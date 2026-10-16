@@ -17,7 +17,7 @@ use crate::clients::protocol::CompletedRun;
 /// Base URL for OpenRouter's OpenAI-compatible API.
 const BASE_URL: &str = "https://openrouter.ai/api/v1";
 
-/// Provider name this backend answers to, used to match `task-clients` specs.
+/// Provider name this backend answers to, used to match `task-models` specs.
 const PROVIDER_NAME: &str = "openrouter";
 
 const API_KEY_ENV: &str = "OPENROUTER_API_KEY";

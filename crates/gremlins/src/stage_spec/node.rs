@@ -2,7 +2,7 @@
 //!
 //! A parsed stage tree is a [`StageSpec`] — one variant per stage type,
 //! with composites holding their fully parsed children. The tree is pure
-//! data: nothing here touches a client, a worktree, or the network.
+//! data: nothing here touches a model, a worktree, or the network.
 
 use std::collections::HashMap;
 
@@ -10,8 +10,8 @@ use indexmap::IndexMap;
 use serde_yaml::{Mapping, Value};
 use thiserror::Error;
 
+use crate::clients::client::ModelURI;
 use crate::definition::r#static::loader::{StageEntry, StageNode};
-use crate::definition::ClientSpec;
 use crate::schemas::error::SchemaError;
 use crate::stage_spec::agent::Agent;
 use crate::stage_spec::composite::StageAttrs;
@@ -43,27 +43,27 @@ impl From<StageError> for SchemaError {
 /// One node of the parsed stage tree.
 ///
 /// Leaf variants wrap the stage's own data plus the two things the tree adds:
-/// the `skip_if_exists` guard and the stage's `client`. Composite variants
+/// the `skip_if_exists` guard and the stage's `model`. Composite variants
 /// reuse the composite stage's parsed data and replace its raw
 /// `Vec<serde_json::Value>` body with the fully parsed children.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StageSpec {
     Agent {
         stage: Agent,
-        client: Option<ClientSpec>,
-        task_clients: Option<IndexMap<String, String>>,
+        model: Option<ModelURI>,
+        task_models: Option<IndexMap<String, String>>,
     },
     Exec {
         stage: Exec,
-        client: Option<ClientSpec>,
-        task_clients: Option<IndexMap<String, String>>,
+        model: Option<ModelURI>,
+        task_models: Option<IndexMap<String, String>>,
     },
     Sequence {
         attrs: StageAttrs,
         max_iterations: u32,
         interval: Option<f64>,
-        client: Option<ClientSpec>,
-        task_clients: Option<IndexMap<String, String>>,
+        model: Option<ModelURI>,
+        task_models: Option<IndexMap<String, String>>,
         body: Vec<StageSpec>,
     },
     Parallel {
@@ -71,8 +71,8 @@ pub enum StageSpec {
         max_concurrent: Option<u32>,
         cancel_on_error: bool,
         error_policy: ErrorPolicy,
-        client: Option<ClientSpec>,
-        task_clients: Option<IndexMap<String, String>>,
+        model: Option<ModelURI>,
+        task_models: Option<IndexMap<String, String>>,
         body: Vec<StageSpec>,
         fork: Option<ForkSpec>,
         join: Option<JoinSpec>,
@@ -100,23 +100,23 @@ impl StageSpec {
         }
     }
 
-    /// The stage's own client, if it declared one.
-    pub fn client(&self) -> Option<&ClientSpec> {
+    /// The stage's own model, if it declared one.
+    pub fn model(&self) -> Option<&ModelURI> {
         match self {
-            StageSpec::Agent { client, .. }
-            | StageSpec::Exec { client, .. }
-            | StageSpec::Sequence { client, .. }
-            | StageSpec::Parallel { client, .. } => client.as_ref(),
+            StageSpec::Agent { model, .. }
+            | StageSpec::Exec { model, .. }
+            | StageSpec::Sequence { model, .. }
+            | StageSpec::Parallel { model, .. } => model.as_ref(),
         }
     }
 
-    /// The stage's own task-client overrides, if any.
-    pub fn task_clients(&self) -> Option<&IndexMap<String, String>> {
+    /// The stage's own task-model overrides, if any.
+    pub fn task_models(&self) -> Option<&IndexMap<String, String>> {
         match self {
-            StageSpec::Agent { task_clients, .. }
-            | StageSpec::Exec { task_clients, .. }
-            | StageSpec::Sequence { task_clients, .. }
-            | StageSpec::Parallel { task_clients, .. } => task_clients.as_ref(),
+            StageSpec::Agent { task_models, .. }
+            | StageSpec::Exec { task_models, .. }
+            | StageSpec::Sequence { task_models, .. }
+            | StageSpec::Parallel { task_models, .. } => task_models.as_ref(),
         }
     }
 
@@ -169,36 +169,29 @@ impl StageSpec {
         match self {
             StageSpec::Agent {
                 stage,
-                client,
-                task_clients,
-            } => agent_to_yaml(stage, client, task_clients),
+                model,
+                task_models,
+            } => agent_to_yaml(stage, model, task_models),
             StageSpec::Exec {
                 stage,
-                client,
-                task_clients,
-            } => exec_to_yaml(stage, client, task_clients),
+                model,
+                task_models,
+            } => exec_to_yaml(stage, model, task_models),
             StageSpec::Sequence {
                 attrs,
                 max_iterations,
                 interval,
-                client,
-                task_clients,
+                model,
+                task_models,
                 body,
-            } => sequence_to_yaml(
-                attrs,
-                *max_iterations,
-                *interval,
-                client,
-                task_clients,
-                body,
-            ),
+            } => sequence_to_yaml(attrs, *max_iterations, *interval, model, task_models, body),
             StageSpec::Parallel {
                 attrs,
                 max_concurrent,
                 cancel_on_error,
                 error_policy,
-                client,
-                task_clients,
+                model,
+                task_models,
                 body,
                 fork,
                 join,
@@ -207,8 +200,8 @@ impl StageSpec {
                 *max_concurrent,
                 *cancel_on_error,
                 *error_policy,
-                client,
-                task_clients,
+                model,
+                task_models,
                 body,
                 fork,
                 join,
@@ -308,12 +301,12 @@ fn options_to_yaml(options: &HashMap<String, serde_json::Value>) -> Value {
     Value::Mapping(out)
 }
 
-fn client_to_yaml(client: &Option<ClientSpec>) -> Option<Value> {
-    client.as_ref().map(|c| Value::String(c.0.clone()))
+fn model_to_yaml(model: &Option<ModelURI>) -> Option<Value> {
+    model.as_ref().map(|c| Value::String(c.to_string()))
 }
 
-fn task_clients_to_yaml(task_clients: &Option<IndexMap<String, String>>) -> Value {
-    match task_clients {
+fn task_models_to_yaml(task_models: &Option<IndexMap<String, String>>) -> Value {
+    match task_models {
         Some(map) if !map.is_empty() => {
             let mut out = Mapping::with_capacity(map.len());
             for (k, v) in map {
@@ -325,14 +318,14 @@ fn task_clients_to_yaml(task_clients: &Option<IndexMap<String, String>>) -> Valu
     }
 }
 
-fn insert_task_clients(m: &mut Mapping, task_clients: &Option<IndexMap<String, String>>) {
-    insert_if_nonempty(m, "task-clients", task_clients_to_yaml(task_clients));
+fn insert_task_models(m: &mut Mapping, task_models: &Option<IndexMap<String, String>>) {
+    insert_if_nonempty(m, "task-models", task_models_to_yaml(task_models));
 }
 
 fn agent_to_yaml(
     stage: &Agent,
-    client: &Option<ClientSpec>,
-    task_clients: &Option<IndexMap<String, String>>,
+    model: &Option<ModelURI>,
+    task_models: &Option<IndexMap<String, String>>,
 ) -> Value {
     let mut m = Mapping::new();
     m.insert(
@@ -372,17 +365,17 @@ fn agent_to_yaml(
             Value::Mapping(interp_map),
         );
     }
-    if let Some(client_val) = client_to_yaml(client) {
-        m.insert(Value::String("client".to_string()), client_val);
+    if let Some(model_val) = model_to_yaml(model) {
+        m.insert(Value::String("model".to_string()), model_val);
     }
-    insert_task_clients(&mut m, task_clients);
+    insert_task_models(&mut m, task_models);
     Value::Mapping(m)
 }
 
 fn exec_to_yaml(
     stage: &Exec,
-    client: &Option<ClientSpec>,
-    task_clients: &Option<IndexMap<String, String>>,
+    model: &Option<ModelURI>,
+    task_models: &Option<IndexMap<String, String>>,
 ) -> Value {
     let mut m = Mapping::new();
     m.insert(
@@ -410,10 +403,10 @@ fn exec_to_yaml(
             Value::Mapping(interp_map),
         );
     }
-    if let Some(client_val) = client_to_yaml(client) {
-        m.insert(Value::String("client".to_string()), client_val);
+    if let Some(model_val) = model_to_yaml(model) {
+        m.insert(Value::String("model".to_string()), model_val);
     }
-    insert_task_clients(&mut m, task_clients);
+    insert_task_models(&mut m, task_models);
     Value::Mapping(m)
 }
 
@@ -421,8 +414,8 @@ fn sequence_to_yaml(
     attrs: &StageAttrs,
     max_iterations: u32,
     interval: Option<f64>,
-    client: &Option<ClientSpec>,
-    task_clients: &Option<IndexMap<String, String>>,
+    model: &Option<ModelURI>,
+    task_models: &Option<IndexMap<String, String>>,
     body: &[StageSpec],
 ) -> Value {
     let mut m = Mapping::new();
@@ -446,10 +439,10 @@ fn sequence_to_yaml(
             serde_yaml::to_value(interval_secs).unwrap_or(Value::Null),
         );
     }
-    if let Some(client_val) = client_to_yaml(client) {
-        m.insert(Value::String("client".to_string()), client_val);
+    if let Some(model_val) = model_to_yaml(model) {
+        m.insert(Value::String("model".to_string()), model_val);
     }
-    insert_task_clients(&mut m, task_clients);
+    insert_task_models(&mut m, task_models);
     insert_str_if_nonempty(&mut m, "skip_if_exists", &attrs.skip_if_exists);
     let children: Vec<Value> = body.iter().map(StageSpec::to_yaml).collect();
     m.insert(Value::String("body".to_string()), Value::Sequence(children));
@@ -462,8 +455,8 @@ fn parallel_to_yaml(
     max_concurrent: Option<u32>,
     cancel_on_error: bool,
     error_policy: ErrorPolicy,
-    client: &Option<ClientSpec>,
-    task_clients: &Option<IndexMap<String, String>>,
+    model: &Option<ModelURI>,
+    task_models: &Option<IndexMap<String, String>>,
     body: &[StageSpec],
     fork: &Option<ForkSpec>,
     join: &Option<JoinSpec>,
@@ -495,10 +488,10 @@ fn parallel_to_yaml(
             Value::String(error_policy.as_str().to_string()),
         );
     }
-    if let Some(client_val) = client_to_yaml(client) {
-        m.insert(Value::String("client".to_string()), client_val);
+    if let Some(model_val) = model_to_yaml(model) {
+        m.insert(Value::String("model".to_string()), model_val);
     }
-    insert_task_clients(&mut m, task_clients);
+    insert_task_models(&mut m, task_models);
     insert_str_if_nonempty(&mut m, "skip_if_exists", &attrs.skip_if_exists);
     if let Some(ref fork_spec) = fork {
         let cmds: Vec<Value> = fork_spec

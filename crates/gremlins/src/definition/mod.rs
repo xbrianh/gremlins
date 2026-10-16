@@ -14,17 +14,13 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use thiserror::Error;
 
+use crate::clients::client::ModelURI;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
 pub use crate::stage_spec::agent::Agent;
 pub use crate::stage_spec::exec::Exec;
 pub use crate::stage_spec::node::StageSpec;
 pub use crate::stage_spec::parallel::{ErrorPolicy, ForkSpec, JoinSpec};
-
-/// Parsed client descriptor from a stage dict's `client` key.
-/// A plain String so gremlins-core stays free of PyO3.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ClientSpec(pub String);
 
 pub(crate) mod r#static;
 pub use r#static::StaticDefinition;
@@ -51,8 +47,8 @@ pub struct Sequence {
     pub stages: Vec<ExecutorStage>,
     pub scope: Option<String>,
     pub skip_if_exists: String,
-    pub client: Option<ClientSpec>,
-    pub task_clients: Option<IndexMap<String, String>>,
+    pub model: Option<ModelURI>,
+    pub task_models: Option<IndexMap<String, String>>,
     pub max_iterations: u32,
     pub interval: Option<f64>,
 }
@@ -68,14 +64,14 @@ pub enum ExecutorStage {
     /// Run an agent stage.
     Agent {
         stage: Agent,
-        client: Option<ClientSpec>,
-        task_clients: Option<IndexMap<String, String>>,
+        model: Option<ModelURI>,
+        task_models: Option<IndexMap<String, String>>,
     },
     /// Run an exec stage.
     Exec {
         stage: Exec,
-        client: Option<ClientSpec>,
-        task_clients: Option<IndexMap<String, String>>,
+        model: Option<ModelURI>,
+        task_models: Option<IndexMap<String, String>>,
     },
     /// Run a sequence of stages in order.
     Sequence(Sequence),
@@ -85,8 +81,8 @@ pub enum ExecutorStage {
         max_concurrent: Option<u32>,
         cancel_on_error: bool,
         error_policy: ErrorPolicy,
-        client: Option<ClientSpec>,
-        task_clients: Option<IndexMap<String, String>>,
+        model: Option<ModelURI>,
+        task_models: Option<IndexMap<String, String>>,
         children: Vec<Box<dyn GremlinDefinition>>,
         skip_if_exists: String,
         fork: Option<ForkSpec>,
@@ -119,24 +115,24 @@ impl ExecutorStage {
         }
     }
 
-    /// The stage's own client, if it declared one.
-    pub fn client(&self) -> Option<&ClientSpec> {
+    /// The stage's own model, if it declared one.
+    pub fn model(&self) -> Option<&ModelURI> {
         match self {
-            ExecutorStage::Agent { client, .. }
-            | ExecutorStage::Exec { client, .. }
-            | ExecutorStage::Parallel { client, .. } => client.as_ref(),
-            ExecutorStage::Sequence(seq) => seq.client.as_ref(),
+            ExecutorStage::Agent { model, .. }
+            | ExecutorStage::Exec { model, .. }
+            | ExecutorStage::Parallel { model, .. } => model.as_ref(),
+            ExecutorStage::Sequence(seq) => seq.model.as_ref(),
             ExecutorStage::Done => None,
         }
     }
 
-    /// The stage's own task-client overrides, if any.
-    pub fn task_clients(&self) -> Option<&IndexMap<String, String>> {
+    /// The stage's own task-model overrides, if any.
+    pub fn task_models(&self) -> Option<&IndexMap<String, String>> {
         match self {
-            ExecutorStage::Agent { task_clients, .. }
-            | ExecutorStage::Exec { task_clients, .. }
-            | ExecutorStage::Parallel { task_clients, .. } => task_clients.as_ref(),
-            ExecutorStage::Sequence(seq) => seq.task_clients.as_ref(),
+            ExecutorStage::Agent { task_models, .. }
+            | ExecutorStage::Exec { task_models, .. }
+            | ExecutorStage::Parallel { task_models, .. } => task_models.as_ref(),
+            ExecutorStage::Sequence(seq) => seq.task_models.as_ref(),
             ExecutorStage::Done => None,
         }
     }
@@ -166,8 +162,8 @@ pub trait GremlinDefinition: Send + Sync {
     /// The definition's identity (the YAML file stem, or equivalent).
     fn name(&self) -> &str;
 
-    /// The client every stage uses unless it declares its own.
-    fn default_client(&self) -> &str;
+    /// The model every stage uses unless it declares its own.
+    fn default_model(&self) -> &ModelURI;
 
     /// Bootstrap commands and input sources.
     fn bootstrap(&self) -> &Bootstrap;
@@ -187,12 +183,12 @@ pub trait GremlinDefinition: Send + Sync {
     /// Whether this definition is a stub (not yet loaded).
     fn is_stub(&self) -> bool;
 
-    /// Bake an overriding client spec into this provider so that
-    /// [`default_client`](Self::default_client) returns it.
+    /// Bake an overriding model spec into this provider so that
+    /// [`default_model`](Self::default_model) returns it.
     ///
     /// Called by [`Gremlin::fork`](crate::executor::gremlin::Gremlin::fork)
-    /// when an effective client propagates from an enclosing group.
-    fn with_client(&mut self, client: &str);
+    /// when an effective model propagates from an enclosing group.
+    fn with_model(&mut self, model: &ModelURI);
 
     /// Clone this provider into a new heap-allocated box.
     fn clone_box(&self) -> Box<dyn GremlinDefinition>;
@@ -244,8 +240,8 @@ impl GremlinDefinition for Box<dyn GremlinDefinition> {
         self.as_ref().name()
     }
 
-    fn default_client(&self) -> &str {
-        self.as_ref().default_client()
+    fn default_model(&self) -> &ModelURI {
+        self.as_ref().default_model()
     }
 
     fn bootstrap(&self) -> &Bootstrap {
@@ -268,8 +264,8 @@ impl GremlinDefinition for Box<dyn GremlinDefinition> {
         self.as_ref().is_stub()
     }
 
-    fn with_client(&mut self, client: &str) {
-        self.as_mut().with_client(client)
+    fn with_model(&mut self, model: &ModelURI) {
+        self.as_mut().with_model(model)
     }
 
     fn clone_box(&self) -> Box<dyn GremlinDefinition> {

@@ -18,7 +18,7 @@ use serde_json::{Map, Value};
 use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
 use crate::clients::backend::{ClientError, RunParams};
-use crate::clients::client::Client;
+use crate::clients::client::{Client, ModelURI};
 use crate::clients::task_kind::TaskKind;
 use crate::config;
 use crate::definition::{ExecutorStage, GremlinDefinition};
@@ -105,15 +105,15 @@ async fn run_stage_scoped(
     stage: &ExecutorStage,
     gremlin: &mut Gremlin,
     scope: &str,
-    enclosing_client: Option<&str>,
-    enclosing_task_clients: Option<&IndexMap<String, String>>,
+    enclosing_model: Option<&ModelURI>,
+    enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
     let _attempt = gremlin.state.read_str("attempt");
-    // Fall back to the gremlin's inherited task-clients when the caller
+    // Fall back to the gremlin's inherited task-models when the caller
     // doesn't pass an explicit enclosing map (e.g. parallel children
     // dispatched via run_stage). Clone to avoid borrowing conflicts.
-    let inherited = gremlin.enclosing_task_clients.clone();
-    let enclosing_task_clients = enclosing_task_clients.or(inherited.as_ref());
+    let inherited = gremlin.enclosing_task_models.clone();
+    let enclosing_task_models = enclosing_task_models.or(inherited.as_ref());
     send_log(
         &gremlin.runtime_config.log_tx,
         format!(
@@ -125,10 +125,10 @@ async fn run_stage_scoped(
 
     match stage {
         ExecutorStage::Agent { .. } => {
-            run_agent(stage, gremlin, enclosing_client, enclosing_task_clients).await
+            run_agent(stage, gremlin, enclosing_model, enclosing_task_models).await
         }
         ExecutorStage::Exec { .. } => {
-            run_exec(stage, gremlin, enclosing_client, enclosing_task_clients).await
+            run_exec(stage, gremlin, enclosing_model, enclosing_task_models).await
         }
         ExecutorStage::Sequence(_) => {
             log::debug!("stage '{}': entering sequence", stage.name());
@@ -136,89 +136,95 @@ async fn run_stage_scoped(
                 stage,
                 gremlin,
                 scope,
-                enclosing_client,
-                enclosing_task_clients,
+                enclosing_model,
+                enclosing_task_models,
             )
             .await
         }
         ExecutorStage::Parallel { .. } => {
             log::debug!("dispatching stage '{}' to run_parallel", stage.name());
-            run_parallel(stage, gremlin, enclosing_client, enclosing_task_clients).await
+            run_parallel(stage, gremlin, enclosing_model, enclosing_task_models).await
         }
         ExecutorStage::Done => Ok(()),
     }
 }
 
-/// Resolve the client spec string for a stage, consulting:
-/// 1. The stage's own `client:` field (always wins)
-/// 2. The enclosing composite's explicit `client:` (new — the `fill_client` replacement)
-/// 3. `default-client-by-stage` from runtime config (exact → longest prefix)
-/// 4. The definition's `default_client`
-fn resolve_client_spec(
+/// Resolve the model spec for a stage, consulting:
+/// 1. The stage's own `model:` field (always wins)
+/// 2. The enclosing composite's explicit `model:` (new — the `fill_model` replacement)
+/// 3. `default-model-by-stage` from runtime config (exact → longest prefix)
+/// 4. The definition's `default_model`
+fn resolve_model_spec(
     stage: &ExecutorStage,
     gremlin: &Gremlin,
-    enclosing_client: Option<&str>,
-) -> String {
-    // 1. Explicit stage client always wins
-    if let Some(spec) = stage.client() {
-        return spec.0.clone();
+    enclosing_model: Option<&ModelURI>,
+) -> Result<ModelURI, RunError> {
+    // 1. Explicit stage model always wins
+    if let Some(spec) = stage.model() {
+        return Ok(spec.clone());
     }
 
-    // 2. Enclosing composite's explicit client
-    if let Some(client) = enclosing_client {
-        return client.to_string();
+    // 2. Enclosing composite's explicit model
+    if let Some(model) = enclosing_model {
+        return Ok(model.clone());
     }
 
     let stage_name = stage.name();
+    let parse = |model_spec: &str| {
+        ModelURI::parse(model_spec).map_err(|message| RunError::StageFailed {
+            stage: stage_name.to_string(),
+            message,
+        })
+    };
 
-    // 3. Consult default-client-by-stage from runtime config
+    // 3. Consult default-model-by-stage from runtime config
     {
-        let exact = &gremlin.runtime_config.stage_clients_exact;
-        let prefix = &gremlin.runtime_config.stage_clients_prefix;
+        let exact = &gremlin.runtime_config.stage_models_exact;
+        let prefix = &gremlin.runtime_config.stage_models_prefix;
 
         // Exact match
-        if let Some(client_spec) = exact.get(stage_name) {
-            return client_spec.clone();
+        if let Some(model_spec) = exact.get(stage_name) {
+            return parse(model_spec);
         }
 
         // Longest prefix match
         let mut best: Option<(&str, &str)> = None;
-        for (prefix_key, client_spec) in prefix {
+        for (prefix_key, model_spec) in prefix {
             if stage_name.starts_with(prefix_key.as_str()) {
                 match best {
                     Some((prev_key, _prev_spec)) if prefix_key.len() > prev_key.len() => {
-                        best = Some((prefix_key, client_spec));
+                        best = Some((prefix_key, model_spec));
                     }
                     None => {
-                        best = Some((prefix_key, client_spec));
+                        best = Some((prefix_key, model_spec));
                     }
                     _ => {}
                 }
             }
         }
-        if let Some((_prefix_key, client_spec)) = best {
-            return client_spec.to_string();
+        if let Some((_prefix_key, model_spec)) = best {
+            return parse(model_spec);
         }
     }
 
     // 4. Fall back to definition default
-    gremlin.definition.default_client().to_string()
+    Ok(gremlin.definition.default_model().clone())
 }
 
-/// The client a stage runs with: resolved via [`resolve_client_spec`], then
+/// The client a stage runs with: resolved via [`resolve_model_spec`], then
 /// parsed. When the resolved spec equals the definition default, the gremlin's
 /// already-constructed client handle is reused to avoid building a second
 /// backend for the same spec.
 fn resolve_client(
     stage: &ExecutorStage,
     gremlin: &Gremlin,
-    enclosing_client: Option<&str>,
+    enclosing_model: Option<&ModelURI>,
 ) -> Result<Client, RunError> {
-    let spec = resolve_client_spec(stage, gremlin, enclosing_client);
-    if spec == gremlin.definition.default_client() {
+    let spec = resolve_model_spec(stage, gremlin, enclosing_model)?;
+    if &spec == gremlin.definition.default_model() {
         Ok(gremlin.client.clone())
     } else {
-        Client::parse(&spec).map_err(|message| RunError::StageFailed {
+        Client::from_uri(spec).map_err(|message| RunError::StageFailed {
             stage: stage.name().to_string(),
             message,
         })
@@ -229,49 +235,49 @@ fn resolve_client(
 // Agent
 // ---------------------------------------------------------------------------
 
-/// Resolve the effective task-client lookup map for an agent stage, merging
+/// Resolve the effective task-model lookup map for an agent stage, merging
 /// the three runtime layers (global defaults, enclosing composite, stage-local)
 /// and parsing the result into a kind-keyed `HashMap`.
 ///
 /// This is the map handed to [`build_task_selector`]; it describes
-/// task-kind → model-spec entries, *not* the stage-name → client-spec
-/// entries held in `RuntimeConfig::stage_clients_*`. Keeping the two apart is
+/// task-kind → model-spec entries, *not* the stage-name → model-spec
+/// entries held in `RuntimeConfig::stage_models_*`. Keeping the two apart is
 /// what this helper exists to make testable.
-fn resolve_task_clients(
+fn resolve_task_models(
     global: Option<&IndexMap<String, String>>,
     enclosing: Option<&IndexMap<String, String>>,
     stage: Option<&IndexMap<String, String>>,
 ) -> Result<HashMap<TaskKind, String>, config::ConfigError> {
-    let effective = config::merge_task_clients_runtime(global, enclosing, stage);
-    config::parse_task_clients_map(effective.as_ref())
+    let effective = config::merge_task_models_runtime(global, enclosing, stage);
+    config::parse_task_models_map(effective.as_ref())
 }
 
 async fn run_agent(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
-    enclosing_client: Option<&str>,
-    enclosing_task_clients: Option<&IndexMap<String, String>>,
+    enclosing_model: Option<&ModelURI>,
+    enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
     let ExecutorStage::Agent {
         stage: agent,
-        client: _stage_client,
-        task_clients: stage_task_clients,
+        model: _stage_model,
+        task_models: stage_task_models,
     } = node
     else {
         unreachable!("run_agent is only called for agent stages")
     };
 
-    let task_clients_by_kind = resolve_task_clients(
-        gremlin.runtime_config.default_task_clients.as_ref(),
-        enclosing_task_clients,
-        stage_task_clients.as_ref(),
+    let task_models_by_kind = resolve_task_models(
+        gremlin.runtime_config.default_task_models.as_ref(),
+        enclosing_task_models,
+        stage_task_models.as_ref(),
     )
     .map_err(|e| RunError::StageFailed {
         stage: agent.name.clone(),
         message: e.to_string(),
     })?;
 
-    let client = resolve_client(node, gremlin, enclosing_client)?;
+    let client = resolve_client(node, gremlin, enclosing_model)?;
     let framework_subs = gremlin.framework_subs(&agent.name);
     let _attempt = gremlin.state.read_str("attempt");
     let loop_iter = gremlin.loop_iter.clone();
@@ -381,14 +387,14 @@ async fn run_agent(
 
     let stage_env = gremlin.env.clone();
 
-    let task_clients = {
+    let task_models = {
         let backend = client
             .get_or_build_backend()
             .map_err(|message| RunError::StageFailed {
                 stage: agent.name.clone(),
                 message,
             })?;
-        crate::clients::task::build_task_selector(backend, &task_clients_by_kind)
+        crate::clients::task::build_task_selector(backend, &task_models_by_kind)
     };
 
     // Chat gremlins pre-populate the agent loop's history from the previous
@@ -457,7 +463,7 @@ async fn run_agent(
         log_tx: gremlin.runtime_config.log_tx.clone(),
         base_env: Some(gremlin.env.clone()),
         allow_all: prepared.allow_all,
-        task_clients,
+        task_models,
         cancel_token: gremlin.cancel_token.clone(),
         stream_events: gremlin.runtime_config.stream_events.clone(),
         prepopulated_messages,
@@ -611,13 +617,13 @@ async fn run_agent(
 async fn run_exec(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
-    _enclosing_client: Option<&str>,
-    _enclosing_task_clients: Option<&IndexMap<String, String>>,
+    _enclosing_model: Option<&ModelURI>,
+    _enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
     let ExecutorStage::Exec {
         stage: exec,
-        client: _stage_client,
-        task_clients: _task_clients,
+        model: _stage_model,
+        task_models: _task_models,
     } = node
     else {
         unreachable!("run_exec is only called for exec stages")
@@ -792,24 +798,20 @@ async fn run_sequence(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
     scope: &str,
-    enclosing_client: Option<&str>,
-    enclosing_task_clients: Option<&IndexMap<String, String>>,
+    enclosing_model: Option<&ModelURI>,
+    enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
     let ExecutorStage::Sequence(seq) = node else {
         unreachable!("run_sequence is only called for sequence stages")
     };
 
-    let enclosing_client = seq
-        .client
-        .as_ref()
-        .map(|c| c.0.as_str())
-        .or(enclosing_client);
-    let merged_task_clients = config::merge_task_clients_runtime(
+    let enclosing_model = seq.model.as_ref().or(enclosing_model);
+    let merged_task_models = config::merge_task_models_runtime(
         None, // global defaults already baked into enclosing
-        enclosing_task_clients,
-        seq.task_clients.as_ref(),
+        enclosing_task_models,
+        seq.task_models.as_ref(),
     );
-    let enclosing_task_clients = merged_task_clients.as_ref();
+    let enclosing_task_models = merged_task_models.as_ref();
 
     let key = stage_key(scope, &seq.name);
     let max_iterations = seq.max_iterations.max(1);
@@ -834,8 +836,8 @@ async fn run_sequence(
                 child,
                 gremlin,
                 &key,
-                enclosing_client,
-                enclosing_task_clients,
+                enclosing_model,
+                enclosing_task_models,
             ))
             .await?;
         }
@@ -893,8 +895,8 @@ async fn run_sequence(
                 child,
                 gremlin,
                 &loop_iter,
-                enclosing_client,
-                enclosing_task_clients,
+                enclosing_model,
+                enclosing_task_models,
             ))
             .await
             {
@@ -1161,24 +1163,28 @@ mod tests {
     use crate::schemas::bootstrap::Bootstrap;
     use crate::test_support::{GitSandbox, Sandbox};
 
+    fn model(spec: &str) -> ModelURI {
+        ModelURI::parse(spec).unwrap()
+    }
+
     /// A gremlin with no git, no worktree, and a seeded state directory: the
     /// smallest thing `run_stage` needs to dispatch a stage.
-    fn test_gremlin(stages: Vec<StageSpec>, default_client: &str) -> (Sandbox, Gremlin) {
-        test_gremlin_with_bootstrap(stages, default_client, Bootstrap::default())
+    fn test_gremlin(stages: Vec<StageSpec>, default_model: &str) -> (Sandbox, Gremlin) {
+        test_gremlin_with_bootstrap(stages, default_model, Bootstrap::default())
     }
 
     fn test_gremlin_with_bootstrap(
         stages: Vec<StageSpec>,
-        default_client: &str,
+        default_model: &str,
         bootstrap: Bootstrap,
     ) -> (Sandbox, Gremlin) {
-        test_gremlin_full(stages, None, default_client, bootstrap)
+        test_gremlin_full(stages, None, default_model, bootstrap)
     }
 
     fn test_gremlin_full(
         stages: Vec<StageSpec>,
         land: Option<StageSpec>,
-        default_client: &str,
+        default_model: &str,
         bootstrap: Bootstrap,
     ) -> (Sandbox, Gremlin) {
         let sandbox = Sandbox::new();
@@ -1191,7 +1197,7 @@ mod tests {
             "id": "gr-test",
             "attempt": "test-0001",
             "stage": "starting",
-            "client": default_client,
+            "model": default_model,
         });
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
 
@@ -1200,7 +1206,7 @@ mod tests {
         let definition = StaticDefinition::new(
             "test".to_string(),
             PathBuf::from("test.yaml"),
-            default_client.to_string(),
+            model(default_model),
             bootstrap,
             stages,
             land,
@@ -1212,13 +1218,13 @@ mod tests {
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),
             definition_path: None,
-            client_override: None,
+            model_override: None,
             definition: Box::new(definition),
             workdir: None,
             project_root: sandbox.path().to_path_buf(),
             state: state_data,
             env: HashMap::new(),
-            client: Client::parse(default_client).unwrap(),
+            client: Client::parse(default_model).unwrap(),
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot(),
@@ -1226,7 +1232,7 @@ mod tests {
             interactive_session: None,
             scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
             clean_cmds: Vec::new(),
-            enclosing_task_clients: None,
+            enclosing_task_models: None,
         };
         (sandbox, gremlin)
     }
@@ -1301,29 +1307,29 @@ mod tests {
 
     /// The wiring regression: `run_agent` must hand `build_task_selector` the
     /// *task*-client maps (task-description → model-spec), never the
-    /// `RuntimeConfig::stage_clients_*` fields (stage-name → client-spec). The
+    /// `RuntimeConfig::stage_models_*` fields (stage-name → model-spec). The
     /// two have the same `HashMap<String, String>` type, so a swapped argument
     /// compiles cleanly — this boundary test pins the source of the maps.
     #[test]
-    fn resolve_task_clients_uses_task_maps_not_stage_maps() {
+    fn resolve_task_models_uses_task_maps_not_stage_maps() {
         let (_sandbox, mut gremlin) = test_gremlin(vec![], "cmd/true");
 
-        // A stage-client entry keyed by the *stage name* — the wrong map.
+        // A stage-model entry keyed by the *stage name* — the wrong map.
         gremlin
             .runtime_config
-            .stage_clients_exact
-            .insert("writer".to_string(), "cmd/stage-client".to_string());
+            .stage_models_exact
+            .insert("writer".to_string(), "cmd/stage-model".to_string());
         gremlin
             .runtime_config
-            .stage_clients_prefix
+            .stage_models_prefix
             .insert("wri".to_string(), "cmd/stage-prefix".to_string());
 
-        // A task-client entry keyed by a *task kind* — the right map.
+        // A task-model entry keyed by a *task kind* — the right map.
         let global = IndexMap::from([("Scout".to_string(), "openai/mini".to_string())]);
-        gremlin.runtime_config.default_task_clients = Some(global);
+        gremlin.runtime_config.default_task_models = Some(global);
 
-        let by_kind = resolve_task_clients(
-            gremlin.runtime_config.default_task_clients.as_ref(),
+        let by_kind = resolve_task_models(
+            gremlin.runtime_config.default_task_models.as_ref(),
             None,
             None,
         )
@@ -1333,11 +1339,11 @@ mod tests {
         assert_eq!(
             by_kind.get(&TaskKind::Scout),
             Some(&"openai/mini".to_string()),
-            "the task-client entry must be present"
+            "the task-model entry must be present"
         );
         assert!(
             !by_kind.contains_key(&TaskKind::Implement),
-            "stage-client entries must not appear in the task-client map"
+            "stage-model entries must not appear in the task-model map"
         );
     }
 
@@ -1347,7 +1353,7 @@ mod tests {
             .skip_if_exists("artifact://done.md")
             .stage(
                 AgentBuilder::new("writer-inner")
-                    .client("cmd/false")
+                    .model(model("cmd/false"))
                     .prompt("hi")
                     .build()
                     .unwrap(),
@@ -1373,7 +1379,7 @@ mod tests {
             .skip_if_exists("done.md")
             .stage(
                 AgentBuilder::new("writer-inner")
-                    .client("cmd/false")
+                    .model(model("cmd/false"))
                     .prompt("hi")
                     .build()
                     .unwrap(),
@@ -1397,7 +1403,7 @@ mod tests {
         let stages = vec![AgentBuilder::new("writer")
             // The cmd backend appends --model <model> --add-dir <artifact_dir>
             // after the command, so $3 is the artifact_dir.
-            .client("cmd/sh -c 'touch \"$3\"/writer.md'")
+            .model(model("cmd/sh -c 'touch \"$3\"/writer.md'"))
             .output("out?", output("artifact://{name}.md"))
             .prompt("write {out}")
             .build()
@@ -1411,7 +1417,7 @@ mod tests {
     #[tokio::test]
     async fn agent_missing_artifact_bails() {
         let stages = vec![AgentBuilder::new("writer")
-            .client("cmd/sh -c 'cat >/dev/null'")
+            .model(model("cmd/sh -c 'cat >/dev/null'"))
             .output("out", output("artifact://out.md"))
             .prompt("write {out}")
             .build()
@@ -1709,7 +1715,7 @@ mod tests {
     async fn run_records_a_bail_and_returns_one() {
         // A missing non-optional artifact causes a Bail.
         let stages = vec![AgentBuilder::new("writer")
-            .client("cmd/sh -c 'cat >/dev/null'")
+            .model(model("cmd/sh -c 'cat >/dev/null'"))
             .output("out", output("artifact://out.md"))
             .prompt("hi {out}")
             .build()
@@ -1976,7 +1982,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn create_then_run_end_to_end() {
         let fx = GitSandbox::with_definition(
-            "default_client: 'cmd/true'\n\
+            "default_model: 'cmd/true'\n\
              stages:\n\
              \x20 - name: solo\n\
              \x20   type: exec\n\

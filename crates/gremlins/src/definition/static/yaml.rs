@@ -16,10 +16,10 @@ use crate::builders::artifacts::{InterpolationValue, OutputTarget};
 use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
 use crate::builders::definition::{fill_builder_names, DefinitionBuilder, LandBuilder};
 use crate::builders::exec::ExecBuilder;
+use crate::clients::client::ModelURI;
 use crate::clients::task_kind::TaskKind;
 use crate::config;
 use crate::definition::r#static::expand;
-use crate::definition::ClientSpec;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
 use crate::stage_spec::node::StageSpec;
@@ -31,10 +31,23 @@ use super::StaticDefinition;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// The message emitted when no layer supplied a default client.
-const MISSING_DEFAULT_CLIENT: &str = "gremlin definition is missing 'default_client' — set a \
-     'default_client' in the definition YAML, pass --client on the command line, or set \
-     'default-client' in settings.yaml";
+/// The message emitted when no layer supplied a default model.
+const MISSING_DEFAULT_MODEL: &str = "gremlin definition is missing 'default_model' — set a \
+     'default_model' in the definition YAML, pass --model on the command line, or set \
+     'default-model' in settings.yaml";
+
+/// Legacy model-selection keys carried over from the `client` grammar.
+///
+/// These were renamed in #1928/#1931 with **no** backward-compatibility
+/// aliases. A YAML file that still uses them is rejected rather than silently
+/// ignoring the model selection and falling back to a default (or losing a
+/// stage override).
+const LEGACY_DEFAULT_MODEL_KEYS: [(&str, &str); 2] = [
+    ("default_client", "default_model"),
+    ("default_task_clients", "default_task_models"),
+];
+const LEGACY_STAGE_MODEL_KEYS: [(&str, &str); 2] =
+    [("client", "model"), ("task-clients", "task-models")];
 
 // ---------------------------------------------------------------------------
 // Public constructors
@@ -42,12 +55,12 @@ const MISSING_DEFAULT_CLIENT: &str = "gremlin definition is missing 'default_cli
 
 impl StaticDefinition {
     /// Load a definition from a YAML file, expanding includes, stage-definitions,
-    /// and prompts. `client_override` is the CLI `--client` value; consulted only
+    /// and prompts. `model_override` is the CLI `--model` value; consulted only
     /// when the YAML declares none.
     pub fn from_yaml_file(
         path: &Path,
-        client_override: Option<&str>,
-        config_default_client: Option<&str>,
+        model_override: Option<&str>,
+        config_default_model: Option<&str>,
     ) -> Result<Self, SchemaError> {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         if !path.exists() {
@@ -65,8 +78,8 @@ impl StaticDefinition {
         from_expanded_value(
             expanded,
             &path,
-            client_override,
-            config_default_client,
+            model_override,
+            config_default_model,
             Some(&settings),
         )
     }
@@ -78,15 +91,15 @@ impl StaticDefinition {
     /// its absence.
     pub fn from_expanded_bytes(
         data: &[u8],
-        client_override: Option<&str>,
-        config_default_client: Option<&str>,
+        model_override: Option<&str>,
+        config_default_model: Option<&str>,
     ) -> Result<Self, SchemaError> {
         let expanded = parse_expanded_yaml(data)?;
         from_expanded_value(
             expanded,
             Path::new("definition.yaml"),
-            client_override,
-            config_default_client,
+            model_override,
+            config_default_model,
             None,
         )
     }
@@ -95,13 +108,13 @@ impl StaticDefinition {
     /// walk. Strips the `__gremlins_expanded__` sentinel before dispatching.
     pub fn from_expanded_yaml_file(
         path: &Path,
-        client_override: Option<&str>,
-        config_default_client: Option<&str>,
+        model_override: Option<&str>,
+        config_default_model: Option<&str>,
     ) -> Result<Self, SchemaError> {
         let data = std::fs::read(path)
             .map_err(|e| SchemaError::Generic(format!("failed to read {}: {e}", path.display())))?;
         let expanded = parse_expanded_yaml(&data)?;
-        from_expanded_value(expanded, path, client_override, config_default_client, None)
+        from_expanded_value(expanded, path, model_override, config_default_model, None)
     }
 }
 
@@ -129,8 +142,8 @@ fn parse_expanded_yaml(data: &[u8]) -> Result<Value, SchemaError> {
 fn from_expanded_value(
     expanded: Value,
     path: &Path,
-    default_client_override: Option<&str>,
-    config_default_client: Option<&str>,
+    default_model_override: Option<&str>,
+    config_default_model: Option<&str>,
     settings: Option<&config::Config>,
 ) -> Result<StaticDefinition, SchemaError> {
     let root = expanded
@@ -140,6 +153,8 @@ fn from_expanded_value(
             got: format!("{expanded:?}"),
         })?;
 
+    reject_legacy_default_model_keys(root)?;
+
     let name = root
         .get("name")
         .and_then(Value::as_str)
@@ -147,53 +162,53 @@ fn from_expanded_value(
         .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(String::from))
         .unwrap_or_default();
 
-    let raw_yaml_default_client = default_client_from_yaml(root)?;
+    let raw_yaml_default_model = default_model_from_yaml(root)?;
     base_ref_from_yaml(root)?;
 
     let raw_stages = stages_from_yaml(root)?;
 
-    // Capture profile names from raw default-client sources before
-    // resolution. These determine which profile's `task-clients`
-    // stages inherit when they don't supply their own client.
-    let yaml_default_profile: Option<String> = raw_yaml_default_client
+    // Capture profile names from raw default-model sources before
+    // resolution. These determine which profile's `task-models`
+    // stages inherit when they don't supply their own model.
+    let yaml_default_profile: Option<String> = raw_yaml_default_model
         .as_ref()
         .and_then(|raw| raw.strip_prefix("profile:").map(|s| s.to_string()));
     let override_default_profile: Option<String> =
-        default_client_override.and_then(|raw| raw.strip_prefix("profile:").map(|s| s.to_string()));
+        default_model_override.and_then(|raw| raw.strip_prefix("profile:").map(|s| s.to_string()));
     let config_default_profile: Option<String> =
-        config_default_client.and_then(|raw| raw.strip_prefix("profile:").map(|s| s.to_string()));
+        config_default_model.and_then(|raw| raw.strip_prefix("profile:").map(|s| s.to_string()));
 
-    // Bake every stage and default client with the current settings profile
+    // Bake every stage and default model with the current settings profile
     // (source-definition path only). Expanded definitions from
     // `from_expanded_bytes` / `from_expanded_yaml_file` pass `None` here:
     // their values are already concrete `provider/model[?k=v]` strings, so
     // no profile resolution is needed and a missing/malformed settings.yaml
     // must not block resuming from a baked definition.
-    let yaml_default_client = match settings {
-        Some(settings) => raw_yaml_default_client
-            .map(|c| resolve_client(&c, settings).map_err(SchemaError::Generic))
+    let yaml_default_model = match settings {
+        Some(settings) => raw_yaml_default_model
+            .map(|c| resolve_model(&c, settings).map_err(SchemaError::Generic))
             .transpose()?,
-        None => raw_yaml_default_client,
+        None => raw_yaml_default_model,
     };
-    let config_default_client = match settings {
-        Some(settings) => config_default_client
-            .map(|c| resolve_client(c, settings).map_err(SchemaError::Generic))
+    let config_default_model = match settings {
+        Some(settings) => config_default_model
+            .map(|c| resolve_model(c, settings).map_err(SchemaError::Generic))
             .transpose()?,
-        None => config_default_client.map(String::from),
+        None => config_default_model.map(String::from),
     };
-    let default_client_override = match settings {
-        Some(settings) => default_client_override
-            .map(|c| resolve_client(c, settings).map_err(SchemaError::Generic))
+    let default_model_override = match settings {
+        Some(settings) => default_model_override
+            .map(|c| resolve_model(c, settings).map_err(SchemaError::Generic))
             .transpose()?,
-        None => default_client_override.map(String::from),
+        None => default_model_override.map(String::from),
     };
 
     // Determine which profile (if any) contributes the effective default
-    // client.  This mirrors resolve_default_client's precedence:
+    // model.  This mirrors resolve_default_model's precedence:
     // YAML > CLI override > settings.yaml.
-    let effective_profile: Option<&str> = if yaml_default_client.is_some() {
+    let effective_profile: Option<&str> = if yaml_default_model.is_some() {
         yaml_default_profile.as_deref()
-    } else if default_client_override
+    } else if default_model_override
         .as_ref()
         .is_some_and(|s| !s.is_empty())
     {
@@ -228,29 +243,29 @@ fn from_expanded_value(
         (None, Vec::new())
     };
 
-    let default_client = resolve_default_client(
-        yaml_default_client,
-        default_client_override.as_deref(),
-        config_default_client.as_deref(),
+    let default_model = resolve_default_model(
+        yaml_default_model,
+        default_model_override.as_deref(),
+        config_default_model.as_deref(),
     )?;
 
-    // Read or resolve default_task_clients.
-    // If the YAML already contains a `default_task_clients` key (from a
+    // Read or resolve default_task_models.
+    // If the YAML already contains a `default_task_models` key (from a
     // previously expanded definition), use it directly — values are
     // already resolved.  Otherwise resolve the global
-    // `default-task-clients` through profiles so the expanded output
+    // `default-task-models` through profiles so the expanded output
     // includes only concrete `provider/model[?k=v]` strings.
-    let default_task_clients = yaml_default_task_clients(root, settings)?;
+    let default_task_models = yaml_default_task_models(root, settings)?;
 
     let builder = DefinitionBuilder {
         name,
-        default_client,
+        default_model,
         prompt_dir: path.parent().map(Path::to_path_buf),
         bootstrap,
         stages,
         land,
         clean_cmds,
-        default_task_clients,
+        default_task_models,
     };
 
     builder.build()
@@ -278,6 +293,7 @@ fn stage_from_yaml(
             "stage {name:?}: must have a 'type' field"
         )));
     }
+    reject_legacy_stage_model_keys(mapping, &name)?;
 
     match stage_type {
         "agent" => agent_from_yaml(mapping, &name, settings, effective_profile),
@@ -297,6 +313,30 @@ fn yaml_str(mapping: &Mapping, key: &str) -> Option<String> {
         .filter(|v| !v.is_null())
         .and_then(Value::as_str)
         .map(String::from)
+}
+
+/// Reject legacy top-level model-selection keys on a definition mapping.
+fn reject_legacy_default_model_keys(root: &Mapping) -> Result<(), SchemaError> {
+    for (legacy, replacement) in LEGACY_DEFAULT_MODEL_KEYS {
+        if root.contains_key(legacy) {
+            return Err(SchemaError::Generic(format!(
+                "top-level '{legacy}' is no longer supported; use '{replacement}' instead"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Reject legacy stage-level model-selection keys on a stage mapping.
+fn reject_legacy_stage_model_keys(mapping: &Mapping, label: &str) -> Result<(), SchemaError> {
+    for (legacy, replacement) in LEGACY_STAGE_MODEL_KEYS {
+        if mapping.contains_key(legacy) {
+            return Err(SchemaError::Generic(format!(
+                "{label}: '{legacy}' is no longer supported; use '{replacement}' instead"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Read the nested `interpolation:` structure: `{inputs: {…}, outputs: {…}}`.
@@ -374,14 +414,14 @@ fn yaml_string_map_ordered(
     };
     let map = raw
         .as_mapping()
-        .ok_or_else(|| SchemaError::Generic("'task-clients' must be a mapping".to_string()))?;
+        .ok_or_else(|| SchemaError::Generic("'task-models' must be a mapping".to_string()))?;
     let mut result = IndexMap::new();
     for (k, v) in map {
         let ks = k.as_str().ok_or_else(|| {
-            SchemaError::Generic("'task-clients' keys must be strings".to_string())
+            SchemaError::Generic("'task-models' keys must be strings".to_string())
         })?;
         let vs = v.as_str().ok_or_else(|| {
-            SchemaError::Generic("'task-clients' values must be strings".to_string())
+            SchemaError::Generic("'task-models' values must be strings".to_string())
         })?;
         if TaskKind::parse(ks) == Some(TaskKind::Fork) {
             return Err(SchemaError::Generic(
@@ -390,7 +430,7 @@ fn yaml_string_map_ordered(
         }
         if TaskKind::parse(ks).is_none() {
             return Err(SchemaError::Generic(format!(
-                "unknown task-clients key {ks:?}: expected one of {}",
+                "unknown task-models key {ks:?}: expected one of {}",
                 TaskKind::CONFIGURABLE
                     .iter()
                     .map(|k| k.as_str())
@@ -447,69 +487,71 @@ fn yaml_skip_if_exists(mapping: &Mapping) -> String {
     yaml_str(mapping, "skip_if_exists").unwrap_or_default()
 }
 
-/// Read `client` — None when absent. Values are resolved through profiles
+/// Read `model` — None when absent. Values are resolved through profiles
 /// when settings are supplied; otherwise they are assumed to already be
 /// concrete `provider/model[?k=v]` strings.
-fn yaml_client(
+fn yaml_model(
     mapping: &Mapping,
     settings: Option<&config::Config>,
-) -> Result<Option<ClientSpec>, SchemaError> {
-    let Some(raw) = yaml_str(mapping, "client") else {
+) -> Result<Option<ModelURI>, SchemaError> {
+    let Some(raw) = yaml_str(mapping, "model") else {
         return Ok(None);
     };
     let resolved = match settings {
-        Some(settings) => resolve_client(&raw, settings).map_err(SchemaError::Generic)?,
+        Some(settings) => resolve_model(&raw, settings).map_err(SchemaError::Generic)?,
         None => raw,
     };
-    Ok(Some(ClientSpec(resolved)))
+    Ok(Some(
+        ModelURI::parse(&resolved).map_err(SchemaError::Generic)?,
+    ))
 }
 
-/// Read `task-clients` — an ordered string→string map, resolved through
+/// Read `task-models` — an ordered string→string map, resolved through
 /// profiles when settings are supplied. Returns `None` when the stage has no
-/// `task-clients` key and no profile contributes task-clients.
-/// Global `default-task-clients` are NOT merged here; that happens at
+/// `task-models` key and no profile contributes task-models.
+/// Global `default-task-models` are NOT merged here; that happens at
 /// runtime so composite-stage inheritance works correctly.
 ///
-/// When the stage's `client` references a profile (e.g. `profile:foo`),
-/// that profile's `task_clients` are used as a base layer; the stage's own
-/// `task-clients` entries win on key conflict.  When the stage has no
-/// `client` of its own but `effective_profile` names a profile (because
-/// the definition default-client, CLI --client, or settings.yaml
-/// default-client selected a profile), that profile's `task_clients` also
+/// When the stage's `model` references a profile (e.g. `profile:foo`),
+/// that profile's `task_models` are used as a base layer; the stage's own
+/// `task-models` entries win on key conflict.  When the stage has no
+/// `model` of its own but `effective_profile` names a profile (because
+/// the definition default-model, CLI --model, or settings.yaml
+/// default-model selected a profile), that profile's `task_models` also
 /// serve as the base layer.
-fn yaml_task_clients(
+fn yaml_task_models(
     mapping: &Mapping,
     settings: Option<&config::Config>,
     effective_profile: Option<&str>,
 ) -> Result<Option<IndexMap<String, String>>, SchemaError> {
-    let stage = yaml_string_map_ordered(mapping, "task-clients")?;
+    let stage = yaml_string_map_ordered(mapping, "task-models")?;
 
-    // Resolve which profile (if any) contributes task-clients as a base.
-    // Priority: the stage's own `client: profile:…` wins; otherwise the
+    // Resolve which profile (if any) contributes task-models as a base.
+    // Priority: the stage's own `model: profile:…` wins; otherwise the
     // effective default-profile from the definition.
-    let profile_name: Option<String> = yaml_str(mapping, "client")
+    let profile_name: Option<String> = yaml_str(mapping, "model")
         .and_then(|raw| raw.strip_prefix("profile:").map(|name| name.to_string()))
         .or_else(|| effective_profile.map(|s| s.to_string()));
 
-    let profile_task_clients: Option<IndexMap<String, String>> = settings.and_then(|settings| {
+    let profile_task_models: Option<IndexMap<String, String>> = settings.and_then(|settings| {
         profile_name
             .as_ref()
-            .and_then(|name| settings.client_profiles().get(name))
-            .and_then(|profile| profile.task_clients.clone())
+            .and_then(|name| settings.model_profiles().get(name))
+            .and_then(|profile| profile.task_models.clone())
     });
 
-    if stage.is_none() && profile_task_clients.is_none() {
+    if stage.is_none() && profile_task_models.is_none() {
         return Ok(None);
     }
 
     // Merge: profile base + stage overrides (stage wins on conflict).
     let mut resolved = IndexMap::new();
     if let Some(settings) = settings {
-        if let Some(ref profile_tc) = profile_task_clients {
+        if let Some(ref profile_tc) = profile_task_models {
             for (key, value) in profile_tc {
                 resolved.insert(
                     key.clone(),
-                    config::resolve_client_reference(value, settings)
+                    config::resolve_model_reference(value, settings)
                         .map_err(SchemaError::Generic)?,
                 );
             }
@@ -518,7 +560,7 @@ fn yaml_task_clients(
             for (key, value) in stage_tc {
                 resolved.insert(
                     key.clone(),
-                    config::resolve_client_reference(value, settings)
+                    config::resolve_model_reference(value, settings)
                         .map_err(SchemaError::Generic)?,
                 );
             }
@@ -531,8 +573,8 @@ fn yaml_task_clients(
     Ok(Some(resolved))
 }
 
-fn resolve_client(raw: &str, settings: &config::Config) -> Result<String, String> {
-    config::resolve_client_reference(raw, settings)
+fn resolve_model(raw: &str, settings: &config::Config) -> Result<String, String> {
+    config::resolve_model_reference(raw, settings)
 }
 
 /// Build an [`AgentBuilder`] from a YAML stage mapping.
@@ -545,8 +587,8 @@ fn agent_from_yaml(
     let prompts = yaml_string_list(mapping, "prompt")?;
     let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
     let options = yaml_options(mapping)?;
-    let client = yaml_client(mapping, settings)?;
-    let task_clients = yaml_task_clients(mapping, settings, effective_profile)?;
+    let model = yaml_model(mapping, settings)?;
+    let task_models = yaml_task_models(mapping, settings, effective_profile)?;
 
     let mut builder = AgentBuilder::new(name);
     for p in prompts {
@@ -561,11 +603,11 @@ fn agent_from_yaml(
     for (k, v) in options {
         builder = builder.option(k, v);
     }
-    if let Some(c) = client {
-        builder = builder.client(c.0);
+    if let Some(c) = model {
+        builder = builder.model(c);
     }
-    if let Some(tc) = task_clients {
-        builder = builder.task_clients(tc);
+    if let Some(tc) = task_models {
+        builder = builder.task_models(tc);
     }
 
     builder.build()
@@ -580,8 +622,8 @@ fn exec_from_yaml(
 ) -> Result<StageSpec, SchemaError> {
     let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
     let options = yaml_options(mapping)?;
-    let client = yaml_client(mapping, settings)?;
-    let task_clients = yaml_task_clients(mapping, settings, effective_profile)?;
+    let model = yaml_model(mapping, settings)?;
+    let task_models = yaml_task_models(mapping, settings, effective_profile)?;
 
     let mut builder = ExecBuilder::new(name);
     for (k, v) in interpolation_map {
@@ -593,11 +635,11 @@ fn exec_from_yaml(
     for (k, v) in options {
         builder = builder.option(k, v);
     }
-    if let Some(c) = client {
-        builder = builder.client(c.0);
+    if let Some(c) = model {
+        builder = builder.model(c);
     }
-    if let Some(tc) = task_clients {
-        builder = builder.task_clients(tc);
+    if let Some(tc) = task_models {
+        builder = builder.task_models(tc);
     }
 
     builder.build()
@@ -623,8 +665,8 @@ fn sequence_from_yaml(
         }
     };
     let skip_if_exists = yaml_skip_if_exists(mapping);
-    let client = yaml_client(mapping, settings)?;
-    let task_clients = yaml_task_clients(mapping, settings, effective_profile)?;
+    let model = yaml_model(mapping, settings)?;
+    let task_models = yaml_task_models(mapping, settings, effective_profile)?;
 
     // Interval from top-level key.  Only accepts numbers (YAML integers
     // coerce to f64 via as_f64).  Reject non-numeric values with a
@@ -652,11 +694,11 @@ fn sequence_from_yaml(
     if !skip_if_exists.is_empty() {
         builder = builder.skip_if_exists(skip_if_exists);
     }
-    if let Some(c) = client {
-        builder = builder.client(c.0);
+    if let Some(c) = model {
+        builder = builder.model(c);
     }
-    if let Some(tc) = task_clients {
-        builder = builder.task_clients(tc);
+    if let Some(tc) = task_models {
+        builder = builder.task_models(tc);
     }
 
     builder.build()
@@ -705,8 +747,8 @@ fn parallel_from_yaml(
         }
     };
     let skip_if_exists = yaml_skip_if_exists(mapping);
-    let client = yaml_client(mapping, settings)?;
-    let task_clients = yaml_task_clients(mapping, settings, effective_profile)?;
+    let model = yaml_model(mapping, settings)?;
+    let task_models = yaml_task_models(mapping, settings, effective_profile)?;
 
     let body = yaml_children(mapping, "body", settings, effective_profile)?;
 
@@ -724,11 +766,11 @@ fn parallel_from_yaml(
     if !skip_if_exists.is_empty() {
         builder = builder.skip_if_exists(skip_if_exists);
     }
-    if let Some(c) = client {
-        builder = builder.client(c.0);
+    if let Some(c) = model {
+        builder = builder.model(c);
     }
-    if let Some(tc) = task_clients {
-        builder = builder.task_clients(tc);
+    if let Some(tc) = task_models {
+        builder = builder.task_models(tc);
     }
     if let Some(fork_cmds) = fork {
         builder = builder.fork(fork_cmds);
@@ -784,6 +826,8 @@ fn land_from_yaml_builder(
     mapping: &Mapping,
     settings: Option<&config::Config>,
 ) -> Result<(StageSpec, Vec<String>), SchemaError> {
+    reject_legacy_stage_model_keys(mapping, "land")?;
+
     let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
     let options = yaml_options(mapping)?;
     // Reject legacy options.cmds — land_cmds / clean_cmds are the only
@@ -794,7 +838,7 @@ fn land_from_yaml_builder(
                 .to_string(),
         ));
     }
-    let client = yaml_client(mapping, settings)?;
+    let model = yaml_model(mapping, settings)?;
 
     let land_cmds = yaml_string_list(mapping, "land_cmds")?;
     let clean_cmds = yaml_string_list(mapping, "clean_cmds")?;
@@ -809,8 +853,8 @@ fn land_from_yaml_builder(
     for (k, v) in options {
         builder = builder.option(k, v);
     }
-    if let Some(c) = client {
-        builder = builder.client(c.0);
+    if let Some(c) = model {
+        builder = builder.model(c);
     }
     if !land_cmds.is_empty() {
         builder = builder.land_cmds(land_cmds);
@@ -847,19 +891,19 @@ fn project_root_for(path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn default_client_from_yaml(root: &Mapping) -> Result<Option<String>, SchemaError> {
-    let Some(value) = root.get("default_client").filter(|value| !value.is_null()) else {
+fn default_model_from_yaml(root: &Mapping) -> Result<Option<String>, SchemaError> {
+    let Some(value) = root.get("default_model").filter(|value| !value.is_null()) else {
         return Ok(None);
     };
-    let client = value
+    let model = value
         .as_str()
-        .ok_or_else(|| SchemaError::Generic("default_client must be a string".to_string()))?;
-    if client.trim().is_empty() {
+        .ok_or_else(|| SchemaError::Generic("default_model must be a string".to_string()))?;
+    if model.trim().is_empty() {
         return Err(SchemaError::Generic(
-            "default_client must be a non-empty string".to_string(),
+            "default_model must be a non-empty string".to_string(),
         ));
     }
-    Ok(Some(client.to_string()))
+    Ok(Some(model.to_string()))
 }
 
 fn base_ref_from_yaml(root: &Mapping) -> Result<(), SchemaError> {
@@ -879,32 +923,32 @@ fn stages_from_yaml(root: &Mapping) -> Result<Vec<Value>, SchemaError> {
     }
 }
 
-/// Read `default_task_clients` from the already-expanded YAML, or resolve
-/// the global `default-task-clients` through profiles.
+/// Read `default_task_models` from the already-expanded YAML, or resolve
+/// the global `default-task-models` through profiles.
 ///
-/// When the YAML already carries a `default_task_clients` key (round-tripped
+/// When the YAML already carries a `default_task_models` key (round-tripped
 /// from a previous expansion), values are treated as already-resolved
 /// `provider/model[?k=v]` strings and returned as-is.  Otherwise the global
-/// `default-task-clients` map is read from settings.yaml and every value is
+/// `default-task-models` map is read from settings.yaml and every value is
 /// resolved through the profile table so the expanded output only contains
-/// concrete client specs.
-fn yaml_default_task_clients(
+/// concrete model specs.
+fn yaml_default_task_models(
     root: &Mapping,
     settings: Option<&config::Config>,
 ) -> Result<Option<IndexMap<String, String>>, SchemaError> {
-    // If the expanded YAML already carries default_task_clients, use them
+    // If the expanded YAML already carries default_task_models, use them
     // directly — they were resolved during a previous expansion.
-    if let Some(raw) = root.get("default_task_clients").filter(|v| !v.is_null()) {
+    if let Some(raw) = root.get("default_task_models").filter(|v| !v.is_null()) {
         let map = raw.as_mapping().ok_or_else(|| {
-            SchemaError::Generic("'default_task_clients' must be a mapping".to_string())
+            SchemaError::Generic("'default_task_models' must be a mapping".to_string())
         })?;
         let mut result = IndexMap::new();
         for (k, v) in map {
             let key = k.as_str().ok_or_else(|| {
-                SchemaError::Generic("'default_task_clients' keys must be strings".to_string())
+                SchemaError::Generic("'default_task_models' keys must be strings".to_string())
             })?;
             let value = v.as_str().ok_or_else(|| {
-                SchemaError::Generic("'default_task_clients' values must be strings".to_string())
+                SchemaError::Generic("'default_task_models' values must be strings".to_string())
             })?;
             if TaskKind::parse(key) == Some(TaskKind::Fork) {
                 return Err(SchemaError::Generic(
@@ -913,7 +957,7 @@ fn yaml_default_task_clients(
             }
             if TaskKind::parse(key).is_none() {
                 return Err(SchemaError::Generic(format!(
-                    "unknown default_task_clients key {key:?}: expected one of {}",
+                    "unknown default_task_models key {key:?}: expected one of {}",
                     TaskKind::CONFIGURABLE
                         .iter()
                         .map(|k| k.as_str())
@@ -929,12 +973,12 @@ fn yaml_default_task_clients(
         return Ok(Some(result));
     }
 
-    // Otherwise, resolve the global default-task-clients through profiles.
+    // Otherwise, resolve the global default-task-models through profiles.
     let settings = match settings {
         Some(settings) => settings,
         None => return Ok(None),
     };
-    let global = match settings.default_task_clients() {
+    let global = match settings.default_task_models() {
         Some(g) => g,
         None => return Ok(None),
     };
@@ -942,7 +986,7 @@ fn yaml_default_task_clients(
     for (key, value) in global {
         resolved.insert(
             key.clone(),
-            resolve_client(value, settings).map_err(SchemaError::Generic)?,
+            resolve_model(value, settings).map_err(SchemaError::Generic)?,
         );
     }
     if resolved.is_empty() {
@@ -952,25 +996,26 @@ fn yaml_default_task_clients(
     }
 }
 
-fn resolve_default_client(
+fn resolve_default_model(
     yaml_default: Option<String>,
-    override_client: Option<&str>,
-    config_default_client: Option<&str>,
-) -> Result<String, SchemaError> {
-    if let Some(client) = yaml_default {
-        return Ok(client);
-    }
-    // A blank `--client` is no client at all: skip it rather than resolve to an
-    // unusable empty spec.
-    if let Some(client) = override_client
+    override_model: Option<&str>,
+    config_default_model: Option<&str>,
+) -> Result<ModelURI, SchemaError> {
+    let raw = if let Some(model) = yaml_default {
+        model
+    } else if let Some(model) = override_model
         .map(str::trim)
-        .filter(|client| !client.is_empty())
+        .filter(|model| !model.is_empty())
     {
-        return Ok(client.to_string());
-    }
-    config_default_client
-        .map(String::from)
-        .ok_or_else(|| SchemaError::Generic(MISSING_DEFAULT_CLIENT.to_string()))
+        model.to_string()
+    } else {
+        config_default_model
+            .map(String::from)
+            .ok_or_else(|| SchemaError::Generic(MISSING_DEFAULT_MODEL.to_string()))?
+    };
+    ModelURI::parse(&raw).map_err(|message| {
+        SchemaError::Generic(format!("invalid default model {raw:?}: {message}"))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -984,8 +1029,14 @@ mod tests {
     use crate::builders::artifacts::output;
     use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
     use crate::builders::exec::ExecBuilder;
+    use crate::clients::client::ModelURI;
     use crate::definition::GremlinDefinition;
     use crate::stage_spec::parallel::ErrorPolicy;
+    use std::fs;
+
+    fn model(spec: &str) -> ModelURI {
+        ModelURI::parse(spec).unwrap()
+    }
 
     // ------------------------------------------------------------------
     // to_yaml / from_yaml round-trip symmetry
@@ -1022,7 +1073,7 @@ mod tests {
             )
             .output("plan", output("artifact://plan.md"))
             .option("model", "xai/grok-4")
-            .client("xai/grok-4")
+            .model(model("xai/grok-4"))
             .build()
             .unwrap();
         assert_round_trip(&stage);
@@ -1046,7 +1097,7 @@ mod tests {
             )
             .output("out", output("artifact://out.txt"))
             .option("timeout", "30")
-            .client("local")
+            .model(model("cmd/true"))
             .build()
             .unwrap();
         assert_round_trip(&stage);
@@ -1066,7 +1117,7 @@ mod tests {
             .max_iterations(3)
             .interval(1.5)
             .skip_if_exists("artifact://done.txt")
-            .client("xai/grok-4")
+            .model(model("xai/grok-4"))
             .build()
             .unwrap();
         assert_round_trip(&stage);
@@ -1131,14 +1182,14 @@ mod tests {
     fn from_expanded_bytes_does_not_load_settings() {
         // Expanded definitions are already concrete and must deserialize even
         // when settings.yaml is malformed / unavailable.
-        let _sandbox = crate::test_support::Sandbox::with_config(Some("default-client: [\n"));
+        let _sandbox = crate::test_support::Sandbox::with_config(Some("default-model: [\n"));
 
         let yaml = "__gremlins_expanded__: true\n\
                      name: resume-me\n\
-                     default_client: openai/gpt-4\n\
+                     default_model: openai/gpt-4\n\
                      stages: []\n";
         let def = StaticDefinition::from_expanded_bytes(yaml.as_bytes(), None, None).unwrap();
-        assert_eq!(def.default_client(), "openai/gpt-4");
+        assert_eq!(def.default_model(), &model("openai/gpt-4"));
     }
 
     #[test]
@@ -1226,7 +1277,7 @@ mod tests {
             .cancel_on_error(true)
             .error_policy(ErrorPolicy::All)
             .skip_if_exists("artifact://reviews-done")
-            .client("xai/grok-4")
+            .model(model("xai/grok-4"))
             .build()
             .unwrap();
         assert_round_trip(&stage);
@@ -1243,10 +1294,10 @@ mod tests {
     }
 
     #[test]
-    fn task_clients_unknown_key_is_a_schema_error() {
+    fn task_models_unknown_key_is_a_schema_error() {
         use serde_yaml::Mapping;
 
-        // A minimal agent stage carrying a `task-clients` map with a
+        // A minimal agent stage carrying a `task-models` map with a
         // non-`TaskKind` key must be rejected at load time.
         for bad_key in ["", "scout", "Scout*"] {
             let mut m = Mapping::new();
@@ -1268,20 +1319,111 @@ mod tests {
                 serde_yaml::Value::String("openai/mini".into()),
             );
             m.insert(
-                serde_yaml::Value::String("task-clients".into()),
+                serde_yaml::Value::String("task-models".into()),
                 serde_yaml::Value::Mapping(tc),
             );
 
             let err = stage_from_yaml(&m, Some(&config::Config::default()), None)
-                .expect_err("an unknown task-clients key must be rejected");
+                .expect_err("an unknown task-models key must be rejected");
             let msg = err.to_string();
             assert!(
-                msg.contains("unknown task-clients key"),
+                msg.contains("unknown task-models key"),
                 "error must name the bad key, got: {msg}"
             );
             assert!(
                 msg.contains("Scout"),
                 "error must list the allowed kinds, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_yaml_file_rejects_legacy_top_level_model_keys() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let project = sandbox.path().join("project");
+        let overlay = project.join(".gremlins");
+        fs::create_dir_all(&overlay).unwrap();
+
+        for (legacy, replacement) in [
+            ("default_client", "default_model"),
+            ("default_task_clients", "default_task_models"),
+        ] {
+            let definition_path = overlay.join(format!("legacy-{legacy}.yaml"));
+            fs::write(
+                &definition_path,
+                format!("{legacy}: openai/gpt-4\nstages: []\n"),
+            )
+            .unwrap();
+
+            let err = StaticDefinition::from_yaml_file(&definition_path, None, None)
+                .expect_err("legacy top-level model keys must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(legacy) && msg.contains(replacement),
+                "error must name {legacy:?} and its replacement {replacement:?}, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_yaml_file_rejects_legacy_stage_model_keys() {
+        let sandbox = crate::test_support::Sandbox::new();
+        let project = sandbox.path().join("project");
+        let overlay = project.join(".gremlins");
+        fs::create_dir_all(&overlay).unwrap();
+
+        for (legacy, replacement) in [("client", "model"), ("task-clients", "task-models")] {
+            let definition_path = overlay.join(format!("legacy-stage-{legacy}.yaml"));
+            let value = match legacy {
+                "client" => "openai/gpt-4",
+                _ => "{Scout: openai/gpt-4}",
+            };
+            fs::write(
+                &definition_path,
+                format!(
+                    "default_model: openai/gpt-4\nstages:\n  - name: plan\n    type: agent\n    {legacy}: {value}\n"
+                ),
+            )
+            .unwrap();
+
+            let err = StaticDefinition::from_yaml_file(&definition_path, None, None)
+                .expect_err("legacy stage model keys must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(legacy) && msg.contains(replacement),
+                "error must name {legacy:?} and its replacement {replacement:?}, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_expanded_bytes_rejects_legacy_model_keys() {
+        let _sandbox = crate::test_support::Sandbox::new();
+
+        for (kind, yaml) in [
+            (
+                "default_client",
+                "__gremlins_expanded__: true\nname: old\ndefault_client: openai/gpt-4\nstages: []\n",
+            ),
+            (
+                "default_task_clients",
+                "__gremlins_expanded__: true\nname: old\ndefault_model: openai/gpt-4\ndefault_task_clients:\n  Scout: openai/gpt-4\nstages: []\n",
+            ),
+            (
+                "stage-client",
+                "__gremlins_expanded__: true\nname: old\ndefault_model: openai/gpt-4\nstages:\n  - name: plan\n    type: agent\n    client: openai/gpt-4\n",
+            ),
+            (
+                "stage-task-clients",
+                "__gremlins_expanded__: true\nname: old\ndefault_model: openai/gpt-4\nstages:\n  - name: plan\n    type: agent\n    task-clients:\n      Scout: openai/gpt-4\n",
+            ),
+        ] {
+            let err = StaticDefinition::from_expanded_bytes(yaml.as_bytes(), None, None)
+                .expect_err("expanded definitions with legacy keys must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("no longer supported"),
+                "{kind}: expected a legacy-key rejection, got: {msg}"
             );
         }
     }

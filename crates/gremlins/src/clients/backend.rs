@@ -41,10 +41,10 @@ pub struct RunParams {
     /// a [`super::tools::SandboxMode`] when assembling the `ToolContext`.
     pub(crate) allow_all: bool,
     /// Task-client selector, pre-built by the executor from
-    /// `settings.yaml` `task-clients` entries. `None` when no
+    /// `settings.yaml` `task-models` entries. `None` when no
     /// entries are configured or when the backend cannot serve
     /// any of them (e.g. `cmd`).
-    pub task_clients: Option<TaskModelSelector<DynModel<Completion>>>,
+    pub task_models: Option<TaskModelSelector<DynModel<Completion>>>,
     /// Supervisor-owned cancel token. When set, the backend uses it instead of
     /// creating its own, so `gremlins stop` cancels in-flight agent loops.
     pub cancel_token: Option<Arc<CancelToken>>,
@@ -78,7 +78,7 @@ impl Clone for RunParams {
             log_tx: self.log_tx.clone(),
             base_env: self.base_env.clone(),
             allow_all: self.allow_all,
-            task_clients: self.task_clients.clone(),
+            task_models: self.task_models.clone(),
             cancel_token: self.cancel_token.clone(),
             stream_events: self.stream_events.clone(),
             prepopulated_messages: self.prepopulated_messages.clone(),
@@ -120,7 +120,7 @@ pub trait Backend: Send + Sync {
     /// Build a [`DynModel`] from a `provider/model` spec, or `None` when
     /// the spec names a different provider or the model cannot be built.
     ///
-    /// Called by the executor to pre-build the `task-clients` selector
+    /// Called by the executor to pre-build the `task-models` selector
     /// before the agent loop starts.
     fn make_model(&self, spec: &str) -> Option<DynModel<Completion>>;
 

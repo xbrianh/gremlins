@@ -10,12 +10,12 @@ per-stage builder (`AgentBuilder`, `ExecBuilder`, `SequenceBuilder`,
 
 | File | Role |
 |---|---|
-| `node.rs` | `BuilderStage` enum — the typed stage tree. Pure data: accessors (`name()`, `stage_type()`, `client()`, `skip_if_exists()`, `body()`, `set_name()`), serialization to YAML (`to_yaml`, `to_stage_node`), and `to_stage_entry` for name-filling. No parsing logic. |
+| `node.rs` | `BuilderStage` enum — the typed stage tree. Pure data: accessors (`name()`, `stage_type()`, `model()`, `skip_if_exists()`, `body()`, `set_name()`), serialization to YAML (`to_yaml`, `to_stage_node`), and `to_stage_entry` for name-filling. No parsing logic. |
 | `agent.rs` | `Agent` struct. Leaf stage: prompt list, options, interpolation/bind maps. |
 | `exec.rs` | `Exec` struct. Leaf stage: shell commands via `options.cmds`. |
 | `sequence.rs` | `Sequence` struct. Composite: iterates its body up to `max_iterations` with an optional `interval`. |
 | `parallel.rs` | `ParallelGroup` struct, `ErrorPolicy` enum, child-name validation. Composite: runs children concurrently. |
-| `composite.rs` | `StageAttrs` — shared composite infrastructure (name, type, path, `skip_if_exists`, `client_explicit`). |
+| `composite.rs` | `StageAttrs` — shared composite infrastructure (name, type, path, `skip_if_exists`, `model_explicit`). |
 | `constants.rs` | `FRAMEWORK_KEYS` — variable names (`name`, `model`, `cwd`, `base_ref`) reserved for runtime injection and excluded from interpolation maps. |
 | `builders/agent.rs` | `AgentBuilder` — builder pattern for `BuilderStage::Agent`. Validates interpolation syntax, framework-key collisions, bind/interpolation key collisions, and unused keys. |
 | `builders/exec.rs` | `ExecBuilder` — builder pattern for `BuilderStage::Exec`. Validates interpolation syntax, bind/interpolation key collisions, and unused keys. Unlike `AgentBuilder`, rejects **all** `FRAMEWORK_KEYS` in options (including `model`). |
@@ -49,12 +49,12 @@ bare `parallel:` sugar.
 
 ## Key invariants
 
-- **`client` is read by every stage type.** Both leaf builders
+- **`model` is read by every stage type.** Both leaf builders
   (`agent_from_yaml`, `exec_from_yaml`) and composite builders read the
-  `client` key and store it as `Option<ClientSpec>` on their
-  `BuilderStage` variant. At runtime, an explicit leaf client takes
-  precedence over an enclosing composite's client (see
-  `executor/run.rs::resolve_client_spec`).
+  `model` key and store it as `Option<ModelURI>` on their
+  `BuilderStage` variant. At runtime, an explicit leaf model takes
+  precedence over an enclosing composite's model (see
+  `executor/run.rs::resolve_model_spec`).
 - **`skip_if_exists` is composite-only.** Set on `Sequence` and `Parallel`
   via the builder; leaf `BuilderStage` accessors return `""`.
 - **Composite bodies are fully parsed.** Children are `Vec<BuilderStage>`,
@@ -85,7 +85,7 @@ bare `parallel:` sugar.
 | Change serialization shape | `node.rs` — `to_yaml` / `*_to_yaml` helpers |
 | Add a composite-only attribute | `composite.rs` (struct), `node.rs` (serialize), `builders/composite.rs` (builder) |
 | Understand variable substitution | `executor/vars.rs::substitute_vars` |
-| Find `ClientSpec` | `definition/mod.rs` — the canonical definition of the `ClientSpec` newtype |
+| Find `ModelURI` | `clients/client.rs` — the canonical definition of `ModelURI::parse` |
 
 ## Adding a new stage type
 
@@ -93,14 +93,14 @@ bare `parallel:` sugar.
    struct and a builder (e.g., `FooBuilder`) following the pattern in
    `builders/agent.rs` (leaf) or `builders/composite.rs` (composite).
 2. **BuilderStage variant.** Add a variant to `BuilderStage` in `node.rs`.
-   For composites, include `StageAttrs`, `client: Option<ClientSpec>`,
+   For composites, include `StageAttrs`, `model: Option<ModelURI>`,
    and `body: Vec<BuilderStage>`.
 3. **Wire into `stage_from_yaml`.** Add a match arm and a `foo_from_yaml`
    helper in `definition/static/yaml.rs`.
 4. **Serialization.** Add a `*_to_yaml` helper and a match arm in
    `BuilderStage::to_yaml`. Add a match arm in `to_stage_node` for
    bind/interpolation propagation.
-5. **Accessors.** Add match arms to `name()`, `stage_type()`, `client()`,
+5. **Accessors.** Add match arms to `name()`, `stage_type()`, `model()`,
    `skip_if_exists()`, `body()`, `set_name()`.
 6. **Tests.** Add parse round-trip tests in `builders/definition.rs`'s
    test module.

@@ -303,7 +303,7 @@ pub(crate) async fn run_agent_loop(
     // Wire up the Task runner before entering the turn loop.
     let runner = super::task::make_task_runner(
         model.clone(),
-        ctx.params.task_clients.clone(),
+        ctx.params.task_models.clone(),
         opts.tool_filter.map(|f| f.to_vec()),
         cancel.clone(),
         tool_ctx.clone(),
@@ -2396,7 +2396,7 @@ mod tests {
                 log_tx: None,
                 base_env: None,
                 allow_all: false,
-                task_clients: None,
+                task_models: None,
                 cancel_token: None,
                 stream_events: None,
                 prepopulated_messages: None,
@@ -4414,10 +4414,10 @@ mod tests {
         assert_eq!(rejected, 1, "only the call past the cap is rejected");
     }
 
-    /// A `task-clients` entry matching the task's `kind` must swap in the
+    /// A `task-models` entry matching the task's `kind` must swap in the
     /// model the factory builds, and nothing else about the Task call changes.
     #[tokio::test]
-    async fn task_clients_override_selects_the_task_model() {
+    async fn task_models_override_selects_the_task_model() {
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
         let dir = tempfile::tempdir().unwrap();
@@ -4464,11 +4464,11 @@ mod tests {
             )]),
             factory,
         )
-        .expect("a configured task-clients map yields a selector");
+        .expect("a configured task-models map yields a selector");
         let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
-        ctx.params.task_clients = Some(selector);
+        ctx.params.task_models = Some(selector);
 
         run_agent_loop(
             parent.clone().erase(),
@@ -4484,7 +4484,7 @@ mod tests {
         // The overridden model ran the task and its reply came back verbatim.
         assert!(
             !child.requests().is_empty(),
-            "the task-clients model must be the one that ran the Task"
+            "the task-models model must be the one that ran the Task"
         );
         let reqs = parent.requests();
         let parent_history = &reqs.last().unwrap().chat_history;
@@ -4772,7 +4772,7 @@ mod tests {
         let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
-        ctx.params.task_clients = Some(selector);
+        ctx.params.task_models = Some(selector);
         let mut opts = loop_opts(None);
         opts.max_tokens = Some(8192);
 
@@ -4856,7 +4856,7 @@ mod tests {
         let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
-        ctx.params.task_clients = Some(selector);
+        ctx.params.task_models = Some(selector);
 
         run_agent_loop(
             parent.clone().erase(),

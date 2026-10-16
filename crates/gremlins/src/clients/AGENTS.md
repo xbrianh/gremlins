@@ -13,7 +13,7 @@ themselves (`backends/`).
 |---|---|
 | `mod.rs` | Declares the module structure — `pub mod backend`, `pub mod client`, `pub mod protocol`, etc. The rest of the crate imports directly from submodules (e.g. `clients::backend::Backend`, `clients::client::Client`). |
 | `client.rs` | Owns the `model://provider/model[?key=value,...]` / `provider/model[?key=value,...]` grammar (`ModelURI::parse`), the provider allowlist (`is_known_provider`), and `Client` — the runtime handle that turns a `ModelURI` into a live `Backend` lazily and memoises it (`get_or_build_backend`). |
-| `backend.rs` | The `Backend` trait every provider implements, plus `RunParams` (everything a run needs: prompt, cwd, timeouts, retries, cancellation, interactive session, task-client overrides, …) and `ClientError`. |
+| `backend.rs` | The `Backend` trait every provider implements, plus `RunParams` (everything a run needs: prompt, cwd, timeouts, retries, cancellation, interactive session, task-model overrides, …) and `ClientError`. |
 | `protocol.rs` | `CompletedRun` (exit code, text result, events, cost, token usage, message history) and `UsageStats` — the shared result shape every backend returns. |
 | `agent_loop.rs` | `run_agent_loop` — the shared tool-calling loop used by every native agent backend (OpenAI, OpenRouter, xAI, Copilot, Anthropic, Azure OpenAI), plus `run_agent_loop_nested` for the `Task` tool. Streams model output, dispatches tool calls, classifies errors for retry (`ErrorClassifier`), and exposes `CancelToken` for `gremlins stop`. Reads its `turn-retry` and `timeout-retry` backoff schedules from `settings.yaml` via `crate::config`. |
 | `openai_protocol.rs` | Shared state and run/reap logic (`OpenAiRunState`, `run_openai_compat`, `reap_openai_compat`) for backends that speak the OpenAI completions protocol. |
@@ -26,7 +26,7 @@ themselves (`backends/`).
 | `lazy_auth_http.rs` | Lazy-auth HTTP client wrappers for dynamic-auth backends. `LazyBearerHttpClient` (Anthropic) and `LazyApiKeyHttpClient` (Azure OpenAI) hold a `TokenProvider` + scope and acquire a token on the first outgoing request, caching it for the model's lifetime. |
 | `token_provider.rs` | `TokenProvider` trait — custom abstraction over Azure identity credential types (client secret, CLI, managed identity, chained default), with `TokenProviderError`. |
 | `config.rs` | `agent_system_prompt` / `task_system_prompt` — the system prompts injected into top-level and nested (Task) agent invocations. Also owns `ProviderAuth`, `Providers`, and the `providers.yaml` loading/credential-resolution helpers (`api_key`, `base_url`, `auth_token`, `endpoint`, `api_version`, `azure_auth_method`, `azure_auth_scope`). |
-| `task.rs` | `TaskModelSelector`/`TaskModelFactory` — resolves `task-clients` overrides (exact `TaskKind` lookup) so a `Task` tool call can run under a different model than its parent. |
+| `task.rs` | `TaskModelSelector`/`TaskModelFactory` — resolves `task-models` overrides (exact `TaskKind` lookup) so a `Task` tool call can run under a different model than its parent. |
 | `backends/mod.rs` | The `backends!` macro: declares each backend's module and generates `registry()`, mapping provider name → `BuildFn`. Adding a provider is one line here. |
 | `backends/openai.rs` | `OpenAiBackend` — wraps `OpenAiRunState` for `api.openai.com`, default model `gpt-4o`. |
 | `backends/openrouter.rs` | `OpenRouterBackend` — wraps `OpenAiRunState` for `openrouter.ai`, with its own transient-error classifier for retry. |
@@ -100,6 +100,6 @@ its own JSON event stream instead (`stream_json.rs`).
 | Add or change a native tool | `tools.rs` |
 | Change retry/backoff behavior | `crates/gremlins/src/config.rs` (`backoff:` schedules in `settings.yaml`) and `agent_loop.rs` (retry semantics), or a backend's `ErrorClassifier` |
 | Change the system prompt | `config.rs` |
-| Understand `task-clients` overrides | `task.rs::TaskModelSelector` |
+| Understand `task-models` overrides | `task.rs::TaskModelSelector` |
 | Understand supervisor pause/cancel/resume | `interactive.rs`, `agent_loop.rs::CancelToken` |
 | Add a field to a run's result | `protocol.rs::CompletedRun` / `UsageStats` |

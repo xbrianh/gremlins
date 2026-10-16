@@ -54,7 +54,7 @@ A provider also requires either its API key (`OPENAI_API_KEY`, `XAI_API_KEY`,
 `OPENROUTER_API_KEY`, `GREMLINS_AZURE_OPENAI_API_KEY` or `GREMLINS_AZURE_OPENAI_TOKEN`) or a `cmd/<command>`
 command on `PATH`.
 
-**Azure OpenAI / Azure AI Foundry** uses `azure-openai/<deployment>` as the client
+**Azure OpenAI / Azure AI Foundry** uses `azure-openai/<deployment>` as the model
 specifier. Set `GREMLINS_AZURE_OPENAI_ENDPOINT` (required) and one of
 `GREMLINS_AZURE_OPENAI_TOKEN` (Entra ID bearer token) or `GREMLINS_AZURE_OPENAI_API_KEY`
 (API key). Optionally set `GREMLINS_AZURE_OPENAI_API_VERSION` (defaults to
@@ -139,7 +139,7 @@ These flags are accepted by every gremlin definition:
 | `--print-id-only` | Print only the gremlin id on stdout; suppress the launch banner |
 | `--wait` | Block until the spawned gremlin exits; return its exit code |
 | `--base-ref <ref>` | Git ref to branch the worktree from; defaults to `"HEAD"` (current branch). When the definition declares a `base_ref` bootstrap source, this flag overrides it. |
-| `--client <spec>` | `provider/model` string overriding the definition's `default_client` |
+| `--model <spec>` | `provider/model` string supplying the definition default only when the YAML has no `default_model` |
 | `--telemetry` / `-v` | Enable per-turn telemetry (TTFT, token counts, cache hit ratio) in the gremlin log |
 
 #### Per-definition flags
@@ -178,7 +178,7 @@ gremlins launch gh      # bundled gh.yaml
 **Top-level keys:**
 
 ```yaml
-default_client: xai/grok-4    # required; provider/model string
+default_model: xai/grok-4    # required; provider/model string
 
 github_integration: true      # optional; enables gh CLI integration
 
@@ -215,7 +215,7 @@ stages:
 
 | Key | Description |
 |---|---|
-| `default_client` | **Required.** `provider/model` string used for stages without an explicit `client:` |
+| `default_model` | **Required.** `provider/model` string used for stages without an explicit `model:` |
 | `github_integration` | If true, fetches `origin/<branch>` before creating worktrees and enables `gh` CLI use. |
 | `bootstrap` | CLI source flags, launch-only commands, per-worktree commands, and `cli_out` artifact bindings. See [Bootstrap block](#bootstrap-block). |
 | `prompts` | Named prompt map. Each key maps to a prompt string or list; referenced by name in stage `prompt:` fields. |
@@ -230,7 +230,7 @@ stages:
 |---|---|
 | `name` | Unique stage identifier; used for `resume` targeting |
 | `type` | Stage type — a primitive (`agent`, `exec`, `loop`, `parallel`, `sequence`), a recipe YAML from `.gremlins/stages/` (`plan`, `implement`, `verify`, etc.), or a `stage-definitions` key |
-| `client` | `provider/model` string; overrides `default_client` for this stage |
+| `model` | `provider/model` string; overrides `default_model` for this stage |
 | `prompt` | Path or list of paths. A bare `NAME` resolves from the definition's `prompt_dir`. |
 | `options` | Free-form dict passed to the stage |
 | `skip_if_exists` | Artifact key; if this artifact is verified to exist, skip the stage |
@@ -243,7 +243,7 @@ stages:
 | `cancel_on_error` | If true, cancel outstanding parallel children when one bails (default: false) |
 | `error_policy` | `"any"` (default) or `"all"` — when to halt the parallel group on child bail |
 
-**Client precedence:** CLI `--client` beats per-stage `client:`; per-stage `client:` beats definition `default_client:`.
+**Model precedence:** per-stage `model:` beats an enclosing composite's explicit `model:`; `default-model-by-stage` beats the definition default. The definition default is the YAML's `default_model:`; `--model` or settings `default-model` fill that default only when the YAML does not declare one.
 
 **Parallel-group form:**
 
@@ -253,10 +253,10 @@ stages:
   body:
     - name: review-detail
       type: review-code
-      client: xai/grok-4
+      model: xai/grok-4
     - name: review-security
       type: review-code
-      client: xai/grok-4
+      model: xai/grok-4
   max_concurrent: 2         # optional; defaults to all children at once
 ```
 
@@ -267,21 +267,21 @@ stages:
 | `body` | List of child stage entries (no nesting allowed) |
 | `max_concurrent` | Max simultaneously running children (optional) |
 
-### Client specifiers
+### Model specifiers
 
-Clients are specified as `provider/model` inline strings, either at the definition level (`default_client:`) or per stage (`client:`).
+Models are specified as `provider/model` inline strings, either at the definition level (`default_model:`) or per stage (`model:`).
 
 ```yaml
-default_client: xai/grok-4     # all stages default to this
+default_model: xai/grok-4     # all stages default to this
 stages:
   - name: plan
     type: plan
   - name: implement
     type: implement
-    client: openai/gpt-4o      # this stage uses openai instead
+    model: openai/gpt-4o      # this stage uses openai instead
 ```
 
-Providers: `openai`, `xai`, `openrouter`, `anthropic`, `azure-openai`, `copilot`, `cmd`. The CLI `--client provider/model` flag overrides the definition-level `default_client:` but yields to per-stage `client:` settings.
+Providers: `openai`, `xai`, `openrouter`, `anthropic`, `azure-openai`, `copilot`, `cmd`. The CLI `--model provider/model` flag supplies the definition default only when the YAML does not declare `default_model:`; per-stage `model:` and `default-model-by-stage` still take precedence.
 
 ### `prompt:` field
 
@@ -400,7 +400,7 @@ When a definition declares `land:`, `gremlins land` runs this stage instead of t
 Wrap sibling stages in a `type: parallel` group with a `body:` list to run them concurrently:
 
 ```yaml
-default_client: xai/grok-4
+default_model: xai/grok-4
 
 stages:
   - type: plan
@@ -431,7 +431,7 @@ meaning one failed child halts the group; set `error_policy: all` to halt only w
 Subsequent stages are skipped; the operator can resume or ack the group via CLI.
 
 **State isolation:** Each child gets its own state directory and subprocess.
-Client overrides, worktree paths, and artifact bindings are isolated per-child.
+Model overrides, worktree paths, and artifact bindings are isolated per-child.
 Children run in parallel without blocking each other. Parent `state.json` is updated
 during the concurrent phase (e.g., `active_children` snapshot); copying child artifact
 bindings into the parent registry is deferred until fan-in completes.
@@ -446,17 +446,17 @@ children that haven't landed.
 
 Create `.gremlins/local.yaml` to override the bundled `local`
 definition. This example adds a `verify` stage before `review-code` and
-overrides the client for the address stage:
+overrides the model for the address stage:
 
 ```yaml
-default_client: xai/grok-4
+default_model: xai/grok-4
 
 stages:
   - { type: plan,       prompt: [code-style, plan.md] }
   - { type: implement,  prompt: [code-style, implement.md] }
   - { type: verify,              options: { cmds: ["cargo test"] }, prompt: verify_fix }
   - { type: review-code }
-  - { name: address-code, type: agent, client: openai/gpt-4o, prompt: [code-style, address.md, bail_section.md], interpolation: {text: review-code} }
+  - { name: address-code, type: agent, model: openai/gpt-4o, prompt: [code-style, address.md, bail_section.md], interpolation: {text: review-code} }
 ```
 
 Add a `prompt:` key to any stage to supply a custom prompt; paths are
@@ -468,7 +468,7 @@ per-stage `prompt:` overrides.
 Run two `review-code` passes in parallel, then address both:
 
 ```yaml
-default_client: xai/grok-4
+default_model: xai/grok-4
 
 stages:
   - { type: plan,       prompt: [code-style, plan.md] }
@@ -494,7 +494,7 @@ YAML `stage-definitions:` lets you name and reuse stage patterns within a defini
 stage-definitions:
   review-base: &review-base
     type: review-code
-    client: xai/grok-4
+    model: xai/grok-4
     prompt: code_style.md
 
 stages:
@@ -646,7 +646,7 @@ The boss resumes from its child-spawn stage and proceeds with the next iteration
 
 | Variable | Default | Description |
 |---|---|---|
-| `GREMLINS_REASONING_EFFORT` | *(unset)* | Reasoning effort for OpenAI-compatible backends (`openai`, `xai`, `openrouter`, `azure-openai`). One of `low`, `medium`, `high`. Unset disables reasoning entirely (no token cost) for `openai` and `azure-openai`; `xai` and `openrouter` reason by default with effort `high`. Only takes effect for models that support reasoning. Per-client `reasoning=` params override this default — see [Client specifier syntax](#client-specifier-syntax) below. |
+| `GREMLINS_REASONING_EFFORT` | *(unset)* | Reasoning effort for OpenAI-compatible backends (`openai`, `xai`, `openrouter`, `azure-openai`). One of `low`, `medium`, `high`. Unset disables reasoning entirely (no token cost) for `openai` and `azure-openai`; `xai` and `openrouter` reason by default with effort `high`. Only takes effect for models that support reasoning. Per-model `reasoning=` params override this default — see [Model specifier syntax](#model-specifier-syntax) below. |
 | `GREMLINS_STREAM_IDLE_TIMEOUT` | `600` | Stream idle timeout in seconds for OpenAI-compatible backends. If the model produces no output for this duration the stream is cancelled and the call is retried. |
 | `GREMLINS_AGENT_MAX_TURNS` | `1000` | Maximum agent loop turns. Guards against runaway tool-call loops. Falls back to `GREMLINS_OPENAI_AGENTS_MAX_TURNS` for backward compatibility. |
 | `GREMLINS_LOG_LEVEL` | `INFO` | Log level for gremlins output. One of `DEBUG`, `INFO`, `WARNING`, `ERROR`. Also respects `RUST_LOG` (takes precedence when both are set). |
@@ -673,9 +673,9 @@ backoff:
 | `turn-retry` | `[2.0, 5.0, 10.0, 60.0, 120.0]` | Per-attempt backoff, in seconds, for retryable stream errors (429 / 5xx / no-HTTP-status) retried against the same turn. |
 | `timeout-retry` | `[5.0, 15.0, 30.0]` | Per-attempt backoff, in seconds, for stream idle-timeout retries. |
 
-### Client specifier syntax
+### Model specifier syntax
 
-Client specifiers follow the URI grammar: the canonical form
+Model specifiers follow the URI grammar: the canonical form
 `model://provider/model?k=v,...`, or the scheme-omitted stub
 `provider/model?k=v,...`.
 
@@ -701,7 +701,7 @@ suffixes like `:free`, `:online`, or `:nitro` stay inside the model.
 Params after the `?` are resolved per backend. A key either sets a
 **typed** request field — overriding that backend's default for the key — or
 passes through to `additional_params` unchanged. Knowing which is which matters:
-a typed key parses strictly, so `temperature=hot` fails the client build rather
+a typed key parses strictly, so `temperature=hot` fails the model build rather
 than being forwarded as a string.
 
 A value may be a JSON object or array, in which case commas inside balanced
@@ -730,12 +730,12 @@ anthropic/claude-sonnet-4?cache_control={"type":"ephemeral","ttl":"1h"},max_toke
 `anthropic` and is opt-in elsewhere. `temperature` is opt-in only — it is
 emitted solely from a resolved `temperature`, with no default re-introduced.
 
-**Override precedence:** a client-spec key always wins over any backend or
+**Override precedence:** a model-spec key always wins over any backend or
 harness default for the same key. A default is applied only when the spec omits
-the key. A per-client `reasoning=` param overrides `GREMLINS_REASONING_EFFORT`
-for that client.
+the key. A per-model `reasoning=` param overrides `GREMLINS_REASONING_EFFORT`
+for that model.
 
-**Malformed typed values are a client-build error**, replacing the old lenient
+**Malformed typed values are a model-build error**, replacing the old lenient
 behavior — for example, an invalid Copilot `intent` no longer silently falls
 back to `Panel`. Unknown keys (e.g. `foo=bar`) pass through to
 `additional_params` with JSON-coerced typing and never displace a default.

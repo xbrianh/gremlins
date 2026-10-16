@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use indexmap::IndexMap;
 
 use crate::builders::artifacts::{InterpolationValue, OutputTarget};
+use crate::clients::client::ModelURI;
 use crate::definition::r#static::expand::key_referenced_in_text;
-use crate::definition::ClientSpec;
 use crate::schemas::error::SchemaError;
 use crate::stage_spec::agent::Agent;
 use crate::stage_spec::constants::FRAMEWORK_KEYS;
@@ -35,8 +35,8 @@ pub struct AgentBuilder {
     options: HashMap<String, serde_json::Value>,
     interpolation_map: HashMap<String, String>,
     outputs_map: HashMap<String, String>,
-    client: Option<ClientSpec>,
-    task_clients: Option<IndexMap<String, String>>,
+    model: Option<ModelURI>,
+    task_models: Option<IndexMap<String, String>>,
 }
 
 impl AgentBuilder {
@@ -48,8 +48,8 @@ impl AgentBuilder {
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
-            client: None,
-            task_clients: None,
+            model: None,
+            task_models: None,
         }
     }
 
@@ -112,15 +112,15 @@ impl AgentBuilder {
         self
     }
 
-    /// Set the stage's own client spec.
-    pub fn client(mut self, client: impl Into<String>) -> Self {
-        self.client = Some(ClientSpec(client.into()));
+    /// Set the stage's own model spec.
+    pub fn model(mut self, model: ModelURI) -> Self {
+        self.model = Some(model);
         self
     }
 
-    /// Set the stage's own task-client overrides.
-    pub fn task_clients(mut self, task_clients: IndexMap<String, String>) -> Self {
-        self.task_clients = Some(task_clients);
+    /// Set the stage's own task-model overrides.
+    pub fn task_models(mut self, task_models: IndexMap<String, String>) -> Self {
+        self.task_models = Some(task_models);
         self
     }
 
@@ -227,8 +227,8 @@ impl AgentBuilder {
         };
         Ok(StageSpec::Agent {
             stage,
-            client: self.client,
-            task_clients: self.task_clients,
+            model: self.model,
+            task_models: self.task_models,
         })
     }
 }

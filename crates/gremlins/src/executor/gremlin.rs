@@ -36,7 +36,7 @@ use serde_json::{Map, Value};
 
 use crate::artifacts::uri::Uri;
 use crate::clients::agent_loop::CancelToken;
-use crate::clients::client::Client;
+use crate::clients::client::{Client, ModelURI};
 use crate::clients::interactive::{InteractiveHandle, InteractiveSession, StreamEventSender};
 use crate::config;
 use crate::core::proc::{run_logged_commands, sanitize_log_filename};
@@ -169,13 +169,13 @@ pub fn validate_gremlin_id(id: &str) -> Result<GremlinId, String> {
 #[derive(Default)]
 pub(crate) struct RuntimeConfig {
     /// Exact-match stage→client mappings from config.
-    pub stage_clients_exact: HashMap<String, String>,
+    pub stage_models_exact: HashMap<String, String>,
     /// Prefix-match stage→client mappings from config.
-    pub stage_clients_prefix: HashMap<String, String>,
-    /// The default client from settings.yaml, if any.
-    pub default_client: Option<String>,
-    /// The default task-clients from settings.yaml, if any.
-    pub default_task_clients: Option<IndexMap<String, String>>,
+    pub stage_models_prefix: HashMap<String, String>,
+    /// The default model from settings.yaml, if any.
+    pub default_model: Option<String>,
+    /// The default task-models from settings.yaml, if any.
+    pub default_task_models: Option<IndexMap<String, String>>,
     /// The base process environment captured at startup, before any
     /// bootstrap or system vars are layered on.
     pub base_process_env: HashMap<String, String>,
@@ -193,10 +193,10 @@ pub(crate) struct RuntimeConfig {
 impl Clone for RuntimeConfig {
     fn clone(&self) -> Self {
         Self {
-            stage_clients_exact: self.stage_clients_exact.clone(),
-            stage_clients_prefix: self.stage_clients_prefix.clone(),
-            default_client: self.default_client.clone(),
-            default_task_clients: self.default_task_clients.clone(),
+            stage_models_exact: self.stage_models_exact.clone(),
+            stage_models_prefix: self.stage_models_prefix.clone(),
+            default_model: self.default_model.clone(),
+            default_task_models: self.default_task_models.clone(),
             base_process_env: self.base_process_env.clone(),
             log_tx: self.log_tx.clone(),
             interactive: self.interactive.clone(),
@@ -211,19 +211,19 @@ impl RuntimeConfig {
         let cfg = config::get_global();
         let (stage_exact, stage_prefix) = cfg
             .as_ref()
-            .map(|c| c.default_client_by_stage())
+            .map(|c| c.default_model_by_stage())
             .map(|(e, p)| (e.clone(), p.clone()))
             .unwrap_or_default();
-        let default_client = cfg
+        let default_model = cfg
             .as_ref()
-            .and_then(|c| c.default_client().map(String::from));
-        let default_task_clients = cfg.as_ref().and_then(|c| c.default_task_clients().cloned());
+            .and_then(|c| c.default_model().map(String::from));
+        let default_task_models = cfg.as_ref().and_then(|c| c.default_task_models().cloned());
         let base_process_env: HashMap<String, String> = std::env::vars().collect();
         Self {
-            stage_clients_exact: stage_exact,
-            stage_clients_prefix: stage_prefix,
-            default_client,
-            default_task_clients,
+            stage_models_exact: stage_exact,
+            stage_models_prefix: stage_prefix,
+            default_model,
+            default_task_models,
             base_process_env,
             log_tx: None,
             interactive: None,
@@ -239,9 +239,9 @@ pub struct Gremlin {
     /// read until [`Gremlin::init_runtime`]. `None` means no definition could be
     /// located — a handle that reaches `init_runtime` without one is an error.
     pub definition_path: Option<PathBuf>,
-    /// The CLI `--client` value this run was launched with, replayed when the
+    /// The CLI `--model` value this run was launched with, replayed when the
     /// definition is finally loaded.
-    pub client_override: Option<String>,
+    pub model_override: Option<String>,
     pub definition: Box<dyn GremlinDefinition>,
     pub workdir: Option<WorkDir>,
     pub project_root: PathBuf,
@@ -269,8 +269,8 @@ pub struct Gremlin {
     pub(crate) clean_cmds: Vec<String>,
     /// Task-client overrides inherited from an enclosing composite stage
     /// (sequence or parallel). Set during fork; used by run_stage_scoped
-    /// when no explicit enclosing_task_clients is passed.
-    pub(crate) enclosing_task_clients: Option<IndexMap<String, String>>,
+    /// when no explicit enclosing_task_models is passed.
+    pub(crate) enclosing_task_models: Option<IndexMap<String, String>>,
 }
 
 impl Gremlin {
@@ -291,7 +291,7 @@ impl Gremlin {
         definition_path: &Path,
         _definition: &StaticDefinition,
         stage_inputs: &HashMap<String, String>,
-        client_override: Option<&str>,
+        model_override: Option<&str>,
         config: &GremlinConfig,
     ) -> Result<Gremlin, RunError> {
         // Validate definition_name as a safe gremlin-id component before
@@ -391,7 +391,7 @@ impl Gremlin {
         if !initial.contains_key("definition_args") {
             initial.insert("definition_args".to_string(), Value::Array(Vec::new()));
         }
-        initial.insert("client".to_string(), Value::String(String::new()));
+        initial.insert("model".to_string(), Value::String(String::new()));
         initial.insert(
             "definition_path".to_string(),
             Value::String(definition_path_str.clone()),
@@ -452,13 +452,13 @@ impl Gremlin {
         let gremlin = Gremlin {
             id: gremlin_id,
             definition_path: Some(definition_path),
-            client_override: client_override.map(String::from),
+            model_override: model_override.map(String::from),
             definition: stub,
             workdir: Some(workdir),
             project_root: project_root.to_path_buf(),
             state,
             env: HashMap::new(),
-            client: Client::parse("cmd/true").expect("'cmd/true' is always a valid client spec"),
+            client: Client::parse("cmd/true").expect("'cmd/true' is always a valid model spec"),
             loop_iter: "1".to_string(),
             stage_inputs: stage_inputs.clone(),
             runtime_config,
@@ -466,7 +466,7 @@ impl Gremlin {
             interactive_session: None,
             scratch_dir,
             clean_cmds: Vec::new(),
-            enclosing_task_clients: None,
+            enclosing_task_models: None,
         };
 
         // 5. Create an empty log file.
@@ -588,13 +588,13 @@ impl Gremlin {
         Ok(Gremlin {
             id: gremlin_id,
             definition_path,
-            client_override: None,
+            model_override: None,
             definition,
             workdir,
             project_root,
             state: state_data,
             env: HashMap::new(),
-            client: Client::parse("cmd/true").expect("'cmd/true' is always a valid client spec"),
+            client: Client::parse("cmd/true").expect("'cmd/true' is always a valid model spec"),
             loop_iter: "1".to_string(),
             stage_inputs,
             runtime_config,
@@ -602,7 +602,7 @@ impl Gremlin {
             interactive_session: None,
             scratch_dir,
             clean_cmds: Vec::new(),
-            enclosing_task_clients: None,
+            enclosing_task_models: None,
         })
     }
 
@@ -662,15 +662,15 @@ impl Gremlin {
             };
             StaticDefinition::from_expanded_bytes(
                 &bytes,
-                self.client_override.as_deref(),
-                self.runtime_config.default_client.as_deref(),
+                self.model_override.as_deref(),
+                self.runtime_config.default_model.as_deref(),
             )
             .map_err(|error| RunError::Message(error.to_string()))?
         } else {
             StaticDefinition::from_yaml_file(
                 &definition_path,
-                self.client_override.as_deref(),
-                self.runtime_config.default_client.as_deref(),
+                self.model_override.as_deref(),
+                self.runtime_config.default_model.as_deref(),
             )
             .map_err(|error| RunError::Message(error.to_string()))?
         };
@@ -700,9 +700,9 @@ impl Gremlin {
         // debug. `cmd/true` is the harness's own no-op client, so a bad spec
         // degrades to a run that does nothing rather than one that never starts,
         // while the definition's
-        // declared `default_client` stays on record in `state.json`.
-        let client = Client::parse(&definition.default_client).unwrap_or_else(|_| {
-            Client::parse("cmd/true").expect("'cmd/true' is always a valid client spec")
+        // declared `default_model` stays on record in `state.json`.
+        let client = Client::from_uri(definition.default_model.clone()).unwrap_or_else(|_| {
+            Client::parse("cmd/true").expect("'cmd/true' is always a valid model spec")
         });
 
         register_stage_inputs(
@@ -722,7 +722,7 @@ impl Gremlin {
         )?;
 
         // Nothing below this line can fail, so this is the commit point.
-        let default_client = definition.default_client.clone();
+        let default_model = definition.default_model.to_string();
         if let Some(name) = resume_from {
             definition.goto(name);
         }
@@ -744,10 +744,10 @@ impl Gremlin {
         // that the workspace is real.
         self.env = env;
 
-        // The client label is only knowable once the definition is loaded; the
+        // The model label is only knowable once the definition is loaded; the
         // initial write left it blank and this is the patch that fills it in.
         let mut fields = Map::new();
-        fields.insert("client".to_string(), Value::String(default_client));
+        fields.insert("model".to_string(), Value::String(default_model));
         self.state.patch(&[], &fields);
 
         Ok(())
@@ -759,8 +759,8 @@ impl Gremlin {
     /// `child_definition_path` is the branch's hermetic `definition.yaml`; pass
     /// `None` to inherit the parent's persisted `definition_path`.
     ///
-    /// When `effective_client` is `Some`, the child's provider is mutated via
-    /// [`GremlinDefinition::with_client`] so `default_client()` reflects
+    /// When `effective_model` is `Some`, the child's provider is mutated via
+    /// [`GremlinDefinition::with_model`] so `default_model()` reflects
     /// the override.
     ///
     /// Fork creates the child state directory, copies artifacts, seeds the
@@ -775,21 +775,21 @@ impl Gremlin {
         child_key: &str,
         child_definition_path: Option<&Path>,
         child_provider: Box<dyn GremlinDefinition>,
-        effective_client: Option<&str>,
+        effective_model: Option<&ModelURI>,
     ) -> Result<Gremlin, RunError> {
         log::debug!(
             "fork: child_id={child_id}, parent_id={parent_id}, group_name={group_name}, child_key={child_key}"
         );
         let child_gremlin_id = validate_gremlin_id(child_id).map_err(RunError::Message)?;
 
-        // Allow effective_client mutation via with_client.
+        // Allow effective_model mutation via with_model.
         let mut child_provider = child_provider;
 
-        let client = if let Some(client_spec) = effective_client {
-            let client = Client::parse(client_spec).map_err(|e| {
-                RunError::Message(format!("invalid client spec '{client_spec}': {e}"))
+        let client = if let Some(model_spec) = effective_model {
+            let client = Client::from_uri(model_spec.clone()).map_err(|e| {
+                RunError::Message(format!("invalid model spec '{model_spec}': {e}"))
             })?;
-            child_provider.with_client(client_spec);
+            child_provider.with_model(model_spec);
             client
         } else {
             self.client.clone()
@@ -902,7 +902,7 @@ impl Gremlin {
             definition_path: child_definition_path
                 .map(Path::to_path_buf)
                 .or_else(|| self.definition_path.clone()),
-            client_override: self.client_override.clone(),
+            model_override: self.model_override.clone(),
             definition: child_provider,
             workdir: Some(child_workdir),
             project_root: self.project_root.clone(),
@@ -918,7 +918,7 @@ impl Gremlin {
             interactive_session: None,
             scratch_dir: child_scratch_dir,
             clean_cmds: self.clean_cmds.clone(),
-            enclosing_task_clients: self.enclosing_task_clients.clone(),
+            enclosing_task_models: self.enclosing_task_models.clone(),
         })
     }
 
@@ -1702,9 +1702,9 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("demo.yaml"));
-        // Construction is cheap: the client label is blank until the run
+        // Construction is cheap: the model label is blank until the run
         // loads the definition, and nothing has been parsed yet.
-        assert_eq!(raw["client"], "");
+        assert_eq!(raw["model"], "");
         assert!(gremlin.definition.is_stub());
         assert!(gremlin.env.is_empty());
 
@@ -1718,7 +1718,7 @@ mod tests {
         assert_eq!(gremlin.env["GREMLINS_GREMLIN_ID"], gremlin.id.as_str());
         assert!(gremlin.state.artifact_uri_display().ends_with("artifacts"));
         let raw = gremlin.state.state_tree();
-        assert_eq!(raw["client"], "cmd/true");
+        assert_eq!(raw["model"], "cmd/true");
 
         // Idempotent: a second call is a no-op, not a re-parse.
         let path_before = gremlin.definition.path().to_path_buf();
@@ -1979,7 +1979,7 @@ mod tests {
         std::fs::create_dir_all(&overlay).unwrap();
         std::fs::write(
             overlay.join("demo.yaml"),
-            "default_client: 'cmd/true'\nstages: []\n",
+            "default_model: 'cmd/true'\nstages: []\n",
         )
         .unwrap();
 
@@ -2011,7 +2011,7 @@ mod tests {
         Gremlin {
             id: validate_gremlin_id(id).unwrap(),
             definition_path: None,
-            client_override: None,
+            model_override: None,
             definition: Box::new(StaticDefinition::stub()),
             workdir: workdir.map(WorkDir::Persistent),
             project_root,
@@ -2028,7 +2028,7 @@ mod tests {
             interactive_session: None,
             scratch_dir: ScratchDir::Persistent(scratch_dir),
             clean_cmds: Vec::new(),
-            enclosing_task_clients: None,
+            enclosing_task_models: None,
         }
     }
 
@@ -2159,7 +2159,7 @@ mod tests {
     /// directly into a state directory.
     const HERMETIC_DEFINITION: &str = r#"
 __gremlins_expanded__: true
-default_client: 'cmd/true'
+default_model: 'cmd/true'
 stages:
   - name: run
     type: exec
@@ -2171,7 +2171,7 @@ stages:
     /// Same definition without the sentinel — the direct-load path must
     /// tolerate its absence.
     const HERMETIC_DEFINITION_NO_SENTINEL: &str = r#"
-default_client: 'cmd/true'
+default_model: 'cmd/true'
 stages:
   - name: run
     type: exec
@@ -2199,7 +2199,7 @@ stages:
             "status": "running",
             "pid": null,
             "exit_code": null,
-            "client": "",
+            "model": "",
             "attempt": "0001",
         });
         std::fs::write(
@@ -2232,7 +2232,7 @@ stages:
         gremlin.init_runtime(None).await.unwrap();
 
         assert_eq!(gremlin.definition.name(), "definition");
-        assert_eq!(gremlin.definition.default_client(), "cmd/true");
+        assert_eq!(gremlin.definition.default_model().to_string(), "cmd/true");
         // project_root came from state.json, not from a walk.
         assert_eq!(gremlin.project_root, project_root);
 
@@ -2265,7 +2265,7 @@ stages:
         gremlin.init_runtime(None).await.unwrap();
 
         assert_eq!(gremlin.definition.name(), "definition");
-        assert_eq!(gremlin.definition.default_client(), "cmd/true");
+        assert_eq!(gremlin.definition.default_model().to_string(), "cmd/true");
         let stage = gremlin.definition.next_stage().await.unwrap();
         assert_eq!(stage.name(), "run");
         assert!(matches!(
@@ -2299,7 +2299,7 @@ stages:
             "status": "running",
             "pid": null,
             "exit_code": null,
-            "client": "",
+            "model": "",
             "attempt": "0001",
         });
         std::fs::write(
@@ -2314,7 +2314,7 @@ stages:
         gremlin.init_runtime(None).await.unwrap();
 
         assert_eq!(gremlin.definition.name(), "demo");
-        assert_eq!(gremlin.definition.default_client(), "cmd/true");
+        assert_eq!(gremlin.definition.default_model().to_string(), "cmd/true");
         // Verify no stages via next_stage.
         assert!(matches!(
             gremlin.definition.next_stage().await.unwrap(),
@@ -2351,7 +2351,7 @@ stages:
         let definition_yaml = format!(
             r#"
 __gremlins_expanded__: true
-default_client: 'cmd/true'
+default_model: 'cmd/true'
 stages: []
 land:
   land_cmds:
@@ -2373,7 +2373,7 @@ land:
             "status": "finished",
             "pid": null,
             "exit_code": 0,
-            "client": "",
+            "model": "",
             "attempt": "0001",
         });
         std::fs::write(

@@ -9,7 +9,7 @@ use rig_core::operation::Completion;
 use super::task_kind::TaskKind;
 use super::tools::{self, ToolContext};
 
-/// Build a [`TaskModelSelector`] from the raw `task-clients` config map and a
+/// Build a [`TaskModelSelector`] from the raw `task-models` config map and a
 /// backend that can resolve `provider/model` specs into live models.
 ///
 /// Returns `None` when the map is empty (the common case) or when the backend
@@ -37,36 +37,36 @@ pub(crate) fn build_task_selector(
 
 const MAX_DEPTH: u32 = 3;
 
-/// Builds the model named by a matching `task-clients` entry, for use by one
+/// Builds the model named by a matching `task-models` entry, for use by one
 /// Task invocation.  Returns `None` when the spec names a provider this
 /// backend does not serve — the caller falls back to the parent's model.
 pub(crate) type TaskModelFactory<M = DynModel<Completion>> =
     Arc<dyn Fn(&str) -> Option<M> + Send + Sync>;
 
-/// Lookup map for `task-clients`, keyed by the exact [`TaskKind`] spelling.
+/// Lookup map for `task-models`, keyed by the exact [`TaskKind`] spelling.
 /// Shared behind an `Arc` so a Task fan-out clones one pointer per invocation
 /// rather than the whole map.
 #[derive(Debug)]
-struct TaskClientOverrides {
+struct TaskModelOverrides {
     by_kind: HashMap<TaskKind, String>,
 }
 
-impl TaskClientOverrides {
+impl TaskModelOverrides {
     /// The spec configured for `kind`, if any. Lookup is an exact key match.
     fn spec_for(&self, kind: TaskKind) -> Option<&str> {
         self.by_kind.get(&kind).map(|s| s.as_str())
     }
 }
 
-/// Everything a Task invocation needs to pick a model from `task-clients`: the
+/// Everything a Task invocation needs to pick a model from `task-models`: the
 /// lookup maps and a factory that builds the model a matching entry names.
 ///
-/// `None` at a call site means no `task-clients` is configured, so every task
+/// `None` at a call site means no `task-models` is configured, so every task
 /// keeps the parent's model. Cloning a selector is O(1) — both halves sit behind
 /// an `Arc` — which matters because a Task fan-out clones one per invocation.
 #[derive(Clone)]
 pub struct TaskModelSelector<M = DynModel<Completion>> {
-    overrides: Arc<TaskClientOverrides>,
+    overrides: Arc<TaskModelOverrides>,
     factory: TaskModelFactory<M>,
 }
 
@@ -89,7 +89,7 @@ impl<M: Clone> TaskModelSelector<M> {
             return None;
         }
         Some(Self {
-            overrides: Arc::new(TaskClientOverrides { by_kind }),
+            overrides: Arc::new(TaskModelOverrides { by_kind }),
             factory,
         })
     }
@@ -99,7 +99,7 @@ impl<M: Clone> TaskModelSelector<M> {
     /// cannot serve.
     ///
     /// Returns `(model, spec_string)` where `spec_string` is the matched
-    /// `task-clients` entry (for logging), or `None` when no entry matched or
+    /// `task-models` entry (for logging), or `None` when no entry matched or
     /// the factory could not build a model for the matched spec.
     fn model_for(&self, kind: TaskKind, default_model: &M) -> (M, Option<String>)
     where
@@ -153,7 +153,7 @@ fn task_prefix(base: &str, chain: &str) -> String {
 /// context prefix, and the original `ToolContext` — everything needed to run
 /// a nested agent loop.
 ///
-/// `task_model_selector` carries the `task-clients` configuration, so each
+/// `task_model_selector` carries the `task-models` configuration, so each
 /// invocation resolves its own model from its own `kind`. `None` means
 /// no overrides are configured.
 ///
@@ -248,7 +248,7 @@ fn make_task_runner_at_depth(
                 // A selector, when configured, may swap in a different model based
                 // on this task's own `kind`; otherwise the parent's stands.
                 // Fork always inherits the parent model directly and never consults
-                // the task-clients lookup.
+                // the task-models lookup.
                 let (selected_model, _selected_spec) = if kind == TaskKind::Fork {
                     (model.clone(), None)
                 } else {
@@ -389,8 +389,8 @@ mod tests {
     }
 
     #[test]
-    fn task_client_overrides_match_by_kind() {
-        let overrides = TaskClientOverrides {
+    fn task_model_overrides_match_by_kind() {
+        let overrides = TaskModelOverrides {
             by_kind: HashMap::from([
                 (TaskKind::Scout, "openai/mini".into()),
                 (TaskKind::Implement, "openai/gpt-4o".into()),
@@ -414,7 +414,7 @@ mod tests {
             HashMap::from([(TaskKind::Scout, "openai/mini".into())]),
             factory,
         )
-        .expect("a non-empty task-clients map yields a selector");
+        .expect("a non-empty task-models map yields a selector");
 
         assert_eq!(
             selector.model_for(TaskKind::Scout, &"default".to_string()),
@@ -551,7 +551,7 @@ mod tests {
             ]),
             factory,
         )
-        .expect("a configured task-clients map yields a selector");
+        .expect("a configured task-models map yields a selector");
 
         let cancel = super::super::agent_loop::CancelToken::new();
         let runner = make_task_runner(
@@ -575,11 +575,11 @@ mod tests {
         let output = runner(TaskKind::Fork, "child task".into(), Some(parent_history)).await;
 
         assert_eq!(output, "fork reply");
-        // Fork must bypass task-clients entirely, even when another kind is
+        // Fork must bypass task-models entirely, even when another kind is
         // configured with an override.
         assert!(
             !factory_called.load(Ordering::SeqCst),
-            "Fork must never consult the task-clients factory"
+            "Fork must never consult the task-models factory"
         );
 
         // The child's first request must carry the inherited parent turn

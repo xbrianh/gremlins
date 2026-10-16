@@ -211,10 +211,10 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
             Some(CommandResult::Debug(id.to_string()))
         }
         "model" => Some(CommandResult::Lines(vec![format!(
-            "default client: {}",
+            "default model: {}",
             gremlins::config::global_config()
                 .ok()
-                .and_then(|c| c.default_client().map(String::from))
+                .and_then(|c| c.default_model().map(String::from))
                 .unwrap_or_else(|| "(not configured)".to_string())
         )])),
         _ => Some(CommandResult::Lines(vec![format!(

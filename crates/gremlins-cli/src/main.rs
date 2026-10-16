@@ -44,6 +44,9 @@ enum Cmds {
         /// Run with temp-backed storage — no footprint on disk after completion.
         #[arg(long)]
         ephemeral: bool,
+        /// Model spec supplying `default_model` only when the definition YAML has none.
+        #[arg(long)]
+        model: Option<String>,
     },
     /// List gremlins from the state root as a plain-column table.
     Ls {
@@ -138,7 +141,8 @@ async fn main() {
             definition,
             args,
             ephemeral,
-        }) => launch(&definition, &args, ephemeral).await,
+            model,
+        }) => launch(&definition, args, ephemeral, model).await,
         Some(Cmds::Ls { here }) => ls(here).await,
         Some(Cmds::Info { id }) => info(&id).await,
         Some(Cmds::Stop { id }) => stop(&id).await,
@@ -528,11 +532,8 @@ async fn status(id: &str) -> Result<(), String> {
     );
     println!("pid:           {}", value_display(response.get("pid")));
     println!(
-        "client:        {}",
-        response
-            .get("client")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
+        "model:        {}",
+        response.get("model").and_then(|v| v.as_str()).unwrap_or("")
     );
     println!(
         "attempt:       {}",
@@ -594,7 +595,7 @@ fn status_direct(id: &str) -> Result<(), String> {
         field_display(&gremlin.state, "exit_code")
     );
     println!("pid:           {}", field_display(&gremlin.state, "pid"));
-    println!("client:        {}", field_display(&gremlin.state, "client"));
+    println!("model:        {}", field_display(&gremlin.state, "model"));
     println!(
         "attempt:       {}",
         field_display(&gremlin.state, "attempt")
@@ -668,7 +669,7 @@ fn info_direct(id: &str) -> Result<(), String> {
         "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
         "exit_code": gremlin.state.read_field("exit_code").unwrap_or(Value::Null),
         "pid": gremlin.state.read_field("pid").unwrap_or(Value::Null),
-        "client": gremlin.state.read_str("client"),
+        "model": gremlin.state.read_str("model"),
         "attempt": gremlin.state.read_str("attempt"),
         "kind": gremlin.state.read_str("kind"),
         "bail_info": gremlin
@@ -1317,9 +1318,9 @@ async fn land(id: &str) -> Result<(), String> {
         ));
     }
 
-    let default_client = config::global_config()
+    let default_model = config::global_config()
         .ok()
-        .and_then(|c| c.default_client().map(String::from));
+        .and_then(|c| c.default_model().map(String::from));
     let store = FileSystemStateStore::from_path(state_dir.to_path_buf());
 
     // Load the hermetic definition through the store blob.
@@ -1331,7 +1332,7 @@ async fn land(id: &str) -> Result<(), String> {
         let mut bytes = Vec::new();
         blob.read_to_end(&mut bytes)
             .map_err(|e| format!("gremlin {id}: failed to read definition snapshot: {e}"))?;
-        StaticDefinition::from_expanded_bytes(&bytes, None, default_client.as_deref())
+        StaticDefinition::from_expanded_bytes(&bytes, None, default_model.as_deref())
             .map_err(|e| format!("gremlin {id}: failed to load definition: {e}"))?
     };
 
@@ -1523,10 +1524,22 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
 // launch
 // ---------------------------------------------------------------------------
 
-async fn launch(definition: &str, raw_args: &[String], ephemeral: bool) -> Result<(), String> {
+async fn launch(
+    definition: &str,
+    mut raw_args: Vec<String>,
+    ephemeral: bool,
+    cli_model: Option<String>,
+) -> Result<(), String> {
+    // `--model` is a reserved launch option, but the free-form bootstrap-arg
+    // list is a trailing var-arg, so clap captures `--model` there once any
+    // bootstrap input has been seen. Pull it back out before bootstrap
+    // parsing so `gremlins launch demo --goal text --model cmd/true` works.
+    let model_override = extract_model_override(&mut raw_args, cli_model)?;
+    let model_override = model_override.as_deref();
+
     // Parse --key value pairs up front so malformed trailing args fail fast,
     // before any config or definition resolution.
-    parse_stage_inputs(raw_args)?;
+    parse_stage_inputs(&raw_args)?;
 
     // Bootstrap the global config so path resolvers work.
     config::init_global().map_err(|e| e.to_string())?;
@@ -1538,12 +1551,15 @@ async fn launch(definition: &str, raw_args: &[String], ephemeral: bool) -> Resul
 
     // Load the definition just enough to validate --key args against
     // bootstrap.source.
-    let default_client = config::global_config()
+    let default_model = config::global_config()
         .ok()
-        .and_then(|c| c.default_client().map(String::from));
-    let gremlin_def =
-        StaticDefinition::from_yaml_file(&definition_path, None, default_client.as_deref())
-            .map_err(|e| format!("invalid definition: {e}"))?;
+        .and_then(|c| c.default_model().map(String::from));
+    let gremlin_def = StaticDefinition::from_yaml_file(
+        &definition_path,
+        model_override,
+        default_model.as_deref(),
+    )
+    .map_err(|e| format!("invalid definition: {e}"))?;
 
     // Resolve `filepath`-typed bootstrap sources to absolute paths so the
     // daemon can bind them regardless of its own working directory. The
@@ -1552,7 +1568,7 @@ async fn launch(definition: &str, raw_args: &[String], ephemeral: bool) -> Resul
     let resolved_args = match &gremlin_def.bootstrap.source {
         Some(source) => {
             let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
-            resolve_filepath_args(raw_args, source, &project_root, &cwd)
+            resolve_filepath_args(&raw_args, source, &project_root, &cwd)
         }
         None => raw_args.to_vec(),
     };
@@ -1590,6 +1606,7 @@ async fn launch(definition: &str, raw_args: &[String], ephemeral: bool) -> Resul
         "args": resolved_args,
         "project_root": project_root.to_string_lossy(),
         "ephemeral": ephemeral,
+        "model": model_override,
     }))
     .await?;
 
@@ -1669,6 +1686,52 @@ fn absolute_from(path: &Path, cwd: &Path) -> PathBuf {
     } else {
         cwd.join(path)
     }
+}
+
+/// Remove the reserved `--model` option from the free-form bootstrap args.
+///
+/// Supports both `--model value` and `--model=value` spellings. The
+/// `cli_model` value (if clap happened to parse the flag before the trailing
+/// var-arg began) is used as the initial value, so supplying `--model` twice is
+/// still caught.
+fn extract_model_override(
+    args: &mut Vec<String>,
+    cli_model: Option<String>,
+) -> Result<Option<String>, String> {
+    let mut model = cli_model;
+    let mut bootstrap_args = Vec::with_capacity(args.len());
+    let mut i = 0;
+
+    while i < args.len() {
+        let token = &args[i];
+
+        if let Some(value) = token.strip_prefix("--model=") {
+            if model.is_some() {
+                return Err("--model may only be supplied once".to_string());
+            }
+            if value.is_empty() {
+                return Err("--model requires a value".to_string());
+            }
+            model = Some(value.to_string());
+        } else if token == "--model" {
+            if model.is_some() {
+                return Err("--model may only be supplied once".to_string());
+            }
+            i += 1;
+            let value = args
+                .get(i)
+                .filter(|value| !value.starts_with("--"))
+                .ok_or_else(|| "--model requires a value".to_string())?;
+            model = Some(value.clone());
+        } else {
+            bootstrap_args.push(token.clone());
+        }
+
+        i += 1;
+    }
+
+    *args = bootstrap_args;
+    Ok(model)
 }
 
 fn parse_stage_inputs(raw: &[String]) -> Result<HashMap<String, String>, String> {
@@ -1758,6 +1821,42 @@ mod tests {
     use super::*;
     use gremlins::schemas::bootstrap::{InputSource, InputSources};
     use std::fs;
+
+    #[test]
+    fn launch_parser_reserves_model_after_bootstrap_inputs() {
+        let cli = Cli::try_parse_from([
+            "gremlins", "launch", "demo", "--goal", "text", "--model", "cmd/true",
+        ])
+        .expect("launch args must parse");
+
+        let Some(Cmds::Launch {
+            definition,
+            mut args,
+            model,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected launch command");
+        };
+
+        assert_eq!(definition, "demo");
+        let model_override = extract_model_override(&mut args, model).unwrap();
+        assert_eq!(model_override.as_deref(), Some("cmd/true"));
+        assert_eq!(args, vec!["--goal".to_string(), "text".to_string()]);
+    }
+
+    #[test]
+    fn extract_model_override_rejects_duplicate_model() {
+        let mut args = vec![
+            "--goal".to_string(),
+            "text".to_string(),
+            "--model".to_string(),
+            "openai/gpt-4".to_string(),
+            "--model=cmd/true".to_string(),
+        ];
+        let err = extract_model_override(&mut args, None).unwrap_err();
+        assert!(err.contains("once"), "got: {err}");
+    }
 
     fn inputs(plan_types: &[&str]) -> InputSources {
         let sources = [
