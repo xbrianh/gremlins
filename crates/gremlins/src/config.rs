@@ -595,26 +595,36 @@ static TUI_MODEL_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Read the gremlins-managed TUI model override, if one exists.
 ///
-/// A missing or unparsable `tui.json` is treated as "no override": the
-/// problem is logged and chat/model resolution falls through to settings.
-pub(crate) fn load_tui_model_override() -> Option<String> {
+/// A missing or unparsable `tui.json` is treated as "no override" (logged,
+/// never fatal to chat). A present-but-unreadable file is surfaced as an
+/// error so callers do not silently fall through to a different model.
+pub(crate) fn load_tui_model_override() -> Result<Option<String>, String> {
     let path = tui_model_override_path();
-    let content = std::fs::read_to_string(&path).ok()?;
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(format!(
+                "failed to read tui model override {}: {e}",
+                path.display()
+            ));
+        }
+    };
     match serde_json::from_str::<TuiModelOverrideFile>(&content) {
         Ok(file) if file.model.trim().is_empty() => {
             log::warn!(
                 "tui model override in {} is empty; ignoring",
                 path.display()
             );
-            None
+            Ok(None)
         }
-        Ok(file) => Some(file.model),
+        Ok(file) => Ok(Some(file.model)),
         Err(e) => {
             log::warn!(
                 "ignoring unparsable tui model override at {}: {e}",
                 path.display()
             );
-            None
+            Ok(None)
         }
     }
 }
@@ -658,17 +668,21 @@ pub(crate) fn write_tui_model_override(spec: &str) -> Result<(), String> {
 }
 
 /// Remove the gremlins-managed TUI model override, if present.
-pub(crate) fn clear_tui_model_override() {
+///
+/// A missing file is not an error; any other removal failure is returned so
+/// `/model clear` can report that the override may still be active.
+pub(crate) fn clear_tui_model_override() -> Result<(), String> {
     let _guard = TUI_MODEL_OVERRIDE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = tui_model_override_path();
     match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            log::warn!("failed to clear tui model override {}: {e}", path.display());
-        }
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!(
+            "failed to clear tui model override {}: {e}",
+            path.display()
+        )),
     }
 }
 
@@ -700,8 +714,9 @@ impl TuiModelLayer {
 pub(crate) fn resolve_tui_chat_model(
     config: &Config,
 ) -> Result<Option<(TuiModelLayer, String)>, String> {
+    let override_spec = load_tui_model_override()?;
     let layers = [
-        (TuiModelLayer::Override, load_tui_model_override()),
+        (TuiModelLayer::Override, override_spec),
         (
             TuiModelLayer::TuiModel,
             config.tui_model().map(String::from),
@@ -1473,7 +1488,7 @@ model-profiles:
         assert_eq!(spec, "cmd/override");
 
         // Clearing the override restores the settings precedence.
-        clear_tui_model_override();
+        clear_tui_model_override().unwrap();
         let (source, spec) = resolve_tui_chat_model(&cfg).unwrap().unwrap();
         assert_eq!(source, TuiModelLayer::TuiModel);
         assert_eq!(spec, "cmd/tui");

@@ -2094,7 +2094,9 @@ async fn handle_model(request: &Value) -> Value {
         .unwrap_or(false);
 
     if clear {
-        config::clear_tui_model_override();
+        if let Err(e) = config::clear_tui_model_override() {
+            return error_response(&e);
+        }
     } else if let Some(spec) = request.get("model").and_then(|v| v.as_str()) {
         let spec = spec.trim();
         if spec.is_empty() {
@@ -2946,12 +2948,12 @@ async fn handle_chat(
             }
         }
     };
-    gremlin.definition = Box::new(definition);
     // Rebuild the parsed model handle for the reused gremlin so a `/model`
     // change takes effect on the next turn rather than only after the chat
-    // gremlin is recreated.
-    match Client::from_uri(chat_model.clone()) {
-        Ok(client) => gremlin.client = client,
+    // gremlin is recreated. Build the client before mutating the gremlin so
+    // a failure re-inserts it unchanged (old definition, old client).
+    let client = match Client::from_uri(chat_model.clone()) {
+        Ok(client) => client,
         Err(e) => {
             let mut s = session.lock().await;
             s.chat_gremlins.insert(id.clone(), gremlin);
@@ -2959,7 +2961,9 @@ async fn handle_chat(
             let _ = writer.write_json_line(&resp).await;
             return;
         }
-    }
+    };
+    gremlin.client = client;
+    gremlin.definition = Box::new(definition);
     gremlin.runtime_config.stream_events = Some(StreamEventSender::Mpsc(stream_tx));
     gremlin.cancel_token = Some(turn_cancel.clone());
     // Refresh the environment on every turn: the chat gremlin is persistent
@@ -4057,7 +4061,7 @@ mod tests {
         resolve_chat_env, resolve_filepath_source_values, usage_stats_from_state,
     };
     use crate::builders::{AgentBuilder, DefinitionBuilder};
-    use crate::clients::client::ModelURI;
+    use crate::clients::client::{Client, ModelURI};
     use crate::clients::protocol::UsageStats;
     use crate::executor::socket;
     use crate::schemas::bootstrap::{InputSource, InputSources};
@@ -4118,6 +4122,25 @@ mod tests {
                 };
                 if let Some(env) = env {
                     return env;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for chat gremlin {id} to re-insert"))
+    }
+
+    /// Wait until the chat gremlin has been re-inserted after its turn, then
+    /// return its parsed client handle.
+    async fn wait_for_chat_gremlin_client(session: &super::SessionHandle, id: &str) -> Client {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let client = {
+                    let s = session.lock().await;
+                    s.chat_gremlins.get(id).map(|g| g.client.clone())
+                };
+                if let Some(client) = client {
+                    return client;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -4708,6 +4731,54 @@ model-profiles:
             !super::get_run_map().lock().unwrap().contains_key(&id),
             "teardown must remove the chat gremlin from the run map"
         );
+    }
+
+    #[tokio::test]
+    async fn chat_reuse_rebuilds_client_after_model_change() {
+        let _sandbox = Sandbox::with_config(Some(r#"{"default-model": "cmd/echo"}"#));
+        let project_root = _sandbox.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let state_root = _sandbox.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        let (server, client) = tokio::net::UnixStream::pair().unwrap();
+        let (server_read, server_write) = server.into_split();
+        let writer = super::SharedWriter::new(server_write);
+        let (client_read, _client_write) = client.into_split();
+        let mut reader = tokio::io::BufReader::new(client_read);
+        let _server_read = server_read;
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new("sess-model-reuse".to_string()),
+        ));
+
+        let chat = |turn: &str| {
+            serde_json::json!({
+                "op": "chat",
+                "text": "hello",
+                "turn": turn,
+                "project_root": project_root.to_string_lossy(),
+            })
+        };
+
+        // First turn seeds the chat gremlin with the default model.
+        super::handle_chat(&chat("1"), &state_root, &writer, &session).await;
+        let ack = read_until_type(&mut reader, "ok").await;
+        let id = ack["id"].as_str().unwrap().to_string();
+        let before = wait_for_chat_gremlin_client(&session, &id).await;
+        assert_eq!(before, Client::parse("cmd/echo").unwrap());
+
+        // Change the model override; the reused gremlin must pick up the new
+        // client handle on the next turn without being recreated.
+        let set = handle_model(&serde_json::json!({ "op": "model", "model": "cmd/true" })).await;
+        assert_eq!(set["model"], "cmd/true");
+        assert_eq!(set["source"], "tui.json");
+
+        super::handle_chat(&chat("2"), &state_root, &writer, &session).await;
+        read_until_type(&mut reader, "ok").await;
+        let after = wait_for_chat_gremlin_client(&session, &id).await;
+        assert_eq!(after, Client::parse("cmd/true").unwrap());
+
+        super::teardown_session(&session, &state_root).await;
     }
 
     #[tokio::test]
