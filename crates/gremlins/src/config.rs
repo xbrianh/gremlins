@@ -215,6 +215,11 @@ fn validate_backoff_schedule(name: &str, schedule: Vec<f64>) -> Result<Vec<f64>,
                 "backoff.{name} entries must be positive finite delays in seconds, got {delay:?}"
             )));
         }
+        if std::time::Duration::try_from_secs_f64(*delay).is_err() {
+            return Err(ConfigError::Backoff(format!(
+                "backoff.{name} entry {delay:?} is outside the representable Duration range"
+            )));
+        }
     }
     Ok(schedule)
 }
@@ -1164,6 +1169,19 @@ not-a-key: 1"#,
         assert!(
             matches!(Config::load(), Err(ConfigError::Backoff(_))),
             "infinite backoff delays must be rejected by validation"
+        );
+    }
+
+    #[test]
+    fn test_config_backoff_rejects_unrepresentable_duration() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"backoff:
+  turn-retry: [1.0e20]"#,
+        ));
+        assert!(
+            matches!(Config::load(), Err(ConfigError::Backoff(_))),
+            "finite delays that exceed Duration's range must be rejected by validation: {:?}",
+            Config::load()
         );
     }
 
