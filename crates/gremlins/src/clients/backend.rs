@@ -39,10 +39,12 @@ pub struct RunParams {
     /// gremlin sets `true` to disable it. The agent loop translates this into
     /// a [`super::tools::SandboxMode`] when assembling the `ToolContext`.
     pub(crate) allow_all: bool,
-    /// Task-client selector, pre-built by the executor from
+    /// Task-client selector, built by the executor from
     /// `settings.yaml` `task-models` entries. `None` when no
-    /// entries are configured or when the backend cannot serve
-    /// any of them (e.g. `cmd`).
+    /// entries are configured. Resolution is lazy: the selector's
+    /// provider-agnostic factory builds a backend only when a
+    /// matching task kind actually runs and otherwise falls back to
+    /// the parent model.
     pub task_models: Option<TaskModelSelector<GremlinsModel>>,
     /// Supervisor-owned cancel token. When set, the backend uses it instead of
     /// creating its own, so `gremlins stop` cancels in-flight agent loops.
@@ -124,8 +126,8 @@ pub trait Backend: Send + Sync {
     /// Build a [`GremlinsModel`] from a `provider/model` spec, or `None` when
     /// the spec names a different provider or the model cannot be built.
     ///
-    /// Called by the executor to pre-build the `task-models` selector
-    /// before the agent loop starts.
+    /// Called by the provider-agnostic selector factory when a `task-models`
+    /// override matches a task kind that is actually running.
     fn make_model(&self, spec: &str) -> Option<GremlinsModel>;
 
     async fn resume(&self) -> Result<CompletedRun, ClientError>;

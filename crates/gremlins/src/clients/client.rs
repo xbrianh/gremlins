@@ -19,6 +19,7 @@ use indexmap::IndexMap;
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::backends;
 use crate::clients::interactive::InteractiveSession;
+use crate::clients::model::GremlinsModel;
 use crate::clients::protocol::CompletedRun;
 
 /// The six tools every native agent may call.
@@ -550,6 +551,22 @@ impl PartialEq for Client {
 
 impl Eq for Client {}
 
+/// Provider-agnostic model resolver for `task-models` entries.
+///
+/// Parses `spec` with [`Client`], builds or looks up the provider's backend in
+/// the shared lazy pool, and delegates to [`Backend::make_model`]. Returns
+/// `None` for malformed specs, unknown providers, the `cmd` backend, and
+/// backend-build failures — callers fall back to the parent model without
+/// surfacing an error.
+pub(crate) fn resolve_model(spec: &str) -> Option<GremlinsModel> {
+    let client = Client::parse(spec).ok()?;
+    if client.provider() == "cmd" {
+        return None;
+    }
+    let backend = client.get_or_build_backend().ok()?;
+    backend.make_model(spec)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -757,6 +774,24 @@ mod tests {
         assert!(Client::new("fake".into(), "m".into(), IndexMap::new()).is_err());
         assert!(Client::parse("fake/m").is_err());
         assert!(Client::from_uri(ModelURI::parse("fake/m").unwrap()).is_err());
+    }
+
+    #[test]
+    fn resolve_model_returns_none_for_malformed_specs() {
+        assert!(resolve_model("no-slash").is_none());
+        assert!(resolve_model("/model").is_none());
+        assert!(resolve_model("openai/").is_none());
+        assert!(resolve_model("model://openai").is_none());
+    }
+
+    #[test]
+    fn resolve_model_returns_none_for_unknown_provider() {
+        assert!(resolve_model("fake/model").is_none());
+    }
+
+    #[test]
+    fn resolve_model_returns_none_for_cmd() {
+        assert!(resolve_model("cmd/true").is_none());
     }
 
     #[test]

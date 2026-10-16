@@ -9,29 +9,18 @@ use super::task_kind::TaskKind;
 use super::tools::{self, ToolContext};
 
 /// Build a [`TaskModelSelector`] from the raw `task-models` config map and a
-/// backend that can resolve `provider/model` specs into live models.
+/// provider-agnostic model factory.
 ///
-/// Returns `None` when the map is empty (the common case) or when the backend
-/// cannot serve any of the configured entries.
+/// Returns `None` when the map is empty (the common case). Resolution is
+/// deliberately lazy: `factory` is only invoked for a matching task kind, so a
+/// configured entry whose kind never runs does not force that provider's
+/// backend or credentials to resolve.
 pub(crate) fn build_task_selector(
-    backend: std::sync::Arc<dyn crate::clients::backend::Backend>,
+    factory: TaskModelFactory,
     by_kind: &HashMap<TaskKind, String>,
 ) -> Option<TaskModelSelector<GremlinsModel>> {
-    if by_kind.is_empty() {
-        return None;
-    }
-    // Verify the backend can resolve at least one configured entry.
-    let any_resolvable = by_kind
-        .values()
-        .any(|spec| backend.make_model(spec).is_some());
-    if !any_resolvable {
-        return None;
-    }
     let by_kind = by_kind.clone();
-    TaskModelSelector::new(
-        by_kind,
-        Arc::new(move |spec: &str| backend.make_model(spec)),
-    )
+    TaskModelSelector::new(by_kind, factory)
 }
 
 const MAX_DEPTH: u32 = 3;
@@ -454,6 +443,21 @@ mod tests {
     fn task_model_selector_is_none_when_unconfigured() {
         let factory: TaskModelFactory<String> = Arc::new(|_: &str| Some(String::new()));
         assert!(TaskModelSelector::new(HashMap::new(), factory).is_none());
+    }
+
+    #[test]
+    fn build_task_selector_does_not_eagerly_resolve_entries() {
+        let parent = gm(rig_core::test_utils::MockCompletionModel::from_turns([]).erase());
+        let factory: TaskModelFactory = Arc::new(|_spec| None);
+        let selector = build_task_selector(
+            factory,
+            &HashMap::from([(TaskKind::Scout, "openai/mini".into())]),
+        )
+        .expect("a non-empty task-models map yields a selector");
+
+        let (model, spec) = selector.model_for(TaskKind::Scout, &parent);
+        assert_eq!(spec, None);
+        assert_eq!(model.name(), parent.name());
     }
 
     fn depth_test_ctx() -> ToolContext {
