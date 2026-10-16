@@ -321,7 +321,7 @@ impl Backend for AnthropicBackend {
         if provider == "anthropic" {
             match &self.state.client_state {
                 AnthropicClientState::Static(client) => {
-                    Some(client.completion(model).erase())
+                    Some(client.completion(&model).erase())
                 }
                 AnthropicClientState::Dynamic {
                     ref base_url,
@@ -340,7 +340,7 @@ impl Backend for AnthropicBackend {
                     let client = AnthropicConfig::new("unused")
                         .with_base_url(base_url)
                         .connect(wrapped);
-                    Some(client.completion(model).erase())
+                    Some(client.completion(&model).erase())
                 }
             }
         } else {
@@ -870,7 +870,7 @@ mod tests {
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        let model = backend.make_model("anthropic:claude-sonnet-4-6");
+        let model = backend.make_model("anthropic/claude-sonnet-4-6");
         assert!(model.is_some(), "Static client must produce a model");
     }
 
@@ -886,7 +886,7 @@ mod tests {
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        let model = backend.make_model("anthropic:claude-sonnet-4-6");
+        let model = backend.make_model("anthropic/claude-sonnet-4-6");
         assert!(
             model.is_some(),
             "Dynamic client must produce a model (lazy token acquisition)"
@@ -904,8 +904,8 @@ mod tests {
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        assert!(backend.make_model("openai:gpt-4o").is_none());
-        assert!(backend.make_model("azure-openai:gpt-4o").is_none());
+        assert!(backend.make_model("openai/gpt-4o").is_none());
+        assert!(backend.make_model("azure-openai/gpt-4o").is_none());
     }
 
     /// Explicit `cache_control` with a custom TTL wins over the default.

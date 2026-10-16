@@ -458,7 +458,7 @@ impl Gremlin {
             project_root: project_root.to_path_buf(),
             state,
             env: HashMap::new(),
-            client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
+            client: Client::parse("cmd/true").expect("'cmd/true' is always a valid client spec"),
             loop_iter: "1".to_string(),
             stage_inputs: stage_inputs.clone(),
             runtime_config,
@@ -594,7 +594,7 @@ impl Gremlin {
             project_root,
             state: state_data,
             env: HashMap::new(),
-            client: Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec"),
+            client: Client::parse("cmd/true").expect("'cmd/true' is always a valid client spec"),
             loop_iter: "1".to_string(),
             stage_inputs,
             runtime_config,
@@ -697,12 +697,12 @@ impl Gremlin {
         // An unusable client must not abort a run: the state directory, the
         // workspace and the artifacts all have to exist before any stage can
         // run, and failing here would leave the operator with no run at all to
-        // debug. `cmd:true` is the harness's own no-op client, so a bad spec
+        // debug. `cmd/true` is the harness's own no-op client, so a bad spec
         // degrades to a run that does nothing rather than one that never starts,
         // while the definition's
         // declared `default_client` stays on record in `state.json`.
         let client = Client::parse(&definition.default_client).unwrap_or_else(|_| {
-            Client::parse("cmd:true").expect("'cmd:true' is always a valid client spec")
+            Client::parse("cmd/true").expect("'cmd/true' is always a valid client spec")
         });
 
         register_stage_inputs(
@@ -1652,11 +1652,11 @@ mod tests {
 
     #[test]
     fn framework_subs_carries_the_three_vars() {
-        let subs = framework_subs("plan", "/w", "xai:grok-4");
+        let subs = framework_subs("plan", "/w", "xai/grok-4");
         assert_eq!(subs.len(), 3);
         assert_eq!(subs["name"], "plan");
         assert_eq!(subs["cwd"], "/w");
-        assert_eq!(subs["model"], "xai:grok-4");
+        assert_eq!(subs["model"], "xai/grok-4");
     }
 
     // --- lifecycle ---
@@ -1718,7 +1718,7 @@ mod tests {
         assert_eq!(gremlin.env["GREMLINS_GREMLIN_ID"], gremlin.id.as_str());
         assert!(gremlin.state.artifact_uri_display().ends_with("artifacts"));
         let raw = gremlin.state.state_tree();
-        assert_eq!(raw["client"], "cmd:true");
+        assert_eq!(raw["client"], "cmd/true");
 
         // Idempotent: a second call is a no-op, not a re-parse.
         let path_before = gremlin.definition.path().to_path_buf();
@@ -1979,7 +1979,7 @@ mod tests {
         std::fs::create_dir_all(&overlay).unwrap();
         std::fs::write(
             overlay.join("demo.yaml"),
-            "default_client: 'cmd:true'\nstages: []\n",
+            "default_client: 'cmd/true'\nstages: []\n",
         )
         .unwrap();
 
@@ -2020,7 +2020,7 @@ mod tests {
                 Box::new(FileSystemStateStore::from_path(state_dir)),
             ),
             env: HashMap::new(),
-            client: Client::parse("cmd:true").unwrap(),
+            client: Client::parse("cmd/true").unwrap(),
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             runtime_config: RuntimeConfig::default(),
@@ -2159,7 +2159,7 @@ mod tests {
     /// directly into a state directory.
     const HERMETIC_DEFINITION: &str = r#"
 __gremlins_expanded__: true
-default_client: 'cmd:true'
+default_client: 'cmd/true'
 stages:
   - name: run
     type: exec
@@ -2171,7 +2171,7 @@ stages:
     /// Same definition without the sentinel — the direct-load path must
     /// tolerate its absence.
     const HERMETIC_DEFINITION_NO_SENTINEL: &str = r#"
-default_client: 'cmd:true'
+default_client: 'cmd/true'
 stages:
   - name: run
     type: exec
@@ -2232,7 +2232,7 @@ stages:
         gremlin.init_runtime(None).await.unwrap();
 
         assert_eq!(gremlin.definition.name(), "definition");
-        assert_eq!(gremlin.definition.default_client(), "cmd:true");
+        assert_eq!(gremlin.definition.default_client(), "cmd/true");
         // project_root came from state.json, not from a walk.
         assert_eq!(gremlin.project_root, project_root);
 
@@ -2265,7 +2265,7 @@ stages:
         gremlin.init_runtime(None).await.unwrap();
 
         assert_eq!(gremlin.definition.name(), "definition");
-        assert_eq!(gremlin.definition.default_client(), "cmd:true");
+        assert_eq!(gremlin.definition.default_client(), "cmd/true");
         let stage = gremlin.definition.next_stage().await.unwrap();
         assert_eq!(stage.name(), "run");
         assert!(matches!(
@@ -2314,7 +2314,7 @@ stages:
         gremlin.init_runtime(None).await.unwrap();
 
         assert_eq!(gremlin.definition.name(), "demo");
-        assert_eq!(gremlin.definition.default_client(), "cmd:true");
+        assert_eq!(gremlin.definition.default_client(), "cmd/true");
         // Verify no stages via next_stage.
         assert!(matches!(
             gremlin.definition.next_stage().await.unwrap(),
@@ -2351,7 +2351,7 @@ stages:
         let definition_yaml = format!(
             r#"
 __gremlins_expanded__: true
-default_client: 'cmd:true'
+default_client: 'cmd/true'
 stages: []
 land:
   land_cmds:

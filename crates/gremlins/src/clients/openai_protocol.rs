@@ -346,15 +346,16 @@ pub(crate) async fn run_with_agent_loop(
 /// Split a client specifier into `(provider, model)`, or `None` when the
 /// provider or model part is empty or the spec is otherwise malformed.
 ///
-/// This is a thin adapter over [`crate::clients::client::split_spec`], so it
+/// This is a thin adapter over [`crate::clients::client::ModelURI`], so it
 /// derives the provider and model from the exact same grammar as
-/// [`crate::clients::client::parse_spec`] and discards any parsed parameter
-/// suffix. `openai:gpt-4o:foo=bar` yields `("openai", "gpt-4o")`, while an
+/// [`crate::clients::client::Client`] and discards any parsed parameter
+/// suffix. Both URI spellings are accepted: `openai/gpt-4o?foo=bar` yields
+/// `("openai", "gpt-4o")`, as does `model://openai/gpt-4o?foo=bar`. An
 /// OpenRouter model ID with a colon suffix such as
-/// `openrouter:some/model:free` yields `("openrouter", "some/model:free")`.
-pub(crate) fn provider_and_model(spec: &str) -> Option<(&str, &str)> {
-    let (provider, model, _) = crate::clients::client::split_spec(spec).ok()?;
-    Some((provider, model))
+/// `openrouter/some/model:free` yields `("openrouter", "some/model:free")`.
+pub(crate) fn provider_and_model(spec: &str) -> Option<(String, String)> {
+    let uri = crate::clients::client::ModelURI::parse(spec).ok()?;
+    Some((uri.provider().to_string(), uri.model().to_string()))
 }
 
 // ── tests ────────────────────────────────────────────────────────────────
@@ -552,12 +553,12 @@ mod tests {
         assert_eq!(additional["reasoning"]["effort"], "low");
     }
 
-    fn assert_provider_and_model_agrees_with_parse_spec(spec: &str) {
-        match crate::clients::client::parse_spec(spec) {
-            Ok((provider, model, _)) => {
+    fn assert_provider_and_model_agrees_with_model_uri(spec: &str) {
+        match crate::clients::client::ModelURI::parse(spec) {
+            Ok(uri) => {
                 assert_eq!(
                     provider_and_model(spec),
-                    Some((provider.as_str(), model.as_str())),
+                    Some((uri.provider().to_string(), uri.model().to_string())),
                     "{spec:?}"
                 );
             }
@@ -568,47 +569,55 @@ mod tests {
     }
 
     #[test]
-    fn provider_and_model_agrees_with_parse_spec_on_plain_and_param_specs() {
+    fn provider_and_model_agrees_with_model_uri_on_plain_and_param_specs() {
         for (spec, expected) in [
-            ("openai:gpt-4o", Some(("openai", "gpt-4o"))),
-            ("openai:gpt-4o:foo=bar", Some(("openai", "gpt-4o"))),
-            ("openai:gpt-4o:top_p=0.7,n=3", Some(("openai", "gpt-4o"))),
+            ("openai/gpt-4o", ("openai", "gpt-4o")),
+            ("openai/gpt-4o?foo=bar", ("openai", "gpt-4o")),
+            ("openai/gpt-4o?top_p=0.7,n=3", ("openai", "gpt-4o")),
             (
-                "openrouter:anthropic/claude-sonnet-4:free",
-                Some(("openrouter", "anthropic/claude-sonnet-4:free")),
+                "openrouter/anthropic/claude-sonnet-4:free",
+                ("openrouter", "anthropic/claude-sonnet-4:free"),
             ),
             (
-                "openrouter:google/gemini-2.5-flash:online",
-                Some(("openrouter", "google/gemini-2.5-flash:online")),
+                "openrouter/google/gemini-2.5-flash:online",
+                ("openrouter", "google/gemini-2.5-flash:online"),
             ),
             (
-                "openrouter:some/model:free",
-                Some(("openrouter", "some/model:free")),
+                "openrouter/some/model:free",
+                ("openrouter", "some/model:free"),
             ),
-            (
-                "openai:gpt-4o:reasoning=high,bad",
-                Some(("openai", "gpt-4o:reasoning=high,bad")),
-            ),
-            (
-                "cmd:echo hello:world=foo",
-                Some(("cmd", "echo hello:world=foo")),
-            ),
+            ("model://openai/gpt-4o?foo=bar", ("openai", "gpt-4o")),
+            ("cmd/echo hello:world=foo", ("cmd", "echo hello:world=foo")),
         ] {
-            assert_provider_and_model_agrees_with_parse_spec(spec);
-            assert_eq!(provider_and_model(spec), expected, "{spec:?}");
+            assert_provider_and_model_agrees_with_model_uri(spec);
+            assert_eq!(
+                provider_and_model(spec),
+                Some((expected.0.to_string(), expected.1.to_string())),
+                "{spec:?}"
+            );
         }
     }
 
     #[test]
-    fn provider_and_model_agrees_with_parse_spec_on_malformed_specs() {
-        for spec in ["", "only", ":model", "provider:", "openai::foo=bar"] {
-            assert_provider_and_model_agrees_with_parse_spec(spec);
+    fn provider_and_model_agrees_with_model_uri_on_malformed_specs() {
+        const LEGACY_COLON_SPEC: &str = concat!("openai", ":", "gpt-4o");
+
+        for spec in [
+            "",
+            "only",
+            LEGACY_COLON_SPEC,
+            "/model",
+            "openai/",
+            "openai/gpt-4o?reasoning=high,bad",
+            "model://cmd/true",
+        ] {
+            assert_provider_and_model_agrees_with_model_uri(spec);
         }
 
         // Belt-and-braces: the malformed/empty-parts contract remains None.
         assert_eq!(provider_and_model(""), None);
         assert_eq!(provider_and_model("only"), None);
-        assert_eq!(provider_and_model(":model"), None);
-        assert_eq!(provider_and_model("provider:"), None);
+        assert_eq!(provider_and_model(LEGACY_COLON_SPEC), None);
+        assert_eq!(provider_and_model("openai/"), None);
     }
 }

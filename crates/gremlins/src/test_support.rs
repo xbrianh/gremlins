@@ -184,9 +184,9 @@ pub(crate) struct GitSandbox {
 
 impl GitSandbox {
     /// A sandbox whose `.gremlins/demo.yaml` holds the default
-    /// `default_client: 'cmd:true'` + empty stages.
+    /// `default_client: 'cmd/true'` + empty stages.
     pub(crate) fn new() -> Self {
-        Self::with_definition("default_client: 'cmd:true'\nstages: []\n")
+        Self::with_definition("default_client: 'cmd/true'\nstages: []\n")
     }
 
     /// A sandbox whose `.gremlins/demo.yaml` holds `yaml`.

@@ -4384,14 +4384,14 @@ mod tests {
 
         let child_handle = child.clone();
         let factory: super::super::task::TaskModelFactory = Arc::new(move |spec: &str| {
-            assert_eq!(spec, "openai:mini", "factory receives the matched spec");
+            assert_eq!(spec, "openai/mini", "factory receives the matched spec");
             Some(child_handle.clone().erase())
         });
 
         let selector = super::super::task::TaskModelSelector::new(
             HashMap::from([(
                 super::super::task_kind::TaskKind::Scout,
-                "openai:mini".to_string(),
+                "openai/mini".to_string(),
             )]),
             factory,
         )
@@ -4695,7 +4695,7 @@ mod tests {
         let selector = super::super::task::TaskModelSelector::new(
             HashMap::from([(
                 super::super::task_kind::TaskKind::Scout,
-                "openai:mini".to_string(),
+                "openai/mini".to_string(),
             )]),
             factory,
         )
@@ -4779,7 +4779,7 @@ mod tests {
         let selector = super::super::task::TaskModelSelector::new(
             HashMap::from([(
                 super::super::task_kind::TaskKind::Scout,
-                "openai:mini".to_string(),
+                "openai/mini".to_string(),
             )]),
             factory,
         )

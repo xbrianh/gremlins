@@ -658,7 +658,7 @@ mod tests {
             "id": "gr-test",
             "attempt": "test-0001",
             "stage": "starting",
-            "client": "cmd:true",
+            "client": "cmd/true",
         });
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
 
@@ -671,7 +671,7 @@ mod tests {
             definition: Box::new(StaticDefinition::new(
                 "test".to_string(),
                 PathBuf::from("test.yaml"),
-                "cmd:true".to_string(),
+                "cmd/true".to_string(),
                 bootstrap,
                 Vec::new(),
                 None,
@@ -683,7 +683,7 @@ mod tests {
             project_root: sandbox.path().to_path_buf(),
             state: state_data,
             env: std::env::vars().collect(),
-            client: Client::parse("cmd:true").unwrap(),
+            client: Client::parse("cmd/true").unwrap(),
             stage_inputs,
             loop_iter: "1".to_string(),
             runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot(),

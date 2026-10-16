@@ -258,7 +258,7 @@ impl AzureOpenAiBackend {
         );
 
         let model = if model.is_empty() {
-            return Err("azure-openai backend requires a deployment name (e.g. azure-openai:gpt-4o)".into());
+            return Err("azure-openai backend requires a deployment name (e.g. azure-openai/gpt-4o)".into());
         } else {
             model.to_string()
         };
@@ -394,7 +394,7 @@ impl Backend for AzureOpenAiBackend {
         if provider == "azure-openai" {
             match &self.state.client_state {
                 AzureOpenAiClientState::Static(client) => {
-                    Some(client.completion(model).erase())
+                    Some(client.completion(&model).erase())
                 }
                 AzureOpenAiClientState::Dynamic {
                     ref endpoint,
@@ -418,7 +418,7 @@ impl Backend for AzureOpenAiBackend {
                         .with_api_version(api_version)
                         .with_base_url(endpoint)
                         .connect(wrapped);
-                    Some(client.completion(model).erase())
+                    Some(client.completion(&model).erase())
                 }
             }
         } else {
@@ -926,7 +926,7 @@ mod tests {
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        let model = backend.make_model("azure-openai:gpt-4o");
+        let model = backend.make_model("azure-openai/gpt-4o");
         assert!(model.is_some(), "Static client must produce a model");
     }
 
@@ -943,7 +943,7 @@ mod tests {
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        let model = backend.make_model("azure-openai:gpt-4o");
+        let model = backend.make_model("azure-openai/gpt-4o");
         assert!(
             model.is_some(),
             "Dynamic client must produce a model (lazy token acquisition)"
@@ -962,7 +962,7 @@ mod tests {
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        assert!(backend.make_model("openai:gpt-4o").is_none());
-        assert!(backend.make_model("anthropic:claude-sonnet-4-6").is_none());
+        assert!(backend.make_model("openai/gpt-4o").is_none());
+        assert!(backend.make_model("anthropic/claude-sonnet-4-6").is_none());
     }
 }

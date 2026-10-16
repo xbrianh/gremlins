@@ -4095,7 +4095,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_launch_resolves_relative_filepath_against_project_root() {
-        let sandbox = Sandbox::with_config(Some(r#"{"default-client": "cmd:echo"}"#));
+        let sandbox = Sandbox::with_config(Some(r#"{"default-client": "cmd/echo"}"#));
         let project_root = sandbox.path().join("project");
         std::fs::create_dir_all(&project_root).unwrap();
         std::fs::write(project_root.join("plan.md"), "plan").unwrap();
@@ -4104,7 +4104,7 @@ mod tests {
         std::fs::create_dir_all(definition_path.parent().unwrap()).unwrap();
         std::fs::write(
             &definition_path,
-            r#"default_client: 'cmd:echo'
+            r#"default_client: 'cmd/echo'
 bootstrap:
   source:
     plan:
@@ -4322,7 +4322,7 @@ stages: []
 
     #[tokio::test]
     async fn chat_turn_refreshes_env_and_falls_back_to_base_snapshot() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"default-client": "cmd:echo"}"#));
+        let _sandbox = Sandbox::with_config(Some(r#"{"default-client": "cmd/echo"}"#));
         let project_root = _sandbox.path().join("project");
         std::fs::create_dir_all(&project_root).unwrap();
         let state_root = _sandbox.path().join("state");
@@ -4630,14 +4630,14 @@ stages: []
         std::fs::create_dir_all(&state_root).unwrap();
 
         let stage = AgentBuilder::new("chat").prompt("hello").build().unwrap();
-        let definition = DefinitionBuilder::new("chat", "cmd:echo")
+        let definition = DefinitionBuilder::new("chat", "cmd/echo")
             .stage(stage)
             .build()
             .unwrap();
 
         let gremlin = create_chat_gremlin(
             &definition,
-            "cmd:echo",
+            "cmd/echo",
             &state_root,
             &project_root,
             &HashMap::new(),
@@ -4671,7 +4671,7 @@ stages: []
         std::fs::create_dir_all(&state_root).unwrap();
 
         let stage = AgentBuilder::new("chat").prompt("hello").build().unwrap();
-        let definition = DefinitionBuilder::new("chat", "cmd:echo")
+        let definition = DefinitionBuilder::new("chat", "cmd/echo")
             .stage(stage)
             .build()
             .unwrap();
@@ -4682,7 +4682,7 @@ stages: []
         ]);
 
         let gremlin =
-            create_chat_gremlin(&definition, "cmd:echo", &state_root, &project_root, &env).unwrap();
+            create_chat_gremlin(&definition, "cmd/echo", &state_root, &project_root, &env).unwrap();
 
         assert_eq!(
             gremlin.env, env,

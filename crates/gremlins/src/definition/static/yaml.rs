@@ -166,7 +166,7 @@ fn from_expanded_value(
     // Bake every stage and default client with the current settings profile
     // (source-definition path only). Expanded definitions from
     // `from_expanded_bytes` / `from_expanded_yaml_file` pass `None` here:
-    // their values are already concrete `provider:model[:k=v]` strings, so
+    // their values are already concrete `provider/model[?k=v]` strings, so
     // no profile resolution is needed and a missing/malformed settings.yaml
     // must not block resuming from a baked definition.
     let yaml_default_client = match settings {
@@ -239,7 +239,7 @@ fn from_expanded_value(
     // previously expanded definition), use it directly — values are
     // already resolved.  Otherwise resolve the global
     // `default-task-clients` through profiles so the expanded output
-    // includes only concrete `provider:model[:k=v]` strings.
+    // includes only concrete `provider/model[?k=v]` strings.
     let default_task_clients = yaml_default_task_clients(root, settings)?;
 
     let builder = DefinitionBuilder {
@@ -449,7 +449,7 @@ fn yaml_skip_if_exists(mapping: &Mapping) -> String {
 
 /// Read `client` — None when absent. Values are resolved through profiles
 /// when settings are supplied; otherwise they are assumed to already be
-/// concrete `provider:model[:k=v]` strings.
+/// concrete `provider/model[?k=v]` strings.
 fn yaml_client(
     mapping: &Mapping,
     settings: Option<&config::Config>,
@@ -884,7 +884,7 @@ fn stages_from_yaml(root: &Mapping) -> Result<Vec<Value>, SchemaError> {
 ///
 /// When the YAML already carries a `default_task_clients` key (round-tripped
 /// from a previous expansion), values are treated as already-resolved
-/// `provider:model[:k=v]` strings and returned as-is.  Otherwise the global
+/// `provider/model[?k=v]` strings and returned as-is.  Otherwise the global
 /// `default-task-clients` map is read from settings.yaml and every value is
 /// resolved through the profile table so the expanded output only contains
 /// concrete client specs.
@@ -1021,8 +1021,8 @@ mod tests {
                 ),
             )
             .output("plan", output("artifact://plan.md"))
-            .option("model", "xai:grok-4")
-            .client("xai:grok-4")
+            .option("model", "xai/grok-4")
+            .client("xai/grok-4")
             .build()
             .unwrap();
         assert_round_trip(&stage);
@@ -1066,7 +1066,7 @@ mod tests {
             .max_iterations(3)
             .interval(1.5)
             .skip_if_exists("artifact://done.txt")
-            .client("xai:grok-4")
+            .client("xai/grok-4")
             .build()
             .unwrap();
         assert_round_trip(&stage);
@@ -1135,10 +1135,10 @@ mod tests {
 
         let yaml = "__gremlins_expanded__: true\n\
                      name: resume-me\n\
-                     default_client: openai:gpt-4\n\
+                     default_client: openai/gpt-4\n\
                      stages: []\n";
         let def = StaticDefinition::from_expanded_bytes(yaml.as_bytes(), None, None).unwrap();
-        assert_eq!(def.default_client(), "openai:gpt-4");
+        assert_eq!(def.default_client(), "openai/gpt-4");
     }
 
     #[test]
@@ -1226,7 +1226,7 @@ mod tests {
             .cancel_on_error(true)
             .error_policy(ErrorPolicy::All)
             .skip_if_exists("artifact://reviews-done")
-            .client("xai:grok-4")
+            .client("xai/grok-4")
             .build()
             .unwrap();
         assert_round_trip(&stage);
@@ -1265,7 +1265,7 @@ mod tests {
             let mut tc = Mapping::new();
             tc.insert(
                 serde_yaml::Value::String(bad_key.into()),
-                serde_yaml::Value::String("openai:mini".into()),
+                serde_yaml::Value::String("openai/mini".into()),
             );
             m.insert(
                 serde_yaml::Value::String("task-clients".into()),
