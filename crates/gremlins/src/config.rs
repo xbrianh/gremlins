@@ -1156,14 +1156,26 @@ not-a-key: 1"#,
     }
 
     #[test]
-    fn test_config_backoff_rejects_non_finite_delay() {
+    fn test_config_backoff_rejects_infinite_delay() {
         let _sandbox = Sandbox::with_config(Some(
             r#"backoff:
   turn-retry: [1.0, .inf]"#,
         ));
         assert!(
-            Config::load().is_err(),
-            "non-finite backoff delays must be rejected"
+            matches!(Config::load(), Err(ConfigError::Backoff(_))),
+            "infinite backoff delays must be rejected by validation"
+        );
+    }
+
+    #[test]
+    fn test_config_backoff_rejects_nan_delay() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"backoff:
+  turn-retry: [1.0, .nan]"#,
+        ));
+        assert!(
+            matches!(Config::load(), Err(ConfigError::Backoff(_))),
+            "NaN backoff delays must be rejected by validation"
         );
     }
 

@@ -658,7 +658,7 @@ The boss resumes from its child-spawn stage and proceeds with the next iteration
 
 Retry backoff schedules are configurable in `~/.config/gremlins/settings.yaml`
 under a `backoff:` block. Each key is an ordered list of delays in seconds;
-the agent loops retries with `schedule[0]`, then `schedule[1]`, and so on
+the agent loop retries with `schedule[0]`, then `schedule[1]`, and so on
 until the list is exhausted. Present keys replace their default schedule, and
 an omitted section or key falls back to the default.
 
