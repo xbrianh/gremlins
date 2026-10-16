@@ -595,14 +595,22 @@ static TUI_MODEL_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Read the gremlins-managed TUI model override, if one exists.
 ///
-/// A missing or unparsable `tui.json` is treated as "no override" (logged,
-/// never fatal to chat). A present-but-unreadable file is surfaced as an
-/// error so callers do not silently fall through to a different model.
+/// A missing, unparsable, or non-UTF-8 `tui.json` is treated as "no
+/// override" (logged, never fatal to chat). A present-but-unreadable file is
+/// surfaced as an error so callers do not silently fall through to a
+/// different model.
 pub(crate) fn load_tui_model_override() -> Result<Option<String>, String> {
     let path = tui_model_override_path();
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            log::warn!(
+                "ignoring non-UTF-8 tui model override at {}: {e}",
+                path.display()
+            );
+            return Ok(None);
+        }
         Err(e) => {
             return Err(format!(
                 "failed to read tui model override {}: {e}",
@@ -1462,6 +1470,15 @@ tui-model: "model://xai/grok-4?reasoning=low""#,
         let _sandbox = Sandbox::with_config(Some(r#"tui-model: """#));
         let cfg = Config::load().unwrap();
         assert!(cfg.tui_model().is_none(), "empty tui-model must be unset");
+    }
+
+    #[test]
+    fn test_load_tui_model_override_non_utf8_is_ignored() {
+        let _sandbox = Sandbox::with_config(Some(r#"default-model: "cmd/default""#));
+        let path = resolve_user_config_root(None).join("tui.json");
+        fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+
+        assert_eq!(load_tui_model_override().unwrap(), None);
     }
 
     #[test]
