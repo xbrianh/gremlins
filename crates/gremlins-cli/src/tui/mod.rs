@@ -1800,7 +1800,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             total.as_ref(),
                         ));
                     }
-                    ChatEvent::Done { text, summary, usage, .. } => {
+                    ChatEvent::Done { text, summary, .. } => {
                         log::debug!("Done text_len={} summary_len={} has_current_turn={}",
                             text.len(), summary.len(), live_area.has_current_turn());
                         if !live_area.has_current_turn() {
@@ -1820,30 +1820,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // finished response is committed to the transcript.
                         live_area.finish_turn();
                         live_area.clear_tool_output();
-
-                        // Build usage summary line.
-                        if let Some(usage) = usage {
-                            if let (Some(prompt), Some(completion)) = (
-                                usage.get("prompt_tokens").and_then(|v| v.as_u64()),
-                                usage.get("completion_tokens").and_then(|v| v.as_u64()),
-                            ) {
-                                let cache_read = usage
-                                    .get("cached_input_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-                                let pct = if prompt > 0 {
-                                    format!("{:.0}% cached",
-                                        (cache_read as f64 / prompt as f64) * 100.0)
-                                } else {
-                                    String::new()
-                                };
-                                let summary = format!(
-                                    "{} tokens · {pct}",
-                                    prompt + completion
-                                );
-                                live_area.push_transcript_line(summary);
-                            }
-                        }
 
                         app.active_request = false;
                         active_turn = None;
