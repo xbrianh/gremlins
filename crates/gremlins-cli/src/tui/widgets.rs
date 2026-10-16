@@ -242,6 +242,13 @@ impl TranscriptWidget {
         self.reasoning.push_text(text);
     }
 
+    /// Replace the reasoning stream's title row. The chat TUI uses this to
+    /// render the live per-turn/conversation token stats line.
+    pub fn set_reasoning_title(&mut self, title: &str) {
+        self.reasoning.set_title(title);
+        self.invalidate_desired_cache();
+    }
+
     /// Flush the reasoning slot's trailing partial into a completed line.
     #[allow(dead_code)]
     pub fn flush_reasoning(&mut self) {
@@ -645,6 +652,9 @@ impl TranscriptWidget {
     /// the previous turn is cleared before the new turn begins.
     pub fn submit_prompt(&mut self, prompt: String) {
         self.invalidate_desired_cache();
+        // A stats title describes a completed turn; clear it when starting a
+        // new turn so the next TurnComplete can install a fresh one.
+        self.reasoning.set_title("");
         self.reasoning.clear();
         self.clear_tool_state();
         let mut sep_index = None;
@@ -780,6 +790,7 @@ impl TranscriptWidget {
     /// and clear the draft state.
     pub fn clear_current_turn(&mut self) {
         self.invalidate_desired_cache();
+        self.reasoning.set_title("");
         self.reasoning.clear();
         self.clear_tool_state();
         if let Some(t) = self.turn_start {
@@ -807,6 +818,7 @@ impl TranscriptWidget {
     /// Clear the scrollable FIFO.
     pub fn clear_scrollable(&mut self) {
         self.invalidate_desired_cache();
+        self.reasoning.set_title("");
         self.reasoning.clear();
         self.clear_tool_state();
         self.scrollable.clear();
@@ -1449,9 +1461,10 @@ pub struct StreamingWidget {
     title: Option<String>,
     /// Prefix rendered before the title row (e.g. the `◆ ` tool chrome).
     title_prefix: String,
-    /// Whether the title row is committed even when the body is empty.
-    /// Tool streams keep their `◆` call title; reasoning collapses entirely
-    /// when empty instead of leaving a stray header line behind.
+    /// Whether the title row is rendered and committed even when the body is
+    /// empty. Tool streams keep their `◆` call title at commit time; the
+    /// reasoning stream uses it for the live stats title so it both appears
+    /// during the turn and persists to scrollback after no-body turns.
     retain_title_when_empty: bool,
     /// Left gutter, in cells, reserved before every streamed body line (e.g.
     /// a four-space indent for reasoning and tool output).
@@ -1514,6 +1527,7 @@ impl StreamingWidget {
     /// Configure the title row at construction time. An empty title renders
     /// no row. Set the prefix with [`with_title_prefix`](Self::with_title_prefix)
     /// before or after this; ordering between the two is irrelevant.
+    #[allow(dead_code)]
     pub fn with_title(mut self, title: &str) -> Self {
         self.set_title(title);
         self
@@ -1542,14 +1556,16 @@ impl StreamingWidget {
     }
 
     /// The configured reasoning stream: four-cell body gutter, `◈ `-prefixed
-    /// chrome title, nickel italic text, and a retained commit tail that
-    /// collapses (no title line) when empty.
+    /// chrome title, nickel italic text, and a retained commit tail. The
+    /// title renders and commits even when the stream has no reasoning body,
+    /// so the chat TUI's live token stats line is visible (and persisted to
+    /// scrollback) on turns that produced no reasoning text.
     pub fn reasoning(row_cap: u16) -> Self {
         Self::new(reasoning_stream_line, row_cap, 20)
             .with_title_prefix(&format!("{} ", glyph::REASONING))
             .with_body_indent(4)
-            .with_title("model reasoning:")
             .retain_tail()
+            .retain_title_when_empty()
     }
 
     /// The configured live tool-output stream: four-cell body gutter, no
@@ -1814,10 +1830,12 @@ impl StreamingWidget {
         Some(tool_chrome_line(&self.title_prefix, title))
     }
 
-    /// Wrapped title rows. Idle streams collapse to zero even when a title
-    /// is configured, so the title never allocates screen space on its own.
+    /// Wrapped title rows. Streams that opt into `retain_title_when_empty`
+    /// (the reasoning stats title) render their title even when the body is
+    /// empty; other streams still collapse to zero so an unset/static title
+    /// never allocates screen space on its own.
     fn title_rows(&self, width: u16, _ctx: &RenderContext) -> u16 {
-        if self.is_empty() || width == 0 {
+        if width == 0 || (self.is_empty() && !self.retain_title_when_empty) {
             return 0;
         }
         match self.title_line() {
@@ -1866,10 +1884,11 @@ impl LiveAreaWidget for StreamingWidget {
     }
 
     fn max_height(&self, width: u16, ctx: &RenderContext) -> u16 {
+        let title_rows = self.title_rows(width, ctx);
         if self.is_empty() {
-            0
+            title_rows
         } else {
-            self.title_rows(width, ctx).saturating_add(self.row_cap)
+            title_rows.saturating_add(self.row_cap)
         }
     }
 
@@ -3865,6 +3884,7 @@ mod tests {
     fn reasoning_tail_commits_between_prompt_and_response() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
+        transcript.set_reasoning_title("turn 1 stats");
         transcript.push_reasoning_text("thinking\n");
         transcript.flush_reasoning();
         transcript.push_response("answer");
@@ -3880,7 +3900,7 @@ mod tests {
             text,
             vec![
                 "▍» hi".to_string(),
-                "◈ model reasoning:".to_string(),
+                "◈ turn 1 stats".to_string(),
                 "    thinking".to_string(),
                 "answer".to_string()
             ]
@@ -3891,6 +3911,7 @@ mod tests {
     fn reasoning_title_commits_between_prompt_and_tail_exactly_once() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
+        transcript.set_reasoning_title("turn 1 stats");
         transcript.push_response("answer");
         for i in 0..8 {
             transcript.push_reasoning_text(&format!("thinking {i}\n"));
@@ -3905,11 +3926,11 @@ mod tests {
             .map(|l| l.to_string())
             .collect();
         assert_eq!(
-            text.iter().filter(|l| *l == "◈ model reasoning:").count(),
+            text.iter().filter(|l| *l == "◈ turn 1 stats").count(),
             1,
             "reasoning must commit exactly one glyph-prefixed header row: {text:?}"
         );
-        let title = text.iter().position(|l| l == "◈ model reasoning:").unwrap();
+        let title = text.iter().position(|l| l == "◈ turn 1 stats").unwrap();
         let answer = text.iter().position(|l| l == "answer").unwrap();
         assert_eq!(text[0], "▍» hi");
         assert!(
@@ -3953,6 +3974,7 @@ mod tests {
     fn finish_turn_orders_prompt_reasoning_tools_response() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
+        transcript.set_reasoning_title("turn 1 stats");
         transcript.push_reasoning_text("thinking\n");
         transcript.push_tool_line("grep");
         transcript.push_response("answer");
@@ -3968,7 +3990,7 @@ mod tests {
             text,
             vec![
                 "▍» hi".to_string(),
-                "◈ model reasoning:".to_string(),
+                "◈ turn 1 stats".to_string(),
                 "    thinking".to_string(),
                 "◆ grep".to_string(),
                 "answer".to_string(),
@@ -3980,6 +4002,7 @@ mod tests {
     fn reasoning_commit_uses_retained_five_row_tail_after_short_display() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
+        transcript.set_reasoning_title("turn 1 stats");
         transcript.push_response("answer");
         for i in 0..8 {
             transcript.push_reasoning_text(&format!("thinking {i}\n"));
@@ -4007,7 +4030,7 @@ mod tests {
             text,
             vec![
                 "▍» hi".to_string(),
-                "◈ model reasoning:".to_string(),
+                "◈ turn 1 stats".to_string(),
                 "    thinking 3".to_string(),
                 "    thinking 4".to_string(),
                 "    thinking 5".to_string(),

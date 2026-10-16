@@ -492,6 +492,12 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().push_reasoning_text(text);
     }
 
+    /// Replace the embedded reasoning stream's title row with the live
+    /// token/cache stats string.
+    pub fn set_reasoning_title(&mut self, title: &str) {
+        self.transcript_mut().set_reasoning_title(title);
+    }
+
     /// Append a live tool-output chunk to the transcript's tool stream keyed
     /// by tool-call id.
     pub fn push_tool_output_chunk(&mut self, id: &str, call: &str, text: &str) {
@@ -1801,6 +1807,7 @@ mod tests {
         app.project_name = "gremlins".to_string();
 
         live_area.submit_prompt("hi".to_string());
+        live_area.set_reasoning_title("turn 1 stats");
         for i in 0..6 {
             live_area.push_reasoning_text(&format!("reasoning line {i}\n"));
         }
@@ -1808,13 +1815,14 @@ mod tests {
         live_area.compose(&app).unwrap();
 
         let visible = dump_buffer(live_area.backend().buffer());
-        // The reasoning band now carries a live header, so with 4 transcript
-        // rows (1 reserved for the prompt + 3 for the reasoning band) only
-        // two body rows remain after the header. The band must still keep
-        // the newest reasoning lines, not the head, and later taller frames
-        // must not resurrect lines trimmed from this shorter band.
+        // The reasoning band carries the live stats header, so with 4
+        // transcript rows (1 reserved for the prompt + 3 for the reasoning
+        // band) only two body rows remain after the header. The band must
+        // still keep the newest reasoning lines, not the head, and later
+        // taller frames must not resurrect lines trimmed from this shorter
+        // band.
         assert!(
-            visible.contains("◈ model reasoning:"),
+            visible.contains("turn 1 stats"),
             "reasoning header should stay visible in the short band.\nBuffer:\n{visible}"
         );
         for i in 4..6 {
