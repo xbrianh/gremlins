@@ -189,11 +189,7 @@ impl ModelURI {
         }
         let (model, params) = Self::split_model_params(rest, original)?;
         let extra_params = Self::parse_params(params, original)?;
-        Ok(Self {
-            provider: provider.to_string(),
-            model: model.to_string(),
-            extra_params,
-        })
+        Self::from_parts(provider.to_string(), model.to_string(), extra_params)
     }
 
     fn parse_stub(s: &str) -> Result<Self, String> {
@@ -215,19 +211,11 @@ impl ModelURI {
             }
             // `cmd` never parses params; the entire remainder is the shell
             // command, including any `?`, `&`, or `/`.
-            return Ok(Self {
-                provider: provider.to_string(),
-                model: rest.to_string(),
-                extra_params: IndexMap::new(),
-            });
+            return Self::from_parts(provider.to_string(), rest.to_string(), IndexMap::new());
         }
         let (model, params) = Self::split_model_params(rest, s)?;
         let extra_params = Self::parse_params(params, s)?;
-        Ok(Self {
-            provider: provider.to_string(),
-            model: model.to_string(),
-            extra_params,
-        })
+        Self::from_parts(provider.to_string(), model.to_string(), extra_params)
     }
 
     fn split_model_params<'a>(
@@ -264,6 +252,73 @@ impl ModelURI {
         }
     }
 
+    /// Validate raw parts and build a normalized reference.
+    ///
+    /// This is the shape-only invariant chokepoint shared by the parsers and
+    /// [`Client::new`]: the raw `(provider, model, params)` triple is checked
+    /// against the same grammar rules as a parsed spec, without going through
+    /// a string round-trip.
+    fn from_parts(
+        provider: String,
+        model: String,
+        extra_params: IndexMap<String, String>,
+    ) -> Result<Self, String> {
+        let full = format!("{provider}/{model}");
+        if provider.is_empty() {
+            return Err(format!(
+                "invalid client specifier {full:?}: provider must not be empty"
+            ));
+        }
+        if provider.contains('/') {
+            return Err(format!(
+                "invalid client specifier {full:?}: provider must not contain '/'"
+            ));
+        }
+        if provider == "cmd" {
+            if model.is_empty() {
+                return Err(format!(
+                    "invalid client specifier {full:?}: model must not be empty"
+                ));
+            }
+            if !extra_params.is_empty() {
+                return Err(format!(
+                    "invalid client specifier {full:?}: the command backend does not accept params"
+                ));
+            }
+            return Ok(Self {
+                provider,
+                model,
+                extra_params,
+            });
+        }
+        if model.is_empty() {
+            return Err(format!(
+                "invalid client specifier {full:?}: model must not be empty"
+            ));
+        }
+        if model.contains('?') {
+            return Err(format!(
+                "invalid client specifier {full:?}: '?' is the params separator and cannot appear in the model"
+            ));
+        }
+        if !extra_params.is_empty() {
+            let rendered = render_params(&extra_params);
+            match parse_params_list(&rendered) {
+                ParamsList::Ok(reparsed) if reparsed == extra_params => {}
+                _ => {
+                    return Err(format!(
+                        "invalid client params {rendered:?}: expected 'key=value,...' (full specifier {full:?})"
+                    ));
+                }
+            }
+        }
+        Ok(Self {
+            provider,
+            model,
+            extra_params,
+        })
+    }
+
     /// The provider half of the reference.
     pub fn provider(&self) -> &str {
         &self.provider
@@ -289,12 +344,7 @@ impl std::fmt::Display for ModelURI {
         }
         write!(f, "model://{}/{}", self.provider, self.model)?;
         if !self.extra_params.is_empty() {
-            let params: Vec<String> = self
-                .extra_params
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect();
-            write!(f, "?{}", params.join(","))?;
+            write!(f, "?{}", render_params(&self.extra_params))?;
         }
         Ok(())
     }
@@ -303,6 +353,15 @@ impl std::fmt::Display for ModelURI {
 fn backend_pool() -> &'static Mutex<HashMap<String, Arc<dyn Backend>>> {
     static POOL: OnceLock<Mutex<HashMap<String, Arc<dyn Backend>>>> = OnceLock::new();
     POOL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Render an extra-param map as the `k=v,k=v,...` list used after `?`.
+fn render_params(params: &IndexMap<String, String>) -> String {
+    params
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// A resolved model reference plus the harness-side runtime handle.
@@ -319,8 +378,9 @@ pub struct Client {
 }
 
 impl Client {
-    /// Direct constructor. Validates the provider name. `native_block` is the
-    /// default allowlist.
+    /// Direct constructor. Validates the reference shape through
+    /// [`ModelURI::from_parts`] and the provider name through
+    /// [`is_known_provider`]. `native_block` is the default allowlist.
     ///
     /// Prefer [`Client::parse`] when the spec came from user input; this
     /// constructor exists for callers that already hold the parts.
@@ -329,11 +389,7 @@ impl Client {
         model: String,
         extra_params: IndexMap<String, String>,
     ) -> Result<Self, String> {
-        Self::from_uri(ModelURI {
-            provider,
-            model,
-            extra_params,
-        })
+        Self::from_uri(ModelURI::from_parts(provider, model, extra_params)?)
     }
 
     /// Wrap an already-parsed [`ModelURI`], validating its provider name.
@@ -701,6 +757,35 @@ mod tests {
         assert!(Client::new("fake".into(), "m".into(), IndexMap::new()).is_err());
         assert!(Client::parse("fake/m").is_err());
         assert!(Client::from_uri(ModelURI::parse("fake/m").unwrap()).is_err());
+    }
+
+    #[test]
+    fn client_new_revalidates_shape_invariants() {
+        assert!(Client::new("openai".into(), String::new(), IndexMap::new()).is_err());
+        assert!(Client::new("openai".into(), "gpt?x=1".into(), IndexMap::new()).is_err());
+        assert!(Client::new(String::new(), "gpt".into(), IndexMap::new()).is_err());
+        assert!(Client::new("openai/x".into(), "gpt".into(), IndexMap::new()).is_err());
+
+        let err = Client::new(
+            "cmd".into(),
+            "true".into(),
+            IndexMap::from([("x".to_string(), "1".to_string())]),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("command backend does not accept params"),
+            "{err:?}"
+        );
+
+        let err = Client::new(
+            "openai".into(),
+            "gpt-4o".into(),
+            IndexMap::from([("bad-key".to_string(), "1".to_string())]),
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid client params"), "{err:?}");
+
+        assert!(Client::new("cmd".into(), "echo hi?y=1".into(), IndexMap::new()).is_ok());
     }
 
     #[test]
