@@ -437,16 +437,16 @@ async fn run_agent(
     // Compaction is a read-time, in-memory transform. `verbatim_history` keeps
     // the full archive so the post-run write can reconstruct the verbatim
     // transcript instead of persisting the compacted working memory. The soft
-    // trigger is evaluated against the assembled request, so subtract an
-    // estimate of the non-history request bytes (current prompt, system
-    // preamble, and tool definitions) before choosing the retained window.
-    let chat_compaction_overhead = {
-        let tool_definitions_len =
-            serde_json::to_vec(&crate::clients::tools::tool_definitions(None))
-                .map(|json| json.len())
-                .unwrap_or(0);
-        prepared.user_prompt().len() + prepared.system_prompt().len() + tool_definitions_len
-    };
+    // trigger is evaluated against the normalized serialized request, so the
+    // history budget subtracts the empty-request envelope (prompt, system
+    // preamble, tool definitions, and JSON quoting) before choosing the
+    // retained window.
+    let tool_definitions = crate::clients::tools::tool_definitions(None);
+    let chat_compaction_overhead = completion_request_overhead(
+        &prepared.user_prompt(),
+        &prepared.system_prompt(),
+        &tool_definitions,
+    );
     let prepopulated_messages = verbatim_history.as_ref().map(|history| {
         conversation::compact(
             history,
@@ -1160,6 +1160,35 @@ impl Gremlin {
     }
 }
 
+/// Estimate the serialized size of every request field except the chat
+/// history.
+///
+/// The agent loop's hard prompt ceiling measures the normalized
+/// [`rig_core::completion::CompletionRequest`], not the bare transcript. This
+/// helper builds that same request with an empty message list and subtracts
+/// the one-byte difference between an empty and a non-empty `chat_history`
+/// array; [`conversation::compact`] then adds the serialized history length
+/// back, so the soft trigger tracks the real normalized request size instead
+/// of summing raw prompt bytes.
+fn completion_request_overhead(
+    prompt: &str,
+    system_prompt: &str,
+    tools: &[rig_core::completion::ToolDefinition],
+) -> usize {
+    use rig_core::completion::{CompletionRequest, Message};
+
+    let mut request = CompletionRequest::new(Message::user(prompt.to_string()))
+        .messages(Vec::<Message>::new())
+        .tools(tools.to_vec());
+    if !system_prompt.is_empty() {
+        request = request.preamble(system_prompt.to_string());
+    }
+
+    serde_json::to_vec(&request)
+        .map(|json| json.len().saturating_sub(1))
+        .unwrap_or(0)
+}
+
 /// Reconstruct a `Vec<Message>` from the serialized conversation artifact
 /// (`artifact://conversation.json`). The artifact is a JSON array of rig
 /// `Message` values (role-tagged), so deserialization round-trips all variants
@@ -1372,6 +1401,47 @@ mod tests {
     }
 
     #[test]
+    fn chat_compaction_overhead_tracks_serialized_request_not_raw_prompt_bytes() {
+        use rig_core::completion::{CompletionRequest, Message};
+
+        let prompt = "line one\n\"quoted\" and a backslash \\";
+        let system = "system\nwith \"escapes\"";
+        let tools = crate::clients::tools::tool_definitions(None);
+        let overhead = completion_request_overhead(prompt, system, &tools);
+
+        let raw_estimate = prompt.len()
+            + system.len()
+            + serde_json::to_vec(&tools)
+                .map(|json| json.len())
+                .unwrap_or(0);
+        assert!(
+            overhead > raw_estimate,
+            "serialized envelope must account for JSON escaping and request fields: \
+             overhead={overhead}, raw={raw_estimate}"
+        );
+
+        let history = vec![Message::user(
+            "history\nwith \"escapes\" and a backslash \\",
+        )];
+        let full_request = CompletionRequest::new(Message::user(prompt.to_string()))
+            .messages(history.clone())
+            .tools(tools)
+            .preamble(system.to_string());
+        let full_len = serde_json::to_vec(&full_request)
+            .map(|json| json.len())
+            .unwrap();
+        let history_len = serde_json::to_string(&history)
+            .map(|json| json.len())
+            .unwrap();
+
+        assert_eq!(
+            overhead + history_len,
+            full_len,
+            "empty-request envelope plus serialized history must equal the full request"
+        );
+    }
+
+    #[test]
     fn chat_compaction_rejoins_verbatim_archive_with_new_turn() {
         use rig_core::completion::message::{
             AssistantContent, CallId, ToolCall, ToolFunction, ToolName,
@@ -1421,9 +1491,33 @@ mod tests {
             )]),
             tool_result("Bash", "bash_1", "[exit 1]\ncargo failed"),
             Message::user("Actions taken this turn:\n- Bash cargo check (failed)\n"),
+            assistant_with_tools(&[tool_call(
+                "done_1",
+                "Done",
+                serde_json::json!({"summary": "checked"}),
+            )]),
+            tool_result("Done", "done_1", "Done accepted."),
+            Message::user("now run cargo test"),
+            assistant_with_tools(&[tool_call(
+                "bash_2",
+                "Bash",
+                serde_json::json!({"command": "cargo test"}),
+            )]),
+            tool_result("Bash", "bash_2", "[exit 0]\nok"),
+            Message::user("Actions taken this turn:\n- Bash cargo test\n"),
+            assistant_with_tools(&[tool_call(
+                "done_2",
+                "Done",
+                serde_json::json!({"summary": "tested"}),
+            )]),
+            tool_result("Done", "done_2", "Done accepted."),
         ];
 
-        let compacted = conversation::compact(&prior, 512, 0);
+        let compacted = conversation::compact(
+            &prior,
+            serde_json::to_string(&prior).unwrap().len() as u64 - 1,
+            0,
+        );
         assert!(
             compacted.len() < prior.len(),
             "compaction should shrink the archived prefix"
