@@ -1018,6 +1018,41 @@ not-a-key: 1"#,
     }
 
     #[test]
+    fn test_resolve_model_reference_resolves_profiles_and_passes_through() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-model: "profile:fast"
+model-profiles:
+  fast:
+    model: cmd/echo
+  smart:
+    model: model://xai/grok-4?reasoning=high
+"#,
+        ));
+        let cfg = Config::load().unwrap();
+
+        assert_eq!(
+            resolve_model_reference("profile:fast", &cfg).unwrap(),
+            "cmd/echo"
+        );
+        assert_eq!(
+            resolve_model_reference("profile:smart", &cfg).unwrap(),
+            "model://xai/grok-4?reasoning=high"
+        );
+        assert_eq!(
+            resolve_model_reference("openai/gpt-4o", &cfg).unwrap(),
+            "openai/gpt-4o"
+        );
+        assert!(resolve_model_reference("profile:nope", &cfg).is_err());
+        // Only the exact `profile:` prefix triggers resolution; a stray
+        // delimiter (e.g. `profile;` or `profile/`) is treated as a literal
+        // `provider/model` spec and passes through unchanged.
+        assert_eq!(
+            resolve_model_reference("profile;", &cfg).unwrap(),
+            "profile;"
+        );
+    }
+
+    #[test]
     fn test_config_denies_unknown_key_under_paths() {
         let _sandbox = Sandbox::with_config(Some(
             r#"paths:

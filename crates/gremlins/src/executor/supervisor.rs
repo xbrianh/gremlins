@@ -2733,13 +2733,25 @@ async fn handle_chat(
 
     let project_root = project_root.unwrap_or_else(config::project_root);
 
-    // 2. Get default model
+    // 2. Get default model, resolving `profile:` references through the
+    //    model-profiles table. Resolution is required here: unlike the
+    //    pipeline path (which bakes profiles during definition load), the
+    //    chat gremlin is built directly from the raw settings value and would
+    //    otherwise hand `profile:<name>` straight to `Client::parse`.
     let default_model = match config::global_config() {
         Ok(cfg) => match cfg.default_model() {
-            Some(c) => match ModelURI::parse(c) {
-                Ok(uri) => uri,
+            Some(c) => match config::resolve_model_reference(c, &cfg) {
+                Ok(resolved) => match ModelURI::parse(&resolved) {
+                    Ok(uri) => uri,
+                    Err(e) => {
+                        let resp =
+                            error_response(&format!("invalid default model {resolved:?}: {e}"));
+                        let _ = writer.write_json_line(&resp).await;
+                        return;
+                    }
+                },
                 Err(e) => {
-                    let resp = error_response(&format!("invalid default model {c:?}: {e}"));
+                    let resp = error_response(&format!("invalid default model: {e}"));
                     let _ = writer.write_json_line(&resp).await;
                     return;
                 }
@@ -4560,6 +4572,130 @@ stages: []
             !super::get_run_map().lock().unwrap().contains_key(&id),
             "teardown must remove the chat gremlin from the run map"
         );
+    }
+
+    #[tokio::test]
+    async fn chat_resolves_profile_default_model() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-model: "profile:fast"
+model-profiles:
+  fast:
+    model: cmd/echo
+"#,
+        ));
+        let project_root = _sandbox.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let state_root = _sandbox.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        let (server, client) = tokio::net::UnixStream::pair().unwrap();
+        let (server_read, server_write) = server.into_split();
+        let writer = super::SharedWriter::new(server_write);
+        let (client_read, _client_write) = client.into_split();
+        let mut reader = tokio::io::BufReader::new(client_read);
+        let _server_read = server_read;
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new("sess-profile-test".to_string()),
+        ));
+
+        let request = serde_json::json!({
+            "op": "chat",
+            "text": "hello",
+            "turn": "1",
+            "project_root": project_root.to_string_lossy(),
+        });
+
+        super::handle_chat(&request, &state_root, &writer, &session).await;
+        let ack = read_until_type(&mut reader, "ok").await;
+        assert_eq!(ack["status"], "streaming");
+        assert!(!ack["id"].as_str().unwrap().is_empty());
+
+        super::teardown_session(&session, &state_root).await;
+    }
+
+    #[tokio::test]
+    async fn chat_reports_error_on_unknown_profile() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-model: "profile:nope"
+model-profiles:
+  fast:
+    model: cmd/echo
+"#,
+        ));
+        let project_root = _sandbox.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let state_root = _sandbox.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        let (server, client) = tokio::net::UnixStream::pair().unwrap();
+        let (server_read, server_write) = server.into_split();
+        let writer = super::SharedWriter::new(server_write);
+        let (client_read, _client_write) = client.into_split();
+        let mut reader = tokio::io::BufReader::new(client_read);
+        let _server_read = server_read;
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new("sess-unknown-profile".to_string()),
+        ));
+
+        let request = serde_json::json!({
+            "op": "chat",
+            "text": "hello",
+            "turn": "1",
+            "project_root": project_root.to_string_lossy(),
+        });
+
+        super::handle_chat(&request, &state_root, &writer, &session).await;
+        let err = read_until_type(&mut reader, "error").await;
+        assert!(
+            err["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown model profile"),
+            "expected unknown profile error, got: {err}"
+        );
+
+        super::teardown_session(&session, &state_root).await;
+    }
+
+    #[tokio::test]
+    async fn chat_reports_error_on_empty_profile_model() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-model: "profile:empty"
+model-profiles:
+  empty:
+    model: ""
+"#,
+        ));
+        let project_root = _sandbox.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let state_root = _sandbox.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        let (server, client) = tokio::net::UnixStream::pair().unwrap();
+        let (server_read, server_write) = server.into_split();
+        let writer = super::SharedWriter::new(server_write);
+        let (client_read, _client_write) = client.into_split();
+        let mut reader = tokio::io::BufReader::new(client_read);
+        let _server_read = server_read;
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new("sess-empty-profile".to_string()),
+        ));
+
+        let request = serde_json::json!({
+            "op": "chat",
+            "text": "hello",
+            "turn": "1",
+            "project_root": project_root.to_string_lossy(),
+        });
+
+        super::handle_chat(&request, &state_root, &writer, &session).await;
+        let err = read_until_type(&mut reader, "error").await;
+        assert!(
+            err["message"].as_str().unwrap().contains("has no model"),
+            "expected empty profile client error, got: {err}"
+        );
+
+        super::teardown_session(&session, &state_root).await;
     }
 
     #[tokio::test]
