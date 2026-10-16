@@ -4575,6 +4575,130 @@ stages: []
     }
 
     #[tokio::test]
+    async fn chat_resolves_profile_default_model() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-model: "profile:fast"
+model-profiles:
+  fast:
+    model: cmd/echo
+"#,
+        ));
+        let project_root = _sandbox.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let state_root = _sandbox.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        let (server, client) = tokio::net::UnixStream::pair().unwrap();
+        let (server_read, server_write) = server.into_split();
+        let writer = super::SharedWriter::new(server_write);
+        let (client_read, _client_write) = client.into_split();
+        let mut reader = tokio::io::BufReader::new(client_read);
+        let _server_read = server_read;
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new("sess-profile-test".to_string()),
+        ));
+
+        let request = serde_json::json!({
+            "op": "chat",
+            "text": "hello",
+            "turn": "1",
+            "project_root": project_root.to_string_lossy(),
+        });
+
+        super::handle_chat(&request, &state_root, &writer, &session).await;
+        let ack = read_until_type(&mut reader, "ok").await;
+        assert_eq!(ack["status"], "streaming");
+        assert!(!ack["id"].as_str().unwrap().is_empty());
+
+        super::teardown_session(&session, &state_root).await;
+    }
+
+    #[tokio::test]
+    async fn chat_reports_error_on_unknown_profile() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-model: "profile:nope"
+model-profiles:
+  fast:
+    model: cmd/echo
+"#,
+        ));
+        let project_root = _sandbox.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let state_root = _sandbox.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        let (server, client) = tokio::net::UnixStream::pair().unwrap();
+        let (server_read, server_write) = server.into_split();
+        let writer = super::SharedWriter::new(server_write);
+        let (client_read, _client_write) = client.into_split();
+        let mut reader = tokio::io::BufReader::new(client_read);
+        let _server_read = server_read;
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new("sess-unknown-profile".to_string()),
+        ));
+
+        let request = serde_json::json!({
+            "op": "chat",
+            "text": "hello",
+            "turn": "1",
+            "project_root": project_root.to_string_lossy(),
+        });
+
+        super::handle_chat(&request, &state_root, &writer, &session).await;
+        let err = read_until_type(&mut reader, "error").await;
+        assert!(
+            err["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown model profile"),
+            "expected unknown profile error, got: {err}"
+        );
+
+        super::teardown_session(&session, &state_root).await;
+    }
+
+    #[tokio::test]
+    async fn chat_reports_error_on_empty_profile_model() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-model: "profile:empty"
+model-profiles:
+  empty:
+    model: ""
+"#,
+        ));
+        let project_root = _sandbox.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let state_root = _sandbox.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        let (server, client) = tokio::net::UnixStream::pair().unwrap();
+        let (server_read, server_write) = server.into_split();
+        let writer = super::SharedWriter::new(server_write);
+        let (client_read, _client_write) = client.into_split();
+        let mut reader = tokio::io::BufReader::new(client_read);
+        let _server_read = server_read;
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new("sess-empty-profile".to_string()),
+        ));
+
+        let request = serde_json::json!({
+            "op": "chat",
+            "text": "hello",
+            "turn": "1",
+            "project_root": project_root.to_string_lossy(),
+        });
+
+        super::handle_chat(&request, &state_root, &writer, &session).await;
+        let err = read_until_type(&mut reader, "error").await;
+        assert!(
+            err["message"].as_str().unwrap().contains("has no model"),
+            "expected empty profile client error, got: {err}"
+        );
+
+        super::teardown_session(&session, &state_root).await;
+    }
+
+    #[tokio::test]
     async fn stop_session_chat_gremlin_removes_ownership_and_cancels_turn() {
         let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
             super::ClientSession::new("sess-stop-test".to_string()),
