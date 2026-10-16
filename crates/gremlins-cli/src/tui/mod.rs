@@ -865,10 +865,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     let mut debug_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // ── Startup banner ────────────────────────────────────────────
-    for line in motif::spire_banner() {
+    for line in motif::banner() {
         live_area.push_styled_line(line);
     }
-    live_area.push_styled_line(motif::tagline());
 
     // ── Ctrl+C pending-quit state (event-loop-local input routing) ──
     let mut pending_quit: Option<Instant> = None;
@@ -1209,7 +1208,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         // transcript also clears its embedded
                                         // reasoning and tool slots.
                                         live_area.clear_transcript();
-                                        live_area.push_styled_line(motif::marble_line());
+                                        for line in motif::banner() {
+                                            live_area.push_styled_line(line);
+                                        }
                                         // `/clear` closes the current session and
                                         // opens a fresh one. The daemon cancels
                                         // any in-flight turn and drops the old

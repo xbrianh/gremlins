@@ -159,6 +159,13 @@ pub fn groove_rule_with_fill(width: u16, caps: (&str, &str), fill_glyph: &str) -
     ))
 }
 
+/// The full startup banner: the seven-line spire plus the tagline.
+pub fn banner() -> Vec<Line<'static>> {
+    let mut lines = spire_banner();
+    lines.push(tagline());
+    lines
+}
+
 /// The startup spire banner, gold → chrome → brass.
 ///
 /// Seven lines, all single-width, so it never pushes the first prompt off a
@@ -184,16 +191,6 @@ pub fn spire_banner() -> Vec<Line<'static>> {
 pub fn tagline() -> Line<'static> {
     Line::from(Span::styled(
         "   type /help for commands — Ctrl+C clears/cancels (repeat within 1s to exit)",
-        Style::default()
-            .fg(DEFAULT_THEME.subtle)
-            .add_modifier(ratatui::style::Modifier::ITALIC),
-    ))
-}
-
-/// The one-line `/clear` confirmation, in nickel italic.
-pub fn marble_line() -> Line<'static> {
-    Line::from(Span::styled(
-        "fresh marble.",
         Style::default()
             .fg(DEFAULT_THEME.subtle)
             .add_modifier(ratatui::style::Modifier::ITALIC),
@@ -232,6 +229,20 @@ mod tests {
     fn spire_banner_is_seven_lines_single_width() {
         let lines = spire_banner();
         assert_eq!(lines.len(), 7);
+        for l in &lines {
+            let s = l.to_string();
+            assert!(
+                s.chars()
+                    .all(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) <= 1),
+                "non-single-width glyph in banner line: {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn banner_returns_seven_spire_lines_plus_tagline() {
+        let lines = banner();
+        assert_eq!(lines.len(), 8);
         for l in &lines {
             let s = l.to_string();
             assert!(
