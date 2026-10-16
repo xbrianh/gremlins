@@ -522,7 +522,21 @@ fn usage_stats(
 }
 
 fn turn_stats(turn: usize, usage: Option<&Usage>) -> Option<TurnStats> {
-    usage.map(|u| TurnStats {
+    let u = usage?;
+    // `response.partial().usage` is a bare `Usage` struct, so the stream-end
+    // handler wraps it in `Some` even when the provider reported no token
+    // fields at all. In that case consumers must see `None` (unavailable
+    // usage), not a measured zero-filled record. Explicitly reported zeros
+    // are preserved because only the all-absent case is filtered out.
+    if u.input_tokens.is_none()
+        && u.output_tokens.is_none()
+        && u.cached_input_tokens.is_none()
+        && u.cache_creation_input_tokens.is_none()
+        && u.reasoning_tokens.is_none()
+    {
+        return None;
+    }
+    Some(TurnStats {
         turn,
         prompt_tokens: u.input_tokens.unwrap_or(0),
         completion_tokens: u.output_tokens.unwrap_or(0),
