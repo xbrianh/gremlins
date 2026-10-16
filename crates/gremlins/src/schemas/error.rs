@@ -45,7 +45,7 @@ pub enum SchemaError {
     UnresolvedArtifactConsumer { stage: String, uri: String },
 
     #[error("gremlin definition is missing 'default_model' — every definition must declare one")]
-    MissingDefaultClient,
+    MissingDefaultModel,
 
     #[error("gremlin definition file not found: {path}")]
     DefinitionFileNotFound { path: String },

@@ -139,7 +139,7 @@ These flags are accepted by every gremlin definition:
 | `--print-id-only` | Print only the gremlin id on stdout; suppress the launch banner |
 | `--wait` | Block until the spawned gremlin exits; return its exit code |
 | `--base-ref <ref>` | Git ref to branch the worktree from; defaults to `"HEAD"` (current branch). When the definition declares a `base_ref` bootstrap source, this flag overrides it. |
-| `--model <spec>` | `provider/model` string overriding the definition's `default_model` |
+| `--model <spec>` | `provider/model` string supplying the definition default only when the YAML has no `default_model` |
 | `--telemetry` / `-v` | Enable per-turn telemetry (TTFT, token counts, cache hit ratio) in the gremlin log |
 
 #### Per-definition flags
@@ -243,7 +243,7 @@ stages:
 | `cancel_on_error` | If true, cancel outstanding parallel children when one bails (default: false) |
 | `error_policy` | `"any"` (default) or `"all"` — when to halt the parallel group on child bail |
 
-**Model precedence:** CLI `--model` beats per-stage `model:`; per-stage `model:` beats definition `default_model:`.
+**Model precedence:** per-stage `model:` beats an enclosing composite's explicit `model:`; `default-model-by-stage` beats the definition default. The definition default is the YAML's `default_model:`; `--model` or settings `default-model` fill that default only when the YAML does not declare one.
 
 **Parallel-group form:**
 
@@ -281,7 +281,7 @@ stages:
     model: openai/gpt-4o      # this stage uses openai instead
 ```
 
-Providers: `openai`, `xai`, `openrouter`, `anthropic`, `azure-openai`, `copilot`, `cmd`. The CLI `--model provider/model` flag overrides the definition-level `default_model:` but yields to per-stage `model:` settings.
+Providers: `openai`, `xai`, `openrouter`, `anthropic`, `azure-openai`, `copilot`, `cmd`. The CLI `--model provider/model` flag supplies the definition default only when the YAML does not declare `default_model:`; per-stage `model:` and `default-model-by-stage` still take precedence.
 
 ### `prompt:` field
 

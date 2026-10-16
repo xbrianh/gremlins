@@ -44,7 +44,7 @@ enum Cmds {
         /// Run with temp-backed storage — no footprint on disk after completion.
         #[arg(long)]
         ephemeral: bool,
-        /// Model spec overriding the definition's `default_model`.
+        /// Model spec supplying `default_model` only when the definition YAML has none.
         #[arg(long)]
         model: Option<String>,
     },

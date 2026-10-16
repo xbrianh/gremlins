@@ -85,7 +85,7 @@ bare `parallel:` sugar.
 | Change serialization shape | `node.rs` — `to_yaml` / `*_to_yaml` helpers |
 | Add a composite-only attribute | `composite.rs` (struct), `node.rs` (serialize), `builders/composite.rs` (builder) |
 | Understand variable substitution | `executor/vars.rs::substitute_vars` |
-| Find `ModelURI` | `definition/mod.rs` — the canonical definition of the `ModelURI` newtype |
+| Find `ModelURI` | `clients/client.rs` — the canonical definition of `ModelURI::parse` |
 
 ## Adding a new stage type
 
