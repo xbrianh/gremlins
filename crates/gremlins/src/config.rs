@@ -103,6 +103,7 @@ pub struct Config {
     model_profiles: IndexMap<String, ModelProfile>,
     path_overrides: PathOverrides,
     max_tool_output_bytes: u64,
+    chat_compaction_threshold_bytes: u64,
     backoff: BackoffConfig,
 }
 
@@ -181,6 +182,8 @@ struct ConfigFile {
     paths: Option<PathsSection>,
     #[serde(rename = "max-tool-output-bytes", default)]
     max_tool_output_bytes: Option<u64>,
+    #[serde(rename = "chat-compaction-threshold-bytes", default)]
+    chat_compaction_threshold_bytes: Option<u64>,
     backoff: Option<BackoffSection>,
 }
 
@@ -252,9 +255,15 @@ impl Config {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES);
+                let chat_compaction_threshold_bytes =
+                    std::env::var("GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(DEFAULT_CHAT_COMPACTION_THRESHOLD_BYTES);
                 return Ok(Config {
                     default_model: env_default_model(),
                     max_tool_output_bytes,
+                    chat_compaction_threshold_bytes,
                     ..Config::default()
                 });
             }
@@ -352,6 +361,15 @@ impl Config {
             })
             .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES);
 
+        let chat_compaction_threshold_bytes = cfg_file
+            .chat_compaction_threshold_bytes
+            .or_else(|| {
+                std::env::var("GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+            })
+            .unwrap_or(DEFAULT_CHAT_COMPACTION_THRESHOLD_BYTES);
+
         Ok(Config {
             default_model,
             tui_model,
@@ -361,6 +379,7 @@ impl Config {
             model_profiles,
             path_overrides,
             max_tool_output_bytes,
+            chat_compaction_threshold_bytes,
             backoff,
         })
     }
@@ -398,6 +417,10 @@ impl Config {
 
     pub fn max_tool_output_bytes(&self) -> u64 {
         self.max_tool_output_bytes
+    }
+
+    pub fn chat_compaction_threshold_bytes(&self) -> u64 {
+        self.chat_compaction_threshold_bytes
     }
 
     pub fn turn_retry_schedule(&self) -> &[f64] {
@@ -923,6 +946,10 @@ pub(crate) fn completion_nudge_budget() -> usize {
 /// Default cap for tool output: 300 000 bytes.
 pub(crate) const DEFAULT_MAX_TOOL_OUTPUT_BYTES: u64 = 300_000;
 
+/// Default chat compaction threshold: 768 KiB (75% of the 1 MiB prompt
+/// ceiling).
+pub(crate) const DEFAULT_CHAT_COMPACTION_THRESHOLD_BYTES: u64 = 786_432;
+
 /// Default ceiling for a serialized prompt: 1 MiB.
 pub(crate) const DEFAULT_MAX_PROMPT_BYTES: u64 = 1_048_576;
 
@@ -947,6 +974,21 @@ pub(crate) fn max_tool_output_bytes() -> u64 {
                 .and_then(|v| v.parse().ok())
         })
         .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES)
+}
+
+/// GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES — soft byte trigger for chat
+/// conversation compaction. Default 786 432 (768 KiB). 0 disables proactive
+/// compaction; the hard `max-prompt-bytes` ceiling still applies. Settings.yaml
+/// `chat-compaction-threshold-bytes` takes precedence over the env var.
+pub(crate) fn chat_compaction_threshold_bytes() -> u64 {
+    get_global()
+        .map(|c| c.chat_compaction_threshold_bytes())
+        .or_else(|| {
+            std::env::var("GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(DEFAULT_CHAT_COMPACTION_THRESHOLD_BYTES)
 }
 
 /// Effective turn-level retry schedule from the global config, falling back
@@ -1990,5 +2032,68 @@ model-profiles:
         // No settings.yaml, no env var — should get the 300_000 default.
         let cfg = Config::load().unwrap();
         assert_eq!(cfg.max_tool_output_bytes(), DEFAULT_MAX_TOOL_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn test_chat_compaction_threshold_bytes_default() {
+        let _env = EnvGuard::lock();
+        assert_eq!(
+            chat_compaction_threshold_bytes(),
+            DEFAULT_CHAT_COMPACTION_THRESHOLD_BYTES
+        );
+    }
+
+    #[test]
+    fn test_chat_compaction_threshold_bytes_from_env() {
+        let mut env = EnvGuard::lock();
+        env.set("GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES", "5000");
+        assert_eq!(chat_compaction_threshold_bytes(), 5000);
+    }
+
+    #[test]
+    fn test_chat_compaction_threshold_bytes_zero_from_env() {
+        let mut env = EnvGuard::lock();
+        env.set("GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES", "0");
+        assert_eq!(chat_compaction_threshold_bytes(), 0);
+    }
+
+    #[test]
+    fn test_chat_compaction_threshold_bytes_from_settings_yaml() {
+        let _sandbox = Sandbox::with_config(Some(r#"{"chat-compaction-threshold-bytes": 12345}"#));
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.chat_compaction_threshold_bytes(), 12345);
+    }
+
+    #[test]
+    fn test_chat_compaction_threshold_bytes_settings_overrides_env() {
+        let _sandbox = Sandbox::with_config(Some(r#"{"chat-compaction-threshold-bytes": 77777}"#));
+        // Env var is set after sandbox creation (sandbox clears it on init).
+        // settings.yaml value (77777) must win over the env var (999).
+        std::env::set_var("GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES", "999");
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.chat_compaction_threshold_bytes(), 77777);
+    }
+
+    #[test]
+    fn test_chat_compaction_threshold_bytes_env_fallback_no_settings_file() {
+        let mut env = EnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
+        env.set("GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES", "4242");
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.chat_compaction_threshold_bytes(), 4242);
+    }
+
+    #[test]
+    fn test_chat_compaction_threshold_bytes_default_no_settings_file() {
+        let mut env = EnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
+        // No settings.yaml, no env var — should get the 786_432 default.
+        let cfg = Config::load().unwrap();
+        assert_eq!(
+            cfg.chat_compaction_threshold_bytes(),
+            DEFAULT_CHAT_COMPACTION_THRESHOLD_BYTES
+        );
     }
 }

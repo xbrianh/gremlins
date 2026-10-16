@@ -24,6 +24,7 @@ use crate::config;
 use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
 use crate::executor::bootstrap::run_definition_bootstrap;
+use crate::executor::conversation;
 use crate::executor::exec_runner::{commit_exec, prepare_exec, run_shell, ExecError};
 use crate::executor::gremlin::Gremlin;
 #[cfg(test)]
@@ -403,7 +404,7 @@ async fn run_agent(
     // exists but fails to parse is fatal: running with an empty prefix would
     // then overwrite the unreadable artifact with the new turn's messages,
     // destroying recoverable history.
-    let prepopulated_messages = if gremlin.state.read_str("kind") == "chat" {
+    let verbatim_history = if gremlin.state.read_str("kind") == "chat" {
         match gremlin
             .state
             .content("artifact://conversation.json", None)
@@ -432,6 +433,14 @@ async fn run_agent(
     } else {
         None
     };
+
+    // Compaction is a read-time, in-memory transform. `verbatim_history` keeps
+    // the full archive so the post-run write can reconstruct the verbatim
+    // transcript instead of persisting the compacted working memory.
+    let prepopulated_messages = verbatim_history
+        .as_ref()
+        .map(|history| conversation::compact(history, config::chat_compaction_threshold_bytes()));
+    let prepopulated_len = prepopulated_messages.as_ref().map(Vec::len).unwrap_or(0);
 
     let params = RunParams {
         prompt: prepared.user_prompt(),
@@ -567,11 +576,26 @@ async fn run_agent(
 
     // Chat gremlins persist the agent loop's accumulated message history as a
     // structured artifact so the next stage can pre-populate its own history
-    // with full model context. On serialize failure, log and leave any prior
-    // artifact untouched rather than erasing it with an empty array.
+    // with full model context. If compaction ran at read time, reconstruct the
+    // full verbatim history (the pre-compaction prefix plus this turn's new
+    // messages) so `artifact://conversation.json` is never the compacted
+    // working memory. On serialize failure, log and leave any prior artifact
+    // untouched rather than erasing it with an empty array.
     if gremlin.state.read_str("kind") == "chat" {
         if let Some(messages) = &completed.messages {
-            match serde_json::to_string(messages) {
+            let full_history = match &verbatim_history {
+                Some(prior) => {
+                    let mut full = prior.clone();
+                    if let Some(tail) = messages.get(prepopulated_len..) {
+                        full.extend(tail.iter().cloned());
+                    } else {
+                        full = messages.clone();
+                    }
+                    full
+                }
+                None => messages.clone(),
+            };
+            match serde_json::to_string(&full_history) {
                 Ok(json) => {
                     if let Ok(uri) = Uri::parse("artifact://conversation.json") {
                         let _ = gremlin.state.write_into_registry(&uri, &json).await;
