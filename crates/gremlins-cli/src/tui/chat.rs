@@ -48,6 +48,10 @@ pub enum ChatEvent {
         /// The `Done` tool's `summary` argument, appended to the turn's
         /// model text at turn end.
         summary: String,
+        /// Conversation-wide token/cache delta carried by the daemon's
+        /// `done` event. The TUI no longer renders this line directly; the
+        /// `TurnComplete` stats title already reports the same figures.
+        #[allow(dead_code)]
         usage: Option<Value>,
         turn: Option<String>,
     },
