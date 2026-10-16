@@ -55,7 +55,7 @@ this section — do not try to run them yourself.
 | `/log <id>` | show gremlin log |
 | `/watch` | show the running gremlins table; arrow keys select, `Ctrl+O` toggles an inline live log |
 | `/debug <id>` | open a full-screen interactive debug session |
-| `/model` | show the gremlin's default model (`model://provider/model` or `provider/model`) |
+| `/model` / `/model <spec>` / `/model clear` | show, set, or clear the TUI chat model (`model://provider/model` or `provider/model`) |
 | `/chat` | chat is always active (type directly) |
 | `/clear` / `/new` | restart chat |
 | `/help` | show this help |

@@ -96,6 +96,7 @@ impl Default for BackoffConfig {
 #[derive(Debug, Clone, Default)]
 pub struct Config {
     default_model: Option<String>,
+    tui_model: Option<String>,
     exact_stage_models: HashMap<String, String>,
     prefix_stage_models: HashMap<String, String>,
     default_task_models: Option<IndexMap<String, String>>,
@@ -169,6 +170,8 @@ impl<'de> Deserialize<'de> for StrictString {
 struct ConfigFile {
     #[serde(rename = "default-model")]
     default_model: Option<StrictString>,
+    #[serde(rename = "tui-model")]
+    tui_model: Option<StrictString>,
     #[serde(rename = "default-model-by-stage")]
     default_model_by_stage: Option<IndexMap<String, StrictString>>,
     #[serde(rename = "default-task-models")]
@@ -264,6 +267,8 @@ impl Config {
             .filter(|s| !s.is_empty())
             .or_else(env_default_model);
 
+        let tui_model = cfg_file.tui_model.map(|s| s.0).filter(|s| !s.is_empty());
+
         let stage_models_raw: Option<IndexMap<String, String>> = cfg_file
             .default_model_by_stage
             .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
@@ -349,6 +354,7 @@ impl Config {
 
         Ok(Config {
             default_model,
+            tui_model,
             exact_stage_models,
             prefix_stage_models,
             default_task_models: task_models,
@@ -361,6 +367,11 @@ impl Config {
 
     pub fn default_model(&self) -> Option<&str> {
         self.default_model.as_deref()
+    }
+
+    /// The raw `tui-model` value from settings.yaml, without env fallback.
+    pub fn tui_model(&self) -> Option<&str> {
+        self.tui_model.as_deref()
     }
 
     /// Returns `(exact_map, prefix_map)` from `default-model-by-stage`.
@@ -563,6 +574,154 @@ fn env_default_model() -> Option<String> {
 // ---------------------------------------------------------------------------
 // Client-profile resolution
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// TUI model override (gremlins-managed tui.json)
+// ---------------------------------------------------------------------------
+
+fn tui_model_override_path() -> PathBuf {
+    resolve_user_config_root(None).join("tui.json")
+}
+
+/// One `tui.json` override file. This file is written by the supervisor's
+/// `/model` op and is never hand-managed by the operator.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TuiModelOverrideFile {
+    model: String,
+}
+
+static TUI_MODEL_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Read the gremlins-managed TUI model override, if one exists.
+///
+/// A missing or unparsable `tui.json` is treated as "no override": the
+/// problem is logged and chat/model resolution falls through to settings.
+pub(crate) fn load_tui_model_override() -> Option<String> {
+    let path = tui_model_override_path();
+    let content = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str::<TuiModelOverrideFile>(&content) {
+        Ok(file) if file.model.trim().is_empty() => {
+            log::warn!(
+                "tui model override in {} is empty; ignoring",
+                path.display()
+            );
+            None
+        }
+        Ok(file) => Some(file.model),
+        Err(e) => {
+            log::warn!(
+                "ignoring unparsable tui model override at {}: {e}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// Atomically persist a resolved concrete model spec to `tui.json`.
+///
+/// The daemon resolves and validates a spec before calling this, so the file
+/// always carries a concrete provider/model string rather than a profile
+/// reference.
+pub(crate) fn write_tui_model_override(spec: &str) -> Result<(), String> {
+    let _guard = TUI_MODEL_OVERRIDE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = tui_model_override_path();
+    let dir = path
+        .parent()
+        .ok_or_else(|| format!("invalid tui model override path {}", path.display()))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("failed to create config dir {}: {e}", dir.display()))?;
+
+    let file = TuiModelOverrideFile {
+        model: spec.to_string(),
+    };
+    let data = serde_json::to_vec_pretty(&file)
+        .map_err(|e| format!("failed to encode tui model override: {e}"))?;
+    let tmp = dir.join("tui.json.tmp");
+    std::fs::write(&tmp, data).map_err(|e| {
+        format!(
+            "failed to write temporary tui model override {}: {e}",
+            tmp.display()
+        )
+    })?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "failed to install tui model override {}: {e}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Remove the gremlins-managed TUI model override, if present.
+pub(crate) fn clear_tui_model_override() {
+    let _guard = TUI_MODEL_OVERRIDE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = tui_model_override_path();
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            log::warn!("failed to clear tui model override {}: {e}", path.display());
+        }
+    }
+}
+
+/// Which settings layer produced the effective TUI chat model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TuiModelLayer {
+    Override,
+    TuiModel,
+    DefaultModel,
+}
+
+impl TuiModelLayer {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Override => "tui.json",
+            Self::TuiModel => "tui-model",
+            Self::DefaultModel => "default-model",
+        }
+    }
+}
+
+/// Resolve the model used by the TUI chat and by `/model`.
+///
+/// Precedence is `tui.json` → `tui-model` (settings.yaml) → `default-model`
+/// (settings.yaml), with each chosen value run through profile resolution.
+/// Empty strings are filtered on load for both settings keys and here for the
+/// override. This function deliberately does **not** mutate
+/// [`Config::default_model`].
+pub(crate) fn resolve_tui_chat_model(
+    config: &Config,
+) -> Result<Option<(TuiModelLayer, String)>, String> {
+    let layers = [
+        (TuiModelLayer::Override, load_tui_model_override()),
+        (
+            TuiModelLayer::TuiModel,
+            config.tui_model().map(String::from),
+        ),
+        (
+            TuiModelLayer::DefaultModel,
+            config.default_model().map(String::from),
+        ),
+    ];
+    for (source, spec) in layers {
+        let Some(spec) = spec else {
+            continue;
+        };
+        if spec.trim().is_empty() {
+            continue;
+        }
+        return resolve_model_reference(&spec, config).map(|resolved| Some((source, resolved)));
+    }
+    Ok(None)
+}
 
 /// Resolve a model reference through the flat `model-profiles` table.
 ///
@@ -1262,6 +1421,72 @@ model-profiles:
             cfg.default_model().is_none(),
             "empty default-model must be filtered out"
         );
+    }
+
+    #[test]
+    fn test_config_tui_model_field() {
+        let cfg_file: ConfigFile = serde_yaml::from_str(r#"tui-model: "xai/grok-4""#).unwrap();
+        assert_eq!(
+            cfg_file.tui_model.as_ref().map(|s| s.0.as_str()),
+            Some("xai/grok-4")
+        );
+    }
+
+    #[test]
+    fn test_config_tui_model_loads() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-model: "cmd/default"
+tui-model: "model://xai/grok-4?reasoning=low""#,
+        ));
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.tui_model(), Some("model://xai/grok-4?reasoning=low"));
+    }
+
+    #[test]
+    fn test_config_tui_model_empty_string_filtered() {
+        let _sandbox = Sandbox::with_config(Some(r#"tui-model: """#));
+        let cfg = Config::load().unwrap();
+        assert!(cfg.tui_model().is_none(), "empty tui-model must be unset");
+    }
+
+    #[test]
+    fn test_resolve_tui_chat_model_precedence() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-model: "cmd/default"
+tui-model: "cmd/tui"
+model-profiles:
+  fast:
+    model: cmd/echo
+"#,
+        ));
+        let cfg = Config::load().unwrap();
+
+        // No override: tui-model beats default-model.
+        let (source, spec) = resolve_tui_chat_model(&cfg).unwrap().unwrap();
+        assert_eq!(source, TuiModelLayer::TuiModel);
+        assert_eq!(spec, "cmd/tui");
+
+        // A written override wins over both settings layers.
+        write_tui_model_override("cmd/override").unwrap();
+        let (source, spec) = resolve_tui_chat_model(&cfg).unwrap().unwrap();
+        assert_eq!(source, TuiModelLayer::Override);
+        assert_eq!(spec, "cmd/override");
+
+        // Clearing the override restores the settings precedence.
+        clear_tui_model_override();
+        let (source, spec) = resolve_tui_chat_model(&cfg).unwrap().unwrap();
+        assert_eq!(source, TuiModelLayer::TuiModel);
+        assert_eq!(spec, "cmd/tui");
+    }
+
+    #[test]
+    fn test_resolve_tui_chat_model_default_falls_back() {
+        let _sandbox = Sandbox::with_config(Some(r#"default-model: "cmd/default""#));
+        let cfg = Config::load().unwrap();
+
+        let (source, spec) = resolve_tui_chat_model(&cfg).unwrap().unwrap();
+        assert_eq!(source, TuiModelLayer::DefaultModel);
+        assert_eq!(spec, "cmd/default");
     }
 
     #[test]
