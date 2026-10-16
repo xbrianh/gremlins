@@ -1247,7 +1247,7 @@ mod tests {
 
     #[test]
     fn loop_iter_defaults_to_one() {
-        let (_sandbox, gremlin) = test_gremlin(vec![], "cmd:true");
+        let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
         assert_eq!(gremlin.loop_iter, "1");
     }
 
@@ -1306,20 +1306,20 @@ mod tests {
     /// compiles cleanly — this boundary test pins the source of the maps.
     #[test]
     fn resolve_task_clients_uses_task_maps_not_stage_maps() {
-        let (_sandbox, mut gremlin) = test_gremlin(vec![], "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(vec![], "cmd/true");
 
         // A stage-client entry keyed by the *stage name* — the wrong map.
         gremlin
             .runtime_config
             .stage_clients_exact
-            .insert("writer".to_string(), "cmd:stage-client".to_string());
+            .insert("writer".to_string(), "cmd/stage-client".to_string());
         gremlin
             .runtime_config
             .stage_clients_prefix
-            .insert("wri".to_string(), "cmd:stage-prefix".to_string());
+            .insert("wri".to_string(), "cmd/stage-prefix".to_string());
 
         // A task-client entry keyed by a *task kind* — the right map.
-        let global = IndexMap::from([("Scout".to_string(), "openai:mini".to_string())]);
+        let global = IndexMap::from([("Scout".to_string(), "openai/mini".to_string())]);
         gremlin.runtime_config.default_task_clients = Some(global);
 
         let by_kind = resolve_task_clients(
@@ -1332,7 +1332,7 @@ mod tests {
         // The task-kind key survives; the stage-name keys do not leak in.
         assert_eq!(
             by_kind.get(&TaskKind::Scout),
-            Some(&"openai:mini".to_string()),
+            Some(&"openai/mini".to_string()),
             "the task-client entry must be present"
         );
         assert!(
@@ -1347,14 +1347,14 @@ mod tests {
             .skip_if_exists("artifact://done.md")
             .stage(
                 AgentBuilder::new("writer-inner")
-                    .client("cmd:false")
+                    .client("cmd/false")
                     .prompt("hi")
                     .build()
                     .unwrap(),
             )
             .build()
             .unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         gremlin
             .state
             .write_into_registry(&Uri::parse("artifact://done.md").unwrap(), "done")
@@ -1373,14 +1373,14 @@ mod tests {
             .skip_if_exists("done.md")
             .stage(
                 AgentBuilder::new("writer-inner")
-                    .client("cmd:false")
+                    .client("cmd/false")
                     .prompt("hi")
                     .build()
                     .unwrap(),
             )
             .build()
             .unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         gremlin
             .state
             .write_into_registry(&Uri::parse("artifact://done.md").unwrap(), "done")
@@ -1388,7 +1388,7 @@ mod tests {
             .unwrap();
 
         let stage = take_first_stage(&mut gremlin).await;
-        // `cmd:false` would fail the stage if the guard did not skip it.
+        // `cmd/false` would fail the stage if the guard did not skip it.
         assert!(run_stage(&stage, &mut gremlin).await.is_ok());
     }
 
@@ -1397,12 +1397,12 @@ mod tests {
         let stages = vec![AgentBuilder::new("writer")
             // The cmd backend appends --model <model> --add-dir <artifact_dir>
             // after the command, so $3 is the artifact_dir.
-            .client("cmd:sh -c 'touch \"$3\"/writer.md'")
+            .client("cmd/sh -c 'touch \"$3\"/writer.md'")
             .output("out?", output("artifact://{name}.md"))
             .prompt("write {out}")
             .build()
             .unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         let stage = take_first_stage(&mut gremlin).await;
         run_stage(&stage, &mut gremlin).await.unwrap();
         assert!(gremlin.state.is_registered("artifact://writer.md").await);
@@ -1411,12 +1411,12 @@ mod tests {
     #[tokio::test]
     async fn agent_missing_artifact_bails() {
         let stages = vec![AgentBuilder::new("writer")
-            .client("cmd:sh -c 'cat >/dev/null'")
+            .client("cmd/sh -c 'cat >/dev/null'")
             .output("out", output("artifact://out.md"))
             .prompt("write {out}")
             .build()
             .unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         let stage = take_first_stage(&mut gremlin).await;
 
         match run_stage(&stage, &mut gremlin).await {
@@ -1433,7 +1433,7 @@ mod tests {
             .cmds(vec!["true".to_string()])
             .build()
             .unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         let stage = take_first_stage(&mut gremlin).await;
         assert!(run_stage(&stage, &mut gremlin).await.is_ok());
     }
@@ -1444,7 +1444,7 @@ mod tests {
             .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
             .build()
             .unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         let stage = take_first_stage(&mut gremlin).await;
 
         match run_stage(&stage, &mut gremlin).await {
@@ -1472,7 +1472,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         let stage = take_first_stage(&mut gremlin).await;
 
         run_stage(&stage, &mut gremlin).await.unwrap();
@@ -1491,7 +1491,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         let stage = take_first_stage(&mut gremlin).await;
 
         match run_stage(&stage, &mut gremlin).await {
@@ -1517,7 +1517,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         gremlin
             .state
             .write_into_registry(&Uri::parse("artifact://done").unwrap(), "yes")
@@ -1543,7 +1543,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         let stage = take_first_stage(&mut gremlin).await;
 
         match run_stage(&stage, &mut gremlin).await {
@@ -1569,7 +1569,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         let stage = take_first_stage(&mut gremlin).await;
 
         match run_stage(&stage, &mut gremlin).await {
@@ -1597,7 +1597,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         let stage = take_first_stage(&mut gremlin).await;
 
         // Should run without error — the inner sequence runs twice.
@@ -1622,7 +1622,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         let stage = take_first_stage(&mut gremlin).await;
 
         run_stage(&stage, &mut gremlin).await.unwrap();
@@ -1644,7 +1644,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         let stage = take_first_stage(&mut gremlin).await;
 
         // Should run 3 iterations with 10ms sleeps, then bail on exhaustion.
@@ -1672,7 +1672,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         let stage = take_first_stage(&mut gremlin).await;
 
         let result = run_stage(&stage, &mut gremlin).await;
@@ -1693,7 +1693,7 @@ mod tests {
                 .build()
                 .unwrap(),
         ];
-        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         let state_dir = sandbox.path().join("state").join("gr-test");
 
         assert_eq!(gremlin.run(None).await.unwrap(), 0);
@@ -1709,12 +1709,12 @@ mod tests {
     async fn run_records_a_bail_and_returns_one() {
         // A missing non-optional artifact causes a Bail.
         let stages = vec![AgentBuilder::new("writer")
-            .client("cmd:sh -c 'cat >/dev/null'")
+            .client("cmd/sh -c 'cat >/dev/null'")
             .output("out", output("artifact://out.md"))
             .prompt("hi {out}")
             .build()
             .unwrap()];
-        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         let state_dir = sandbox.path().join("state").join("gr-test");
 
         assert_eq!(gremlin.run(None).await.unwrap(), 1);
@@ -1756,7 +1756,7 @@ mod tests {
                 .build()
                 .unwrap(),
         ];
-        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
 
         assert_eq!(gremlin.run(Some("second")).await.unwrap(), 0);
         assert!(!sandbox.path().join("first.marker").exists());
@@ -1785,7 +1785,7 @@ mod tests {
             )
             .build()
             .unwrap()];
-        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         let state_dir = sandbox.path().join("state").join("gr-test");
 
         // First run: group fails because "bad" exits non-zero.
@@ -1857,7 +1857,7 @@ mod tests {
             .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
             .build()
             .unwrap()];
-        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd:true");
+        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
         let state_dir = sandbox.path().join("state").join("gr-test");
 
         match gremlin.run(None).await {
@@ -1888,7 +1888,7 @@ mod tests {
             .unwrap()];
         let (sandbox, mut gremlin) = test_gremlin_with_bootstrap(
             stages,
-            "cmd:true",
+            "cmd/true",
             Bootstrap {
                 cmds: vec!["exit 5".to_string()],
                 ..Default::default()
@@ -1926,7 +1926,7 @@ mod tests {
             .unwrap()];
         let (sandbox, mut gremlin) = test_gremlin_with_bootstrap(
             stages,
-            "cmd:true",
+            "cmd/true",
             Bootstrap {
                 cmds: vec!["echo prepared > marker.txt".to_string()],
                 ..Default::default()
@@ -1951,7 +1951,7 @@ mod tests {
             .unwrap()];
         let (sandbox, mut gremlin) = test_gremlin_with_bootstrap(
             stages,
-            "cmd:true",
+            "cmd/true",
             Bootstrap {
                 cmds: vec!["touch bootstrap.marker".to_string()],
                 ..Default::default()
@@ -1976,7 +1976,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn create_then_run_end_to_end() {
         let fx = GitSandbox::with_definition(
-            "default_client: 'cmd:true'\n\
+            "default_client: 'cmd/true'\n\
              stages:\n\
              \x20 - name: solo\n\
              \x20   type: exec\n\

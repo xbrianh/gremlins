@@ -51,10 +51,10 @@ can have running gremlins simultaneously without interference.
 - `git` — [Git](https://git-scm.com/downloads) (pre-installed on most systems)
 
 A provider also requires either its API key (`OPENAI_API_KEY`, `XAI_API_KEY`,
-`OPENROUTER_API_KEY`, `GREMLINS_AZURE_OPENAI_API_KEY` or `GREMLINS_AZURE_OPENAI_TOKEN`) or a `cmd:`
+`OPENROUTER_API_KEY`, `GREMLINS_AZURE_OPENAI_API_KEY` or `GREMLINS_AZURE_OPENAI_TOKEN`) or a `cmd/<command>`
 command on `PATH`.
 
-**Azure OpenAI / Azure AI Foundry** uses `azure-openai:<deployment>` as the client
+**Azure OpenAI / Azure AI Foundry** uses `azure-openai/<deployment>` as the client
 specifier. Set `GREMLINS_AZURE_OPENAI_ENDPOINT` (required) and one of
 `GREMLINS_AZURE_OPENAI_TOKEN` (Entra ID bearer token) or `GREMLINS_AZURE_OPENAI_API_KEY`
 (API key). Optionally set `GREMLINS_AZURE_OPENAI_API_VERSION` (defaults to
@@ -139,7 +139,7 @@ These flags are accepted by every gremlin definition:
 | `--print-id-only` | Print only the gremlin id on stdout; suppress the launch banner |
 | `--wait` | Block until the spawned gremlin exits; return its exit code |
 | `--base-ref <ref>` | Git ref to branch the worktree from; defaults to `"HEAD"` (current branch). When the definition declares a `base_ref` bootstrap source, this flag overrides it. |
-| `--client <spec>` | `provider:model` string overriding the definition's `default_client` |
+| `--client <spec>` | `provider/model` string overriding the definition's `default_client` |
 | `--telemetry` / `-v` | Enable per-turn telemetry (TTFT, token counts, cache hit ratio) in the gremlin log |
 
 #### Per-definition flags
@@ -178,7 +178,7 @@ gremlins launch gh      # bundled gh.yaml
 **Top-level keys:**
 
 ```yaml
-default_client: xai:grok-4    # required; provider:model string
+default_client: xai/grok-4    # required; provider/model string
 
 github_integration: true      # optional; enables gh CLI integration
 
@@ -215,7 +215,7 @@ stages:
 
 | Key | Description |
 |---|---|
-| `default_client` | **Required.** `provider:model` string used for stages without an explicit `client:` |
+| `default_client` | **Required.** `provider/model` string used for stages without an explicit `client:` |
 | `github_integration` | If true, fetches `origin/<branch>` before creating worktrees and enables `gh` CLI use. |
 | `bootstrap` | CLI source flags, launch-only commands, per-worktree commands, and `cli_out` artifact bindings. See [Bootstrap block](#bootstrap-block). |
 | `prompts` | Named prompt map. Each key maps to a prompt string or list; referenced by name in stage `prompt:` fields. |
@@ -230,7 +230,7 @@ stages:
 |---|---|
 | `name` | Unique stage identifier; used for `resume` targeting |
 | `type` | Stage type — a primitive (`agent`, `exec`, `loop`, `parallel`, `sequence`), a recipe YAML from `.gremlins/stages/` (`plan`, `implement`, `verify`, etc.), or a `stage-definitions` key |
-| `client` | `provider:model` string; overrides `default_client` for this stage |
+| `client` | `provider/model` string; overrides `default_client` for this stage |
 | `prompt` | Path or list of paths. A bare `NAME` resolves from the definition's `prompt_dir`. |
 | `options` | Free-form dict passed to the stage |
 | `skip_if_exists` | Artifact key; if this artifact is verified to exist, skip the stage |
@@ -253,10 +253,10 @@ stages:
   body:
     - name: review-detail
       type: review-code
-      client: xai:grok-4
+      client: xai/grok-4
     - name: review-security
       type: review-code
-      client: xai:grok-4
+      client: xai/grok-4
   max_concurrent: 2         # optional; defaults to all children at once
 ```
 
@@ -269,19 +269,19 @@ stages:
 
 ### Client specifiers
 
-Clients are specified as `provider:model` inline strings, either at the definition level (`default_client:`) or per stage (`client:`).
+Clients are specified as `provider/model` inline strings, either at the definition level (`default_client:`) or per stage (`client:`).
 
 ```yaml
-default_client: xai:grok-4     # all stages default to this
+default_client: xai/grok-4     # all stages default to this
 stages:
   - name: plan
     type: plan
   - name: implement
     type: implement
-    client: openai:gpt-4o      # this stage uses openai instead
+    client: openai/gpt-4o      # this stage uses openai instead
 ```
 
-Providers: `openai`, `xai`, `openrouter`, `azure-openai`, `cmd`. The CLI `--client provider:model` flag overrides the definition-level `default_client:` but yields to per-stage `client:` settings.
+Providers: `openai`, `xai`, `openrouter`, `anthropic`, `azure-openai`, `copilot`, `cmd`. The CLI `--client provider/model` flag overrides the definition-level `default_client:` but yields to per-stage `client:` settings.
 
 ### `prompt:` field
 
@@ -400,7 +400,7 @@ When a definition declares `land:`, `gremlins land` runs this stage instead of t
 Wrap sibling stages in a `type: parallel` group with a `body:` list to run them concurrently:
 
 ```yaml
-default_client: xai:grok-4
+default_client: xai/grok-4
 
 stages:
   - type: plan
@@ -449,14 +449,14 @@ definition. This example adds a `verify` stage before `review-code` and
 overrides the client for the address stage:
 
 ```yaml
-default_client: xai:grok-4
+default_client: xai/grok-4
 
 stages:
   - { type: plan,       prompt: [code-style, plan.md] }
   - { type: implement,  prompt: [code-style, implement.md] }
   - { type: verify,              options: { cmds: ["cargo test"] }, prompt: verify_fix }
   - { type: review-code }
-  - { name: address-code, type: agent, client: openai:gpt-4o, prompt: [code-style, address.md, bail_section.md], interpolation: {text: review-code} }
+  - { name: address-code, type: agent, client: openai/gpt-4o, prompt: [code-style, address.md, bail_section.md], interpolation: {text: review-code} }
 ```
 
 Add a `prompt:` key to any stage to supply a custom prompt; paths are
@@ -468,7 +468,7 @@ per-stage `prompt:` overrides.
 Run two `review-code` passes in parallel, then address both:
 
 ```yaml
-default_client: xai:grok-4
+default_client: xai/grok-4
 
 stages:
   - { type: plan,       prompt: [code-style, plan.md] }
@@ -494,7 +494,7 @@ YAML `stage-definitions:` lets you name and reuse stage patterns within a defini
 stage-definitions:
   review-base: &review-base
     type: review-code
-    client: xai:grok-4
+    client: xai/grok-4
     prompt: code_style.md
 
 stages:
@@ -656,22 +656,30 @@ The boss resumes from its child-spawn stage and proceeds with the next iteration
 
 ### Client specifier syntax
 
-Client specifiers follow the format `provider:model` with an optional `:k=v,...`
-params suffix:
+Client specifiers follow the URI grammar: the canonical form
+`model://provider/model?k=v,...`, or the scheme-omitted stub
+`provider/model?k=v,...`.
 
 ```
-provider:model:k1=v1,k2=v2,...
+model://provider/model?k1=v1,k2=v2,...
+provider/model?k1=v1,k2=v2,...
 ```
 
 **Examples:**
 
 ```
-xai:grok-4:reasoning=high
-openrouter:deepseek/deepseek-v4-pro:reasoning=high,thinking=deepseek
-openai:gpt-4o-mini:temperature=0.7
+xai/grok-4?reasoning=high
+openrouter/deepseek/deepseek-v4-pro?reasoning=high,thinking=deepseek
+openai/gpt-4o-mini?temperature=0.7
+model://xai/grok-4?reasoning=high
 ```
 
-Params after the second colon are resolved per backend. A key either sets a
+`?` is the only params introducer. The provider is the first path segment; the
+model is everything after it and before the first `?`, preserved verbatim — so
+`openrouter/some/model:free` names the model `some/model:free`, and colon
+suffixes like `:free`, `:online`, or `:nitro` stay inside the model.
+
+Params after the `?` are resolved per backend. A key either sets a
 **typed** request field — overriding that backend's default for the key — or
 passes through to `additional_params` unchanged. Knowing which is which matters:
 a typed key parses strictly, so `temperature=hot` fails the client build rather
@@ -682,7 +690,7 @@ braces/brackets or double-quoted strings do not split parameters. This is how a
 JSON-shaped typed key such as `cache_control` carries more than one field:
 
 ```
-anthropic:claude-sonnet-4:cache_control={"type":"ephemeral","ttl":"1h"},max_tokens=4096
+anthropic/claude-sonnet-4?cache_control={"type":"ephemeral","ttl":"1h"},max_tokens=4096
 ```
 
 **Typed keys** (accepted value shapes):
@@ -713,7 +721,7 @@ behavior — for example, an invalid Copilot `intent` no longer silently falls
 back to `Panel`. Unknown keys (e.g. `foo=bar`) pass through to
 `additional_params` with JSON-coerced typing and never displace a default.
 
-- The `cmd` provider does not parse params — the full string after `cmd:` is
+- The `cmd` provider does not parse params — the full string after `cmd/` is
   treated as the shell command.
 
 ### Filesystem overrides
@@ -755,25 +763,25 @@ agent can invoke. It does not limit *impact within reach*. A gremlin with
 write access to your worktree can make any change inside it. Review landed
 commits before merging.
 
-**Backend differences**: On `openai:`, `xai:`, and `openrouter:` backends,
+**Backend differences**: On the `openai`, `xai`, and `openrouter` backends,
 gremlins owns the tool layer and enforces worktree/cwd containment directly.
-On `cmd:` backends, the gremlins-layer containment is **not** translated into
+On `cmd` backends, the gremlins-layer containment is **not** translated into
 CLI flags or settings — the underlying command reads the operator's ambient
 config and enforces whatever the operator has configured there. See "Backend
 config inheritance" below.
 
 ### Backend config inheritance
 
-The `cmd:` backend runs the specified command as a subprocess. It does *not*
+The `cmd` backend runs the specified command as a subprocess. It does *not*
 materialize a per-gremlin config dir. Whatever the operator has configured
 for their interactive session is exactly what the subprocess sees:
 
 - **Settings** — the subprocess reads whatever config files it normally would.
   The gremlins-layer
-  `allowed_tools` / `disallowed_tools` block has no effect on `cmd:` runs;
+  `allowed_tools` / `disallowed_tools` block has no effect on `cmd` runs;
   configure tool permissions via your own settings.
 
-  Gremlin worktrees — where the `cmd:` subprocess does its file edits —
+  Gremlin worktrees — where the `cmd` subprocess does its file edits —
   live under a stable, gremlins-scoped prefix in the system temp directory.
   Discover it at runtime:
 

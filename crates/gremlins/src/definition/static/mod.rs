@@ -563,7 +563,7 @@ mod tests {
         let def = StaticDefinition {
             name: "test-gremlin".into(),
             path: "/tmp/test.yaml".into(),
-            default_client: "openai:gpt-4".into(),
+            default_client: "openai/gpt-4".into(),
             bootstrap: Bootstrap::default(),
             stages: vec![],
             land: Some(parsed_exec("land")),
@@ -582,7 +582,7 @@ mod tests {
         let def = StaticDefinition {
             name: "test-gremlin".into(),
             path: "/tmp/test.yaml".into(),
-            default_client: "openai:gpt-4".into(),
+            default_client: "openai/gpt-4".into(),
             bootstrap: Bootstrap::default(),
             stages: vec![],
             land: Some(parsed_exec("land")),
@@ -612,7 +612,7 @@ mod tests {
         let def = StaticDefinition {
             name: "test-gremlin".into(),
             path: "/tmp/test.yaml".into(),
-            default_client: "openai:gpt-4".into(),
+            default_client: "openai/gpt-4".into(),
             bootstrap: Bootstrap::default(),
             stages: vec![],
             land: None,
@@ -622,7 +622,7 @@ mod tests {
             cursor: 0,
         };
         assert_eq!(def.name(), "test-gremlin");
-        assert_eq!(def.default_client(), "openai:gpt-4");
+        assert_eq!(def.default_client(), "openai/gpt-4");
         assert!(def.land().is_none());
     }
 
@@ -743,10 +743,10 @@ mod tests {
                 interpolation_map: std::collections::HashMap::new(),
                 outputs_map: std::collections::HashMap::new(),
             },
-            client: Some(ClientSpec("xai:grok-5".into())),
+            client: Some(ClientSpec("xai/grok-5".into())),
             task_clients: None,
         };
-        assert_eq!(stage.client(), Some(&ClientSpec("xai:grok-5".into())));
+        assert_eq!(stage.client(), Some(&ClientSpec("xai/grok-5".into())));
     }
 
     #[test]
@@ -812,7 +812,7 @@ mod tests {
         StaticDefinition {
             name: "test-def".into(),
             path: "/tmp/test.yaml".into(),
-            default_client: "openai:gpt-4".into(),
+            default_client: "openai/gpt-4".into(),
             bootstrap: Bootstrap::default(),
             stages,
             land: None,
@@ -948,7 +948,7 @@ mod tests {
             },
             max_iterations: 5,
             interval: Some(20.0),
-            client: Some(ClientSpec("xai:grok".into())),
+            client: Some(ClientSpec("xai/grok".into())),
             task_clients: None,
             body: vec![parsed_agent("loop-child")],
         };
@@ -962,7 +962,7 @@ mod tests {
             ExecutorStage::Sequence(seq) => {
                 assert_eq!(seq.max_iterations, 5);
                 assert_eq!(seq.interval, Some(20.0));
-                assert_eq!(seq.client, Some(ClientSpec("xai:grok".into())));
+                assert_eq!(seq.client, Some(ClientSpec("xai/grok".into())));
                 assert_eq!(seq.stages.len(), 1);
                 assert_eq!(seq.stages[0].name(), "loop-child");
                 assert!(seq.scope.is_none());
@@ -979,7 +979,7 @@ mod tests {
             max_concurrent: Some(4),
             cancel_on_error: true,
             error_policy: ErrorPolicy::All,
-            client: Some(ClientSpec("openai:gpt-5".into())),
+            client: Some(ClientSpec("openai/gpt-5".into())),
             task_clients: None,
             body: vec![parsed_agent("rev-a"), parsed_agent("rev-b")],
             fork: None,
@@ -1002,13 +1002,13 @@ mod tests {
                 assert_eq!(max_concurrent, Some(4));
                 assert!(cancel_on_error);
                 assert_eq!(error_policy, ErrorPolicy::All);
-                assert_eq!(client, Some(ClientSpec("openai:gpt-5".into())));
+                assert_eq!(client, Some(ClientSpec("openai/gpt-5".into())));
                 assert_eq!(children.len(), 2);
                 // Each child is a StaticDefinition that inherits parent metadata
                 // (name, default_client, bootstrap).
                 for child in &children {
                     assert_eq!(child.name(), "test-def");
-                    assert_eq!(child.default_client(), "openai:gpt-4");
+                    assert_eq!(child.default_client(), "openai/gpt-4");
                 }
             }
             _ => panic!("expected Parallel"),
@@ -1079,7 +1079,7 @@ mod tests {
         // Round-trip: deserialize and verify it's a valid definition.
         let mut deserialized = StaticDefinition::deserialize(&bytes).unwrap();
         assert_eq!(deserialized.name(), "test-def");
-        assert_eq!(deserialized.default_client(), "openai:gpt-4");
+        assert_eq!(deserialized.default_client(), "openai/gpt-4");
         // Stage traversal: all three stages must survive the round-trip.
         let mut stage_names: Vec<String> = Vec::new();
         loop {

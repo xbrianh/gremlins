@@ -1,6 +1,6 @@
 //! Typed extra-param resolution shared by every backend.
 //!
-//! A client specifier's trailing `:k=v,...` list is resolved per backend into
+//! A client specifier's trailing `?k=v,...` list is resolved per backend into
 //! a [`ResolvedParams`]: the typed `temperature` and `max_tokens` request
 //! fields plus the `additional_params` object that carries every remaining
 //! key.  Each backend owns its own default table and calls the strict parsers
@@ -9,7 +9,7 @@
 
 use serde_json::Value;
 
-/// The result of resolving a raw `provider:model:k=v,...` param map.
+/// The result of resolving a raw `provider/model?k=v,...` param map.
 ///
 /// `temperature` and `max_tokens` are the typed top-level request fields; they
 /// are emitted only from a resolved value and never appear in `additional`.

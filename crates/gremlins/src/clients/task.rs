@@ -10,7 +10,7 @@ use super::task_kind::TaskKind;
 use super::tools::{self, ToolContext};
 
 /// Build a [`TaskModelSelector`] from the raw `task-clients` config map and a
-/// backend that can resolve `provider:model` specs into live models.
+/// backend that can resolve `provider/model` specs into live models.
 ///
 /// Returns `None` when the map is empty (the common case) or when the backend
 /// cannot serve any of the configured entries.
@@ -392,15 +392,15 @@ mod tests {
     fn task_client_overrides_match_by_kind() {
         let overrides = TaskClientOverrides {
             by_kind: HashMap::from([
-                (TaskKind::Scout, "openai:mini".into()),
-                (TaskKind::Implement, "openai:gpt-4o".into()),
+                (TaskKind::Scout, "openai/mini".into()),
+                (TaskKind::Implement, "openai/gpt-4o".into()),
             ]),
         };
 
-        assert_eq!(overrides.spec_for(TaskKind::Scout), Some("openai:mini"));
+        assert_eq!(overrides.spec_for(TaskKind::Scout), Some("openai/mini"));
         assert_eq!(
             overrides.spec_for(TaskKind::Implement),
-            Some("openai:gpt-4o")
+            Some("openai/gpt-4o")
         );
         // Nothing matches.
         assert_eq!(overrides.spec_for(TaskKind::Review), None);
@@ -411,7 +411,7 @@ mod tests {
         let factory: TaskModelFactory<String> =
             Arc::new(|spec: &str| Some(format!("built:{spec}")));
         let selector = TaskModelSelector::new(
-            HashMap::from([(TaskKind::Scout, "openai:mini".into())]),
+            HashMap::from([(TaskKind::Scout, "openai/mini".into())]),
             factory,
         )
         .expect("a non-empty task-clients map yields a selector");
@@ -419,8 +419,8 @@ mod tests {
         assert_eq!(
             selector.model_for(TaskKind::Scout, &"default".to_string()),
             (
-                "built:openai:mini".to_string(),
-                Some("openai:mini".to_string())
+                "built:openai/mini".to_string(),
+                Some("openai/mini".to_string())
             )
         );
         // No match — the default model stands.
@@ -434,7 +434,7 @@ mod tests {
     fn task_model_selector_falls_back_when_factory_returns_none() {
         let factory: TaskModelFactory<String> = Arc::new(|_spec: &str| None);
         let selector = TaskModelSelector::new(
-            HashMap::from([(TaskKind::Scout, "openai:mini".into())]),
+            HashMap::from([(TaskKind::Scout, "openai/mini".into())]),
             factory,
         )
         .expect("a non-empty map yields a selector");
@@ -546,8 +546,8 @@ mod tests {
         });
         let selector = TaskModelSelector::new(
             HashMap::from([
-                (TaskKind::Scout, "openai:mini".into()),
-                (TaskKind::Fork, "openai:fork".into()),
+                (TaskKind::Scout, "openai/mini".into()),
+                (TaskKind::Fork, "openai/fork".into()),
             ]),
             factory,
         )
@@ -636,7 +636,7 @@ mod tests {
         let factory: TaskModelFactory =
             Arc::new(move |_spec: &str| Some(child_handle.clone().erase()));
         let selector = TaskModelSelector::new(
-            HashMap::from([(TaskKind::Scout, "openai:mini".to_string())]),
+            HashMap::from([(TaskKind::Scout, "openai/mini".to_string())]),
             factory,
         )
         .expect("configured");

@@ -389,7 +389,7 @@ impl Default for LandBuilder {
 /// ```ignore
 /// use gremlins::builders::*;
 ///
-/// let def = DefinitionBuilder::new("demo", "xai:grok-4")
+/// let def = DefinitionBuilder::new("demo", "xai/grok-4")
 ///     .stage(
 ///         AgentBuilder::new("plan")
 ///             .prompt("write the plan to {plan}")
@@ -609,7 +609,7 @@ mod tests {
 
     #[test]
     fn definition_builder_basic() {
-        let def = DefinitionBuilder::new("demo", "xai:grok-4")
+        let def = DefinitionBuilder::new("demo", "xai/grok-4")
             .stage(
                 AgentBuilder::new("plan")
                     .prompt("write the plan to {plan}")
@@ -628,7 +628,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(def.name, "demo");
-        assert_eq!(def.default_client, "xai:grok-4");
+        assert_eq!(def.default_client, "xai/grok-4");
         assert_eq!(def.stages.len(), 2);
         assert_eq!(def.stages[0].name(), "plan");
         assert_eq!(def.stages[0].stage_type(), "agent");
@@ -639,7 +639,7 @@ mod tests {
 
     #[test]
     fn definition_builder_rejects_duplicate_producers() {
-        let err = DefinitionBuilder::new("demo", "xai:grok-4")
+        let err = DefinitionBuilder::new("demo", "xai/grok-4")
             .stage(
                 AgentBuilder::new("first")
                     .prompt("one {out}")
@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn definition_builder_rejects_unresolved_consumers() {
-        let err = DefinitionBuilder::new("demo", "xai:grok-4")
+        let err = DefinitionBuilder::new("demo", "xai/grok-4")
             .stage(
                 ExecBuilder::new("consumer")
                     .cmd("cat {missing}")
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn definition_builder_with_land() {
-        let def = DefinitionBuilder::new("demo", "xai:grok-4")
+        let def = DefinitionBuilder::new("demo", "xai/grok-4")
             .stage(
                 AgentBuilder::new("plan")
                     .prompt("write {plan} and create {pr_url}")
@@ -715,7 +715,7 @@ mod tests {
             .launch_cmd("gremlins:bind_artifact(\"artifact://plan.md\", plan)")
             .build();
 
-        let def = DefinitionBuilder::new("demo", "xai:grok-4")
+        let def = DefinitionBuilder::new("demo", "xai/grok-4")
             .bootstrap(bootstrap)
             .stage(
                 ExecBuilder::new("consumer")
@@ -732,14 +732,14 @@ mod tests {
 
     #[test]
     fn from_builder_entry_point() {
-        let builder = DefinitionBuilder::new("demo", "xai:grok-4");
+        let builder = DefinitionBuilder::new("demo", "xai/grok-4");
         let def = StaticDefinition::from_builder(builder).unwrap();
         assert_eq!(def.name, "demo");
     }
 
     #[test]
     fn builder_populates_expanded_yaml() {
-        let def = DefinitionBuilder::new("demo", "xai:grok-4")
+        let def = DefinitionBuilder::new("demo", "xai/grok-4")
             .stage(
                 AgentBuilder::new("plan")
                     .prompt("write the plan to {plan}")
@@ -815,7 +815,7 @@ mod tests {
         // Agent exempts "model" from framework-key collision.
         AgentBuilder::new("test")
             .prompt("hi")
-            .option("model", "openai:gpt-5")
+            .option("model", "openai/gpt-5")
             .build()
             .unwrap();
     }
@@ -1159,7 +1159,7 @@ mod tests {
     fn fill_builder_names_recurses_into_composites() {
         // Build a sequence with unnamed children — name-filling should
         // assign names at every depth.
-        let def = DefinitionBuilder::new("demo", "xai:grok-4")
+        let def = DefinitionBuilder::new("demo", "xai/grok-4")
             .stage(
                 SequenceBuilder::new("workflow")
                     .stage(ExecBuilder::new("").cmd("echo one").build().unwrap())

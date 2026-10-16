@@ -117,7 +117,7 @@ pub trait Backend: Send + Sync {
         interactive: Option<InteractiveSession>,
     ) -> Result<CompletedRun, ClientError>;
 
-    /// Build a [`DynModel`] from a `provider:model` spec, or `None` when
+    /// Build a [`DynModel`] from a `provider/model` spec, or `None` when
     /// the spec names a different provider or the model cannot be built.
     ///
     /// Called by the executor to pre-build the `task-clients` selector
@@ -130,7 +130,7 @@ pub trait Backend: Send + Sync {
 
     fn total_cost_usd(&self) -> Option<f64>;
 
-    /// Resolve the raw `provider:model:k=v,...` param map into typed request
+    /// Resolve the raw `provider/model?k=v,...` param map into typed request
     /// fields plus the `additional_params` passthrough object.
     ///
     /// This is the single place extra-param meaning is decided: a key either

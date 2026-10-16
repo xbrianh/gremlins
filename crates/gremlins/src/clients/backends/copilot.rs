@@ -544,7 +544,7 @@ impl Backend for CopilotBackend {
     fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
         let (provider, model) = openai_protocol::provider_and_model(spec)?;
         if provider == PROVIDER_NAME {
-            Some(self.state.client.completion(model).erase())
+            Some(self.state.client.completion(&model).erase())
         } else {
             None
         }

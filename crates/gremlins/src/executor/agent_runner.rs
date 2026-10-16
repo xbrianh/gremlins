@@ -460,7 +460,7 @@ mod tests {
             prompts: vec!["hi".to_string()],
             options: HashMap::from([(
                 "model".to_string(),
-                serde_json::Value::String("{provider}:{variant}".to_string()),
+                serde_json::Value::String("{provider}/{variant}".to_string()),
             )]),
             interpolation_map: HashMap::from([(
                 "provider".to_string(),
@@ -472,7 +472,7 @@ mod tests {
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
-        assert_eq!(prepared.model, Some("openai:{variant}".to_string()));
+        assert_eq!(prepared.model, Some("openai/{variant}".to_string()));
     }
 
     #[tokio::test]

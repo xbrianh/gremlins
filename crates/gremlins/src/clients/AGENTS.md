@@ -1,16 +1,18 @@
 # clients/ — client backends and the agent loop
 
-A definition names its model with a single string, `provider:model[:key=value,...]`.
-This module owns that grammar, the lazy construction of backends from it, the
-shared tool-calling agent loop used by every native (rig-based) backend, and
-the concrete backend implementations themselves (`backends/`).
+A definition names its model with a single string using the URI grammar:
+`model://provider/model[?key=value,...]`, or the scheme-omitted stub
+`provider/model[?key=value,...]`. This module owns that grammar, the lazy
+construction of backends from it, the shared tool-calling agent loop used by
+every native (rig-based) backend, and the concrete backend implementations
+themselves (`backends/`).
 
 ## File map
 
 | File | Role |
 |---|---|
 | `mod.rs` | Declares the module structure — `pub mod backend`, `pub mod client`, `pub mod protocol`, etc. The rest of the crate imports directly from submodules (e.g. `clients::backend::Backend`, `clients::client::Client`). |
-| `client.rs` | Owns the `provider:model[:key=value,...]` grammar (`parse_spec`), the provider allowlist (`is_known_provider`), and `Client` — the type that turns a spec into a live `Backend` lazily and memoises it (`get_or_build_backend`). |
+| `client.rs` | Owns the `model://provider/model[?key=value,...]` / `provider/model[?key=value,...]` grammar (`ModelURI::parse`), the provider allowlist (`is_known_provider`), and `Client` — the runtime handle that turns a `ModelURI` into a live `Backend` lazily and memoises it (`get_or_build_backend`). |
 | `backend.rs` | The `Backend` trait every provider implements, plus `RunParams` (everything a run needs: prompt, cwd, timeouts, retries, cancellation, interactive session, task-client overrides, …) and `ClientError`. |
 | `protocol.rs` | `CompletedRun` (exit code, text result, events, cost, token usage, message history) and `UsageStats` — the shared result shape every backend returns. |
 | `agent_loop.rs` | `run_agent_loop` — the shared tool-calling loop used by every native agent backend (OpenAI, OpenRouter, xAI, Copilot, Anthropic, Azure OpenAI), plus `run_agent_loop_nested` for the `Task` tool. Streams model output, dispatches tool calls, classifies errors for retry (`ErrorClassifier`), and exposes `CancelToken` for `gremlins stop`. |
@@ -37,14 +39,18 @@ the concrete backend implementations themselves (`backends/`).
 
 ## Architecture
 
-**Spec grammar.** `client.rs::parse_spec` splits `provider:model[:key=value,...]`
-into `(provider, model, extra_params)`. The trailing parameter list is only
-recognised for non-`cmd` providers — a `cmd` backend's "model" is a shell
-command, so anything after the first colon belongs to it verbatim. For other
-providers, a colon suffix that doesn't parse as `key=value,...` is kept as
-part of the model (OpenRouter routes on suffixes like `:free`, `:online`), so
-`openrouter:some/model:free` names the model `some/model:free`.
-`is_known_provider` just checks membership in `backends::registry()`.
+**Spec grammar.** `client.rs::ModelURI::parse` splits a model reference into
+`(provider, model, extra_params)`. Both the canonical `model://provider/model`
+form and the scheme-omitted stub `provider/model` form are accepted; `?` is the
+only params introducer, so the portion after `?` is parsed with
+`parse_params_list` and returned as `extra_params`. A `cmd` backend's "model"
+is a shell command, so everything after `cmd/` belongs to it verbatim and
+`cmd` never has params (`model://cmd/...` is rejected). Colons are no longer
+structural: everything between the first path separator and the first `?` is
+model content, so `openrouter/some/model:free` names the model
+`some/model:free`. `is_known_provider` just checks membership in
+`backends::registry()`; `Client::new`/`Client::from_uri` keep the allowlist
+enforcement separate from the shape-only `ModelURI::parse`.
 
 **Lazy, memoised construction.** `Client::get_or_build_backend` builds the
 `Arc<dyn Backend>` for a spec on first use and caches it behind a
@@ -90,7 +96,7 @@ its own JSON event stream instead (`stream_json.rs`).
 | You want to … | Look at |
 |---|---|
 | Add a new client provider | `backends/mod.rs` (register in the `backends!` macro), then a new `backends/<name>.rs` implementing `Backend`. If it's OpenAI-protocol-compatible, wrap `OpenAiRunState` like `backends/openai.rs`/`backends/xai.rs`. If it's a native rig provider (like Anthropic, Copilot, or Azure OpenAI), use `run_agent_loop` directly. |
-| Understand the spec grammar | `client.rs::parse_spec`, `is_known_provider` |
+| Understand the spec grammar | `client.rs::ModelURI::parse`, `is_known_provider` |
 | Change how backends are cached/built | `client.rs::Client::get_or_build_backend` |
 | Add or change a native tool | `tools.rs` |
 | Change retry/backoff behavior | `retry.rs` (`with_retry`, `STREAM_IDLE_BACKOFF`), or a backend's `ErrorClassifier` |

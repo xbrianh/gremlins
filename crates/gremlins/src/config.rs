@@ -490,7 +490,7 @@ fn env_default_client() -> Option<String> {
 /// Resolve a client reference through the flat `client-profiles` table.
 ///
 /// Strings starting with `profile:` are profile lookups; everything else is
-/// already a `provider:model[:k=v]` spec and passes through unchanged. An
+/// already a `provider/model[?k=v,...]` spec and passes through unchanged. An
 /// unknown profile is an error.
 pub fn resolve_client_reference(spec: &str, config: &Config) -> Result<String, String> {
     let name = match spec.strip_prefix("profile:") {
@@ -986,10 +986,10 @@ not-a-key: 1"#,
     #[test]
     fn test_config_default_client() {
         let cfg_file: ConfigFile =
-            serde_yaml::from_str(r#"default-client: "openai:gpt-4o""#).unwrap();
+            serde_yaml::from_str(r#"default-client: "openai/gpt-4o""#).unwrap();
         assert_eq!(
             cfg_file.default_client.as_ref().map(|s| s.0.as_str()),
-            Some("openai:gpt-4o")
+            Some("openai/gpt-4o")
         );
     }
 
@@ -1009,9 +1009,9 @@ not-a-key: 1"#,
         let map: IndexMap<String, String> = [
             (
                 "local-review-*".to_string(),
-                "openrouter:doomclientv5".to_string(),
+                "openrouter/doomclientv5".to_string(),
             ),
-            ("plan-*".to_string(), "openai:gpt-5".to_string()),
+            ("plan-*".to_string(), "openai/gpt-5".to_string()),
         ]
         .into();
         let (exact, prefix) = parse_stage_clients(Some(&map));
@@ -1019,21 +1019,21 @@ not-a-key: 1"#,
         assert_eq!(prefix.len(), 2);
         assert_eq!(
             prefix.get("local-review-").unwrap(),
-            "openrouter:doomclientv5"
+            "openrouter/doomclientv5"
         );
-        assert_eq!(prefix.get("plan-").unwrap(), "openai:gpt-5");
+        assert_eq!(prefix.get("plan-").unwrap(), "openai/gpt-5");
     }
 
     #[test]
     fn test_config_exact_and_prefix() {
         let map: IndexMap<String, String> = [
-            ("review".to_string(), "openai:gpt-5".to_string()),
-            ("plan-*".to_string(), "openai:gpt-4o".to_string()),
+            ("review".to_string(), "openai/gpt-5".to_string()),
+            ("plan-*".to_string(), "openai/gpt-4o".to_string()),
         ]
         .into();
         let (exact, prefix) = parse_stage_clients(Some(&map));
-        assert_eq!(exact.get("review").unwrap(), "openai:gpt-5");
-        assert_eq!(prefix.get("plan-").unwrap(), "openai:gpt-4o");
+        assert_eq!(exact.get("review").unwrap(), "openai/gpt-5");
+        assert_eq!(prefix.get("plan-").unwrap(), "openai/gpt-4o");
     }
 
     #[test]
@@ -1046,7 +1046,7 @@ not-a-key: 1"#,
             &path,
             r#"default-client-by-stage:
   prefix-*: 42
-  valid-*: openrouter:model
+  valid-*: openrouter/model
 "#,
         )
         .unwrap();
@@ -1060,41 +1060,41 @@ not-a-key: 1"#,
     #[test]
     fn test_config_empty_prefix_star_skipped() {
         let map: IndexMap<String, String> = [
-            ("*".to_string(), "openrouter:model".to_string()),
-            ("plan-*".to_string(), "openai:gpt-5".to_string()),
+            ("*".to_string(), "openrouter/model".to_string()),
+            ("plan-*".to_string(), "openai/gpt-5".to_string()),
         ]
         .into();
         let (exact, prefix) = parse_stage_clients(Some(&map));
         assert!(exact.is_empty());
         assert_eq!(prefix.len(), 1);
-        assert_eq!(prefix.get("plan-").unwrap(), "openai:gpt-5");
+        assert_eq!(prefix.get("plan-").unwrap(), "openai/gpt-5");
     }
 
     #[test]
     fn test_parse_task_clients() {
         // Canonical kind keys are kept as-is.
         let map: IndexMap<String, String> = [
-            ("Scout".to_string(), "openai:gpt-4o-mini".to_string()),
-            ("Implement".to_string(), "openai:gpt-4o".to_string()),
+            ("Scout".to_string(), "openai/gpt-4o-mini".to_string()),
+            ("Implement".to_string(), "openai/gpt-4o".to_string()),
         ]
         .into();
         let by_kind = parse_task_clients_map(Some(&map)).unwrap();
         assert_eq!(by_kind.len(), 2);
-        assert_eq!(by_kind.get(&TaskKind::Scout).unwrap(), "openai:gpt-4o-mini");
-        assert_eq!(by_kind.get(&TaskKind::Implement).unwrap(), "openai:gpt-4o");
+        assert_eq!(by_kind.get(&TaskKind::Scout).unwrap(), "openai/gpt-4o-mini");
+        assert_eq!(by_kind.get(&TaskKind::Implement).unwrap(), "openai/gpt-4o");
 
         // Unknown keys are rejected at runtime, matching load-time validation.
         let map: IndexMap<String, String> = [
-            ("Scout".to_string(), "openai:gpt-4o-mini".to_string()),
-            ("Bogus".to_string(), "openai:gpt-5".to_string()),
+            ("Scout".to_string(), "openai/gpt-4o-mini".to_string()),
+            ("Bogus".to_string(), "openai/gpt-5".to_string()),
         ]
         .into();
         assert!(parse_task_clients_map(Some(&map)).is_err());
 
         // Fork is skipped by the parser, matching load-time validation.
         let map: IndexMap<String, String> = [
-            ("Scout".to_string(), "openai:gpt-4o-mini".to_string()),
-            ("Fork".to_string(), "openai:gpt-5".to_string()),
+            ("Scout".to_string(), "openai/gpt-4o-mini".to_string()),
+            ("Fork".to_string(), "openai/gpt-5".to_string()),
         ]
         .into();
         let by_kind = parse_task_clients_map(Some(&map)).unwrap();
@@ -1111,8 +1111,8 @@ not-a-key: 1"#,
         // load-time validation, so the parser must skip Fork rather than
         // building an override for it.
         let map: IndexMap<String, String> = [
-            ("Scout".to_string(), "openai:gpt-4o-mini".to_string()),
-            ("Fork".to_string(), "openai:gpt-5".to_string()),
+            ("Scout".to_string(), "openai/gpt-4o-mini".to_string()),
+            ("Fork".to_string(), "openai/gpt-5".to_string()),
         ]
         .into();
         let by_kind = parse_task_clients_map(Some(&map)).unwrap();
@@ -1123,15 +1123,15 @@ not-a-key: 1"#,
     #[test]
     fn test_validate_task_clients_rejects_unknown_keys() {
         let map: IndexMap<String, String> =
-            [("Scout".to_string(), "openai:mini".to_string())].into();
+            [("Scout".to_string(), "openai/mini".to_string())].into();
         assert!(validate_task_clients_keys(map.keys()).is_ok());
 
         let bad: IndexMap<String, String> =
-            [("scout".to_string(), "openai:mini".to_string())].into();
+            [("scout".to_string(), "openai/mini".to_string())].into();
         assert!(validate_task_clients_keys(bad.keys()).is_err());
 
         let star: IndexMap<String, String> =
-            [("Scout*".to_string(), "openai:mini".to_string())].into();
+            [("Scout*".to_string(), "openai/mini".to_string())].into();
         assert!(validate_task_clients_keys(star.keys()).is_err());
 
         let empty: IndexMap<String, String> = IndexMap::new();
@@ -1141,7 +1141,7 @@ not-a-key: 1"#,
     #[test]
     fn test_validate_task_clients_rejects_fork() {
         let fork: IndexMap<String, String> =
-            [("Fork".to_string(), "openai:mini".to_string())].into();
+            [("Fork".to_string(), "openai/mini".to_string())].into();
         let err = validate_task_clients_keys(fork.keys()).unwrap_err();
         assert!(
             err.to_string().contains("Fork cannot be configured"),

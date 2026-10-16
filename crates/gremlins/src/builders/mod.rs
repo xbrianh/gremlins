@@ -6,7 +6,7 @@
 //! ```ignore
 //! use gremlins::builders::*;
 //!
-//! let def = DefinitionBuilder::new("demo", "xai:grok-4")
+//! let def = DefinitionBuilder::new("demo", "xai/grok-4")
 //!     .stage(
 //!         AgentBuilder::new("plan")
 //!             .prompt("write the plan to {plan}")
