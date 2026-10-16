@@ -2,14 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rig_core::driver::DynModel;
 use rig_core::error::ProviderError;
-use rig_core::operation::Completion;
 use rig_core::providers::openai::{OpenAI, wire};
 
 use crate::clients::agent_loop::ErrorClassifier;
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
+use crate::clients::model::GremlinsModel;
 use crate::clients::openai_protocol::{self, reap_openai_compat, run_openai_compat, OpenAiRunState};
 use crate::clients::params::ResolvedParams;
 use crate::clients::protocol::CompletedRun;
@@ -166,10 +165,13 @@ impl Backend for OpenRouterBackend {
         None
     }
 
-    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
+    fn make_model(&self, spec: &str) -> Option<GremlinsModel> {
         let (provider, model) = openai_protocol::provider_and_model(spec)?;
         if provider == PROVIDER_NAME {
-            Some(self.state.client.completion(&model).erase())
+            Some(GremlinsModel::new(
+                self.state.client.completion(&model).erase(),
+                crate::config::max_prompt_bytes(),
+            ))
         } else {
             None
         }

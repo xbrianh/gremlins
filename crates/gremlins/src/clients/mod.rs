@@ -8,6 +8,7 @@ pub(crate) mod config;
 pub(crate) mod interactive;
 pub(crate) mod lazy_auth_http;
 pub(crate) mod log_util;
+pub mod model;
 pub mod openai_protocol;
 pub mod params;
 pub mod protocol;

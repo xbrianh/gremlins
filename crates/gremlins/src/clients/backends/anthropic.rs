@@ -3,9 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use rig_core::driver::DynModel;
 use rig_core::http_client::DynHttpClient;
-use rig_core::operation::Completion;
 use rig_core::providers::anthropic::{Anthropic, AnthropicConfig};
 
 use crate::clients::agent_loop::{
@@ -14,6 +12,7 @@ use crate::clients::agent_loop::{
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::lazy_auth_http::LazyBearerHttpClient;
+use crate::clients::model::GremlinsModel;
 use crate::clients::openai_protocol;
 use crate::clients::params::{self, ResolvedParams};
 use crate::clients::protocol::CompletedRun;
@@ -122,7 +121,10 @@ impl AnthropicRunState {
         // we acquire a fresh token and build a client per attempt.
         let result = match &self.client_state {
             AnthropicClientState::Static(client) => {
-                let model = client.completion(&model_name).erase();
+                let model = GremlinsModel::new(
+                    client.completion(&model_name).erase(),
+                    crate::config::max_prompt_bytes(),
+                );
                 run_agent_loop(
                     model,
                     prompt,
@@ -162,7 +164,10 @@ impl AnthropicRunState {
                     let client = AnthropicConfig::new("unused")
                         .with_base_url(base_url)
                         .connect(wrapped);
-                    let model = client.completion(&model_name).erase();
+                    let model = GremlinsModel::new(
+                        client.completion(&model_name).erase(),
+                        crate::config::max_prompt_bytes(),
+                    );
                     run_agent_loop(
                         model,
                         prompt,
@@ -316,12 +321,15 @@ impl AnthropicBackend {
 
 #[async_trait]
 impl Backend for AnthropicBackend {
-    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
+    fn make_model(&self, spec: &str) -> Option<GremlinsModel> {
         let (provider, model) = openai_protocol::provider_and_model(spec)?;
         if provider == "anthropic" {
             match &self.state.client_state {
                 AnthropicClientState::Static(client) => {
-                    Some(client.completion(&model).erase())
+                    Some(GremlinsModel::new(
+                        client.completion(&model).erase(),
+                        crate::config::max_prompt_bytes(),
+                    ))
                 }
                 AnthropicClientState::Dynamic {
                     ref base_url,
@@ -340,7 +348,10 @@ impl Backend for AnthropicBackend {
                     let client = AnthropicConfig::new("unused")
                         .with_base_url(base_url)
                         .connect(wrapped);
-                    Some(client.completion(&model).erase())
+                    Some(GremlinsModel::new(
+                        client.completion(&model).erase(),
+                        crate::config::max_prompt_bytes(),
+                    ))
                 }
             }
         } else {

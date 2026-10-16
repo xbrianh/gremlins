@@ -10,6 +10,7 @@ use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 use super::agent_loop::{run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext};
 use super::backend::{ClientError, RunParams};
 use super::interactive::InteractiveSession;
+use super::model::GremlinsModel;
 use super::params::{self, ResolvedParams};
 use super::protocol::CompletedRun;
 
@@ -322,7 +323,10 @@ pub(crate) async fn run_with_agent_loop(
     max_tokens: Option<u64>,
     interactive: Option<InteractiveSession>,
 ) -> Result<CompletedRun, ClientError> {
-    let model = client.completion(model_name).erase();
+    let model = GremlinsModel::new(
+        client.completion(model_name).erase(),
+        crate::config::max_prompt_bytes(),
+    );
     let mut ctx = ctx.clone();
     ctx.params.model = Some(model_name.to_string());
 

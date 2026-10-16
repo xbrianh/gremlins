@@ -20,7 +20,7 @@ use std::sync::{Mutex, MutexGuard};
 use crate::config;
 
 /// Environment variables the path resolvers read directly.
-const OVERRIDES: [&str; 19] = [
+const OVERRIDES: [&str; 20] = [
     "GREMLINS_SANDBOX_ROOT",
     "GREMLINS_PROJECT_ROOT",
     "GREMLINS_OVERLAY_DIR",
@@ -39,6 +39,7 @@ const OVERRIDES: [&str; 19] = [
     "XAI_BASE_URL",
     "OPENROUTER_BASE_URL",
     "GREMLINS_MAX_TOOL_OUTPUT_BYTES",
+    "GREMLINS_MAX_PROMPT_BYTES",
     "GREMLINS_REASONING_EFFORT",
 ];
 

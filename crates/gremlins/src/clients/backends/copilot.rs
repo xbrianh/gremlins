@@ -5,12 +5,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use rig_core::driver::DynModel;
 use rig_core::http_client::middleware::HttpMiddleware;
 use rig_core::http_client::{
     Error as HttpError, HeaderMap, HeaderValue, Method, Result as HttpResult, Uri,
 };
-use rig_core::operation::Completion;
 use rig_core::providers::copilot::{Copilot, CopilotConfig, CopilotIntent};
 use rig_core::wasm_compat::WasmBoxedFuture;
 use serde::Deserialize;
@@ -20,6 +18,7 @@ use crate::clients::agent_loop::{
 };
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
+use crate::clients::model::GremlinsModel;
 use crate::clients::openai_protocol;
 use crate::clients::params::{self, ResolvedParams};
 use crate::clients::protocol::CompletedRun;
@@ -449,7 +448,7 @@ fn parse_extra_params(
 }
 
 impl CopilotRunState {
-    fn make_model(&self, override_model: Option<&str>) -> DynModel<Completion> {
+    fn make_model(&self, override_model: Option<&str>) -> GremlinsModel {
         let model_name = match override_model {
             Some(m) if !m.is_empty() => m.to_string(),
             _ => self.model.clone(),
@@ -464,7 +463,7 @@ impl CopilotRunState {
         if self.tool_result_array_content {
             mdl.wire = mdl.wire.with_tool_result_array_content();
         }
-        mdl.erase()
+        GremlinsModel::new(mdl.erase(), crate::config::max_prompt_bytes())
     }
 }
 
@@ -541,10 +540,13 @@ impl CopilotBackend {
 
 #[async_trait]
 impl Backend for CopilotBackend {
-    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
+    fn make_model(&self, spec: &str) -> Option<GremlinsModel> {
         let (provider, model) = openai_protocol::provider_and_model(spec)?;
         if provider == PROVIDER_NAME {
-            Some(self.state.client.completion(&model).erase())
+            Some(GremlinsModel::new(
+                self.state.client.completion(&model).erase(),
+                crate::config::max_prompt_bytes(),
+            ))
         } else {
             None
         }
