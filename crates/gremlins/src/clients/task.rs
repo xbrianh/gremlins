@@ -3,9 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rig_core::completion::Message;
-use rig_core::driver::DynModel;
-use rig_core::operation::Completion;
 
+use super::model::GremlinsModel;
 use super::task_kind::TaskKind;
 use super::tools::{self, ToolContext};
 
@@ -17,7 +16,7 @@ use super::tools::{self, ToolContext};
 pub(crate) fn build_task_selector(
     backend: std::sync::Arc<dyn crate::clients::backend::Backend>,
     by_kind: &HashMap<TaskKind, String>,
-) -> Option<TaskModelSelector<DynModel<Completion>>> {
+) -> Option<TaskModelSelector<GremlinsModel>> {
     if by_kind.is_empty() {
         return None;
     }
@@ -40,8 +39,7 @@ const MAX_DEPTH: u32 = 3;
 /// Builds the model named by a matching `task-models` entry, for use by one
 /// Task invocation.  Returns `None` when the spec names a provider this
 /// backend does not serve — the caller falls back to the parent's model.
-pub(crate) type TaskModelFactory<M = DynModel<Completion>> =
-    Arc<dyn Fn(&str) -> Option<M> + Send + Sync>;
+pub(crate) type TaskModelFactory<M = GremlinsModel> = Arc<dyn Fn(&str) -> Option<M> + Send + Sync>;
 
 /// Lookup map for `task-models`, keyed by the exact [`TaskKind`] spelling.
 /// Shared behind an `Arc` so a Task fan-out clones one pointer per invocation
@@ -65,7 +63,7 @@ impl TaskModelOverrides {
 /// keeps the parent's model. Cloning a selector is O(1) — both halves sit behind
 /// an `Arc` — which matters because a Task fan-out clones one per invocation.
 #[derive(Clone)]
-pub struct TaskModelSelector<M = DynModel<Completion>> {
+pub struct TaskModelSelector<M = GremlinsModel> {
     overrides: Arc<TaskModelOverrides>,
     factory: TaskModelFactory<M>,
 }
@@ -164,8 +162,8 @@ fn task_prefix(base: &str, chain: &str) -> String {
 /// exhaust the bound between them. Only genuine nesting increments depth.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn make_task_runner(
-    model: DynModel<Completion>,
-    task_model_selector: Option<TaskModelSelector<DynModel<Completion>>>,
+    model: GremlinsModel,
+    task_model_selector: Option<TaskModelSelector<GremlinsModel>>,
     tool_filter: Option<Vec<String>>,
     cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
@@ -201,8 +199,8 @@ pub(crate) fn make_task_runner(
 
 #[allow(clippy::too_many_arguments)]
 fn make_task_runner_at_depth(
-    model: DynModel<Completion>,
-    task_model_selector: Option<TaskModelSelector<DynModel<Completion>>>,
+    model: GremlinsModel,
+    task_model_selector: Option<TaskModelSelector<GremlinsModel>>,
     tool_filter: Option<Vec<String>>,
     cancel: Arc<super::agent_loop::CancelToken>,
     ctx: ToolContext,
@@ -355,8 +353,14 @@ fn make_task_runner_at_depth(
 mod tests {
     use super::*;
     use rig_core::completion::Message;
+    use rig_core::driver::DynModel;
+    use rig_core::operation::Completion;
 
     use std::collections::HashSet;
+
+    fn gm(model: DynModel<Completion>) -> GremlinsModel {
+        GremlinsModel::new(model, crate::config::max_prompt_bytes())
+    }
 
     #[test]
     fn segments_are_four_hex_digits() {
@@ -488,7 +492,7 @@ mod tests {
 
         let cancel = super::super::agent_loop::CancelToken::new();
         let runner = make_task_runner(
-            model.clone().erase(),
+            gm(model.clone().erase()),
             None,
             None,
             cancel,
@@ -524,6 +528,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oversized_task_prompt_returns_string_without_calling_model() {
+        let ctx = depth_test_ctx();
+        let inner = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
+            rig_core::test_utils::MockStreamEvent::text("should not run"),
+        ]]);
+        let model = GremlinsModel::new(inner.clone().erase(), 16);
+        let cancel = super::super::agent_loop::CancelToken::new();
+        let runner = make_task_runner(
+            model,
+            None,
+            None,
+            cancel,
+            ctx,
+            String::new(),
+            "model".into(),
+            5.0,
+            10,
+            0,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let output = runner(TaskKind::Scout, "x".repeat(10_000), None).await;
+        assert!(
+            output.starts_with("Task error: prompt size "),
+            "oversized task prompt must surface as a Task error string, got: {output}"
+        );
+        assert!(
+            output.contains("exceeds configured limit of 16 bytes"),
+            "oversized task prompt must report limit and actual size, got: {output}"
+        );
+        assert!(
+            inner.requests().is_empty(),
+            "oversized task prompt must not reach the model"
+        );
+    }
+
+    #[tokio::test]
     async fn fork_inherits_parent_history_and_parent_model() {
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
@@ -555,7 +599,7 @@ mod tests {
 
         let cancel = super::super::agent_loop::CancelToken::new();
         let runner = make_task_runner(
-            child.clone().erase(),
+            gm(child.clone().erase()),
             Some(selector),
             None,
             cancel,
@@ -634,7 +678,7 @@ mod tests {
 
         let child_handle = child.clone();
         let factory: TaskModelFactory =
-            Arc::new(move |_spec: &str| Some(child_handle.clone().erase()));
+            Arc::new(move |_spec: &str| Some(gm(child_handle.clone().erase())));
         let selector = TaskModelSelector::new(
             HashMap::from([(TaskKind::Scout, "openai/mini".to_string())]),
             factory,
@@ -644,7 +688,7 @@ mod tests {
         let cancel = super::super::agent_loop::CancelToken::new();
         let extra = serde_json::json!({"parallel_tool_calls": true, "foo": "bar"});
         let runner = make_task_runner(
-            parent.clone().erase(),
+            gm(parent.clone().erase()),
             Some(selector),
             None,
             cancel,
@@ -688,7 +732,7 @@ mod tests {
         let model = rig_core::test_utils::MockCompletionModel::from_turns([]).erase();
         let cancel = super::super::agent_loop::CancelToken::new();
         let runner = make_task_runner_at_depth(
-            model,
+            gm(model),
             None,
             None,
             cancel,
@@ -730,7 +774,7 @@ mod tests {
         .erase();
         let cancel = super::super::agent_loop::CancelToken::new();
         let runner = make_task_runner(
-            model,
+            gm(model),
             None,
             None,
             cancel,
@@ -774,7 +818,7 @@ mod tests {
         ]);
         let cancel = super::super::agent_loop::CancelToken::new();
         let runner = make_task_runner(
-            model.clone().erase(),
+            gm(model.clone().erase()),
             None,
             None,
             cancel,
@@ -833,7 +877,7 @@ mod tests {
         .erase();
         let cancel = super::super::agent_loop::CancelToken::new();
         let runner = make_task_runner(
-            model,
+            gm(model),
             None,
             None,
             cancel,
@@ -933,7 +977,7 @@ mod tests {
         ) -> (tools::TaskFn, tokio::sync::mpsc::UnboundedReceiver<String>) {
             let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
             let runner = make_task_runner(
-                rig_core::test_utils::MockCompletionModel::from_stream_turns(turns).erase(),
+                gm(rig_core::test_utils::MockCompletionModel::from_stream_turns(turns).erase()),
                 None,
                 None,
                 super::super::super::agent_loop::CancelToken::new(),

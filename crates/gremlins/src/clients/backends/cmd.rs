@@ -12,10 +12,9 @@ use tokio::process::{Child, Command};
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
+use crate::clients::model::GremlinsModel;
 use crate::clients::params::ResolvedParams;
 use crate::clients::protocol::CompletedRun;
-use rig_core::driver::DynModel;
-use rig_core::operation::Completion;
 use crate::clients::stream_json::{self, StreamState};
 
 fn footer_re() -> &'static Regex {
@@ -618,7 +617,7 @@ impl Backend for CmdBackend {
         }
     }
 
-    fn make_model(&self, _spec: &str) -> Option<DynModel<Completion>> {
+    fn make_model(&self, _spec: &str) -> Option<GremlinsModel> {
         None
     }
 

@@ -5,11 +5,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use rig_core::completion::Message;
-use rig_core::driver::DynModel;
-use rig_core::operation::Completion;
 
 use super::agent_loop::CancelToken;
 use super::interactive::{InteractiveSession, StreamEventSender};
+use super::model::GremlinsModel;
 use super::params::ResolvedParams;
 use super::protocol::CompletedRun;
 use super::task::TaskModelSelector;
@@ -44,7 +43,7 @@ pub struct RunParams {
     /// `settings.yaml` `task-models` entries. `None` when no
     /// entries are configured or when the backend cannot serve
     /// any of them (e.g. `cmd`).
-    pub task_models: Option<TaskModelSelector<DynModel<Completion>>>,
+    pub task_models: Option<TaskModelSelector<GremlinsModel>>,
     /// Supervisor-owned cancel token. When set, the backend uses it instead of
     /// creating its own, so `gremlins stop` cancels in-flight agent loops.
     pub cancel_token: Option<Arc<CancelToken>>,
@@ -93,6 +92,7 @@ pub enum ClientError {
     RetryExhausted { message: String },
     Runtime { message: String },
     Bail { reason: String },
+    PromptTooLarge { limit: u64, actual: u64 },
 }
 
 impl std::fmt::Display for ClientError {
@@ -103,6 +103,10 @@ impl std::fmt::Display for ClientError {
             ClientError::RetryExhausted { message } => write!(f, "{message}"),
             ClientError::Runtime { message } => write!(f, "{message}"),
             ClientError::Bail { reason } => write!(f, "{reason}"),
+            ClientError::PromptTooLarge { limit, actual } => write!(
+                f,
+                "prompt size {actual} bytes exceeds configured limit of {limit} bytes"
+            ),
         }
     }
 }
@@ -117,12 +121,12 @@ pub trait Backend: Send + Sync {
         interactive: Option<InteractiveSession>,
     ) -> Result<CompletedRun, ClientError>;
 
-    /// Build a [`DynModel`] from a `provider/model` spec, or `None` when
+    /// Build a [`GremlinsModel`] from a `provider/model` spec, or `None` when
     /// the spec names a different provider or the model cannot be built.
     ///
     /// Called by the executor to pre-build the `task-models` selector
     /// before the agent loop starts.
-    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>>;
+    fn make_model(&self, spec: &str) -> Option<GremlinsModel>;
 
     async fn resume(&self) -> Result<CompletedRun, ClientError>;
 

@@ -741,6 +741,18 @@ pub(crate) fn completion_nudge_budget() -> usize {
 /// Default cap for tool output: 300 000 bytes.
 pub(crate) const DEFAULT_MAX_TOOL_OUTPUT_BYTES: u64 = 300_000;
 
+/// Default ceiling for a serialized prompt: 1 MiB.
+pub(crate) const DEFAULT_MAX_PROMPT_BYTES: u64 = 1_048_576;
+
+/// GREMLINS_MAX_PROMPT_BYTES — cap a serialized prompt at this many bytes.
+/// Default 1 048 576 (1 MiB).
+pub(crate) fn max_prompt_bytes() -> u64 {
+    std::env::var("GREMLINS_MAX_PROMPT_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_MAX_PROMPT_BYTES)
+}
+
 /// GREMLINS_MAX_TOOL_OUTPUT_BYTES — cap tool output at this many bytes.
 /// Default 300 000. 0 means no limit. Settings.yaml `max-tool-output-bytes`
 /// takes precedence over the env var.
@@ -1670,6 +1682,19 @@ model-profiles:
         let mut env = EnvGuard::lock();
         env.set("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "0");
         assert_eq!(max_tool_output_bytes(), 0);
+    }
+
+    #[test]
+    fn test_max_prompt_bytes_default() {
+        let _env = EnvGuard::lock();
+        assert_eq!(max_prompt_bytes(), DEFAULT_MAX_PROMPT_BYTES);
+    }
+
+    #[test]
+    fn test_max_prompt_bytes_from_env() {
+        let mut env = EnvGuard::lock();
+        env.set("GREMLINS_MAX_PROMPT_BYTES", "512");
+        assert_eq!(max_prompt_bytes(), 512);
     }
 
     #[test]
