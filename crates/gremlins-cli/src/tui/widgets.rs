@@ -379,19 +379,21 @@ impl TranscriptWidget {
     /// Build a committed stream block: flush the trailing partial, prepend
     /// the stream's own title row (matching the live header exactly), then
     /// append the retained tail capped at the shared stream row count.
-    /// Streams with no content commit nothing, so an empty reasoning stream
-    /// never emits a stray header. Retained logical lines are expanded into
+    /// Tool streams commit their `◆` title even when the body is empty;
+    /// plain-title streams (reasoning) collapse entirely when empty so they
+    /// never emit a stray header. Retained logical lines are expanded into
     /// pre-wrapped physical rows at the FIFO's inner body width before
     /// insertion.
     fn commit_stream_block(&mut self, mut stream: StreamingWidget) -> Vec<Line<'static>> {
         stream.flush();
         let rendered = stream.commit_lines();
-        if rendered.is_empty() {
+        let title = stream.title_line();
+        if rendered.is_empty() && (title.is_none() || stream.title_prefix.is_empty()) {
             return Vec::new();
         }
 
         let mut block: Vec<Line<'static>> = Vec::new();
-        if let Some(title) = stream.title_line() {
+        if let Some(title) = title {
             block.push(title);
         }
         let width = self.last_width.saturating_sub(1);
@@ -3475,6 +3477,19 @@ mod tests {
         assert_eq!(rows[3].trim_end(), "    mnopqr", "{rows:?}");
         assert_eq!(rows[4].trim_end(), "    stuvwx", "{rows:?}");
         assert_eq!(rows[5].trim_end(), "    yz", "{rows:?}");
+    }
+
+    #[test]
+    fn committed_empty_tool_stream_keeps_call_title() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.last_width = 20;
+
+        let tool = StreamingWidget::tool(10).with_title("grep foo");
+        let block = transcript.commit_stream_block(tool);
+
+        let rows = full_rendered_rows(&block, 20);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].trim_end(), "◆ grep foo", "{rows:?}");
     }
 
     #[test]
