@@ -15,9 +15,8 @@ themselves (`backends/`).
 | `client.rs` | Owns the `model://provider/model[?key=value,...]` / `provider/model[?key=value,...]` grammar (`ModelURI::parse`), the provider allowlist (`is_known_provider`), and `Client` — the runtime handle that turns a `ModelURI` into a live `Backend` lazily and memoises it (`get_or_build_backend`). |
 | `backend.rs` | The `Backend` trait every provider implements, plus `RunParams` (everything a run needs: prompt, cwd, timeouts, retries, cancellation, interactive session, task-client overrides, …) and `ClientError`. |
 | `protocol.rs` | `CompletedRun` (exit code, text result, events, cost, token usage, message history) and `UsageStats` — the shared result shape every backend returns. |
-| `agent_loop.rs` | `run_agent_loop` — the shared tool-calling loop used by every native agent backend (OpenAI, OpenRouter, xAI, Copilot, Anthropic, Azure OpenAI), plus `run_agent_loop_nested` for the `Task` tool. Streams model output, dispatches tool calls, classifies errors for retry (`ErrorClassifier`), and exposes `CancelToken` for `gremlins stop`. |
+| `agent_loop.rs` | `run_agent_loop` — the shared tool-calling loop used by every native agent backend (OpenAI, OpenRouter, xAI, Copilot, Anthropic, Azure OpenAI), plus `run_agent_loop_nested` for the `Task` tool. Streams model output, dispatches tool calls, classifies errors for retry (`ErrorClassifier`), and exposes `CancelToken` for `gremlins stop`. Reads its `turn-retry` and `timeout-retry` backoff schedules from `settings.yaml` via `crate::config`. |
 | `openai_protocol.rs` | Shared state and run/reap logic (`OpenAiRunState`, `run_openai_compat`, `reap_openai_compat`) for backends that speak the OpenAI completions protocol. |
-| `retry.rs` | `with_retry` backoff helper and the shared `STREAM_IDLE_BACKOFF` schedule, used by both native and `cmd` backends. |
 | `tools.rs` | Implements the six native tools (`Bash`, `Edit`, `Read`, `Write`, `Grep`, `Glob`) plus `Task`/`Done`, with sandboxing (`allowed_roots`) and the `ToolContext` passed through the agent loop. |
 | `interactive.rs` | The channel triplet connecting the supervisor to a running agent loop: `InteractiveHandle`/`InteractiveSession`, plus `PauseToken` for operator pause/resume. `StreamEventSender` wraps the two stream paths — `Broadcast` for debug/interactive (lag-tolerant) and `Mpsc` for chat (bounded, backpressured, lossless). |
 | `stream_json.rs` | Parses `stream-json` event lines (used by `cmd` backends) and extracts `StreamState` (cost, result text, error status). |
@@ -99,7 +98,7 @@ its own JSON event stream instead (`stream_json.rs`).
 | Understand the spec grammar | `client.rs::ModelURI::parse`, `is_known_provider` |
 | Change how backends are cached/built | `client.rs::Client::get_or_build_backend` |
 | Add or change a native tool | `tools.rs` |
-| Change retry/backoff behavior | `retry.rs` (`with_retry`, `STREAM_IDLE_BACKOFF`), or a backend's `ErrorClassifier` |
+| Change retry/backoff behavior | `crates/gremlins/src/config.rs` (`backoff:` schedules in `settings.yaml`) and `agent_loop.rs` (retry semantics), or a backend's `ErrorClassifier` |
 | Change the system prompt | `config.rs` |
 | Understand `task-clients` overrides | `task.rs::TaskModelSelector` |
 | Understand supervisor pause/cancel/resume | `interactive.rs`, `agent_loop.rs::CancelToken` |

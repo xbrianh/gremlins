@@ -759,11 +759,10 @@ mod tests {
     /// When every attempt fails retryably, the Task still returns a string
     /// result (not an unwinding error) so the parent sees `Task error: …`.
     ///
-    /// The inner agent loop retries 429s at the turn boundary (3 slots in
-    /// `TURN_RETRY_BACKOFF`). After exhaustion the inner loop returns
-    /// `RetryExhausted`, which is *not* retryable by the outer `with_retry` — the
-    /// backend-level wrapper no longer second-guesses exhausted turn-level
-    /// retries. Total: 4 requests (initial + 3 turn-level retries).
+    /// The inner agent loop retries 429s at the turn boundary (five slots in
+    /// the default `turn-retry` schedule). After exhaustion the inner loop
+    /// returns `RetryExhausted`, which is not retried again by the backend
+    /// wrapper. Total: 6 requests (initial + 5 turn-level retries).
     #[tokio::test(start_paused = true)]
     async fn make_task_runner_exhausts_retries_as_string() {
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
@@ -792,18 +791,17 @@ mod tests {
         );
 
         let handle = tokio::spawn(runner(TaskKind::Scout, "exhaust".into(), None));
-        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        tokio::time::advance(std::time::Duration::from_secs(200)).await;
         let output = handle.await.unwrap();
         assert!(
             output.starts_with("Task error: "),
             "exhausted retries must remain in the tool result, got: {output}"
         );
-        // Inner loop: 3 turn-level retries (4 attempts) before giving up.
-        // The exhausted error is RetryExhausted, so with_retry does not retry.
+        // Inner loop: 5 turn-level retries (6 attempts) before giving up.
         assert_eq!(
             model.requests().len(),
-            4,
-            "turn-level retries exhaust without with_retry safety net"
+            6,
+            "turn-level retries exhaust after five backoff slots"
         );
     }
 
