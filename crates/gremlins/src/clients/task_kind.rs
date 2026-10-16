@@ -1,13 +1,13 @@
 //! The fixed set of task kinds a `Task` tool invocation can name.
 //!
 //! `TaskKind` is the single source of truth for the nine allowed spellings.
-//! Tool dispatch, `task-clients` config parsing, and task-client model
+//! Tool dispatch, `task-models` config parsing, and task-model
 //! selection all validate through this one enum — none of them keep an
 //! independent string list.
 
 /// The canonical labels a `Task` tool call can carry as its `kind`.
 ///
-/// These are the exact spellings accepted in `settings.yaml` `task-clients`
+/// These are the exact spellings accepted in `settings.yaml` `task-models`
 /// keys and in the `Task` tool's `kind` argument. Matching is exact and
 /// case-sensitive: no case-folding, no suffix matching, no fallback from an
 /// unknown value.
@@ -59,7 +59,7 @@ impl TaskKind {
         }
     }
 
-    /// The canonical spellings that may be configured through `task-clients`.
+    /// The canonical spellings that may be configured through `task-models`.
     /// `Fork` is intentionally excluded: it always inherits the parent model
     /// and is rejected as a configuration key.
     pub const CONFIGURABLE: [TaskKind; 8] = [

@@ -836,16 +836,16 @@ fn _expand_stage_def(
                         existing_name,
                     );
                 }
-                if let Some(client) = call_site_map.get("client") {
+                if let Some(model) = call_site_map.get("model") {
                     inner_map.insert(
-                        serde_yaml::Value::String("client".to_string()),
-                        client.clone(),
+                        serde_yaml::Value::String("model".to_string()),
+                        model.clone(),
                     );
                 }
-                if let Some(task_clients) = call_site_map.get("task-clients") {
+                if let Some(task_models) = call_site_map.get("task-models") {
                     inner_map.insert(
-                        serde_yaml::Value::String("task-clients".to_string()),
-                        task_clients.clone(),
+                        serde_yaml::Value::String("task-models".to_string()),
+                        task_models.clone(),
                     );
                 }
                 // Merge call-site interpolation.inputs into inner stage's interpolation.inputs
@@ -983,11 +983,11 @@ fn _expand_stage_def(
     let mut merged = definition.clone();
     let merged_map = merged.as_mapping_mut().unwrap();
 
-    // Merge call-site keys: name, interpolation (inputs/outputs), client, and
-    // task-clients. `client:` / `task-clients:` propagate to a
+    // Merge call-site keys: name, interpolation (inputs/outputs), model, and
+    // task-models. `model:` / `task-models:` propagate to a
     // single-primitive recipe the same way they propagate to the first inner
     // stage of a multi-stage recipe.
-    for key in &["name", "interpolation", "client", "task-clients"] {
+    for key in &["name", "interpolation", "model", "task-models"] {
         if let Some(v) = call_site_map.get(*key) {
             if *key == "interpolation" {
                 // Handle nested interpolation merge

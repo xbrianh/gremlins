@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use indexmap::IndexMap;
 
 use crate::builders::artifacts::{InterpolationValue, OutputTarget};
+use crate::clients::client::ModelURI;
 use crate::definition::r#static::expand::key_referenced_in_text;
 use crate::definition::r#static::loader::{self, StageEntry, StageNode};
 use crate::definition::r#static::StaticDefinition;
@@ -159,7 +160,7 @@ pub struct LandBuilder {
     options: HashMap<String, serde_json::Value>,
     interpolation_map: HashMap<String, String>,
     outputs_map: HashMap<String, String>,
-    client: Option<crate::definition::ClientSpec>,
+    model: Option<ModelURI>,
 }
 
 impl LandBuilder {
@@ -171,7 +172,7 @@ impl LandBuilder {
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
-            client: None,
+            model: None,
         }
     }
 
@@ -241,9 +242,9 @@ impl LandBuilder {
         self
     }
 
-    /// Set the stage's own client spec.
-    pub fn client(mut self, client: impl Into<String>) -> Self {
-        self.client = Some(crate::definition::ClientSpec(client.into()));
+    /// Set the stage's own model spec.
+    pub fn model(mut self, model: ModelURI) -> Self {
+        self.model = Some(model);
         self
     }
 
@@ -360,8 +361,8 @@ impl LandBuilder {
         Ok((
             StageSpec::Exec {
                 stage,
-                client: self.client,
-                task_clients: None,
+                model: self.model,
+                task_models: None,
             },
             clean_cmds,
         ))
@@ -389,7 +390,7 @@ impl Default for LandBuilder {
 /// ```ignore
 /// use gremlins::builders::*;
 ///
-/// let def = DefinitionBuilder::new("demo", "xai/grok-4")
+/// let def = DefinitionBuilder::new("demo", model("xai/grok-4"))
 ///     .stage(
 ///         AgentBuilder::new("plan")
 ///             .prompt("write the plan to {plan}")
@@ -403,29 +404,29 @@ impl Default for LandBuilder {
 #[derive(Debug, Clone)]
 pub struct DefinitionBuilder {
     pub(crate) name: String,
-    pub(crate) default_client: String,
+    pub(crate) default_model: ModelURI,
     pub(crate) prompt_dir: Option<PathBuf>,
     pub(crate) bootstrap: Bootstrap,
     pub(crate) stages: Vec<StageSpec>,
     pub(crate) land: Option<StageSpec>,
     pub(crate) clean_cmds: Vec<String>,
-    pub(crate) default_task_clients: Option<IndexMap<String, String>>,
+    pub(crate) default_task_models: Option<IndexMap<String, String>>,
 }
 
 impl DefinitionBuilder {
     /// Start building a definition.
     ///
-    /// `name` is the definition identity.  `default_client` is required.
-    pub fn new(name: impl Into<String>, default_client: impl Into<String>) -> Self {
+    /// `name` is the definition identity.  `default_model` is required.
+    pub fn new(name: impl Into<String>, default_model: ModelURI) -> Self {
         DefinitionBuilder {
             name: name.into(),
-            default_client: default_client.into(),
+            default_model,
             prompt_dir: None,
             bootstrap: Bootstrap::default(),
             stages: Vec::new(),
             land: None,
             clean_cmds: Vec::new(),
-            default_task_clients: None,
+            default_task_models: None,
         }
     }
 
@@ -435,9 +436,9 @@ impl DefinitionBuilder {
         self
     }
 
-    /// Set the default client.
-    pub fn default_client(mut self, client: impl Into<String>) -> Self {
-        self.default_client = client.into();
+    /// Set the default model.
+    pub fn default_model(mut self, default_model: ModelURI) -> Self {
+        self.default_model = default_model;
         self
     }
 
@@ -477,9 +478,9 @@ impl DefinitionBuilder {
         self
     }
 
-    /// Set the global default-task-clients (resolved through profiles).
-    pub fn default_task_clients(mut self, dtc: Option<IndexMap<String, String>>) -> Self {
-        self.default_task_clients = dtc;
+    /// Set the global default-task-models (resolved through profiles).
+    pub fn default_task_models(mut self, dtc: Option<IndexMap<String, String>>) -> Self {
+        self.default_task_models = dtc;
         self
     }
 
@@ -487,14 +488,6 @@ impl DefinitionBuilder {
     /// [`StaticDefinition`].
     pub fn build(mut self) -> Result<StaticDefinition, SchemaError> {
         let name = self.name.clone();
-
-        // Reject blank required fields.
-        if self.default_client.is_empty() {
-            return Err(SchemaError::Stage {
-                name: name.clone(),
-                msg: "'default_client' must not be blank".to_string(),
-            });
-        }
 
         // Validate land stage: must be an exec stage named "land".
         if let Some(ref land) = self.land {
@@ -536,13 +529,13 @@ impl DefinitionBuilder {
         let mut definition = StaticDefinition::new(
             self.name,
             path,
-            self.default_client,
+            self.default_model,
             self.bootstrap,
             self.stages,
             self.land,
             self.clean_cmds,
             serde_yaml::Value::Null,
-            self.default_task_clients,
+            self.default_task_models,
         );
 
         // Populate expanded_yaml from the typed tree.
@@ -607,9 +600,13 @@ mod tests {
     use crate::builders::exec::ExecBuilder;
     use serde_yaml::Value;
 
+    fn model(spec: &str) -> ModelURI {
+        ModelURI::parse(spec).unwrap()
+    }
+
     #[test]
     fn definition_builder_basic() {
-        let def = DefinitionBuilder::new("demo", "xai/grok-4")
+        let def = DefinitionBuilder::new("demo", model("xai/grok-4"))
             .stage(
                 AgentBuilder::new("plan")
                     .prompt("write the plan to {plan}")
@@ -628,7 +625,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(def.name, "demo");
-        assert_eq!(def.default_client, "xai/grok-4");
+        assert_eq!(def.default_model.to_string(), "model://xai/grok-4");
         assert_eq!(def.stages.len(), 2);
         assert_eq!(def.stages[0].name(), "plan");
         assert_eq!(def.stages[0].stage_type(), "agent");
@@ -639,7 +636,7 @@ mod tests {
 
     #[test]
     fn definition_builder_rejects_duplicate_producers() {
-        let err = DefinitionBuilder::new("demo", "xai/grok-4")
+        let err = DefinitionBuilder::new("demo", model("xai/grok-4"))
             .stage(
                 AgentBuilder::new("first")
                     .prompt("one {out}")
@@ -665,7 +662,7 @@ mod tests {
 
     #[test]
     fn definition_builder_rejects_unresolved_consumers() {
-        let err = DefinitionBuilder::new("demo", "xai/grok-4")
+        let err = DefinitionBuilder::new("demo", model("xai/grok-4"))
             .stage(
                 ExecBuilder::new("consumer")
                     .cmd("cat {missing}")
@@ -684,7 +681,7 @@ mod tests {
 
     #[test]
     fn definition_builder_with_land() {
-        let def = DefinitionBuilder::new("demo", "xai/grok-4")
+        let def = DefinitionBuilder::new("demo", model("xai/grok-4"))
             .stage(
                 AgentBuilder::new("plan")
                     .prompt("write {plan} and create {pr_url}")
@@ -715,7 +712,7 @@ mod tests {
             .launch_cmd("gremlins:bind_artifact(\"artifact://plan.md\", plan)")
             .build();
 
-        let def = DefinitionBuilder::new("demo", "xai/grok-4")
+        let def = DefinitionBuilder::new("demo", model("xai/grok-4"))
             .bootstrap(bootstrap)
             .stage(
                 ExecBuilder::new("consumer")
@@ -732,14 +729,14 @@ mod tests {
 
     #[test]
     fn from_builder_entry_point() {
-        let builder = DefinitionBuilder::new("demo", "xai/grok-4");
+        let builder = DefinitionBuilder::new("demo", model("xai/grok-4"));
         let def = StaticDefinition::from_builder(builder).unwrap();
         assert_eq!(def.name, "demo");
     }
 
     #[test]
     fn builder_populates_expanded_yaml() {
-        let def = DefinitionBuilder::new("demo", "xai/grok-4")
+        let def = DefinitionBuilder::new("demo", model("xai/grok-4"))
             .stage(
                 AgentBuilder::new("plan")
                     .prompt("write the plan to {plan}")
@@ -1159,7 +1156,7 @@ mod tests {
     fn fill_builder_names_recurses_into_composites() {
         // Build a sequence with unnamed children — name-filling should
         // assign names at every depth.
-        let def = DefinitionBuilder::new("demo", "xai/grok-4")
+        let def = DefinitionBuilder::new("demo", model("xai/grok-4"))
             .stage(
                 SequenceBuilder::new("workflow")
                     .stage(ExecBuilder::new("").cmd("echo one").build().unwrap())

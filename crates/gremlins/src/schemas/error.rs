@@ -44,7 +44,7 @@ pub enum SchemaError {
     #[error("stage {stage}: artifact {uri:?} is consumed via interpolation but never produced by any prior stage's outputs, bootstrap bind_artifact, or cli_out")]
     UnresolvedArtifactConsumer { stage: String, uri: String },
 
-    #[error("gremlin definition is missing 'default_client' — every definition must declare one")]
+    #[error("gremlin definition is missing 'default_model' — every definition must declare one")]
     MissingDefaultClient,
 
     #[error("gremlin definition file not found: {path}")]

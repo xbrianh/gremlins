@@ -417,7 +417,7 @@ struct CopilotRunState {
     log_label: String,
 }
 
-/// Parse Copilot-specific typed flags from the client-spec parameter map.
+/// Parse Copilot-specific typed flags from the model-spec parameter map.
 ///
 /// `intent` accepts `edits` or `panel`; `strict_tools` and
 /// `tool_result_array_content` are strict bools.  A malformed value is a

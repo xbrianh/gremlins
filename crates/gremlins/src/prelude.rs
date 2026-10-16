@@ -5,7 +5,7 @@
 //! ```
 
 pub use crate::builders::*;
-pub use crate::definition::ClientSpec;
+pub use crate::clients::client::ModelURI;
 pub use crate::definition::{GremlinDefinition, StaticDefinition};
 pub use crate::schemas::bootstrap::Bootstrap;
 pub use crate::schemas::error::SchemaError;

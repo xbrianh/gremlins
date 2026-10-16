@@ -1,6 +1,6 @@
 //! Typed extra-param resolution shared by every backend.
 //!
-//! A client specifier's trailing `?k=v,...` list is resolved per backend into
+//! A model specifier's trailing `?k=v,...` list is resolved per backend into
 //! a [`ResolvedParams`]: the typed `temperature` and `max_tokens` request
 //! fields plus the `additional_params` object that carries every remaining
 //! key.  Each backend owns its own default table and calls the strict parsers

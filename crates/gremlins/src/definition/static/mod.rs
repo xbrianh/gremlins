@@ -7,10 +7,15 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use serde_yaml::{Mapping, Value};
 
+use crate::clients::client::ModelURI;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::stage_spec::node::StageSpec;
 
 use super::{DefinitionError, ExecutorStage, GremlinDefinition, Sequence, UNLOADED_NAME};
+
+fn default_model_placeholder() -> ModelURI {
+    ModelURI::parse("cmd/true").expect("'cmd/true' is always a valid model spec")
+}
 
 pub(crate) mod expand;
 pub(crate) mod loader;
@@ -38,8 +43,8 @@ pub struct StaticDefinition {
     pub name: String,
     /// Where the definition was loaded from, canonicalised where possible.
     pub path: PathBuf,
-    /// Every stage runs with this client unless it declares its own.
-    pub default_client: String,
+    /// Every stage runs with this model unless it declares its own.
+    pub default_model: ModelURI,
     /// Bootstrap commands and input sources.
     pub bootstrap: Bootstrap,
     /// The stage tree, in declaration order.
@@ -51,10 +56,10 @@ pub struct StaticDefinition {
     /// The fully expanded YAML tree, kept for round-tripping via
     /// [`to_expanded_yaml`](StaticDefinition::to_expanded_yaml).
     pub(crate) expanded_yaml: Value,
-    /// Global `default-task-clients` from settings.yaml, resolved through
+    /// Global `default-task-models` from settings.yaml, resolved through
     /// profiles at load time. Included in serialized output so child
     /// processes do not depend on the current config.
-    pub(crate) default_task_clients: Option<IndexMap<String, String>>,
+    pub(crate) default_task_models: Option<IndexMap<String, String>>,
     cursor: usize,
 }
 
@@ -64,24 +69,24 @@ impl StaticDefinition {
     pub fn new(
         name: String,
         path: PathBuf,
-        default_client: String,
+        default_model: ModelURI,
         bootstrap: Bootstrap,
         stages: Vec<StageSpec>,
         land: Option<StageSpec>,
         clean_cmds: Vec<String>,
         expanded_yaml: Value,
-        default_task_clients: Option<IndexMap<String, String>>,
+        default_task_models: Option<IndexMap<String, String>>,
     ) -> Self {
         StaticDefinition {
             name,
             path,
-            default_client,
+            default_model,
             bootstrap,
             stages,
             land,
             clean_cmds,
             expanded_yaml,
-            default_task_clients,
+            default_task_models,
             cursor: 0,
         }
     }
@@ -95,13 +100,13 @@ impl StaticDefinition {
         StaticDefinition {
             name: UNLOADED_NAME.to_string(),
             path: PathBuf::from("."),
-            default_client: String::new(),
+            default_model: default_model_placeholder(),
             bootstrap: Bootstrap::default(),
             stages: Vec::new(),
             land: None,
             clean_cmds: Vec::new(),
             expanded_yaml: Value::Null,
-            default_task_clients: None,
+            default_task_models: None,
             cursor: 0,
         }
     }
@@ -124,13 +129,13 @@ impl StaticDefinition {
         StaticDefinition {
             name: "clean-loaded".to_string(),
             path,
-            default_client: String::new(),
+            default_model: default_model_placeholder(),
             bootstrap: Bootstrap::default(),
             stages: Vec::new(),
             land: None,
             clean_cmds,
             expanded_yaml: Value::Null,
-            default_task_clients: None,
+            default_task_models: None,
             cursor: 0,
         }
     }
@@ -144,7 +149,7 @@ impl StaticDefinition {
     ///
     /// Used by the parallel executor to give each child a definition that
     /// contains only the child's own stage(s), while inheriting every other
-    /// field (name, path, default_client, base_ref, bootstrap) from the
+    /// field (name, path, default_model, base_ref, bootstrap) from the
     /// parent. `land` is cleared so parallel children never duplicate the
     /// parent's land side effects.
     pub(crate) fn clone_with_stages(&self, stages: Vec<StageSpec>) -> Self {
@@ -177,22 +182,22 @@ impl StaticDefinition {
             Value::String(self.name.clone()),
         );
 
-        // default_client — always present.
+        // default_model — always present.
         root.insert(
-            Value::String("default_client".to_string()),
-            Value::String(self.default_client.clone()),
+            Value::String("default_model".to_string()),
+            Value::String(self.default_model.to_string()),
         );
 
-        // default_task_clients — included when present so child processes
+        // default_task_models — included when present so child processes
         // do not depend on the current settings.yaml.
-        if let Some(ref dtc) = self.default_task_clients {
+        if let Some(ref dtc) = self.default_task_models {
             if !dtc.is_empty() {
                 let mut dtc_map = Mapping::new();
                 for (key, value) in dtc {
                     dtc_map.insert(Value::String(key.clone()), Value::String(value.clone()));
                 }
                 root.insert(
-                    Value::String("default_task_clients".to_string()),
+                    Value::String("default_task_models".to_string()),
                     Value::Mapping(dtc_map),
                 );
             }
@@ -286,28 +291,28 @@ impl StaticDefinition {
         match stage {
             StageSpec::Agent {
                 stage,
-                client,
-                task_clients,
+                model,
+                task_models,
             } => ExecutorStage::Agent {
                 stage,
-                client,
-                task_clients,
+                model,
+                task_models,
             },
             StageSpec::Exec {
                 stage,
-                client,
-                task_clients,
+                model,
+                task_models,
             } => ExecutorStage::Exec {
                 stage,
-                client,
-                task_clients,
+                model,
+                task_models,
             },
             StageSpec::Sequence {
                 attrs,
                 max_iterations,
                 interval,
-                client: seq_client,
-                task_clients,
+                model: seq_model,
+                task_models,
                 body,
             } => {
                 let stages: Vec<ExecutorStage> =
@@ -317,8 +322,8 @@ impl StaticDefinition {
                     stages,
                     scope: None,
                     skip_if_exists: attrs.skip_if_exists,
-                    client: seq_client,
-                    task_clients,
+                    model: seq_model,
+                    task_models,
                     max_iterations,
                     interval,
                 })
@@ -328,8 +333,8 @@ impl StaticDefinition {
                 max_concurrent,
                 cancel_on_error,
                 error_policy,
-                client,
-                task_clients,
+                model,
+                task_models,
                 body,
                 fork,
                 join,
@@ -345,8 +350,8 @@ impl StaticDefinition {
                     max_concurrent,
                     cancel_on_error,
                     error_policy,
-                    client,
-                    task_clients,
+                    model,
+                    task_models,
                     children,
                     skip_if_exists: attrs.skip_if_exists,
                     fork,
@@ -363,8 +368,8 @@ impl GremlinDefinition for StaticDefinition {
         &self.name
     }
 
-    fn default_client(&self) -> &str {
-        &self.default_client
+    fn default_model(&self) -> &ModelURI {
+        &self.default_model
     }
 
     fn bootstrap(&self) -> &Bootstrap {
@@ -387,8 +392,8 @@ impl GremlinDefinition for StaticDefinition {
         self.name.is_empty() || self.name == UNLOADED_NAME
     }
 
-    fn with_client(&mut self, client: &str) {
-        self.default_client = client.to_string();
+    fn with_model(&mut self, model: &ModelURI) {
+        self.default_model = model.clone();
     }
 
     fn clone_box(&self) -> Box<dyn GremlinDefinition> {
@@ -521,11 +526,15 @@ fn bootstrap_to_yaml(bootstrap: &Bootstrap) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::definition::ClientSpec;
+    use crate::clients::client::ModelURI;
     use crate::stage_spec::agent::Agent;
     use crate::stage_spec::composite::StageAttrs;
     use crate::stage_spec::exec::Exec;
     use crate::stage_spec::parallel::ErrorPolicy;
+
+    fn model(spec: &str) -> ModelURI {
+        ModelURI::parse(spec).unwrap()
+    }
 
     fn stub_definition() -> StaticDefinition {
         StaticDefinition::stub()
@@ -539,9 +548,9 @@ mod tests {
     }
 
     #[test]
-    fn static_definition_delegates_default_client() {
+    fn static_definition_delegates_default_model() {
         let def = stub_definition();
-        assert_eq!(def.default_client(), "");
+        assert_eq!(def.default_model().to_string(), "cmd/true");
     }
 
     #[test]
@@ -563,13 +572,13 @@ mod tests {
         let def = StaticDefinition {
             name: "test-gremlin".into(),
             path: "/tmp/test.yaml".into(),
-            default_client: "openai/gpt-4".into(),
+            default_model: model("openai/gpt-4"),
             bootstrap: Bootstrap::default(),
             stages: vec![],
             land: Some(parsed_exec("land")),
             clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
-            default_task_clients: None,
+            default_task_models: None,
             cursor: 0,
         };
         let land = def.land().expect("land is populated");
@@ -582,13 +591,13 @@ mod tests {
         let def = StaticDefinition {
             name: "test-gremlin".into(),
             path: "/tmp/test.yaml".into(),
-            default_client: "openai/gpt-4".into(),
+            default_model: model("openai/gpt-4"),
             bootstrap: Bootstrap::default(),
             stages: vec![],
             land: Some(parsed_exec("land")),
             clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
-            default_task_clients: None,
+            default_task_models: None,
             cursor: 0,
         };
         let boxed: Box<dyn GremlinDefinition> = Box::new(def);
@@ -612,17 +621,17 @@ mod tests {
         let def = StaticDefinition {
             name: "test-gremlin".into(),
             path: "/tmp/test.yaml".into(),
-            default_client: "openai/gpt-4".into(),
+            default_model: model("openai/gpt-4"),
             bootstrap: Bootstrap::default(),
             stages: vec![],
             land: None,
             clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
-            default_task_clients: None,
+            default_task_models: None,
             cursor: 0,
         };
         assert_eq!(def.name(), "test-gremlin");
-        assert_eq!(def.default_client(), "openai/gpt-4");
+        assert_eq!(def.default_model().to_string(), "model://openai/gpt-4");
         assert!(def.land().is_none());
     }
 
@@ -637,8 +646,8 @@ mod tests {
                 interpolation_map: std::collections::HashMap::new(),
                 outputs_map: std::collections::HashMap::new(),
             },
-            client: None,
-            task_clients: None,
+            model: None,
+            task_models: None,
         }
     }
 
@@ -650,8 +659,8 @@ mod tests {
                 interpolation_map: std::collections::HashMap::new(),
                 outputs_map: std::collections::HashMap::new(),
             },
-            client: None,
-            task_clients: None,
+            model: None,
+            task_models: None,
         }
     }
 
@@ -660,7 +669,7 @@ mod tests {
         let stage = make_agent("plan");
         assert_eq!(stage.name(), "plan");
         assert_eq!(stage.stage_type(), "agent");
-        assert!(stage.client().is_none());
+        assert!(stage.model().is_none());
         assert_eq!(stage.skip_if_exists(), "");
     }
 
@@ -669,7 +678,7 @@ mod tests {
         let stage = make_exec("build");
         assert_eq!(stage.name(), "build");
         assert_eq!(stage.stage_type(), "exec");
-        assert!(stage.client().is_none());
+        assert!(stage.model().is_none());
         assert_eq!(stage.skip_if_exists(), "");
     }
 
@@ -680,14 +689,14 @@ mod tests {
             stages: vec![make_agent("first"), make_exec("second")],
             scope: None,
             skip_if_exists: String::new(),
-            client: None,
-            task_clients: None,
+            model: None,
+            task_models: None,
             max_iterations: 1,
             interval: None,
         });
         assert_eq!(seq.name(), "my-sequence");
         assert_eq!(seq.stage_type(), "sequence");
-        assert!(seq.client().is_none());
+        assert!(seq.model().is_none());
     }
 
     #[test]
@@ -697,8 +706,8 @@ mod tests {
             stages: vec![],
             scope: None,
             skip_if_exists: String::new(),
-            client: None,
-            task_clients: None,
+            model: None,
+            task_models: None,
             max_iterations: 1,
             interval: None,
         });
@@ -712,8 +721,8 @@ mod tests {
             max_concurrent: None,
             cancel_on_error: false,
             error_policy: ErrorPolicy::Any,
-            client: None,
-            task_clients: None,
+            model: None,
+            task_models: None,
             children: vec![],
             skip_if_exists: "artifact://reviews".into(),
             fork: None,
@@ -721,7 +730,7 @@ mod tests {
         };
         assert_eq!(stage.name(), "reviews");
         assert_eq!(stage.stage_type(), "parallel");
-        assert!(stage.client().is_none());
+        assert!(stage.model().is_none());
         assert_eq!(stage.skip_if_exists(), "artifact://reviews");
     }
 
@@ -729,12 +738,12 @@ mod tests {
     fn executor_stage_done() {
         assert_eq!(ExecutorStage::Done.name(), "");
         assert_eq!(ExecutorStage::Done.stage_type(), "done");
-        assert!(ExecutorStage::Done.client().is_none());
+        assert!(ExecutorStage::Done.model().is_none());
         assert_eq!(ExecutorStage::Done.skip_if_exists(), "");
     }
 
     #[test]
-    fn executor_stage_client_some() {
+    fn executor_stage_model_some() {
         let stage = ExecutorStage::Agent {
             stage: Agent {
                 name: "plan".into(),
@@ -743,10 +752,10 @@ mod tests {
                 interpolation_map: std::collections::HashMap::new(),
                 outputs_map: std::collections::HashMap::new(),
             },
-            client: Some(ClientSpec("xai/grok-5".into())),
-            task_clients: None,
+            model: Some(model("xai/grok-5")),
+            task_models: None,
         };
-        assert_eq!(stage.client(), Some(&ClientSpec("xai/grok-5".into())));
+        assert_eq!(stage.model(), Some(&model("xai/grok-5")));
     }
 
     #[test]
@@ -756,8 +765,8 @@ mod tests {
             stages: vec![],
             scope: None,
             skip_if_exists: "artifact://guard".into(),
-            client: None,
-            task_clients: None,
+            model: None,
+            task_models: None,
             max_iterations: 1,
             interval: None,
         });
@@ -788,8 +797,8 @@ mod tests {
                 interpolation_map: std::collections::HashMap::new(),
                 outputs_map: std::collections::HashMap::new(),
             },
-            client: None,
-            task_clients: None,
+            model: None,
+            task_models: None,
         }
     }
 
@@ -802,8 +811,8 @@ mod tests {
                 interpolation_map: std::collections::HashMap::new(),
                 outputs_map: std::collections::HashMap::new(),
             },
-            client: None,
-            task_clients: None,
+            model: None,
+            task_models: None,
         }
     }
 
@@ -812,13 +821,13 @@ mod tests {
         StaticDefinition {
             name: "test-def".into(),
             path: "/tmp/test.yaml".into(),
-            default_client: "openai/gpt-4".into(),
+            default_model: model("openai/gpt-4"),
             bootstrap: Bootstrap::default(),
             stages,
             land: None,
             clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
-            default_task_clients: None,
+            default_task_models: None,
             cursor: 0,
         }
     }
@@ -916,8 +925,8 @@ mod tests {
             },
             max_iterations: 1,
             interval: None,
-            client: None,
-            task_clients: None,
+            model: None,
+            task_models: None,
             body: vec![parsed_agent("inner-a"), parsed_exec("inner-b")],
         };
         let def = definition_with(vec![seq]);
@@ -948,8 +957,8 @@ mod tests {
             },
             max_iterations: 5,
             interval: Some(20.0),
-            client: Some(ClientSpec("xai/grok".into())),
-            task_clients: None,
+            model: Some(model("xai/grok")),
+            task_models: None,
             body: vec![parsed_agent("loop-child")],
         };
         let def = definition_with(vec![seq]);
@@ -962,7 +971,7 @@ mod tests {
             ExecutorStage::Sequence(seq) => {
                 assert_eq!(seq.max_iterations, 5);
                 assert_eq!(seq.interval, Some(20.0));
-                assert_eq!(seq.client, Some(ClientSpec("xai/grok".into())));
+                assert_eq!(seq.model, Some(model("xai/grok")));
                 assert_eq!(seq.stages.len(), 1);
                 assert_eq!(seq.stages[0].name(), "loop-child");
                 assert!(seq.scope.is_none());
@@ -979,8 +988,8 @@ mod tests {
             max_concurrent: Some(4),
             cancel_on_error: true,
             error_policy: ErrorPolicy::All,
-            client: Some(ClientSpec("openai/gpt-5".into())),
-            task_clients: None,
+            model: Some(model("openai/gpt-5")),
+            task_models: None,
             body: vec![parsed_agent("rev-a"), parsed_agent("rev-b")],
             fork: None,
             join: None,
@@ -995,20 +1004,20 @@ mod tests {
                 max_concurrent,
                 cancel_on_error,
                 error_policy,
-                client,
+                model: model_val,
                 children,
                 ..
             } => {
                 assert_eq!(max_concurrent, Some(4));
                 assert!(cancel_on_error);
                 assert_eq!(error_policy, ErrorPolicy::All);
-                assert_eq!(client, Some(ClientSpec("openai/gpt-5".into())));
+                assert_eq!(model_val, Some(model("openai/gpt-5")));
                 assert_eq!(children.len(), 2);
                 // Each child is a StaticDefinition that inherits parent metadata
-                // (name, default_client, bootstrap).
+                // (name, default_model, bootstrap).
                 for child in &children {
                     assert_eq!(child.name(), "test-def");
-                    assert_eq!(child.default_client(), "openai/gpt-4");
+                    assert_eq!(child.default_model().to_string(), "model://openai/gpt-4");
                 }
             }
             _ => panic!("expected Parallel"),
@@ -1022,8 +1031,8 @@ mod tests {
             max_concurrent: None,
             cancel_on_error: false,
             error_policy: ErrorPolicy::Any,
-            client: None,
-            task_clients: None,
+            model: None,
+            task_models: None,
             body: vec![parsed_agent("sole-child")],
             fork: None,
             join: None,
@@ -1079,7 +1088,10 @@ mod tests {
         // Round-trip: deserialize and verify it's a valid definition.
         let mut deserialized = StaticDefinition::deserialize(&bytes).unwrap();
         assert_eq!(deserialized.name(), "test-def");
-        assert_eq!(deserialized.default_client(), "openai/gpt-4");
+        assert_eq!(
+            deserialized.default_model().to_string(),
+            "model://openai/gpt-4"
+        );
         // Stage traversal: all three stages must survive the round-trip.
         let mut stage_names: Vec<String> = Vec::new();
         loop {

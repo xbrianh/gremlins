@@ -70,13 +70,13 @@ impl OpenAiRunState {
 /// [`OpenAiBackend`] and [`OpenRouterBackend`].  The two differ only in
 /// `classify_error` (the per-attempt error classifier passed through to
 /// [`run_with_agent_loop`]) and `provider_name` (used to match
-/// `task-clients` specs).
+/// `task-models` specs).
 pub(crate) async fn run_openai_compat(
     state: &OpenAiRunState,
     params: RunParams,
     interactive: Option<InteractiveSession>,
     classify_error: Option<ErrorClassifier>,
-    _provider_name: &str, // kept for logging; unused after task-clients moved to Backend trait
+    _provider_name: &str, // kept for logging; unused after task-models moved to Backend trait
 ) -> Result<CompletedRun, ClientError> {
     let idle_timeout = params
         .idle_timeout
@@ -343,7 +343,7 @@ pub(crate) async fn run_with_agent_loop(
     .await
 }
 
-/// Split a client specifier into `(provider, model)`, or `None` when the
+/// Split a model specifier into `(provider, model)`, or `None` when the
 /// provider or model part is empty or the spec is otherwise malformed.
 ///
 /// This is a thin adapter over [`crate::clients::client::ModelURI`], so it

@@ -455,13 +455,17 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use crate::clients::client::Client;
+    use crate::clients::client::{Client, ModelURI};
 
     use crate::definition::StaticDefinition;
     use crate::executor::gremlin::{validate_gremlin_id, ScratchDir, WorkDir};
     use crate::executor::state::{self, StateData};
     use crate::schemas::bootstrap::Bootstrap;
     use crate::test_support::Sandbox;
+
+    fn model(spec: &str) -> ModelURI {
+        ModelURI::parse(spec).unwrap()
+    }
 
     // --- DSL parsing ---
 
@@ -658,7 +662,7 @@ mod tests {
             "id": "gr-test",
             "attempt": "test-0001",
             "stage": "starting",
-            "client": "cmd/true",
+            "model": "cmd/true",
         });
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
 
@@ -667,11 +671,11 @@ mod tests {
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),
             definition_path: None,
-            client_override: None,
+            model_override: None,
             definition: Box::new(StaticDefinition::new(
                 "test".to_string(),
                 PathBuf::from("test.yaml"),
-                "cmd/true".to_string(),
+                model("cmd/true"),
                 bootstrap,
                 Vec::new(),
                 None,
@@ -691,7 +695,7 @@ mod tests {
             interactive_session: None,
             scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
             clean_cmds: Vec::new(),
-            enclosing_task_clients: None,
+            enclosing_task_models: None,
         };
         (sandbox, gremlin)
     }

@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::definition::ClientSpec;
+use crate::clients::client::ModelURI;
 use crate::stage_spec::composite::StageAttrs;
 
 /// How a group decides to fail once individual children have errored.
@@ -80,7 +80,7 @@ pub struct ParallelGroup {
     pub cancel_on_error: bool,
     pub error_policy: ErrorPolicy,
     pub body: Vec<Value>,
-    pub client: Option<ClientSpec>,
+    pub model: Option<ModelURI>,
     pub fork: Option<ForkSpec>,
     pub join: Option<JoinSpec>,
 }

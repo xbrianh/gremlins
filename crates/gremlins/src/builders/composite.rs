@@ -2,7 +2,7 @@
 
 use indexmap::IndexMap;
 
-use crate::definition::ClientSpec;
+use crate::clients::client::ModelURI;
 use crate::schemas::error::SchemaError;
 use crate::stage_spec::composite::StageAttrs;
 use crate::stage_spec::node::StageSpec;
@@ -29,8 +29,8 @@ pub struct SequenceBuilder {
     name: String,
     body: Vec<StageSpec>,
     skip_if_exists: String,
-    client: Option<ClientSpec>,
-    task_clients: Option<IndexMap<String, String>>,
+    model: Option<ModelURI>,
+    task_models: Option<IndexMap<String, String>>,
     max_iterations: u32,
     interval: Option<f64>,
 }
@@ -42,8 +42,8 @@ impl SequenceBuilder {
             name: name.into(),
             body: Vec::new(),
             skip_if_exists: String::new(),
-            client: None,
-            task_clients: None,
+            model: None,
+            task_models: None,
             max_iterations: 1,
             interval: None,
         }
@@ -73,15 +73,15 @@ impl SequenceBuilder {
         self
     }
 
-    /// Set the stage's own client spec.
-    pub fn client(mut self, client: impl Into<String>) -> Self {
-        self.client = Some(ClientSpec(client.into()));
+    /// Set the stage's own model spec.
+    pub fn model(mut self, model: ModelURI) -> Self {
+        self.model = Some(model);
         self
     }
 
-    /// Set the stage's own task-client overrides.
-    pub fn task_clients(mut self, task_clients: IndexMap<String, String>) -> Self {
-        self.task_clients = Some(task_clients);
+    /// Set the stage's own task-model overrides.
+    pub fn task_models(mut self, task_models: IndexMap<String, String>) -> Self {
+        self.task_models = Some(task_models);
         self
     }
 
@@ -121,13 +121,13 @@ impl SequenceBuilder {
         let mut attrs = StageAttrs::new(self.name);
         attrs.stage_type = "sequence".to_string();
         attrs.skip_if_exists = self.skip_if_exists;
-        attrs.client_explicit = self.client.is_some();
+        attrs.model_explicit = self.model.is_some();
         Ok(StageSpec::Sequence {
             attrs,
             max_iterations: self.max_iterations,
             interval: self.interval,
-            client: self.client,
-            task_clients: self.task_clients,
+            model: self.model,
+            task_models: self.task_models,
             body: self.body,
         })
     }
@@ -158,8 +158,8 @@ pub struct ParallelBuilder {
     cancel_on_error: bool,
     error_policy: ErrorPolicy,
     skip_if_exists: String,
-    client: Option<ClientSpec>,
-    task_clients: Option<IndexMap<String, String>>,
+    model: Option<ModelURI>,
+    task_models: Option<IndexMap<String, String>>,
     fork: Option<ForkSpec>,
     join: Option<JoinSpec>,
 }
@@ -174,8 +174,8 @@ impl ParallelBuilder {
             cancel_on_error: false,
             error_policy: ErrorPolicy::Any,
             skip_if_exists: String::new(),
-            client: None,
-            task_clients: None,
+            model: None,
+            task_models: None,
             fork: None,
             join: None,
         }
@@ -223,15 +223,15 @@ impl ParallelBuilder {
         self
     }
 
-    /// Set the stage's own client spec.
-    pub fn client(mut self, client: impl Into<String>) -> Self {
-        self.client = Some(ClientSpec(client.into()));
+    /// Set the stage's own model spec.
+    pub fn model(mut self, model: ModelURI) -> Self {
+        self.model = Some(model);
         self
     }
 
-    /// Set the stage's own task-client overrides.
-    pub fn task_clients(mut self, task_clients: IndexMap<String, String>) -> Self {
-        self.task_clients = Some(task_clients);
+    /// Set the stage's own task-model overrides.
+    pub fn task_models(mut self, task_models: IndexMap<String, String>) -> Self {
+        self.task_models = Some(task_models);
         self
     }
 
@@ -283,14 +283,14 @@ impl ParallelBuilder {
         let mut attrs = StageAttrs::new(self.name);
         attrs.stage_type = "parallel".to_string();
         attrs.skip_if_exists = self.skip_if_exists;
-        attrs.client_explicit = self.client.is_some();
+        attrs.model_explicit = self.model.is_some();
         Ok(StageSpec::Parallel {
             attrs,
             max_concurrent: self.max_concurrent,
             cancel_on_error: self.cancel_on_error,
             error_policy: self.error_policy,
-            client: self.client,
-            task_clients: self.task_clients,
+            model: self.model,
+            task_models: self.task_models,
             body: self.body,
             fork: self.fork,
             join: self.join,

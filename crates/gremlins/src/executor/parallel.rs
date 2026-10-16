@@ -22,6 +22,7 @@ use indexmap::IndexMap;
 use tokio::sync::watch;
 
 use crate::artifacts::uri::Uri;
+use crate::clients::client::ModelURI;
 use crate::core::proc::{run_logged_commands, sanitize_log_filename};
 use crate::definition::ErrorPolicy;
 use crate::definition::{ExecutorStage, GremlinDefinition};
@@ -54,31 +55,31 @@ async fn mark_child_done(state: &dyn StateStore, scope: &str, child_name: &str) 
 pub(crate) async fn run_parallel(
     stage: &ExecutorStage,
     gremlin: &mut Gremlin,
-    enclosing_client: Option<&str>,
-    enclosing_task_clients: Option<&IndexMap<String, String>>,
+    enclosing_model: Option<&ModelURI>,
+    enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
     let ExecutorStage::Parallel {
         name: group_name,
         max_concurrent,
         cancel_on_error,
         error_policy,
-        client,
+        model,
         children,
         skip_if_exists: _,
         fork,
         join,
-        task_clients,
+        task_models,
     } = stage
     else {
         unreachable!("run_parallel is only called for parallel stages")
     };
 
-    let merged_task_clients = crate::config::merge_task_clients_runtime(
+    let merged_task_models = crate::config::merge_task_models_runtime(
         None, // global defaults already baked into enclosing
-        enclosing_task_clients,
-        task_clients.as_ref(),
+        enclosing_task_models,
+        task_models.as_ref(),
     );
-    let enclosing_task_clients = merged_task_clients.as_ref();
+    let enclosing_task_models = merged_task_models.as_ref();
 
     let total_children = children.len();
 
@@ -150,11 +151,7 @@ pub(crate) async fn run_parallel(
     let mut launched: Vec<LaunchedChild> = Vec::with_capacity(children.len());
 
     for child in children {
-        let enclosing_spec = enclosing_client.map(|c| crate::definition::ClientSpec(c.to_string()));
-        let effective_client: Option<&str> = client
-            .as_ref()
-            .or(enclosing_spec.as_ref())
-            .map(|c| c.0.as_str());
+        let effective_model: Option<&ModelURI> = model.as_ref().or(enclosing_model);
 
         let child_name = child.first_stage_name().to_string();
 
@@ -181,13 +178,13 @@ pub(crate) async fn run_parallel(
                 &child_name,
                 None,
                 child.clone_box(),
-                effective_client,
+                effective_model,
             )
             .await?;
 
-        // Thread task-client overrides from the enclosing composite stage
+        // Thread task-model overrides from the enclosing composite stage
         // into the child so run_stage_scoped can merge them at runtime.
-        child_gremlin.enclosing_task_clients = enclosing_task_clients.cloned();
+        child_gremlin.enclosing_task_models = enclosing_task_models.cloned();
 
         // Populate the child workspace (fork commands run after fork()
         // completes). On failure the child state has already been
@@ -665,6 +662,8 @@ mod tests {
     use crate::builders::composite::ParallelBuilder;
     use crate::builders::exec::ExecBuilder;
 
+    use crate::clients::client::ModelURI;
+    use crate::config;
     use crate::definition::StageSpec;
     use crate::definition::{ExecutorStage, StaticDefinition};
     use crate::executor::gremlin::{validate_gremlin_id, RuntimeConfig, ScratchDir};
@@ -672,12 +671,16 @@ mod tests {
     use crate::schemas::bootstrap::Bootstrap;
     use crate::test_support::Sandbox;
 
+    fn model(spec: &str) -> ModelURI {
+        ModelURI::parse(spec).unwrap()
+    }
+
     /// Convert the first parsed stage to an ExecutorStage for dispatch.
     fn first_executor_stage(stages: &[StageSpec]) -> ExecutorStage {
         let def = StaticDefinition::new(
             "test".to_string(),
             PathBuf::from("test.yaml"),
-            "cmd/true".to_string(),
+            model("cmd/true"),
             Bootstrap::default(),
             vec![],
             None,
@@ -687,11 +690,10 @@ mod tests {
         );
         def.convert_stage(stages[0].clone())
     }
-    use crate::config;
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    fn test_gremlin(stages: Vec<StageSpec>, default_client: &str) -> (Sandbox, Gremlin) {
+    fn test_gremlin(stages: Vec<StageSpec>, default_model: &str) -> (Sandbox, Gremlin) {
         let sandbox = Sandbox::new();
         let state_dir = config::state_root().join("gr-test");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -700,7 +702,7 @@ mod tests {
             "id": "gr-test",
             "attempt": "test-0001",
             "stage": "starting",
-            "client": default_client,
+            "model": default_model,
         });
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
 
@@ -709,11 +711,11 @@ mod tests {
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),
             definition_path: None,
-            client_override: None,
+            model_override: None,
             definition: Box::new(StaticDefinition::new(
                 "test".to_string(),
                 PathBuf::from("test.yaml"),
-                default_client.to_string(),
+                model(default_model),
                 Bootstrap::default(),
                 stages.clone(),
                 None,
@@ -725,7 +727,7 @@ mod tests {
             project_root: sandbox.path().to_path_buf(),
             state: state_data,
             env: HashMap::new(),
-            client: crate::clients::client::Client::parse(default_client).unwrap(),
+            client: crate::clients::client::Client::parse(default_model).unwrap(),
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
             runtime_config: RuntimeConfig::snapshot(),
@@ -733,7 +735,7 @@ mod tests {
             interactive_session: None,
             scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
             clean_cmds: Vec::new(),
-            enclosing_task_clients: None,
+            enclosing_task_models: None,
         };
         (sandbox, gremlin)
     }
@@ -747,8 +749,8 @@ mod tests {
             max_concurrent: None,
             cancel_on_error: false,
             error_policy: ErrorPolicy::Any,
-            client: None,
-            task_clients: None,
+            model: None,
+            task_models: None,
             children: vec![],
             skip_if_exists: String::new(),
             fork: None,
@@ -1058,7 +1060,7 @@ mod tests {
     #[tokio::test]
     async fn parallel_with_explicit_client_succeeds() {
         let stages = vec![ParallelBuilder::new("group")
-            .client("cmd/true")
+            .model(model("cmd/true"))
             .stage(
                 ExecBuilder::new("a")
                     .cmds(vec!["true".to_string()])

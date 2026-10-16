@@ -44,6 +44,9 @@ enum Cmds {
         /// Run with temp-backed storage — no footprint on disk after completion.
         #[arg(long)]
         ephemeral: bool,
+        /// Model spec overriding the definition's `default_model`.
+        #[arg(long)]
+        model: Option<String>,
     },
     /// List gremlins from the state root as a plain-column table.
     Ls {
@@ -138,7 +141,8 @@ async fn main() {
             definition,
             args,
             ephemeral,
-        }) => launch(&definition, &args, ephemeral).await,
+            model,
+        }) => launch(&definition, &args, ephemeral, model.as_deref()).await,
         Some(Cmds::Ls { here }) => ls(here).await,
         Some(Cmds::Info { id }) => info(&id).await,
         Some(Cmds::Stop { id }) => stop(&id).await,
@@ -528,11 +532,8 @@ async fn status(id: &str) -> Result<(), String> {
     );
     println!("pid:           {}", value_display(response.get("pid")));
     println!(
-        "client:        {}",
-        response
-            .get("client")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
+        "model:        {}",
+        response.get("model").and_then(|v| v.as_str()).unwrap_or("")
     );
     println!(
         "attempt:       {}",
@@ -594,7 +595,7 @@ fn status_direct(id: &str) -> Result<(), String> {
         field_display(&gremlin.state, "exit_code")
     );
     println!("pid:           {}", field_display(&gremlin.state, "pid"));
-    println!("client:        {}", field_display(&gremlin.state, "client"));
+    println!("model:        {}", field_display(&gremlin.state, "model"));
     println!(
         "attempt:       {}",
         field_display(&gremlin.state, "attempt")
@@ -668,7 +669,7 @@ fn info_direct(id: &str) -> Result<(), String> {
         "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
         "exit_code": gremlin.state.read_field("exit_code").unwrap_or(Value::Null),
         "pid": gremlin.state.read_field("pid").unwrap_or(Value::Null),
-        "client": gremlin.state.read_str("client"),
+        "model": gremlin.state.read_str("model"),
         "attempt": gremlin.state.read_str("attempt"),
         "kind": gremlin.state.read_str("kind"),
         "bail_info": gremlin
@@ -1317,9 +1318,9 @@ async fn land(id: &str) -> Result<(), String> {
         ));
     }
 
-    let default_client = config::global_config()
+    let default_model = config::global_config()
         .ok()
-        .and_then(|c| c.default_client().map(String::from));
+        .and_then(|c| c.default_model().map(String::from));
     let store = FileSystemStateStore::from_path(state_dir.to_path_buf());
 
     // Load the hermetic definition through the store blob.
@@ -1331,7 +1332,7 @@ async fn land(id: &str) -> Result<(), String> {
         let mut bytes = Vec::new();
         blob.read_to_end(&mut bytes)
             .map_err(|e| format!("gremlin {id}: failed to read definition snapshot: {e}"))?;
-        StaticDefinition::from_expanded_bytes(&bytes, None, default_client.as_deref())
+        StaticDefinition::from_expanded_bytes(&bytes, None, default_model.as_deref())
             .map_err(|e| format!("gremlin {id}: failed to load definition: {e}"))?
     };
 
@@ -1523,7 +1524,12 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
 // launch
 // ---------------------------------------------------------------------------
 
-async fn launch(definition: &str, raw_args: &[String], ephemeral: bool) -> Result<(), String> {
+async fn launch(
+    definition: &str,
+    raw_args: &[String],
+    ephemeral: bool,
+    model_override: Option<&str>,
+) -> Result<(), String> {
     // Parse --key value pairs up front so malformed trailing args fail fast,
     // before any config or definition resolution.
     parse_stage_inputs(raw_args)?;
@@ -1538,12 +1544,15 @@ async fn launch(definition: &str, raw_args: &[String], ephemeral: bool) -> Resul
 
     // Load the definition just enough to validate --key args against
     // bootstrap.source.
-    let default_client = config::global_config()
+    let default_model = config::global_config()
         .ok()
-        .and_then(|c| c.default_client().map(String::from));
-    let gremlin_def =
-        StaticDefinition::from_yaml_file(&definition_path, None, default_client.as_deref())
-            .map_err(|e| format!("invalid definition: {e}"))?;
+        .and_then(|c| c.default_model().map(String::from));
+    let gremlin_def = StaticDefinition::from_yaml_file(
+        &definition_path,
+        model_override,
+        default_model.as_deref(),
+    )
+    .map_err(|e| format!("invalid definition: {e}"))?;
 
     // Resolve `filepath`-typed bootstrap sources to absolute paths so the
     // daemon can bind them regardless of its own working directory. The
@@ -1590,6 +1599,7 @@ async fn launch(definition: &str, raw_args: &[String], ephemeral: bool) -> Resul
         "args": resolved_args,
         "project_root": project_root.to_string_lossy(),
         "ephemeral": ephemeral,
+        "model": model_override,
     }))
     .await?;
 

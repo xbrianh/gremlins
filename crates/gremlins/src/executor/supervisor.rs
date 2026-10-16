@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 use crate::clients::agent_loop::CancelToken;
-use crate::clients::client::Client;
+use crate::clients::client::{Client, ModelURI};
 use crate::clients::interactive::{
     InteractiveChannels, InteractiveCommand, InteractiveEvent, InteractiveHandle, StreamEventSender,
 };
@@ -1195,13 +1195,17 @@ async fn handle_launch(
             Err(e) => return error_response(&format!("definition not found: {e}")),
         };
 
-    let default_client = config::global_config()
+    let default_model = config::global_config()
         .ok()
-        .and_then(|c| c.default_client().map(String::from));
+        .and_then(|c| c.default_model().map(String::from));
+    let model_override = request
+        .get("model")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
     let gremlin_def = match crate::definition::StaticDefinition::from_yaml_file(
         &definition_path,
-        None,
-        default_client.as_deref(),
+        model_override,
+        default_model.as_deref(),
     ) {
         Ok(d) => d,
         Err(e) => return error_response(&format!("invalid definition: {e}")),
@@ -1235,7 +1239,7 @@ async fn handle_launch(
         &definition_path,
         &gremlin_def,
         &resolved_stage_inputs,
-        None,
+        model_override,
         &GremlinConfig { ephemeral },
     ) {
         Ok(g) => g,
@@ -1777,7 +1781,7 @@ async fn handle_status(request: &Value, _state_root: &Path) -> Value {
         let exit_code = tree.get("exit_code").cloned().unwrap_or(Value::Null);
         let pid = tree.get("pid").cloned().unwrap_or(Value::Null);
         let client = tree
-            .get("client")
+            .get("model")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -1805,7 +1809,7 @@ async fn handle_status(request: &Value, _state_root: &Path) -> Value {
             "ended_at": ended_at,
             "exit_code": exit_code,
             "pid": pid,
-            "client": client,
+            "model": client,
             "attempt": attempt,
             "kind": kind,
         }));
@@ -1838,7 +1842,7 @@ async fn handle_status(request: &Value, _state_root: &Path) -> Value {
         "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
         "exit_code": gremlin.state.read_field("exit_code").unwrap_or(Value::Null),
         "pid": gremlin.state.read_field("pid").unwrap_or(Value::Null),
-        "client": gremlin.state.read_str("client"),
+        "model": gremlin.state.read_str("model"),
         "attempt": gremlin.state.read_str("attempt"),
         "kind": gremlin.state.read_str("kind"),
     }))
@@ -1916,7 +1920,7 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
         let exit_code = tree.get("exit_code").cloned().unwrap_or(Value::Null);
         let pid = tree.get("pid").cloned().unwrap_or(Value::Null);
         let client = tree
-            .get("client")
+            .get("model")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -1952,7 +1956,7 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
             "ended_at": ended_at,
             "exit_code": exit_code,
             "pid": pid,
-            "client": client,
+            "model": client,
             "attempt": attempt,
             "kind": kind,
             "bail_info": bail_info,
@@ -1988,7 +1992,7 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
         "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
         "exit_code": gremlin.state.read_field("exit_code").unwrap_or(Value::Null),
         "pid": gremlin.state.read_field("pid").unwrap_or(Value::Null),
-        "client": gremlin.state.read_str("client"),
+        "model": gremlin.state.read_str("model"),
         "attempt": gremlin.state.read_str("attempt"),
         "kind": gremlin.state.read_str("kind"),
         "bail_info": gremlin.state.stage_error().map(Value::Object).unwrap_or(Value::Null),
@@ -2301,9 +2305,9 @@ async fn handle_debug(
             return;
         }
 
-        let default_client = config::global_config()
+        let default_model = config::global_config()
             .ok()
-            .and_then(|c| c.default_client().map(String::from));
+            .and_then(|c| c.default_model().map(String::from));
         let store_for_read = Arc::clone(&store);
         let stage_name_for_def = stage_name.clone();
         let is_agent = tokio::task::spawn_blocking(move || {
@@ -2318,7 +2322,7 @@ async fn handle_debug(
             let def = crate::definition::StaticDefinition::from_expanded_bytes(
                 &bytes,
                 None,
-                default_client.as_deref(),
+                default_model.as_deref(),
             )
             .map_err(|e| format!("failed to load definition: {e}"))?;
             Ok(def
@@ -2729,12 +2733,19 @@ async fn handle_chat(
 
     let project_root = project_root.unwrap_or_else(config::project_root);
 
-    // 2. Get default client
-    let default_client = match config::global_config() {
-        Ok(cfg) => match cfg.default_client() {
-            Some(c) => c.to_string(),
+    // 2. Get default model
+    let default_model = match config::global_config() {
+        Ok(cfg) => match cfg.default_model() {
+            Some(c) => match ModelURI::parse(c) {
+                Ok(uri) => uri,
+                Err(e) => {
+                    let resp = error_response(&format!("invalid default model {c:?}: {e}"));
+                    let _ = writer.write_json_line(&resp).await;
+                    return;
+                }
+            },
             None => {
-                let resp = error_response("no default client configured");
+                let resp = error_response("no default model configured");
                 let _ = writer.write_json_line(&resp).await;
                 return;
             }
@@ -2763,7 +2774,7 @@ async fn handle_chat(
         }
     };
 
-    let definition = match crate::builders::DefinitionBuilder::new("chat", &default_client)
+    let definition = match crate::builders::DefinitionBuilder::new("chat", default_model.clone())
         .stage(stage)
         .build()
     {
@@ -2798,7 +2809,7 @@ async fn handle_chat(
         None => {
             let gremlin = match create_chat_gremlin(
                 &definition,
-                &default_client,
+                &default_model,
                 state_root,
                 &project_root,
                 &env,
@@ -3375,7 +3386,7 @@ static CHAT_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 fn create_chat_gremlin(
     definition: &crate::definition::StaticDefinition,
-    default_client: &str,
+    default_model: &ModelURI,
     _state_root: &Path,
     project_root: &Path,
     env: &HashMap<String, String>,
@@ -3416,8 +3427,8 @@ fn create_chat_gremlin(
     initial.insert("status".to_string(), Value::String("running".to_string()));
     initial.insert("started_at".to_string(), Value::String(state::now_stamp()));
     initial.insert(
-        "client".to_string(),
-        Value::String(default_client.to_string()),
+        "model".to_string(),
+        Value::String(default_model.to_string()),
     );
     initial.insert("stage".to_string(), Value::String("chat".to_string()));
     initial.insert("pid".to_string(), Value::from(std::process::id() as i64));
@@ -3453,8 +3464,8 @@ fn create_chat_gremlin(
         .map_err(|e| format!("failed to create log: {e}"))?;
 
     let runtime_config = RuntimeConfig::snapshot();
-    let client = Client::parse(default_client)
-        .map_err(|e| format!("invalid default client '{default_client}': {e}"))?;
+    let client = Client::from_uri(default_model.clone())
+        .map_err(|e| format!("invalid default model '{default_model}': {e}"))?;
 
     let scratch_dir = ScratchDir::Temp(
         tempfile::TempDir::new().map_err(|e| format!("failed to create temp scratch dir: {e}"))?,
@@ -3463,7 +3474,7 @@ fn create_chat_gremlin(
     Ok(Gremlin {
         id: gremlin_id,
         definition_path: None,
-        client_override: None,
+        model_override: None,
         definition: Box::new(definition.clone()),
         workdir: None,
         project_root,
@@ -3477,7 +3488,7 @@ fn create_chat_gremlin(
         interactive_session: None,
         scratch_dir,
         clean_cmds: Vec::new(),
-        enclosing_task_clients: None,
+        enclosing_task_models: None,
     })
 }
 
@@ -3852,18 +3863,18 @@ pub(crate) async fn stop_child(id: &str) {
 /// Reap backend resources for an aborted gremlin by reading its client
 /// spec from state.json and calling [`Client::reap_all`].
 ///
-/// If the client spec cannot be read or parsed this is a silent no-op —
+/// If the model spec cannot be read or parsed this is a silent no-op —
 /// the gremlin may not have started running yet.
 fn reap_client_for(id: &str) {
     let spec = state::StateData::open(id)
-        .map(|sd| sd.read_str("client"))
+        .map(|sd| sd.read_str("model"))
         .unwrap_or_default();
     if spec.is_empty() {
         return;
     }
     match Client::parse(&spec) {
         Ok(client) => client.reap_all(id),
-        Err(e) => log::warn!("reap_client_for {id}: failed to parse client spec {spec:?}: {e}"),
+        Err(e) => log::warn!("reap_client_for {id}: failed to parse model spec {spec:?}: {e}"),
     }
 }
 
@@ -3952,6 +3963,7 @@ mod tests {
         resolve_filepath_source_values, usage_stats_from_state,
     };
     use crate::builders::{AgentBuilder, DefinitionBuilder};
+    use crate::clients::client::ModelURI;
     use crate::clients::protocol::UsageStats;
     use crate::executor::socket;
     use crate::schemas::bootstrap::{InputSource, InputSources};
@@ -3963,6 +3975,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::{broadcast, watch};
+
+    fn model(spec: &str) -> ModelURI {
+        ModelURI::parse(spec).unwrap()
+    }
 
     async fn read_until_type(
         reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
@@ -4215,7 +4231,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_launch_resolves_relative_filepath_against_project_root() {
-        let sandbox = Sandbox::with_config(Some(r#"{"default-client": "cmd/echo"}"#));
+        let sandbox = Sandbox::with_config(Some(r#"{"default-model": "cmd/echo"}"#));
         let project_root = sandbox.path().join("project");
         std::fs::create_dir_all(&project_root).unwrap();
         std::fs::write(project_root.join("plan.md"), "plan").unwrap();
@@ -4224,7 +4240,7 @@ mod tests {
         std::fs::create_dir_all(definition_path.parent().unwrap()).unwrap();
         std::fs::write(
             &definition_path,
-            r#"default_client: 'cmd/echo'
+            r#"default_model: 'cmd/echo'
 bootstrap:
   source:
     plan:
@@ -4442,7 +4458,7 @@ stages: []
 
     #[tokio::test]
     async fn chat_turn_refreshes_env_and_falls_back_to_base_snapshot() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"default-client": "cmd/echo"}"#));
+        let _sandbox = Sandbox::with_config(Some(r#"{"default-model": "cmd/echo"}"#));
         let project_root = _sandbox.path().join("project");
         std::fs::create_dir_all(&project_root).unwrap();
         let state_root = _sandbox.path().join("state");
@@ -4750,14 +4766,14 @@ stages: []
         std::fs::create_dir_all(&state_root).unwrap();
 
         let stage = AgentBuilder::new("chat").prompt("hello").build().unwrap();
-        let definition = DefinitionBuilder::new("chat", "cmd/echo")
+        let definition = DefinitionBuilder::new("chat", model("cmd/echo"))
             .stage(stage)
             .build()
             .unwrap();
 
         let gremlin = create_chat_gremlin(
             &definition,
-            "cmd/echo",
+            &model("cmd/echo"),
             &state_root,
             &project_root,
             &HashMap::new(),
@@ -4791,7 +4807,7 @@ stages: []
         std::fs::create_dir_all(&state_root).unwrap();
 
         let stage = AgentBuilder::new("chat").prompt("hello").build().unwrap();
-        let definition = DefinitionBuilder::new("chat", "cmd/echo")
+        let definition = DefinitionBuilder::new("chat", model("cmd/echo"))
             .stage(stage)
             .build()
             .unwrap();
@@ -4801,8 +4817,14 @@ stages: []
             ("HOME".to_string(), "/home/operator".to_string()),
         ]);
 
-        let gremlin =
-            create_chat_gremlin(&definition, "cmd/echo", &state_root, &project_root, &env).unwrap();
+        let gremlin = create_chat_gremlin(
+            &definition,
+            &model("cmd/echo"),
+            &state_root,
+            &project_root,
+            &env,
+        )
+        .unwrap();
 
         assert_eq!(
             gremlin.env, env,

@@ -26,7 +26,7 @@ run()
  ├─ LiveArea::new() (raw mode + cursor hide + clear main screen)
  └─ run_app()
       ├─ App::new()
-      ├─ client::connect() → DaemonClient + event_rx + raw_rx
+      ├─ model::connect() → DaemonClient + event_rx + raw_rx
       ├─ Initial "ls" snapshot → populates app.active_runs
       ├─ Crossterm event channel (poll 20ms → mpsc)
       ├─ Per-frame: live_area.compose(&app) → render widgets → commit overflow → draw
@@ -54,7 +54,7 @@ run()
 - **Full-screen views.** `RunsView` renders the running-gremlin watch table and owns an optional inline live-log pane, and `DebugWidget` renders the interactive debug screen while owning its prompt/history/connection state. Each full-screen view is flexible and fills the whole terminal.
 - **Embedded live tool slot.** `Bash`/`WebSearch` live output lives inside `TranscriptWidget` as a configured `StreamingWidget` sibling of the reasoning slot, ordered prompt → reasoning → tool → response. Both streaming slots are capped at `STREAM_MAX_ROWS`, tail-anchored, lossy head-trimmed (ANSI-stripped for tool output), collapse to zero when idle, and never enter the transcript FIFO or terminal scrollback while streaming. Tool tails commit on `ToolResult` (with leftovers flushed at `finish_turn`); reasoning commits only at `finish_turn`. **Sub-agent (`Task`) tool output is not forwarded:** nested loops run with `stream_events = None`, so their `ToolResult` events never reach the parent TUI; `make_task_runner` therefore clears the inherited live-output sender (`child_ctx.tool_output = None`) so a sub-agent's Bash chunks can't create a tool slot with no matching `ToolResult` to close it.
 - **Chat uses a fresh socket per message.** The daemon processes chat as an ephemeral stage. The persistent `DaemonClient` stays free for commands during chat.
-- **Log follow uses a dedicated socket.** The `log` op with `follow:true` monopolizes its connection, so it gets its own (`client::follow_log`).
+- **Log follow uses a dedicated socket.** The `log` op with `follow:true` monopolizes its connection, so it gets its own (`model::follow_log`).
 - **Debug sessions use a dedicated socket.** `/debug <id>` opens a fresh socket with its own reader task and command channel (`talk`/`quit`/`bail`/`continue`).
 - **Request/response ordering is FIFO.** `DaemonClient::send_request` holds a write lock across enqueue + write so concurrent callers can't interleave.
 

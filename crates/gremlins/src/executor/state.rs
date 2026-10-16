@@ -1805,7 +1805,7 @@ pub fn now_iso() -> String {
 pub fn default_for(name: &str) -> Option<Value> {
     Some(match name {
         "attempt" | "kind" | "project_root" | "workdir" | "status" | "started_at"
-        | "description" | "parent_id" | "client" | "definition_path" | "stage" | "group_name"
+        | "description" | "parent_id" | "model" | "definition_path" | "stage" | "group_name"
         | "child_key" => Value::String(String::new()),
         "definition_args" => Value::Array(Vec::new()),
         "stage_inputs" | "metadata" => Value::Object(Map::new()),
@@ -1825,7 +1825,7 @@ pub fn field_names() -> [&'static str; 18] {
         "description",
         "parent_id",
         "definition_args",
-        "client",
+        "model",
         "definition_path",
         "stage",
         "pid",

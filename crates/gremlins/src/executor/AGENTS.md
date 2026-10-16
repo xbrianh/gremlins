@@ -53,10 +53,10 @@ metadata or `clean` never pays for the runtime.
 `run_parallel`, `Done` → no-op. Scope (`a/b`, `loop~2`) and
 `skip_if_exists` guards are sequence-level concerns, not leaf concerns.
 
-Client resolution order lives in `run.rs::resolve_client_spec`:
-1. stage's own `client:`; 2. enclosing composite's explicit client;
-3. `default-client-by-stage` runtime config (exact → longest prefix);
-4. definition `default_client`.
+Client resolution order lives in `run.rs::resolve_model_spec`:
+1. stage's own `model:`; 2. enclosing composite's explicit model;
+3. `default-model-by-stage` runtime config (exact → longest prefix);
+4. definition `default_model`.
 
 ### State and artifacts
 
@@ -116,7 +116,7 @@ reconstructs the lock from the inherited fd (`socket.rs`).
 | You want to … | Look at |
 |---|---|
 | Change the run loop / stage sequencing | `run.rs::Gremlin::run`, `run_stage_scoped`, `run_sequence` |
-| Change client selection | `run.rs::resolve_client_spec` |
+| Change model selection | `run.rs::resolve_model_spec` |
 | Add or change storage/registry behavior | `state.rs::StateStore` trait + `FileSystemStateStore` |
 | Understand state fields/defaults | `state.rs::default_for`, `field_names`, `StateData` |
 | Change environment assembly | `gremlin.rs::resolve_env`, `system_env`, `framework_subs` |

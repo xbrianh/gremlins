@@ -66,14 +66,14 @@ impl From<PathsSection> for PathOverrides {
 // Config
 // ---------------------------------------------------------------------------
 
-/// A named client profile from `settings.yaml`.
+/// A named model profile from `settings.yaml`.
 ///
-/// A profile is flat: one concrete `client:` spec and an optional
-/// `task-clients` map. No inheritance, no merging between profiles.
+/// A profile is flat: one concrete `model:` spec and an optional
+/// `task-models` map. No inheritance, no merging between profiles.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct ClientProfile {
-    pub client: String,
-    pub task_clients: Option<IndexMap<String, String>>,
+pub struct ModelProfile {
+    pub model: String,
+    pub task_models: Option<IndexMap<String, String>>,
 }
 
 /// Effective retry backoff schedules from `settings.yaml`.
@@ -95,11 +95,11 @@ impl Default for BackoffConfig {
 /// Parsed content of settings.yaml.
 #[derive(Debug, Clone, Default)]
 pub struct Config {
-    default_client: Option<String>,
-    exact_stage_clients: HashMap<String, String>,
-    prefix_stage_clients: HashMap<String, String>,
-    default_task_clients: Option<IndexMap<String, String>>,
-    client_profiles: IndexMap<String, ClientProfile>,
+    default_model: Option<String>,
+    exact_stage_models: HashMap<String, String>,
+    prefix_stage_models: HashMap<String, String>,
+    default_task_models: Option<IndexMap<String, String>>,
+    model_profiles: IndexMap<String, ModelProfile>,
     path_overrides: PathOverrides,
     max_tool_output_bytes: u64,
     backoff: BackoffConfig,
@@ -167,17 +167,14 @@ impl<'de> Deserialize<'de> for StrictString {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
-    #[serde(rename = "default-client")]
-    default_client: Option<StrictString>,
-    #[serde(rename = "default-client-by-stage")]
-    default_client_by_stage: Option<IndexMap<String, StrictString>>,
-    /// Deprecated spelling. `default-task-clients` wins when both are set.
-    #[serde(rename = "task-clients")]
-    task_clients: Option<IndexMap<String, StrictString>>,
-    #[serde(rename = "default-task-clients")]
-    default_task_clients: Option<IndexMap<String, StrictString>>,
-    #[serde(rename = "client-profiles")]
-    client_profiles: Option<IndexMap<String, ProfileFile>>,
+    #[serde(rename = "default-model")]
+    default_model: Option<StrictString>,
+    #[serde(rename = "default-model-by-stage")]
+    default_model_by_stage: Option<IndexMap<String, StrictString>>,
+    #[serde(rename = "default-task-models")]
+    default_task_models: Option<IndexMap<String, StrictString>>,
+    #[serde(rename = "model-profiles")]
+    model_profiles: Option<IndexMap<String, ProfileFile>>,
     paths: Option<PathsSection>,
     #[serde(rename = "max-tool-output-bytes", default)]
     max_tool_output_bytes: Option<u64>,
@@ -194,13 +191,13 @@ struct BackoffSection {
     timeout_retry: Option<Vec<f64>>,
 }
 
-/// A single `client-profiles` entry as it appears in `settings.yaml`.
+/// A single `model-profiles` entry as it appears in `settings.yaml`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileFile {
-    client: Option<StrictString>,
-    #[serde(rename = "task-clients", default)]
-    task_clients: Option<IndexMap<String, StrictString>>,
+    model: Option<StrictString>,
+    #[serde(rename = "task-models", default)]
+    task_models: Option<IndexMap<String, StrictString>>,
 }
 
 fn validate_backoff_schedule(name: &str, schedule: Vec<f64>) -> Result<Vec<f64>, ConfigError> {
@@ -253,7 +250,7 @@ impl Config {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES);
                 return Ok(Config {
-                    default_client: env_default_client(),
+                    default_model: env_default_model(),
                     max_tool_output_bytes,
                     ..Config::default()
                 });
@@ -261,73 +258,67 @@ impl Config {
             Err(e) => return Err(e),
         };
 
-        let default_client = cfg_file
-            .default_client
+        let default_model = cfg_file
+            .default_model
             .map(|s| s.0)
             .filter(|s| !s.is_empty())
-            .or_else(env_default_client);
+            .or_else(env_default_model);
 
-        let stage_clients_raw: Option<IndexMap<String, String>> = cfg_file
-            .default_client_by_stage
+        let stage_models_raw: Option<IndexMap<String, String>> = cfg_file
+            .default_model_by_stage
             .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
 
-        // Validate every present task-client map before applying precedence,
+        // Validate every present task-model map before applying precedence,
         // so a bad key in a shadowed map is still rejected.
-        if let Some(m) = cfg_file.default_task_clients.as_ref() {
-            validate_task_clients_keys(m.keys())?;
-        }
-        if let Some(m) = cfg_file.task_clients.as_ref() {
-            validate_task_clients_keys(m.keys())?;
+        if let Some(m) = cfg_file.default_task_models.as_ref() {
+            validate_task_models_keys(m.keys())?;
         }
 
-        let task_clients: Option<IndexMap<String, String>> = cfg_file
-            .default_task_clients
-            .or(cfg_file.task_clients)
+        let task_models: Option<IndexMap<String, String>> = cfg_file
+            .default_task_models
             .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
 
-        // Validate profile-level task-clients keys before consuming the map.
-        if let Some(profiles) = cfg_file.client_profiles.as_ref() {
+        // Validate profile-level task-models keys before consuming the map.
+        if let Some(profiles) = cfg_file.model_profiles.as_ref() {
             for profile in profiles.values() {
-                if let Some(m) = profile.task_clients.as_ref() {
-                    validate_task_clients_keys(m.keys())?;
+                if let Some(m) = profile.task_models.as_ref() {
+                    validate_task_models_keys(m.keys())?;
                 }
             }
         }
 
-        let client_profiles: IndexMap<String, ClientProfile> = cfg_file
-            .client_profiles
+        let model_profiles: IndexMap<String, ModelProfile> = cfg_file
+            .model_profiles
             .unwrap_or_default()
             .into_iter()
             .map(|(name, profile)| {
-                let task_clients = profile
-                    .task_clients
+                let task_models = profile
+                    .task_models
                     .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect());
                 (
                     name,
-                    ClientProfile {
-                        client: profile.client.map(|s| s.0).unwrap_or_default(),
-                        task_clients,
+                    ModelProfile {
+                        model: profile.model.map(|s| s.0).unwrap_or_default(),
+                        task_models,
                     },
                 )
             })
             .collect();
 
-        // Resolve profile references in stage client specifiers.
-        let stage_clients: Option<IndexMap<String, String>> = match stage_clients_raw {
+        // Resolve profile references in stage model specifiers.
+        let stage_models: Option<IndexMap<String, String>> = match stage_models_raw {
             Some(map) => {
                 let resolved: Result<IndexMap<String, String>, String> = map
                     .into_iter()
                     .map(|(k, v)| {
                         let resolved = if let Some(name) = v.strip_prefix("profile:") {
-                            let profile = client_profiles.get(name).ok_or_else(|| {
-                                format!(
-                                    "unknown client profile {name:?} in default-client-by-stage"
-                                )
+                            let profile = model_profiles.get(name).ok_or_else(|| {
+                                format!("unknown model profile {name:?} in default-model-by-stage")
                             })?;
-                            if profile.client.trim().is_empty() {
-                                return Err(format!("client profile {name:?} has no client"));
+                            if profile.model.trim().is_empty() {
+                                return Err(format!("model profile {name:?} has no model"));
                             }
-                            profile.client.clone()
+                            profile.model.clone()
                         } else {
                             v
                         };
@@ -338,8 +329,7 @@ impl Config {
             }
             None => None,
         };
-        let (exact_stage_clients, prefix_stage_clients) =
-            parse_stage_clients(stage_clients.as_ref());
+        let (exact_stage_models, prefix_stage_models) = parse_stage_models(stage_models.as_ref());
 
         let path_overrides = cfg_file.paths.map(PathOverrides::from).unwrap_or_default();
 
@@ -358,37 +348,37 @@ impl Config {
             .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES);
 
         Ok(Config {
-            default_client,
-            exact_stage_clients,
-            prefix_stage_clients,
-            default_task_clients: task_clients,
-            client_profiles,
+            default_model,
+            exact_stage_models,
+            prefix_stage_models,
+            default_task_models: task_models,
+            model_profiles,
             path_overrides,
             max_tool_output_bytes,
             backoff,
         })
     }
 
-    pub fn default_client(&self) -> Option<&str> {
-        self.default_client.as_deref()
+    pub fn default_model(&self) -> Option<&str> {
+        self.default_model.as_deref()
     }
 
-    /// Returns `(exact_map, prefix_map)` from `default-client-by-stage`.
-    pub fn default_client_by_stage(&self) -> (&HashMap<String, String>, &HashMap<String, String>) {
-        (&self.exact_stage_clients, &self.prefix_stage_clients)
+    /// Returns `(exact_map, prefix_map)` from `default-model-by-stage`.
+    pub fn default_model_by_stage(&self) -> (&HashMap<String, String>, &HashMap<String, String>) {
+        (&self.exact_stage_models, &self.prefix_stage_models)
     }
 
-    /// The raw `default-task-clients` map, in declaration order.
+    /// The raw `default-task-models` map, in declaration order.
     ///
-    /// Used by stage-level `task-clients` merging at pipeline-load time: a
+    /// Used by stage-level `task-models` merging at pipeline-load time: a
     /// stage map starts from this and adds its own entries.
-    pub fn default_task_clients(&self) -> Option<&IndexMap<String, String>> {
-        self.default_task_clients.as_ref()
+    pub fn default_task_models(&self) -> Option<&IndexMap<String, String>> {
+        self.default_task_models.as_ref()
     }
 
-    /// The flat client-profile lookup table.
-    pub fn client_profiles(&self) -> &IndexMap<String, ClientProfile> {
-        &self.client_profiles
+    /// The flat model-profile lookup table.
+    pub fn model_profiles(&self) -> &IndexMap<String, ModelProfile> {
+        &self.model_profiles
     }
 
     pub fn path_overrides(&self) -> &PathOverrides {
@@ -413,10 +403,10 @@ impl Config {
 }
 
 // ---------------------------------------------------------------------------
-// Stage client parsing
+// Stage model parsing
 // ---------------------------------------------------------------------------
 
-fn parse_stage_clients(
+fn parse_stage_models(
     map: Option<&IndexMap<String, String>>,
 ) -> (HashMap<String, String>, HashMap<String, String>) {
     let Some(obj) = map else {
@@ -430,7 +420,7 @@ fn parse_stage_clients(
         if let Some(p) = key.strip_suffix('*') {
             if p.is_empty() {
                 warn!(
-                    "config key {:?} in default-client-by-stage produces an empty prefix, \
+                    "config key {:?} in default-model-by-stage produces an empty prefix, \
                      which would match every stage — skipping",
                     key
                 );
@@ -445,12 +435,12 @@ fn parse_stage_clients(
     (exact, prefix)
 }
 
-/// Parse an already-resolved stage-level `task-clients` map into the kind-keyed
+/// Parse an already-resolved stage-level `task-models` map into the kind-keyed
 /// lookup form used by task runners. Keys must already be canonical `TaskKind`
 /// spellings (guaranteed by the YAML reader); an unknown or empty key is a hard
 /// error, matching the load-time validation, so a merged runtime map that
 /// bypasses load-time checks cannot silently drop an override.
-pub fn parse_task_clients_map(
+pub fn parse_task_models_map(
     map: Option<&IndexMap<String, String>>,
 ) -> Result<HashMap<TaskKind, String>, ConfigError> {
     let Some(obj) = map else {
@@ -461,8 +451,8 @@ pub fn parse_task_clients_map(
     for (key, val_str) in obj {
         // Unknown keys are rejected at runtime, matching load-time validation.
         let Some(kind) = TaskKind::parse(key) else {
-            return Err(ConfigError::TaskClients(format!(
-                "unknown task-clients key {key:?}: expected one of {}",
+            return Err(ConfigError::TaskModels(format!(
+                "unknown task-models key {key:?}: expected one of {}",
                 TaskKind::CONFIGURABLE
                     .iter()
                     .map(|k| k.as_str())
@@ -481,20 +471,20 @@ pub fn parse_task_clients_map(
     Ok(by_kind)
 }
 
-/// Validate that every key in a `task-clients`/`default-task-clients` map is a
+/// Validate that every key in a `task-models`/`default-task-models` map is a
 /// canonical `TaskKind` spelling. An unknown or empty key is a hard error.
-fn validate_task_clients_keys<'a>(
+fn validate_task_models_keys<'a>(
     keys: impl Iterator<Item = &'a String>,
 ) -> Result<(), ConfigError> {
     for key in keys {
         if TaskKind::parse(key) == Some(TaskKind::Fork) {
-            return Err(ConfigError::TaskClients(
+            return Err(ConfigError::TaskModels(
                 "Fork cannot be configured — it always inherits the parent model".to_string(),
             ));
         }
         if TaskKind::parse(key).is_none() {
-            return Err(ConfigError::TaskClients(format!(
-                "unknown task-clients key {key:?}: expected one of {}",
+            return Err(ConfigError::TaskModels(format!(
+                "unknown task-models key {key:?}: expected one of {}",
                 TaskKind::CONFIGURABLE
                     .iter()
                     .map(|k| k.as_str())
@@ -518,8 +508,8 @@ pub enum ConfigError {
     Yaml(#[from] serde_yaml::Error),
     #[error("profile error: {0}")]
     Profile(String),
-    #[error("task-clients error: {0}")]
-    TaskClients(String),
+    #[error("task-models error: {0}")]
+    TaskModels(String),
     #[error("backoff error: {0}")]
     Backoff(String),
 }
@@ -564,8 +554,8 @@ pub fn clear_global() {
 // Env-var helpers
 // ---------------------------------------------------------------------------
 
-fn env_default_client() -> Option<String> {
-    std::env::var("GREMLINS_DEFAULT_CLIENT")
+fn env_default_model() -> Option<String> {
+    std::env::var("GREMLINS_DEFAULT_MODEL")
         .ok()
         .filter(|s| !s.is_empty())
 }
@@ -574,38 +564,38 @@ fn env_default_client() -> Option<String> {
 // Client-profile resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve a client reference through the flat `client-profiles` table.
+/// Resolve a model reference through the flat `model-profiles` table.
 ///
 /// Strings starting with `profile:` are profile lookups; everything else is
 /// already a `provider/model[?k=v,...]` spec and passes through unchanged. An
 /// unknown profile is an error.
-pub fn resolve_client_reference(spec: &str, config: &Config) -> Result<String, String> {
+pub fn resolve_model_reference(spec: &str, config: &Config) -> Result<String, String> {
     let name = match spec.strip_prefix("profile:") {
         Some(name) => name,
         None => return Ok(spec.to_string()),
     };
     let profile = config
-        .client_profiles
+        .model_profiles
         .get(name)
-        .ok_or_else(|| format!("unknown client profile {name:?}"))?;
-    if profile.client.trim().is_empty() {
-        return Err(format!("client profile {name:?} has no client"));
+        .ok_or_else(|| format!("unknown model profile {name:?}"))?;
+    if profile.model.trim().is_empty() {
+        return Err(format!("model profile {name:?} has no model"));
     }
-    Ok(profile.client.clone())
+    Ok(profile.model.clone())
 }
 
-/// Resolve a `client:` / `default-client:` value through the global config.
-pub fn resolve_client_with_global(spec: &str) -> Result<String, String> {
+/// Resolve a `model:` / `default-model:` value through the global config.
+pub fn resolve_model_with_global(spec: &str) -> Result<String, String> {
     let config = global_config().map_err(|e| e.to_string())?;
-    resolve_client_reference(spec, &config)
+    resolve_model_reference(spec, &config)
 }
 
-/// Merge a stage-level `task-clients` map over the global
-/// `default-task-clients`, and resolve every value through profiles.
+/// Merge a stage-level `task-models` map over the global
+/// `default-task-models`, and resolve every value through profiles.
 ///
 /// Stage entries win on key conflict; keys not present at the stage level
 /// fall back to the global map.
-pub fn merge_task_clients(
+pub fn merge_task_models(
     stage: Option<&IndexMap<String, String>>,
     global: Option<&IndexMap<String, String>>,
     config: &Config,
@@ -621,20 +611,20 @@ pub fn merge_task_clients(
     }
     let mut resolved = IndexMap::new();
     for (key, value) in &merged {
-        resolved.insert(key.clone(), resolve_client_reference(value, config)?);
+        resolved.insert(key.clone(), resolve_model_reference(value, config)?);
     }
     Ok(Some(resolved))
 }
 
-/// Merge three layers of already-resolved task-client maps at runtime.
+/// Merge three layers of already-resolved task-model maps at runtime.
 ///
 /// Layer order (later wins on key conflict):
-/// 1. Global `default-task-clients` from settings.yaml
-/// 2. Enclosing composite stage's effective task-clients
-/// 3. Current stage's own `task-clients`
+/// 1. Global `default-task-models` from settings.yaml
+/// 2. Enclosing composite stage's effective task-models
+/// 3. Current stage's own `task-models`
 ///
 /// Returns `None` when all layers are empty.
-pub fn merge_task_clients_runtime(
+pub fn merge_task_models_runtime(
     global: Option<&IndexMap<String, String>>,
     enclosing: Option<&IndexMap<String, String>>,
     stage: Option<&IndexMap<String, String>>,
@@ -1010,7 +1000,7 @@ mod tests {
     #[test]
     fn test_config_denies_unknown_top_level_key() {
         let _sandbox = Sandbox::with_config(Some(
-            r#"default-client: "a:b"
+            r#"default-model: "a:b"
 not-a-key: 1"#,
         ));
         assert!(matches!(Config::load(), Err(ConfigError::Yaml(_))));
@@ -1019,9 +1009,9 @@ not-a-key: 1"#,
     #[test]
     fn test_config_denies_unknown_key_in_profile() {
         let _sandbox = Sandbox::with_config(Some(
-            r#"client-profiles:
+            r#"model-profiles:
   demo:
-    client: "a:b"
+    model: "a:b"
     not-a-key: 1"#,
         ));
         assert!(matches!(Config::load(), Err(ConfigError::Yaml(_))));
@@ -1100,7 +1090,7 @@ not-a-key: 1"#,
 
     #[test]
     fn test_config_backoff_defaults_when_section_absent() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"default-client": "a:b"}"#));
+        let _sandbox = Sandbox::with_config(Some(r#"{"default-model": "a:b"}"#));
         let cfg = Config::load().unwrap();
         assert_eq!(cfg.backoff.turn_retry, DEFAULT_TURN_RETRY_BACKOFF.to_vec());
         assert_eq!(
@@ -1207,28 +1197,28 @@ not-a-key: 1"#,
     }
 
     #[test]
-    fn test_config_default_client() {
+    fn test_config_default_model() {
         let cfg_file: ConfigFile =
-            serde_yaml::from_str(r#"default-client: "openai/gpt-4o""#).unwrap();
+            serde_yaml::from_str(r#"default-model: "openai/gpt-4o""#).unwrap();
         assert_eq!(
-            cfg_file.default_client.as_ref().map(|s| s.0.as_str()),
+            cfg_file.default_model.as_ref().map(|s| s.0.as_str()),
             Some("openai/gpt-4o")
         );
     }
 
     #[test]
-    fn test_config_default_client_empty_string() {
-        // Config::load filters empty default-client strings.
-        let _sandbox = Sandbox::with_config(Some(r#"default-client: """#));
+    fn test_config_default_model_empty_string() {
+        // Config::load filters empty default-model strings.
+        let _sandbox = Sandbox::with_config(Some(r#"default-model: """#));
         let cfg = Config::load().unwrap();
         assert!(
-            cfg.default_client().is_none(),
-            "empty default-client must be filtered out"
+            cfg.default_model().is_none(),
+            "empty default-model must be filtered out"
         );
     }
 
     #[test]
-    fn test_config_default_client_by_stage() {
+    fn test_config_default_model_by_stage() {
         let map: IndexMap<String, String> = [
             (
                 "local-review-*".to_string(),
@@ -1237,7 +1227,7 @@ not-a-key: 1"#,
             ("plan-*".to_string(), "openai/gpt-5".to_string()),
         ]
         .into();
-        let (exact, prefix) = parse_stage_clients(Some(&map));
+        let (exact, prefix) = parse_stage_models(Some(&map));
         assert!(exact.is_empty());
         assert_eq!(prefix.len(), 2);
         assert_eq!(
@@ -1254,7 +1244,7 @@ not-a-key: 1"#,
             ("plan-*".to_string(), "openai/gpt-4o".to_string()),
         ]
         .into();
-        let (exact, prefix) = parse_stage_clients(Some(&map));
+        let (exact, prefix) = parse_stage_models(Some(&map));
         assert_eq!(exact.get("review").unwrap(), "openai/gpt-5");
         assert_eq!(prefix.get("plan-").unwrap(), "openai/gpt-4o");
     }
@@ -1267,7 +1257,7 @@ not-a-key: 1"#,
         let path = dir.path().join("settings.yaml");
         fs::write(
             &path,
-            r#"default-client-by-stage:
+            r#"default-model-by-stage:
   prefix-*: 42
   valid-*: openrouter/model
 "#,
@@ -1287,21 +1277,21 @@ not-a-key: 1"#,
             ("plan-*".to_string(), "openai/gpt-5".to_string()),
         ]
         .into();
-        let (exact, prefix) = parse_stage_clients(Some(&map));
+        let (exact, prefix) = parse_stage_models(Some(&map));
         assert!(exact.is_empty());
         assert_eq!(prefix.len(), 1);
         assert_eq!(prefix.get("plan-").unwrap(), "openai/gpt-5");
     }
 
     #[test]
-    fn test_parse_task_clients() {
+    fn test_parse_task_models() {
         // Canonical kind keys are kept as-is.
         let map: IndexMap<String, String> = [
             ("Scout".to_string(), "openai/gpt-4o-mini".to_string()),
             ("Implement".to_string(), "openai/gpt-4o".to_string()),
         ]
         .into();
-        let by_kind = parse_task_clients_map(Some(&map)).unwrap();
+        let by_kind = parse_task_models_map(Some(&map)).unwrap();
         assert_eq!(by_kind.len(), 2);
         assert_eq!(by_kind.get(&TaskKind::Scout).unwrap(), "openai/gpt-4o-mini");
         assert_eq!(by_kind.get(&TaskKind::Implement).unwrap(), "openai/gpt-4o");
@@ -1312,7 +1302,7 @@ not-a-key: 1"#,
             ("Bogus".to_string(), "openai/gpt-5".to_string()),
         ]
         .into();
-        assert!(parse_task_clients_map(Some(&map)).is_err());
+        assert!(parse_task_models_map(Some(&map)).is_err());
 
         // Fork is skipped by the parser, matching load-time validation.
         let map: IndexMap<String, String> = [
@@ -1320,16 +1310,16 @@ not-a-key: 1"#,
             ("Fork".to_string(), "openai/gpt-5".to_string()),
         ]
         .into();
-        let by_kind = parse_task_clients_map(Some(&map)).unwrap();
+        let by_kind = parse_task_models_map(Some(&map)).unwrap();
         assert_eq!(by_kind.len(), 1);
         assert!(!by_kind.contains_key(&TaskKind::Fork));
 
         // Absent key yields an empty map.
-        assert!(parse_task_clients_map(None).unwrap().is_empty());
+        assert!(parse_task_models_map(None).unwrap().is_empty());
     }
 
     #[test]
-    fn test_parse_task_clients_skips_fork_defensively() {
+    fn test_parse_task_models_skips_fork_defensively() {
         // Defense-in-depth: a merged runtime map could theoretically bypass
         // load-time validation, so the parser must skip Fork rather than
         // building an override for it.
@@ -1338,34 +1328,34 @@ not-a-key: 1"#,
             ("Fork".to_string(), "openai/gpt-5".to_string()),
         ]
         .into();
-        let by_kind = parse_task_clients_map(Some(&map)).unwrap();
+        let by_kind = parse_task_models_map(Some(&map)).unwrap();
         assert_eq!(by_kind.len(), 1);
         assert!(!by_kind.contains_key(&TaskKind::Fork));
     }
 
     #[test]
-    fn test_validate_task_clients_rejects_unknown_keys() {
+    fn test_validate_task_models_rejects_unknown_keys() {
         let map: IndexMap<String, String> =
             [("Scout".to_string(), "openai/mini".to_string())].into();
-        assert!(validate_task_clients_keys(map.keys()).is_ok());
+        assert!(validate_task_models_keys(map.keys()).is_ok());
 
         let bad: IndexMap<String, String> =
             [("scout".to_string(), "openai/mini".to_string())].into();
-        assert!(validate_task_clients_keys(bad.keys()).is_err());
+        assert!(validate_task_models_keys(bad.keys()).is_err());
 
         let star: IndexMap<String, String> =
             [("Scout*".to_string(), "openai/mini".to_string())].into();
-        assert!(validate_task_clients_keys(star.keys()).is_err());
+        assert!(validate_task_models_keys(star.keys()).is_err());
 
         let empty: IndexMap<String, String> = IndexMap::new();
-        assert!(validate_task_clients_keys(empty.keys()).is_ok());
+        assert!(validate_task_models_keys(empty.keys()).is_ok());
     }
 
     #[test]
-    fn test_validate_task_clients_rejects_fork() {
+    fn test_validate_task_models_rejects_fork() {
         let fork: IndexMap<String, String> =
             [("Fork".to_string(), "openai/mini".to_string())].into();
-        let err = validate_task_clients_keys(fork.keys()).unwrap_err();
+        let err = validate_task_models_keys(fork.keys()).unwrap_err();
         assert!(
             err.to_string().contains("Fork cannot be configured"),
             "got: {err}"
@@ -1402,7 +1392,7 @@ not-a-key: 1"#,
     fn test_paths_section_absent() {
         // A real settings.yaml, with no `paths` key: the loader must not invent
         // overrides for a section that is simply absent.
-        let _sandbox = Sandbox::with_config(Some(r#"{"default-client": "a:b"}"#));
+        let _sandbox = Sandbox::with_config(Some(r#"{"default-model": "a:b"}"#));
         let cfg = Config::load().unwrap();
         let overrides = cfg.path_overrides();
         assert!(overrides.state_root.is_none());
@@ -1587,7 +1577,7 @@ not-a-key: 1"#,
         // Lazy load only happens once — values are identical
         let cfg1 = global_config().unwrap();
         let cfg2 = global_config().unwrap();
-        assert_eq!(cfg1.default_client(), cfg2.default_client());
+        assert_eq!(cfg1.default_model(), cfg2.default_model());
 
         // After clear, a new Arc is created
         clear_global();
