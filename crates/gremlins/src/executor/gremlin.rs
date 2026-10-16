@@ -172,6 +172,12 @@ pub(crate) struct RuntimeConfig {
     pub stage_models_exact: HashMap<String, String>,
     /// Prefix-match stage→client mappings from config.
     pub stage_models_prefix: HashMap<String, String>,
+    /// Exact-match stage→client mappings from the selected default model
+    /// profile's `model-by-stage`, if any.
+    pub profile_stage_models_exact: HashMap<String, String>,
+    /// Prefix-match stage→client mappings from the selected default model
+    /// profile's `model-by-stage`, if any.
+    pub profile_stage_models_prefix: HashMap<String, String>,
     /// The default model from settings.yaml, if any.
     pub default_model: Option<String>,
     /// The default task-models from settings.yaml, if any.
@@ -195,6 +201,8 @@ impl Clone for RuntimeConfig {
         Self {
             stage_models_exact: self.stage_models_exact.clone(),
             stage_models_prefix: self.stage_models_prefix.clone(),
+            profile_stage_models_exact: self.profile_stage_models_exact.clone(),
+            profile_stage_models_prefix: self.profile_stage_models_prefix.clone(),
             default_model: self.default_model.clone(),
             default_task_models: self.default_task_models.clone(),
             base_process_env: self.base_process_env.clone(),
@@ -214,6 +222,11 @@ impl RuntimeConfig {
             .map(|c| c.default_model_by_stage())
             .map(|(e, p)| (e.clone(), p.clone()))
             .unwrap_or_default();
+        let (profile_stage_exact, profile_stage_prefix) = cfg
+            .as_ref()
+            .map(|c| c.profile_model_by_stage())
+            .map(|(e, p)| (e.clone(), p.clone()))
+            .unwrap_or_default();
         let default_model = cfg
             .as_ref()
             .and_then(|c| c.default_model().map(String::from));
@@ -222,6 +235,8 @@ impl RuntimeConfig {
         Self {
             stage_models_exact: stage_exact,
             stage_models_prefix: stage_prefix,
+            profile_stage_models_exact: profile_stage_exact,
+            profile_stage_models_prefix: profile_stage_prefix,
             default_model,
             default_task_models,
             base_process_env,
@@ -271,6 +286,12 @@ pub struct Gremlin {
     /// (sequence or parallel). Set during fork; used by run_stage_scoped
     /// when no explicit enclosing_task_models is passed.
     pub(crate) enclosing_task_models: Option<IndexMap<String, String>>,
+    /// Explicit model inherited from an enclosing composite stage when this
+    /// gremlin was forked for a parallel child. Consulted by
+    /// `run_stage_scoped` before profile `model-by-stage` resolution so a
+    /// parallel group's `model:` (or its outer composite's `model:`) keeps
+    /// beating the selected profile's stage map.
+    pub(crate) enclosing_model: Option<ModelURI>,
 }
 
 impl Gremlin {
@@ -467,6 +488,7 @@ impl Gremlin {
             scratch_dir,
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
+            enclosing_model: None,
         };
 
         // 5. Create an empty log file.
@@ -603,6 +625,7 @@ impl Gremlin {
             scratch_dir,
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
+            enclosing_model: None,
         })
     }
 
@@ -761,7 +784,9 @@ impl Gremlin {
     ///
     /// When `effective_model` is `Some`, the child's provider is mutated via
     /// [`GremlinDefinition::with_model`] so `default_model()` reflects
-    /// the override.
+    /// the override, and the child also stores it as its inherited
+    /// `enclosing_model` so it is consulted before profile
+    /// `model-by-stage` resolution during dispatch.
     ///
     /// Fork creates the child state directory, copies artifacts, seeds the
     /// registry, and writes an initial state.json. It does **not** populate
@@ -919,6 +944,7 @@ impl Gremlin {
             scratch_dir: child_scratch_dir,
             clean_cmds: self.clean_cmds.clone(),
             enclosing_task_models: self.enclosing_task_models.clone(),
+            enclosing_model: effective_model.cloned(),
         })
     }
 
@@ -2029,6 +2055,7 @@ mod tests {
             scratch_dir: ScratchDir::Persistent(scratch_dir),
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
+            enclosing_model: None,
         }
     }
 

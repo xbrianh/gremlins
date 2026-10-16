@@ -658,6 +658,7 @@ async fn cleanup_child_workspace(child_name: &str, gremlin: Option<Gremlin>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builders::agent::AgentBuilder;
     use crate::builders::artifacts::output;
     use crate::builders::composite::ParallelBuilder;
     use crate::builders::exec::ExecBuilder;
@@ -736,6 +737,7 @@ mod tests {
             scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
+            enclosing_model: None,
         };
         (sandbox, gremlin)
     }
@@ -1073,6 +1075,31 @@ mod tests {
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    /// A parallel group's explicit `model:` is an enclosing model for its
+    /// children, so it must keep beating the selected profile's
+    /// `model-by-stage` map. `cmd/true` (the group model) succeeds while
+    /// `cmd/false` (the profile `plan` mapping) would fail the child.
+    #[tokio::test]
+    async fn parallel_group_model_beats_profile_stage_model() {
+        let stages = vec![ParallelBuilder::new("group")
+            .model(model("cmd/true"))
+            .stage(AgentBuilder::new("plan").prompt("hi").build().unwrap())
+            .build()
+            .unwrap()];
+        let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd/true");
+        gremlin
+            .runtime_config
+            .profile_stage_models_exact
+            .insert("plan".to_string(), "cmd/false".to_string());
+
+        let stage = first_executor_stage(&stages);
+        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        assert!(
+            result.is_ok(),
+            "group model should beat profile stage model, got {result:?}"
+        );
     }
 
     // --- Parent log relay ---

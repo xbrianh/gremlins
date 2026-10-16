@@ -3597,6 +3597,7 @@ fn create_chat_gremlin(
         scratch_dir,
         clean_cmds: Vec::new(),
         enclosing_task_models: None,
+        enclosing_model: None,
     })
 }
 
