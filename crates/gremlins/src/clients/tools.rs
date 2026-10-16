@@ -9,6 +9,7 @@ use regex::Regex;
 use rig_core::completion::ToolDefinition;
 use tokio::process::Command;
 
+use super::agent_loop::format_tool_call_parts;
 use super::task_kind::TaskKind;
 
 const GREP_MAX_LINES: usize = 2000;
@@ -71,6 +72,17 @@ impl SandboxMode {
     }
 }
 
+/// One live tool-output chunk streamed from a running tool into the TUI's
+/// embedded tool slot. Display-only; never reaches the model or the
+/// permanent transcript.
+#[derive(Clone, Debug)]
+pub(crate) struct ToolOutputLine {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) call: String,
+    pub(crate) text: String,
+}
+
 #[derive(Clone)]
 pub(crate) struct ToolContext {
     pub cwd: Option<PathBuf>,
@@ -84,6 +96,31 @@ pub(crate) struct ToolContext {
     /// Point-in-time snapshot of the parent conversation, available to Task
     /// tool calls (used only by `Fork`). `None` when unavailable.
     pub(crate) parent_history: Option<Vec<rig_core::completion::Message>>,
+    /// Optional live-output channel for streaming tool output lines from
+    /// `Bash` and `WebSearch` into the interactive TUI live pane.
+    pub(crate) tool_output: Option<tokio::sync::mpsc::Sender<ToolOutputLine>>,
+}
+
+impl ToolContext {
+    /// Send one completed live-output line for the tool call identified by
+    /// `id` to the optional display channel. Tool results returned to the
+    /// model are unaffected.
+    ///
+    /// Awaits channel capacity so a slow live-output forwarder throttles the
+    /// producing read loop rather than overflowing the buffer and silently
+    /// dropping chunks from the live tool stream.
+    pub(crate) async fn emit_output(&self, id: &str, name: &str, call: &str, text: &str) {
+        if let Some(tx) = &self.tool_output {
+            let _ = tx
+                .send(ToolOutputLine {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    call: call.to_string(),
+                    text: text.to_string(),
+                })
+                .await;
+        }
+    }
 }
 
 pub(crate) fn project_root() -> PathBuf {
@@ -1416,7 +1453,69 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
-pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
+/// Cursor state for [`emit_live_lines`]: `scan` marks the start of the line
+/// currently being assembled and `searched` how far into the buffer the
+/// previous call already looked for newlines.
+struct LineScanner {
+    scan: usize,
+    searched: usize,
+}
+
+impl LineScanner {
+    fn new() -> Self {
+        Self {
+            scan: 0,
+            searched: 0,
+        }
+    }
+}
+
+async fn emit_live_lines(
+    id: &str,
+    name: &str,
+    call: &str,
+    ctx: &ToolContext,
+    bytes: &[u8],
+    scanner: &mut LineScanner,
+    flush: bool,
+) {
+    // `scanner.scan` marks the start of the line currently being assembled;
+    // `scanner.searched` is how far into `bytes` the previous call already
+    // looked for newlines. Each call only searches the region appended since
+    // the last call, so a long newline-free run costs O(new bytes) instead of
+    // re-scanning the whole accumulated buffer on every 8 KiB read (the old
+    // `bytes[scan..]` scan was O(n²) on newline-free output).
+    //
+    // Completed lines are coalesced into a single chunk so a busy command
+    // that emits hundreds of lines per read costs one channel event rather
+    // than one event per line — per-line chunks would crowd the terminal
+    // `ToolResult`/`TurnComplete`/`Done` control events out of the bounded
+    // chat channel. Downstream line-buffered widgets split on `\n` anyway.
+    let mut merged = String::new();
+    let mut cursor = scanner.searched;
+    while cursor < bytes.len() {
+        let pos = match bytes[cursor..].iter().position(|&b| b == b'\n') {
+            Some(pos) => pos,
+            None => break,
+        };
+        let end = cursor + pos;
+        merged.push_str(&String::from_utf8_lossy(&bytes[scanner.scan..end]));
+        merged.push('\n');
+        cursor = end + 1;
+        scanner.scan = cursor;
+    }
+    scanner.searched = bytes.len();
+    if flush && scanner.scan < bytes.len() {
+        merged.push_str(&String::from_utf8_lossy(&bytes[scanner.scan..]));
+        merged.push('\n');
+        scanner.scan = bytes.len();
+    }
+    if !merged.is_empty() {
+        ctx.emit_output(id, name, call, &merged).await;
+    }
+}
+
+pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str, id: &str) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1425,6 +1524,7 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
         Ok(s) => s,
         Err(e) => return e,
     };
+    let call = format_tool_call_parts("Bash", &args);
     let timeout_secs = args
         .get("timeout")
         .and_then(|v| v.as_u64())
@@ -1458,7 +1558,7 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
         env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
         cmd.env_clear().envs(env);
     }
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return format!("Error: {e}"),
     };
@@ -1467,7 +1567,81 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
     // kills the whole group — not just the direct `bash` child.
     #[cfg(unix)]
     let mut process_group_guard = ProcessGroupGuard::new(child.id());
-    match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
+
+    // Take the pipes explicitly so the read loop can process stdout and
+    // stderr concurrently and emit completed lines to the live pane while
+    // keeping the exact same raw stdout-then-stderr result string.
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut out_buf = [0u8; 8192];
+    let mut err_buf = [0u8; 8192];
+    let read_all = async {
+        use tokio::io::AsyncReadExt;
+        let mut stdout_done = stdout.is_none();
+        let mut stderr_done = stderr.is_none();
+        let mut read_error: Option<std::io::Error> = None;
+        let mut out_scanner = LineScanner::new();
+        let mut err_scanner = LineScanner::new();
+        loop {
+            if read_error.is_some() || (stdout_done && stderr_done) {
+                break;
+            }
+            tokio::select! {
+                r = async {
+                    stdout.as_mut().unwrap().read(&mut out_buf).await
+                }, if !stdout_done => {
+                    match r {
+                        Ok(0) => {
+                            stdout_done = true;
+                            stdout = None;
+                        }
+                        Ok(n) => {
+                            out.extend_from_slice(&out_buf[..n]);
+                            emit_live_lines(id, "Bash", &call, ctx, &out, &mut out_scanner, false)
+                                .await;
+                        }
+                        Err(e) => {
+                            stdout = None;
+                            read_error = Some(e);
+                        }
+                    }
+                }
+                r = async {
+                    stderr.as_mut().unwrap().read(&mut err_buf).await
+                }, if !stderr_done => {
+                    match r {
+                        Ok(0) => {
+                            stderr_done = true;
+                            stderr = None;
+                        }
+                        Ok(n) => {
+                            err.extend_from_slice(&err_buf[..n]);
+                            emit_live_lines(id, "Bash", &call, ctx, &err, &mut err_scanner, false)
+                                .await;
+                        }
+                        Err(e) => {
+                            stderr = None;
+                            read_error = Some(e);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(e) = read_error {
+            return Err(e);
+        }
+        emit_live_lines(id, "Bash", &call, ctx, &out, &mut out_scanner, true).await;
+        emit_live_lines(id, "Bash", &call, ctx, &err, &mut err_scanner, true).await;
+        Ok(())
+    };
+
+    let run = async {
+        read_all.await?;
+        child.wait().await
+    };
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), run).await {
         Err(_) => {
             // `process_group_guard` fires as this function returns; the
             // direct child is also covered by `kill_on_drop` when the
@@ -1479,26 +1653,31 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str) -> String {
             process_group_guard.disarm();
             format!("Error: {e}")
         }
-        Ok(Ok(output)) => {
+        Ok(Ok(status)) => {
             #[cfg(unix)]
             process_group_guard.disarm();
-            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            if output.status.success() {
+            let mut text = String::from_utf8_lossy(&out).into_owned();
+            text.push_str(&String::from_utf8_lossy(&err));
+            if status.success() {
                 text
             } else {
-                format!("[exit {}]\n{text}", output.status.code().unwrap_or(1))
+                format!("[exit {}]\n{text}", status.code().unwrap_or(1))
             }
         }
     }
 }
 
-pub(crate) async fn websearch_invoke(ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn websearch_invoke(ctx: &ToolContext, args_json: &str, id: &str) -> String {
     let cap = crate::config::max_tool_output_bytes();
-    websearch_invoke_with_cap(ctx, args_json, cap).await
+    websearch_invoke_with_cap(ctx, args_json, cap, id).await
 }
 
-async fn websearch_invoke_with_cap(ctx: &ToolContext, args_json: &str, cap: u64) -> String {
+async fn websearch_invoke_with_cap(
+    ctx: &ToolContext,
+    args_json: &str,
+    cap: u64,
+    id: &str,
+) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1507,6 +1686,7 @@ async fn websearch_invoke_with_cap(ctx: &ToolContext, args_json: &str, cap: u64)
         Ok(s) => s,
         Err(e) => return e,
     };
+    let call = format_tool_call_parts("WebSearch", &args);
     let timeout_secs = args
         .get("timeout")
         .and_then(|v| v.as_u64())
@@ -1599,6 +1779,8 @@ async fn websearch_invoke_with_cap(ctx: &ToolContext, args_json: &str, cap: u64)
         let mut stderr_done = stderr.is_none();
         let out_limit = data_limit;
         let err_limit = data_limit;
+        let mut out_scanner = LineScanner::new();
+        let mut err_scanner = LineScanner::new();
         loop {
             if capped || (stdout_done && stderr_done) {
                 break;
@@ -1617,6 +1799,8 @@ async fn websearch_invoke_with_cap(ctx: &ToolContext, args_json: &str, cap: u64)
                             }
                             let take = n.min(remaining);
                             out.extend_from_slice(&out_buf[..take]);
+                            emit_live_lines(id, "WebSearch", &call, ctx, &out, &mut out_scanner, false)
+                                .await;
                             if take < n {
                                 capped = true;
                                 break;
@@ -1641,6 +1825,8 @@ async fn websearch_invoke_with_cap(ctx: &ToolContext, args_json: &str, cap: u64)
                             if body_room > 0 {
                                 let take = n.min(err_room);
                                 err.extend_from_slice(&err_buf[..take]);
+                                emit_live_lines(id, "WebSearch", &call, ctx, &err, &mut err_scanner, false)
+                                    .await;
                             } else if err_room == 0 {
                                 stderr_done = true;
                             }
@@ -1649,6 +1835,8 @@ async fn websearch_invoke_with_cap(ctx: &ToolContext, args_json: &str, cap: u64)
                 }
             }
         }
+        emit_live_lines(id, "WebSearch", &call, ctx, &out, &mut out_scanner, true).await;
+        emit_live_lines(id, "WebSearch", &call, ctx, &err, &mut err_scanner, true).await;
         capped
     };
     let capped = match tokio::time::timeout(Duration::from_secs(timeout_secs), read_all).await {
@@ -2120,7 +2308,7 @@ fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
     None
 }
 
-pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn invoke(id: &str, name: &str, ctx: &ToolContext, args_json: &str) -> String {
     if let Some(allowed) = &ctx.allowed_tools {
         if !always_available(name) && !allowed.iter().any(|n| n == name) {
             return format!("Error: unknown tool {name}");
@@ -2166,11 +2354,11 @@ pub(crate) async fn invoke(name: &str, ctx: &ToolContext, args_json: &str) -> St
     let res = match name {
         "Read" => read_invoke(ctx, args_json).await,
         "Edit" => edit_invoke(ctx, args_json).await,
-        "Bash" => bash_invoke(ctx, args_json).await,
+        "Bash" => bash_invoke(ctx, args_json, id).await,
         "Write" => write_invoke(ctx, args_json).await,
         "Grep" => grep_invoke(ctx, args_json).await,
         "Glob" => glob_invoke(ctx, args_json).await,
-        "WebSearch" => websearch_invoke(ctx, args_json).await,
+        "WebSearch" => websearch_invoke(ctx, args_json, id).await,
         "Task" => {
             if let Some(f) = &ctx.task_fn {
                 let kind_str = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
@@ -2500,6 +2688,7 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         }
     }
 
@@ -2548,17 +2737,59 @@ mod tests {
         let dir = tmp();
         let mut c = ctx(&dir);
         let args = serde_json::json!({"command": "echo hi"}).to_string();
-        assert_eq!(bash_invoke(&c, &args).await.trim(), "hi");
+        assert_eq!(bash_invoke(&c, &args, "tool-test-id").await.trim(), "hi");
         c.extra_env = Some(HashMap::from([("GREMLIN_TEST_TOKEN".into(), "abc".into())]));
         let env_args =
             serde_json::json!({"command": "printf %s \"$GREMLIN_TEST_TOKEN\""}).to_string();
-        assert_eq!(bash_invoke(&c, &env_args).await, "abc");
+        assert_eq!(bash_invoke(&c, &env_args, "tool-test-id").await, "abc");
         let fail = serde_json::json!({"command": "exit 7"}).to_string();
-        assert!(bash_invoke(&c, &fail).await.starts_with("[exit 7]"));
+        assert!(bash_invoke(&c, &fail, "tool-test-id")
+            .await
+            .starts_with("[exit 7]"));
         // Process substitution is bash-only; `sh` would fail here, proving
         // the interpreter is `bash` rather than a POSIX shell.
         let bash_only = serde_json::json!({"command": "diff <(echo a) <(echo a)"}).to_string();
-        assert_eq!(bash_invoke(&c, &bash_only).await.trim(), "");
+        assert_eq!(bash_invoke(&c, &bash_only, "tool-test-id").await.trim(), "");
+    }
+
+    #[tokio::test]
+    async fn bash_streaming_emits_completed_lines_and_final_flush() {
+        let dir = tmp();
+        let mut c = ctx(&dir);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ToolOutputLine>(8);
+        c.tool_output = Some(tx);
+
+        // No trailing newline: the final flush must emit the trailing partial
+        // with an appended `\n`.
+        let args = serde_json::json!({ "command": "printf 'a\\nbb\\nccc'" }).to_string();
+        let out = bash_invoke(&c, &args, "tool-test-id").await;
+        assert_eq!(out, "a\nbb\nccc");
+
+        let mut chunks = Vec::new();
+        while let Ok(line) = rx.try_recv() {
+            assert_eq!(line.id, "tool-test-id");
+            assert_eq!(line.name, "Bash");
+            chunks.push(line.text);
+        }
+        let joined: String = chunks.concat();
+        assert_eq!(
+            joined, "a\nbb\nccc\n",
+            "live chunks must preserve line boundaries and flush the trailing partial"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_interleaved_stdout_stderr_preserves_stdout_then_stderr() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        // Interleave stdout/stderr writes so completion order is not trivially
+        // the emission order; the result string must still be stdout-then-stderr.
+        let args = serde_json::json!(
+            { "command": "printf out1; printf err1 >&2; printf out2; printf err2 >&2" }
+        )
+        .to_string();
+        let out = bash_invoke(&c, &args, "tool-test-id").await;
+        assert_eq!(out, "out1out2err1err2");
     }
 
     #[tokio::test]
@@ -2566,7 +2797,7 @@ mod tests {
         let dir = tmp();
         let c = ctx(&dir);
         let args = serde_json::json!({"command": "echo ok", "timeout": 5}).to_string();
-        let out = bash_invoke(&c, &args).await;
+        let out = bash_invoke(&c, &args, "tool-test-id").await;
         assert_eq!(out.trim(), "ok");
         assert!(!out.contains("[timeout]"));
     }
@@ -2576,7 +2807,7 @@ mod tests {
         let dir = tmp();
         let c = ctx(&dir);
         let args = serde_json::json!({"command": "sleep 10", "timeout": 1}).to_string();
-        let out = bash_invoke(&c, &args).await;
+        let out = bash_invoke(&c, &args, "tool-test-id").await;
         assert_eq!(out, "[timeout]");
     }
 
@@ -2596,7 +2827,7 @@ mod tests {
             child = child_pid.display(),
         );
         let args = serde_json::json!({ "command": command, "timeout": 1 }).to_string();
-        let out = bash_invoke(&c, &args).await;
+        let out = bash_invoke(&c, &args, "tool-test-id").await;
         assert_eq!(out, "[timeout]");
 
         let read_pid = |path: &std::path::Path| -> u32 {
@@ -2629,7 +2860,7 @@ mod tests {
         let dir = tmp();
         let c = ctx(&dir);
         let args = serde_json::json!({"command": "echo ok"}).to_string();
-        let out = bash_invoke(&c, &args).await;
+        let out = bash_invoke(&c, &args, "tool-test-id").await;
         assert_eq!(out.trim(), "ok");
         assert!(!out.contains("[timeout]"));
     }
@@ -2639,7 +2870,7 @@ mod tests {
         let dir = tmp();
         let c = ctx(&dir);
         let args = serde_json::json!({"command": "echo ok", "timeout": 0}).to_string();
-        let out = bash_invoke(&c, &args).await;
+        let out = bash_invoke(&c, &args, "tool-test-id").await;
         assert_eq!(out.trim(), "ok");
         assert!(!out.contains("[timeout]"));
     }
@@ -2660,9 +2891,10 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let args = serde_json::json!({"command": "pwd; ls"}).to_string();
-        let output = bash_invoke(&c, &args).await;
+        let output = bash_invoke(&c, &args, "tool-test-id").await;
         assert!(
             output.contains(dir.to_str().unwrap()),
             "bash_invoke pwd must contain cwd={}, got: {output}",
@@ -2687,10 +2919,11 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let expected = std::env::current_dir().unwrap();
         let args = serde_json::json!({"command": "pwd"}).to_string();
-        let output = bash_invoke(&c, &args).await;
+        let output = bash_invoke(&c, &args, "tool-test-id").await;
         assert!(
             output.trim().contains(expected.to_str().unwrap()),
             "bash_invoke with cwd=None should use process cwd={}, got: {output}",
@@ -2884,7 +3117,7 @@ mod tests {
         let c = ctx(&dir);
         let (url, server) = spawn_http_server("hello from local server\n".into(), true);
         let args = serde_json::json!({ "url": url }).to_string();
-        let out = websearch_invoke(&c, &args).await;
+        let out = websearch_invoke(&c, &args, "tool-test-id").await;
         server.join().unwrap();
         assert_eq!(out, "hello from local server");
     }
@@ -2897,7 +3130,7 @@ mod tests {
         let (url, server) = spawn_http_server("ok\n".into(), true);
         // `timeout` is optional; an args object with only `url` must dispatch.
         let args = serde_json::json!({ "url": url }).to_string();
-        let out = websearch_invoke(&c, &args).await;
+        let out = websearch_invoke(&c, &args, "tool-test-id").await;
         server.join().unwrap();
         assert_eq!(out, "ok");
         assert!(!out.contains("[timeout]"));
@@ -2911,7 +3144,7 @@ mod tests {
         // Bind and immediately release a port so the connection is refused.
         let url = format!("http://127.0.0.1:{}/", unused_local_port());
         let args = serde_json::json!({ "url": url, "timeout": 5 }).to_string();
-        let out = websearch_invoke(&c, &args).await;
+        let out = websearch_invoke(&c, &args, "tool-test-id").await;
         assert!(out.starts_with("[exit"), "got: {out:?}");
         assert!(out.contains("curl:"), "got: {out:?}");
         assert!(out.contains("Failed to connect"), "got: {out:?}");
@@ -2928,7 +3161,7 @@ mod tests {
         let (url, server) = spawn_http_server(body, false);
         let cap = 64;
         let args = serde_json::json!({ "url": url, "timeout": 5 }).to_string();
-        let out = websearch_invoke_with_cap(&c, &args, cap).await;
+        let out = websearch_invoke_with_cap(&c, &args, cap, "tool-test-id").await;
         server.join().unwrap();
         assert!(out.starts_with("[truncated at 64 bytes]\n"), "got: {out:?}");
         assert!(out.contains("0123456789"), "got: {out:?}");
@@ -3544,7 +3777,7 @@ mod tests {
         c.audit_log = Some(log.clone());
         let outside = dir.parent().unwrap().join("secret.txt");
         let args = serde_json::json!({"file_path": outside.to_str().unwrap()}).to_string();
-        let result = invoke("Read", &c, &args).await;
+        let result = invoke("tool-test-id", "Read", &c, &args).await;
         assert!(result.contains("outside sandbox"));
         let entry: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
@@ -3561,7 +3794,7 @@ mod tests {
         let mut c = ctx(&dir);
         c.audit_log = Some(log.clone());
         let args = serde_json::json!({"file_path": target.to_str().unwrap()}).to_string();
-        let result = invoke("Read", &c, &args).await;
+        let result = invoke("tool-test-id", "Read", &c, &args).await;
         assert_eq!(result, "hi");
         let entry: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
@@ -3574,7 +3807,7 @@ mod tests {
         let log = dir.join("audit.jsonl");
         let mut c = ctx(&dir);
         c.audit_log = Some(log.clone());
-        let result = invoke("Read", &c, "not-json{{{").await;
+        let result = invoke("tool-test-id", "Read", &c, "not-json{{{").await;
         assert!(result.contains("Error"));
         let entry: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
@@ -3588,7 +3821,7 @@ mod tests {
         let mut c = ctx(&dir);
         c.audit_log = Some(log.clone());
         let args = serde_json::json!({"command": "cat /etc/passwd"}).to_string();
-        let result = invoke("Bash", &c, &args).await;
+        let result = invoke("tool-test-id", "Bash", &c, &args).await;
         assert!(result.contains("outside sandbox"));
         let entry: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
@@ -3610,11 +3843,12 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let write_args =
             serde_json::json!({"file_path": target.to_str().unwrap(), "content": "nope"})
                 .to_string();
-        let write_out = invoke("Write", &c, &write_args).await;
+        let write_out = invoke("tool-test-id", "Write", &c, &write_args).await;
         assert!(write_out.contains("unknown tool"));
         assert!(!target.exists());
 
@@ -3623,7 +3857,7 @@ mod tests {
             "command": format!("touch {}", marker.display())
         })
         .to_string();
-        let bash_out = invoke("Bash", &c, &bash_args).await;
+        let bash_out = invoke("tool-test-id", "Bash", &c, &bash_args).await;
         assert!(bash_out.contains("unknown tool"));
         assert!(!marker.exists());
     }
@@ -4017,9 +4251,10 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
-        let result = invoke("Task", &c, &args).await;
+        let result = invoke("tool-test-id", "Task", &c, &args).await;
         assert!(result.contains("Task not available"));
     }
 
@@ -4042,9 +4277,10 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
-        let result = invoke("Task", &c, &args).await;
+        let result = invoke("tool-test-id", "Task", &c, &args).await;
         assert!(*called.lock().unwrap());
         assert!(result.contains("task result: Scout / do something"));
     }
@@ -4065,14 +4301,15 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": ""}).to_string();
-        let result = invoke("Task", &c, &args).await;
+        let result = invoke("tool-test-id", "Task", &c, &args).await;
         assert!(result.contains("Task prompt is required"));
 
         // Missing prompt key entirely — caught by schema validation.
         let args2 = serde_json::json!({"kind": "Scout"}).to_string();
-        let result2 = invoke("Task", &c, &args2).await;
+        let result2 = invoke("tool-test-id", "Task", &c, &args2).await;
         assert!(result2.contains("missing 'prompt'"), "got: {result2}");
     }
 
@@ -4095,9 +4332,10 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let args = serde_json::json!({"kind": "Bogus", "prompt": "go"}).to_string();
-        let result = invoke("Task", &c, &args).await;
+        let result = invoke("tool-test-id", "Task", &c, &args).await;
         assert!(result.contains("unknown Task kind"), "got: {result}");
         assert!(
             !*called.lock().unwrap(),
@@ -4120,9 +4358,13 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
-        assert_eq!(invoke("Task", &c, &args).await, "# Scout\n\nbody");
+        assert_eq!(
+            invoke("tool-test-id", "Task", &c, &args).await,
+            "# Scout\n\nbody"
+        );
     }
 
     #[tokio::test]
@@ -4130,7 +4372,7 @@ mod tests {
         let dir = tmp();
         let c = ctx(&dir);
         let args = serde_json::json!({"summary": "wrote three files and fixed tests"}).to_string();
-        let result = invoke("Done", &c, &args).await;
+        let result = invoke("tool-test-id", "Done", &c, &args).await;
         assert_eq!(result, "Done. wrote three files and fixed tests");
     }
 
@@ -4139,7 +4381,7 @@ mod tests {
         let dir = tmp();
         let c = ctx(&dir);
         let args = serde_json::json!({"summary": ""}).to_string();
-        let result = invoke("Done", &c, &args).await;
+        let result = invoke("tool-test-id", "Done", &c, &args).await;
         assert_eq!(result, "Done. ");
     }
 
@@ -4389,7 +4631,7 @@ mod tests {
         // Generate output that is ~200 bytes — well over a 10-byte cap.
         let args = serde_json::json!({"command": "i=0; while [ $i -lt 200 ]; do printf x; i=$((i+1)); done"}).to_string();
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
-        let result = invoke("Bash", &c, &args).await;
+        let result = invoke("tool-test-id", "Bash", &c, &args).await;
         assert!(
             result.contains("Tool output exceeded the limit"),
             "oversized Bash must be capped, got: {result}"
@@ -4409,7 +4651,7 @@ mod tests {
         std::fs::write(dir.join("big.txt"), &big).unwrap();
         let args = serde_json::json!({"file_path": "big.txt"}).to_string();
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
-        let result = invoke("Read", &c, &args).await;
+        let result = invoke("tool-test-id", "Read", &c, &args).await;
         assert!(
             result.contains("Tool output exceeded the limit"),
             "oversized Read must be capped, got: {result}"
@@ -4427,7 +4669,7 @@ mod tests {
         let c = ctx(&dir);
         let args = serde_json::json!({"command": "i=0; while [ $i -lt 200 ]; do printf x; i=$((i+1)); done"}).to_string();
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "0");
-        let result = invoke("Bash", &c, &args).await;
+        let result = invoke("tool-test-id", "Bash", &c, &args).await;
         assert!(
             result.contains('x'),
             "cap=0 must return actual output, got: {result}"
@@ -4446,7 +4688,7 @@ mod tests {
         let long_summary = "x".repeat(500);
         let args = serde_json::json!({"summary": &long_summary}).to_string();
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
-        let result = invoke("Done", &c, &args).await;
+        let result = invoke("tool-test-id", "Done", &c, &args).await;
         assert!(
             result.starts_with("Done. "),
             "Done must not be capped, got: {result}"
@@ -4472,10 +4714,11 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
-        let result = invoke("Task", &c, &args).await;
+        let result = invoke("tool-test-id", "Task", &c, &args).await;
         assert!(
             result.contains('x'),
             "Task must not be capped, got: {result}"
@@ -4499,6 +4742,7 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            tool_output: None,
         }
     }
 
@@ -4519,7 +4763,7 @@ mod tests {
 
         let c = allow_all_ctx(&dir);
         let args = serde_json::json!({"file_path": secret.to_str().unwrap()}).to_string();
-        let result = invoke("Read", &c, &args).await;
+        let result = invoke("tool-test-id", "Read", &c, &args).await;
         assert_eq!(
             result, "top secret",
             "AllowAll must permit out-of-roots read"
@@ -4543,7 +4787,7 @@ mod tests {
         let c = allow_all_ctx(&dir);
         let args =
             serde_json::json!({"file_path": target.to_str().unwrap(), "content": "hi"}).to_string();
-        let result = invoke("Write", &c, &args).await;
+        let result = invoke("tool-test-id", "Write", &c, &args).await;
         assert_eq!(result, "OK", "AllowAll must permit out-of-roots write");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hi");
     }
@@ -4554,7 +4798,7 @@ mod tests {
         let c = allow_all_ctx(&dir);
         // /etc/passwd is outside every root; bash_check must not deny it.
         let args = serde_json::json!({"command": "cat /etc/passwd"}).to_string();
-        let result = invoke("Bash", &c, &args).await;
+        let result = invoke("tool-test-id", "Bash", &c, &args).await;
         assert!(
             !result.contains("outside sandbox"),
             "AllowAll must bypass bash_check, got: {result}"

@@ -17,7 +17,7 @@ the concrete backend implementations themselves (`backends/`).
 | `openai_protocol.rs` | Shared state and run/reap logic (`OpenAiRunState`, `run_openai_compat`, `reap_openai_compat`) for backends that speak the OpenAI completions protocol. |
 | `retry.rs` | `with_retry` backoff helper and the shared `STREAM_IDLE_BACKOFF` schedule, used by both native and `cmd` backends. |
 | `tools.rs` | Implements the six native tools (`Bash`, `Edit`, `Read`, `Write`, `Grep`, `Glob`) plus `Task`/`Done`, with sandboxing (`allowed_roots`) and the `ToolContext` passed through the agent loop. |
-| `interactive.rs` | The channel triplet connecting the supervisor to a running agent loop: `InteractiveHandle`/`InteractiveSession`, plus `PauseToken` for operator pause/resume. |
+| `interactive.rs` | The channel triplet connecting the supervisor to a running agent loop: `InteractiveHandle`/`InteractiveSession`, plus `PauseToken` for operator pause/resume. `StreamEventSender` wraps the two stream paths — `Broadcast` for debug/interactive (lag-tolerant) and `Mpsc` for chat (bounded, backpressured, lossless). |
 | `stream_json.rs` | Parses `stream-json` event lines (used by `cmd` backends) and extracts `StreamState` (cost, result text, error status). |
 | `log_util.rs` | `trunc` — single-purpose string truncation helper for log lines. |
 | `anthropic_bearer_http.rs` | `BearerHttpClient` — eager HTTP client wrapper that rewrites `x-api-key` → `Authorization: Bearer` for Azure's Anthropic-compatible API (cognitive services with Entra ID tokens). Used by `backends/anthropic.rs` for the per-attempt dynamic-auth path; the lazy variant used by `make_model` lives in `lazy_auth_http.rs`. |

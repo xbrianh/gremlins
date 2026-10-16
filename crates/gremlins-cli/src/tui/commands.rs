@@ -11,11 +11,9 @@ pub enum CommandResult {
         op: String,
         payload: serde_json::Value,
     },
-    /// Toggle the non-blocking gremlins watch table.
-    ToggleWatch,
-    /// Open a single-gremlin log viewer overlay.
-    WatchSingle(String),
-    /// Open an interactive debug session overlay.
+    /// Enter the full-screen gremlins watch table.
+    ShowRuns,
+    /// Enter the full-screen interactive debug session.
     Debug(String),
 }
 
@@ -194,10 +192,12 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
             })
         }
         "watch" => {
-            if let Some(id) = args.first() {
-                Some(CommandResult::WatchSingle(id.to_string()))
+            if args.is_empty() {
+                Some(CommandResult::ShowRuns)
             } else {
-                Some(CommandResult::ToggleWatch)
+                Some(CommandResult::Lines(vec![
+                    "usage: /watch — select a running gremlin with Up/Down and press Ctrl+O to open or close its live log".to_string(),
+                ]))
             }
         }
         "debug" => {
@@ -263,9 +263,9 @@ fn help_text() -> Vec<String> {
         "  /stop <id>       — stop a gremlin".to_string(),
         "  /resume <id>     — resume a gremlin".to_string(),
         "  /log <id>        — show gremlin log".to_string(),
-        "  /watch           — toggle the gremlins watch table".to_string(),
-        "  /watch <id>      — open a single-gremlin log viewer".to_string(),
-        "  /debug <id>      — open an interactive debug session".to_string(),
+        "  /watch           — show running gremlins; ↑/↓ select, Ctrl+O toggles live log"
+            .to_string(),
+        "  /debug <id>      — open a full-screen interactive debug session".to_string(),
         "  /model           — show default client".to_string(),
         "  /chat            — chat is always active (type directly)".to_string(),
         "  /clear, /new     — restart chat".to_string(),
@@ -276,7 +276,10 @@ fn help_text() -> Vec<String> {
         "  Ctrl+C           — clear / cancel; repeat within 1s to exit".to_string(),
         "  Ctrl+D (empty)   — exit".to_string(),
         "  Ctrl+L           — redraw screen".to_string(),
-        "  Esc              — clear input / cancel in-flight chat".to_string(),
+        "  Ctrl+O           — in /watch: open or close the selected gremlin's live log".to_string(),
+        "  Up/Down          — in /watch: move the gremlin selection".to_string(),
+        "  Esc              — in /watch: close the live log first, then return to chat; otherwise clear/cancel"
+            .to_string(),
         "  Ctrl+G           — open external editor".to_string(),
         "  Tab              — complete filepaths (Shift+Tab cycles back)".to_string(),
         "".to_string(),
@@ -414,5 +417,20 @@ mod tests {
         assert!(lines
             .iter()
             .any(|l| l.contains("usage: /artifact <id> <artifact://uri> [--json-path <path>]")));
+    }
+
+    #[test]
+    fn watch_without_id_enters_runs_screen() {
+        assert!(matches!(dispatch("/watch"), Some(CommandResult::ShowRuns)));
+    }
+
+    #[test]
+    fn watch_with_id_prints_usage_instead_of_opening_a_viewer() {
+        let lines = match dispatch("/watch gr-1") {
+            Some(CommandResult::Lines(lines)) => lines,
+            _ => panic!("expected usage lines"),
+        };
+        assert!(lines.iter().any(|l| l.contains("usage: /watch")));
+        assert!(lines.iter().any(|l| l.contains("Ctrl+O")));
     }
 }

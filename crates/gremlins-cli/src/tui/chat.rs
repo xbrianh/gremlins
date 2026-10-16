@@ -15,8 +15,21 @@ pub enum ChatEvent {
         text: String,
         turn: Option<String>,
     },
-    ToolResult {
+    ToolOutputChunk {
+        id: String,
         name: String,
+        /// Formatted tool call (`format_tool_call` output) used as the
+        /// live tool-slot title row.
+        call: String,
+        text: String,
+        turn: Option<String>,
+    },
+    ToolResult {
+        id: String,
+        name: String,
+        /// Formatted tool call (`format_tool_call` output) used as the
+        /// committed tool-block title row.
+        call: String,
         output: String,
         turn: Option<String>,
     },
@@ -63,9 +76,42 @@ pub(crate) fn parse_chat_event(value: &Value) -> Option<ChatEvent> {
                 .to_string(),
             turn,
         }),
-        Some("tool_result") => Some(ChatEvent::ToolResult {
+        Some("tool_output_chunk") => Some(ChatEvent::ToolOutputChunk {
+            id: value
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             name: value
                 .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            call: value
+                .get("call")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            text: value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            turn,
+        }),
+        Some("tool_result") => Some(ChatEvent::ToolResult {
+            id: value
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            name: value
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            call: value
+                .get("call")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
@@ -170,6 +216,62 @@ mod tests {
                 assert_eq!(summary, "");
             }
             other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_output_chunk_carries_id_name_call_and_turn() {
+        let value = serde_json::json!({
+            "type": "tool_output_chunk",
+            "id": "call_9",
+            "name": "Bash",
+            "call": "Bash(command=\"make -j8 check && make -j8 test\")",
+            "text": "hello\n",
+            "turn": "7",
+        });
+        match parse_chat_event(&value) {
+            Some(ChatEvent::ToolOutputChunk {
+                id,
+                name,
+                call,
+                text,
+                turn,
+            }) => {
+                assert_eq!(id, "call_9");
+                assert_eq!(name, "Bash");
+                assert_eq!(call, "Bash(command=\"make -j8 check && make -j8 test\")");
+                assert_eq!(text, "hello\n");
+                assert_eq!(turn.as_deref(), Some("7"));
+            }
+            other => panic!("expected ToolOutputChunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_result_carries_id_and_call() {
+        let value = serde_json::json!({
+            "type": "tool_result",
+            "id": "call_11",
+            "name": "Grep",
+            "call": "Grep(pattern=\"fn main\")",
+            "output": "src/main.rs:1:fn main() {}",
+            "turn": "8",
+        });
+        match parse_chat_event(&value) {
+            Some(ChatEvent::ToolResult {
+                id,
+                name,
+                call,
+                output,
+                turn,
+            }) => {
+                assert_eq!(id, "call_11");
+                assert_eq!(name, "Grep");
+                assert_eq!(call, "Grep(pattern=\"fn main\")");
+                assert_eq!(output, "src/main.rs:1:fn main() {}");
+                assert_eq!(turn.as_deref(), Some("8"));
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
         }
     }
 }

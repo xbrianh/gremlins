@@ -125,8 +125,27 @@ pub enum InteractiveEvent {
     StreamChunk { text: String },
     /// Incremental reasoning fragment from the model stream.
     ReasoningChunk { text: String },
+    /// A line-buffered tool-output chunk streamed while a tool runs. This is
+    /// display-only and never reaches the model or the permanent transcript.
+    ToolOutputChunk {
+        /// Tool-call id this chunk belongs to.
+        id: String,
+        name: String,
+        /// Formatted tool call (`format_tool_call` output), used by the TUI
+        /// as the live tool-slot title row.
+        call: String,
+        text: String,
+    },
     /// A tool result produced after execution.
-    ToolResult { name: String, output: String },
+    ToolResult {
+        /// Tool-call id this result belongs to.
+        id: String,
+        name: String,
+        /// Formatted tool call (`format_tool_call` output), used by the TUI
+        /// as the committed tool-block title row.
+        call: String,
+        output: String,
+    },
     /// Interactive session ended.
     Ended {
         /// How the session ended: "resumed", "bailed", or "disconnect".
@@ -145,8 +164,8 @@ pub enum InteractiveEvent {
 /// The interactive/debug path uses a broadcast sender because it genuinely
 /// has multiple subscribers (the debug supervisor calls `subscribe()`). The
 /// chat path uses a bounded mpsc sender so a single runaway chat can never
-/// exhaust daemon memory — when the channel is full, events are dropped
-/// (the TUI already reconciles from `TurnComplete`).
+/// exhaust daemon memory — the bound limits memory, while an awaited send
+/// provides backpressure instead of dropping live stream events.
 #[derive(Clone, Debug)]
 pub enum StreamEventSender {
     Broadcast(broadcast::Sender<InteractiveEvent>),
@@ -157,11 +176,10 @@ impl StreamEventSender {
     /// Send one stream event.
     ///
     /// The broadcast variant preserves the existing `receiver_count()` gate
-    /// so non-interactive pipeline runs (no subscriber) avoid per-token
-    /// allocation. The mpsc variant uses `try_send`: when the bounded
-    /// channel is full the event is dropped (the TUI reconciles from
-    /// `TurnComplete`).
-    pub(crate) fn send(&self, event: InteractiveEvent) {
+    /// and lag-tolerant semantics. The mpsc variant awaits channel capacity,
+    /// so a slow chat consumer throttles the producer instead of causing
+    /// silent gaps in live text / reasoning / tool output.
+    pub(crate) async fn send(&self, event: InteractiveEvent) {
         match self {
             Self::Broadcast(tx) => {
                 if tx.receiver_count() > 0 {
@@ -169,14 +187,30 @@ impl StreamEventSender {
                 }
             }
             Self::Mpsc(tx) => {
-                // Use try_send for all events. Terminal events
-                // (TurnComplete/Done/Ended) are protected from loss by the
-                // TUI's reconciliation from TurnComplete and the safety-net
-                // run_task branch in run_chat_turn's select loop.
-                // blocking_send would panic here because send() is called
-                // from within a tokio async runtime context.
-                let _ = tx.try_send(event);
+                // Await capacity rather than `try_send`-dropping. The chat
+                // `run_chat_turn` drain is the sole consumer and is always
+                // polled concurrently, so this backpressure never deadlocks;
+                // it just makes the agent loop wait for the front-end.
+                let _ = tx.send(event).await;
             }
+        }
+    }
+
+    /// Reserve the right to send one event without awaiting again.
+    ///
+    /// The mpsc variant waits for channel capacity; the returned permit then
+    /// sends synchronously without another await. This lets the live
+    /// tool-output forwarder receive a dequeued line only after chat
+    /// capacity is already secured, so an interrupting tool batch cannot
+    /// drop an in-flight chunk between `recv` and `send`. The broadcast
+    /// variant has no capacity to reserve.
+    pub(crate) async fn reserve(&self) -> StreamEventPermit<'_> {
+        match self {
+            Self::Broadcast(_) => StreamEventPermit::Broadcast(self),
+            Self::Mpsc(tx) => match tx.reserve().await {
+                Ok(permit) => StreamEventPermit::Mpsc(permit),
+                Err(_closed) => StreamEventPermit::Closed,
+            },
         }
     }
 
@@ -185,11 +219,35 @@ impl StreamEventSender {
     /// Broadcast senders only deliver when at least one receiver is
     /// subscribed, so callers can skip building an [`InteractiveEvent`]
     /// entirely for unsubscribed broadcast senders. Mpsc senders always
-    /// deliver (unbounded sends never block), so they report `true`.
+    /// deliver (awaiting capacity when necessary), so they report `true`.
     pub(crate) fn wants_events(&self) -> bool {
         match self {
             Self::Broadcast(tx) => tx.receiver_count() > 0,
             Self::Mpsc(_) => true,
+        }
+    }
+}
+
+/// A pre-reserved stream-channel slot.
+pub(crate) enum StreamEventPermit<'a> {
+    Broadcast(&'a StreamEventSender),
+    Mpsc(mpsc::Permit<'a, InteractiveEvent>),
+    Closed,
+}
+
+impl StreamEventPermit<'_> {
+    /// Send one event using the reserved slot. This never awaits.
+    pub(crate) fn send(self, event: InteractiveEvent) {
+        match self {
+            Self::Broadcast(sender) => {
+                if let StreamEventSender::Broadcast(tx) = sender {
+                    if tx.receiver_count() > 0 {
+                        let _ = tx.send(event);
+                    }
+                }
+            }
+            Self::Mpsc(permit) => permit.send(event),
+            Self::Closed => {}
         }
     }
 }
@@ -210,7 +268,10 @@ impl InteractiveChannels {
     /// Create a new channel triplet with a shared [`PauseToken`].
     pub(crate) fn new() -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
-        let (evt_tx, _) = broadcast::channel(16);
+        // Bumped well above the old 16 so a bursty tool-output stream (now
+        // coalesced to one chunk per 8 KiB read) doesn't lag the debug
+        // consumer on every Bash call.
+        let (evt_tx, _) = broadcast::channel(256);
         let pause = PauseToken::new();
         Self {
             cmd_tx,
@@ -503,30 +564,54 @@ mod tests {
         assert!(mpsc_sender.wants_events());
     }
 
-    /// A bounded mpsc stream sender drops events when the channel is full;
-    /// the TUI reconciles from `TurnComplete`, so transient stream-chunk
-    /// loss is acceptable.
+    /// A bounded mpsc stream sender blocks on a full channel instead of
+    /// dropping, so the chat stream stays lossless under backpressure.
     #[tokio::test]
-    async fn mpsc_stream_sender_drops_on_overflow_and_closes() {
-        let (tx, mut rx) = mpsc::channel(16);
+    async fn mpsc_stream_sender_blocks_on_overflow_then_delivers() {
+        let (tx, mut rx) = mpsc::channel::<InteractiveEvent>(16);
         let sender = StreamEventSender::Mpsc(tx);
 
-        // Fill beyond capacity — the last events are dropped.
-        for i in 0..256 {
-            sender.send(InteractiveEvent::StreamChunk {
-                text: format!("chunk-{i}"),
-            });
+        // Fill the channel to capacity without blocking.
+        for i in 0..16 {
+            sender
+                .send(InteractiveEvent::StreamChunk {
+                    text: format!("chunk-{i}"),
+                })
+                .await;
         }
 
-        // Drop the sender so the channel closes after draining buffered
-        // events, rather than blocking forever.
+        // The 17th send must not resolve until the consumer drains one slot.
+        let sender_clone = sender.clone();
+        let blocked_send = tokio::spawn(async move {
+            sender_clone
+                .send(InteractiveEvent::StreamChunk {
+                    text: "chunk-blocked".into(),
+                })
+                .await;
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !blocked_send.is_finished(),
+            "mpsc send must block on a full channel instead of dropping"
+        );
+
+        // Drain one buffered event; that frees capacity for the blocked send.
+        let first = rx.recv().await.expect("first buffered event");
+        assert!(matches!(first, InteractiveEvent::StreamChunk { .. }));
+        tokio::time::timeout(Duration::from_secs(1), blocked_send)
+            .await
+            .expect("blocked send should complete once capacity is available")
+            .expect("blocked send task should not panic");
+
         drop(sender);
 
-        let mut count = 0;
+        // The channel closes after the original sender is dropped and the
+        // cloned sender returned from the spawned task. Every queued event
+        // (the 15 remaining initial chunks plus the blocked one) survives.
+        let mut count = 1; // `first`, already drained above
         while rx.recv().await.is_some() {
             count += 1;
         }
-        assert!(count <= 16, "at most 16 events survive: got {count}");
-        assert!(count > 0, "some events must be delivered");
+        assert_eq!(count, 17, "every event must be delivered losslessly");
     }
 }

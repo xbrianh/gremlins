@@ -27,6 +27,53 @@ pub fn line_wrapped_height(line: &Line<'static>, width: u16) -> usize {
         .line_count(width)
 }
 
+/// A wrapping-aware window over the wrapped tail of a set of lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TailWindow {
+    /// Wrapped rows above the visible window that must be skipped.
+    pub skip: usize,
+    /// Index of the first line contributing a row to the visible window.
+    pub start: usize,
+    /// Wrapped rows of `lines[start]` that lie above the visible window.
+    pub partial: usize,
+}
+
+/// Compute the wrapped-row tail window for a viewport `height` rows tall.
+///
+/// The returned window describes how to paint only the last `height` wrapped
+/// rows of `lines`: skip `TailWindow::skip` rows, start at
+/// `TailWindow::start`, and render `TailWindow::partial` rows of that first
+/// line above the window. Callers render `lines[start..]` into a buffer
+/// `partial + height` rows tall and copy the final `height` rows.
+pub fn tail_window(lines: &[Line<'static>], width: u16, height: usize) -> TailWindow {
+    if lines.is_empty() || width == 0 || height == 0 {
+        return TailWindow {
+            skip: 0,
+            start: 0,
+            partial: 0,
+        };
+    }
+
+    let full_rows = wrapped_height(lines, width);
+    let skip = full_rows.saturating_sub(height);
+    let mut before_start = 0usize;
+    let mut start = lines.len();
+    for (i, line) in lines.iter().enumerate() {
+        let line_rows = line_wrapped_height(line, width);
+        if before_start + line_rows > skip {
+            start = i;
+            break;
+        }
+        before_start += line_rows;
+    }
+
+    TailWindow {
+        skip,
+        start,
+        partial: skip.saturating_sub(before_start),
+    }
+}
+
 /// A FIFO of styled lines.
 pub struct LineBuffer {
     lines: Vec<Line<'static>>,
