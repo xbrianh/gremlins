@@ -862,7 +862,7 @@ impl RunsView {
         let header_wrapped = wrapped_height(&header_lines, area.width) as u16;
 
         let runs = Self::listed_runs(ctx);
-        let running = runs.len();
+        let running = runs.iter().filter(|(_, r)| r.status == "running").count();
         let total = ctx.active_runs.len();
         let footer_line = Line::from(Span::styled(
             format!("  {running} running · {total} total"),
@@ -933,6 +933,11 @@ impl RunsView {
             let mut end = start;
             while end < run_lines.len() && prefix[end + 1] - prefix[start] <= visible_rows {
                 end += 1;
+            }
+            // Always include at least the selected row, even if it wraps
+            // beyond the available body height.
+            if end == start && start < run_lines.len() {
+                end = start + 1;
             }
 
             Paragraph::new(run_lines[start..end].to_vec())

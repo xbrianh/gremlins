@@ -1504,6 +1504,10 @@ async fn run_agent_loop_core(
                             text: line.text,
                         });
                     }
+                } else {
+                    // Drain the channel so the sender doesn't block when
+                    // the broadcast subscriber has disconnected.
+                    while rx.recv().await.is_some() {}
                 }
             }
             // Park forever so this branch never resolves the select; the

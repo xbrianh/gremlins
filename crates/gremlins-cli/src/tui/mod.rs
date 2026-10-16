@@ -1628,9 +1628,19 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             if app.watch_following.as_deref() == Some(id)
                                 && generation == Some(watch_follow_generation)
                             {
-                                live_area.push_watch_line(format!("error: {message}"));
-                                app.watch_follow_error = Some(message.to_string());
-                                abort_watch_follow(&mut watch_follow_handle);
+                                // Ignore socket-closed notifications for
+                                // terminal runs — handle_log replays the
+                                // history and reaches normal EOF without a
+                                // live subscription.
+                                let is_terminal = app
+                                    .active_runs
+                                    .get(id)
+                                    .map_or(false, |r| r.status != "running");
+                                if !is_terminal {
+                                    live_area.push_watch_line(format!("error: {message}"));
+                                    app.watch_follow_error = Some(message.to_string());
+                                    abort_watch_follow(&mut watch_follow_handle);
+                                }
                             }
                         }
                     }
@@ -1850,7 +1860,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             live_area.push_debug_output(text);
                         }
                         live_area.push_debug_output("debug: agent called Done".to_string());
-                        live_area.clear_tool_output();
                         live_area.set_debug_connected(false);
                         debug_task = None;
                         debug_cmd_tx = None;
@@ -1858,7 +1867,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     }
                     DebugEvent::Ended { reason } => {
                         live_area.push_debug_output(format!("debug: session ended ({reason})"));
-                        live_area.clear_tool_output();
                         live_area.set_debug_connected(false);
                         debug_task = None;
                         debug_cmd_tx = None;
@@ -1890,7 +1898,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     }
                     DebugEvent::Disconnected => {
                         live_area.push_debug_output("debug: disconnected".to_string());
-                        live_area.clear_tool_output();
                         live_area.set_debug_connected(false);
                         debug_task = None;
                         debug_cmd_tx = None;
