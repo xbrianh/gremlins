@@ -1,3 +1,5 @@
+use std::io::{self, Write};
+
 use rig_core::completion::{CompletionRequest, CompletionResponse};
 use rig_core::driver::DynModel;
 use rig_core::error::ProviderError;
@@ -84,13 +86,30 @@ impl GremlinsModel {
     }
 
     fn measure(&self, request: &CompletionRequest) -> Result<u64, GremlinsModelError> {
-        serde_json::to_vec(request)
-            .map(|bytes| bytes.len() as u64)
-            .map_err(|e| {
-                GremlinsModelError::Provider(Box::new(ProviderError::Provider(format!(
-                    "failed to serialize completion request for prompt-size check: {e}"
-                ))))
-            })
+        let mut counter = ByteCounter::default();
+        serde_json::to_writer(&mut counter, request).map_err(|e| {
+            GremlinsModelError::Provider(Box::new(ProviderError::Provider(format!(
+                "failed to serialize completion request for prompt-size check: {e}"
+            ))))
+        })?;
+        Ok(counter.count)
+    }
+}
+
+/// An [`io::Write`] sink that counts serialized bytes without buffering them.
+#[derive(Default)]
+struct ByteCounter {
+    count: u64,
+}
+
+impl Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.count += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 

@@ -2222,7 +2222,7 @@ mod tests {
     use tokio::sync::broadcast::error::RecvError;
 
     fn gm(model: DynModel<Completion>) -> GremlinsModel {
-        GremlinsModel::new(model, crate::config::max_prompt_bytes())
+        GremlinsModel::new(model, crate::config::DEFAULT_MAX_PROMPT_BYTES)
     }
 
     #[test]
