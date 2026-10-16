@@ -37,7 +37,7 @@ use crate::tui::motif;
 use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::widgets::{
     layout_widgets, render_wrapped_tail, DebugWidget, InfoBarWidget, InputBarWidget,
-    LiveAreaWidget, RenderContext, TranscriptWidget,
+    LiveAreaWidget, RenderContext, StreamingWidget, TranscriptWidget,
 };
 
 /// Approximate number of rows reserved at the bottom of the screen for the
@@ -53,6 +53,7 @@ const INITIAL_RESERVED_ROWS: u16 = 2;
 /// engine, then puts it back. The renderer only calls trait methods.
 struct Scene {
     transcript: TranscriptWidget,
+    reasoning: StreamingWidget,
     input_bar: InputBarWidget,
     info_bar: InfoBarWidget,
     screen_view: Option<ScreenView>,
@@ -62,6 +63,8 @@ impl Default for Scene {
     fn default() -> Self {
         Self {
             transcript: TranscriptWidget::new(),
+            reasoning: StreamingWidget::reasoning(TranscriptWidget::STREAM_MAX_ROWS)
+                .with_left_margin(1),
             input_bar: InputBarWidget::new(),
             info_bar: InfoBarWidget,
             screen_view: None,
@@ -334,23 +337,27 @@ impl<B: Backend> LiveArea<B> {
         }
     }
 
-    /// Compose the ordered chat stack: transcript, input bar, info bar.
+    /// Compose the ordered chat stack: transcript, reasoning, input bar,
+    /// info bar. The transcript absorbs leftover rows; the reasoning band is
+    /// fixed-height and collapses to zero when idle, pinning it directly
+    /// above the input and info bars.
     fn compose_chat(&mut self, scene: &mut Scene, app: &App) -> io::Result<()> {
         let gremlin_count = app.gremlin_count_str();
         let ctx = self.render_context(app, &gremlin_count);
         let width = self.cols;
         let mut widgets: Vec<&mut dyn LiveAreaWidget> = vec![
             &mut scene.transcript,
+            &mut scene.reasoning,
             &mut scene.input_bar,
             &mut scene.info_bar,
         ];
         let layout = layout_widgets(widgets.as_mut_slice(), width, self.rows, &ctx);
         self.reserved_rows = layout
             .heights
-            .get(1)
+            .get(2)
             .copied()
             .unwrap_or(0)
-            .saturating_add(layout.heights.get(2).copied().unwrap_or(0));
+            .saturating_add(layout.heights.get(3).copied().unwrap_or(0));
         self.finish_compose(
             widgets.as_mut_slice(),
             &layout.heights,
@@ -440,6 +447,10 @@ impl<B: Backend> LiveArea<B> {
         &mut self.scene.transcript
     }
 
+    fn reasoning_mut(&mut self) -> &mut StreamingWidget {
+        &mut self.scene.reasoning
+    }
+
     fn input_bar_mut(&mut self) -> &mut InputBarWidget {
         &mut self.scene.input_bar
     }
@@ -461,9 +472,11 @@ impl<B: Backend> LiveArea<B> {
     // ── Widget mutation (moved from `App`) ───────────────────────
 
     /// Start a new turn with the given prompt: push a separator and the
-    /// markdown-rendered prompt, then pin the turn start. The transcript
-    /// clears its embedded reasoning and tool slots with the new prompt.
+    /// markdown-rendered prompt, then pin the turn start. The live reasoning
+    /// band and the transcript's tool slots are cleared with the new prompt.
     pub fn submit_prompt(&mut self, prompt: String) {
+        self.reasoning_mut().set_title("");
+        self.reasoning_mut().clear();
         self.transcript_mut().submit_prompt(prompt);
     }
 
@@ -484,18 +497,18 @@ impl<B: Backend> LiveArea<B> {
     /// reasoning line.
     #[allow(dead_code)]
     pub fn flush_reasoning(&mut self) {
-        self.transcript_mut().flush_reasoning();
+        self.reasoning_mut().flush();
     }
 
     /// Append reasoning text (may be a partial chunk).
     pub fn push_reasoning_text(&mut self, text: &str) {
-        self.transcript_mut().push_reasoning_text(text);
+        self.reasoning_mut().push_text(text);
     }
 
-    /// Replace the embedded reasoning stream's title row with the live
+    /// Replace the reasoning stream's title row with the live
     /// token/cache stats string.
     pub fn set_reasoning_title(&mut self, title: &str) {
-        self.transcript_mut().set_reasoning_title(title);
+        self.reasoning_mut().set_title(title);
     }
 
     /// Append a live tool-output chunk to the transcript's tool stream keyed
@@ -545,11 +558,16 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().reconcile_response(text);
     }
 
-    /// Unpin the current turn and clear its draft state. `finish_turn`
-    /// commits the retained reasoning tail into the transcript FIFO, then
-    /// clears the embedded reasoning and tool slots so finished history reads
-    /// prompt → reasoning → tools → answer.
+    /// Unpin the current turn and clear its draft state. The live reasoning
+    /// band is drained and its retained tail is committed into the transcript
+    /// FIFO after the prompt and before any committed tool blocks, then the
+    /// band is replaced with a fresh title-less stream so it collapses.
     pub fn finish_turn(&mut self) {
+        let stream = std::mem::replace(
+            &mut self.scene.reasoning,
+            StreamingWidget::reasoning(TranscriptWidget::STREAM_MAX_ROWS).with_left_margin(1),
+        );
+        self.transcript_mut().commit_reasoning(stream);
         self.transcript_mut().finish_turn();
     }
 
@@ -591,12 +609,16 @@ impl<B: Backend> LiveArea<B> {
 
     /// Discard the current turn without committing it to the transcript.
     pub fn clear_current_turn(&mut self) {
+        self.reasoning_mut().set_title("");
+        self.reasoning_mut().clear();
         self.transcript_mut().clear_current_turn();
     }
 
-    /// Clear the transcript/scrollback, including the embedded reasoning and
+    /// Clear the transcript/scrollback, including the live reasoning band and
     /// tool slots.
     pub fn clear_transcript(&mut self) {
+        self.reasoning_mut().set_title("");
+        self.reasoning_mut().clear();
         self.transcript_mut().clear_scrollable();
     }
 
@@ -1640,9 +1662,15 @@ mod tests {
         else {
             unreachable!("checked above");
         };
+        let info = lines.iter().position(|l| l.contains("◆ GREMLINS")).unwrap();
+        let input = lines.iter().rposition(|l| l.contains("»")).unwrap();
         assert!(
-            prompt < reasoning && reasoning < tool && tool < response,
-            "a turn must render prompt → reasoning → tool → response.\nBuffer:\n{visible}"
+            prompt < tool
+                && tool < response
+                && response < reasoning
+                && reasoning + 1 == input
+                && input + 1 == info,
+            "a turn must render transcript (prompt → tool → response), then the bottom reasoning band directly above the input bar, then the info bar.\nBuffer:\n{visible}"
         );
     }
 
@@ -1674,9 +1702,14 @@ mod tests {
         let (Some(prompt), Some(reasoning), Some(response)) = (prompt, reasoning, response) else {
             unreachable!("checked above");
         };
+        let info = lines.iter().position(|l| l.contains("◆ GREMLINS")).unwrap();
+        let input = lines.iter().rposition(|l| l.contains("»")).unwrap();
         assert!(
-            prompt < reasoning && reasoning < response,
-            "a turn must render prompt → reasoning → response.\nBuffer:\n{visible}"
+            prompt < response
+                && response < reasoning
+                && reasoning + 1 == input
+                && input + 1 == info,
+            "a turn must render prompt → response, then the bottom reasoning band directly above the input bar, then the info bar.\nBuffer:\n{visible}"
         );
     }
 
@@ -2308,7 +2341,7 @@ mod tests {
         app.project_name = "gremlins".to_string();
 
         live_area.submit_prompt("hi".to_string());
-        // The embedded reasoning band caps at 5 rows; only the newest 5
+        // The bottom reasoning band caps at 5 rows; only the newest 5
         // lines stay visible even when no other widget contests the space.
         for i in 0..8 {
             live_area.push_reasoning_text(&format!("reasoning line {i}\n"));
