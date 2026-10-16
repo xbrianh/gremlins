@@ -169,6 +169,20 @@ fn split_params_suffix(rest: &str) -> Result<SplitParams<'_>, String> {
 /// off, and only a repeated key within one is an error. `provider_and_model` in
 /// `openai_protocol` re-splits a spec by the same rule, so the two agree.
 pub fn parse_spec(s: &str) -> Result<(String, String, IndexMap<String, String>), String> {
+    let (provider, model, extra_params) = split_spec(s)?;
+    Ok((provider.to_string(), model.to_string(), extra_params))
+}
+
+/// Borrowed form of [`parse_spec`]: split `provider:model[:k=v,...]` into the
+/// three subslices/components.
+///
+/// This is the grammar implementation shared by [`parse_spec`] and
+/// `openai_protocol::provider_and_model`. It owns the canonical split — the
+/// first colon delimits the provider, the model is kept verbatim for `cmd`,
+/// and for every other provider the leftmost colon whose remainder is a valid
+/// parameter list is stripped. The owning parser only converts the borrowed
+/// parts into heap strings; the adapter in `openai_protocol` discards params.
+pub(crate) fn split_spec(s: &str) -> Result<(&str, &str, IndexMap<String, String>), String> {
     let (provider, rest) = s
         .split_once(':')
         .ok_or_else(|| format!("invalid client specifier {s:?}: expected 'provider:model'"))?;
@@ -184,14 +198,14 @@ pub fn parse_spec(s: &str) -> Result<(String, String, IndexMap<String, String>),
     }
     let mut extra_params = IndexMap::new();
     let model = if provider == "cmd" {
-        rest.to_string()
+        rest
     } else {
         match split_params_suffix(rest)? {
             Some((model, params)) => {
                 extra_params = params;
-                model.to_string()
+                model
             }
-            None => rest.to_string(),
+            None => rest,
         }
     };
     if model.is_empty() {
@@ -199,7 +213,7 @@ pub fn parse_spec(s: &str) -> Result<(String, String, IndexMap<String, String>),
             "invalid client specifier {s:?}: model must not be empty"
         ));
     }
-    Ok((provider.to_string(), model, extra_params))
+    Ok((provider, model, extra_params))
 }
 
 fn backend_pool() -> &'static Mutex<HashMap<String, Arc<dyn Backend>>> {
