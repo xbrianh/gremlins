@@ -47,7 +47,12 @@ is a shell command, so everything after `cmd/` belongs to it verbatim and
 `cmd` never has params (`model://cmd/...` is rejected). Colons are no longer
 structural: everything between the first path separator and the first `?` is
 model content, so `openrouter/some/model:free` names the model
-`some/model:free`. `is_known_provider` just checks membership in
+`some/model:free`. The provider name `profile` is reserved for load-time
+model-profile references (`profile/<name>`): `ModelURI::parse` rejects both
+`profile/...` and `model://profile/...` with a reserved-profile-reference-prefix
+error, so a profile reference can never be misparsed as a literal
+`provider/model` spec (profile resolution itself lives in `config.rs`, not
+here). `is_known_provider` just checks membership in
 `backends::registry()`; `Client::new`/`Client::from_uri` keep the allowlist
 enforcement separate from the shape-only `ModelURI::parse`.
 

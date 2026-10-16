@@ -4469,7 +4469,7 @@ model-profiles:
         assert_eq!(show["model"], "cmd/tui");
         assert_eq!(show["source"], "tui-model");
 
-        let set = handle_model(&serde_json::json!({"op": "model", "model": "profile:fast"})).await;
+        let set = handle_model(&serde_json::json!({"op": "model", "model": "profile/fast"})).await;
         assert_eq!(set.get("type").and_then(Value::as_str), Some("ok"));
         assert_eq!(set["model"], "cmd/echo");
         assert_eq!(set["source"], "tui.json");
@@ -4512,9 +4512,23 @@ model-profiles:
         let _sandbox = Sandbox::with_config(Some(r#"default-model: "cmd/default""#));
         let override_path = crate::config::resolve_user_config_root(None).join("tui.json");
 
-        let resp = handle_model(&serde_json::json!({"op": "model", "model": "profile:nope"})).await;
+        let resp = handle_model(&serde_json::json!({"op": "model", "model": "profile/nope"})).await;
         assert_eq!(resp.get("type").and_then(Value::as_str), Some("error"));
         assert!(!override_path.exists());
+    }
+
+    #[test]
+    fn model_parser_reserves_profile_provider() {
+        for spec in ["profile/foo", "model://profile/foo"] {
+            let err = Client::parse(spec).unwrap_err();
+            assert!(
+                err.contains("reserved profile-reference prefix"),
+                "{spec:?} -> {err:?}"
+            );
+        }
+
+        let err = Client::parse("profile:foo").unwrap_err();
+        assert!(err.contains("expected 'provider/model'"), "{err:?}");
     }
 
     #[tokio::test]
@@ -4904,7 +4918,7 @@ default-model-by-stage:
     #[tokio::test]
     async fn chat_resolves_profile_default_model() {
         let _sandbox = Sandbox::with_config(Some(
-            r#"default-model: "profile:fast"
+            r#"default-model: "profile/fast"
 model-profiles:
   fast:
     model: cmd/echo
@@ -4943,7 +4957,7 @@ model-profiles:
     #[tokio::test]
     async fn chat_reports_error_on_unknown_profile() {
         let _sandbox = Sandbox::with_config(Some(
-            r#"default-model: "profile:nope"
+            r#"default-model: "profile/nope"
 model-profiles:
   fast:
     model: cmd/echo
@@ -4987,7 +5001,7 @@ model-profiles:
     #[tokio::test]
     async fn chat_reports_error_on_empty_profile_model() {
         let _sandbox = Sandbox::with_config(Some(
-            r#"default-model: "profile:empty"
+            r#"default-model: "profile/empty"
 model-profiles:
   empty:
     model: ""

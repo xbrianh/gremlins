@@ -172,11 +172,11 @@ fn from_expanded_value(
     // stages inherit when they don't supply their own model.
     let yaml_default_profile: Option<String> = raw_yaml_default_model
         .as_ref()
-        .and_then(|raw| raw.strip_prefix("profile:").map(|s| s.to_string()));
+        .and_then(|raw| config::profile_name(raw).map(|s| s.to_string()));
     let override_default_profile: Option<String> =
-        default_model_override.and_then(|raw| raw.strip_prefix("profile:").map(|s| s.to_string()));
+        default_model_override.and_then(|raw| config::profile_name(raw).map(|s| s.to_string()));
     let config_default_profile: Option<String> =
-        config_default_model.and_then(|raw| raw.strip_prefix("profile:").map(|s| s.to_string()));
+        config_default_model.and_then(|raw| config::profile_name(raw).map(|s| s.to_string()));
 
     // Bake every stage and default model with the current settings profile
     // (source-definition path only). Expanded definitions from
@@ -512,7 +512,7 @@ fn yaml_model(
 /// Global `default-task-models` are NOT merged here; that happens at
 /// runtime so composite-stage inheritance works correctly.
 ///
-/// When the stage's `model` references a profile (e.g. `profile:foo`),
+/// When the stage's `model` references a profile (e.g. `profile/foo`),
 /// that profile's `task_models` are used as a base layer; the stage's own
 /// `task-models` entries win on key conflict.  When the stage has no
 /// `model` of its own but `effective_profile` names a profile (because
@@ -527,10 +527,10 @@ fn yaml_task_models(
     let stage = yaml_string_map_ordered(mapping, "task-models")?;
 
     // Resolve which profile (if any) contributes task-models as a base.
-    // Priority: the stage's own `model: profile:…` wins; otherwise the
+    // Priority: the stage's own `model: profile/<name>` wins; otherwise the
     // effective default-profile from the definition.
     let profile_name: Option<String> = yaml_str(mapping, "model")
-        .and_then(|raw| raw.strip_prefix("profile:").map(|name| name.to_string()))
+        .and_then(|raw| config::profile_name(&raw).map(|name| name.to_string()))
         .or_else(|| effective_profile.map(|s| s.to_string()));
 
     let profile_task_models: Option<IndexMap<String, String>> = settings.and_then(|settings| {
