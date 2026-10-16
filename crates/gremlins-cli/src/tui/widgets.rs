@@ -150,7 +150,9 @@ pub trait LiveAreaWidget {
 /// tool output, then the streaming-response tail. The FIFO head drains into
 /// terminal scrollback when the combined content exceeds the region's height.
 /// The live reasoning stream is owned by the typed scene as a top-level
-/// bottom band and is committed through [`Self::commit_reasoning`].
+/// bottom band. At turn finish only its title line is committed through
+/// [`Self::commit_reasoning_title`]; the reasoning body is display-only and
+/// cleared with the live band.
 pub struct TranscriptWidget {
     /// The single styled FIFO — the only transcript content that overflows.
     scrollable: LineBuffer,
@@ -360,15 +362,13 @@ impl TranscriptWidget {
         }
     }
 
-    /// Build a committed stream block: flush the trailing partial, prepend
-    /// the stream's own title row (matching the live header exactly), then
-    /// append the retained tail capped at the shared stream row count.
-    /// Streams flagged [`retain_title_when_empty`](StreamingWidget) (tools
-    /// and the reasoning stats title) commit their title even when the body
-    /// is empty; every other stream collapses entirely when empty so it never
-    /// emits a stray header. Retained logical lines are expanded into
-    /// pre-wrapped physical rows at the FIFO's inner body width before
-    /// insertion.
+    /// Build a committed tool-stream block: flush the trailing partial,
+    /// prepend the stream's own title row (matching the live header exactly),
+    /// then append the retained tail capped at the shared stream row count.
+    /// Tool streams commit their title even when the body is empty; every
+    /// other stream collapses entirely when empty so it never emits a stray
+    /// header. Retained logical lines are expanded into pre-wrapped physical
+    /// rows at the FIFO's inner body width before insertion.
     fn commit_stream_block(&mut self, mut stream: StreamingWidget) -> Vec<Line<'static>> {
         stream.flush();
         let rendered = stream.commit_lines();
@@ -485,15 +485,20 @@ impl TranscriptWidget {
         self.insert_tool_lines(block);
     }
 
-    /// Commit a finished reasoning stream's retained tail into the
-    /// transcript just after the prompt and before any committed tool
-    /// blocks/events.
-    pub fn commit_reasoning(&mut self, stream: StreamingWidget) {
-        if self.turn_start.is_none() {
+    /// Commit the reasoning stream's title line as the final FIFO line of
+    /// the finished turn.
+    ///
+    /// The stream's body is intentionally discarded: live reasoning is
+    /// display-only and never enters the transcript FIFO or terminal
+    /// scrollback. Call this only after [`Self::finish_turn`] has rebuilt
+    /// the response and reconciled pending tool results, so no later
+    /// pipeline step can truncate or reorder the title.
+    pub fn commit_reasoning_title(&mut self, stream: StreamingWidget) {
+        let Some(title) = stream.title_line() else {
             return;
-        }
-        let block = self.commit_stream_block(stream);
-        self.insert_reasoning_lines(block);
+        };
+        self.invalidate_desired_cache();
+        self.scrollable.push(title);
     }
 
     /// Insert a contiguous run of styled lines into the active turn directly
@@ -513,27 +518,6 @@ impl TranscriptWidget {
             inserted += 1;
         }
         self.response_start = Some(idx + inserted);
-    }
-
-    /// Insert a contiguous run of styled reasoning lines directly after the
-    /// prompt, before the tool-event band. This advances both the prompt and
-    /// response boundaries so later tool commits still land above the
-    /// streaming response.
-    fn insert_reasoning_lines(&mut self, lines: Vec<Line<'static>>) {
-        if lines.is_empty() || self.turn_start.is_none() {
-            return;
-        }
-        self.invalidate_desired_cache();
-        let idx = self.prompt_end.min(self.scrollable.len());
-        let mut inserted = 0usize;
-        for line in lines {
-            self.scrollable.insert(idx + inserted, line);
-            inserted += 1;
-        }
-        self.prompt_end += inserted;
-        if let Some(response_start) = &mut self.response_start {
-            *response_start += inserted;
-        }
     }
 
     /// Append a system message. When a turn is active, the message is
@@ -738,9 +722,10 @@ impl TranscriptWidget {
         self.turn_start.is_some()
     }
 
-    /// Unpin the current turn and clear its draft state. The retained
-    /// reasoning tail is committed to the FIFO before tool reconciliation,
-    /// then the rest of the content is already in the FIFO.
+    /// Unpin the current turn and clear its draft state. Pending tool results
+    /// are reconciled and the dirty response region is rebuilt; reasoning is
+    /// committed separately by the scene after this call returns so its title
+    /// becomes the final FIFO line of the turn.
     pub fn finish_turn(&mut self) {
         self.reconcile_pending_tools();
         self.rebuild_response();
@@ -1572,16 +1557,16 @@ impl StreamingWidget {
     }
 
     /// The configured reasoning stream: four-cell body gutter, `◈ `-prefixed
-    /// chrome title, nickel italic text, and a retained commit tail. The
-    /// title renders and commits even when the stream has no reasoning body,
-    /// so the chat TUI's live token stats line is visible (and persisted to
-    /// scrollback) on turns that produced no reasoning text.
+    /// chrome title, nickel italic text. The title renders and commits even
+    /// when the stream has no reasoning body, so the chat TUI's live token
+    /// stats line is visible (and its title persists to scrollback) on turns
+    /// that produced no reasoning text. The body is display-only and cleared
+    /// at turn finish, so the stream keeps no retained commit tail.
     pub fn reasoning(row_cap: u16) -> Self {
         Self::new(reasoning_stream_line, row_cap, 20)
             .with_title_prefix(&format!("{} ", glyph::REASONING))
             .with_body_indent(4)
             .with_reasoning_title_style()
-            .retain_tail()
             .retain_title_when_empty()
             .render_title_when_empty()
     }
@@ -1847,7 +1832,7 @@ impl StreamingWidget {
         self.last_width.set(body_width);
     }
 
-    fn title_line(&self) -> Option<Line<'static>> {
+    pub(crate) fn title_line(&self) -> Option<Line<'static>> {
         let title = self.title.as_deref()?;
         if title.is_empty() {
             return None;
@@ -3636,7 +3621,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_reasoning_stats_title_renders_live_and_commits() {
+    fn empty_reasoning_stats_title_renders_live_and_exposes_title() {
         let ctx = input_ctx("", 0);
         let mut reasoning = StreamingWidget::reasoning(5);
         reasoning.set_title("turn 1 stats");
@@ -3654,12 +3639,31 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].trim_end(), "◈ turn 1 stats", "{rows:?}");
 
-        let mut transcript = TranscriptWidget::new();
-        transcript.last_width = 20;
-        let block = transcript.commit_stream_block(reasoning);
-        let rows = full_rendered_rows(&block, 20);
+        let title = reasoning.title_line().expect("title should be exposed");
+        let rows = full_rendered_rows(&[title], 20);
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].trim_end(), "◈ turn 1 stats", "{rows:?}");
+
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("answer");
+        transcript.finish_turn();
+        transcript.commit_reasoning_title(reasoning);
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(
+            text,
+            vec![
+                "▍» hi".to_string(),
+                "answer".to_string(),
+                "◈ turn 1 stats".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -4001,7 +4005,7 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_tail_commits_between_prompt_and_response() {
+    fn reasoning_title_commits_after_response() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
         transcript.push_response("answer");
@@ -4010,8 +4014,8 @@ mod tests {
         reasoning.set_title("turn 1 stats");
         reasoning.push_text("thinking\n");
         reasoning.flush();
-        transcript.commit_reasoning(reasoning);
         transcript.finish_turn();
+        transcript.commit_reasoning_title(reasoning);
 
         let text: Vec<String> = transcript
             .scrollable
@@ -4023,15 +4027,18 @@ mod tests {
             text,
             vec![
                 "▍» hi".to_string(),
+                "answer".to_string(),
                 "◈ turn 1 stats".to_string(),
-                "    thinking".to_string(),
-                "answer".to_string()
             ]
+        );
+        assert!(
+            !text.iter().any(|l| l.contains("thinking")),
+            "reasoning body must be cleared, not committed: {text:?}"
         );
     }
 
     #[test]
-    fn reasoning_title_commits_between_prompt_and_tail_exactly_once() {
+    fn reasoning_title_commits_after_response_exactly_once() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
         transcript.push_response("answer");
@@ -4042,8 +4049,8 @@ mod tests {
             reasoning.push_text(&format!("thinking {i}\n"));
         }
         reasoning.flush();
-        transcript.commit_reasoning(reasoning);
         transcript.finish_turn();
+        transcript.commit_reasoning_title(reasoning);
 
         let text: Vec<String> = transcript
             .scrollable
@@ -4060,9 +4067,10 @@ mod tests {
         let answer = text.iter().position(|l| l == "answer").unwrap();
         assert_eq!(text[0], "▍» hi");
         assert!(
-            title < answer,
-            "reasoning title must precede the response: {text:?}"
+            answer < title,
+            "reasoning title must be the final line of the turn: {text:?}"
         );
+        assert_eq!(title, text.len() - 1, "title must be last: {text:?}");
         assert!(
             text[title].contains(glyph::REASONING),
             "reasoning header must carry the reasoning glyph: {text:?}"
@@ -4071,9 +4079,10 @@ mod tests {
             !text[title].contains('◆'),
             "reasoning header must use the reasoning glyph, not the tool diamond: {text:?}"
         );
-        assert_eq!(text[title + 1], "    thinking 3");
-        assert!(text.contains(&"    thinking 7".to_string()), "{text:?}");
-        assert!(!text.contains(&"    thinking 0".to_string()), "{text:?}");
+        assert!(
+            !text.iter().any(|l| l.contains("thinking")),
+            "reasoning body must not enter the FIFO: {text:?}"
+        );
     }
 
     #[test]
@@ -4097,7 +4106,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_turn_orders_prompt_reasoning_tools_response() {
+    fn finish_turn_orders_prompt_tools_response_reasoning_title() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
         let mut reasoning = StreamingWidget::reasoning(TranscriptWidget::STREAM_MAX_ROWS);
@@ -4106,8 +4115,8 @@ mod tests {
         reasoning.flush();
         transcript.push_tool_line("grep");
         transcript.push_response("answer");
-        transcript.commit_reasoning(reasoning);
         transcript.finish_turn();
+        transcript.commit_reasoning_title(reasoning);
 
         let text: Vec<String> = transcript
             .scrollable
@@ -4119,16 +4128,15 @@ mod tests {
             text,
             vec![
                 "▍» hi".to_string(),
-                "◈ turn 1 stats".to_string(),
-                "    thinking".to_string(),
                 "◆ grep".to_string(),
                 "answer".to_string(),
+                "◈ turn 1 stats".to_string(),
             ]
         );
     }
 
     #[test]
-    fn reasoning_commit_uses_retained_five_row_tail_after_short_display() {
+    fn reasoning_commit_is_title_only_after_short_display() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
         transcript.push_response("answer");
@@ -4141,8 +4149,8 @@ mod tests {
         reasoning.flush();
 
         // Simulate a contested frame where the band is transiently painted
-        // into a two-row body viewport; the retained commit tail must not
-        // depend on that live allocation.
+        // into a two-row body viewport; the live display may trim the body
+        // but the finish commit must discard it entirely.
         let ctx = input_ctx("", 0);
         {
             let area = Rect::new(0, 0, 40, 3);
@@ -4150,8 +4158,8 @@ mod tests {
             LiveAreaWidget::render(&mut reasoning, area, &mut buf, &ctx);
         }
 
-        transcript.commit_reasoning(reasoning);
         transcript.finish_turn();
+        transcript.commit_reasoning_title(reasoning);
 
         let text: Vec<String> = transcript
             .scrollable
@@ -4163,23 +4171,23 @@ mod tests {
             text,
             vec![
                 "▍» hi".to_string(),
-                "◈ turn 1 stats".to_string(),
-                "    thinking 3".to_string(),
-                "    thinking 4".to_string(),
-                "    thinking 5".to_string(),
-                "    thinking 6".to_string(),
-                "    thinking 7".to_string(),
                 "answer".to_string(),
+                "◈ turn 1 stats".to_string(),
             ]
+        );
+        assert!(
+            !text.iter().any(|l| l.contains("thinking")),
+            "reasoning body must be discarded regardless of the live display: {text:?}"
         );
     }
 
     #[test]
-    fn reasoning_stays_out_of_fifo_until_explicitly_committed() {
+    fn reasoning_body_stays_out_of_fifo_after_commit() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
         transcript.push_response("answer");
         let mut reasoning = StreamingWidget::reasoning(TranscriptWidget::STREAM_MAX_ROWS);
+        reasoning.set_title("turn 1 stats");
         reasoning.push_text("thinking\n");
         reasoning.flush();
         LiveAreaWidget::finalize(&mut transcript, 80);
@@ -4192,6 +4200,7 @@ mod tests {
             .map(|l| l.to_string())
             .collect();
         assert!(!text.iter().any(|l| l.contains("thinking")), "{text:?}");
+        assert!(!text.iter().any(|l| l.contains("turn 1 stats")), "{text:?}");
 
         let live: Vec<String> = reasoning
             .rendered_lines()
@@ -4200,15 +4209,22 @@ mod tests {
             .collect();
         assert_eq!(live, vec!["thinking".to_string()]);
 
-        transcript.commit_reasoning(reasoning);
         transcript.finish_turn();
+        transcript.commit_reasoning_title(reasoning);
         let text: Vec<String> = transcript
             .scrollable
             .visible_lines()
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert!(text.iter().any(|l| l.contains("thinking")), "{text:?}");
+        assert!(
+            text.iter().any(|l| l.contains("◈ turn 1 stats")),
+            "reasoning title must commit as the final FIFO line: {text:?}"
+        );
+        assert!(
+            !text.iter().any(|l| l.contains("thinking")),
+            "reasoning body must never enter the FIFO: {text:?}"
+        );
     }
 
     #[test]

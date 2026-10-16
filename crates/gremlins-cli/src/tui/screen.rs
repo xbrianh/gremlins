@@ -570,16 +570,20 @@ impl<B: Backend> LiveArea<B> {
     }
 
     /// Unpin the current turn and clear its draft state. The live reasoning
-    /// band is drained and its retained tail is committed into the transcript
-    /// FIFO after the prompt and before any committed tool blocks, then the
-    /// band is replaced with a fresh title-less stream so it collapses.
+    /// band is replaced with a fresh title-less stream so it collapses and its
+    /// body is discarded; after the transcript has rebuilt the response and
+    /// reconciled pending tool results, the band's title line is committed as
+    /// the final FIFO line of the finished turn.
     pub fn finish_turn(&mut self) {
         let stream = std::mem::replace(
             &mut self.scene.reasoning,
             StreamingWidget::reasoning(TranscriptWidget::STREAM_MAX_ROWS).with_left_margin(1),
         );
-        self.transcript_mut().commit_reasoning(stream);
+        let had_turn = self.transcript_mut().has_current_turn();
         self.transcript_mut().finish_turn();
+        if had_turn {
+            self.transcript_mut().commit_reasoning_title(stream);
+        }
     }
 
     /// Whether the current turn has any content.
@@ -1725,7 +1729,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_turn_commits_reasoning_tail() {
+    fn finish_turn_commits_reasoning_title_only() {
         let cols: u16 = 80;
         let rows: u16 = 12;
         let mut live_area = new_live(cols, rows);
@@ -1747,8 +1751,12 @@ mod tests {
             "finished response should remain in the FIFO.\nBuffer:\n{visible}"
         );
         assert!(
-            visible.contains("    thinking"),
-            "finished reasoning tail should be committed to the transcript.\nBuffer:\n{visible}"
+            visible.contains("◈ clanking"),
+            "finished reasoning title should be committed to the transcript.\nBuffer:\n{visible}"
+        );
+        assert!(
+            !visible.contains("    thinking"),
+            "finished reasoning body must be cleared, not committed.\nBuffer:\n{visible}"
         );
     }
 
@@ -1798,7 +1806,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_turn_commits_clanking_header_then_tail_before_response() {
+    fn finish_turn_commits_clanking_header_after_response() {
         let cols: u16 = 80;
         let rows: u16 = 12;
         let mut live_area = new_live(cols, rows);
@@ -1824,16 +1832,18 @@ mod tests {
             1,
             "exactly one committed reasoning header should carry clanking.\nBuffer:\n{visible}"
         );
-        let (Some(prompt), Some(header), Some(reasoning), Some(response)) =
-            (prompt, header, reasoning, response)
-        else {
+        assert!(
+            reasoning.is_none(),
+            "reasoning body must not be committed.\nBuffer:\n{visible}"
+        );
+        let (Some(prompt), Some(header), Some(response)) = (prompt, header, response) else {
             panic!(
-                "prompt, clanking header, reasoning tail, and response should all be visible.\nBuffer:\n{visible}"
+                "prompt, clanking header, and response should all be visible.\nBuffer:\n{visible}"
             );
         };
         assert!(
-            prompt < header && header < reasoning && reasoning < response,
-            "committed order must be prompt → clanking header → reasoning tail → response.\nBuffer:\n{visible}"
+            prompt < response && response < header,
+            "committed order must be prompt → response → clanking header.\nBuffer:\n{visible}"
         );
     }
 
@@ -1869,8 +1879,8 @@ mod tests {
             );
         };
         assert!(
-            header < response,
-            "committed stats header must precede the response.\nBuffer:\n{visible}"
+            response < header,
+            "committed stats header must be the final line of the turn.\nBuffer:\n{visible}"
         );
     }
 
@@ -2669,18 +2679,26 @@ mod tests {
             combined.contains("Done") && combined.contains("grep"),
             "tool lines should survive as transcript content.\nCombined:\n{combined}"
         );
-        // The reasoning tail commits at turn end and overflows in FIFO order
-        // with the prompt and tool blocks.
+        // The reasoning title commits at turn end after the response; the
+        // body is display-only and cleared.
         assert!(
-            combined.contains("    thinking..."),
-            "reasoning tail should be committed like tool output.\nCombined:\n{combined}"
+            !combined.contains("    thinking..."),
+            "reasoning body must be cleared, not committed.\nCombined:\n{combined}"
         );
         let prompt = combined.find("▍» hi").expect("prompt present");
-        let reasoning = combined.find("    thinking...").expect("reasoning present");
         let tool = combined.find("◆ Done").expect("tool present");
+        let summary = combined
+            .find("final summary line")
+            .expect("summary present");
+        let title = combined
+            .find("◈ clanking")
+            .expect("reasoning title present");
+        let tokens = combined
+            .find("42 tokens")
+            .expect("post-turn system line present");
         assert!(
-            prompt < reasoning && reasoning < tool,
-            "committed order must be prompt → reasoning → tools.\nCombined:\n{combined}"
+            prompt < tool && tool < summary && summary < title && title < tokens,
+            "committed order must be prompt → tools → response → reasoning title.\nCombined:\n{combined}"
         );
     }
 }
