@@ -18,6 +18,9 @@ pub mod glyph {
     pub const CHEVRON: &str = "»";
     /// Gold center diamond for glint rules.
     pub const DIAMOND: &str = "◆";
+    /// Art-deco double diamond (nested) used for the reasoning-stream
+    /// header.
+    pub const REASONING: &str = "◈";
     /// Blockquote bar (gold).
     pub const QUOTE_BAR: &str = "║";
     /// List bullet (brass).
