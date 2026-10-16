@@ -11,7 +11,6 @@ pub(crate) mod log_util;
 pub mod openai_protocol;
 pub mod params;
 pub mod protocol;
-pub(crate) mod retry;
 pub(crate) mod stream_json;
 pub(crate) mod task;
 pub(crate) mod task_kind;

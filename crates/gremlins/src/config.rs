@@ -11,6 +11,12 @@ use crate::clients::task_kind::TaskKind;
 /// Default name of the project-local overlay directory.
 pub(crate) const OVERLAY_DIRNAME: &str = ".gremlins";
 
+/// Default turn-level retry backoff schedule in seconds.
+pub(crate) const DEFAULT_TURN_RETRY_BACKOFF: [f64; 5] = [2.0, 5.0, 10.0, 60.0, 120.0];
+
+/// Default idle-timeout retry backoff schedule in seconds.
+pub(crate) const DEFAULT_TIMEOUT_RETRY_BACKOFF: [f64; 3] = [5.0, 15.0, 30.0];
+
 // ---------------------------------------------------------------------------
 // Path overrides from settings.yaml "paths" section
 // ---------------------------------------------------------------------------
@@ -70,6 +76,22 @@ pub struct ClientProfile {
     pub task_clients: Option<IndexMap<String, String>>,
 }
 
+/// Effective retry backoff schedules from `settings.yaml`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BackoffConfig {
+    pub(crate) turn_retry: Vec<f64>,
+    pub(crate) timeout_retry: Vec<f64>,
+}
+
+impl Default for BackoffConfig {
+    fn default() -> Self {
+        Self {
+            turn_retry: DEFAULT_TURN_RETRY_BACKOFF.to_vec(),
+            timeout_retry: DEFAULT_TIMEOUT_RETRY_BACKOFF.to_vec(),
+        }
+    }
+}
+
 /// Parsed content of settings.yaml.
 #[derive(Debug, Clone, Default)]
 pub struct Config {
@@ -80,6 +102,7 @@ pub struct Config {
     client_profiles: IndexMap<String, ClientProfile>,
     path_overrides: PathOverrides,
     max_tool_output_bytes: u64,
+    backoff: BackoffConfig,
 }
 
 /// A string newtype that rejects non-string YAML scalars (numbers,
@@ -158,6 +181,17 @@ struct ConfigFile {
     paths: Option<PathsSection>,
     #[serde(rename = "max-tool-output-bytes", default)]
     max_tool_output_bytes: Option<u64>,
+    backoff: Option<BackoffSection>,
+}
+
+/// The `backoff` section of settings.yaml.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackoffSection {
+    #[serde(rename = "turn-retry", default)]
+    turn_retry: Option<Vec<f64>>,
+    #[serde(rename = "timeout-retry", default)]
+    timeout_retry: Option<Vec<f64>>,
 }
 
 /// A single `client-profiles` entry as it appears in `settings.yaml`.
@@ -167,6 +201,38 @@ struct ProfileFile {
     client: Option<StrictString>,
     #[serde(rename = "task-clients", default)]
     task_clients: Option<IndexMap<String, StrictString>>,
+}
+
+fn validate_backoff_schedule(name: &str, schedule: Vec<f64>) -> Result<Vec<f64>, ConfigError> {
+    if schedule.is_empty() {
+        return Err(ConfigError::Backoff(format!(
+            "backoff.{name} must contain at least one delay"
+        )));
+    }
+    for delay in &schedule {
+        if !delay.is_finite() || *delay <= 0.0 {
+            return Err(ConfigError::Backoff(format!(
+                "backoff.{name} entries must be positive finite delays in seconds, got {delay:?}"
+            )));
+        }
+    }
+    Ok(schedule)
+}
+
+impl BackoffConfig {
+    fn from_section(section: BackoffSection) -> Result<Self, ConfigError> {
+        let default = Self::default();
+        Ok(Self {
+            turn_retry: match section.turn_retry {
+                Some(schedule) => validate_backoff_schedule("turn-retry", schedule)?,
+                None => default.turn_retry,
+            },
+            timeout_retry: match section.timeout_retry {
+                Some(schedule) => validate_backoff_schedule("timeout-retry", schedule)?,
+                None => default.timeout_retry,
+            },
+        })
+    }
 }
 
 impl Config {
@@ -272,6 +338,11 @@ impl Config {
 
         let path_overrides = cfg_file.paths.map(PathOverrides::from).unwrap_or_default();
 
+        let backoff = match cfg_file.backoff {
+            Some(section) => BackoffConfig::from_section(section)?,
+            None => BackoffConfig::default(),
+        };
+
         let max_tool_output_bytes = cfg_file
             .max_tool_output_bytes
             .or_else(|| {
@@ -289,6 +360,7 @@ impl Config {
             client_profiles,
             path_overrides,
             max_tool_output_bytes,
+            backoff,
         })
     }
 
@@ -320,6 +392,14 @@ impl Config {
 
     pub fn max_tool_output_bytes(&self) -> u64 {
         self.max_tool_output_bytes
+    }
+
+    pub fn turn_retry_schedule(&self) -> &[f64] {
+        &self.backoff.turn_retry
+    }
+
+    pub fn timeout_retry_schedule(&self) -> &[f64] {
+        &self.backoff.timeout_retry
     }
 
     pub fn overlay_dirname(&self) -> &'static str {
@@ -435,6 +515,8 @@ pub enum ConfigError {
     Profile(String),
     #[error("task-clients error: {0}")]
     TaskClients(String),
+    #[error("backoff error: {0}")]
+    Backoff(String),
 }
 
 fn parse_yaml_config(path: &Path) -> Result<ConfigFile, ConfigError> {
@@ -676,6 +758,22 @@ pub(crate) fn max_tool_output_bytes() -> u64 {
                 .and_then(|v| v.parse().ok())
         })
         .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES)
+}
+
+/// Effective turn-level retry schedule from the global config, falling back
+/// to the in-code default when the global config is uninitialized.
+pub(crate) fn turn_retry_backoff() -> Vec<f64> {
+    get_global()
+        .map(|c| c.backoff.turn_retry.clone())
+        .unwrap_or_else(|| DEFAULT_TURN_RETRY_BACKOFF.to_vec())
+}
+
+/// Effective idle-timeout retry schedule from the global config, falling back
+/// to the in-code default when the global config is uninitialized.
+pub(crate) fn timeout_retry_backoff() -> Vec<f64> {
+    get_global()
+        .map(|c| c.backoff.timeout_retry.clone())
+        .unwrap_or_else(|| DEFAULT_TIMEOUT_RETRY_BACKOFF.to_vec())
 }
 
 /// GREMLINS_SCRATCH_DIR for tool scratch space. Creates the directory.
@@ -981,6 +1079,101 @@ not-a-key: 1"#,
             overrides.scratch_root,
             Some(PathBuf::from("/tmp/gremlins-scratch"))
         );
+    }
+
+    #[test]
+    fn test_config_accepts_backoff_section() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"backoff:
+  turn-retry: [1.0, 2.5, 5.0]
+  timeout-retry: [7.0, 14.0]"#,
+        ));
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.backoff.turn_retry, vec![1.0, 2.5, 5.0]);
+        assert_eq!(cfg.backoff.timeout_retry, vec![7.0, 14.0]);
+    }
+
+    #[test]
+    fn test_config_backoff_defaults_when_section_absent() {
+        let _sandbox = Sandbox::with_config(Some(r#"{"default-client": "a:b"}"#));
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.backoff.turn_retry, DEFAULT_TURN_RETRY_BACKOFF.to_vec());
+        assert_eq!(
+            cfg.backoff.timeout_retry,
+            DEFAULT_TIMEOUT_RETRY_BACKOFF.to_vec()
+        );
+    }
+
+    #[test]
+    fn test_config_backoff_partial_section_falls_back_per_key() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"backoff:
+  turn-retry: [1.0, 2.0]"#,
+        ));
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.backoff.turn_retry, vec![1.0, 2.0]);
+        assert_eq!(
+            cfg.backoff.timeout_retry,
+            DEFAULT_TIMEOUT_RETRY_BACKOFF.to_vec()
+        );
+    }
+
+    #[test]
+    fn test_config_backoff_denies_unknown_key() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"backoff:
+  turn-retry: [1.0]
+  not-a-key: [2.0]"#,
+        ));
+        assert!(matches!(Config::load(), Err(ConfigError::Yaml(_))));
+    }
+
+    #[test]
+    fn test_config_backoff_rejects_empty_schedule() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"backoff:
+  turn-retry: []"#,
+        ));
+        assert!(matches!(Config::load(), Err(ConfigError::Backoff(_))));
+    }
+
+    #[test]
+    fn test_config_backoff_rejects_non_positive_delay() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"backoff:
+  timeout-retry: [5.0, -1.0]"#,
+        ));
+        assert!(matches!(Config::load(), Err(ConfigError::Backoff(_))));
+    }
+
+    #[test]
+    fn test_config_backoff_rejects_non_numeric_delay() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"backoff:
+  turn-retry: [1.0, nope]"#,
+        ));
+        assert!(matches!(Config::load(), Err(ConfigError::Yaml(_))));
+    }
+
+    #[test]
+    fn test_config_backoff_rejects_non_finite_delay() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"backoff:
+  turn-retry: [1.0, .inf]"#,
+        ));
+        assert!(
+            Config::load().is_err(),
+            "non-finite backoff delays must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_config_backoff_rejects_zero_delay() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"backoff:
+  timeout-retry: [5.0, 0.0]"#,
+        ));
+        assert!(matches!(Config::load(), Err(ConfigError::Backoff(_))));
     }
 
     #[test]

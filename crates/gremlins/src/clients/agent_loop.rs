@@ -21,7 +21,6 @@ use super::interactive::{
 };
 use super::log_util::trunc;
 use super::protocol::{CompletedRun, UsageStats};
-use super::retry::{TIMEOUT_RETRY_BACKOFF, TURN_RETRY_BACKOFF};
 use super::tools::{self, ToolContext};
 
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
@@ -630,6 +629,9 @@ async fn run_agent_loop_core(
     let mut interactive_active: bool = false;
     let mut pending_run_one_turn: bool = false;
 
+    let turn_retry_backoff = crate::config::turn_retry_backoff();
+    let timeout_retry_backoff = crate::config::timeout_retry_backoff();
+
     let mut remaining_turns = max_turns;
     while remaining_turns > 0 {
         if cancel.is_cancelled() {
@@ -770,8 +772,8 @@ async fn run_agent_loop_core(
             Err(e) => {
                 // Retryable (429/5xx) error before streaming began — back off
                 // and re-execute this same turn with history intact.
-                if turn_retries < TURN_RETRY_BACKOFF.len() && is_retryable(&e, opts) {
-                    let wait = TURN_RETRY_BACKOFF[turn_retries];
+                if turn_retries < turn_retry_backoff.len() && is_retryable(&e, opts) {
+                    let wait = turn_retry_backoff[turn_retries];
                     turn_retries += 1;
                     log::info!(
                         "agent_loop: retryable stream error on turn {turn_num} (attempt {turn_retries}), backing off {wait}s: {e}"
@@ -900,8 +902,8 @@ async fn run_agent_loop_core(
             };
             match item {
                 Err(_) => {
-                    if timeout_retries < TIMEOUT_RETRY_BACKOFF.len() {
-                        let wait = TIMEOUT_RETRY_BACKOFF[timeout_retries];
+                    if timeout_retries < timeout_retry_backoff.len() {
+                        let wait = timeout_retry_backoff[timeout_retries];
                         timeout_retries += 1;
                         log::info!(
                             "agent_loop: idle timeout on turn {turn_num} (attempt {timeout_retries}), backing off {wait}s"
@@ -938,8 +940,8 @@ async fn run_agent_loop_core(
                 Ok(Some(Err(e))) => {
                     // Retryable (429/5xx) error delivered mid-stream — back off
                     // and re-execute this same turn with history intact.
-                    if turn_retries < TURN_RETRY_BACKOFF.len() && is_retryable(&e, opts) {
-                        let wait = TURN_RETRY_BACKOFF[turn_retries];
+                    if turn_retries < turn_retry_backoff.len() && is_retryable(&e, opts) {
+                        let wait = turn_retry_backoff[turn_retries];
                         turn_retries += 1;
                         log::info!(
                             "agent_loop: retryable mid-stream error on turn {turn_num} (attempt {turn_retries}), backing off {wait}s: {e}"
@@ -1729,14 +1731,14 @@ async fn run_agent_loop_core(
         if exhausted_turn_retries {
             log::error!(
                 "agent_loop: exhausted turn-level retries ({} attempts), giving up (label={}): {err}",
-                TURN_RETRY_BACKOFF.len() + 1,
+                turn_retry_backoff.len() + 1,
                 prefix
             );
             send_log(log_tx, prefix, "exit: exhausted turn-level retries");
             return Err(ClientError::RetryExhausted {
                 message: format!(
                     "exhausted turn-level retries ({} attempts): {err}",
-                    TURN_RETRY_BACKOFF.len() + 1,
+                    turn_retry_backoff.len() + 1,
                 ),
             });
         }
@@ -2363,7 +2365,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn loop_idle_timeout_exhausts_turn_retries() {
+    async fn loop_idle_timeout_exhausts_timeout_retries() {
         let ctx = test_ctx(None, None);
         let cancel = CancelToken::new();
         let model = rig_core::driver::Model::new(
@@ -2380,10 +2382,10 @@ mod tests {
             None,
         ));
         // The stream hangs forever, so each turn hits the idle timeout
-        // (0.05 s). After 3 turn-level timeout retries (2 + 5 + 10 s) the
-        // fourth attempt exhausts the budget and returns Runtime.
-        // Total wall-clock: 4 × 0.05 + 2 + 5 + 10 ≈ 17.2 s.
-        tokio::time::advance(Duration::from_secs(18)).await;
+        // (0.05 s). After 3 turn-level timeout retries (5 + 15 + 30 s) the
+        // fourth attempt exhausts the budget and returns RetryExhausted.
+        // Total wall-clock: 4 × 0.05 + 5 + 15 + 30 ≈ 50.3 s.
+        tokio::time::advance(Duration::from_secs(52)).await;
         let err = handle.await.unwrap().unwrap_err();
         assert!(
             matches!(err, ClientError::RetryExhausted { .. }),
@@ -2861,7 +2863,8 @@ mod tests {
             loop_opts(None),
             None,
         ));
-        // Skip past the turn-level backoff (2s for the first retry).
+        // Skip past the default turn-level schedule's first backoff (2s;
+        // schedule [2, 5, 10, 60, 120]).
         tokio::time::advance(Duration::from_secs(3)).await;
         let result = handle.await.unwrap().unwrap();
 
@@ -3003,7 +3006,8 @@ mod tests {
             loop_opts(None),
             None,
         ));
-        // Skip past the first turn-level backoff (2s).
+        // Skip past the default turn-level schedule's first backoff (2s;
+        // schedule [2, 5, 10, 60, 120]).
         tokio::time::advance(Duration::from_secs(3)).await;
         let result = handle.await.unwrap().unwrap();
 
@@ -3074,9 +3078,10 @@ mod tests {
     }
 
     /// When turn-level 429 retries are exhausted, the error must surface as
-    /// `Runtime` so the backend `with_retry` does not retry it again.
+    /// `RetryExhausted` so callers do not mistake it for a still-retryable
+    /// transient error.
     #[tokio::test(start_paused = true)]
-    async fn loop_429_exhausted_retries_returns_runtime() {
+    async fn loop_429_exhausted_retries_returns_retry_exhausted() {
         let dir = std::env::temp_dir().join(format!(
             "gremlins-oa-429-exhaust-{}-{}",
             std::process::id(),
@@ -3104,8 +3109,9 @@ mod tests {
             loop_opts(None),
             None,
         ));
-        // Advance past all turn-level backoffs: 2 + 5 + 10 = 17 s.
-        tokio::time::advance(Duration::from_secs(20)).await;
+        // Advance past all five turn-level backoffs:
+        // 2 + 5 + 10 + 60 + 120 = 197 s.
+        tokio::time::advance(Duration::from_secs(200)).await;
         let err = handle.await.unwrap().unwrap_err();
         assert!(
             matches!(err, ClientError::RetryExhausted { .. }),

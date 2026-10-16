@@ -654,6 +654,25 @@ The boss resumes from its child-spawn stage and proceeds with the next iteration
 | `GREMLINS_ARTIFACT_REMINDER_BUDGET` | `3` | How many times the agent loop will nudge the model when expected output artifacts have not been bound yet. |
 | `GREMLINS_COMPLETION_NUDGE_BUDGET` | `11` | How many empty-turn nudges to inject before giving up on a stuck agent loop. |
 
+### settings.yaml backoff schedules
+
+Retry backoff schedules are configurable in `~/.config/gremlins/settings.yaml`
+under a `backoff:` block. Each key is an ordered list of delays in seconds;
+the agent loops retries with `schedule[0]`, then `schedule[1]`, and so on
+until the list is exhausted. Present keys replace their default schedule, and
+an omitted section or key falls back to the default.
+
+```yaml
+backoff:
+  turn-retry: [2.0, 5.0, 10.0, 60.0, 120.0]  # default
+  timeout-retry: [5.0, 15.0, 30.0]            # default
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `turn-retry` | `[2.0, 5.0, 10.0, 60.0, 120.0]` | Per-attempt backoff, in seconds, for retryable stream errors (429 / 5xx / no-HTTP-status) retried against the same turn. |
+| `timeout-retry` | `[5.0, 15.0, 30.0]` | Per-attempt backoff, in seconds, for stream idle-timeout retries. |
+
 ### Client specifier syntax
 
 Client specifiers follow the format `provider:model` with an optional `:k=v,...`
