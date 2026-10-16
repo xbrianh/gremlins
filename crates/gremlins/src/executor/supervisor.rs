@@ -3948,10 +3948,11 @@ fn validate_launch_inputs(
 #[cfg(test)]
 mod tests {
     use super::{
-        create_chat_gremlin, handle_artifact, handle_launch, resolve_chat_env,
-        resolve_filepath_source_values,
+        add_usage_stats, create_chat_gremlin, handle_artifact, handle_launch, resolve_chat_env,
+        resolve_filepath_source_values, usage_stats_from_state,
     };
     use crate::builders::{AgentBuilder, DefinitionBuilder};
+    use crate::clients::protocol::UsageStats;
     use crate::executor::socket;
     use crate::schemas::bootstrap::{InputSource, InputSources};
     use crate::test_support::Sandbox;
@@ -4013,6 +4014,65 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for chat gremlin {id} to re-insert"))
+    }
+
+    #[test]
+    fn add_usage_stats_sums_baseline_and_prompt_totals() {
+        let baseline = UsageStats {
+            prompt_tokens: 10,
+            completion_tokens: 20,
+            cached_input_tokens: 30,
+            cache_creation_input_tokens: 40,
+            reasoning_tokens: 50,
+            turns: 2,
+        };
+        let delta = UsageStats {
+            prompt_tokens: 5,
+            completion_tokens: 6,
+            cached_input_tokens: 7,
+            cache_creation_input_tokens: 8,
+            reasoning_tokens: 9,
+            turns: 1,
+        };
+
+        let total = add_usage_stats(&baseline, &delta);
+
+        assert_eq!(total.prompt_tokens, 15);
+        assert_eq!(total.completion_tokens, 26);
+        assert_eq!(total.cached_input_tokens, 37);
+        assert_eq!(total.cache_creation_input_tokens, 48);
+        assert_eq!(total.reasoning_tokens, 59);
+        assert_eq!(total.turns, 3);
+    }
+
+    #[test]
+    fn usage_stats_from_state_reads_persisted_usage_and_defaults_missing_state() {
+        let state = serde_json::json!({
+            "prompt_tokens": 11,
+            "completion_tokens": 12,
+            "cached_input_tokens": 13,
+            "cache_creation_input_tokens": 14,
+            "reasoning_tokens": 15,
+            "turns": 3
+        });
+
+        let stats = usage_stats_from_state(Some(&state));
+
+        assert_eq!(stats.prompt_tokens, 11);
+        assert_eq!(stats.completion_tokens, 12);
+        assert_eq!(stats.cached_input_tokens, 13);
+        assert_eq!(stats.cache_creation_input_tokens, 14);
+        assert_eq!(stats.reasoning_tokens, 15);
+        assert_eq!(stats.turns, 3);
+
+        let stats = usage_stats_from_state(None);
+
+        assert_eq!(stats.prompt_tokens, 0);
+        assert_eq!(stats.completion_tokens, 0);
+        assert_eq!(stats.cached_input_tokens, 0);
+        assert_eq!(stats.cache_creation_input_tokens, 0);
+        assert_eq!(stats.reasoning_tokens, 0);
+        assert_eq!(stats.turns, 0);
     }
 
     #[test]

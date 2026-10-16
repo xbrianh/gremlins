@@ -386,11 +386,12 @@ impl TranscriptWidget {
     /// Build a committed stream block: flush the trailing partial, prepend
     /// the stream's own title row (matching the live header exactly), then
     /// append the retained tail capped at the shared stream row count.
-    /// Streams flagged [`retain_title_when_empty`](StreamingWidget) (tools)
-    /// commit their `◆` title even when the body is empty; every other
-    /// stream (reasoning) collapses entirely when empty so it never emits a
-    /// stray header. Retained logical lines are expanded into pre-wrapped
-    /// physical rows at the FIFO's inner body width before insertion.
+    /// Streams flagged [`retain_title_when_empty`](StreamingWidget) (tools
+    /// and the reasoning stats title) commit their title even when the body
+    /// is empty; every other stream collapses entirely when empty so it never
+    /// emits a stray header. Retained logical lines are expanded into
+    /// pre-wrapped physical rows at the FIFO's inner body width before
+    /// insertion.
     fn commit_stream_block(&mut self, mut stream: StreamingWidget) -> Vec<Line<'static>> {
         stream.flush();
         let rendered = stream.commit_lines();
@@ -1461,11 +1462,15 @@ pub struct StreamingWidget {
     title: Option<String>,
     /// Prefix rendered before the title row (e.g. the `◆ ` tool chrome).
     title_prefix: String,
-    /// Whether the title row is rendered and committed even when the body is
-    /// empty. Tool streams keep their `◆` call title at commit time; the
-    /// reasoning stream uses it for the live stats title so it both appears
-    /// during the turn and persists to scrollback after no-body turns.
+    /// Whether the title row is committed even when the body is empty. Tool
+    /// streams keep their `◆` call title at commit time; the reasoning
+    /// stream keeps the live stats title so no-body turns persist a line to
+    /// scrollback.
     retain_title_when_empty: bool,
+    /// Whether the title row is rendered live while the body is empty. Only
+    /// the reasoning stats title opts into this; tool streams still collapse
+    /// until commit so an idle tool call never allocates screen space.
+    render_title_when_empty: bool,
     /// Left gutter, in cells, reserved before every streamed body line (e.g.
     /// a four-space indent for reasoning and tool output).
     body_indent: u16,
@@ -1493,6 +1498,7 @@ impl StreamingWidget {
             title: None,
             title_prefix: String::new(),
             retain_title_when_empty: false,
+            render_title_when_empty: false,
             body_indent: 0,
             row_cap,
             size_priority,
@@ -1517,10 +1523,20 @@ impl StreamingWidget {
     /// Commit the title row even when the stream body is empty.
     ///
     /// By default a stream with no body collapses entirely at commit time so
-    /// no stray header line is emitted; flagged streams (tools) keep their
-    /// `◆` call title instead.
+    /// no stray header line is emitted; flagged streams (tools and the
+    /// reasoning stats title) keep their title instead.
     pub fn retain_title_when_empty(mut self) -> Self {
         self.retain_title_when_empty = true;
+        self
+    }
+
+    /// Render the title row live even when the stream body is empty.
+    ///
+    /// This is separate from [`retain_title_when_empty`](Self::retain_title_when_empty):
+    /// a stream may commit an empty-body title (e.g. a tool call's `◆` line)
+    /// without allocating live rows while it is idle.
+    pub fn render_title_when_empty(mut self) -> Self {
+        self.render_title_when_empty = true;
         self
     }
 
@@ -1566,6 +1582,7 @@ impl StreamingWidget {
             .with_body_indent(4)
             .retain_tail()
             .retain_title_when_empty()
+            .render_title_when_empty()
     }
 
     /// The configured live tool-output stream: four-cell body gutter, no
@@ -1830,12 +1847,12 @@ impl StreamingWidget {
         Some(tool_chrome_line(&self.title_prefix, title))
     }
 
-    /// Wrapped title rows. Streams that opt into `retain_title_when_empty`
+    /// Wrapped title rows. Streams that opt into `render_title_when_empty`
     /// (the reasoning stats title) render their title even when the body is
-    /// empty; other streams still collapse to zero so an unset/static title
-    /// never allocates screen space on its own.
+    /// empty; other streams still collapse to zero so a commit-only title
+    /// never allocates live screen space on its own.
     fn title_rows(&self, width: u16, _ctx: &RenderContext) -> u16 {
-        if width == 0 || (self.is_empty() && !self.retain_title_when_empty) {
+        if width == 0 || (self.is_empty() && !self.render_title_when_empty) {
             return 0;
         }
         match self.title_line() {
@@ -3528,6 +3545,44 @@ mod tests {
         let rows = full_rendered_rows(&block, 20);
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].trim_end(), "◆ grep foo", "{rows:?}");
+    }
+
+    #[test]
+    fn empty_tool_stream_collapses_live_despite_commit_title() {
+        let ctx = input_ctx("", 0);
+        let tool = StreamingWidget::tool(10).with_title("grep foo");
+
+        assert!(tool.is_empty());
+        assert_eq!(tool.min_height(20, &ctx), 0);
+        assert_eq!(tool.desired_height(20, &ctx), 0);
+        assert_eq!(tool.max_height(20, &ctx), 0);
+    }
+
+    #[test]
+    fn empty_reasoning_stats_title_renders_live_and_commits() {
+        let ctx = input_ctx("", 0);
+        let mut reasoning = StreamingWidget::reasoning(5);
+        reasoning.set_title("turn 1 stats");
+
+        assert!(reasoning.is_empty());
+        assert_eq!(reasoning.min_height(20, &ctx), 1);
+        assert_eq!(reasoning.desired_height(20, &ctx), 1);
+        assert_eq!(reasoning.max_height(20, &ctx), 1);
+
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(area);
+        reasoning.render(area, &mut buf, &ctx);
+
+        let rows = rendered_rows(&buf, 20, 1);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].trim_end(), "◈ turn 1 stats", "{rows:?}");
+
+        let mut transcript = TranscriptWidget::new();
+        transcript.last_width = 20;
+        let block = transcript.commit_stream_block(reasoning);
+        let rows = full_rendered_rows(&block, 20);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].trim_end(), "◈ turn 1 stats", "{rows:?}");
     }
 
     #[test]

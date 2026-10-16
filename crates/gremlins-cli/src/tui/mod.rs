@@ -2130,9 +2130,47 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_chat_request, ctrl_c_should_quit, format_socket_response};
+    use super::{build_chat_request, ctrl_c_should_quit, format_socket_response, stats_title};
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn stats_title_formats_turn_delta_and_conversation_total() {
+        let stats = serde_json::json!({
+            "turn": 3,
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "cached_input_tokens": 40,
+            "cache_creation_input_tokens": 5,
+            "reasoning_tokens": 30
+        });
+        let total = serde_json::json!({
+            "turn": 4,
+            "prompt_tokens": 400,
+            "completion_tokens": 200,
+            "cached_input_tokens": 150,
+            "cache_creation_input_tokens": 15,
+            "reasoning_tokens": 120
+        });
+
+        let title = stats_title(Some(&stats), Some(&total));
+
+        assert_eq!(
+            title,
+            "turn 3 · in 100 · out 50 · cache 40 (+5 new) · reason 30 · Σ in 400 · out 200 · cache 150 (+15 new) · reason 120",
+            "{title}"
+        );
+    }
+
+    #[test]
+    fn stats_title_renders_dashes_when_usage_is_absent() {
+        let title = stats_title(None, None);
+
+        assert_eq!(
+            title,
+            "turn - · in - · out - · cache - (+- new) · reason - · Σ in - · out - · cache - (+- new) · reason -"
+        );
+    }
 
     #[test]
     fn format_artifact_content_splits_embedded_newlines() {
