@@ -1,4 +1,5 @@
 /// Result of executing a slash command.
+#[derive(Debug)]
 pub enum CommandResult {
     /// Lines to append to the output buffer.
     Lines(Vec<String>),
@@ -210,13 +211,25 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
             }
             Some(CommandResult::Debug(id.to_string()))
         }
-        "model" => Some(CommandResult::Lines(vec![format!(
-            "default model: {}",
-            gremlins::config::global_config()
-                .ok()
-                .and_then(|c| c.default_model().map(String::from))
-                .unwrap_or_else(|| "(not configured)".to_string())
-        )])),
+        "model" => {
+            if args.is_empty() {
+                return Some(CommandResult::SocketOp {
+                    op: "model".to_string(),
+                    payload: serde_json::json!({"op": "model"}),
+                });
+            }
+            if args.len() == 1 && args[0] == "clear" {
+                return Some(CommandResult::SocketOp {
+                    op: "model".to_string(),
+                    payload: serde_json::json!({"op": "model", "clear": true}),
+                });
+            }
+            let spec = args.join(" ");
+            Some(CommandResult::SocketOp {
+                op: "model".to_string(),
+                payload: serde_json::json!({"op": "model", "model": spec}),
+            })
+        }
         _ => Some(CommandResult::Lines(vec![format!(
             "unknown command: /{cmd} — type /help for available commands"
         )])),
@@ -266,7 +279,8 @@ fn help_text() -> Vec<String> {
         "  /watch           — show running gremlins; ↑/↓ select, Ctrl+O toggles live log"
             .to_string(),
         "  /debug <id>      — open a full-screen interactive debug session".to_string(),
-        "  /model           — show default client".to_string(),
+        "  /model           — show, set (/model <spec>), or clear (/model clear) the TUI chat model"
+            .to_string(),
         "  /chat            — chat is always active (type directly)".to_string(),
         "  /clear, /new     — restart chat".to_string(),
         "  /help            — show this help".to_string(),
@@ -432,5 +446,41 @@ mod tests {
         };
         assert!(lines.iter().any(|l| l.contains("usage: /watch")));
         assert!(lines.iter().any(|l| l.contains("Ctrl+O")));
+    }
+
+    #[test]
+    fn model_without_args_builds_show_socket_op() {
+        match dispatch("/model") {
+            Some(CommandResult::SocketOp { op, payload }) => {
+                assert_eq!(op, "model");
+                assert_eq!(payload, serde_json::json!({ "op": "model" }));
+            }
+            other => panic!("expected a model socket op, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_with_spec_builds_set_socket_op() {
+        match dispatch("/model openai/gpt-4o") {
+            Some(CommandResult::SocketOp { op, payload }) => {
+                assert_eq!(op, "model");
+                assert_eq!(
+                    payload,
+                    serde_json::json!({ "op": "model", "model": "openai/gpt-4o" })
+                );
+            }
+            other => panic!("expected a model socket op, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_clear_builds_clear_socket_op() {
+        match dispatch("/model clear") {
+            Some(CommandResult::SocketOp { op, payload }) => {
+                assert_eq!(op, "model");
+                assert_eq!(payload, serde_json::json!({ "op": "model", "clear": true }));
+            }
+            other => panic!("expected a model socket op, got {other:?}"),
+        }
     }
 }

@@ -1015,6 +1015,11 @@ async fn dispatch_op(
             let _ = writer.write_json_line(&resp).await;
             DispatchOutcome::Continue
         }
+        "model" => {
+            let resp = handle_model(request).await;
+            let _ = writer.write_json_line(&resp).await;
+            DispatchOutcome::Continue
+        }
         _ => {
             let resp = error_response(&format!("unknown op: {op:?}"));
             let _ = writer.write_json_line(&resp).await;
@@ -2062,6 +2067,74 @@ async fn handle_artifact(request: &Value) -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// model
+// ---------------------------------------------------------------------------
+
+/// Show, set, or clear the gremlins-managed TUI chat model override.
+///
+/// - no `model` / no `clear` — show the resolved chat model
+/// - `model: "<spec>"`       — validate and persist the override
+/// - `clear: true`           — remove the override
+///
+/// Responses always echo the resolved model (or null when unset) so the TUI
+/// never needs to read `tui.json` directly.
+async fn handle_model(request: &Value) -> Value {
+    if let Err(e) = config::init_global() {
+        return error_response(&format!("config init: {e}"));
+    }
+
+    let cfg = match config::global_config() {
+        Ok(cfg) => cfg,
+        Err(e) => return error_response(&format!("config error: {e}")),
+    };
+
+    let clear = request
+        .get("clear")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if clear {
+        if let Err(e) = config::clear_tui_model_override() {
+            return error_response(&e);
+        }
+    } else if let Some(spec) = request.get("model").and_then(|v| v.as_str()) {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            return error_response("missing 'model' field");
+        }
+
+        // Validate before writing: profile references must resolve through
+        // the loaded config and the resulting concrete spec must be accepted
+        // by a real client (syntax check plus known-provider check). Once
+        // validated, ensure the raw concrete spec is stored so chat reads
+        // never need to resolve a profile.
+        let resolved = match config::resolve_model_reference(spec, &cfg) {
+            Ok(resolved) => resolved,
+            Err(e) => return error_response(&format!("invalid model: {e}")),
+        };
+        if let Err(e) = Client::parse(&resolved) {
+            return error_response(&format!("invalid model spec {resolved:?}: {e}"));
+        }
+        if let Err(e) = config::write_tui_model_override(&resolved) {
+            return error_response(&e);
+        }
+    }
+
+    match config::resolve_tui_chat_model(&cfg) {
+        Ok(Some((source, spec))) => ok_response(serde_json::json!({
+            "model": spec,
+            "source": source.as_str(),
+        })),
+        Ok(None) => ok_response(serde_json::json!({
+            "model": Value::Null,
+            "source": Value::Null,
+            "message": "chat model: not configured",
+        })),
+        Err(e) => error_response(&format!("invalid model: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // log
 // ---------------------------------------------------------------------------
 
@@ -2733,37 +2806,36 @@ async fn handle_chat(
 
     let project_root = project_root.unwrap_or_else(config::project_root);
 
-    // 2. Get default model, resolving `profile:` references through the
-    //    model-profiles table. Resolution is required here: unlike the
-    //    pipeline path (which bakes profiles during definition load), the
-    //    chat gremlin is built directly from the raw settings value and would
-    //    otherwise hand `profile:<name>` straight to `Client::parse`.
-    let default_model = match config::global_config() {
-        Ok(cfg) => match cfg.default_model() {
-            Some(c) => match config::resolve_model_reference(c, &cfg) {
-                Ok(resolved) => match ModelURI::parse(&resolved) {
-                    Ok(uri) => uri,
-                    Err(e) => {
-                        let resp =
-                            error_response(&format!("invalid default model {resolved:?}: {e}"));
-                        let _ = writer.write_json_line(&resp).await;
-                        return;
-                    }
-                },
-                Err(e) => {
-                    let resp = error_response(&format!("invalid default model: {e}"));
-                    let _ = writer.write_json_line(&resp).await;
-                    return;
-                }
-            },
-            None => {
-                let resp = error_response("no default model configured");
+    let cfg = match config::global_config() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            let resp = error_response(&format!("config error: {e}"));
+            let _ = writer.write_json_line(&resp).await;
+            return;
+        }
+    };
+
+    // 2. Resolve the chat model through the TUI model resolver:
+    //    tui.json -> tui-model -> default-model. The resolver returns a
+    //    concrete spec (profile references already resolved), so only the
+    //    `ModelURI` shape check remains before the spec goes into the
+    //    per-turn chat definition.
+    let chat_model = match config::resolve_tui_chat_model(&cfg) {
+        Ok(Some((_source, spec))) => match ModelURI::parse(&spec) {
+            Ok(uri) => uri,
+            Err(e) => {
+                let resp = error_response(&format!("invalid chat model {spec:?}: {e}"));
                 let _ = writer.write_json_line(&resp).await;
                 return;
             }
         },
+        Ok(None) => {
+            let resp = error_response("no model configured");
+            let _ = writer.write_json_line(&resp).await;
+            return;
+        }
         Err(e) => {
-            let resp = error_response(&format!("config error: {e}"));
+            let resp = error_response(&format!("invalid chat model: {e}"));
             let _ = writer.write_json_line(&resp).await;
             return;
         }
@@ -2774,6 +2846,7 @@ async fn handle_chat(
     let system_prompt = build_chat_system_prompt(context);
     let stage = match crate::builders::AgentBuilder::new("chat")
         .prompt(text)
+        .model(chat_model.clone())
         .option("system_prompt", system_prompt)
         .option(crate::executor::agent_runner::SANDBOX_ALLOW_ALL_KEY, true)
         .build()
@@ -2786,7 +2859,7 @@ async fn handle_chat(
         }
     };
 
-    let definition = match crate::builders::DefinitionBuilder::new("chat", default_model.clone())
+    let definition = match crate::builders::DefinitionBuilder::new("chat", chat_model.clone())
         .stage(stage)
         .build()
     {
@@ -2821,7 +2894,7 @@ async fn handle_chat(
         None => {
             let gremlin = match create_chat_gremlin(
                 &definition,
-                &default_model,
+                &chat_model,
                 state_root,
                 &project_root,
                 &env,
@@ -2877,7 +2950,30 @@ async fn handle_chat(
             }
         }
     };
+    // Rebuild the parsed model handle for the reused gremlin so a `/model`
+    // change takes effect on the next turn rather than only after the chat
+    // gremlin is recreated. Build the client before mutating the gremlin so
+    // a failure re-inserts it unchanged (old definition, old client).
+    let client = match Client::from_uri(chat_model.clone()) {
+        Ok(client) => client,
+        Err(e) => {
+            let mut s = session.lock().await;
+            s.chat_gremlins.insert(id.clone(), gremlin);
+            let resp = error_response(&format!("invalid chat model '{chat_model}': {e}"));
+            let _ = writer.write_json_line(&resp).await;
+            return;
+        }
+    };
+    gremlin.client = client;
     gremlin.definition = Box::new(definition);
+    // Keep the state.json `model` field in sync too: `/info` reads it from
+    // the live state store rather than the in-memory client handle.
+    let mut state_patch = serde_json::Map::new();
+    state_patch.insert(
+        "model".to_string(),
+        serde_json::Value::String(chat_model.to_string()),
+    );
+    gremlin.state.patch(&[], &state_patch);
     gremlin.runtime_config.stream_events = Some(StreamEventSender::Mpsc(stream_tx));
     gremlin.cancel_token = Some(turn_cancel.clone());
     // Refresh the environment on every turn: the chat gremlin is persistent
@@ -3971,11 +4067,11 @@ fn validate_launch_inputs(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_usage_stats, create_chat_gremlin, handle_artifact, handle_launch, resolve_chat_env,
-        resolve_filepath_source_values, usage_stats_from_state,
+        add_usage_stats, create_chat_gremlin, handle_artifact, handle_launch, handle_model,
+        resolve_chat_env, resolve_filepath_source_values, usage_stats_from_state,
     };
     use crate::builders::{AgentBuilder, DefinitionBuilder};
-    use crate::clients::client::ModelURI;
+    use crate::clients::client::{Client, ModelURI};
     use crate::clients::protocol::UsageStats;
     use crate::executor::socket;
     use crate::schemas::bootstrap::{InputSource, InputSources};
@@ -4036,6 +4132,44 @@ mod tests {
                 };
                 if let Some(env) = env {
                     return env;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for chat gremlin {id} to re-insert"))
+    }
+
+    /// Wait until the chat gremlin has been re-inserted after its turn, then
+    /// return its parsed client handle.
+    async fn wait_for_chat_gremlin_client(session: &super::SessionHandle, id: &str) -> Client {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let client = {
+                    let s = session.lock().await;
+                    s.chat_gremlins.get(id).map(|g| g.client.clone())
+                };
+                if let Some(client) = client {
+                    return client;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for chat gremlin {id} to re-insert"))
+    }
+
+    /// Wait until the chat gremlin has been re-inserted after its turn, then
+    /// return the `model` value persisted in its state.json.
+    async fn wait_for_chat_gremlin_state_model(session: &super::SessionHandle, id: &str) -> String {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let model = {
+                    let s = session.lock().await;
+                    s.chat_gremlins.get(id).map(|g| g.state.read_str("model"))
+                };
+                if let Some(model) = model {
+                    return model;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -4320,6 +4454,70 @@ stages: []
     }
 
     #[tokio::test]
+    async fn model_op_show_set_clear_round_trip() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-model: "cmd/default"
+tui-model: "cmd/tui"
+model-profiles:
+  fast:
+    model: cmd/echo
+"#,
+        ));
+
+        let show = handle_model(&serde_json::json!({"op": "model"})).await;
+        assert_eq!(show.get("type").and_then(Value::as_str), Some("ok"));
+        assert_eq!(show["model"], "cmd/tui");
+        assert_eq!(show["source"], "tui-model");
+
+        let set = handle_model(&serde_json::json!({"op": "model", "model": "profile:fast"})).await;
+        assert_eq!(set.get("type").and_then(Value::as_str), Some("ok"));
+        assert_eq!(set["model"], "cmd/echo");
+        assert_eq!(set["source"], "tui.json");
+
+        let show_after_set = handle_model(&serde_json::json!({"op": "model"})).await;
+        assert_eq!(show_after_set["model"], "cmd/echo");
+        assert_eq!(show_after_set["source"], "tui.json");
+
+        let clear = handle_model(&serde_json::json!({"op": "model", "clear": true})).await;
+        assert_eq!(clear.get("type").and_then(Value::as_str), Some("ok"));
+        assert_eq!(clear["model"], "cmd/tui");
+        assert_eq!(clear["source"], "tui-model");
+
+        let override_path = crate::config::resolve_user_config_root(None).join("tui.json");
+        assert!(!override_path.exists());
+    }
+
+    #[tokio::test]
+    async fn model_op_invalid_spec_does_not_create_override() {
+        let _sandbox = Sandbox::with_config(Some(r#"default-model: "cmd/default""#));
+        let override_path = crate::config::resolve_user_config_root(None).join("tui.json");
+
+        let resp = handle_model(&serde_json::json!({"op": "model", "model": "not-a-model"})).await;
+        assert_eq!(resp.get("type").and_then(Value::as_str), Some("error"));
+        assert!(!override_path.exists());
+    }
+
+    #[tokio::test]
+    async fn model_op_unknown_provider_does_not_create_override() {
+        let _sandbox = Sandbox::with_config(Some(r#"default-model: "cmd/default""#));
+        let override_path = crate::config::resolve_user_config_root(None).join("tui.json");
+
+        let resp = handle_model(&serde_json::json!({"op": "model", "model": "fake/m"})).await;
+        assert_eq!(resp.get("type").and_then(Value::as_str), Some("error"));
+        assert!(!override_path.exists());
+    }
+
+    #[tokio::test]
+    async fn model_op_unknown_profile_does_not_create_override() {
+        let _sandbox = Sandbox::with_config(Some(r#"default-model: "cmd/default""#));
+        let override_path = crate::config::resolve_user_config_root(None).join("tui.json");
+
+        let resp = handle_model(&serde_json::json!({"op": "model", "model": "profile:nope"})).await;
+        assert_eq!(resp.get("type").and_then(Value::as_str), Some("error"));
+        assert!(!override_path.exists());
+    }
+
+    #[tokio::test]
     async fn handle_artifact_returns_unknown_gremlin_for_missing_state() {
         let _sandbox = Sandbox::new();
         let resp = handle_artifact(
@@ -4572,6 +4770,135 @@ stages: []
             !super::get_run_map().lock().unwrap().contains_key(&id),
             "teardown must remove the chat gremlin from the run map"
         );
+    }
+
+    #[tokio::test]
+    async fn chat_reuse_rebuilds_client_after_model_change() {
+        let _sandbox = Sandbox::with_config(Some(r#"{"default-model": "cmd/echo"}"#));
+        let project_root = _sandbox.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let state_root = _sandbox.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        let (server, client) = tokio::net::UnixStream::pair().unwrap();
+        let (server_read, server_write) = server.into_split();
+        let writer = super::SharedWriter::new(server_write);
+        let (client_read, _client_write) = client.into_split();
+        let mut reader = tokio::io::BufReader::new(client_read);
+        let _server_read = server_read;
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new("sess-model-reuse".to_string()),
+        ));
+
+        let chat = |turn: &str| {
+            serde_json::json!({
+                "op": "chat",
+                "text": "hello",
+                "turn": turn,
+                "project_root": project_root.to_string_lossy(),
+            })
+        };
+
+        // First turn seeds the chat gremlin with the default model.
+        super::handle_chat(&chat("1"), &state_root, &writer, &session).await;
+        let ack = read_until_type(&mut reader, "ok").await;
+        let id = ack["id"].as_str().unwrap().to_string();
+        let before = wait_for_chat_gremlin_client(&session, &id).await;
+        assert_eq!(before, Client::parse("cmd/echo").unwrap());
+        assert_eq!(
+            wait_for_chat_gremlin_state_model(&session, &id).await,
+            "cmd/echo"
+        );
+
+        // Change the model override; the reused gremlin must pick up the new
+        // client handle on the next turn without being recreated.
+        let set = handle_model(&serde_json::json!({ "op": "model", "model": "cmd/true" })).await;
+        assert_eq!(set["model"], "cmd/true");
+        assert_eq!(set["source"], "tui.json");
+
+        super::handle_chat(&chat("2"), &state_root, &writer, &session).await;
+        read_until_type(&mut reader, "ok").await;
+        let after = wait_for_chat_gremlin_client(&session, &id).await;
+        assert_eq!(after, Client::parse("cmd/true").unwrap());
+        assert_eq!(
+            wait_for_chat_gremlin_state_model(&session, &id).await,
+            "cmd/true"
+        );
+
+        super::teardown_session(&session, &state_root).await;
+    }
+
+    #[tokio::test]
+    async fn chat_stage_model_wins_over_default_model_by_stage() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-model: "cmd/default"
+default-model-by-stage:
+  chat: cmd/echo
+"#,
+        ));
+        let project_root = _sandbox.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let state_root = _sandbox.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        let (server, client) = tokio::net::UnixStream::pair().unwrap();
+        let (server_read, server_write) = server.into_split();
+        let writer = super::SharedWriter::new(server_write);
+        let (client_read, _client_write) = client.into_split();
+        let mut reader = tokio::io::BufReader::new(client_read);
+        let _server_read = server_read;
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new("sess-stage-model".to_string()),
+        ));
+
+        let set = handle_model(&serde_json::json!({ "op": "model", "model": "cmd/true" })).await;
+        assert_eq!(set["model"], "cmd/true");
+        assert_eq!(set["source"], "tui.json");
+
+        super::handle_chat(
+            &serde_json::json!({
+                "op": "chat",
+                "text": "hello",
+                "turn": "1",
+                "project_root": project_root.to_string_lossy(),
+            }),
+            &state_root,
+            &writer,
+            &session,
+        )
+        .await;
+        let ack = read_until_type(&mut reader, "ok").await;
+        let id = ack["id"].as_str().unwrap().to_string();
+
+        // The serialized chat definition must carry both the definition
+        // default and an explicit stage model, so execution cannot fall back
+        // to the `chat: cmd/echo` entry in `default-model-by-stage`.
+        let store = super::get_run_map()
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .store
+            .clone();
+        let mut blob = store
+            .open("definition.yaml", crate::executor::state::BlobMode::Read)
+            .unwrap();
+        let mut serialized = Vec::new();
+        std::io::Read::read_to_end(&mut blob, &mut serialized).unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_slice(&serialized).unwrap();
+        assert_eq!(
+            yaml.get("default_model").and_then(|v| v.as_str()),
+            Some("cmd/true")
+        );
+        let stage_model = yaml
+            .get("stages")
+            .and_then(|v| v.as_sequence())
+            .and_then(|stages| stages.first())
+            .and_then(|stage| stage.get("model"))
+            .and_then(|model| model.as_str());
+        assert_eq!(stage_model, Some("cmd/true"));
+
+        super::teardown_session(&session, &state_root).await;
     }
 
     #[tokio::test]

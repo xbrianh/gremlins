@@ -2008,6 +2008,23 @@ fn format_socket_response(op: &str, resp: &serde_json::Value) -> Vec<String> {
                 vec![serde_json::to_string_pretty(resp).unwrap_or_else(|_| format!("{resp:#?}"))]
             }
         }
+        "model" => {
+            match (
+                resp.get("model").and_then(|v| v.as_str()),
+                resp.get("source").and_then(|v| v.as_str()),
+            ) {
+                (Some(model), Some(source)) => {
+                    vec![format!("chat model: {model} (source: {source})")]
+                }
+                _ => {
+                    vec![resp
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("chat model: not configured")
+                        .to_string()]
+                }
+            }
+        }
         "launch" => match resp.get("id").and_then(|v| v.as_str()) {
             Some(id) => vec![id.to_string()],
             None => {
@@ -2153,6 +2170,32 @@ mod tests {
         let resp = serde_json::json!({ "id": "gr-1", "content": "line one\nline two\n" });
         let lines = format_socket_response("artifact", &resp);
         assert_eq!(lines, vec!["line one", "line two", ""]);
+    }
+
+    #[test]
+    fn format_model_response_shows_resolved_model_and_source() {
+        let resp = serde_json::json!({
+            "type": "ok",
+            "model": "cmd/echo",
+            "source": "tui.json",
+        });
+        let lines = format_socket_response("model", &resp);
+        assert_eq!(
+            lines,
+            vec!["chat model: cmd/echo (source: tui.json)".to_string()]
+        );
+    }
+
+    #[test]
+    fn format_model_response_renders_not_configured_message() {
+        let resp = serde_json::json!({
+            "type": "ok",
+            "model": null,
+            "source": null,
+            "message": "chat model: not configured",
+        });
+        let lines = format_socket_response("model", &resp);
+        assert_eq!(lines, vec!["chat model: not configured".to_string()]);
     }
 
     #[test]
