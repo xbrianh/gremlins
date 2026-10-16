@@ -1808,17 +1808,22 @@ mod tests {
         live_area.compose(&app).unwrap();
 
         let visible = dump_buffer(live_area.backend().buffer());
-        // With 4 transcript rows (1 reserved for the prompt + 3 for the
-        // reasoning band) shaving the band below its 5-row cap must keep the
-        // newest reasoning lines, not the head, and later taller frames must
-        // not resurrect lines trimmed from this shorter band.
-        for i in 3..6 {
+        // The reasoning band now carries a live header, so with 4 transcript
+        // rows (1 reserved for the prompt + 3 for the reasoning band) only
+        // two body rows remain after the header. The band must still keep
+        // the newest reasoning lines, not the head, and later taller frames
+        // must not resurrect lines trimmed from this shorter band.
+        assert!(
+            visible.contains("model reasoning:"),
+            "reasoning header should stay visible in the short band.\nBuffer:\n{visible}"
+        );
+        for i in 4..6 {
             assert!(
                 visible.contains(&format!("reasoning line {i}")),
                 "reasoning line {i} should be visible in the short-band tail.\nBuffer:\n{visible}"
             );
         }
-        for i in 0..3 {
+        for i in 0..4 {
             assert!(
                 !visible.contains(&format!("reasoning line {i}")),
                 "reasoning line {i} should be trimmed by the short band.\nBuffer:\n{visible}"

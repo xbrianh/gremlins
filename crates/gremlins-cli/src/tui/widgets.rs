@@ -284,7 +284,7 @@ impl TranscriptWidget {
 
         if let Some(stream) = self.tools.remove(id) {
             self.tool_calls_by_id.remove(id);
-            self.commit_tool_stream_block(call, stream);
+            self.commit_tool_stream_block(stream);
         } else if !call.is_empty() {
             self.insert_tool_lines(vec![tool_line(call)]);
         }
@@ -369,7 +369,7 @@ impl TranscriptWidget {
                 let stream = self.tools.remove(&stream_id).unwrap();
                 self.committed_tool_ids.insert(stream_id.clone());
                 self.tool_calls_by_id.remove(&stream_id);
-                self.commit_tool_stream_block(&call, stream);
+                self.commit_tool_stream_block(stream);
             } else if !call.is_empty() {
                 self.insert_tool_lines(vec![tool_line(&call)]);
             }
@@ -377,25 +377,28 @@ impl TranscriptWidget {
     }
 
     /// Build a committed stream block: flush the trailing partial, prepend
-    /// an optional title row, then append the retained tail capped at the
-    /// shared stream row count. Tools invoke this with their `◆` title;
-    /// reasoning invokes it without one. Retained logical lines are expanded
-    /// into pre-wrapped physical rows at the FIFO's inner body width before
+    /// the stream's own title row (matching the live header exactly), then
+    /// append the retained tail capped at the shared stream row count.
+    /// Tool streams commit their `◆` title even when the body is empty;
+    /// plain-title streams (reasoning) collapse entirely when empty so they
+    /// never emit a stray header. Retained logical lines are expanded into
+    /// pre-wrapped physical rows at the FIFO's inner body width before
     /// insertion.
-    fn commit_stream_block(
-        &mut self,
-        title: Option<&str>,
-        mut stream: StreamingWidget,
-    ) -> Vec<Line<'static>> {
+    fn commit_stream_block(&mut self, mut stream: StreamingWidget) -> Vec<Line<'static>> {
         stream.flush();
+        let rendered = stream.commit_lines();
+        let title = stream.title_line();
+        if rendered.is_empty() && (title.is_none() || stream.title_prefix.is_empty()) {
+            return Vec::new();
+        }
+
         let mut block: Vec<Line<'static>> = Vec::new();
-        if let Some(title) = title.filter(|title| !title.is_empty()) {
-            block.push(tool_line(title));
+        if let Some(title) = title {
+            block.push(title);
         }
         let width = self.last_width.saturating_sub(1);
         let body_width = width.saturating_sub(stream.body_indent);
-        let rendered = stream.commit_lines();
-        if body_width > 0 && !rendered.is_empty() {
+        if body_width > 0 {
             let window = tail_window(&rendered, body_width, Self::STREAM_MAX_ROWS as usize);
             block.extend(Self::expand_stream_tail(
                 &rendered[window.start..],
@@ -492,8 +495,8 @@ impl TranscriptWidget {
 
     /// Commit a finished tool stream as title + retained tail above the
     /// streaming response region.
-    fn commit_tool_stream_block(&mut self, call: &str, stream: StreamingWidget) {
-        let block = self.commit_stream_block(Some(call), stream);
+    fn commit_tool_stream_block(&mut self, stream: StreamingWidget) {
+        let block = self.commit_stream_block(stream);
         self.insert_tool_lines(block);
     }
 
@@ -507,7 +510,7 @@ impl TranscriptWidget {
             &mut self.reasoning,
             StreamingWidget::reasoning(Self::STREAM_MAX_ROWS),
         );
-        let block = self.commit_stream_block(None, stream);
+        let block = self.commit_stream_block(stream);
         self.insert_reasoning_lines(block);
     }
 
@@ -1493,6 +1496,14 @@ impl StreamingWidget {
         self
     }
 
+    /// Configure the title row at construction time. An empty title renders
+    /// no row. Set the prefix with [`with_title_prefix`](Self::with_title_prefix)
+    /// before or after this; ordering between the two is irrelevant.
+    pub fn with_title(mut self, title: &str) -> Self {
+        self.set_title(title);
+        self
+    }
+
     /// Configure the left gutter reserved before every streamed body line.
     pub fn with_body_indent(mut self, indent: u16) -> Self {
         self.body_indent = indent;
@@ -1520,6 +1531,7 @@ impl StreamingWidget {
     pub fn reasoning(row_cap: u16) -> Self {
         Self::new(reasoning_stream_line, row_cap, 20)
             .with_body_indent(4)
+            .with_title("model reasoning:")
             .retain_tail()
     }
 
@@ -1591,7 +1603,9 @@ impl StreamingWidget {
         }
     }
 
-    /// Reset the live region for a new turn.
+    /// Reset the live region for a new turn. The configured title row is
+    /// preserved so a construction-time title (such as the reasoning
+    /// stream's) survives the clear/reset cycle.
     pub fn clear(&mut self) {
         self.lines.clear();
         self.partial.clear();
@@ -1599,7 +1613,6 @@ impl StreamingWidget {
         self.line_count = 0;
         self.scrolled.set(0);
         self.last_width.set(0);
-        self.title = None;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -3453,9 +3466,9 @@ mod tests {
         let mut transcript = TranscriptWidget::new();
         transcript.last_width = 11;
 
-        let mut tool = StreamingWidget::tool(10);
+        let mut tool = StreamingWidget::tool(10).with_title("TITLE");
         tool.push_text("abcdefghijklmnopqrstuvwxyz\n");
-        let block = transcript.commit_stream_block(Some("TITLE"), tool);
+        let block = transcript.commit_stream_block(tool);
 
         let rows = full_rendered_rows(&block, 10);
         assert_eq!(rows[0].trim_end(), "◆ TITLE", "{rows:?}");
@@ -3464,6 +3477,19 @@ mod tests {
         assert_eq!(rows[3].trim_end(), "    mnopqr", "{rows:?}");
         assert_eq!(rows[4].trim_end(), "    stuvwx", "{rows:?}");
         assert_eq!(rows[5].trim_end(), "    yz", "{rows:?}");
+    }
+
+    #[test]
+    fn committed_empty_tool_stream_keeps_call_title() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.last_width = 20;
+
+        let tool = StreamingWidget::tool(10).with_title("grep foo");
+        let block = transcript.commit_stream_block(tool);
+
+        let rows = full_rendered_rows(&block, 20);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].trim_end(), "◆ grep foo", "{rows:?}");
     }
 
     #[test]
@@ -3553,10 +3579,11 @@ mod tests {
         let cols = 40;
         LiveAreaWidget::finalize(&mut transcript, cols);
 
-        // Six rows are exactly enough for prompt + reasoning + tool-call
-        // event + live tool title + live tool body + response. The short
-        // response bottom-anchors below the live tool slot.
-        let area = Rect::new(0, 0, cols, 6);
+        // Seven rows are exactly enough for prompt + reasoning header +
+        // reasoning body + tool-call event + live tool title + live tool body
+        // + response. The short response bottom-anchors below the live tool
+        // slot.
+        let area = Rect::new(0, 0, cols, 7);
         let mut buf = Buffer::empty(area);
         LiveAreaWidget::render(&mut transcript, area, &mut buf, &ctx);
         let rows = rendered_rows(&buf, cols, area.height);
@@ -3834,9 +3861,68 @@ mod tests {
             text,
             vec![
                 "▍» hi".to_string(),
+                "model reasoning:".to_string(),
                 "    thinking".to_string(),
                 "answer".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn reasoning_title_commits_between_prompt_and_tail_exactly_once() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("answer");
+        for i in 0..8 {
+            transcript.push_reasoning_text(&format!("thinking {i}\n"));
+        }
+
+        transcript.finish_turn();
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(
+            text.iter().filter(|l| *l == "model reasoning:").count(),
+            1,
+            "reasoning must commit exactly one plain header row: {text:?}"
+        );
+        let title = text.iter().position(|l| l == "model reasoning:").unwrap();
+        let answer = text.iter().position(|l| l == "answer").unwrap();
+        assert_eq!(text[0], "▍» hi");
+        assert!(
+            title < answer,
+            "reasoning title must precede the response: {text:?}"
+        );
+        assert!(
+            !text[title].contains('◆'),
+            "reasoning header must be plain, with no tool diamond: {text:?}"
+        );
+        assert_eq!(text[title + 1], "    thinking 3");
+        assert!(text.contains(&"    thinking 7".to_string()), "{text:?}");
+        assert!(!text.contains(&"    thinking 0".to_string()), "{text:?}");
+    }
+
+    #[test]
+    fn empty_reasoning_commits_no_title() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("answer");
+        transcript.finish_turn();
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(text, vec!["▍» hi".to_string(), "answer".to_string()]);
+        assert!(
+            !text.iter().any(|l| l == "model reasoning:"),
+            "empty reasoning must not commit a header: {text:?}"
         );
     }
 
@@ -3859,6 +3945,7 @@ mod tests {
             text,
             vec![
                 "▍» hi".to_string(),
+                "model reasoning:".to_string(),
                 "    thinking".to_string(),
                 "◆ grep".to_string(),
                 "answer".to_string(),
@@ -3897,6 +3984,7 @@ mod tests {
             text,
             vec![
                 "▍» hi".to_string(),
+                "model reasoning:".to_string(),
                 "    thinking 3".to_string(),
                 "    thinking 4".to_string(),
                 "    thinking 5".to_string(),
