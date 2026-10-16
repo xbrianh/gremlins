@@ -387,15 +387,10 @@ async fn run_agent(
 
     let stage_env = gremlin.env.clone();
 
-    let task_models = {
-        let backend = client
-            .get_or_build_backend()
-            .map_err(|message| RunError::StageFailed {
-                stage: agent.name.clone(),
-                message,
-            })?;
-        crate::clients::task::build_task_selector(backend, &task_models_by_kind)
-    };
+    let task_models = crate::clients::task::build_task_selector(
+        std::sync::Arc::new(crate::clients::client::resolve_model),
+        &task_models_by_kind,
+    );
 
     // Chat gremlins pre-populate the agent loop's history from the previous
     // stage's conversation artifact so full model context flows between turns.

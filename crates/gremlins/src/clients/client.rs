@@ -550,6 +550,31 @@ impl PartialEq for Client {
 
 impl Eq for Client {}
 
+/// Provider-agnostic model resolver for `task-models` entries.
+///
+/// Parses `spec` with [`Client`], builds or looks up the provider's backend in
+/// the shared lazy pool, and delegates to [`Backend::make_model`] and
+/// [`Backend::resolved_params`]. The returned [`TaskModel`] carries the target
+/// provider's own request options, so a cross-provider override never inherits
+/// the parent model's `temperature`/`max_tokens`/`extra`. Returns `None` for
+/// malformed specs, unknown providers, the `cmd` backend, and backend-build
+/// failures — callers fall back to the parent model without surfacing an error.
+pub(crate) fn resolve_model(spec: &str) -> Option<super::task::TaskModel> {
+    let client = Client::parse(spec).ok()?;
+    if client.provider() == "cmd" {
+        return None;
+    }
+    let backend = client.get_or_build_backend().ok()?;
+    let model = backend.make_model(spec)?;
+    let resolved = backend.resolved_params()?;
+    Some(super::task::TaskModel {
+        model,
+        temperature: resolved.temperature,
+        max_tokens: resolved.max_tokens,
+        extra: resolved.additional_value(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -757,6 +782,24 @@ mod tests {
         assert!(Client::new("fake".into(), "m".into(), IndexMap::new()).is_err());
         assert!(Client::parse("fake/m").is_err());
         assert!(Client::from_uri(ModelURI::parse("fake/m").unwrap()).is_err());
+    }
+
+    #[test]
+    fn resolve_model_returns_none_for_malformed_specs() {
+        assert!(resolve_model("no-slash").is_none());
+        assert!(resolve_model("/model").is_none());
+        assert!(resolve_model("openai/").is_none());
+        assert!(resolve_model("model://openai").is_none());
+    }
+
+    #[test]
+    fn resolve_model_returns_none_for_unknown_provider() {
+        assert!(resolve_model("fake/model").is_none());
+    }
+
+    #[test]
+    fn resolve_model_returns_none_for_cmd() {
+        assert!(resolve_model("cmd/true").is_none());
     }
 
     #[test]

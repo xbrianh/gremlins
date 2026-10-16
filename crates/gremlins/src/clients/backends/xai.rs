@@ -112,6 +112,10 @@ impl Backend for XaiBackend {
         None
     }
 
+    fn resolved_params(&self) -> Option<ResolvedParams> {
+        Some(self.state.resolved.clone())
+    }
+
     fn resolve_params(raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
         openai_protocol::resolve_openai_protocol(PROVIDER_NAME, raw)
     }

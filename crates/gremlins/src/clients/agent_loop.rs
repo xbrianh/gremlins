@@ -4505,7 +4505,12 @@ mod tests {
         let child_handle = child.clone();
         let factory: super::super::task::TaskModelFactory = Arc::new(move |spec: &str| {
             assert_eq!(spec, "openai/mini", "factory receives the matched spec");
-            Some(gm(child_handle.clone().erase()))
+            Some(super::super::task::TaskModel {
+                model: gm(child_handle.clone().erase()),
+                temperature: None,
+                max_tokens: None,
+                extra: None,
+            })
         });
 
         let selector = super::super::task::TaskModelSelector::new(
@@ -4809,8 +4814,14 @@ mod tests {
         ]]);
 
         let child_handle = child.clone();
-        let factory: super::super::task::TaskModelFactory =
-            Arc::new(move |_spec: &str| Some(gm(child_handle.clone().erase())));
+        let factory: super::super::task::TaskModelFactory = Arc::new(move |_spec: &str| {
+            Some(super::super::task::TaskModel {
+                model: gm(child_handle.clone().erase()),
+                temperature: None,
+                max_tokens: Some(8192),
+                extra: None,
+            })
+        });
 
         let selector = super::super::task::TaskModelSelector::new(
             HashMap::from([(
@@ -4893,8 +4904,14 @@ mod tests {
         ]]);
 
         let child_handle = child.clone();
-        let factory: super::super::task::TaskModelFactory =
-            Arc::new(move |_spec: &str| Some(gm(child_handle.clone().erase())));
+        let factory: super::super::task::TaskModelFactory = Arc::new(move |_spec: &str| {
+            Some(super::super::task::TaskModel {
+                model: gm(child_handle.clone().erase()),
+                temperature: None,
+                max_tokens: None,
+                extra: None,
+            })
+        });
 
         let selector = super::super::task::TaskModelSelector::new(
             HashMap::from([(

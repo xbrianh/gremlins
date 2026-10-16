@@ -657,6 +657,10 @@ impl Backend for CopilotBackend {
         None
     }
 
+    fn resolved_params(&self) -> Option<ResolvedParams> {
+        Some(self.state.resolved.clone())
+    }
+
     fn resolve_params(raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
         // Validate the typed flags strictly (so a malformed value errors at
         // build time), then resolve temperature/max_tokens and passthrough.
