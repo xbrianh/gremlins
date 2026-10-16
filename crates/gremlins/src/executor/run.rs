@@ -24,6 +24,7 @@ use crate::config;
 use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
 use crate::executor::bootstrap::run_definition_bootstrap;
+use crate::executor::conversation;
 use crate::executor::exec_runner::{commit_exec, prepare_exec, run_shell, ExecError};
 use crate::executor::gremlin::Gremlin;
 #[cfg(test)]
@@ -422,7 +423,7 @@ async fn run_agent(
     // exists but fails to parse is fatal: running with an empty prefix would
     // then overwrite the unreadable artifact with the new turn's messages,
     // destroying recoverable history.
-    let prepopulated_messages = if gremlin.state.read_str("kind") == "chat" {
+    let verbatim_history = if gremlin.state.read_str("kind") == "chat" {
         match gremlin
             .state
             .content("artifact://conversation.json", None)
@@ -451,6 +452,28 @@ async fn run_agent(
     } else {
         None
     };
+
+    // Compaction is a read-time, in-memory transform. `verbatim_history` keeps
+    // the full archive so the post-run write can reconstruct the verbatim
+    // transcript instead of persisting the compacted working memory. The soft
+    // trigger is evaluated against the normalized serialized request, so the
+    // history budget subtracts the empty-request envelope (prompt, system
+    // preamble, tool definitions, and JSON quoting) before choosing the
+    // retained window.
+    let tool_definitions = crate::clients::tools::tool_definitions(None);
+    let chat_compaction_overhead = completion_request_overhead(
+        &prepared.user_prompt(),
+        &prepared.system_prompt(),
+        &tool_definitions,
+    );
+    let prepopulated_messages = verbatim_history.as_ref().map(|history| {
+        conversation::compact(
+            history,
+            config::chat_compaction_threshold_bytes(),
+            chat_compaction_overhead,
+        )
+    });
+    let prepopulated_len = prepopulated_messages.as_ref().map(Vec::len).unwrap_or(0);
 
     let params = RunParams {
         prompt: prepared.user_prompt(),
@@ -586,18 +609,45 @@ async fn run_agent(
 
     // Chat gremlins persist the agent loop's accumulated message history as a
     // structured artifact so the next stage can pre-populate its own history
-    // with full model context. On serialize failure, log and leave any prior
-    // artifact untouched rather than erasing it with an empty array.
+    // with full model context. If compaction ran at read time, reconstruct the
+    // full verbatim history (the pre-compaction prefix plus this turn's new
+    // messages) so `artifact://conversation.json` is never the compacted
+    // working memory. On serialize failure, log and leave any prior artifact
+    // untouched rather than erasing it with an empty array.
     if gremlin.state.read_str("kind") == "chat" {
         if let Some(messages) = &completed.messages {
-            match serde_json::to_string(messages) {
-                Ok(json) => {
-                    if let Ok(uri) = Uri::parse("artifact://conversation.json") {
-                        let _ = gremlin.state.write_into_registry(&uri, &json).await;
+            // Reconstruct the full verbatim history: the pre-compaction prefix
+            // plus this turn's new messages. When the agent loop did not keep
+            // the compacted prefix intact, refuse to persist anything rather
+            // than replacing the verbatim archive with compacted or partial
+            // working memory.
+            let full_history = match &verbatim_history {
+                Some(prior) => match append_new_turn_to_verbatim(prior, messages, prepopulated_len)
+                {
+                    Some(full) => Some(full),
+                    None => {
+                        log::warn!(
+                            "chat: refusing to persist conversation artifact: \
+                             completed message history ({} messages) is shorter \
+                             than the compacted prefix ({prepopulated_len} messages)",
+                            messages.len()
+                        );
+                        None
                     }
-                }
-                Err(e) => {
-                    log::warn!("chat: failed to serialize conversation artifact: {e}");
+                },
+                None => Some(messages.clone()),
+            };
+
+            if let Some(full_history) = full_history {
+                match serde_json::to_string(&full_history) {
+                    Ok(json) => {
+                        if let Ok(uri) = Uri::parse("artifact://conversation.json") {
+                            let _ = gremlin.state.write_into_registry(&uri, &json).await;
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("chat: failed to serialize conversation artifact: {e}");
+                    }
                 }
             }
         }
@@ -1129,6 +1179,35 @@ impl Gremlin {
     }
 }
 
+/// Estimate the serialized size of every request field except the chat
+/// history.
+///
+/// The agent loop's hard prompt ceiling measures the normalized
+/// [`rig_core::completion::CompletionRequest`], not the bare transcript. This
+/// helper builds that same request with an empty message list and subtracts
+/// the one-byte difference between an empty and a non-empty `chat_history`
+/// array; [`conversation::compact`] then adds the serialized history length
+/// back, so the soft trigger tracks the real normalized request size instead
+/// of summing raw prompt bytes.
+fn completion_request_overhead(
+    prompt: &str,
+    system_prompt: &str,
+    tools: &[rig_core::completion::ToolDefinition],
+) -> usize {
+    use rig_core::completion::{CompletionRequest, Message};
+
+    let mut request = CompletionRequest::new(Message::user(prompt.to_string()))
+        .messages(Vec::<Message>::new())
+        .tools(tools.to_vec());
+    if !system_prompt.is_empty() {
+        request = request.preamble(system_prompt.to_string());
+    }
+
+    serde_json::to_vec(&request)
+        .map(|json| json.len().saturating_sub(1))
+        .unwrap_or(0)
+}
+
 /// Reconstruct a `Vec<Message>` from the serialized conversation artifact
 /// (`artifact://conversation.json`). The artifact is a JSON array of rig
 /// `Message` values (role-tagged), so deserialization round-trips all variants
@@ -1142,6 +1221,26 @@ pub(crate) fn messages_from_conversation(
 ) -> Result<Vec<rig_core::completion::Message>, String> {
     serde_json::from_str::<Vec<rig_core::completion::Message>>(json)
         .map_err(|e| format!("chat: failed to parse conversation artifact: {e}"))
+}
+
+/// Rejoin the verbatim pre-compaction archive with the new-turn suffix of the
+/// compacted working transcript.
+///
+/// `completed` is the agent loop's accumulated history (the compacted prefix
+/// plus this run's new messages). Slicing it at `compacted_prefix_len` leaves
+/// exactly the new messages, which are appended to `prior` to rebuild the full
+/// verbatim transcript. If `completed` is shorter than the compacted prefix,
+/// returns `None` rather than guessing; callers must then leave the archived
+/// artifact untouched.
+fn append_new_turn_to_verbatim(
+    prior: &[rig_core::completion::Message],
+    completed: &[rig_core::completion::Message],
+    compacted_prefix_len: usize,
+) -> Option<Vec<rig_core::completion::Message>> {
+    let tail = completed.get(compacted_prefix_len..)?;
+    let mut full = prior.to_vec();
+    full.extend(tail.iter().cloned());
+    Some(full)
 }
 
 /// Clamp `text` to at most `max` bytes, cutting on a char boundary.
@@ -1315,12 +1414,166 @@ mod tests {
         assert_eq!(re_serialized, json, "round-trip must be byte-stable");
     }
 
-    /// A malformed artifact must yield an error (so the caller refuses to
-    /// run and avoids overwriting good history with an empty prefix).
     #[test]
     fn messages_from_conversation_rejects_malformed_json() {
         assert!(messages_from_conversation("not json").is_err());
         assert!(messages_from_conversation("{}").is_err());
+    }
+
+    #[test]
+    fn chat_compaction_overhead_tracks_serialized_request_not_raw_prompt_bytes() {
+        use rig_core::completion::{CompletionRequest, Message};
+
+        let prompt = "line one\n\"quoted\" and a backslash \\";
+        let system = "system\nwith \"escapes\"";
+        let tools = crate::clients::tools::tool_definitions(None);
+        let overhead = completion_request_overhead(prompt, system, &tools);
+
+        let raw_estimate = prompt.len()
+            + system.len()
+            + serde_json::to_vec(&tools)
+                .map(|json| json.len())
+                .unwrap_or(0);
+        assert!(
+            overhead > raw_estimate,
+            "serialized envelope must account for JSON escaping and request fields: \
+             overhead={overhead}, raw={raw_estimate}"
+        );
+
+        let history = vec![Message::user(
+            "history\nwith \"escapes\" and a backslash \\",
+        )];
+        let full_request = CompletionRequest::new(Message::user(prompt.to_string()))
+            .messages(history.clone())
+            .tools(tools)
+            .preamble(system.to_string());
+        let full_len = serde_json::to_vec(&full_request)
+            .map(|json| json.len())
+            .unwrap();
+        let history_len = serde_json::to_string(&history)
+            .map(|json| json.len())
+            .unwrap();
+
+        assert_eq!(
+            overhead + history_len,
+            full_len,
+            "empty-request envelope plus serialized history must equal the full request"
+        );
+    }
+
+    #[test]
+    fn chat_compaction_rejoins_verbatim_archive_with_new_turn() {
+        use rig_core::completion::message::{
+            AssistantContent, CallId, ToolCall, ToolFunction, ToolName,
+        };
+        use rig_core::completion::Message;
+
+        fn tool_call(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
+            ToolCall::from_dual_wire(
+                "",
+                id,
+                ToolFunction::new(ToolName::new(name.to_string()).unwrap(), args),
+            )
+        }
+
+        fn assistant_with_tools(calls: &[ToolCall]) -> Message {
+            Message::Assistant {
+                id: None,
+                content: calls
+                    .iter()
+                    .cloned()
+                    .map(AssistantContent::ToolCall)
+                    .collect(),
+            }
+        }
+
+        fn tool_result(name: &str, call_id: &str, output: &str) -> Message {
+            Message::tool_result(
+                CallId::from_wire(call_id.to_string()),
+                ToolName::new(name.to_string()).unwrap(),
+                output.to_string(),
+            )
+        }
+
+        let prior = vec![
+            Message::user("read and check"),
+            assistant_with_tools(&[tool_call(
+                "read_1",
+                "Read",
+                serde_json::json!({"file_path": "a.txt"}),
+            )]),
+            tool_result("Read", "read_1", "hello from a.txt"),
+            Message::user("Actions taken this turn:\n- Read a.txt\n"),
+            assistant_with_tools(&[tool_call(
+                "bash_1",
+                "Bash",
+                serde_json::json!({"command": "cargo check"}),
+            )]),
+            tool_result("Bash", "bash_1", "[exit 1]\ncargo failed"),
+            Message::user("Actions taken this turn:\n- Bash cargo check (failed)\n"),
+            assistant_with_tools(&[tool_call(
+                "done_1",
+                "Done",
+                serde_json::json!({"summary": "checked"}),
+            )]),
+            tool_result("Done", "done_1", "Done accepted."),
+            Message::user("now run cargo test"),
+            assistant_with_tools(&[tool_call(
+                "bash_2",
+                "Bash",
+                serde_json::json!({"command": "cargo test"}),
+            )]),
+            tool_result("Bash", "bash_2", "[exit 0]\nok"),
+            Message::user("Actions taken this turn:\n- Bash cargo test\n"),
+            assistant_with_tools(&[tool_call(
+                "done_2",
+                "Done",
+                serde_json::json!({"summary": "tested"}),
+            )]),
+            tool_result("Done", "done_2", "Done accepted."),
+        ];
+
+        let compacted = conversation::compact(
+            &prior,
+            serde_json::to_string(&prior).unwrap().len() as u64 - 1,
+            0,
+        );
+        assert!(
+            compacted.len() < prior.len(),
+            "compaction should shrink the archived prefix"
+        );
+        let compacted_prefix_len = compacted.len();
+
+        let new_turn = vec![
+            Message::user("now run cargo check again"),
+            assistant_with_tools(&[tool_call(
+                "bash_2",
+                "Bash",
+                serde_json::json!({"command": "cargo check"}),
+            )]),
+            tool_result("Bash", "bash_2", "[exit 0]\nok"),
+            Message::user("Actions taken this turn:\n- Bash cargo check\n"),
+        ];
+
+        let mut completed = compacted.clone();
+        completed.extend(new_turn.clone());
+
+        let mut expected = prior.clone();
+        expected.extend(new_turn.clone());
+
+        let reconstructed =
+            append_new_turn_to_verbatim(&prior, &completed, compacted_prefix_len).unwrap();
+        assert_eq!(reconstructed, expected);
+        assert_ne!(reconstructed, compacted);
+    }
+
+    #[test]
+    fn append_new_turn_to_verbatim_refuses_shorter_completed_history() {
+        use rig_core::completion::Message;
+
+        let prior = [Message::user("a"), Message::user("b")];
+        let completed = [Message::user("a")];
+        assert!(append_new_turn_to_verbatim(&prior, &completed, 2).is_none());
     }
 
     // --- agent ---
