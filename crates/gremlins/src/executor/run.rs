@@ -436,10 +436,24 @@ async fn run_agent(
 
     // Compaction is a read-time, in-memory transform. `verbatim_history` keeps
     // the full archive so the post-run write can reconstruct the verbatim
-    // transcript instead of persisting the compacted working memory.
-    let prepopulated_messages = verbatim_history
-        .as_ref()
-        .map(|history| conversation::compact(history, config::chat_compaction_threshold_bytes()));
+    // transcript instead of persisting the compacted working memory. The soft
+    // trigger is evaluated against the assembled request, so subtract an
+    // estimate of the non-history request bytes (current prompt, system
+    // preamble, and tool definitions) before choosing the retained window.
+    let chat_compaction_overhead = {
+        let tool_definitions_len =
+            serde_json::to_vec(&crate::clients::tools::tool_definitions(None))
+                .map(|json| json.len())
+                .unwrap_or(0);
+        prepared.user_prompt().len() + prepared.system_prompt().len() + tool_definitions_len
+    };
+    let prepopulated_messages = verbatim_history.as_ref().map(|history| {
+        conversation::compact(
+            history,
+            config::chat_compaction_threshold_bytes(),
+            chat_compaction_overhead,
+        )
+    });
     let prepopulated_len = prepopulated_messages.as_ref().map(Vec::len).unwrap_or(0);
 
     let params = RunParams {
@@ -583,26 +597,38 @@ async fn run_agent(
     // untouched rather than erasing it with an empty array.
     if gremlin.state.read_str("kind") == "chat" {
         if let Some(messages) = &completed.messages {
+            // Reconstruct the full verbatim history: the pre-compaction prefix
+            // plus this turn's new messages. When the agent loop did not keep
+            // the compacted prefix intact, refuse to persist anything rather
+            // than replacing the verbatim archive with compacted or partial
+            // working memory.
             let full_history = match &verbatim_history {
-                Some(prior) => {
-                    let mut full = prior.clone();
-                    if let Some(tail) = messages.get(prepopulated_len..) {
-                        full.extend(tail.iter().cloned());
-                    } else {
-                        full = messages.clone();
+                Some(prior) => match append_new_turn_to_verbatim(prior, messages, prepopulated_len)
+                {
+                    Some(full) => Some(full),
+                    None => {
+                        log::warn!(
+                            "chat: refusing to persist conversation artifact: \
+                             completed message history ({} messages) is shorter \
+                             than the compacted prefix ({prepopulated_len} messages)",
+                            messages.len()
+                        );
+                        None
                     }
-                    full
-                }
-                None => messages.clone(),
+                },
+                None => Some(messages.clone()),
             };
-            match serde_json::to_string(&full_history) {
-                Ok(json) => {
-                    if let Ok(uri) = Uri::parse("artifact://conversation.json") {
-                        let _ = gremlin.state.write_into_registry(&uri, &json).await;
+
+            if let Some(full_history) = full_history {
+                match serde_json::to_string(&full_history) {
+                    Ok(json) => {
+                        if let Ok(uri) = Uri::parse("artifact://conversation.json") {
+                            let _ = gremlin.state.write_into_registry(&uri, &json).await;
+                        }
                     }
-                }
-                Err(e) => {
-                    log::warn!("chat: failed to serialize conversation artifact: {e}");
+                    Err(e) => {
+                        log::warn!("chat: failed to serialize conversation artifact: {e}");
+                    }
                 }
             }
         }
@@ -1149,6 +1175,26 @@ pub(crate) fn messages_from_conversation(
         .map_err(|e| format!("chat: failed to parse conversation artifact: {e}"))
 }
 
+/// Rejoin the verbatim pre-compaction archive with the new-turn suffix of the
+/// compacted working transcript.
+///
+/// `completed` is the agent loop's accumulated history (the compacted prefix
+/// plus this run's new messages). Slicing it at `compacted_prefix_len` leaves
+/// exactly the new messages, which are appended to `prior` to rebuild the full
+/// verbatim transcript. If `completed` is shorter than the compacted prefix,
+/// returns `None` rather than guessing; callers must then leave the archived
+/// artifact untouched.
+fn append_new_turn_to_verbatim(
+    prior: &[rig_core::completion::Message],
+    completed: &[rig_core::completion::Message],
+    compacted_prefix_len: usize,
+) -> Option<Vec<rig_core::completion::Message>> {
+    let tail = completed.get(compacted_prefix_len..)?;
+    let mut full = prior.to_vec();
+    full.extend(tail.iter().cloned());
+    Some(full)
+}
+
 /// Clamp `text` to at most `max` bytes, cutting on a char boundary.
 ///
 /// The Python executor sliced the operator-facing reason (`reason[:200]`) for
@@ -1319,12 +1365,101 @@ mod tests {
         assert_eq!(re_serialized, json, "round-trip must be byte-stable");
     }
 
-    /// A malformed artifact must yield an error (so the caller refuses to
-    /// run and avoids overwriting good history with an empty prefix).
     #[test]
     fn messages_from_conversation_rejects_malformed_json() {
         assert!(messages_from_conversation("not json").is_err());
         assert!(messages_from_conversation("{}").is_err());
+    }
+
+    #[test]
+    fn chat_compaction_rejoins_verbatim_archive_with_new_turn() {
+        use rig_core::completion::message::{
+            AssistantContent, CallId, ToolCall, ToolFunction, ToolName,
+        };
+        use rig_core::completion::Message;
+
+        fn tool_call(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
+            ToolCall::from_dual_wire(
+                "",
+                id,
+                ToolFunction::new(ToolName::new(name.to_string()).unwrap(), args),
+            )
+        }
+
+        fn assistant_with_tools(calls: &[ToolCall]) -> Message {
+            Message::Assistant {
+                id: None,
+                content: calls
+                    .iter()
+                    .cloned()
+                    .map(AssistantContent::ToolCall)
+                    .collect(),
+            }
+        }
+
+        fn tool_result(name: &str, call_id: &str, output: &str) -> Message {
+            Message::tool_result(
+                CallId::from_wire(call_id.to_string()),
+                ToolName::new(name.to_string()).unwrap(),
+                output.to_string(),
+            )
+        }
+
+        let prior = vec![
+            Message::user("read and check"),
+            assistant_with_tools(&[tool_call(
+                "read_1",
+                "Read",
+                serde_json::json!({"file_path": "a.txt"}),
+            )]),
+            tool_result("Read", "read_1", "hello from a.txt"),
+            Message::user("Actions taken this turn:\n- Read a.txt\n"),
+            assistant_with_tools(&[tool_call(
+                "bash_1",
+                "Bash",
+                serde_json::json!({"command": "cargo check"}),
+            )]),
+            tool_result("Bash", "bash_1", "[exit 1]\ncargo failed"),
+            Message::user("Actions taken this turn:\n- Bash cargo check (failed)\n"),
+        ];
+
+        let compacted = conversation::compact(&prior, 512, 0);
+        assert!(
+            compacted.len() < prior.len(),
+            "compaction should shrink the archived prefix"
+        );
+        let compacted_prefix_len = compacted.len();
+
+        let new_turn = vec![
+            Message::user("now run cargo check again"),
+            assistant_with_tools(&[tool_call(
+                "bash_2",
+                "Bash",
+                serde_json::json!({"command": "cargo check"}),
+            )]),
+            tool_result("Bash", "bash_2", "[exit 0]\nok"),
+            Message::user("Actions taken this turn:\n- Bash cargo check\n"),
+        ];
+
+        let mut completed = compacted.clone();
+        completed.extend(new_turn.clone());
+
+        let mut expected = prior.clone();
+        expected.extend(new_turn.clone());
+
+        let reconstructed =
+            append_new_turn_to_verbatim(&prior, &completed, compacted_prefix_len).unwrap();
+        assert_eq!(reconstructed, expected);
+        assert_ne!(reconstructed, compacted);
+    }
+
+    #[test]
+    fn append_new_turn_to_verbatim_refuses_shorter_completed_history() {
+        use rig_core::completion::Message;
+
+        let prior = [Message::user("a"), Message::user("b")];
+        let completed = [Message::user("a")];
+        assert!(append_new_turn_to_verbatim(&prior, &completed, 2).is_none());
     }
 
     // --- agent ---

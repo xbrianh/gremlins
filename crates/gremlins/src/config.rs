@@ -2066,10 +2066,17 @@ model-profiles:
 
     #[test]
     fn test_chat_compaction_threshold_bytes_settings_overrides_env() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"chat-compaction-threshold-bytes": 77777}"#));
-        // Env var is set after sandbox creation (sandbox clears it on init).
-        // settings.yaml value (77777) must win over the env var (999).
-        std::env::set_var("GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES", "999");
+        let mut env = EnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("settings.yaml"),
+            r#"{"chat-compaction-threshold-bytes": 77777}"#,
+        )
+        .unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
+        env.set("GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES", "999");
         let cfg = Config::load().unwrap();
         assert_eq!(cfg.chat_compaction_threshold_bytes(), 77777);
     }
