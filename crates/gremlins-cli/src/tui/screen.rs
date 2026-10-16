@@ -1814,7 +1814,7 @@ mod tests {
         // the newest reasoning lines, not the head, and later taller frames
         // must not resurrect lines trimmed from this shorter band.
         assert!(
-            visible.contains("model reasoning:"),
+            visible.contains("◈ model reasoning:"),
             "reasoning header should stay visible in the short band.\nBuffer:\n{visible}"
         );
         for i in 4..6 {

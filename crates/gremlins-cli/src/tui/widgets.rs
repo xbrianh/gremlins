@@ -379,16 +379,16 @@ impl TranscriptWidget {
     /// Build a committed stream block: flush the trailing partial, prepend
     /// the stream's own title row (matching the live header exactly), then
     /// append the retained tail capped at the shared stream row count.
-    /// Tool streams commit their `◆` title even when the body is empty;
-    /// plain-title streams (reasoning) collapse entirely when empty so they
-    /// never emit a stray header. Retained logical lines are expanded into
-    /// pre-wrapped physical rows at the FIFO's inner body width before
-    /// insertion.
+    /// Streams flagged [`retain_title_when_empty`](StreamingWidget) (tools)
+    /// commit their `◆` title even when the body is empty; every other
+    /// stream (reasoning) collapses entirely when empty so it never emits a
+    /// stray header. Retained logical lines are expanded into pre-wrapped
+    /// physical rows at the FIFO's inner body width before insertion.
     fn commit_stream_block(&mut self, mut stream: StreamingWidget) -> Vec<Line<'static>> {
         stream.flush();
         let rendered = stream.commit_lines();
         let title = stream.title_line();
-        if rendered.is_empty() && (title.is_none() || stream.title_prefix.is_empty()) {
+        if rendered.is_empty() && (title.is_none() || !stream.retain_title_when_empty) {
             return Vec::new();
         }
 
@@ -1449,6 +1449,10 @@ pub struct StreamingWidget {
     title: Option<String>,
     /// Prefix rendered before the title row (e.g. the `◆ ` tool chrome).
     title_prefix: String,
+    /// Whether the title row is committed even when the body is empty.
+    /// Tool streams keep their `◆` call title; reasoning collapses entirely
+    /// when empty instead of leaving a stray header line behind.
+    retain_title_when_empty: bool,
     /// Left gutter, in cells, reserved before every streamed body line (e.g.
     /// a four-space indent for reasoning and tool output).
     body_indent: u16,
@@ -1475,6 +1479,7 @@ impl StreamingWidget {
             styler,
             title: None,
             title_prefix: String::new(),
+            retain_title_when_empty: false,
             body_indent: 0,
             row_cap,
             size_priority,
@@ -1493,6 +1498,16 @@ impl StreamingWidget {
     /// Configure the prefix rendered before the title row.
     pub fn with_title_prefix(mut self, prefix: &str) -> Self {
         self.title_prefix = prefix.to_string();
+        self
+    }
+
+    /// Commit the title row even when the stream body is empty.
+    ///
+    /// By default a stream with no body collapses entirely at commit time so
+    /// no stray header line is emitted; flagged streams (tools) keep their
+    /// `◆` call title instead.
+    pub fn retain_title_when_empty(mut self) -> Self {
+        self.retain_title_when_empty = true;
         self
     }
 
@@ -1526,10 +1541,12 @@ impl StreamingWidget {
         }
     }
 
-    /// The configured reasoning stream: four-cell body gutter, nickel
-    /// italic text, and a retained commit tail.
+    /// The configured reasoning stream: four-cell body gutter, `◈ `-prefixed
+    /// chrome title, nickel italic text, and a retained commit tail that
+    /// collapses (no title line) when empty.
     pub fn reasoning(row_cap: u16) -> Self {
         Self::new(reasoning_stream_line, row_cap, 20)
+            .with_title_prefix(&format!("{} ", glyph::REASONING))
             .with_body_indent(4)
             .with_title("model reasoning:")
             .retain_tail()
@@ -1537,12 +1554,14 @@ impl StreamingWidget {
 
     /// The configured live tool-output stream: four-cell body gutter, no
     /// bullet glyph, a `◆ `-prefixed title row, and a retained commit tail.
-    /// Text is ANSI-stripped.
+    /// The `◆` title commits even when the body is empty. Text is
+    /// ANSI-stripped.
     pub fn tool(row_cap: u16) -> Self {
         Self::new(tool_stream_line, row_cap, 10)
             .with_title_prefix(&format!("{} ", glyph::DIAMOND))
             .with_body_indent(4)
             .retain_tail()
+            .retain_title_when_empty()
     }
 
     /// The body text width: the outer width minus the reserved left gutter.
@@ -3861,7 +3880,7 @@ mod tests {
             text,
             vec![
                 "▍» hi".to_string(),
-                "model reasoning:".to_string(),
+                "◈ model reasoning:".to_string(),
                 "    thinking".to_string(),
                 "answer".to_string()
             ]
@@ -3886,11 +3905,11 @@ mod tests {
             .map(|l| l.to_string())
             .collect();
         assert_eq!(
-            text.iter().filter(|l| *l == "model reasoning:").count(),
+            text.iter().filter(|l| *l == "◈ model reasoning:").count(),
             1,
-            "reasoning must commit exactly one plain header row: {text:?}"
+            "reasoning must commit exactly one glyph-prefixed header row: {text:?}"
         );
-        let title = text.iter().position(|l| l == "model reasoning:").unwrap();
+        let title = text.iter().position(|l| l == "◈ model reasoning:").unwrap();
         let answer = text.iter().position(|l| l == "answer").unwrap();
         assert_eq!(text[0], "▍» hi");
         assert!(
@@ -3898,8 +3917,12 @@ mod tests {
             "reasoning title must precede the response: {text:?}"
         );
         assert!(
+            text[title].contains(glyph::REASONING),
+            "reasoning header must carry the reasoning glyph: {text:?}"
+        );
+        assert!(
             !text[title].contains('◆'),
-            "reasoning header must be plain, with no tool diamond: {text:?}"
+            "reasoning header must use the reasoning glyph, not the tool diamond: {text:?}"
         );
         assert_eq!(text[title + 1], "    thinking 3");
         assert!(text.contains(&"    thinking 7".to_string()), "{text:?}");
@@ -3921,7 +3944,7 @@ mod tests {
             .collect();
         assert_eq!(text, vec!["▍» hi".to_string(), "answer".to_string()]);
         assert!(
-            !text.iter().any(|l| l == "model reasoning:"),
+            !text.iter().any(|l| l.contains(glyph::REASONING)),
             "empty reasoning must not commit a header: {text:?}"
         );
     }
@@ -3945,7 +3968,7 @@ mod tests {
             text,
             vec![
                 "▍» hi".to_string(),
-                "model reasoning:".to_string(),
+                "◈ model reasoning:".to_string(),
                 "    thinking".to_string(),
                 "◆ grep".to_string(),
                 "answer".to_string(),
@@ -3984,7 +4007,7 @@ mod tests {
             text,
             vec![
                 "▍» hi".to_string(),
-                "model reasoning:".to_string(),
+                "◈ model reasoning:".to_string(),
                 "    thinking 3".to_string(),
                 "    thinking 4".to_string(),
                 "    thinking 5".to_string(),
