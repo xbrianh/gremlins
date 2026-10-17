@@ -715,6 +715,11 @@ pub async fn run() -> Result<(), String> {
     // on exit the `LiveArea` drop guard restores the cursor and raw mode.
     let mut live_area = LiveArea::new().map_err(|e| format!("terminal setup failed: {e}"))?;
 
+    // Snapshot the real stderr before redirecting it, so a post-redirect
+    // failure can restore it and let the CLI entry point report the error
+    // once on the operator's terminal instead of into tui.log.
+    let saved_stderr = unsafe { libc::dup(2) };
+
     // Redirect stderr to tui.log so debug logs persist next to executor.log.
     // Config is loaded first so a custom `paths.state-root` is honored for
     // the log path.
@@ -731,14 +736,21 @@ pub async fn run() -> Result<(), String> {
     }
 
     if let Err(e) = run_app(&mut live_area).await {
-        // stderr now points at tui.log, so a fatal post-redirect failure must
-        // be written to stdout. Restore the terminal first so the message is
-        // printed on a sane terminal rather than into raw mode.
+        // Restore the saved real stderr so the CLI entry point reports the
+        // error exactly once, on the operator's terminal rather than into
+        // tui.log. Restore the terminal first so the message is printed on
+        // a sane terminal rather than into raw mode.
         drop(live_area);
-        println!("gremlins: {e}");
+        if saved_stderr >= 0 {
+            unsafe { libc::dup2(saved_stderr, 2) };
+            unsafe { libc::close(saved_stderr) };
+        }
         return Err(e.to_string());
     }
 
+    if saved_stderr >= 0 {
+        unsafe { libc::close(saved_stderr) };
+    }
     Ok(())
 }
 
