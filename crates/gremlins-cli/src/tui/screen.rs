@@ -1790,7 +1790,7 @@ mod tests {
         );
 
         live_area.set_reasoning_title(
-            "clanking · turn 3 · in 100 (cache 40%, +5 new) · out 50 · reason 30 · Σ in 400 (cache 38%, +15 new) · out 200 · reason 120",
+            "clanking · turn 3 · in 100 (cache 40%, +5 new) · out 50 · reason 30 · Σ out 200 · reason 120 · last prompt 100",
         );
         live_area.compose(&app).unwrap();
         let visible = dump_buffer(live_area.backend().buffer());
@@ -1858,7 +1858,7 @@ mod tests {
 
         live_area.submit_prompt("hi".to_string());
         live_area.set_reasoning_title(
-            "clanking · turn 2 · in 10 (cache 40%, +1 new) · out 5 · reason 3 · Σ in 20 (cache 40%, +2 new) · out 10 · reason 6",
+            "clanking · turn 2 · in 10 (cache 40%, +1 new) · out 5 · reason 3 · Σ out 10 · reason 6 · last prompt 10",
         );
         live_area.replace_response("answer");
         live_area.finish_turn();

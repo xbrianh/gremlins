@@ -608,19 +608,42 @@ fn usage_title_part(usage: Option<&serde_json::Value>) -> String {
     )
 }
 
+/// Format the conversation-wide Σ (total) portion of the stats title.
+/// Only completion and reasoning tokens are summed: prompt-token totals are
+/// not monotonic across conversation compaction, so they are reported as a
+/// separate per-turn `last prompt` field instead.
+fn totals_title_part(total: Option<&serde_json::Value>) -> String {
+    let num = |name: &str| match usage_field(total, name) {
+        Some(v) => v.to_string(),
+        None => "-".to_string(),
+    };
+
+    format!(
+        "out {} · reason {}",
+        num("completion_tokens"),
+        num("reasoning_tokens")
+    )
+}
+
 /// Build the reasoning-stream stats title shown on each `TurnComplete`:
 /// the `clanking` header label, the just-completed turn's delta, and the
-/// conversation-wide total.
+/// conversation-wide completion/reasoning total, plus the current turn's
+/// prompt-token size.
 fn stats_title(stats: Option<&serde_json::Value>, total: Option<&serde_json::Value>) -> String {
     let turn = stats
         .and_then(|v| v.get("turn"))
         .and_then(|v| v.as_u64())
         .map(|v| v.to_string())
         .unwrap_or_else(|| "-".to_string());
+    let last_prompt = match usage_field(stats, "prompt_tokens") {
+        Some(v) => v.to_string(),
+        None => "-".to_string(),
+    };
     let mut parts = [
         format!("clanking · turn {turn}"),
         usage_title_part(stats),
-        format!("Σ {}", usage_title_part(total)),
+        format!("Σ {}", totals_title_part(total)),
+        format!("last prompt {last_prompt}"),
     ];
     if stats.is_none() {
         parts[0] = "clanking · turn -".to_string();
@@ -2224,7 +2247,35 @@ mod tests {
 
         assert_eq!(
             title,
-            "clanking · turn 3 · in 100 (cache 40%, +5 new) · out 50 · reason 30 · Σ in 400 (cache 38%, +15 new) · out 200 · reason 120",
+            "clanking · turn 3 · in 100 (cache 40%, +5 new) · out 50 · reason 30 · Σ out 200 · reason 120 · last prompt 100",
+            "{title}"
+        );
+    }
+
+    #[test]
+    fn stats_title_last_prompt_tracks_latest_turn_stats_not_the_conversation_total() {
+        let stats = serde_json::json!({
+            "turn": 2,
+            "prompt_tokens": 77,
+            "completion_tokens": 9,
+            "cached_input_tokens": 0,
+            "cache_creation_input_tokens": 3,
+            "reasoning_tokens": 4
+        });
+        let total = serde_json::json!({
+            "turn": 2,
+            "prompt_tokens": 999,
+            "completion_tokens": 21,
+            "cached_input_tokens": 500,
+            "cache_creation_input_tokens": 16,
+            "reasoning_tokens": 8
+        });
+
+        let title = stats_title(Some(&stats), Some(&total));
+
+        assert_eq!(
+            title,
+            "clanking · turn 2 · in 77 (cache 0%, +3 new) · out 9 · reason 4 · Σ out 21 · reason 8 · last prompt 77",
             "{title}"
         );
     }
@@ -2235,7 +2286,7 @@ mod tests {
 
         assert_eq!(
             title,
-            "clanking · turn - · in - · out - · reason - · Σ in - · out - · reason -"
+            "clanking · turn - · in - · out - · reason - · Σ out - · reason - · last prompt -"
         );
     }
 
@@ -2254,7 +2305,7 @@ mod tests {
 
         assert_eq!(
             title,
-            "clanking · turn 1 · in 0 (cache -, +2 new) · out 7 · reason 1 · Σ in - · out - · reason -"
+            "clanking · turn 1 · in 0 (cache -, +2 new) · out 7 · reason 1 · Σ out - · reason - · last prompt 0"
         );
     }
 
