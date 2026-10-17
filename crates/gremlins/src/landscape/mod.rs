@@ -4,6 +4,7 @@
 //! heading, or top-level key locations — without reading the body. Everything
 //! here is deliberately regex/line oriented; no native parsing dependencies.
 
+pub(crate) mod cache;
 mod error;
 pub(crate) mod heuristic;
 
@@ -85,10 +86,33 @@ impl LandscapeExplorer {
     /// are not followed. Hidden and vendor directories, unrecognized files, and
     /// oversized files are skipped. Files with no recognizable items are
     /// omitted.
-    pub fn build(&self, root: &Path, depth_limit: usize) -> Result<Vec<FileOutline>, OutlineError> {
+    ///
+    /// When `cache_path` is `Some`, unchanged files (matching `mtime` and
+    /// `size`) are served from the cache file at that path and the refreshed
+    /// cache is written back after the walk. When it is `None`, behavior is
+    /// exactly as before: every recognized file is parsed.
+    pub fn build(
+        &self,
+        root: &Path,
+        depth_limit: usize,
+        cache_path: Option<&Path>,
+    ) -> Result<Vec<FileOutline>, OutlineError> {
+        let mut cache = cache_path.map(cache::LandscapeCache::load);
+        let canonical_cache = cache_path.and_then(|path| std::fs::canonicalize(path).ok());
         let mut out = Vec::new();
-        self.build_dir(root, 0, depth_limit, &mut out)?;
+        self.build_dir(
+            root,
+            0,
+            depth_limit,
+            cache.as_mut(),
+            canonical_cache.as_deref(),
+            &mut out,
+        )?;
         out.sort_by(|a, b| a.path.cmp(&b.path));
+        if let (Some(cache), Some(path)) = (cache, cache_path) {
+            // Caching is an optimization: a failed write never fails the build.
+            let _ = cache.save(path);
+        }
         Ok(out)
     }
 
@@ -97,6 +121,8 @@ impl LandscapeExplorer {
         dir: &Path,
         depth: usize,
         depth_limit: usize,
+        mut cache: Option<&mut cache::LandscapeCache>,
+        canonical_cache: Option<&Path>,
         out: &mut Vec<FileOutline>,
     ) -> Result<(), OutlineError> {
         if depth > depth_limit {
@@ -118,19 +144,74 @@ impl LandscapeExplorer {
                 if should_skip_dir(&path) {
                     continue;
                 }
-                self.build_dir(&path, depth + 1, depth_limit, out)?;
+                self.build_dir(
+                    &path,
+                    depth + 1,
+                    depth_limit,
+                    cache.as_deref_mut(),
+                    canonical_cache,
+                    out,
+                )?;
             } else if metadata.is_file() {
                 if !is_outlineable_file(&path) || metadata.len() > MAX_OUTLINE_BYTES {
                     continue;
                 }
-                if let Ok(items) = self.outline_file(&path) {
-                    if !items.is_empty() {
-                        out.push(FileOutline { path, items });
-                    }
+                if canonical_cache.is_some_and(|canonical| same_file(canonical, &path)) {
+                    continue;
                 }
+                self.collect_file(&path, cache.as_deref_mut(), out);
             }
         }
         Ok(())
+    }
+
+    /// Add `path` to `out`, using the cache when its fingerprint is known and
+    /// matches, and reparsing otherwise.
+    fn collect_file(
+        &self,
+        path: &Path,
+        cache: Option<&mut cache::LandscapeCache>,
+        out: &mut Vec<FileOutline>,
+    ) {
+        if let Some(cache) = cache {
+            let fingerprint = file_fingerprint(path);
+            if let Some((mtime_ns, size)) = fingerprint {
+                if let Some(items) = cache.get(path, mtime_ns, size) {
+                    if !items.is_empty() {
+                        out.push(FileOutline {
+                            path: path.to_path_buf(),
+                            items,
+                        });
+                    }
+                    return;
+                }
+            }
+
+            let Ok(items) = self.outline_file(path) else {
+                cache.remove(path);
+                return;
+            };
+            // Cache every successful parse, even one with no items, so an
+            // unchanged empty file is not re-parsed on the next build.
+            if let Some((mtime_ns, size)) = fingerprint {
+                cache.insert(path, mtime_ns, size, items.clone());
+            }
+            if !items.is_empty() {
+                out.push(FileOutline {
+                    path: path.to_path_buf(),
+                    items,
+                });
+            }
+        } else {
+            if let Ok(items) = self.outline_file(path) {
+                if !items.is_empty() {
+                    out.push(FileOutline {
+                        path: path.to_path_buf(),
+                        items,
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -150,6 +231,33 @@ fn should_skip_dir(path: &Path) -> bool {
         return false;
     };
     name.starts_with('.') || SKIP_DIR_NAMES.contains(&name)
+}
+
+/// Resolve a file's cache fingerprint: `(mtime_ns, size)`.
+///
+/// Stat errors (including a vanished file) are cache misses, not build errors:
+/// the caller simply falls back to a fresh parse and stores nothing.
+fn file_fingerprint(path: &Path) -> Option<(u64, u64)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let mtime = metadata.modified().ok()?;
+    let mtime_ns = mtime.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos() as u64;
+    Some((mtime_ns, metadata.len()))
+}
+
+/// Whether `path` names the same on-disk file as the already-canonicalized
+/// cache blob `canonical_cache`.
+///
+/// The cheap file-name check avoids canonicalizing every visited file; the
+/// canonical comparison is only performed for files that share the cache
+/// blob's name (typically just one).
+fn same_file(canonical_cache: &Path, path: &Path) -> bool {
+    if path.file_name() != canonical_cache.file_name() {
+        return false;
+    }
+    match std::fs::canonicalize(path) {
+        Ok(canonical) => canonical == canonical_cache,
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]
@@ -218,17 +326,17 @@ mod tests {
         std::fs::write(root.path().join("a/mid.rs"), "fn mid() {}\n").unwrap();
         std::fs::write(root.path().join("a/b/deep.md"), "# Deep\n").unwrap();
 
-        let depth0 = LandscapeExplorer.build(root.path(), 0).unwrap();
+        let depth0 = LandscapeExplorer.build(root.path(), 0, None).unwrap();
         assert_eq!(depth0.len(), 1);
         assert_eq!(depth0[0].path, root.path().join("top.rs"));
 
-        let depth1 = LandscapeExplorer.build(root.path(), 1).unwrap();
+        let depth1 = LandscapeExplorer.build(root.path(), 1, None).unwrap();
         let paths: Vec<&Path> = depth1.iter().map(|f| f.path.as_path()).collect();
         assert!(paths.contains(&root.path().join("top.rs").as_path()));
         assert!(paths.contains(&root.path().join("a/mid.rs").as_path()));
         assert!(!paths.contains(&root.path().join("a/b/deep.md").as_path()));
 
-        let all = LandscapeExplorer.build(root.path(), 10).unwrap();
+        let all = LandscapeExplorer.build(root.path(), 10, None).unwrap();
         assert_eq!(all.len(), 3);
     }
 
@@ -242,7 +350,7 @@ mod tests {
         std::fs::write(root.path().join(".git/config.rs"), "fn skip() {}\n").unwrap();
         std::fs::write(root.path().join("notes.txt"), "fn skip() {}\n").unwrap();
 
-        let all = LandscapeExplorer.build(root.path(), 10).unwrap();
+        let all = LandscapeExplorer.build(root.path(), 10, None).unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].path, root.path().join("keep.rs"));
     }
@@ -250,7 +358,97 @@ mod tests {
     #[test]
     fn build_missing_root_is_error() {
         let path = PathBuf::from("/definitely/not/present/build-root");
-        let result = LandscapeExplorer.build(&path, 0);
+        let result = LandscapeExplorer.build(&path, 0, None);
         assert!(matches!(result, Err(OutlineError::Read(_))));
+    }
+
+    #[test]
+    fn build_with_and_without_cache_produce_identical_results() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# B\n").unwrap();
+
+        let uncached = LandscapeExplorer.build(root.path(), 10, None).unwrap();
+        let cache_path = root.path().join("landscape.cache.json");
+        let cached = LandscapeExplorer
+            .build(root.path(), 10, Some(&cache_path))
+            .unwrap();
+
+        assert_eq!(uncached, cached);
+        assert!(cache_path.exists());
+
+        // A second cached build returns identical results even though the
+        // cache blob itself now lives inside the walked root.
+        let recached = LandscapeExplorer
+            .build(root.path(), 10, Some(&cache_path))
+            .unwrap();
+        assert_eq!(uncached, recached);
+    }
+
+    #[test]
+    fn build_cache_reuses_untouched_files_and_invalidates_touched() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a.rs");
+        let b = root.path().join("b.rs");
+        // Same byte length, so rewriting `a` below keeps its size stable.
+        std::fs::write(&a, "fn a() {}\n").unwrap();
+        std::fs::write(&b, "fn b() {}\n").unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache_path = cache_dir.path().join("landscape.cache.json");
+
+        let first = LandscapeExplorer
+            .build(root.path(), 10, Some(&cache_path))
+            .unwrap();
+        assert_eq!(first.len(), 2);
+
+        // Rewrite `a` with a different name but an unchanged fingerprint:
+        // content and size stay the same, and mtime is restored afterwards. A
+        // cache hit must therefore report the old name.
+        let a_mtime = std::fs::metadata(&a).unwrap().modified().unwrap();
+        std::fs::write(&a, "fn A() {}\n").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&a)
+            .unwrap()
+            .set_modified(a_mtime)
+            .unwrap();
+
+        // Rewrite `b` with different-length content so its fingerprint (size,
+        // and usually mtime) changes; the reparse must pick up the new name
+        // even if timestamp resolution does not advance.
+        std::fs::write(&b, "fn touched() {}\n").unwrap();
+
+        let second = LandscapeExplorer
+            .build(root.path(), 10, Some(&cache_path))
+            .unwrap();
+        assert_eq!(second.len(), 2);
+
+        let names = |path: &Path| -> Vec<String> {
+            second
+                .iter()
+                .find(|outline| outline.path == path)
+                .map(|outline| outline.items.iter().map(|item| item.name.clone()).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(names(&a), vec!["a"]);
+        assert_eq!(names(&b), vec!["touched"]);
+    }
+
+    #[test]
+    fn build_corrupt_cache_is_treated_as_empty_and_rewritten() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.rs"), "fn a() {}\n").unwrap();
+        let cache_path = root.path().join("landscape.cache.json");
+        std::fs::write(&cache_path, "{ this is not valid json").unwrap();
+
+        let result = LandscapeExplorer
+            .build(root.path(), 10, Some(&cache_path))
+            .unwrap();
+        assert_eq!(result.len(), 1);
+
+        // The next build must have overwritten the corrupt blob with a valid one.
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cache_path).unwrap()).unwrap();
+        assert!(value.is_object());
     }
 }
