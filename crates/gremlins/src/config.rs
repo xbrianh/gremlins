@@ -107,6 +107,7 @@ pub struct Config {
     path_overrides: PathOverrides,
     max_tool_output_bytes: u64,
     chat_compaction_threshold_bytes: u64,
+    max_prompt_bytes: u64,
     backoff: BackoffConfig,
 }
 
@@ -187,6 +188,8 @@ struct ConfigFile {
     max_tool_output_bytes: Option<u64>,
     #[serde(rename = "chat-compaction-threshold-bytes", default)]
     chat_compaction_threshold_bytes: Option<u64>,
+    #[serde(rename = "max-prompt-bytes", default)]
+    max_prompt_bytes: Option<u64>,
     backoff: Option<BackoffSection>,
 }
 
@@ -265,10 +268,15 @@ impl Config {
                         .ok()
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(DEFAULT_CHAT_COMPACTION_THRESHOLD_BYTES);
+                let max_prompt_bytes = std::env::var("GREMLINS_MAX_PROMPT_BYTES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(DEFAULT_MAX_PROMPT_BYTES);
                 return Ok(Config {
                     default_model: env_default_model(),
                     max_tool_output_bytes,
                     chat_compaction_threshold_bytes,
+                    max_prompt_bytes,
                     ..Config::default()
                 });
             }
@@ -406,6 +414,15 @@ impl Config {
             })
             .unwrap_or(DEFAULT_CHAT_COMPACTION_THRESHOLD_BYTES);
 
+        let max_prompt_bytes = cfg_file
+            .max_prompt_bytes
+            .or_else(|| {
+                std::env::var("GREMLINS_MAX_PROMPT_BYTES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+            })
+            .unwrap_or(DEFAULT_MAX_PROMPT_BYTES);
+
         Ok(Config {
             default_model,
             tui_model,
@@ -418,6 +435,7 @@ impl Config {
             path_overrides,
             max_tool_output_bytes,
             chat_compaction_threshold_bytes,
+            max_prompt_bytes,
             backoff,
         })
     }
@@ -468,6 +486,10 @@ impl Config {
 
     pub fn chat_compaction_threshold_bytes(&self) -> u64 {
         self.chat_compaction_threshold_bytes
+    }
+
+    pub fn max_prompt_bytes(&self) -> u64 {
+        self.max_prompt_bytes
     }
 
     pub fn turn_retry_schedule(&self) -> &[f64] {
@@ -1014,11 +1036,16 @@ pub(crate) const DEFAULT_CHAT_COMPACTION_THRESHOLD_BYTES: u64 = 786_432;
 pub(crate) const DEFAULT_MAX_PROMPT_BYTES: u64 = 1_048_576;
 
 /// GREMLINS_MAX_PROMPT_BYTES — cap a serialized prompt at this many bytes.
-/// Default 1 048 576 (1 MiB).
+/// Default 1 048 576 (1 MiB). Settings.yaml `max-prompt-bytes` takes
+/// precedence over the env var.
 pub(crate) fn max_prompt_bytes() -> u64 {
-    std::env::var("GREMLINS_MAX_PROMPT_BYTES")
-        .ok()
-        .and_then(|v| v.parse().ok())
+    get_global()
+        .map(|c| c.max_prompt_bytes())
+        .or_else(|| {
+            std::env::var("GREMLINS_MAX_PROMPT_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
         .unwrap_or(DEFAULT_MAX_PROMPT_BYTES)
 }
 
@@ -2191,6 +2218,50 @@ model-profiles:
         let mut env = EnvGuard::lock();
         env.set("GREMLINS_MAX_PROMPT_BYTES", "512");
         assert_eq!(max_prompt_bytes(), 512);
+    }
+
+    #[test]
+    fn test_max_prompt_bytes_from_settings_yaml() {
+        let _sandbox = Sandbox::with_config(Some(r#"{"max-prompt-bytes": 12345}"#));
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_prompt_bytes(), 12345);
+    }
+
+    #[test]
+    fn test_max_prompt_bytes_settings_overrides_env() {
+        let mut env = EnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("settings.yaml"),
+            r#"{"max-prompt-bytes": 77777}"#,
+        )
+        .unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
+        env.set("GREMLINS_MAX_PROMPT_BYTES", "999");
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_prompt_bytes(), 77777);
+    }
+
+    #[test]
+    fn test_max_prompt_bytes_env_fallback_no_settings_file() {
+        let mut env = EnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
+        env.set("GREMLINS_MAX_PROMPT_BYTES", "4242");
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_prompt_bytes(), 4242);
+    }
+
+    #[test]
+    fn test_max_prompt_bytes_default_no_settings_file() {
+        let mut env = EnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
+        // No settings.yaml, no env var — should get the 1_048_576 default.
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_prompt_bytes(), DEFAULT_MAX_PROMPT_BYTES);
     }
 
     #[test]
