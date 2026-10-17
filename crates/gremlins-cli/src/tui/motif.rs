@@ -176,16 +176,16 @@ pub fn banner() -> Vec<Line<'static>> {
 pub fn spire_banner() -> Vec<Line<'static>> {
     let gold = Style::default().fg(DEFAULT_THEME.heading_primary);
     let sunburst = Style::default().fg(DEFAULT_THEME.sunburst);
-    let chrome = Style::default().fg(DEFAULT_THEME.chrome);
     let brass = Style::default().fg(DEFAULT_THEME.code_border);
+    let wordmark = Style::default().fg(DEFAULT_THEME.wordmark);
 
     vec![
         Line::from(Span::styled("        ▲", sunburst)),
         Line::from(Span::styled("       ▲▲", gold)),
         Line::from(Span::styled("      ▲▲▲", gold)),
         Line::from(Span::styled("     ▲▲▲▲", gold)),
-        Line::from(Span::styled("   ═════◆═════", chrome)),
-        Line::from(vec![Span::styled("   G R E M L I N S", chrome)]),
+        Line::from(Span::styled("   ═════◆═════", wordmark)),
+        Line::from(vec![Span::styled("   G R E M L I N S", wordmark)]),
         Line::from(Span::styled("   machine-age pipeline works", brass)),
     ]
 }
