@@ -1981,12 +1981,10 @@ fn append_file_matches(
     options: &GrepOptions,
     out: &mut GrepCollector,
 ) {
-    let lines: Vec<&str> = content.lines().collect();
-
     // Zero context keeps the exact legacy format: one `path:line:content`
     // entry per match and no block separators.
     if options.context_before == 0 && options.context_after == 0 {
-        for (idx, line) in lines.iter().enumerate() {
+        for (idx, line) in content.lines().enumerate() {
             if pattern.is_match(line) {
                 if out.match_count >= options.max_matches {
                     out.truncated = true;
@@ -2000,11 +1998,16 @@ fn append_file_matches(
         return;
     }
 
+    let lines: Vec<&str> = content.lines().collect();
+    let last_line = lines.len();
+
     let mut match_lines = Vec::new();
+    let mut first_excluded: Option<usize> = None;
     for (idx, line) in lines.iter().enumerate() {
         if pattern.is_match(line) {
             if out.match_count >= options.max_matches {
                 out.truncated = true;
+                first_excluded = Some(idx + 1);
                 break;
             }
             match_lines.push(idx + 1);
@@ -2016,12 +2019,17 @@ fn append_file_matches(
     }
 
     // Expand each match into a 1-based inclusive [start, end] window and
-    // merge windows that touch or overlap.
-    let last_line = lines.len();
+    // merge windows that touch or overlap. A match past `max_matches` that
+    // would otherwise fall inside an admitted window is never emitted:
+    // truncation caps the window before that line, so it is not mislabeled
+    // as context.
     let mut windows: Vec<(usize, usize)> = Vec::new();
     for &line_no in &match_lines {
         let start = line_no.saturating_sub(options.context_before).max(1);
-        let end = line_no.saturating_add(options.context_after).min(last_line);
+        let mut end = line_no.saturating_add(options.context_after).min(last_line);
+        if let Some(excluded) = first_excluded {
+            end = end.min(excluded - 1);
+        }
         match windows.last_mut() {
             Some((_, last_end)) if start <= last_end.saturating_add(1) => {
                 *last_end = (*last_end).max(end);
@@ -2032,25 +2040,23 @@ fn append_file_matches(
 
     // Emit each merged window as one context block. Context lines use `-`
     // where match lines use `:`; non-contiguous blocks are separated by `--`.
-    let mut next_match = 0usize;
+    // Since windows are capped to exclude any match past `max_matches`, every
+    // emitted line that matches the pattern is a genuine admitted match.
     for (block_idx, &(start, end)) in windows.iter().enumerate() {
         if out.blocked || block_idx > 0 {
             out.matches.push("--".to_string());
         }
         out.blocked = true;
         for line_no in start..=end {
-            let is_match = next_match < match_lines.len() && match_lines[next_match] == line_no;
-            if is_match {
-                next_match += 1;
-            }
-            let separator = if is_match { ':' } else { '-' };
+            let line = lines[line_no - 1];
+            let separator = if pattern.is_match(line) { ':' } else { '-' };
             out.matches.push(format!(
                 "{}{}{}{}{}",
                 path.display(),
                 separator,
                 line_no,
                 separator,
-                lines[line_no - 1]
+                line
             ));
         }
     }
@@ -3149,12 +3155,12 @@ mod tests {
         .to_string();
         let out = grep_invoke(&c, &args).await;
         let p = path.display();
+        // All ten lines match, but only three are admitted; the fourth match
+        // must be excluded entirely rather than emitted as `-` context.
         assert_eq!(
-            out.matches(&format!("{p}:")).count(),
-            3,
-            "max_matches must count matches, not emitted lines: {out}"
+            out,
+            format!("{p}:1:hit 1\n{p}:2:hit 2\n{p}:3:hit 3\n[truncated at 3 matches]"),
         );
-        assert!(out.ends_with("[truncated at 3 matches]"), "got: {out}");
     }
 
     #[tokio::test]
