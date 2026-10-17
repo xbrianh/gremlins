@@ -1072,27 +1072,12 @@ async fn rm_one(id: &str) -> Result<(), String> {
         }
     }
 
-    // Load clean_cmds from the definition YAML directly — no bootstrap.env
-    // sourcing, no client build. Clean commands must run even when the full
-    // runtime init would fail.
+    // Load clean_cmds from the run's hermetic definition snapshot — no
+    // bootstrap.env sourcing, no client build, no stage traversal. Clean
+    // commands must run even when the full runtime init would fail.
     let mut gremlin = gremlin;
-    if let Some(ref def_path) = gremlin.definition_path {
-        if def_path.exists() {
-            match StaticDefinition::from_yaml_file(def_path, None, None) {
-                Ok(def) => {
-                    let clean_cmds = def.clean_cmds().to_vec();
-                    if !clean_cmds.is_empty() {
-                        gremlin.definition = Box::new(StaticDefinition::with_clean_cmds(
-                            def_path.clone(),
-                            clean_cmds,
-                        ));
-                    }
-                }
-                Err(e) => {
-                    log::warn!("gremlin {id}: could not load definition for clean commands: {e}");
-                }
-            }
-        }
+    if let Err(e) = gremlin.attach_clean_cmds() {
+        log::warn!("gremlin {id}: could not load definition for clean commands: {e}");
     }
 
     gremlin.clean(true).await;
@@ -1272,27 +1257,12 @@ async fn clean(id: &str, keep: bool) -> Result<(), String> {
         }
     }
 
-    // Load clean_cmds from the definition YAML directly — no bootstrap.env
-    // sourcing, no client build. Clean commands must run even when the full
-    // runtime init would fail.
+    // Load clean_cmds from the run's hermetic definition snapshot — no
+    // bootstrap.env sourcing, no client build, no stage traversal. Clean
+    // commands must run even when the full runtime init would fail.
     let mut gremlin = gremlin;
-    if let Some(ref def_path) = gremlin.definition_path {
-        if def_path.exists() {
-            match StaticDefinition::from_yaml_file(def_path, None, None) {
-                Ok(def) => {
-                    let clean_cmds = def.clean_cmds().to_vec();
-                    if !clean_cmds.is_empty() {
-                        gremlin.definition = Box::new(StaticDefinition::with_clean_cmds(
-                            def_path.clone(),
-                            clean_cmds,
-                        ));
-                    }
-                }
-                Err(e) => {
-                    log::warn!("gremlin {id}: could not load definition for clean commands: {e}");
-                }
-            }
-        }
+    if let Err(e) = gremlin.attach_clean_cmds() {
+        log::warn!("gremlin {id}: could not load definition for clean commands: {e}");
     }
 
     gremlin.clean(!keep).await;
