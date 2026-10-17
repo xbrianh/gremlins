@@ -560,24 +560,56 @@ impl PartialEq for Client {
 
 impl Eq for Client {}
 
+/// Validate a concrete `provider/model[?k=v]` string for use as a
+/// `task-models` entry.
+///
+/// This is the cheap, settings-free check run at definition load. It parses
+/// the spec with [`ModelURI::parse`], rejects the `cmd` provider (Task
+/// overrides must be a model backend, not a shell command), and rejects any
+/// provider absent from [`backends::registry`]. It deliberately performs no
+/// backend or credential resolution so loading a definition stays lazy.
+pub(crate) fn validate_task_model_spec(spec: &str) -> Result<ModelURI, String> {
+    let uri = ModelURI::parse(spec)?;
+    if uri.provider() == "cmd" {
+        return Err(format!(
+            "task-model spec {spec:?} names the command backend, which cannot run task overrides"
+        ));
+    }
+    if !is_known_provider(uri.provider()) {
+        return Err(format!(
+            "task-model spec {spec:?} names unknown provider '{}'",
+            uri.provider()
+        ));
+    }
+    Ok(uri)
+}
+
 /// Provider-agnostic model resolver for `task-models` entries.
 ///
 /// Parses `spec` with [`Client`], builds or looks up the provider's backend in
 /// the shared lazy pool, and delegates to [`Backend::make_model`] and
 /// [`Backend::resolved_params`]. The returned [`TaskModel`] carries the target
 /// provider's own request options, so a cross-provider override never inherits
-/// the parent model's `temperature`/`max_tokens`/`extra`. Returns `None` for
-/// malformed specs, unknown providers, the `cmd` backend, and backend-build
-/// failures — callers fall back to the parent model without surfacing an error.
-pub(crate) fn resolve_model(spec: &str) -> Option<super::task::TaskModel> {
-    let client = Client::parse(spec).ok()?;
-    if client.provider() == "cmd" {
-        return None;
-    }
-    let backend = client.get_or_build_backend().ok()?;
-    let model = backend.make_model(spec)?;
-    let resolved = backend.resolved_params()?;
-    Some(super::task::TaskModel {
+/// the parent model's `temperature`/`max_tokens`/`extra`. Every failure —
+/// malformed spec, unknown provider, `cmd`, and backend-build failure — is
+/// returned as an `Err` with a reason instead of a silent fallback.
+pub(crate) fn resolve_model(spec: &str) -> Result<super::task::TaskModel, String> {
+    let uri = validate_task_model_spec(spec)?;
+    let client = Client::from_uri(uri)?;
+    let backend = client.get_or_build_backend()?;
+    let model = backend.make_model(spec).ok_or_else(|| {
+        format!(
+            "backend for provider '{}' could not build a model for {spec:?}",
+            client.provider()
+        )
+    })?;
+    let resolved = backend.resolved_params().ok_or_else(|| {
+        format!(
+            "backend for provider '{}' could not resolve request options for {spec:?}",
+            client.provider()
+        )
+    })?;
+    Ok(super::task::TaskModel {
         model,
         temperature: resolved.temperature,
         max_tokens: resolved.max_tokens,
@@ -817,21 +849,42 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_returns_none_for_malformed_specs() {
-        assert!(resolve_model("no-slash").is_none());
-        assert!(resolve_model("/model").is_none());
-        assert!(resolve_model("openai/").is_none());
-        assert!(resolve_model("model://openai").is_none());
+    fn resolve_model_returns_err_for_malformed_specs() {
+        for spec in ["no-slash", "/model", "openai/", "model://openai"] {
+            assert!(
+                resolve_model(spec).is_err(),
+                "malformed spec {spec:?} must not resolve"
+            );
+        }
     }
 
     #[test]
-    fn resolve_model_returns_none_for_unknown_provider() {
-        assert!(resolve_model("fake/model").is_none());
+    fn resolve_model_returns_err_for_unknown_provider() {
+        assert!(resolve_model("fake/model").is_err());
     }
 
     #[test]
-    fn resolve_model_returns_none_for_cmd() {
-        assert!(resolve_model("cmd/true").is_none());
+    fn resolve_model_returns_err_for_cmd() {
+        assert!(resolve_model("cmd/true").is_err());
+    }
+
+    #[test]
+    fn validate_task_model_spec_rejects_malformed_unknown_and_cmd() {
+        assert!(validate_task_model_spec("no-slash").is_err());
+        assert!(validate_task_model_spec("fake/model").is_err());
+        assert!(validate_task_model_spec("cmd/true").is_err());
+    }
+
+    #[test]
+    fn validate_task_model_spec_accepts_registered_providers() {
+        for spec in [
+            "openai/gpt-4o",
+            "model://anthropic/claude-sonnet-4-20250514",
+            "openrouter/deepseek/deepseek-v4-pro?reasoning=high",
+        ] {
+            let uri = validate_task_model_spec(spec).unwrap();
+            assert_eq!(uri, ModelURI::parse(spec).unwrap(), "{spec:?}");
+        }
     }
 
     #[test]

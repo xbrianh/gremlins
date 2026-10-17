@@ -40,9 +40,10 @@ pub(crate) struct TaskModel {
 }
 
 /// Builds the model named by a matching `task-models` entry, for use by one
-/// Task invocation.  Returns `None` when the spec names a provider this
-/// backend does not serve — the caller falls back to the parent's model.
-pub(crate) type TaskModelFactory = Arc<dyn Fn(&str) -> Option<TaskModel> + Send + Sync>;
+/// Task invocation. Returns `Err` with a reason when the entry cannot be
+/// resolved (for example, its backend cannot be built because a credential is
+/// missing).
+pub(crate) type TaskModelFactory = Arc<dyn Fn(&str) -> Result<TaskModel, String> + Send + Sync>;
 
 /// Lookup map for `task-models`, keyed by the exact [`TaskKind`] spelling.
 /// Shared behind an `Arc` so a Task fan-out clones one pointer per invocation
@@ -96,19 +97,23 @@ impl TaskModelSelector {
     }
 
     /// The [`TaskModel`] for a Task of `kind`, or a clone of `default` when no
-    /// entry matches or when the matching entry names a provider this backend
-    /// cannot serve.
+    /// entry matches.
     ///
     /// Returns `(model, spec_string)` where `spec_string` is the matched
-    /// `task-models` entry (for logging), or `None` when no entry matched or
-    /// the factory could not build a model for the matched spec.
-    fn model_for(&self, kind: TaskKind, default: &TaskModel) -> (TaskModel, Option<String>) {
+    /// `task-models` entry (for logging), or `None` when no entry matched. A
+    /// matched entry that fails to build is an `Err` — it must surface as a
+    /// task result, not silently fall back to `default`.
+    fn model_for(
+        &self,
+        kind: TaskKind,
+        default: &TaskModel,
+    ) -> Result<(TaskModel, Option<String>), String> {
         match self.overrides.spec_for(kind) {
             Some(spec) => match (self.factory)(spec) {
-                Some(m) => (m, Some(spec.to_string())),
-                None => (default.clone(), None),
+                Ok(m) => Ok((m, Some(spec.to_string()))),
+                Err(reason) => Err(reason),
             },
-            None => (default.clone(), None),
+            None => Ok((default.clone(), None)),
         }
     }
 }
@@ -253,13 +258,17 @@ fn make_task_runner_at_depth(
                     max_tokens,
                     extra: extra.clone(),
                 };
-                let (selected, _selected_spec) = if kind == TaskKind::Fork {
-                    (parent_selection.clone(), None)
+                let selection = if kind == TaskKind::Fork {
+                    Ok((parent_selection.clone(), None))
                 } else {
                     match &task_model_selector {
                         Some(selector) => selector.model_for(kind, &parent_selection),
-                        None => (parent_selection.clone(), None),
+                        None => Ok((parent_selection.clone(), None)),
                     }
+                };
+                let (selected, _selected_spec) = match selection {
+                    Ok(selection) => selection,
+                    Err(reason) => return format!("Task error: {reason}"),
                 };
                 let selected_model = selected.model.clone();
                 let selected_temperature = selected.temperature;
@@ -443,7 +452,7 @@ mod tests {
         };
         let factory: TaskModelFactory = Arc::new(move |spec: &str| {
             assert_eq!(spec, "openai/mini");
-            Some(target.clone())
+            Ok(target.clone())
         });
         let selector = TaskModelSelector::new(
             HashMap::from([(TaskKind::Scout, "openai/mini".into())]),
@@ -451,7 +460,9 @@ mod tests {
         )
         .expect("a non-empty task-models map yields a selector");
 
-        let (selected, spec) = selector.model_for(TaskKind::Scout, &gm_mock_task());
+        let (selected, spec) = selector
+            .model_for(TaskKind::Scout, &gm_mock_task())
+            .unwrap();
         assert_eq!(spec.as_deref(), Some("openai/mini"));
         assert_eq!(selected.temperature, Some(0.2));
         assert_eq!(selected.max_tokens, Some(123));
@@ -461,7 +472,9 @@ mod tests {
         );
 
         // No match — the default model and its options stand.
-        let (selected, spec) = selector.model_for(TaskKind::Review, &gm_mock_task());
+        let (selected, spec) = selector
+            .model_for(TaskKind::Review, &gm_mock_task())
+            .unwrap();
         assert_eq!(spec, None);
         assert_eq!(selected.temperature, None);
         assert_eq!(selected.max_tokens, None);
@@ -469,16 +482,28 @@ mod tests {
     }
 
     #[test]
-    fn task_model_selector_falls_back_when_factory_returns_none() {
-        let factory: TaskModelFactory = Arc::new(|_spec: &str| None);
+    fn task_model_selector_surfaces_factory_errors() {
+        let factory: TaskModelFactory =
+            Arc::new(|_spec: &str| Err("backend build failed: missing credential".to_string()));
         let selector = TaskModelSelector::new(
             HashMap::from([(TaskKind::Scout, "openai/mini".into())]),
             factory,
         )
         .expect("a non-empty map yields a selector");
 
-        // Spec matches but factory returns None — fall back to default.
-        let (selected, spec) = selector.model_for(TaskKind::Scout, &gm_mock_task());
+        // Spec matches but the factory fails — the error must surface.
+        let err = selector
+            .model_for(TaskKind::Scout, &gm_mock_task())
+            .unwrap_err();
+        assert!(
+            err.contains("missing credential"),
+            "factory error must be returned verbatim, got: {err}"
+        );
+
+        // No match still returns the default.
+        let (selected, spec) = selector
+            .model_for(TaskKind::Review, &gm_mock_task())
+            .unwrap();
         assert_eq!(spec, None);
         assert_eq!(selected.temperature, None);
         assert_eq!(selected.max_tokens, None);
@@ -487,7 +512,7 @@ mod tests {
 
     #[test]
     fn task_model_selector_is_none_when_unconfigured() {
-        let factory: TaskModelFactory = Arc::new(|_spec: &str| None);
+        let factory: TaskModelFactory = Arc::new(|_spec: &str| Err("unused".to_string()));
         assert!(TaskModelSelector::new(HashMap::new(), factory).is_none());
     }
 
@@ -497,7 +522,7 @@ mod tests {
         let calls_flag = calls.clone();
         let factory: TaskModelFactory = Arc::new(move |_spec: &str| {
             calls_flag.fetch_add(1, Ordering::SeqCst);
-            None
+            Err("unused".to_string())
         });
         let selector = build_task_selector(
             factory,
@@ -513,19 +538,18 @@ mod tests {
             "selector construction must not resolve entries"
         );
 
-        let (selected, spec) = selector.model_for(TaskKind::Scout, &gm_mock_task());
+        let result = selector.model_for(TaskKind::Scout, &gm_mock_task());
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
             "the matching lookup must resolve the entry exactly once"
         );
-        assert_eq!(spec, None);
-        assert_eq!(selected.temperature, None);
-        assert_eq!(selected.max_tokens, None);
-        assert_eq!(selected.extra, None);
+        assert!(result.is_err(), "factory error must surface");
 
         // A non-matching kind must not trigger another resolution.
-        let (_selected, spec) = selector.model_for(TaskKind::Implement, &gm_mock_task());
+        let (_selected, spec) = selector
+            .model_for(TaskKind::Implement, &gm_mock_task())
+            .unwrap();
         assert_eq!(spec, None);
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -664,7 +688,7 @@ mod tests {
         let factory_flag = factory_called.clone();
         let factory: TaskModelFactory = Arc::new(move |_spec: &str| {
             factory_flag.store(true, Ordering::SeqCst);
-            None
+            Err("factory must not run for Fork".to_string())
         });
         let selector = TaskModelSelector::new(
             HashMap::from([
@@ -763,7 +787,7 @@ mod tests {
         let target_extra_for_factory = target_extra.clone();
         let child_handle = child.clone();
         let factory: TaskModelFactory = Arc::new(move |_spec: &str| {
-            Some(TaskModel {
+            Ok(TaskModel {
                 model: gm(child_handle.clone().erase()),
                 temperature: Some(0.7),
                 max_tokens: Some(8192),
@@ -816,19 +840,21 @@ mod tests {
         }
     }
 
-    /// When the factory cannot resolve a matched spec, the task falls back to
-    /// the parent model *and* keeps the parent's request options.
+    /// When the factory fails to resolve a matched spec, the task must return
+    /// a `Task error: …` string rather than quietly falling back to the parent
+    /// model. The parent model is not invoked for that task.
     #[tokio::test]
-    async fn task_fallback_preserves_parent_options() {
+    async fn task_build_failure_surfaces_as_task_error_without_invoking_parent() {
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
         let ctx = depth_test_ctx();
-        let child = MockCompletionModel::from_stream_turns([vec![
-            MockStreamEvent::text("fallback result"),
+        let parent = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("parent must not run"),
             MockStreamEvent::final_response_with_default_usage(),
         ]]);
 
-        let factory: TaskModelFactory = Arc::new(|_spec: &str| None);
+        let factory: TaskModelFactory =
+            Arc::new(|_spec: &str| Err("backend build failed: missing credential".to_string()));
         let selector = TaskModelSelector::new(
             HashMap::from([(TaskKind::Scout, "openai/mini".to_string())]),
             factory,
@@ -836,9 +862,8 @@ mod tests {
         .expect("configured");
 
         let cancel = super::super::agent_loop::CancelToken::new();
-        let extra = serde_json::json!({ "foo": "bar" });
         let runner = make_task_runner(
-            gm(child.clone().erase()),
+            gm(parent.clone().erase()),
             Some(selector),
             None,
             cancel,
@@ -849,19 +874,24 @@ mod tests {
             10,
             0,
             None,
-            Some(0.3),
-            Some(4242),
-            Some(extra.clone()),
+            None,
+            None,
+            None,
         );
 
         let output = runner(TaskKind::Scout, "go".into(), None).await;
-        assert!(!output.contains("Task error"), "unexpected error: {output}");
-
-        for req in child.requests() {
-            assert_eq!(req.temperature, Some(0.3));
-            assert_eq!(req.max_tokens, Some(4242));
-            assert_eq!(req.additional_params, Some(extra.clone()));
-        }
+        assert!(
+            output.starts_with("Task error: backend build failed"),
+            "backend build failure must surface as a Task error string, got: {output}"
+        );
+        assert!(
+            output.contains("missing credential"),
+            "the reason must be included in the Task error, got: {output}"
+        );
+        assert!(
+            parent.requests().is_empty(),
+            "a failed task-models resolution must not invoke the parent model"
+        );
     }
 
     #[tokio::test]

@@ -43,8 +43,9 @@ pub struct RunParams {
     /// `settings.yaml` `task-models` entries. `None` when no
     /// entries are configured. Resolution is lazy: the selector's
     /// provider-agnostic factory builds a backend only when a
-    /// matching task kind actually runs and otherwise falls back to
-    /// the parent model.
+    /// matching task kind actually runs. A matched entry that fails
+    /// to build surfaces as a `Task error: …` string; a task kind
+    /// with no configured entry keeps the parent model.
     pub task_models: Option<TaskModelSelector>,
     /// Supervisor-owned cancel token. When set, the backend uses it instead of
     /// creating its own, so `gremlins stop` cancels in-flight agent loops.
