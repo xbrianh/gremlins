@@ -170,8 +170,8 @@ impl Renderer {
             Event::HardBreak => self.hard_break(),
             Event::Rule => self.rule(),
             Event::TaskListMarker(checked) => self.task_marker(checked),
-            Event::InlineHtml(html) => self.text(&html),
-            Event::Html(html) => self.text(&html),
+            Event::InlineHtml(html) => self.html_text(&html),
+            Event::Html(html) => self.html_text(&html),
             Event::InlineMath(m) => self.text(&m),
             Event::DisplayMath(m) => self.text(&m),
             Event::FootnoteReference(r) => self.text(&r),
@@ -368,6 +368,25 @@ impl Renderer {
             | TagEnd::MetadataBlock(_)
             | TagEnd::Superscript
             | TagEnd::Subscript => {}
+        }
+    }
+
+    /// Handle an `Html` or `InlineHtml` event payload. When
+    /// `soft_break_hard` is on (the prompt path), split the payload at
+    /// newlines and flush each segment as a separate line so that
+    /// multiline HTML blocks preserve their source layout. Otherwise,
+    /// accumulate into the current line unchanged.
+    fn html_text(&mut self, html: &str) {
+        if self.soft_break_hard {
+            let mut segments = html.split('\n').peekable();
+            while let Some(seg) = segments.next() {
+                self.text(seg);
+                if segments.peek().is_some() {
+                    self.flush_line();
+                }
+            }
+        } else {
+            self.text(html);
         }
     }
 
@@ -953,6 +972,29 @@ mod tests {
             .spans
             .iter()
             .all(|s| s.style.bg == Some(DEFAULT_THEME.code_bg)));
+    }
+
+    #[test]
+    fn render_preserving_breaks_splits_multiline_html_on_newlines() {
+        // `<div>\none\ntwo\n</div>` is a block-level HTML event where
+        // pulldown-cmark emits `Html` payloads with embedded newlines
+        // rather than `SoftBreak` events. The preserving-breaks path
+        // must split those payloads into separate lines.
+        let input = "<div>\none\ntwo\n</div>";
+        let lines = render_preserving_breaks(input, Style::default(), 40);
+        assert_eq!(text_of(&lines), vec!["<div>", "one", "two", "</div>"]);
+    }
+
+    #[test]
+    fn normal_renderer_does_not_split_html_on_newlines() {
+        // Outside the prompt path, the normal renderer produces a single
+        // line — pulldown-cmark treats bare newlines between inline HTML
+        // and text as SoftBreak events (space), so the literal newlines
+        // are gone.
+        let lines = render_default("<div>\none\ntwo\n</div>");
+        let text = text_of(&lines);
+        assert_eq!(text.len(), 1);
+        assert_eq!(text[0], "<div>onetwo</div>");
     }
 
     #[test]
