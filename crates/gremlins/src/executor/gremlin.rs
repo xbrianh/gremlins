@@ -776,6 +776,56 @@ impl Gremlin {
         Ok(())
     }
 
+    /// Load only the clean commands from the run's hermetic `definition.yaml`
+    /// snapshot, so teardown can run them without a full runtime init.
+    ///
+    /// This is the teardown-only counterpart to [`Gremlin::init_runtime`]: it
+    /// reads the same name-validated snapshot blob through the state store and
+    /// parses it with [`StaticDefinition::from_expanded_bytes`], which performs
+    /// no profile resolution and has no `default_model`/settings.yaml
+    /// requirement. No bootstrap env sourcing, no client build, and no stage
+    /// traversal happen here.
+    ///
+    /// The handle's recorded [`Gremlin::definition_path`] is used only as the
+    /// display path for the clean-commands-only definition installed on
+    /// success. A missing or unparseable snapshot is an error; the caller
+    /// keeps the handle's previous (stub) definition and decides whether to
+    /// continue teardown without clean commands.
+    pub fn attach_clean_cmds(&mut self) -> Result<(), RunError> {
+        if !self.state.exists("definition.yaml") {
+            return Err(RunError::Message(format!(
+                "gremlin {}: definition snapshot not found",
+                self.id
+            )));
+        }
+
+        let bytes = {
+            let mut blob = self
+                .state
+                .open_blob("definition.yaml", state::BlobMode::Read)
+                .map_err(|error| RunError::Message(error.to_string()))?;
+            let mut bytes = Vec::new();
+            use std::io::Read;
+            blob.read_to_end(&mut bytes)
+                .map_err(|error| RunError::Message(error.to_string()))?;
+            bytes
+        };
+
+        let definition = StaticDefinition::from_expanded_bytes(&bytes, None, None)
+            .map_err(|error| RunError::Message(error.to_string()))?;
+
+        let clean_cmds = definition.clean_cmds().to_vec();
+        if !clean_cmds.is_empty() {
+            let display_path = self
+                .definition_path
+                .clone()
+                .unwrap_or_else(|| self.definition.path().to_path_buf());
+            self.definition = Box::new(StaticDefinition::with_clean_cmds(display_path, clean_cmds));
+        }
+
+        Ok(())
+    }
+
     /// Fork a child gremlin: copy artifacts, create a workspace, and seed a
     /// fresh `state.json` carrying the child's identity.
     ///
