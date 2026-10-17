@@ -506,6 +506,17 @@ fn yaml_model(
     ))
 }
 
+/// Validate a single resolved task-model spec with a consistent error shape.
+fn validate_task_model_entry(key: &str, value: &str) -> Result<(), SchemaError> {
+    validate_task_model_spec(value)
+        .map(|_| ())
+        .map_err(|message| {
+            SchemaError::Generic(format!(
+                "invalid task-models entry {key:?} ({value:?}): {message}"
+            ))
+        })
+}
+
 /// Read `task-models` — an ordered string→string map, resolved through
 /// profiles when settings are supplied. Returns `None` when the stage has no
 /// `task-models` key and no profile contributes task-models.
@@ -545,37 +556,31 @@ fn yaml_task_models(
     }
 
     // Merge: profile base + stage overrides (stage wins on conflict).
+    // Validate each layer as it is resolved — a stage override must not be
+    // able to hide an invalid profile entry.
     let mut resolved = IndexMap::new();
     if let Some(settings) = settings {
         if let Some(ref profile_tc) = profile_task_models {
             for (key, value) in profile_tc {
-                resolved.insert(
-                    key.clone(),
-                    config::resolve_model_reference(value, settings)
-                        .map_err(SchemaError::Generic)?,
-                );
+                let resolved_value = config::resolve_model_reference(value, settings)
+                    .map_err(SchemaError::Generic)?;
+                validate_task_model_entry(key, &resolved_value)?;
+                resolved.insert(key.clone(), resolved_value);
             }
         }
         if let Some(ref stage_tc) = stage {
             for (key, value) in stage_tc {
-                resolved.insert(
-                    key.clone(),
-                    config::resolve_model_reference(value, settings)
-                        .map_err(SchemaError::Generic)?,
-                );
+                let resolved_value = config::resolve_model_reference(value, settings)
+                    .map_err(SchemaError::Generic)?;
+                validate_task_model_entry(key, &resolved_value)?;
+                resolved.insert(key.clone(), resolved_value);
             }
         }
     } else if let Some(ref stage_tc) = stage {
         for (key, value) in stage_tc {
+            validate_task_model_entry(key, value)?;
             resolved.insert(key.clone(), value.clone());
         }
-    }
-    for (key, value) in &resolved {
-        validate_task_model_spec(value).map_err(|message| {
-            SchemaError::Generic(format!(
-                "invalid task-models entry {key:?} ({value:?}): {message}"
-            ))
-        })?;
     }
     Ok(Some(resolved))
 }
@@ -1680,5 +1685,42 @@ stages:
     fn yaml_loader_resolves_per_stage_profile_task_models() {
         let (_sandbox, def) = load_with_profile_settings(DEFINITION_WITH_STAGE_PROFILE, None, None);
         assert_profile_definition_round_trips(&def, "cmd/default", Some("cmd/echo"));
+    }
+
+    #[test]
+    fn yaml_loader_rejects_invalid_profile_task_model_hidden_by_stage_override() {
+        let settings = r#"
+model-profiles:
+  demo:
+    model: cmd/echo
+    task-models:
+      Scout: cmd/true
+"#;
+        let definition = r#"
+default_model: profile/demo
+stages:
+  - name: plan
+    type: agent
+    prompt:
+      - "hello\n"
+    task-models:
+      Scout: openai/scout
+"#;
+
+        let sandbox = Sandbox::with_config(Some(settings));
+        let definition_path = write_definition(&sandbox, definition);
+
+        let err = StaticDefinition::from_yaml_file(&definition_path, None, None).expect_err(
+            "an invalid profile task-model overridden by a stage entry must still be rejected",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid task-models entry"),
+            "error must name the bad entry, got: {msg}"
+        );
+        assert!(
+            msg.contains("Scout") && msg.contains("cmd/true"),
+            "error must name the offending key and spec, got: {msg}"
+        );
     }
 }
