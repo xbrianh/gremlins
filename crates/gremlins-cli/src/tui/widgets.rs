@@ -47,6 +47,8 @@ pub struct RenderContext<'a> {
     pub gremlin_count: &'a str,
     /// Cached project name.
     pub project_name: &'a str,
+    /// Cached active chat gremlin model, daemon-derived.
+    pub chat_model: Option<&'a str>,
     /// The daemon-derived run table (source of truth for the runs view).
     pub active_runs: &'a HashMap<String, ActiveRun>,
     /// Highlighted gremlin id on the `/watch` screen.
@@ -2526,6 +2528,13 @@ impl LiveAreaWidget for InfoBarWidget {
             Span::styled(ctx.project_name.to_string(), chrome),
         ];
 
+        if let Some(model) = ctx.chat_model {
+            spans.push(Span::styled("  ", band));
+            spans.push(Span::styled("model:", nickel));
+            spans.push(Span::styled(" ", band));
+            spans.push(Span::styled(model.to_string(), chrome));
+        }
+
         if let Some(id) = ctx.following_log {
             spans.push(Span::styled("  ", band));
             spans.push(Span::styled(
@@ -4381,6 +4390,7 @@ mod tests {
             following_log: None,
             gremlin_count: "0",
             project_name: "",
+            chat_model: None,
             active_runs: EMPTY.get_or_init(HashMap::new),
             watch_selection: None,
             watch_following: None,

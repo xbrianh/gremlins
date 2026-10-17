@@ -298,6 +298,7 @@ fn build_chat_request(
 /// is responsible for taking the input, recording history, and stopping any
 /// log follow first. The caller must have already checked `active_request`
 /// and `session_recreating`.
+#[allow(clippy::too_many_arguments)]
 fn send_chat_input(
     live_area: &mut LiveArea,
     app: &mut App,
@@ -306,6 +307,7 @@ fn send_chat_input(
     turn_gen: &mut u64,
     active_turn: &mut Option<String>,
     session_generation: u64,
+    model_tx: mpsc::UnboundedSender<Result<Option<String>, String>>,
 ) -> io::Result<()> {
     if app.active_request {
         let msg = "a request is already in progress — wait for the response";
@@ -377,6 +379,12 @@ fn send_chat_input(
                         message: msg,
                         turn: Some(turn_id.clone()),
                     });
+                } else {
+                    // The chat turn is now airborne: the daemon has created
+                    // (or refreshed) the session's chat gremlin and patched
+                    // its `state.json` model. Refresh the info-bar cache from
+                    // the daemon, which owns model state.
+                    let _ = model_tx.send(query_chat_model(&client_for_chat).await);
                 }
             }
             Err(e) => {
@@ -389,6 +397,18 @@ fn send_chat_input(
     });
 
     Ok(())
+}
+
+/// Query the daemon for the active chat gremlin's model.
+///
+/// The response has `model` as a string or `null` when the session has no
+/// chat gremlin yet. The TUI never reads `tui.json` or `state.json`; the
+/// daemon owns model state.
+async fn query_chat_model(client: &Arc<client::DaemonClient>) -> Result<Option<String>, String> {
+    let resp = client
+        .send_control_request(serde_json::json!({ "op": "chat_model" }))
+        .await?;
+    Ok(resp.get("model").and_then(|v| v.as_str()).map(String::from))
 }
 
 /// Route a submitted line from the full-screen debug view prompt.
@@ -921,6 +941,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
         }
     }
 
+    // Query the daemon for the active chat model before the first prompt so
+    // the info bar can show a restored session's model immediately.
+    match query_chat_model(&client).await {
+        Ok(model) => app.chat_model = model,
+        Err(e) => log::debug!("initial chat_model query failed: {e}"),
+    }
+
     // ── Crossterm event channel (polling task → async) ─────────
     // Uses poll + sleep instead of blocking read so that the event
     // loop is never starved by a background reader holding the stdin lock.
@@ -970,6 +997,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
     // ── Channel for session-recreation completion ─────────────────
     let (reset_tx, mut reset_rx) = mpsc::unbounded_channel::<Result<(), String>>();
+
+    // ── Channel for daemon chat-model lookups ─────────────────────
+    let (model_tx, mut model_rx) = mpsc::unbounded_channel::<Result<Option<String>, String>>();
 
     // ── Channel for run-snapshot refreshes (after event_lagged) ───
     let (snapshot_tx, mut snapshot_rx) = mpsc::unbounded_channel::<HashMap<String, ActiveRun>>();
@@ -1463,6 +1493,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     &mut turn_gen,
                                     &mut active_turn,
                                     session_generation,
+                                    model_tx.clone(),
                                 )?;
                             }
                         }
@@ -1800,10 +1831,27 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             Some(result) = reset_rx.recv() => {
                 app.session_recreating = false;
                 match result {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        // The old chat gremlin died with the old session; the
+                        // daemon reports `model: null` until the next prompt.
+                        app.chat_model = None;
+                        let c = Arc::clone(&client);
+                        let tx = model_tx.clone();
+                        tokio::spawn(async move {
+                            let _ = tx.send(query_chat_model(&c).await);
+                        });
+                    }
                     Err(e) => {
                         live_area.push_transcript_line(format!("error: {e}"));
                     }
+                }
+            }
+
+            // ── Daemon chat-model lookup results ──────────
+            Some(result) = model_rx.recv() => {
+                match result {
+                    Ok(model) => app.chat_model = model,
+                    Err(e) => log::debug!("chat_model query failed: {e}"),
                 }
             }
 

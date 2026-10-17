@@ -337,6 +337,7 @@ impl<B: Backend> LiveArea<B> {
             following_log: app.following_log.as_deref(),
             gremlin_count,
             project_name: app.project_name_str(),
+            chat_model: app.chat_model.as_deref(),
             active_runs: &app.active_runs,
             watch_selection: app.watch_selection.as_deref(),
             watch_following: app.watch_following.as_deref(),

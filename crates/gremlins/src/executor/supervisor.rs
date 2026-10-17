@@ -1020,6 +1020,11 @@ async fn dispatch_op(
             let _ = writer.write_json_line(&resp).await;
             DispatchOutcome::Continue
         }
+        "chat_model" => {
+            let resp = handle_chat_model(request).await;
+            let _ = writer.write_json_line(&resp).await;
+            DispatchOutcome::Continue
+        }
         _ => {
             let resp = error_response(&format!("unknown op: {op:?}"));
             let _ = writer.write_json_line(&resp).await;
@@ -2132,6 +2137,55 @@ async fn handle_model(request: &Value) -> Value {
         })),
         Err(e) => error_response(&format!("invalid model: {e}")),
     }
+}
+
+/// Read the active chat gremlin's resolved model from its `state.json`.
+///
+/// The op is session-scoped: it implicitly targets the chat gremlin owned by
+/// the (currently single) interactive session. When no chat gremlin exists,
+/// the response reports `model: null` so the TUI can degrade its info bar
+/// gracefully. This is a pure read — it never mutates state or files.
+async fn handle_chat_model(_request: &Value) -> Value {
+    let sessions: Vec<SessionHandle> = session_map().lock().unwrap().values().cloned().collect();
+
+    for session in sessions {
+        let model = {
+            let s = session.lock().await;
+
+            // The gremlin is usually parked in `chat_gremlins`, but while a
+            // turn is in-flight it has been moved out of the map. In that
+            // case its id is still known through `current_turn`, and the
+            // run-map store carries the same `state.json` model field.
+            let id = s
+                .chat_gremlins
+                .keys()
+                .next()
+                .cloned()
+                .or_else(|| s.current_turn.as_ref().map(|turn| turn.id.clone()));
+
+            match id {
+                Some(id) => {
+                    if let Some(gremlin) = s.chat_gremlins.get(&id) {
+                        let model = gremlin.state.read_str("model");
+                        (!model.is_empty()).then_some(model)
+                    } else {
+                        let map = get_run_map().lock().unwrap();
+                        map.get(&id).and_then(|handle| {
+                            let model = handle.store.read_str("model");
+                            (!model.is_empty()).then_some(model)
+                        })
+                    }
+                }
+                None => None,
+            }
+        };
+
+        if let Some(model) = model {
+            return ok_response(serde_json::json!({ "model": model }));
+        }
+    }
+
+    ok_response(serde_json::json!({ "model": Value::Null }))
 }
 
 // ---------------------------------------------------------------------------
