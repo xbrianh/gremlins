@@ -781,10 +781,12 @@ impl Gremlin {
     ///
     /// This is the teardown-only counterpart to [`Gremlin::init_runtime`]: it
     /// reads the same name-validated snapshot blob through the state store and
-    /// parses it with [`StaticDefinition::from_expanded_bytes`], which performs
-    /// no profile resolution and has no `default_model`/settings.yaml
-    /// requirement. No bootstrap env sourcing, no client build, and no stage
-    /// traversal happen here.
+    /// parses it with [`StaticDefinition::from_expanded_bytes`]. A no-op model
+    /// fallback is supplied only so an expanded snapshot that omits
+    /// `default_model` still parses: teardown never uses the model, and this
+    /// path performs no profile resolution and reads no settings.yaml. No
+    /// bootstrap env sourcing, no client build, and no stage traversal happen
+    /// here.
     ///
     /// The handle's recorded [`Gremlin::definition_path`] is used only as the
     /// display path for the clean-commands-only definition installed on
@@ -811,7 +813,7 @@ impl Gremlin {
             bytes
         };
 
-        let definition = StaticDefinition::from_expanded_bytes(&bytes, None, None)
+        let definition = StaticDefinition::from_expanded_bytes(&bytes, Some("cmd/true"), None)
             .map_err(|error| RunError::Message(error.to_string()))?;
 
         let clean_cmds = definition.clean_cmds().to_vec();
@@ -2476,6 +2478,227 @@ land:
             !state_dir.exists(),
             "state dir should be gone after clean(true)"
         );
+    }
+
+    #[tokio::test]
+    // The env guard holds a plain mutex across the run's awaits; safe because
+    // `#[tokio::test]` drives a current-thread runtime, so no other task can be
+    // scheduled on this thread while the lock is held.
+    #[allow(clippy::await_holding_lock)]
+    async fn attach_clean_cmds_loads_snapshot_without_default_model() {
+        let mut env = EnvGuard::lock();
+        let sandbox = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
+
+        let id = "gr-attach-clean";
+        let state_dir = sandbox.path().join("state").join(id);
+        let artifact_dir = state_dir.join("artifacts");
+        let workdir = sandbox.path().join("workspace");
+        let project_root = sandbox.path().join("project");
+        let scratch_dir = config::scratch_root(Some(id));
+
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&scratch_dir).unwrap();
+
+        // The source definition no longer exists at the recorded path; only the
+        // hermetic snapshot in the state directory is available.
+        let source_definition = project_root.join("since-deleted.yaml");
+        let marker = sandbox.path().join("clean-ran");
+        let bootstrap_ran = sandbox.path().join("bootstrap-ran");
+
+        // Deliberately no `default_model`: attach_clean_cmds only needs the
+        // clean commands, so expanded parsing must not require settings.yaml or
+        // a profile-bearing model spec.
+        let definition_yaml = format!(
+            r#"
+__gremlins_expanded__: true
+stages:
+  - name: run
+    type: exec
+    options:
+      cmds:
+        - "echo hello"
+land:
+  clean_cmds:
+    - "touch {marker_path}"
+bootstrap:
+  env: |
+    touch {bootstrap_path}
+"#,
+            marker_path = marker.display(),
+            bootstrap_path = bootstrap_ran.display(),
+        );
+        std::fs::write(state_dir.join("definition.yaml"), &definition_yaml).unwrap();
+
+        std::fs::write(
+            state_dir.join("state.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": id,
+                "kind": "demo",
+                "project_root": project_root.to_string_lossy(),
+                "definition_path": source_definition.to_string_lossy(),
+                "workdir": workdir.to_string_lossy(),
+                "status": "finished",
+                "pid": null,
+                "exit_code": 0,
+                "model": "",
+                "attempt": "0001",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut gremlin = Gremlin::from(id).unwrap();
+        assert!(gremlin.definition.is_stub());
+        assert!(!source_definition.exists());
+
+        gremlin.attach_clean_cmds().unwrap();
+        assert_eq!(gremlin.definition.clean_cmds().len(), 1);
+        assert_eq!(
+            gremlin.definition.path(),
+            source_definition.as_path(),
+            "clean-only definition should keep the recorded source path as its display path"
+        );
+
+        gremlin.clean(true).await;
+
+        assert!(
+            marker.exists(),
+            "clean_cmds from the snapshot should have run before teardown"
+        );
+        assert!(
+            !bootstrap_ran.exists(),
+            "attach_clean_cmds must not source bootstrap.env"
+        );
+        assert!(
+            !state_dir.exists(),
+            "state dir should be gone after clean(true)"
+        );
+        assert!(
+            !workdir.exists(),
+            "workspace should be gone after clean(true)"
+        );
+        assert!(
+            !scratch_dir.exists(),
+            "scratch dir should be gone after clean(true)"
+        );
+    }
+
+    #[tokio::test]
+    // The env guard is held across awaits; safe on the current-thread runtime.
+    #[allow(clippy::await_holding_lock)]
+    async fn attach_clean_cmds_missing_snapshot_reports_error_and_clean_continues() {
+        let mut env = EnvGuard::lock();
+        let sandbox = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
+
+        let id = "gr-attach-missing";
+        let state_dir = sandbox.path().join("state").join(id);
+        let workdir = sandbox.path().join("workspace");
+        let project_root = sandbox.path().join("project");
+        let scratch_dir = config::scratch_root(Some(id));
+
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&scratch_dir).unwrap();
+
+        std::fs::write(
+            state_dir.join("state.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": id,
+                "kind": "demo",
+                "project_root": project_root.to_string_lossy(),
+                "definition_path": "",
+                "workdir": workdir.to_string_lossy(),
+                "status": "finished",
+                "pid": null,
+                "exit_code": 0,
+                "model": "",
+                "attempt": "0001",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut gremlin = Gremlin::from(id).unwrap();
+        let error = gremlin.attach_clean_cmds().unwrap_err();
+        assert!(
+            error.to_string().contains("definition snapshot not found"),
+            "error should name the missing snapshot: {error}"
+        );
+        assert!(gremlin.definition.is_stub());
+
+        gremlin.clean(true).await;
+
+        assert!(
+            !state_dir.exists(),
+            "teardown must continue without clean commands"
+        );
+        assert!(!workdir.exists(), "workspace should still be removed");
+        assert!(!scratch_dir.exists(), "scratch dir should still be removed");
+    }
+
+    #[tokio::test]
+    // The env guard is held across awaits; safe on the current-thread runtime.
+    #[allow(clippy::await_holding_lock)]
+    async fn attach_clean_cmds_malformed_snapshot_reports_error_and_clean_continues() {
+        let mut env = EnvGuard::lock();
+        let sandbox = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
+
+        let id = "gr-attach-malformed";
+        let state_dir = sandbox.path().join("state").join(id);
+        let workdir = sandbox.path().join("workspace");
+        let project_root = sandbox.path().join("project");
+        let scratch_dir = config::scratch_root(Some(id));
+
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&scratch_dir).unwrap();
+
+        std::fs::write(state_dir.join("definition.yaml"), b"\xff\xfe").unwrap();
+
+        std::fs::write(
+            state_dir.join("state.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": id,
+                "kind": "demo",
+                "project_root": project_root.to_string_lossy(),
+                "definition_path": "",
+                "workdir": workdir.to_string_lossy(),
+                "status": "finished",
+                "pid": null,
+                "exit_code": 0,
+                "model": "",
+                "attempt": "0001",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut gremlin = Gremlin::from(id).unwrap();
+        let error = gremlin.attach_clean_cmds().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to parse definition YAML"),
+            "error should name the parse failure: {error}"
+        );
+        assert!(gremlin.definition.is_stub());
+
+        gremlin.clean(true).await;
+
+        assert!(
+            !state_dir.exists(),
+            "teardown must continue without clean commands"
+        );
+        assert!(!workdir.exists(), "workspace should still be removed");
+        assert!(!scratch_dir.exists(), "scratch dir should still be removed");
     }
 
     #[tokio::test]
