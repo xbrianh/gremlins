@@ -22,8 +22,9 @@ Terminal UI for the `gremlins` CLI. Built on **ratatui** with **crossterm** for 
 ```
 run()
  ├─ Refuse non-TTY stdout
- ├─ Redirect stderr → state_root/tui.log
+ ├─ config::init_global() (fatal config errors report on real stderr)
  ├─ LiveArea::new() (raw mode + cursor hide + clear main screen)
+ ├─ Redirect stderr → state_root/tui.log
  └─ run_app()
       ├─ App::new()
       ├─ client::connect() → DaemonClient + event_rx + raw_rx

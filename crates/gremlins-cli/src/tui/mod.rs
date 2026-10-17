@@ -698,14 +698,26 @@ async fn recv_debug(rx: &mut Option<mpsc::UnboundedReceiver<DebugEvent>>) -> Opt
 }
 
 /// Initialise the terminal, run the event loop, and restore on exit.
-pub async fn run() {
+pub async fn run() -> Result<(), String> {
     // Refuse to start the TUI when stdout is not a terminal.
     if !std::io::stdout().is_terminal() {
         eprintln!("gremlins: stdout is not a terminal — use `gremlins ls` to list gremlins");
-        return;
+        return Ok(());
     }
 
+    // Load the process-global config before taking over the terminal or
+    // redirecting stderr. A malformed settings.yaml is therefore returned
+    // to the CLI entry point while stderr is still the operator's terminal.
+    gremlins::config::init_global().map_err(|e| e.to_string())?;
+
+    // Terminal setup also runs before the stderr redirect so setup failures
+    // land on the real stderr. `LiveArea::new` leaves raw mode entered, so
+    // on exit the `LiveArea` drop guard restores the cursor and raw mode.
+    let mut live_area = LiveArea::new().map_err(|e| format!("terminal setup failed: {e}"))?;
+
     // Redirect stderr to tui.log so debug logs persist next to executor.log.
+    // Config is loaded first so a custom `paths.state-root` is honored for
+    // the log path.
     let log_path = gremlins::config::state_root().join("tui.log");
     if let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
@@ -718,17 +730,16 @@ pub async fn run() {
         unsafe { libc::close(fd) };
     }
 
-    let mut live_area = match LiveArea::new() {
-        Ok(area) => area,
-        Err(e) => {
-            log::error!("tui: {e}");
-            return;
-        }
-    };
-
     if let Err(e) = run_app(&mut live_area).await {
-        log::error!("tui: {e}");
+        // stderr now points at tui.log, so a fatal post-redirect failure must
+        // be written to stdout. Restore the terminal first so the message is
+        // printed on a sane terminal rather than into raw mode.
+        drop(live_area);
+        println!("gremlins: {e}");
+        return Err(e.to_string());
     }
+
+    Ok(())
 }
 
 /// Path to the persisted input history file, under `$state_root/tui/`.

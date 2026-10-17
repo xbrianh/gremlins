@@ -162,10 +162,7 @@ async fn main() {
         Some(Cmds::Land { id }) => land(&id).await,
         Some(Cmds::Serve { lock_fd }) => serve_daemon(lock_fd).await,
         Some(Cmds::External(args)) => status_external(&args).await,
-        None => {
-            tui::run().await;
-            return;
-        }
+        None => tui::run().await,
     };
     if let Err(e) = result {
         eprintln!("gremlins: {e}");
