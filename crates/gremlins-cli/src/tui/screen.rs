@@ -37,13 +37,22 @@ use crate::tui::motif;
 use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::widgets::{
     layout_widgets, render_wrapped_tail, DebugWidget, InfoBarWidget, InputBarWidget,
-    LiveAreaWidget, RenderContext, TranscriptWidget,
+    LiveAreaWidget, RenderContext, StreamingWidget, TranscriptWidget,
 };
+use crate::tui::REASONING_PLACEHOLDER_TITLE;
 
 /// Approximate number of rows reserved at the bottom of the screen for the
 /// input and info bars before the first layout pass runs. The real value is
 /// tracked each frame from the live widget stack.
 const INITIAL_RESERVED_ROWS: u16 = 2;
+
+/// A fresh reasoning band: the shared reasoning stream configured with the
+/// transcript's one-cell left inset so its title and body align with the
+/// transcript's own inner margin. Constructed identically in
+/// [`Scene::default`] and [`LiveArea::finish_turn`] so the two cannot drift.
+fn new_reasoning_band() -> StreamingWidget {
+    StreamingWidget::reasoning(TranscriptWidget::STREAM_MAX_ROWS).with_left_margin(1)
+}
 
 /// The typed widget owner.
 ///
@@ -53,6 +62,7 @@ const INITIAL_RESERVED_ROWS: u16 = 2;
 /// engine, then puts it back. The renderer only calls trait methods.
 struct Scene {
     transcript: TranscriptWidget,
+    reasoning: StreamingWidget,
     input_bar: InputBarWidget,
     info_bar: InfoBarWidget,
     screen_view: Option<ScreenView>,
@@ -62,6 +72,7 @@ impl Default for Scene {
     fn default() -> Self {
         Self {
             transcript: TranscriptWidget::new(),
+            reasoning: new_reasoning_band(),
             input_bar: InputBarWidget::new(),
             info_bar: InfoBarWidget,
             screen_view: None,
@@ -334,23 +345,27 @@ impl<B: Backend> LiveArea<B> {
         }
     }
 
-    /// Compose the ordered chat stack: transcript, input bar, info bar.
+    /// Compose the ordered chat stack: transcript, reasoning, input bar,
+    /// info bar. The transcript absorbs leftover rows; the reasoning band is
+    /// fixed-height and collapses to zero when idle, pinning it directly
+    /// above the input and info bars.
     fn compose_chat(&mut self, scene: &mut Scene, app: &App) -> io::Result<()> {
         let gremlin_count = app.gremlin_count_str();
         let ctx = self.render_context(app, &gremlin_count);
         let width = self.cols;
         let mut widgets: Vec<&mut dyn LiveAreaWidget> = vec![
             &mut scene.transcript,
+            &mut scene.reasoning,
             &mut scene.input_bar,
             &mut scene.info_bar,
         ];
         let layout = layout_widgets(widgets.as_mut_slice(), width, self.rows, &ctx);
         self.reserved_rows = layout
             .heights
-            .get(1)
+            .get(2)
             .copied()
             .unwrap_or(0)
-            .saturating_add(layout.heights.get(2).copied().unwrap_or(0));
+            .saturating_add(layout.heights.get(3).copied().unwrap_or(0));
         self.finish_compose(
             widgets.as_mut_slice(),
             &layout.heights,
@@ -440,6 +455,16 @@ impl<B: Backend> LiveArea<B> {
         &mut self.scene.transcript
     }
 
+    fn reasoning_mut(&mut self) -> &mut StreamingWidget {
+        &mut self.scene.reasoning
+    }
+
+    /// Clear the live reasoning band's title and body for a new turn.
+    fn reset_reasoning(&mut self) {
+        self.reasoning_mut().set_title("");
+        self.reasoning_mut().clear();
+    }
+
     fn input_bar_mut(&mut self) -> &mut InputBarWidget {
         &mut self.scene.input_bar
     }
@@ -461,9 +486,10 @@ impl<B: Backend> LiveArea<B> {
     // ── Widget mutation (moved from `App`) ───────────────────────
 
     /// Start a new turn with the given prompt: push a separator and the
-    /// markdown-rendered prompt, then pin the turn start. The transcript
-    /// clears its embedded reasoning and tool slots with the new prompt.
+    /// markdown-rendered prompt, then pin the turn start. The live reasoning
+    /// band and the transcript's tool slots are cleared with the new prompt.
     pub fn submit_prompt(&mut self, prompt: String) {
+        self.reset_reasoning();
         self.transcript_mut().submit_prompt(prompt);
     }
 
@@ -484,18 +510,27 @@ impl<B: Backend> LiveArea<B> {
     /// reasoning line.
     #[allow(dead_code)]
     pub fn flush_reasoning(&mut self) {
-        self.transcript_mut().flush_reasoning();
+        self.reasoning_mut().flush();
     }
 
-    /// Append reasoning text (may be a partial chunk).
+    /// Append reasoning text (may be a partial chunk). When the title is empty
+    /// (i.e. before the first `TurnComplete` of the turn) this establishes the
+    /// `clanking` placeholder title so the live band shows its header
+    /// immediately instead of waiting for `TurnComplete`. An existing stats
+    /// title is left intact so the latest completed agent-loop turn's numbers
+    /// stay visible throughout the next agent-loop turn's reasoning.
     pub fn push_reasoning_text(&mut self, text: &str) {
-        self.transcript_mut().push_reasoning_text(text);
+        let reasoning = self.reasoning_mut();
+        if reasoning.title_is_empty() {
+            reasoning.set_title(REASONING_PLACEHOLDER_TITLE);
+        }
+        reasoning.push_text(text);
     }
 
-    /// Replace the embedded reasoning stream's title row with the live
+    /// Replace the reasoning stream's title row with the live
     /// token/cache stats string.
     pub fn set_reasoning_title(&mut self, title: &str) {
-        self.transcript_mut().set_reasoning_title(title);
+        self.reasoning_mut().set_title(title);
     }
 
     /// Append a live tool-output chunk to the transcript's tool stream keyed
@@ -545,12 +580,18 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().reconcile_response(text);
     }
 
-    /// Unpin the current turn and clear its draft state. `finish_turn`
-    /// commits the retained reasoning tail into the transcript FIFO, then
-    /// clears the embedded reasoning and tool slots so finished history reads
-    /// prompt → reasoning → tools → answer.
+    /// Unpin the current turn and clear its draft state. The live reasoning
+    /// band is replaced with a fresh title-less stream so it collapses and its
+    /// body is discarded; after the transcript has rebuilt the response and
+    /// reconciled pending tool results, the band's title line is committed as
+    /// the final FIFO line of the finished turn.
     pub fn finish_turn(&mut self) {
+        let stream = std::mem::replace(&mut self.scene.reasoning, new_reasoning_band());
+        let had_turn = self.transcript_mut().has_current_turn();
         self.transcript_mut().finish_turn();
+        if had_turn {
+            self.transcript_mut().commit_reasoning_title(stream);
+        }
     }
 
     /// Whether the current turn has any content.
@@ -591,12 +632,14 @@ impl<B: Backend> LiveArea<B> {
 
     /// Discard the current turn without committing it to the transcript.
     pub fn clear_current_turn(&mut self) {
+        self.reset_reasoning();
         self.transcript_mut().clear_current_turn();
     }
 
-    /// Clear the transcript/scrollback, including the embedded reasoning and
+    /// Clear the transcript/scrollback, including the live reasoning band and
     /// tool slots.
     pub fn clear_transcript(&mut self) {
+        self.reset_reasoning();
         self.transcript_mut().clear_scrollable();
     }
 
@@ -1640,9 +1683,15 @@ mod tests {
         else {
             unreachable!("checked above");
         };
+        let info = lines.iter().position(|l| l.contains("◆ GREMLINS")).unwrap();
+        let input = lines.iter().rposition(|l| l.contains("»")).unwrap();
         assert!(
-            prompt < reasoning && reasoning < tool && tool < response,
-            "a turn must render prompt → reasoning → tool → response.\nBuffer:\n{visible}"
+            prompt < tool
+                && tool < response
+                && response < reasoning
+                && reasoning + 1 == input
+                && input + 1 == info,
+            "a turn must render transcript (prompt → tool → response), then the bottom reasoning band directly above the input bar, then the info bar.\nBuffer:\n{visible}"
         );
     }
 
@@ -1674,14 +1723,19 @@ mod tests {
         let (Some(prompt), Some(reasoning), Some(response)) = (prompt, reasoning, response) else {
             unreachable!("checked above");
         };
+        let info = lines.iter().position(|l| l.contains("◆ GREMLINS")).unwrap();
+        let input = lines.iter().rposition(|l| l.contains("»")).unwrap();
         assert!(
-            prompt < reasoning && reasoning < response,
-            "a turn must render prompt → reasoning → response.\nBuffer:\n{visible}"
+            prompt < response
+                && response < reasoning
+                && reasoning + 1 == input
+                && input + 1 == info,
+            "a turn must render prompt → response, then the bottom reasoning band directly above the input bar, then the info bar.\nBuffer:\n{visible}"
         );
     }
 
     #[test]
-    fn finish_turn_commits_reasoning_tail() {
+    fn finish_turn_commits_reasoning_title_only() {
         let cols: u16 = 80;
         let rows: u16 = 12;
         let mut live_area = new_live(cols, rows);
@@ -1703,8 +1757,181 @@ mod tests {
             "finished response should remain in the FIFO.\nBuffer:\n{visible}"
         );
         assert!(
-            visible.contains("    thinking"),
-            "finished reasoning tail should be committed to the transcript.\nBuffer:\n{visible}"
+            visible.contains("◈ clanking"),
+            "finished reasoning title should be committed to the transcript.\nBuffer:\n{visible}"
+        );
+        assert!(
+            !visible.contains("    thinking"),
+            "finished reasoning body must be cleared, not committed.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn reasoning_placeholder_title_gives_way_to_turn_complete_stats() {
+        let cols: u16 = 80;
+        let rows: u16 = 12;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        live_area.push_reasoning_text("thinking\n");
+        live_area.flush_reasoning();
+
+        live_area.compose(&app).unwrap();
+        let visible = dump_buffer(live_area.backend().buffer());
+        assert!(
+            visible.contains("◈ clanking"),
+            "first reasoning chunk should surface the clanking placeholder header.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains("thinking"),
+            "first reasoning body should paint beside the placeholder header.\nBuffer:\n{visible}"
+        );
+        assert_eq!(
+            visible.matches('◈').count(),
+            1,
+            "the placeholder header should render the reasoning glyph exactly once.\nBuffer:\n{visible}"
+        );
+
+        live_area.set_reasoning_title(
+            "clanking · turn 3 · in 100 (cache 40%, +5 new) · out 50 · reason 30 · Σ out 200 · reason 120",
+        );
+        live_area.compose(&app).unwrap();
+        let visible = dump_buffer(live_area.backend().buffer());
+        assert!(
+            visible.contains("◈ clanking · turn 3"),
+            "TurnComplete stats should replace the placeholder without losing the clanking prefix.\nBuffer:\n{visible}"
+        );
+        assert_eq!(
+            visible.matches('◈').count(),
+            1,
+            "the stats header should render the reasoning glyph exactly once.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn fresh_reasoning_after_stats_keeps_stats_title() {
+        let cols: u16 = 80;
+        let rows: u16 = 12;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        live_area.push_reasoning_text("first turn thinking\n");
+        live_area.flush_reasoning();
+        live_area.set_reasoning_title(
+            "clanking · turn 1 · in 100 (cache 40%, +5 new) · out 50 · reason 30 · Σ out 200 · reason 120",
+        );
+        live_area.compose(&app).unwrap();
+        let visible = dump_buffer(live_area.backend().buffer());
+        assert!(
+            visible.contains("clanking · turn 1"),
+            "TurnComplete stats should carry the turn-1 header.\nBuffer:\n{visible}"
+        );
+
+        // A new agent-loop iteration streams reasoning under the previous
+        // turn's stats header. The header stays sticky: the latest completed
+        // agent-loop turn's numbers remain visible until the next
+        // `TurnComplete` overwrites them.
+        live_area.push_reasoning_text("second turn thinking\n");
+        live_area.flush_reasoning();
+        live_area.compose(&app).unwrap();
+        let visible = dump_buffer(live_area.backend().buffer());
+        assert!(
+            visible.contains("clanking · turn 1"),
+            "the latest completed turn's stats title must persist over the next turn's reasoning.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains("second turn thinking"),
+            "the next turn's reasoning body should be visible.\nBuffer:\n{visible}"
+        );
+        assert_eq!(
+            visible.matches('◈').count(),
+            1,
+            "the stats header should render the reasoning glyph exactly once.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn finish_turn_commits_clanking_header_after_response() {
+        let cols: u16 = 80;
+        let rows: u16 = 12;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        live_area.push_reasoning_text("thinking\n");
+        live_area.flush_reasoning();
+        live_area.replace_response("answer");
+        live_area.finish_turn();
+
+        live_area.compose(&app).unwrap();
+        let visible = dump_buffer(live_area.backend().buffer());
+        let lines: Vec<&str> = visible.lines().collect();
+        let prompt = lines.iter().position(|l| l.contains("▍» hi"));
+        let header = lines.iter().position(|l| l.contains("◈ clanking"));
+        let reasoning = lines.iter().position(|l| l.contains("    thinking"));
+        let response = lines.iter().position(|l| l.contains("answer"));
+        assert_eq!(
+            visible.matches("◈ clanking").count(),
+            1,
+            "exactly one committed reasoning header should carry clanking.\nBuffer:\n{visible}"
+        );
+        assert!(
+            reasoning.is_none(),
+            "reasoning body must not be committed.\nBuffer:\n{visible}"
+        );
+        let (Some(prompt), Some(header), Some(response)) = (prompt, header, response) else {
+            panic!(
+                "prompt, clanking header, and response should all be visible.\nBuffer:\n{visible}"
+            );
+        };
+        assert!(
+            prompt < response && response < header,
+            "committed order must be prompt → response → clanking header.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn turn_without_reasoning_commits_clanking_stats_header_once() {
+        let cols: u16 = 80;
+        let rows: u16 = 12;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        live_area.set_reasoning_title(
+            "clanking · turn 2 · in 10 (cache 40%, +1 new) · out 5 · reason 3 · Σ out 10 · reason 6",
+        );
+        live_area.replace_response("answer");
+        live_area.finish_turn();
+
+        live_area.compose(&app).unwrap();
+        let visible = dump_buffer(live_area.backend().buffer());
+        let lines: Vec<&str> = visible.lines().collect();
+        let header = lines.iter().position(|l| l.contains("◈ clanking"));
+        let response = lines.iter().position(|l| l.contains("answer"));
+        assert_eq!(
+            visible.matches("◈ clanking").count(),
+            1,
+            "no-body turns should commit exactly one clanking stats header.\nBuffer:\n{visible}"
+        );
+        let (Some(header), Some(response)) = (header, response) else {
+            panic!(
+                "clanking stats header and response should both be visible.\nBuffer:\n{visible}"
+            );
+        };
+        assert!(
+            response < header,
+            "committed stats header must be the final line of the turn.\nBuffer:\n{visible}"
         );
     }
 
@@ -1807,6 +2034,10 @@ mod tests {
         app.project_name = "gremlins".to_string();
 
         live_area.submit_prompt("hi".to_string());
+        // A title header plus more reasoning than the short band can show.
+        // The stats title is sticky: streaming the next agent-loop turn's
+        // reasoning leaves it in place, so the short-band layout math still
+        // has a header row.
         live_area.set_reasoning_title("turn 1 stats");
         for i in 0..6 {
             live_area.push_reasoning_text(&format!("reasoning line {i}\n"));
@@ -1815,7 +2046,7 @@ mod tests {
         live_area.compose(&app).unwrap();
 
         let visible = dump_buffer(live_area.backend().buffer());
-        // The reasoning band carries the live stats header, so with 4
+        // The reasoning band carries the live header, so with 4
         // transcript rows (1 reserved for the prompt + 3 for the reasoning
         // band) only two body rows remain after the header. The band must
         // still keep the newest reasoning lines, not the head, and later
@@ -2308,7 +2539,7 @@ mod tests {
         app.project_name = "gremlins".to_string();
 
         live_area.submit_prompt("hi".to_string());
-        // The embedded reasoning band caps at 5 rows; only the newest 5
+        // The bottom reasoning band caps at 5 rows; only the newest 5
         // lines stay visible even when no other widget contests the space.
         for i in 0..8 {
             live_area.push_reasoning_text(&format!("reasoning line {i}\n"));
@@ -2503,18 +2734,26 @@ mod tests {
             combined.contains("Done") && combined.contains("grep"),
             "tool lines should survive as transcript content.\nCombined:\n{combined}"
         );
-        // The reasoning tail commits at turn end and overflows in FIFO order
-        // with the prompt and tool blocks.
+        // The reasoning title commits at turn end after the response; the
+        // body is display-only and cleared.
         assert!(
-            combined.contains("    thinking..."),
-            "reasoning tail should be committed like tool output.\nCombined:\n{combined}"
+            !combined.contains("    thinking..."),
+            "reasoning body must be cleared, not committed.\nCombined:\n{combined}"
         );
         let prompt = combined.find("▍» hi").expect("prompt present");
-        let reasoning = combined.find("    thinking...").expect("reasoning present");
         let tool = combined.find("◆ Done").expect("tool present");
+        let summary = combined
+            .find("final summary line")
+            .expect("summary present");
+        let title = combined
+            .find("◈ clanking")
+            .expect("reasoning title present");
+        let tokens = combined
+            .find("42 tokens")
+            .expect("post-turn system line present");
         assert!(
-            prompt < reasoning && reasoning < tool,
-            "committed order must be prompt → reasoning → tools.\nCombined:\n{combined}"
+            prompt < tool && tool < summary && summary < title && title < tokens,
+            "committed order must be prompt → tools → response → reasoning title.\nCombined:\n{combined}"
         );
     }
 }

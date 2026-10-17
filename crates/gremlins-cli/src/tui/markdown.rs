@@ -34,9 +34,36 @@ const OPTIONS: Options = Options::ENABLE_TABLES
 /// thematic break and code-block borders). Callers pass the transcript's
 /// content width (usually `width - 1` for the one-cell margin).
 pub fn render(markdown: &str, base: Style, rule_width: u16) -> Vec<Line<'static>> {
+    render_with(markdown, base, rule_width, false)
+}
+
+/// Render `markdown` into styled lines treating a `SoftBreak` (a single
+/// newline) as a hard line break everywhere, so literal newlines in the
+/// source are preserved.
+///
+/// This is the prompt path: the prompt is what the operator actually typed,
+/// so their hard newlines must survive markdown parsing. Fenced code blocks
+/// and other multi-line constructs still parse as one unit — only bare
+/// newlines between spaces become hard breaks. Blank lines remain paragraph
+/// separators.
+pub fn render_preserving_breaks(
+    markdown: &str,
+    base: Style,
+    rule_width: u16,
+) -> Vec<Line<'static>> {
+    render_with(markdown, base, rule_width, true)
+}
+
+fn render_with(
+    markdown: &str,
+    base: Style,
+    rule_width: u16,
+    soft_break_hard: bool,
+) -> Vec<Line<'static>> {
     let mut renderer = Renderer {
         base,
         rule_width,
+        soft_break_hard,
         lines: Vec::new(),
         current: Vec::new(),
         style_stack: vec![base],
@@ -56,6 +83,9 @@ struct Renderer {
     base: Style,
     /// Display width for full-width rules (thematic break, code borders).
     rule_width: u16,
+    /// Whether `SoftBreak` events are hard line breaks rather than a space.
+    /// The prompt renderer opts in so a user's literal newlines survive.
+    soft_break_hard: bool,
     lines: Vec<Line<'static>>,
     /// Spans accumulated for the current logical line.
     current: Vec<Span<'static>>,
@@ -140,8 +170,8 @@ impl Renderer {
             Event::HardBreak => self.hard_break(),
             Event::Rule => self.rule(),
             Event::TaskListMarker(checked) => self.task_marker(checked),
-            Event::InlineHtml(html) => self.text(&html),
-            Event::Html(html) => self.text(&html),
+            Event::InlineHtml(html) => self.html_text(&html),
+            Event::Html(html) => self.html_text(&html),
             Event::InlineMath(m) => self.text(&m),
             Event::DisplayMath(m) => self.text(&m),
             Event::FootnoteReference(r) => self.text(&r),
@@ -341,6 +371,25 @@ impl Renderer {
         }
     }
 
+    /// Handle an `Html` or `InlineHtml` event payload. When
+    /// `soft_break_hard` is on (the prompt path), split the payload at
+    /// newlines and flush each segment as a separate line so that
+    /// multiline HTML blocks preserve their source layout. Otherwise,
+    /// accumulate into the current line unchanged.
+    fn html_text(&mut self, html: &str) {
+        if self.soft_break_hard {
+            let mut segments = html.split('\n').peekable();
+            while let Some(seg) = segments.next() {
+                self.text(seg);
+                if segments.peek().is_some() {
+                    self.flush_line();
+                }
+            }
+        } else {
+            self.text(html);
+        }
+    }
+
     fn text(&mut self, text: &str) {
         if self.code_block.is_some() {
             self.code_block_text(text);
@@ -359,8 +408,10 @@ impl Renderer {
 
     fn soft_break(&mut self) {
         // Inside a blockquote or list, a soft break is a hard line break so
-        // the block prefix/indentation is re-applied to the next line.
-        if self.quote_depth > 0 || !self.list_stack.is_empty() {
+        // the block prefix/indentation is re-applied to the next line. The
+        // prompt path also opts into treating every soft break as a hard
+        // break, preserving the operator's literal newlines.
+        if self.soft_break_hard || self.quote_depth > 0 || !self.list_stack.is_empty() {
             self.flush_line();
         } else {
             self.current.push(Span::raw(" "));
@@ -728,6 +779,21 @@ mod tests {
     }
 
     #[test]
+    fn render_preserving_breaks_keeps_bare_newlines() {
+        let lines = render_preserving_breaks("one\ntwo", Style::default(), 40);
+        assert_eq!(text_of(&lines), vec!["one", "two"]);
+    }
+
+    #[test]
+    fn render_preserving_breaks_still_parses_fenced_blocks_as_one_unit() {
+        let lines = render_preserving_breaks("```\nlet x = 1;\n```", Style::default(), 40);
+        assert_eq!(
+            text_of(&lines),
+            vec![groove_top(40), " let x = 1;".to_string(), groove_bottom(40)]
+        );
+    }
+
+    #[test]
     fn renders_headings() {
         let lines = render_default("# Title\n\n## Sub");
         assert_eq!(text_of(&lines), vec!["◆ Title ◆", "", "─── Sub ───"]);
@@ -906,6 +972,29 @@ mod tests {
             .spans
             .iter()
             .all(|s| s.style.bg == Some(DEFAULT_THEME.code_bg)));
+    }
+
+    #[test]
+    fn render_preserving_breaks_splits_multiline_html_on_newlines() {
+        // `<div>\none\ntwo\n</div>` is a block-level HTML event where
+        // pulldown-cmark emits `Html` payloads with embedded newlines
+        // rather than `SoftBreak` events. The preserving-breaks path
+        // must split those payloads into separate lines.
+        let input = "<div>\none\ntwo\n</div>";
+        let lines = render_preserving_breaks(input, Style::default(), 40);
+        assert_eq!(text_of(&lines), vec!["<div>", "one", "two", "</div>"]);
+    }
+
+    #[test]
+    fn normal_renderer_does_not_split_html_on_newlines() {
+        // Outside the prompt path, the normal renderer produces a single
+        // line — pulldown-cmark treats bare newlines between inline HTML
+        // and text as SoftBreak events (space), so the literal newlines
+        // are gone.
+        let lines = render_default("<div>\none\ntwo\n</div>");
+        let text = text_of(&lines);
+        assert_eq!(text.len(), 1);
+        assert_eq!(text[0], "<div>onetwo</div>");
     }
 
     #[test]

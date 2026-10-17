@@ -1,8 +1,8 @@
 //! LiveArea rendering widgets.
 //!
 //! The LiveArea screen is composed of a transcript widget (the single
-//! styled FIFO with embedded reasoning and live-tool slots), an input bar,
-//! an info bar, and the full-screen debug view widget. Each
+//! styled FIFO with embedded live-tool slots), a top-level reasoning band,
+//! an input bar, an info bar, and the full-screen debug view widget. Each
 //! widget is behind the [`LiveAreaWidget`] trait, owns its own rendering
 //! buffers, and knows how to lay itself out (via
 //! [`LiveAreaWidget::min_height`] and [`LiveAreaWidget::flexible`]) and paint
@@ -143,20 +143,19 @@ pub trait LiveAreaWidget {
 
 /// The transcript: a single styled FIFO plus the current turn's draft state.
 ///
-/// The FIFO is the only overflow producer in the widget model. The
-/// ephemeral reasoning and live-tool bands are nested [`StreamingWidget`]
-/// children: the transcript re-runs the shared recursive layout engine over
-/// those children inside the height the outer engine allocated to the
-/// transcript, and paints top-to-bottom pre-reasoning FIFO head, reasoning,
-/// FIFO tool-call events, live tool output, then the streaming-response
-/// tail. The FIFO head drains into terminal scrollback when the combined
-/// content exceeds the region's height.
+/// The FIFO is the only overflow producer in the widget model. The live
+/// tool-output bands are nested [`StreamingWidget`] children laid out inside
+/// the height the outer engine allocates to the transcript; the transcript
+/// paints top-to-bottom the pre-tool FIFO head, FIFO tool-call events, live
+/// tool output, then the streaming-response tail. The FIFO head drains into
+/// terminal scrollback when the combined content exceeds the region's height.
+/// The live reasoning stream is owned by the typed scene as a top-level
+/// bottom band. At turn finish only its title line is committed through
+/// [`Self::commit_reasoning_title`]; the reasoning body is display-only and
+/// cleared with the live band.
 pub struct TranscriptWidget {
     /// The single styled FIFO — the only transcript content that overflows.
     scrollable: LineBuffer,
-    /// The current turn's ephemeral reasoning slot, rendered between the
-    /// pre-reasoning transcript head and the FIFO tool-call-event band.
-    reasoning: StreamingWidget,
     /// The current turn's ephemeral live tool-output streams, keyed by
     /// tool-call id. A stream is created lazily on its first output chunk and
     /// removed when its tool commits.
@@ -208,12 +207,11 @@ impl TranscriptWidget {
     /// Shared row cap for the live streaming bands and their committed
     /// tails: reasoning band height, live tool slot height, and committed
     /// reasoning/tool tail length.
-    const STREAM_MAX_ROWS: u16 = 5;
+    pub(crate) const STREAM_MAX_ROWS: u16 = 5;
 
     pub fn new() -> Self {
         Self {
             scrollable: LineBuffer::new(),
-            reasoning: StreamingWidget::reasoning(Self::STREAM_MAX_ROWS),
             tools: BTreeMap::new(),
             tool_calls_by_id: HashMap::new(),
             committed_tool_ids: HashSet::new(),
@@ -234,25 +232,6 @@ impl TranscriptWidget {
     /// Invalidate the cached desired height after any content mutation.
     fn invalidate_desired_cache(&self) {
         self.desired_cache.set(None);
-    }
-
-    /// Append reasoning text (may be a partial chunk) to the current turn's
-    /// ephemeral reasoning slot.
-    pub fn push_reasoning_text(&mut self, text: &str) {
-        self.reasoning.push_text(text);
-    }
-
-    /// Replace the reasoning stream's title row. The chat TUI uses this to
-    /// render the live per-turn/conversation token stats line.
-    pub fn set_reasoning_title(&mut self, title: &str) {
-        self.reasoning.set_title(title);
-        self.invalidate_desired_cache();
-    }
-
-    /// Flush the reasoning slot's trailing partial into a completed line.
-    #[allow(dead_code)]
-    pub fn flush_reasoning(&mut self) {
-        self.reasoning.flush();
     }
 
     /// Append live tool output (may be a partial chunk) to the stream for
@@ -383,15 +362,13 @@ impl TranscriptWidget {
         }
     }
 
-    /// Build a committed stream block: flush the trailing partial, prepend
-    /// the stream's own title row (matching the live header exactly), then
-    /// append the retained tail capped at the shared stream row count.
-    /// Streams flagged [`retain_title_when_empty`](StreamingWidget) (tools
-    /// and the reasoning stats title) commit their title even when the body
-    /// is empty; every other stream collapses entirely when empty so it never
-    /// emits a stray header. Retained logical lines are expanded into
-    /// pre-wrapped physical rows at the FIFO's inner body width before
-    /// insertion.
+    /// Build a committed tool-stream block: flush the trailing partial,
+    /// prepend the stream's own title row (matching the live header exactly),
+    /// then append the retained tail capped at the shared stream row count.
+    /// Tool streams commit their title even when the body is empty; every
+    /// other stream collapses entirely when empty so it never emits a stray
+    /// header. Retained logical lines are expanded into pre-wrapped physical
+    /// rows at the FIFO's inner body width before insertion.
     fn commit_stream_block(&mut self, mut stream: StreamingWidget) -> Vec<Line<'static>> {
         stream.flush();
         let rendered = stream.commit_lines();
@@ -508,18 +485,20 @@ impl TranscriptWidget {
         self.insert_tool_lines(block);
     }
 
-    /// Commit the reasoning stream's retained tail into the transcript just
-    /// after the prompt and before any committed tool blocks/events.
-    fn commit_reasoning(&mut self) {
-        if self.turn_start.is_none() {
+    /// Commit the reasoning stream's title line as the final FIFO line of
+    /// the finished turn.
+    ///
+    /// The stream's body is intentionally discarded: live reasoning is
+    /// display-only and never enters the transcript FIFO or terminal
+    /// scrollback. Call this only after [`Self::finish_turn`] has rebuilt
+    /// the response and reconciled pending tool results, so no later
+    /// pipeline step can truncate or reorder the title.
+    pub fn commit_reasoning_title(&mut self, stream: StreamingWidget) {
+        let Some(title) = stream.title_line() else {
             return;
-        }
-        let stream = std::mem::replace(
-            &mut self.reasoning,
-            StreamingWidget::reasoning(Self::STREAM_MAX_ROWS),
-        );
-        let block = self.commit_stream_block(stream);
-        self.insert_reasoning_lines(block);
+        };
+        self.invalidate_desired_cache();
+        self.scrollable.push(title);
     }
 
     /// Insert a contiguous run of styled lines into the active turn directly
@@ -539,27 +518,6 @@ impl TranscriptWidget {
             inserted += 1;
         }
         self.response_start = Some(idx + inserted);
-    }
-
-    /// Insert a contiguous run of styled reasoning lines directly after the
-    /// prompt, before the tool-event band. This advances both the prompt and
-    /// response boundaries so later tool commits still land above the
-    /// streaming response.
-    fn insert_reasoning_lines(&mut self, lines: Vec<Line<'static>>) {
-        if lines.is_empty() || self.turn_start.is_none() {
-            return;
-        }
-        self.invalidate_desired_cache();
-        let idx = self.prompt_end.min(self.scrollable.len());
-        let mut inserted = 0usize;
-        for line in lines {
-            self.scrollable.insert(idx + inserted, line);
-            inserted += 1;
-        }
-        self.prompt_end += inserted;
-        if let Some(response_start) = &mut self.response_start {
-            *response_start += inserted;
-        }
     }
 
     /// Append a system message. When a turn is active, the message is
@@ -653,10 +611,6 @@ impl TranscriptWidget {
     /// the previous turn is cleared before the new turn begins.
     pub fn submit_prompt(&mut self, prompt: String) {
         self.invalidate_desired_cache();
-        // A stats title describes a completed turn; clear it when starting a
-        // new turn so the next TurnComplete can install a fresh one.
-        self.reasoning.set_title("");
-        self.reasoning.clear();
         self.clear_tool_state();
         let mut sep_index = None;
         if !self.scrollable.is_empty() {
@@ -768,15 +722,14 @@ impl TranscriptWidget {
         self.turn_start.is_some()
     }
 
-    /// Unpin the current turn and clear its draft state. The retained
-    /// reasoning tail is committed to the FIFO before tool reconciliation,
-    /// then the rest of the content is already in the FIFO.
+    /// Unpin the current turn and clear its draft state. Pending tool results
+    /// are reconciled and the dirty response region is rebuilt; reasoning is
+    /// committed separately by the scene after this call returns so its title
+    /// becomes the final FIFO line of the turn.
     pub fn finish_turn(&mut self) {
-        self.commit_reasoning();
         self.reconcile_pending_tools();
         self.rebuild_response();
         self.invalidate_desired_cache();
-        self.reasoning.clear();
         self.clear_tool_state();
         self.turn_start = None;
         self.response_start = None;
@@ -791,8 +744,6 @@ impl TranscriptWidget {
     /// and clear the draft state.
     pub fn clear_current_turn(&mut self) {
         self.invalidate_desired_cache();
-        self.reasoning.set_title("");
-        self.reasoning.clear();
         self.clear_tool_state();
         if let Some(t) = self.turn_start {
             self.scrollable.truncate(t);
@@ -819,8 +770,6 @@ impl TranscriptWidget {
     /// Clear the scrollable FIFO.
     pub fn clear_scrollable(&mut self) {
         self.invalidate_desired_cache();
-        self.reasoning.set_title("");
-        self.reasoning.clear();
         self.clear_tool_state();
         self.scrollable.clear();
         self.turn_start = None;
@@ -881,14 +830,12 @@ impl TranscriptWidget {
         h
     }
 
-    /// Wrapped height of the composite transcript: the FIFO plus the
-    /// reasoning stream plus every live tool stream's desired height (each
-    /// child caps itself at its row cap).
+    /// Wrapped height of the composite transcript: the FIFO plus every live
+    /// tool stream's desired height (each child caps itself at its row cap).
     fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
         let inner = width.saturating_sub(1);
         let fifo = self.fifo_desired_height(inner);
-        fifo.saturating_add(self.reasoning.desired_height(inner, ctx))
-            .saturating_add(self.tools_desired_height(inner, ctx))
+        fifo.saturating_add(self.tools_desired_height(inner, ctx))
     }
 
     fn tools_desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
@@ -903,32 +850,24 @@ impl TranscriptWidget {
         })
     }
 
-    /// Re-run the recursive layout engine over the transcript's ephemeral
-    /// children, constrained to the outer allocation minus the FIFO's one-row
-    /// floor. Returns the reasoning height followed by each live tool height
-    /// in sorted-id order.
-    fn ephemeral_heights(
-        &mut self,
-        available_rows: u16,
-        width: u16,
-        ctx: &RenderContext,
-    ) -> (u16, Vec<u16>) {
+    /// Re-run the recursive layout engine over the transcript's live tool
+    /// children, constrained to the outer allocation minus the FIFO's
+    /// one-row floor. Returns each live tool height in sorted-id order.
+    fn tool_heights(&mut self, available_rows: u16, width: u16, ctx: &RenderContext) -> Vec<u16> {
         let child_budget = available_rows.saturating_sub(1);
-        let mut children: Vec<&mut dyn LiveAreaWidget> = Vec::with_capacity(1 + self.tools.len());
-        children.push(&mut self.reasoning);
+        let mut children: Vec<&mut dyn LiveAreaWidget> = Vec::with_capacity(self.tools.len());
         for stream in self.tools.values_mut() {
             children.push(stream);
         }
         let layout = layout_widgets(&mut children, width, child_budget, ctx);
-        (layout.heights[0], layout.heights[1..].to_vec())
+        layout.heights
     }
 
     /// Drain the head of the transcript FIFO that does not fit in
-    /// `available_rows`. The embedded streaming bands are allocated first by
-    /// the recursive layout engine, and the FIFO is drained unconditionally:
-    /// an in-progress turn overflows into terminal scrollback exactly like
-    /// completed history. Reasoning and tool output are never returned as
-    /// overflow.
+    /// `available_rows`. The embedded tool bands are allocated first by the
+    /// recursive layout engine, and the FIFO is drained unconditionally: an
+    /// in-progress turn overflows into terminal scrollback exactly like
+    /// completed history. Tool output is never returned as overflow.
     pub fn take_overflow(
         &mut self,
         available_rows: u16,
@@ -937,13 +876,11 @@ impl TranscriptWidget {
     ) -> Vec<Line<'static>> {
         self.invalidate_desired_cache();
         let inner = width.saturating_sub(1);
-        let (reasoning_rows, tool_rows) = self.ephemeral_heights(available_rows, inner, ctx);
-        let tool_rows = tool_rows
+        let tool_rows = self
+            .tool_heights(available_rows, inner, ctx)
             .into_iter()
             .fold(0u16, |acc, h| acc.saturating_add(h));
-        let fifo_rows = available_rows
-            .saturating_sub(reasoning_rows)
-            .saturating_sub(tool_rows);
+        let fifo_rows = available_rows.saturating_sub(tool_rows);
         let (_overflow_rows, overflow_lines): (_, Vec<_>) =
             split_overflow(&self.scrollable, fifo_rows, inner);
         if overflow_lines.is_empty() {
@@ -1007,38 +944,32 @@ fn render_prompt(prompt: &str, rule_width: u16) -> Vec<Line<'static>> {
     let margin_style = Style::default()
         .fg(DEFAULT_THEME.prompt_margin)
         .bg(DEFAULT_THEME.prompt_bg);
-    // Render each physical line independently so a user-entered `\n` is
-    // preserved as a hard break. The markdown renderer would otherwise
-    // collapse a bare newline into a `SoftBreak` (a space), silently
-    // flattening multi-line prompts. Inline markdown still applies per line.
-    let mut out = Vec::new();
-    let mut first = true;
-    for raw_line in prompt.split('\n') {
-        let lines = markdown::render(raw_line, text_style, rule_width);
-        if lines.is_empty() {
-            // Preserve blank lines as empty lines, but keep first-line
-            // prompt styling when the prompt starts with a newline.
-            let margin = if first { "▍" } else { " " };
-            let marker = if first { "» " } else { "  " };
-            out.push(Line::from(vec![
-                Span::styled(margin, margin_style),
-                Span::styled(marker, marker_style),
-            ]));
-            first = false;
-            continue;
+
+    // Render the prompt once, as a single markdown document. A bare newline
+    // is preserved as a hard line break (the prompt is what the user typed),
+    // blank lines remain paragraph separators, and multi-line constructs such
+    // as fenced code blocks still parse as one unit.
+    let rendered = markdown::render_preserving_breaks(prompt, text_style, rule_width);
+    if rendered.is_empty() {
+        // Empty and whitespace-only prompts still show the first-line marker.
+        return vec![Line::from(vec![
+            Span::styled("▍", margin_style),
+            Span::styled("» ", marker_style),
+        ])];
+    }
+
+    let mut out = Vec::with_capacity(rendered.len());
+    for (index, line) in rendered.into_iter().enumerate() {
+        let mut spans = Vec::with_capacity(line.spans.len() + 2);
+        if index == 0 {
+            spans.push(Span::styled("▍", margin_style));
+            spans.push(Span::styled("» ", marker_style));
+        } else {
+            spans.push(Span::styled(" ", margin_style));
+            spans.push(Span::styled("  ", marker_style));
         }
-        for line in lines {
-            let mut spans = Vec::with_capacity(line.spans.len() + 2);
-            spans.push(Span::styled(if first { "▍" } else { " " }, margin_style));
-            if first {
-                spans.push(Span::styled("» ", marker_style));
-            } else {
-                spans.push(Span::styled("  ", marker_style));
-            }
-            spans.extend(line.spans);
-            out.push(Line::from(spans));
-            first = false;
-        }
+        spans.extend(line.spans);
+        out.push(Line::from(spans));
     }
     out
 }
@@ -1073,6 +1004,25 @@ fn tool_chrome_line(prefix: &str, text: &str) -> Line<'static> {
             Style::default()
                 .fg(DEFAULT_THEME.subtle)
                 .add_modifier(Modifier::ITALIC),
+        ),
+    ])
+}
+
+/// Chrome/gold reasoning header, kept separate from the shared tool-header
+/// styling. The `◈` glyph prefix stays in its own span and the title label
+/// is rendered in gold bold so it reads as a prominent art-deco header above
+/// the dim italic reasoning body.
+fn reasoning_chrome_line(prefix: &str, text: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            prefix.to_string(),
+            Style::default().fg(DEFAULT_THEME.chrome),
+        ),
+        Span::styled(
+            text.to_string(),
+            Style::default()
+                .fg(DEFAULT_THEME.heading_primary)
+                .add_modifier(Modifier::BOLD),
         ),
     ])
 }
@@ -1471,9 +1421,17 @@ pub struct StreamingWidget {
     /// the reasoning stats title opts into this; tool streams still collapse
     /// until commit so an idle tool call never allocates screen space.
     render_title_when_empty: bool,
+    /// Left margin, in cells, reserved before both the title row and the
+    /// body gutter (e.g. the one-cell chat inset so a top-level stream aligns
+    /// with the transcript's own left margin).
+    left_margin: u16,
     /// Left gutter, in cells, reserved before every streamed body line (e.g.
     /// a four-space indent for reasoning and tool output).
     body_indent: u16,
+    /// Styler mapping (title prefix, title text) to the styled title
+    /// [`Line`]. Defaults to the shared tool chrome `◆` header; the
+    /// reasoning stream swaps in the gold/chrome `◈` header.
+    title_styler: fn(&str, &str) -> Line<'static>,
     row_cap: u16,
     size_priority: i32,
     /// When true, the widget keeps a sliding tail of completed lines (capped
@@ -1499,7 +1457,9 @@ impl StreamingWidget {
             title_prefix: String::new(),
             retain_title_when_empty: false,
             render_title_when_empty: false,
+            left_margin: 0,
             body_indent: 0,
+            title_styler: tool_chrome_line,
             row_cap,
             size_priority,
             retain_tail: false,
@@ -1549,9 +1509,25 @@ impl StreamingWidget {
         self
     }
 
+    /// Configure the left margin reserved before the title row and every
+    /// streamed body line.
+    pub fn with_left_margin(mut self, margin: u16) -> Self {
+        self.left_margin = margin;
+        self
+    }
+
     /// Configure the left gutter reserved before every streamed body line.
     pub fn with_body_indent(mut self, indent: u16) -> Self {
         self.body_indent = indent;
+        self
+    }
+
+    /// Configure the styler used for the title row. It receives the title
+    /// prefix and the title text and returns the styled [`Line`]. The
+    /// default is the shared tool chrome `◆` header; the reasoning stream
+    /// installs the gold/chrome `◈` header via [`reasoning_chrome_line`].
+    pub fn with_title_styler(mut self, styler: fn(&str, &str) -> Line<'static>) -> Self {
+        self.title_styler = styler;
         self
     }
 
@@ -1571,16 +1547,22 @@ impl StreamingWidget {
         }
     }
 
+    /// Whether no title row is currently configured.
+    pub fn title_is_empty(&self) -> bool {
+        self.title.as_deref().is_none_or(str::is_empty)
+    }
+
     /// The configured reasoning stream: four-cell body gutter, `◈ `-prefixed
-    /// chrome title, nickel italic text, and a retained commit tail. The
-    /// title renders and commits even when the stream has no reasoning body,
-    /// so the chat TUI's live token stats line is visible (and persisted to
-    /// scrollback) on turns that produced no reasoning text.
+    /// chrome title, nickel italic text. The title renders and commits even
+    /// when the stream has no reasoning body, so the chat TUI's live token
+    /// stats line is visible (and its title persists to scrollback) on turns
+    /// that produced no reasoning text. The body is display-only and cleared
+    /// at turn finish, so the stream keeps no retained commit tail.
     pub fn reasoning(row_cap: u16) -> Self {
         Self::new(reasoning_stream_line, row_cap, 20)
             .with_title_prefix(&format!("{} ", glyph::REASONING))
             .with_body_indent(4)
-            .retain_tail()
+            .with_title_styler(reasoning_chrome_line)
             .retain_title_when_empty()
             .render_title_when_empty()
     }
@@ -1597,9 +1579,16 @@ impl StreamingWidget {
             .retain_title_when_empty()
     }
 
-    /// The body text width: the outer width minus the reserved left gutter.
+    /// Width available to the title row: the outer width minus the left
+    /// margin.
+    fn title_width(&self, width: u16) -> u16 {
+        width.saturating_sub(self.left_margin)
+    }
+
+    /// The body text width: the outer width minus the left margin and the
+    /// reserved left gutter.
     fn body_width(&self, width: u16) -> u16 {
-        width.saturating_sub(self.body_indent)
+        self.title_width(width).saturating_sub(self.body_indent)
     }
 
     /// Style one logical line. The body gutter is reserved by the renderer,
@@ -1839,12 +1828,13 @@ impl StreamingWidget {
         self.last_width.set(body_width);
     }
 
-    fn title_line(&self) -> Option<Line<'static>> {
+    pub(crate) fn title_line(&self) -> Option<Line<'static>> {
         let title = self.title.as_deref()?;
         if title.is_empty() {
             return None;
         }
-        Some(tool_chrome_line(&self.title_prefix, title))
+        let line = (self.title_styler)(&self.title_prefix, title);
+        Some(line)
     }
 
     /// Wrapped title rows. Streams that opt into `render_title_when_empty`
@@ -1852,6 +1842,7 @@ impl StreamingWidget {
     /// empty; other streams still collapse to zero so a commit-only title
     /// never allocates live screen space on its own.
     fn title_rows(&self, width: u16, _ctx: &RenderContext) -> u16 {
+        let width = self.title_width(width);
         if width == 0 || (self.is_empty() && !self.render_title_when_empty) {
             return 0;
         }
@@ -1892,7 +1883,7 @@ impl LiveAreaWidget for StreamingWidget {
 
     fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
         let title_rows = self.title_rows(width, ctx);
-        let stream_rows = if self.is_empty() || width == 0 {
+        let stream_rows = if self.is_empty() || self.body_width(width) == 0 {
             0
         } else {
             self.desired_rows(width).min(self.row_cap)
@@ -1902,7 +1893,7 @@ impl LiveAreaWidget for StreamingWidget {
 
     fn max_height(&self, width: u16, ctx: &RenderContext) -> u16 {
         let title_rows = self.title_rows(width, ctx);
-        if self.is_empty() {
+        if self.is_empty() || self.body_width(width) == 0 {
             title_rows
         } else {
             title_rows.saturating_add(self.row_cap)
@@ -1928,12 +1919,22 @@ impl LiveAreaWidget for StreamingWidget {
         }
 
         let mut y = area.y;
-        if let Some(line) = self.title_line() {
-            let title_rows = self.title_rows(area.width, ctx).min(area.height);
-            if title_rows > 0 {
-                let title_area = Rect::new(area.x, y, area.width, title_rows);
-                render_scrolled_tail(&[line], title_area, buf, area.width, title_rows as usize);
-                y += title_rows;
+        let title_width = self.title_width(area.width);
+        if title_width > 0 {
+            if let Some(line) = self.title_line() {
+                let title_rows = self.title_rows(area.width, ctx).min(area.height);
+                if title_rows > 0 {
+                    let title_area =
+                        Rect::new(area.x + self.left_margin, y, title_width, title_rows);
+                    render_scrolled_tail(
+                        &[line],
+                        title_area,
+                        buf,
+                        title_width,
+                        title_rows as usize,
+                    );
+                    y += title_rows;
+                }
             }
         }
 
@@ -1949,7 +1950,12 @@ impl LiveAreaWidget for StreamingWidget {
         let lines = self.rendered_lines();
         let total = wrapped_height(&lines, body_width);
         let visible_rows = total.saturating_sub(self.scrolled.get());
-        let body_area = Rect::new(area.x + self.body_indent, y, body_width, stream_height);
+        let body_area = Rect::new(
+            area.x + self.left_margin + self.body_indent,
+            y,
+            body_width,
+            stream_height,
+        );
         render_scrolled_tail(&lines, body_area, buf, body_width, visible_rows);
     }
 
@@ -1973,20 +1979,19 @@ impl LiveAreaWidget for TranscriptWidget {
         self.tools
             .values()
             .map(|stream| stream.size_priority())
-            .fold(self.reasoning.size_priority(), |acc, p| acc.min(p))
+            .fold(10, |acc, p| acc.min(p))
     }
 
     fn overflow_priority(&self) -> i32 {
         self.tools
             .values()
             .map(|stream| stream.overflow_priority())
-            .fold(self.reasoning.overflow_priority(), |acc, p| acc.min(p))
+            .fold(0, |acc, p| acc.min(p))
     }
 
     fn min_height(&self, width: u16, ctx: &RenderContext) -> u16 {
         let inner = width.saturating_sub(1);
-        1u16.saturating_add(self.reasoning.min_height(inner, ctx))
-            .saturating_add(self.tools_min_height(inner, ctx))
+        1u16.saturating_add(self.tools_min_height(inner, ctx))
     }
 
     fn flexible(&self, _ctx: &RenderContext) -> bool {
@@ -2006,7 +2011,6 @@ impl LiveAreaWidget for TranscriptWidget {
         self.rebuild_separator(width);
         self.rebuild_response();
         let inner = width.saturating_sub(1);
-        self.reasoning.finalize(inner);
         for stream in self.tools.values_mut() {
             stream.finalize(inner);
         }
@@ -2034,7 +2038,7 @@ impl LiveAreaWidget for TranscriptWidget {
         }
 
         // One-cell left margin: all bands paint inside the same inner rect so
-        // reasoning/tool align with prompt and response.
+        // live tool output aligns with prompt and response.
         let inner = Rect::new(
             area.x + 1,
             area.y,
@@ -2046,13 +2050,10 @@ impl LiveAreaWidget for TranscriptWidget {
             return;
         }
 
-        // Allocate the ephemeral band before borrowing the FIFO lines.
-        let (reasoning_rows, tool_rows) = self.ephemeral_heights(area.height, width, ctx);
+        // Allocate the ephemeral tool band before borrowing the FIFO lines.
+        let tool_rows = self.tool_heights(area.height, width, ctx);
         let tool_rows_total = tool_rows.iter().fold(0u16, |acc, h| acc.saturating_add(*h));
-        let fifo_rows = area
-            .height
-            .saturating_sub(reasoning_rows)
-            .saturating_sub(tool_rows_total);
+        let fifo_rows = area.height.saturating_sub(tool_rows_total);
 
         let lines = self.scrollable.visible_lines();
         if lines.is_empty() {
@@ -2060,10 +2061,9 @@ impl LiveAreaWidget for TranscriptWidget {
         }
 
         // Three-slice split around the two pinned boundaries. Everything
-        // before `prompt_end` is the top-anchored pre-reasoning head (prior
-        // history + current prompt); the middle slice is the permanent
-        // tool-call-event band; everything from `response_start` onward is
-        // the streaming response.
+        // before `prompt_end` is the top-anchored prompt/history head; the
+        // middle slice is the permanent tool-call-event band; everything from
+        // `response_start` onward is the streaming response.
         let prompt_end = self.prompt_end.min(lines.len());
         let response_start = self
             .response_start
@@ -2079,7 +2079,7 @@ impl LiveAreaWidget for TranscriptWidget {
         let tail_rows = wrapped_height(tail, width);
 
         let (pre_band, event_band, tail_band) = if tail.is_empty() {
-            // No response yet: paint the pre-reasoning head and then the
+            // No response yet: paint the prompt/history head and then the
             // tool-call-event band, both top-anchored.
             let pre_band = (pre_rows as u16).min(fifo_rows);
             let event_band = (event_rows as u16).min(fifo_rows.saturating_sub(pre_band));
@@ -2109,12 +2109,6 @@ impl LiveAreaWidget for TranscriptWidget {
         }
 
         y = inner.y + pre_band;
-        if reasoning_rows > 0 {
-            let reasoning_area = Rect::new(inner.x, y, width, reasoning_rows);
-            LiveAreaWidget::render(&mut self.reasoning, reasoning_area, buf, ctx);
-        }
-
-        y = inner.y + pre_band + reasoning_rows;
         if event_band > 0 && !events.is_empty() {
             let event_area = Rect::new(inner.x, y, width, event_band);
             Paragraph::new(events.to_vec())
@@ -2122,7 +2116,7 @@ impl LiveAreaWidget for TranscriptWidget {
                 .render(event_area, buf);
         }
 
-        y = inner.y + pre_band + reasoning_rows + event_band;
+        y = inner.y + pre_band + event_band;
         for (stream, stream_rows) in self.tools.values_mut().zip(tool_rows) {
             if stream_rows == 0 {
                 continue;
@@ -2133,7 +2127,7 @@ impl LiveAreaWidget for TranscriptWidget {
         }
 
         if tail_band > 0 && !tail.is_empty() {
-            if tail_rows <= tail_band as usize && (reasoning_rows > 0 || tool_rows_total > 0) {
+            if tail_rows <= tail_band as usize && tool_rows_total > 0 {
                 // Bottom-anchor the short response inside its allocated band
                 // so the blank rows sit between the ephemeral slots and
                 // response.
@@ -2799,12 +2793,43 @@ mod tests {
     }
 
     #[test]
-    fn submit_prompt_leading_newline_keeps_first_line_marker() {
+    fn submit_prompt_leading_newline_starts_on_first_rendered_line() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("\none".to_string());
         let lines = transcript.scrollable.visible_lines();
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-        assert_eq!(text, vec!["▍» ", "   one"]);
+        assert_eq!(text, vec!["▍» one"]);
+    }
+
+    #[test]
+    fn submit_prompt_renders_fenced_code_block_as_one_bordered_block() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("```\nlet x = 1;\n```".to_string());
+        let lines = transcript.scrollable.visible_lines();
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+
+        let rule_width = transcript.last_width.saturating_sub(4);
+        let top = motif::groove_rule(rule_width, ("◤", "◥")).to_string();
+        let bottom = motif::groove_rule_with_fill(rule_width, ("◣", "◢"), "▁").to_string();
+        assert_eq!(
+            text,
+            vec![
+                format!("▍» {top}"),
+                "    let x = 1;".to_string(),
+                format!("   {bottom}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn submit_prompt_empty_or_whitespace_only_shows_marker() {
+        for prompt in ["", "   "] {
+            let mut transcript = TranscriptWidget::new();
+            transcript.submit_prompt(prompt.to_string());
+            let lines = transcript.scrollable.visible_lines();
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0].to_string(), "▍» ");
+        }
     }
 
     #[test]
@@ -3517,6 +3542,66 @@ mod tests {
     }
 
     #[test]
+    fn streaming_widget_left_margin_offsets_title_and_body() {
+        let ctx = input_ctx("", 0);
+        let mut widget = StreamingWidget::reasoning(5).with_left_margin(1);
+        widget.set_title("TITLE");
+        widget.push_text("abcdef\n");
+
+        let width = 12;
+        let area = Rect::new(0, 0, width, 3);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf, &ctx);
+
+        let rows = rendered_rows(&buf, width, 3);
+        // A one-cell left margin matches the transcript's own inset: the
+        // title starts at column 1 and the four-cell body gutter follows it,
+        // so the committed FIFO tail painted at the transcript's x+1 inset
+        // lines up with the live band.
+        assert_eq!(rows[0].trim_end(), " ◈ TITLE", "{rows:?}");
+        assert_eq!(rows[1].trim_end(), "     abcdef", "{rows:?}");
+    }
+
+    #[test]
+    fn reasoning_title_uses_chrome_gold_style_distinct_from_tool_headers() {
+        let ctx = input_ctx("", 0);
+
+        // Reasoning headers render the glyph in chrome and the label in gold
+        // bold, making them stronger than the nickel italic reasoning body.
+        let mut reasoning = StreamingWidget::reasoning(5).with_left_margin(1);
+        reasoning.set_title("clanking");
+        let area = Rect::new(0, 0, 12, 1);
+        let mut buf = Buffer::empty(area);
+        reasoning.render(area, &mut buf, &ctx);
+
+        assert_eq!(buf[(1, 0)].symbol(), "◈");
+        assert_eq!(buf[(1, 0)].style().fg, Some(DEFAULT_THEME.chrome));
+        assert_eq!(buf[(3, 0)].style().fg, Some(DEFAULT_THEME.heading_primary));
+        assert!(buf[(3, 0)].style().add_modifier.contains(Modifier::BOLD));
+
+        // The shared `◆` tool-header path remains nickel italic, not gold
+        // bold, even when the same title text is rendered through it.
+        let mut tool_like = StreamingWidget::new(reasoning_stream_line, 5, 10)
+            .with_title_prefix("◆ ")
+            .render_title_when_empty();
+        tool_like.set_title("clanking");
+        let mut tool_buf = Buffer::empty(area);
+        tool_like.render(area, &mut tool_buf, &ctx);
+
+        assert_eq!(tool_buf[(0, 0)].symbol(), "◆");
+        assert_eq!(tool_buf[(0, 0)].style().fg, Some(DEFAULT_THEME.chrome));
+        assert_eq!(tool_buf[(2, 0)].style().fg, Some(DEFAULT_THEME.subtle));
+        assert!(tool_buf[(2, 0)]
+            .style()
+            .add_modifier
+            .contains(Modifier::ITALIC));
+        assert!(!tool_buf[(2, 0)]
+            .style()
+            .add_modifier
+            .contains(Modifier::BOLD));
+    }
+
+    #[test]
     fn committed_stream_tail_indents_wrapped_body_rows_and_title_starts_at_column_zero() {
         let mut transcript = TranscriptWidget::new();
         transcript.last_width = 11;
@@ -3559,7 +3644,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_reasoning_stats_title_renders_live_and_commits() {
+    fn empty_reasoning_stats_title_renders_live_and_exposes_title() {
         let ctx = input_ctx("", 0);
         let mut reasoning = StreamingWidget::reasoning(5);
         reasoning.set_title("turn 1 stats");
@@ -3577,12 +3662,31 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].trim_end(), "◈ turn 1 stats", "{rows:?}");
 
-        let mut transcript = TranscriptWidget::new();
-        transcript.last_width = 20;
-        let block = transcript.commit_stream_block(reasoning);
-        let rows = full_rendered_rows(&block, 20);
+        let title = reasoning.title_line().expect("title should be exposed");
+        let rows = full_rendered_rows(&[title], 20);
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].trim_end(), "◈ turn 1 stats", "{rows:?}");
+
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("answer");
+        transcript.finish_turn();
+        transcript.commit_reasoning_title(reasoning);
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(
+            text,
+            vec![
+                "▍» hi".to_string(),
+                "answer".to_string(),
+                "◈ turn 1 stats".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -3631,40 +3735,35 @@ mod tests {
     }
 
     #[test]
-    fn transcript_ephemeral_layout_shrinks_tool_before_reasoning_and_preserves_fifo_floor() {
+    fn transcript_tool_layout_shrinks_preserving_fifo_floor() {
         let ctx = input_ctx("", 0);
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
         transcript.push_response("answer");
         for i in 0..5 {
-            transcript.push_reasoning_text(&format!("reasoning {i}\n"));
             transcript.push_tool_output_chunk("b1", "", &format!("tool {i}\n"));
         }
 
         let cols = 40;
         LiveAreaWidget::finalize(&mut transcript, cols);
 
-        // The transcript re-runs the shared engine on its children with the
-        // parent's already-reduced inner width. Both streams want 5 rows;
-        // with only 5 ephemeral rows available the tool stream (priority 10)
-        // shrinks before reasoning (priority 20), leaving the FIFO its
-        // one-row floor.
-        let (reasoning_rows, tool_rows) = transcript.ephemeral_heights(6, cols - 1, &ctx);
-        assert_eq!(reasoning_rows, 5);
-        assert_eq!(tool_rows, vec![0]);
+        // The transcript re-runs the shared engine on its live tool children
+        // with the parent's already-reduced inner width. The tool stream
+        // wants 5 rows; the FIFO keeps its one-row floor first, so a 6-row
+        // transcript can host the full tool band and a 4-row transcript
+        // shrinks that band to its 3 ephemeral rows.
+        let tool_rows = transcript.tool_heights(6, cols - 1, &ctx);
+        assert_eq!(tool_rows, vec![5]);
 
-        // With only 3 ephemeral rows available, reasoning also yields.
-        let (reasoning_rows, tool_rows) = transcript.ephemeral_heights(4, cols - 1, &ctx);
-        assert_eq!(reasoning_rows, 3);
-        assert_eq!(tool_rows, vec![0]);
+        let tool_rows = transcript.tool_heights(4, cols - 1, &ctx);
+        assert_eq!(tool_rows, vec![3]);
     }
 
     #[test]
-    fn transcript_render_orders_prompt_reasoning_tool_events_tool_output_response() {
+    fn transcript_render_orders_prompt_tool_events_tool_output_response() {
         let ctx = input_ctx("", 0);
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
-        transcript.push_reasoning_text("thinking\n");
         transcript.push_tool_line("grep");
         transcript.push_tool_output_chunk("b1", "bash", "stdout line\n");
         transcript.push_response("answer");
@@ -3672,28 +3771,21 @@ mod tests {
         let cols = 40;
         LiveAreaWidget::finalize(&mut transcript, cols);
 
-        // Seven rows are exactly enough for prompt + reasoning header +
-        // reasoning body + tool-call event + live tool title + live tool body
-        // + response. The short response bottom-anchors below the live tool
-        // slot.
-        let area = Rect::new(0, 0, cols, 7);
+        // Five rows are exactly enough for prompt + tool-call event + live
+        // tool title + live tool body + response.
+        let area = Rect::new(0, 0, cols, 5);
         let mut buf = Buffer::empty(area);
         LiveAreaWidget::render(&mut transcript, area, &mut buf, &ctx);
         let rows = rendered_rows(&buf, cols, area.height);
 
         let prompt_row = rows.iter().position(|r| r.contains("▍» hi")).unwrap();
-        let reasoning_row = rows.iter().position(|r| r.contains("thinking")).unwrap();
         let tool_event_row = rows.iter().position(|r| r.contains("◆ grep")).unwrap();
         let tool_output_row = rows.iter().position(|r| r.contains("stdout line")).unwrap();
         let response_row = rows.iter().position(|r| r.contains("answer")).unwrap();
 
         assert!(
-            prompt_row < reasoning_row,
-            "prompt must render above reasoning: {rows:?}"
-        );
-        assert!(
-            reasoning_row < tool_event_row,
-            "reasoning must render above tool-call events: {rows:?}"
+            prompt_row < tool_event_row,
+            "prompt must render above tool-call events: {rows:?}"
         );
         assert!(
             tool_event_row < tool_output_row,
@@ -3936,14 +4028,17 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_tail_commits_between_prompt_and_response() {
+    fn reasoning_title_commits_after_response() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
-        transcript.set_reasoning_title("turn 1 stats");
-        transcript.push_reasoning_text("thinking\n");
-        transcript.flush_reasoning();
         transcript.push_response("answer");
+
+        let mut reasoning = StreamingWidget::reasoning(TranscriptWidget::STREAM_MAX_ROWS);
+        reasoning.set_title("turn 1 stats");
+        reasoning.push_text("thinking\n");
+        reasoning.flush();
         transcript.finish_turn();
+        transcript.commit_reasoning_title(reasoning);
 
         let text: Vec<String> = transcript
             .scrollable
@@ -3955,24 +4050,30 @@ mod tests {
             text,
             vec![
                 "▍» hi".to_string(),
+                "answer".to_string(),
                 "◈ turn 1 stats".to_string(),
-                "    thinking".to_string(),
-                "answer".to_string()
             ]
+        );
+        assert!(
+            !text.iter().any(|l| l.contains("thinking")),
+            "reasoning body must be cleared, not committed: {text:?}"
         );
     }
 
     #[test]
-    fn reasoning_title_commits_between_prompt_and_tail_exactly_once() {
+    fn reasoning_title_commits_after_response_exactly_once() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
-        transcript.set_reasoning_title("turn 1 stats");
         transcript.push_response("answer");
-        for i in 0..8 {
-            transcript.push_reasoning_text(&format!("thinking {i}\n"));
-        }
 
+        let mut reasoning = StreamingWidget::reasoning(TranscriptWidget::STREAM_MAX_ROWS);
+        reasoning.set_title("turn 1 stats");
+        for i in 0..8 {
+            reasoning.push_text(&format!("thinking {i}\n"));
+        }
+        reasoning.flush();
         transcript.finish_turn();
+        transcript.commit_reasoning_title(reasoning);
 
         let text: Vec<String> = transcript
             .scrollable
@@ -3989,9 +4090,10 @@ mod tests {
         let answer = text.iter().position(|l| l == "answer").unwrap();
         assert_eq!(text[0], "▍» hi");
         assert!(
-            title < answer,
-            "reasoning title must precede the response: {text:?}"
+            answer < title,
+            "reasoning title must be the final line of the turn: {text:?}"
         );
+        assert_eq!(title, text.len() - 1, "title must be last: {text:?}");
         assert!(
             text[title].contains(glyph::REASONING),
             "reasoning header must carry the reasoning glyph: {text:?}"
@@ -4000,9 +4102,10 @@ mod tests {
             !text[title].contains('◆'),
             "reasoning header must use the reasoning glyph, not the tool diamond: {text:?}"
         );
-        assert_eq!(text[title + 1], "    thinking 3");
-        assert!(text.contains(&"    thinking 7".to_string()), "{text:?}");
-        assert!(!text.contains(&"    thinking 0".to_string()), "{text:?}");
+        assert!(
+            !text.iter().any(|l| l.contains("thinking")),
+            "reasoning body must not enter the FIFO: {text:?}"
+        );
     }
 
     #[test]
@@ -4026,14 +4129,17 @@ mod tests {
     }
 
     #[test]
-    fn finish_turn_orders_prompt_reasoning_tools_response() {
+    fn finish_turn_orders_prompt_tools_response_reasoning_title() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
-        transcript.set_reasoning_title("turn 1 stats");
-        transcript.push_reasoning_text("thinking\n");
+        let mut reasoning = StreamingWidget::reasoning(TranscriptWidget::STREAM_MAX_ROWS);
+        reasoning.set_title("turn 1 stats");
+        reasoning.push_text("thinking\n");
+        reasoning.flush();
         transcript.push_tool_line("grep");
         transcript.push_response("answer");
         transcript.finish_turn();
+        transcript.commit_reasoning_title(reasoning);
 
         let text: Vec<String> = transcript
             .scrollable
@@ -4045,35 +4151,38 @@ mod tests {
             text,
             vec![
                 "▍» hi".to_string(),
-                "◈ turn 1 stats".to_string(),
-                "    thinking".to_string(),
                 "◆ grep".to_string(),
                 "answer".to_string(),
+                "◈ turn 1 stats".to_string(),
             ]
         );
     }
 
     #[test]
-    fn reasoning_commit_uses_retained_five_row_tail_after_short_display() {
+    fn reasoning_commit_is_title_only_after_short_display() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
-        transcript.set_reasoning_title("turn 1 stats");
         transcript.push_response("answer");
-        for i in 0..8 {
-            transcript.push_reasoning_text(&format!("thinking {i}\n"));
-        }
 
-        // Simulate a contested frame where the reasoning band is transiently
-        // painted into a two-row body viewport.
+        let mut reasoning = StreamingWidget::reasoning(TranscriptWidget::STREAM_MAX_ROWS);
+        reasoning.set_title("turn 1 stats");
+        for i in 0..8 {
+            reasoning.push_text(&format!("thinking {i}\n"));
+        }
+        reasoning.flush();
+
+        // Simulate a contested frame where the band is transiently painted
+        // into a two-row body viewport; the live display may trim the body
+        // but the finish commit must discard it entirely.
         let ctx = input_ctx("", 0);
         {
-            let stream = &mut transcript.reasoning;
-            let area = Rect::new(0, 0, 40, 2);
+            let area = Rect::new(0, 0, 40, 3);
             let mut buf = Buffer::empty(area);
-            LiveAreaWidget::render(stream, area, &mut buf, &ctx);
+            LiveAreaWidget::render(&mut reasoning, area, &mut buf, &ctx);
         }
 
         transcript.finish_turn();
+        transcript.commit_reasoning_title(reasoning);
 
         let text: Vec<String> = transcript
             .scrollable
@@ -4085,25 +4194,28 @@ mod tests {
             text,
             vec![
                 "▍» hi".to_string(),
-                "◈ turn 1 stats".to_string(),
-                "    thinking 3".to_string(),
-                "    thinking 4".to_string(),
-                "    thinking 5".to_string(),
-                "    thinking 6".to_string(),
-                "    thinking 7".to_string(),
                 "answer".to_string(),
+                "◈ turn 1 stats".to_string(),
             ]
+        );
+        assert!(
+            !text.iter().any(|l| l.contains("thinking")),
+            "reasoning body must be discarded regardless of the live display: {text:?}"
         );
     }
 
     #[test]
-    fn reasoning_stays_out_of_fifo_while_streaming() {
+    fn reasoning_body_stays_out_of_fifo_after_commit() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
-        transcript.push_reasoning_text("thinking\n");
         transcript.push_response("answer");
+        let mut reasoning = StreamingWidget::reasoning(TranscriptWidget::STREAM_MAX_ROWS);
+        reasoning.set_title("turn 1 stats");
+        reasoning.push_text("thinking\n");
+        reasoning.flush();
         LiveAreaWidget::finalize(&mut transcript, 80);
 
+        // Live reasoning lives in the top-level band, not the FIFO.
         let text: Vec<String> = transcript
             .scrollable
             .visible_lines()
@@ -4111,14 +4223,31 @@ mod tests {
             .map(|l| l.to_string())
             .collect();
         assert!(!text.iter().any(|l| l.contains("thinking")), "{text:?}");
+        assert!(!text.iter().any(|l| l.contains("turn 1 stats")), "{text:?}");
 
-        let reasoning: Vec<String> = transcript
-            .reasoning
+        let live: Vec<String> = reasoning
             .rendered_lines()
             .iter()
             .map(|l| l.to_string())
             .collect();
-        assert_eq!(reasoning, vec!["thinking".to_string()]);
+        assert_eq!(live, vec!["thinking".to_string()]);
+
+        transcript.finish_turn();
+        transcript.commit_reasoning_title(reasoning);
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(
+            text.iter().any(|l| l.contains("◈ turn 1 stats")),
+            "reasoning title must commit as the final FIFO line: {text:?}"
+        );
+        assert!(
+            !text.iter().any(|l| l.contains("thinking")),
+            "reasoning body must never enter the FIFO: {text:?}"
+        );
     }
 
     #[test]

@@ -713,13 +713,12 @@ The input and info bars are the last two chat widgets and are excluded from
 the terminal scroll region. Everything above them is the content region.
 
 **Nested transcript.** `TranscriptWidget` is a composite: one styled FIFO
-(the only overflow producer) plus two embedded `StreamingWidget` children
-(reasoning and live tool output). Its own min/desired/max heights sum the
-FIFO and its children; after the parent allocates `H` rows, the transcript
-re-runs the same allocate pass on its child slice and paints top-to-bottom
-pre-reasoning FIFO head, reasoning, FIFO tool-call events, live tool output,
-then streaming response (prompt → reasoning → tool-call events → live tool
-output → response).
+(the only overflow producer) plus an embedded `StreamingWidget` child for
+live tool output. The top-level reasoning band is a separate scene widget
+positioned below the transcript, not a transcript child. The transcript
+paints top-to-bottom the pre-tool FIFO head, FIFO tool-call events, live tool
+output, then the streaming-response tail; the scene then places the live
+reasoning band directly above the input bar.
 
 **Streaming widgets.** `StreamingWidget` owns a `LineBuffer` of completed
 styled lines plus a trailing partial, an optional title row supplied as a
@@ -727,9 +726,11 @@ function of `RenderContext`, a scroll anchor (`scrolled`/`last_width`), a
 per-line styler, and a row cap. It tail-anchors, trims its own head, collapses
 to zero when idle, and never returns overflow. The reasoning instance uses a
 four-space indent plus nickel italic text; the tool instance uses a `◆`
-chrome title and four-space-indented, nickel italic, ANSI-stripped text. Both
-constructors retain a sliding commit tail capped at the shared stream row
-count so turn-end commits never depend on how short the live band was painted.
+chrome title and four-space-indented, nickel italic, ANSI-stripped text. Tool
+streams retain a sliding commit tail capped at the shared stream row count so
+tool-result commits never depend on how short the live band was painted;
+reasoning is display-only — its body is cleared at turn finish and only its
+title line is committed.
 
 ### 8.3 Layout and rendering model
 
@@ -787,8 +788,8 @@ pinned at the viewport bottom.
                      ─── viewport bottom ───
 ```
 
-Each finished turn renders its full layout (prompt, reasoning tail, tool
-list, response) plus the stats footer. Two blank lines separate adjacent
+Each finished turn renders its full layout (prompt, tool list, response,
+reasoning title) plus the stats footer. Two blank lines separate adjacent
 widgets. Older turns scroll off the top into terminal scrollback. The input
 bar waits for the next message.
 
@@ -866,13 +867,14 @@ the viewport into terminal scrollback.
                      ─── viewport bottom ───
 ```
 
-When the turn finishes, the retained reasoning tail is committed to the
-transcript FIFO between the prompt and the tool blocks (prompt → reasoning →
-tools → response), so it appears in the finished history like committed tool
-output and may overflow into terminal scrollback. While the turn is still
-streaming, the in-progress reasoning strand stays display-only and never
-enters the FIFO or scrollback; cancel (Esc), clear, and new-chat paths discard
-it without committing it.
+When the turn finishes, the reasoning title is committed to the transcript
+FIFO as the final line of the turn (prompt → tools → response → reasoning
+title), so it appears in the finished history like committed tool output and
+may overflow into terminal scrollback. The reasoning body is display-only:
+it is cleared with the live band at turn finish and never enters the FIFO or
+scrollback. While the turn is still streaming, the in-progress reasoning
+strand stays display-only and never enters the FIFO or scrollback; cancel
+(Esc), clear, and new-chat paths discard it without committing it.
 
 #### 8.4.4 Gremlins watch (Runs screen)
 
@@ -913,8 +915,8 @@ the selected run; `Esc` closes the pane and then returns to chat.
                         ▼
               ┌─────────────────────┐
               │ transcript widget   │  same layout; tool lines, prompt and
-              │ (finished)          │  response committed as history; reasoning
-              │                     │  committed as a retained tail
+              │ (finished)          │  response committed as history;
+              │                     │  reasoning title committed last
               └─────────────────────┘
                         │
            session ends / cleared
