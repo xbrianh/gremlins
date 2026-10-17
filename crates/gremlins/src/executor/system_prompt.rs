@@ -87,6 +87,7 @@ pub(crate) async fn landscape_block(gremlin: &Gremlin) -> String {
 /// borrow of the gremlin. A missing workspace produces an empty snapshot; any
 /// other failure is logged and also degrades to an empty snapshot.
 async fn build_landscape_snapshot(cwd: PathBuf, cache_path: Option<PathBuf>) -> LandscapeSnapshot {
+    let root = cwd.clone();
     let outlines = tokio::task::spawn_blocking(move || {
         match LandscapeExplorer.build(&cwd, usize::MAX, cache_path.as_deref()) {
             Ok(outlines) => outlines,
@@ -107,7 +108,7 @@ async fn build_landscape_snapshot(cwd: PathBuf, cache_path: Option<PathBuf>) -> 
 
     let file_count = outlines.iter().filter(|o| !o.items.is_empty()).count();
     let item_count: usize = outlines.iter().map(|o| o.items.len()).sum();
-    let block = crate::landscape::format_landscape_block(&outlines);
+    let block = crate::landscape::format_landscape_block(&outlines, &root);
 
     LandscapeSnapshot {
         block,
@@ -210,14 +211,26 @@ mod tests {
     #[tokio::test]
     async fn nonempty_outline_flows_through_assemble() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(
+            dir.path().join("main.rs"),
+            "fn main() {}\nstruct Config {}\nimpl Config {}\n",
+        )
+        .unwrap();
 
         let snapshot = build_landscape_snapshot(dir.path().to_path_buf(), None).await;
         assert!(snapshot.block.contains("<!-- BEGIN LANDSCAPE BLOCK -->"));
-        assert!(snapshot.block.contains("main.rs:\n"));
-        assert!(snapshot.block.contains("fn       main"));
+        assert!(snapshot
+            .block
+            .contains(&format!("<!-- root: {} -->\n", dir.path().display())));
+        assert!(snapshot.block.lines().any(|line| line == "main.rs:"));
+        assert!(!snapshot
+            .block
+            .contains(&format!("{}:", dir.path().join("main.rs").display())));
+        assert!(snapshot.block.contains("1|fn|main\n"));
+        assert!(snapshot.block.contains("2|struct|Config\n"));
+        assert!(snapshot.block.contains("3|impl|Config\n"));
         assert_eq!(snapshot.file_count, 1);
-        assert_eq!(snapshot.item_count, 1);
+        assert_eq!(snapshot.item_count, 3);
 
         let prompt = SystemPrompt::new("base prompt".to_string())
             .with_landscape(snapshot.block.clone())

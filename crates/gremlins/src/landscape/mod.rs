@@ -260,13 +260,30 @@ fn same_file(canonical_cache: &Path, path: &Path) -> bool {
     }
 }
 
+/// One-line legend mapping the compact kind abbreviations used in the block
+/// back to the full [`FN`], [`STRUCT`], [`HEADING`], and similar constants.
+///
+/// The full constants stay human-readable for tool output; this legend only
+/// exists because the landscape block favors density over self-evidence.
+const KIND_LEGEND: &str = "k:key fn struct impl trait enum mod c:class m:method h:heading";
+
 /// Format the captured outlines as the structural landscape block injected
 /// into an agent stage's system prompt.
 ///
-/// An empty landscape (no recognized files, or no outlineable items) formats
-/// to an empty string so callers can skip the block entirely.
-pub(crate) fn format_landscape_block(outlines: &[FileOutline]) -> String {
-    if outlines.iter().all(|outline| outline.items.is_empty()) {
+/// Paths under `root` are emitted relative to it (with `root` itself named in
+/// a preamble comment); anything outside `root` keeps its absolute path.
+/// Files with fewer than three outline items are skipped: they carry too
+/// little structural signal for the per-file overhead.
+///
+/// An empty landscape (no recognized files, no outlineable items, or no
+/// file with at least three items) formats to an empty string so callers can
+/// skip the block entirely.
+pub(crate) fn format_landscape_block(outlines: &[FileOutline], root: &Path) -> String {
+    let outlines: Vec<&FileOutline> = outlines
+        .iter()
+        .filter(|outline| outline.items.len() >= 3)
+        .collect();
+    if outlines.is_empty() {
         return String::new();
     }
 
@@ -277,16 +294,21 @@ pub(crate) fn format_landscape_block(outlines: &[FileOutline]) -> String {
     );
     block.push_str("Line numbers are exact at capture time but may drift if files are edited.\n");
     block.push_str("Use OutlineFile for current line numbers after edits.\n\n");
+    block.push_str(&format!("<!-- root: {} -->\n", root.display()));
+    block.push_str(&format!("<!-- {KIND_LEGEND} -->\n\n"));
 
     for outline in outlines {
-        if outline.items.is_empty() {
-            continue;
-        }
-        block.push_str(&format!("{}:\n", outline.path.display()));
+        let path = match outline.path.strip_prefix(root) {
+            Ok(relative) if !relative.as_os_str().is_empty() => relative.display().to_string(),
+            _ => outline.path.display().to_string(),
+        };
+        block.push_str(&format!("{path}:\n"));
         for item in &outline.items {
             block.push_str(&format!(
-                "{:>6}  {:<8} {}\n",
-                item.line, item.kind, item.name
+                "{}|{}|{}\n",
+                item.line,
+                kind_abbrev(item.kind),
+                item.name
             ));
         }
         block.push('\n');
@@ -294,6 +316,20 @@ pub(crate) fn format_landscape_block(outlines: &[FileOutline]) -> String {
 
     block.push_str("<!-- END LANDSCAPE BLOCK -->\n");
     block
+}
+
+/// Map a full kind constant to its compact landscape abbreviation.
+///
+/// The kind constants themselves are untouched; this mapping exists only for
+/// the landscape block and deliberately keeps the already-short Rust kinds.
+fn kind_abbrev(kind: &str) -> &str {
+    match kind {
+        CLASS => "c",
+        METHOD => "m",
+        HEADING => "h",
+        KEY => "k",
+        _ => kind,
+    }
 }
 
 #[cfg(test)]
@@ -306,7 +342,7 @@ mod tests {
 
     #[test]
     fn format_landscape_block_is_empty_without_outlines() {
-        assert_eq!(format_landscape_block(&[]), "");
+        assert_eq!(format_landscape_block(&[], Path::new("/repo")), "");
     }
 
     #[test]
@@ -315,24 +351,86 @@ mod tests {
             path: PathBuf::from("src/main.rs"),
             items: Vec::new(),
         };
-        assert_eq!(format_landscape_block(std::slice::from_ref(&outline)), "");
+        assert_eq!(
+            format_landscape_block(std::slice::from_ref(&outline), Path::new("/repo")),
+            ""
+        );
+    }
+
+    #[test]
+    fn format_landscape_block_skips_files_with_fewer_than_three_items() {
+        let root = Path::new("/repo");
+        let small = FileOutline {
+            path: root.join("small.rs"),
+            items: vec![OutlineItem::new(FN, "small", 1)],
+        };
+        let big = FileOutline {
+            path: root.join("big.rs"),
+            items: vec![
+                OutlineItem::new(FN, "first", 1),
+                OutlineItem::new(STRUCT, "Big", 2),
+                OutlineItem::new(IMPL, "Big", 3),
+            ],
+        };
+        let block = format_landscape_block(&[small, big], root);
+        assert!(!block.contains("small.rs"));
+        assert!(block.contains("big.rs:\n"));
     }
 
     #[test]
     fn format_landscape_block_formats_files_and_items() {
+        let root = Path::new("/repo");
         let outline = FileOutline {
-            path: PathBuf::from("src/main.rs"),
+            path: root.join("src/main.rs"),
             items: vec![
                 OutlineItem::new(FN, "main", 12),
                 OutlineItem::new(STRUCT, "Config", 45),
+                OutlineItem::new(HEADING, "Overview", 3),
             ],
         };
-        let block = format_landscape_block(std::slice::from_ref(&outline));
+        let block = format_landscape_block(std::slice::from_ref(&outline), root);
         assert!(block.starts_with("<!-- BEGIN LANDSCAPE BLOCK -->\n"));
-        assert!(block.contains("src/main.rs:\n"));
-        assert!(block.contains("    12  fn       main\n"));
-        assert!(block.contains("    45  struct   Config\n"));
+        assert!(block.contains(&format!("<!-- root: {} -->\n", root.display())));
+        assert!(block
+            .contains("<!-- k:key fn struct impl trait enum mod c:class m:method h:heading -->\n"));
+        assert!(block.lines().any(|line| line == "src/main.rs:"));
+        assert!(!block.lines().any(|line| line == "/repo/src/main.rs:"));
+        assert!(block.contains("12|fn|main\n"));
+        assert!(block.contains("45|struct|Config\n"));
+        assert!(block.contains("3|h|Overview\n"));
         assert!(block.ends_with("<!-- END LANDSCAPE BLOCK -->\n"));
+    }
+
+    #[test]
+    fn format_landscape_block_keeps_absolute_path_outside_root() {
+        let root = Path::new("/repo");
+        let outline = FileOutline {
+            path: PathBuf::from("/elsewhere/main.rs"),
+            items: vec![
+                OutlineItem::new(FN, "main", 1),
+                OutlineItem::new(STRUCT, "Config", 2),
+                OutlineItem::new(IMPL, "Config", 3),
+            ],
+        };
+        let block = format_landscape_block(std::slice::from_ref(&outline), root);
+        assert!(block.lines().any(|line| line == "/elsewhere/main.rs:"));
+        assert!(!block.lines().any(|line| line == "main.rs:"));
+    }
+
+    #[test]
+    fn repo_root_landscape_block_is_under_300kb() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .to_path_buf();
+        let outlines = LandscapeExplorer.build(&root, usize::MAX, None).unwrap();
+        let block = format_landscape_block(&outlines, &root);
+        assert!(
+            block.len() < 300 * 1024,
+            "landscape block is {} bytes, expected under 307200",
+            block.len()
+        );
     }
 
     #[test]
