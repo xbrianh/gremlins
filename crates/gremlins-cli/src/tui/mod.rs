@@ -697,8 +697,21 @@ async fn recv_debug(rx: &mut Option<mpsc::UnboundedReceiver<DebugEvent>>) -> Opt
     }
 }
 
+/// Fatal TUI error, classified by whether it has already been reported on
+/// the operator's terminal.
+#[derive(Debug)]
+pub enum RunError {
+    /// The error was written to stdout after the terminal was restored. The
+    /// caller must still exit nonzero, but must not print the message again.
+    Reported,
+    /// The error occurred while stderr was still the operator's terminal.
+    /// The caller should print `gremlins: <message>` to stderr and exit
+    /// nonzero.
+    Unreported(String),
+}
+
 /// Initialise the terminal, run the event loop, and restore on exit.
-pub async fn run() -> Result<(), String> {
+pub async fn run() -> Result<(), RunError> {
     // Refuse to start the TUI when stdout is not a terminal.
     if !std::io::stdout().is_terminal() {
         eprintln!("gremlins: stdout is not a terminal — use `gremlins ls` to list gremlins");
@@ -708,21 +721,27 @@ pub async fn run() -> Result<(), String> {
     // Load the process-global config before taking over the terminal or
     // redirecting stderr. A malformed settings.yaml is therefore returned
     // to the CLI entry point while stderr is still the operator's terminal.
-    gremlins::config::init_global().map_err(|e| e.to_string())?;
+    gremlins::config::init_global().map_err(|e| RunError::Unreported(e.to_string()))?;
 
     // Terminal setup also runs before the stderr redirect so setup failures
     // land on the real stderr. `LiveArea::new` leaves raw mode entered, so
     // on exit the `LiveArea` drop guard restores the cursor and raw mode.
-    let mut live_area = LiveArea::new().map_err(|e| format!("terminal setup failed: {e}"))?;
+    let mut live_area =
+        LiveArea::new().map_err(|e| RunError::Unreported(format!("terminal setup failed: {e}")))?;
 
     // Snapshot the real stderr before redirecting it, so a post-redirect
-    // failure can restore it and let the CLI entry point report the error
-    // once on the operator's terminal instead of into tui.log.
-    let saved_stderr = unsafe { libc::dup(2) };
+    // failure can restore it before reporting the error. Use a close-on-exec
+    // duplicate so a daemon spawned by `run_app` does not inherit a live
+    // copy of the operator's stderr (which would keep a pipe reader waiting
+    // for EOF after the TUI exits).
+    let saved_stderr = unsafe { libc::fcntl(2, libc::F_DUPFD_CLOEXEC, 0) };
 
     // Redirect stderr to tui.log so debug logs persist next to executor.log.
     // Config is loaded first so a custom `paths.state-root` is honored for
-    // the log path.
+    // the log path. Track whether the redirect succeeded: if it did not,
+    // stderr is still the operator's terminal and the CLI entry point can
+    // report post-loop failures there as usual.
+    let mut stderr_redirected = false;
     let log_path = gremlins::config::state_root().join("tui.log");
     if let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
@@ -733,19 +752,31 @@ pub async fn run() -> Result<(), String> {
         let fd = file.into_raw_fd();
         unsafe { libc::dup2(fd, 2) };
         unsafe { libc::close(fd) };
+        stderr_redirected = true;
     }
 
     if let Err(e) = run_app(&mut live_area).await {
-        // Restore the saved real stderr so the CLI entry point reports the
-        // error exactly once, on the operator's terminal rather than into
-        // tui.log. Restore the terminal first so the message is printed on
-        // a sane terminal rather than into raw mode.
+        // Restore the terminal first so the message is printed on a sane
+        // terminal rather than into raw mode, then restore the saved stderr
+        // (when we were able to snapshot it).
         drop(live_area);
         if saved_stderr >= 0 {
             unsafe { libc::dup2(saved_stderr, 2) };
             unsafe { libc::close(saved_stderr) };
         }
-        return Err(e.to_string());
+
+        if stderr_redirected {
+            // The operator's stderr may itself have been redirected before
+            // launch (for example `gremlins 2>/dev/null`), so restoring fd 2
+            // is not enough to make the error visible. Issue #1951 requires
+            // these fatal event-loop/daemon errors on stdout after the
+            // terminal is restored. The CLI exits nonzero without printing
+            // this message again.
+            println!("gremlins: {e}");
+            return Err(RunError::Reported);
+        }
+
+        return Err(RunError::Unreported(e.to_string()));
     }
 
     if saved_stderr >= 0 {

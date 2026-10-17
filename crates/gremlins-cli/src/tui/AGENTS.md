@@ -24,6 +24,7 @@ run()
  ├─ Refuse non-TTY stdout
  ├─ config::init_global() (fatal config errors report on real stderr)
  ├─ LiveArea::new() (raw mode + cursor hide + clear main screen)
+ ├─ Dup real stderr with FD_CLOEXEC
  ├─ Redirect stderr → state_root/tui.log
  └─ run_app()
       ├─ App::new()
@@ -41,6 +42,11 @@ run()
       │    7. chat_rx      — ChatEvent stream
       │    8. debug_evt_rx — DebugEvent stream (recv_debug, pending when idle)
       └─ Exit: commit in-flight turn to history, abort log/debug tasks, client.shutdown()
+
+On a fatal `run_app()` error after the stderr redirect, `run()` restores the
+terminal and the saved stderr, writes the `gremlins: `-prefixed error to
+stdout (so it remains visible even when stderr was redirected at launch), and
+returns `RunError::Reported` so the CLI exits nonzero without printing it again.
 ```
 
 ## Key Design Decisions
