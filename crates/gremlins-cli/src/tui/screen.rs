@@ -109,11 +109,6 @@ pub struct LiveArea<B: Backend = CrosstermBackend<Stdout>> {
     /// Rows occupied by the bottom bars (input + info) in the most recent
     /// frame. These rows are excluded from the scrollback region.
     reserved_rows: u16,
-    /// Whether the reasoning title currently carries a `TurnComplete` stats
-    /// line. Set by [`set_reasoning_title`], cleared by `reset_reasoning` and
-    /// [`push_reasoning_text`] so a stale prior-turn stats header never sits
-    /// over the next agent-loop turn's reasoning.
-    reasoning_stats_shown: bool,
 }
 
 impl<B: Backend> LiveArea<B> {
@@ -134,7 +129,6 @@ impl<B: Backend> LiveArea<B> {
             scene: Scene::default(),
             last_screen_was_chat: true,
             reserved_rows: INITIAL_RESERVED_ROWS,
-            reasoning_stats_shown: false,
         }
     }
 
@@ -465,13 +459,10 @@ impl<B: Backend> LiveArea<B> {
         &mut self.scene.reasoning
     }
 
-    /// Clear the live reasoning band's title and body for a new turn, and
-    /// drop the "stats shown" marker so the next reasoning chunk installs the
-    /// `clanking` placeholder.
+    /// Clear the live reasoning band's title and body for a new turn.
     fn reset_reasoning(&mut self) {
         self.reasoning_mut().set_title("");
         self.reasoning_mut().clear();
-        self.reasoning_stats_shown = false;
     }
 
     fn input_bar_mut(&mut self) -> &mut InputBarWidget {
@@ -522,19 +513,14 @@ impl<B: Backend> LiveArea<B> {
         self.reasoning_mut().flush();
     }
 
-    /// Append reasoning text (may be a partial chunk). The first chunk of a
-    /// turn establishes the `clanking` placeholder title so the live band
-    /// shows its header immediately instead of waiting for `TurnComplete`.
+    /// Append reasoning text (may be a partial chunk). When the title is empty
+    /// (i.e. before the first `TurnComplete` of the turn) this establishes the
+    /// `clanking` placeholder title so the live band shows its header
+    /// immediately instead of waiting for `TurnComplete`. An existing stats
+    /// title is left intact so the latest completed agent-loop turn's numbers
+    /// stay visible throughout the next agent-loop turn's reasoning.
     pub fn push_reasoning_text(&mut self, text: &str) {
-        // A reasoning chunk after a `TurnComplete` belongs to the next
-        // agent-loop turn: reset the stats header back to the placeholder so
-        // the prior turn's numbers never sit over the new turn's reasoning.
-        let stats_shown = self.reasoning_stats_shown;
-        self.reasoning_stats_shown = false;
         let reasoning = self.reasoning_mut();
-        if stats_shown && !reasoning.title_is_empty() {
-            reasoning.set_title(REASONING_PLACEHOLDER_TITLE);
-        }
         if reasoning.title_is_empty() {
             reasoning.set_title(REASONING_PLACEHOLDER_TITLE);
         }
@@ -545,7 +531,6 @@ impl<B: Backend> LiveArea<B> {
     /// token/cache stats string.
     pub fn set_reasoning_title(&mut self, title: &str) {
         self.reasoning_mut().set_title(title);
-        self.reasoning_stats_shown = true;
     }
 
     /// Append a live tool-output chunk to the transcript's tool stream keyed
@@ -602,7 +587,6 @@ impl<B: Backend> LiveArea<B> {
     /// the final FIFO line of the finished turn.
     pub fn finish_turn(&mut self) {
         let stream = std::mem::replace(&mut self.scene.reasoning, new_reasoning_band());
-        self.reasoning_stats_shown = false;
         let had_turn = self.transcript_mut().has_current_turn();
         self.transcript_mut().finish_turn();
         if had_turn {
@@ -1828,7 +1812,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_reasoning_after_stats_resets_header_to_placeholder() {
+    fn fresh_reasoning_after_stats_keeps_stats_title() {
         let cols: u16 = 80;
         let rows: u16 = 12;
         let mut live_area = new_live(cols, rows);
@@ -1850,19 +1834,16 @@ mod tests {
         );
 
         // A new agent-loop iteration streams reasoning under the previous
-        // turn's stats header. The header must reset to the placeholder so
-        // stale turn-1 numbers never sit over the new turn's reasoning.
+        // turn's stats header. The header stays sticky: the latest completed
+        // agent-loop turn's numbers remain visible until the next
+        // `TurnComplete` overwrites them.
         live_area.push_reasoning_text("second turn thinking\n");
         live_area.flush_reasoning();
         live_area.compose(&app).unwrap();
         let visible = dump_buffer(live_area.backend().buffer());
         assert!(
-            !visible.contains("turn 1"),
-            "the prior turn's stats must not persist over the next turn's reasoning.\nBuffer:\n{visible}"
-        );
-        assert!(
-            visible.contains("◈ clanking"),
-            "the placeholder header should return for the next turn's reasoning.\nBuffer:\n{visible}"
+            visible.contains("clanking · turn 1"),
+            "the latest completed turn's stats title must persist over the next turn's reasoning.\nBuffer:\n{visible}"
         );
         assert!(
             visible.contains("second turn thinking"),
@@ -1871,7 +1852,7 @@ mod tests {
         assert_eq!(
             visible.matches('◈').count(),
             1,
-            "the placeholder header should render the reasoning glyph exactly once.\nBuffer:\n{visible}"
+            "the stats header should render the reasoning glyph exactly once.\nBuffer:\n{visible}"
         );
     }
 
@@ -2054,9 +2035,9 @@ mod tests {
 
         live_area.submit_prompt("hi".to_string());
         // A title header plus more reasoning than the short band can show.
-        // The first chunk after a stats title resets it back to the `clanking`
-        // placeholder, which still occupies the header row the layout math
-        // depends on.
+        // The stats title is sticky: streaming the next agent-loop turn's
+        // reasoning leaves it in place, so the short-band layout math still
+        // has a header row.
         live_area.set_reasoning_title("turn 1 stats");
         for i in 0..6 {
             live_area.push_reasoning_text(&format!("reasoning line {i}\n"));
@@ -2072,7 +2053,7 @@ mod tests {
         // taller frames must not resurrect lines trimmed from this shorter
         // band.
         assert!(
-            visible.contains("◈ clanking"),
+            visible.contains("turn 1 stats"),
             "reasoning header should stay visible in the short band.\nBuffer:\n{visible}"
         );
         for i in 4..6 {
