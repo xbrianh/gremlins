@@ -18,6 +18,9 @@ pub struct App {
     pub active_runs: HashMap<String, ActiveRun>,
     /// Cached project name for the info bar.
     pub project_name: String,
+    /// Display-only cache of the active chat gremlin's model, populated by
+    /// the daemon's `chat_model` op. The daemon owns the ground truth.
+    pub chat_model: Option<String>,
     /// When Some, the TUI is following a gremlin's log and printing log lines
     /// to the transcript as they arrive.
     pub following_log: Option<String>,
@@ -112,6 +115,7 @@ impl App {
             input_cursor: 0,
             active_runs: HashMap::new(),
             project_name,
+            chat_model: None,
             following_log: None,
             active_request: false,
             session_recreating: false,

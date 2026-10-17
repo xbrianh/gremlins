@@ -28,6 +28,10 @@ use editor::{open_editor, ReaderChannels, SuspendHandle};
 use gremlins::executor::socket;
 use screen::LiveArea;
 
+/// A daemon `chat_model` lookup result tagged with the session generation it
+/// was issued for. Stale generations are ignored by the event loop.
+type ChatModelQuery = (u64, Result<Option<String>, String>);
+
 /// Drop-guard that aborts a JoinHandle on drop, ensuring a dedicated
 /// log-follow socket is closed even when the outer forwarding task is
 /// cancelled via `abort()`.
@@ -298,6 +302,7 @@ fn build_chat_request(
 /// is responsible for taking the input, recording history, and stopping any
 /// log follow first. The caller must have already checked `active_request`
 /// and `session_recreating`.
+#[allow(clippy::too_many_arguments)]
 fn send_chat_input(
     live_area: &mut LiveArea,
     app: &mut App,
@@ -306,6 +311,7 @@ fn send_chat_input(
     turn_gen: &mut u64,
     active_turn: &mut Option<String>,
     session_generation: u64,
+    model_tx: mpsc::UnboundedSender<ChatModelQuery>,
 ) -> io::Result<()> {
     if app.active_request {
         let msg = "a request is already in progress — wait for the response";
@@ -377,6 +383,19 @@ fn send_chat_input(
                         message: msg,
                         turn: Some(turn_id.clone()),
                     });
+                } else {
+                    // The chat turn is now airborne: the daemon has created
+                    // (or refreshed) the session's chat gremlin and patched
+                    // its `state.json` model. Refresh the info-bar cache from
+                    // the daemon, which owns model state. Spawn rather than
+                    // await so this task finishes as soon as the ack is
+                    // handled and never borrows the client longer than needed.
+                    let client_for_model = Arc::clone(&client_for_chat);
+                    let model_tx = model_tx.clone();
+                    tokio::spawn(async move {
+                        let result = query_chat_model(&client_for_model, session_generation).await;
+                        let _ = model_tx.send(result);
+                    });
                 }
             }
             Err(e) => {
@@ -389,6 +408,43 @@ fn send_chat_input(
     });
 
     Ok(())
+}
+
+/// Query the daemon for the active chat gremlin's model and return the
+/// result tagged with the session generation the query was issued for.
+///
+/// The response has `model` as a string or `null` when the session has no
+/// chat gremlin yet. A non-`ok` reply, a missing `model` key, or a
+/// non-string/non-null model is treated as an error so a malformed reply can
+/// never silently clear the info bar. The TUI never reads `tui.json` or
+/// `state.json`; the daemon owns model state.
+async fn query_chat_model(
+    client: &Arc<client::DaemonClient>,
+    session_generation: u64,
+) -> ChatModelQuery {
+    let result = client
+        .send_session_request_for_generation(
+            serde_json::json!({ "op": "chat_model" }),
+            session_generation,
+        )
+        .await
+        .and_then(|resp| {
+            if resp.get("type").and_then(|v| v.as_str()) != Some("ok") {
+                return Err(resp
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("chat_model request failed")
+                    .to_string());
+            }
+
+            match resp.get("model") {
+                Some(serde_json::Value::Null) => Ok(None),
+                Some(serde_json::Value::String(model)) => Ok(Some(model.clone())),
+                _ => Err("chat_model response missing 'model' field".to_string()),
+            }
+        });
+
+    (session_generation, result)
 }
 
 /// Route a submitted line from the full-screen debug view prompt.
@@ -921,6 +977,14 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
         }
     }
 
+    // Query the daemon for the active chat model before the first prompt so
+    // the info bar can show a restored session's model immediately.
+    let session_generation = client.session_generation().await;
+    match query_chat_model(&client, session_generation).await {
+        (_, Ok(model)) => app.chat_model = model,
+        (_, Err(e)) => log::debug!("initial chat_model query failed: {e}"),
+    }
+
     // ── Crossterm event channel (polling task → async) ─────────
     // Uses poll + sleep instead of blocking read so that the event
     // loop is never starved by a background reader holding the stdin lock.
@@ -970,6 +1034,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
     // ── Channel for session-recreation completion ─────────────────
     let (reset_tx, mut reset_rx) = mpsc::unbounded_channel::<Result<(), String>>();
+
+    // ── Channel for daemon chat-model lookups ─────────────────────
+    let (model_tx, mut model_rx) = mpsc::unbounded_channel::<ChatModelQuery>();
 
     // ── Channel for run-snapshot refreshes (after event_lagged) ───
     let (snapshot_tx, mut snapshot_rx) = mpsc::unbounded_channel::<HashMap<String, ActiveRun>>();
@@ -1463,6 +1530,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     &mut turn_gen,
                                     &mut active_turn,
                                     session_generation,
+                                    model_tx.clone(),
                                 )?;
                             }
                         }
@@ -1800,10 +1868,37 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             Some(result) = reset_rx.recv() => {
                 app.session_recreating = false;
                 match result {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        // The old chat gremlin died with the old session; the
+                        // daemon reports `model: null` until the next prompt.
+                        app.chat_model = None;
+                        let c = Arc::clone(&client);
+                        let tx = model_tx.clone();
+                        tokio::spawn(async move {
+                            let session_generation = c.session_generation().await;
+                            let result = query_chat_model(&c, session_generation).await;
+                            let _ = tx.send(result);
+                        });
+                    }
                     Err(e) => {
                         live_area.push_transcript_line(format!("error: {e}"));
                     }
+                }
+            }
+
+            // ── Daemon chat-model lookup results ──────────
+            Some((query_generation, result)) = model_rx.recv() => {
+                let current_generation = client.session_generation().await;
+                if query_generation != current_generation {
+                    log::debug!(
+                        "dropping stale chat_model query for generation {query_generation} \
+                         (current {current_generation})"
+                    );
+                    continue;
+                }
+                match result {
+                    Ok(model) => app.chat_model = model,
+                    Err(e) => log::debug!("chat_model query failed: {e}"),
                 }
             }
 

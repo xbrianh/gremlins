@@ -47,6 +47,8 @@ pub struct RenderContext<'a> {
     pub gremlin_count: &'a str,
     /// Cached project name.
     pub project_name: &'a str,
+    /// Cached active chat gremlin model, daemon-derived.
+    pub chat_model: Option<&'a str>,
     /// The daemon-derived run table (source of truth for the runs view).
     pub active_runs: &'a HashMap<String, ActiveRun>,
     /// Highlighted gremlin id on the `/watch` screen.
@@ -2526,6 +2528,13 @@ impl LiveAreaWidget for InfoBarWidget {
             Span::styled(ctx.project_name.to_string(), chrome),
         ];
 
+        if let Some(model) = ctx.chat_model {
+            spans.push(Span::styled("  ", band));
+            spans.push(Span::styled("model:", nickel));
+            spans.push(Span::styled(" ", band));
+            spans.push(Span::styled(model.to_string(), chrome));
+        }
+
         if let Some(id) = ctx.following_log {
             spans.push(Span::styled("  ", band));
             spans.push(Span::styled(
@@ -4381,6 +4390,7 @@ mod tests {
             following_log: None,
             gremlin_count: "0",
             project_name: "",
+            chat_model: None,
             active_runs: EMPTY.get_or_init(HashMap::new),
             watch_selection: None,
             watch_following: None,
@@ -4409,6 +4419,33 @@ mod tests {
             .wrap(Wrap { trim: false })
             .render(area, &mut buf);
         rendered_rows(&buf, width, height)
+    }
+
+    #[test]
+    fn info_bar_shows_model_only_when_chat_model_is_some() {
+        let width = 80;
+        let height = 1;
+        let area = Rect::new(0, 0, width, height);
+
+        let mut with_model = input_ctx("", 0);
+        with_model.chat_model = Some("openai/gpt-4o");
+        let mut buf = Buffer::empty(area);
+        InfoBarWidget.render(area, &mut buf, &with_model);
+        let row = &rendered_rows(&buf, width, height)[0];
+        assert!(row.contains("model:"), "expected model segment: {row:?}");
+        assert!(
+            row.contains("openai/gpt-4o"),
+            "expected model value: {row:?}"
+        );
+
+        let without_model = input_ctx("", 0);
+        let mut buf = Buffer::empty(area);
+        InfoBarWidget.render(area, &mut buf, &without_model);
+        let row = &rendered_rows(&buf, width, height)[0];
+        assert!(
+            !row.contains("model:"),
+            "model segment must be omitted when None: {row:?}"
+        );
     }
 
     #[test]
