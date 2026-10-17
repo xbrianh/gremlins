@@ -1250,6 +1250,9 @@ fn read_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
         Ok(c) => c,
         Err(e) => return format!("Error: {e}"),
     };
+    if content.is_empty() {
+        return String::new();
+    }
     let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
     let limit = args
         .get("limit")
@@ -1262,7 +1265,13 @@ fn read_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
     if let Some(limit) = limit {
         lines.truncate(limit);
     }
-    lines.concat()
+    let mut numbered = String::new();
+    for (idx, line) in lines.iter().enumerate() {
+        // `offset` is a 0-indexed skip count, so the file line number is
+        // offset + window index + 1 — never the window-relative index.
+        numbered.push_str(&format!("{}|{line}", offset + idx + 1));
+    }
+    numbered
 }
 
 pub(crate) async fn edit_invoke(ctx: &ToolContext, args_json: &str) -> String {
@@ -1945,13 +1954,114 @@ fn fnmatch_name(name: &str, pat: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[derive(Clone, Copy)]
+struct GrepOptions {
+    max_matches: usize,
+    context_before: usize,
+    context_after: usize,
+}
+
+/// Accumulates match/context output across the files visited by one grep
+/// invocation. Keeping the mutable scan state together avoids threading four
+/// separate `&mut` references through the recursive walk.
+struct GrepCollector {
+    matches: Vec<String>,
+    match_count: usize,
+    blocked: bool,
+    truncated: bool,
+}
+
+/// Shared per-file matcher. Both the single-file and directory-walk grep
+/// paths call this so match formatting, context expansion, and truncation
+/// semantics cannot drift between the two.
+fn append_file_matches(
+    path: &Path,
+    content: &str,
+    pattern: &Regex,
+    options: &GrepOptions,
+    out: &mut GrepCollector,
+) {
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Zero context keeps the exact legacy format: one `path:line:content`
+    // entry per match and no block separators.
+    if options.context_before == 0 && options.context_after == 0 {
+        for (idx, line) in lines.iter().enumerate() {
+            if pattern.is_match(line) {
+                if out.match_count >= options.max_matches {
+                    out.truncated = true;
+                    return;
+                }
+                out.matches
+                    .push(format!("{}:{}:{line}", path.display(), idx + 1));
+                out.match_count += 1;
+            }
+        }
+        return;
+    }
+
+    let mut match_lines = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        if pattern.is_match(line) {
+            if out.match_count >= options.max_matches {
+                out.truncated = true;
+                break;
+            }
+            match_lines.push(idx + 1);
+            out.match_count += 1;
+        }
+    }
+    if match_lines.is_empty() {
+        return;
+    }
+
+    // Expand each match into a 1-based inclusive [start, end] window and
+    // merge windows that touch or overlap.
+    let last_line = lines.len();
+    let mut windows: Vec<(usize, usize)> = Vec::new();
+    for &line_no in &match_lines {
+        let start = line_no.saturating_sub(options.context_before).max(1);
+        let end = line_no.saturating_add(options.context_after).min(last_line);
+        match windows.last_mut() {
+            Some((_, last_end)) if start <= last_end.saturating_add(1) => {
+                *last_end = (*last_end).max(end);
+            }
+            _ => windows.push((start, end)),
+        }
+    }
+
+    // Emit each merged window as one context block. Context lines use `-`
+    // where match lines use `:`; non-contiguous blocks are separated by `--`.
+    let mut next_match = 0usize;
+    for (block_idx, &(start, end)) in windows.iter().enumerate() {
+        if out.blocked || block_idx > 0 {
+            out.matches.push("--".to_string());
+        }
+        out.blocked = true;
+        for line_no in start..=end {
+            let is_match = next_match < match_lines.len() && match_lines[next_match] == line_no;
+            if is_match {
+                next_match += 1;
+            }
+            let separator = if is_match { ':' } else { '-' };
+            out.matches.push(format!(
+                "{}{}{}{}{}",
+                path.display(),
+                separator,
+                line_no,
+                separator,
+                lines[line_no - 1]
+            ));
+        }
+    }
+}
+
 fn scan_file(
     path: &Path,
     roots: Option<&[PathBuf]>,
     pattern: &Regex,
-    max_matches: usize,
-    matches: &mut Vec<String>,
-    truncated: &mut bool,
+    options: &GrepOptions,
+    out: &mut GrepCollector,
 ) {
     // Skip files that resolve outside any allowed root (e.g. via a symlink).
     // `None` roots means containment is disabled (AllowAll).
@@ -1967,15 +2077,7 @@ fn scan_file(
         Ok(c) => c,
         Err(_) => return,
     };
-    for (i, line) in content.lines().enumerate() {
-        if pattern.is_match(line) {
-            if matches.len() >= max_matches {
-                *truncated = true;
-                return;
-            }
-            matches.push(format!("{}:{}:{line}", path.display(), i + 1));
-        }
-    }
+    append_file_matches(path, &content, pattern, options, out);
 }
 
 fn walk_grep(
@@ -1983,9 +2085,8 @@ fn walk_grep(
     roots: Option<&[PathBuf]>,
     pattern: &Regex,
     glob_filter: Option<&str>,
-    max_matches: usize,
-    matches: &mut Vec<String>,
-    truncated: &mut bool,
+    options: &GrepOptions,
+    out: &mut GrepCollector,
 ) {
     let mut entries: Vec<_> = match std::fs::read_dir(dir) {
         Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
@@ -2011,7 +2112,7 @@ fn walk_grep(
         }
     }
     for (path, name) in files {
-        if *truncated {
+        if out.truncated {
             return;
         }
         if let Some(g) = glob_filter {
@@ -2019,10 +2120,10 @@ fn walk_grep(
                 continue;
             }
         }
-        scan_file(&path, roots, pattern, max_matches, matches, truncated);
+        scan_file(&path, roots, pattern, options, out);
     }
     for d in dirs {
-        if *truncated {
+        if out.truncated {
             return;
         }
         // Skip directory symlinks that resolve outside any allowed root.
@@ -2031,15 +2132,7 @@ fn walk_grep(
                 continue;
             }
         }
-        walk_grep(
-            &d,
-            roots,
-            pattern,
-            glob_filter,
-            max_matches,
-            matches,
-            truncated,
-        );
+        walk_grep(&d, roots, pattern, glob_filter, options, out);
     }
 }
 
@@ -2072,13 +2165,27 @@ fn grep_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
         .get("glob")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
-    let max_matches = args
-        .get("max_matches")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
-        .unwrap_or(GREP_MAX_LINES);
-    let mut matches = Vec::new();
-    let mut truncated = false;
+    let options = GrepOptions {
+        max_matches: args
+            .get("max_matches")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(GREP_MAX_LINES),
+        context_before: args
+            .get("context_before")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize,
+        context_after: args
+            .get("context_after")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize,
+    };
+    let mut out = GrepCollector {
+        matches: Vec::new(),
+        match_count: 0,
+        blocked: false,
+        truncated: false,
+    };
     if base.is_file() {
         let name = base.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if let Some(roots) = roots {
@@ -2090,38 +2197,21 @@ fn grep_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
             if is_binary_prefix(&base) {
                 return "(no matches)".into();
             }
-            match std::fs::read_to_string(&base) {
-                Ok(content) => {
-                    for (i, line) in content.lines().enumerate() {
-                        if pattern.is_match(line) {
-                            if matches.len() >= max_matches {
-                                truncated = true;
-                                break;
-                            }
-                            matches.push(format!("{}:{}:{line}", base.display(), i + 1));
-                        }
-                    }
-                }
+            let content = match std::fs::read_to_string(&base) {
+                Ok(content) => content,
                 Err(e) => return format!("Error: {e}"),
-            }
+            };
+            append_file_matches(&base, &content, &pattern, &options, &mut out);
         }
     } else {
-        walk_grep(
-            &base,
-            roots,
-            &pattern,
-            glob_filter,
-            max_matches,
-            &mut matches,
-            &mut truncated,
-        );
+        walk_grep(&base, roots, &pattern, glob_filter, &options, &mut out);
     }
-    if matches.is_empty() {
+    if out.matches.is_empty() {
         return "(no matches)".into();
     }
-    let mut result = matches.join("\n");
-    if truncated {
-        result.push_str(&format!("\n[truncated at {max_matches} matches]"));
+    let mut result = out.matches.join("\n");
+    if out.truncated {
+        result.push_str(&format!("\n[truncated at {} matches]", options.max_matches));
     }
     result
 }
@@ -2183,7 +2273,11 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool
             ("file_path", "string", true),
             ("content", "string", true),
         ]),
-        "Grep" => Some(vec![("pattern", "string", true)]),
+        "Grep" => Some(vec![
+            ("pattern", "string", true),
+            ("context_before", "integer", false),
+            ("context_after", "integer", false),
+        ]),
         "Glob" => Some(vec![("pattern", "string", true)]),
         "Task" => Some(vec![("kind", "string", true), ("prompt", "string", true)]),
         "Done" => Some(vec![("summary", "string", true)]),
@@ -2434,7 +2528,7 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
     let mut all = vec![
         ToolDefinition {
             name: "Read".into(),
-            description: "Read the contents of a file. Paths outside the sandbox are rejected. Use offset/limit to paginate large files — continue reading with offset until you have the whole file.".into(),
+            description: "Read the contents of a file. Paths outside the sandbox are rejected. Use offset/limit to paginate large files — continue reading with offset until you have the whole file. Each returned line is prefixed with its true 1-based line number in the source file followed by a `|` separator (e.g. `12|content`); `offset` is a 0-indexed line skip count, so line numbers stay aligned with `Grep` results even when paging.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2448,7 +2542,7 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
                     },
                     "offset": {
                         "type": "integer",
-                        "description": "Line number to start reading from (1-indexed)"
+                        "description": "Number of lines to skip from the start of the file (0-indexed, default 0)"
                     }
                 },
                 "required": ["file_path"],
@@ -2529,7 +2623,7 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
         },
         ToolDefinition {
             name: "Grep".into(),
-            description: "Search file contents using a Rust regex pattern. Returns matches in `path:line_number:line_content` format. Binaries and dot-directories are skipped, as are common build dirs (node_modules, target, __pycache__). Results are truncated at max_matches (default 2000). The regex engine does NOT support lookahead or lookbehind.".into(),
+            description: "Search file contents using a Rust regex pattern. Returns matches in `path:line_number:line_content` format. When `context_before`/`context_after` are nonzero, each match expands to include up to that many surrounding lines; context lines use a `-` separator instead of `:` (e.g. `path-12-context`), touching/overlapping windows merge into one block, and non-contiguous blocks are separated by a single `--` line. `max_matches` counts matches, not emitted lines. Binaries and dot-directories are skipped, as are common build dirs (node_modules, target, __pycache__). Results are truncated at max_matches (default 2000). The regex engine does NOT support lookahead or lookbehind.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2548,6 +2642,14 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
                     "max_matches": {
                         "type": "integer",
                         "description": "Maximum number of matches to return (optional, default 2000)"
+                    },
+                    "context_before": {
+                        "type": "integer",
+                        "description": "Number of context lines to include before each match (optional, default 0)"
+                    },
+                    "context_after": {
+                        "type": "integer",
+                        "description": "Number of context lines to include after each match (optional, default 0)"
                     }
                 },
                 "required": ["pattern"],
@@ -2702,10 +2804,29 @@ mod tests {
                 .to_string();
         assert_eq!(write_invoke(&c, &args).await, "OK");
         let read_args = serde_json::json!({"file_path": "a.txt"}).to_string();
-        assert_eq!(read_invoke(&c, &read_args).await, "hello\nworld\n");
+        assert_eq!(read_invoke(&c, &read_args).await, "1|hello\n2|world\n");
         let limited =
             serde_json::json!({"file_path": "a.txt", "offset": 1, "limit": 1}).to_string();
-        assert_eq!(read_invoke(&c, &limited).await, "world\n");
+        assert_eq!(read_invoke(&c, &limited).await, "2|world\n");
+    }
+
+    #[tokio::test]
+    async fn read_numbers_lines_with_true_file_line_numbers() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        std::fs::write(dir.join("nums.txt"), "a\nb\nc\nd\n").unwrap();
+        let args =
+            serde_json::json!({"file_path": "nums.txt", "offset": 1, "limit": 2}).to_string();
+        assert_eq!(read_invoke(&c, &args).await, "2|b\n3|c\n");
+
+        // No trailing newline and empty files stay well-formed.
+        std::fs::write(dir.join("no-newline.txt"), "x\ny").unwrap();
+        let args = serde_json::json!({"file_path": "no-newline.txt"}).to_string();
+        assert_eq!(read_invoke(&c, &args).await, "1|x\n2|y");
+
+        std::fs::write(dir.join("empty.txt"), "").unwrap();
+        let args = serde_json::json!({"file_path": "empty.txt"}).to_string();
+        assert_eq!(read_invoke(&c, &args).await, "");
     }
 
     #[tokio::test]
@@ -2949,6 +3070,137 @@ mod tests {
         assert!(found.contains("one.rs"));
         assert!(found.contains("three.rs"));
         assert!(!found.contains("two.py"));
+    }
+
+    #[tokio::test]
+    async fn grep_context_expands_with_line_numbers_and_clips() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let path = dir.join("ctx.txt");
+        std::fs::write(&path, "lead\nzero\nalpha\nbeta\ngamma\n").unwrap();
+        let args = serde_json::json!({
+            "pattern": "alpha",
+            "path": path.to_str().unwrap(),
+            "context_before": 5,
+            "context_after": 1
+        })
+        .to_string();
+        let out = grep_invoke(&c, &args).await;
+        let p = path.display();
+        assert_eq!(
+            out,
+            format!("{p}-1-lead\n{p}-2-zero\n{p}:3:alpha\n{p}-4-beta")
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_context_separates_non_contiguous_blocks() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let path = dir.join("blocks.txt");
+        std::fs::write(&path, "a\nb\nc\nd\ne\nf\ng\n").unwrap();
+        let args = serde_json::json!({
+            "pattern": "b|f",
+            "path": path.to_str().unwrap(),
+            "context_before": 1,
+            "context_after": 1
+        })
+        .to_string();
+        let out = grep_invoke(&c, &args).await;
+        let p = path.display();
+        assert_eq!(
+            out,
+            format!("{p}-1-a\n{p}:2:b\n{p}-3-c\n--\n{p}-5-e\n{p}:6:f\n{p}-7-g")
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_context_merges_touching_windows() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let path = dir.join("merge.txt");
+        std::fs::write(&path, "a\nb\nc\nd\ne\n").unwrap();
+        let args = serde_json::json!({
+            "pattern": "b|d",
+            "path": path.to_str().unwrap(),
+            "context_before": 1,
+            "context_after": 1
+        })
+        .to_string();
+        let out = grep_invoke(&c, &args).await;
+        let p = path.display();
+        assert_eq!(out, format!("{p}-1-a\n{p}:2:b\n{p}-3-c\n{p}:4:d\n{p}-5-e"));
+    }
+
+    #[tokio::test]
+    async fn grep_context_max_matches_counts_matches_not_lines() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let path = dir.join("hits.txt");
+        let body: String = (1..=10).map(|i| format!("hit {i}\n")).collect();
+        std::fs::write(&path, body).unwrap();
+        let args = serde_json::json!({
+            "pattern": "hit",
+            "path": path.to_str().unwrap(),
+            "max_matches": 3,
+            "context_before": 1,
+            "context_after": 1
+        })
+        .to_string();
+        let out = grep_invoke(&c, &args).await;
+        let p = path.display();
+        assert_eq!(
+            out.matches(&format!("{p}:")).count(),
+            3,
+            "max_matches must count matches, not emitted lines: {out}"
+        );
+        assert!(out.ends_with("[truncated at 3 matches]"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn grep_without_context_is_byte_identical_to_legacy_format() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let path = dir.join("plain.txt");
+        std::fs::write(&path, "a\nb\nc\n").unwrap();
+        let args = serde_json::json!({
+            "pattern": "b",
+            "path": path.to_str().unwrap(),
+            "context_before": 0,
+            "context_after": 0
+        })
+        .to_string();
+        let out = grep_invoke(&c, &args).await;
+        assert_eq!(out, format!("{}:2:b", path.display()));
+    }
+
+    #[tokio::test]
+    async fn grep_context_directory_walk_uses_same_matcher() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        std::fs::write(dir.join("a.txt"), "1\n2 alpha\n3\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "x\ny alpha\nz\n").unwrap();
+        let args = serde_json::json!({
+            "pattern": "alpha",
+            "context_before": 1,
+            "context_after": 1
+        })
+        .to_string();
+        let out = grep_invoke(&c, &args).await;
+        let a = dir.join(".").join("a.txt");
+        let b = dir.join(".").join("b.txt");
+        assert_eq!(
+            out,
+            format!(
+                "{}-1-1\n{}:2:2 alpha\n{}-3-3\n--\n{}-1-x\n{}:2:y alpha\n{}-3-z",
+                a.display(),
+                a.display(),
+                a.display(),
+                b.display(),
+                b.display(),
+                b.display()
+            )
+        );
     }
 
     #[tokio::test]
@@ -3795,7 +4047,7 @@ mod tests {
         c.audit_log = Some(log.clone());
         let args = serde_json::json!({"file_path": target.to_str().unwrap()}).to_string();
         let result = invoke("tool-test-id", "Read", &c, &args).await;
-        assert_eq!(result, "hi");
+        assert_eq!(result, "1|hi");
         let entry: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
         assert_eq!(entry["status"], "ok");
@@ -4765,7 +5017,7 @@ mod tests {
         let args = serde_json::json!({"file_path": secret.to_str().unwrap()}).to_string();
         let result = invoke("tool-test-id", "Read", &c, &args).await;
         assert_eq!(
-            result, "top secret",
+            result, "1|top secret",
             "AllowAll must permit out-of-roots read"
         );
     }
