@@ -572,19 +572,38 @@ fn usage_field(usage: Option<&serde_json::Value>, field: &str) -> Option<u64> {
 }
 
 /// Format one usage object as the compact token/cache portion of the live
-/// stats title. Missing values render as dashes.
+/// stats title. Missing values render as dashes. The cache-hit rate is
+/// grouped inside the `in` field as a percentage of prompt tokens.
 fn usage_title_part(usage: Option<&serde_json::Value>) -> String {
     let field = |name: &str| usage_field(usage, name);
     let num = |name: &str| match field(name) {
         Some(v) => v.to_string(),
         None => "-".to_string(),
     };
+
+    let prompt = field("prompt_tokens");
+    let in_part = match prompt {
+        Some(p) if p > 0 => {
+            let cached = field("cached_input_tokens");
+            let pct = match cached {
+                Some(c) => format!("{:.0}%", (c as f64 / p as f64) * 100.0),
+                None => "-".to_string(),
+            };
+            format!(
+                "in {p} (cache {pct}, +{} new)",
+                num("cache_creation_input_tokens")
+            )
+        }
+        Some(_) => format!(
+            "in 0 (cache -, +{} new)",
+            num("cache_creation_input_tokens")
+        ),
+        None => "in -".to_string(),
+    };
+
     format!(
-        "in {} · out {} · cache {} (+{} new) · reason {}",
-        num("prompt_tokens"),
+        "{in_part} · out {} · reason {}",
         num("completion_tokens"),
-        num("cached_input_tokens"),
-        num("cache_creation_input_tokens"),
         num("reasoning_tokens")
     )
 }
@@ -2205,7 +2224,7 @@ mod tests {
 
         assert_eq!(
             title,
-            "clanking · turn 3 · in 100 · out 50 · cache 40 (+5 new) · reason 30 · Σ in 400 · out 200 · cache 150 (+15 new) · reason 120",
+            "clanking · turn 3 · in 100 (cache 40%, +5 new) · out 50 · reason 30 · Σ in 400 (cache 38%, +15 new) · out 200 · reason 120",
             "{title}"
         );
     }
@@ -2216,7 +2235,26 @@ mod tests {
 
         assert_eq!(
             title,
-            "clanking · turn - · in - · out - · cache - (+- new) · reason - · Σ in - · out - · cache - (+- new) · reason -"
+            "clanking · turn - · in - · out - · reason - · Σ in - · out - · reason -"
+        );
+    }
+
+    #[test]
+    fn stats_title_renders_zero_prompt_with_cache_dash() {
+        let stats = serde_json::json!({
+            "turn": 1,
+            "prompt_tokens": 0,
+            "completion_tokens": 7,
+            "cached_input_tokens": 0,
+            "cache_creation_input_tokens": 2,
+            "reasoning_tokens": 1
+        });
+
+        let title = stats_title(Some(&stats), None);
+
+        assert_eq!(
+            title,
+            "clanking · turn 1 · in 0 (cache -, +2 new) · out 7 · reason 1 · Σ in - · out - · reason -"
         );
     }
 
