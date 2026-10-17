@@ -162,10 +162,11 @@ async fn main() {
         Some(Cmds::Land { id }) => land(&id).await,
         Some(Cmds::Serve { lock_fd }) => serve_daemon(lock_fd).await,
         Some(Cmds::External(args)) => status_external(&args).await,
-        None => {
-            tui::run().await;
-            return;
-        }
+        None => match tui::run().await {
+            Ok(()) => Ok(()),
+            Err(tui::RunError::Reported) => std::process::exit(1),
+            Err(tui::RunError::Unreported(e)) => Err(e),
+        },
     };
     if let Err(e) = result {
         eprintln!("gremlins: {e}");
