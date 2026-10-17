@@ -16,7 +16,7 @@ use crate::builders::artifacts::{InterpolationValue, OutputTarget};
 use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
 use crate::builders::definition::{fill_builder_names, DefinitionBuilder, LandBuilder};
 use crate::builders::exec::ExecBuilder;
-use crate::clients::client::ModelURI;
+use crate::clients::client::{validate_task_model_spec, ModelURI};
 use crate::clients::task_kind::TaskKind;
 use crate::config;
 use crate::definition::r#static::expand;
@@ -506,6 +506,17 @@ fn yaml_model(
     ))
 }
 
+/// Validate a single resolved task-model spec with a consistent error shape.
+fn validate_task_model_entry(key: &str, value: &str) -> Result<(), SchemaError> {
+    validate_task_model_spec(value)
+        .map(|_| ())
+        .map_err(|message| {
+            SchemaError::Generic(format!(
+                "invalid task-models entry {key:?} ({value:?}): {message}"
+            ))
+        })
+}
+
 /// Read `task-models` — an ordered string→string map, resolved through
 /// profiles when settings are supplied. Returns `None` when the stage has no
 /// `task-models` key and no profile contributes task-models.
@@ -545,28 +556,29 @@ fn yaml_task_models(
     }
 
     // Merge: profile base + stage overrides (stage wins on conflict).
+    // Validate each layer as it is resolved — a stage override must not be
+    // able to hide an invalid profile entry.
     let mut resolved = IndexMap::new();
     if let Some(settings) = settings {
         if let Some(ref profile_tc) = profile_task_models {
             for (key, value) in profile_tc {
-                resolved.insert(
-                    key.clone(),
-                    config::resolve_model_reference(value, settings)
-                        .map_err(SchemaError::Generic)?,
-                );
+                let resolved_value = config::resolve_model_reference(value, settings)
+                    .map_err(SchemaError::Generic)?;
+                validate_task_model_entry(key, &resolved_value)?;
+                resolved.insert(key.clone(), resolved_value);
             }
         }
         if let Some(ref stage_tc) = stage {
             for (key, value) in stage_tc {
-                resolved.insert(
-                    key.clone(),
-                    config::resolve_model_reference(value, settings)
-                        .map_err(SchemaError::Generic)?,
-                );
+                let resolved_value = config::resolve_model_reference(value, settings)
+                    .map_err(SchemaError::Generic)?;
+                validate_task_model_entry(key, &resolved_value)?;
+                resolved.insert(key.clone(), resolved_value);
             }
         }
     } else if let Some(ref stage_tc) = stage {
         for (key, value) in stage_tc {
+            validate_task_model_entry(key, value)?;
             resolved.insert(key.clone(), value.clone());
         }
     }
@@ -965,6 +977,11 @@ fn yaml_default_task_models(
                         .join(", ")
                 )));
             }
+            validate_task_model_spec(value).map_err(|message| {
+                SchemaError::Generic(format!(
+                    "invalid default_task_models entry {key:?} ({value:?}): {message}"
+                ))
+            })?;
             result.insert(key.to_string(), value.to_string());
         }
         if result.is_empty() {
@@ -984,10 +1001,13 @@ fn yaml_default_task_models(
     };
     let mut resolved = IndexMap::new();
     for (key, value) in global {
-        resolved.insert(
-            key.clone(),
-            resolve_model(value, settings).map_err(SchemaError::Generic)?,
-        );
+        let resolved_value = resolve_model(value, settings).map_err(SchemaError::Generic)?;
+        validate_task_model_spec(&resolved_value).map_err(|message| {
+            SchemaError::Generic(format!(
+                "invalid default-task-models entry {key:?} ({resolved_value:?}): {message}"
+            ))
+        })?;
+        resolved.insert(key.clone(), resolved_value);
     }
     if resolved.is_empty() {
         Ok(None)
@@ -1049,8 +1069,8 @@ model-profiles:
   demo:
     model: cmd/echo
     task-models:
-      Scout: cmd/scout
-      Implement: cmd/implement
+      Scout: openai/scout
+      Implement: openai/implement
 "#;
 
     const DEFINITION_WITH_DEFAULT_PROFILE: &str = r#"
@@ -1061,7 +1081,7 @@ stages:
     prompt:
       - "hello\n"
     task-models:
-      Implement: cmd/stage-implement
+      Implement: openai/stage-implement
 "#;
 
     const DEFINITION_WITHOUT_DEFAULT: &str = r#"
@@ -1071,7 +1091,7 @@ stages:
     prompt:
       - "hello\n"
     task-models:
-      Implement: cmd/stage-implement
+      Implement: openai/stage-implement
 "#;
 
     const DEFINITION_WITH_STAGE_PROFILE: &str = r#"
@@ -1083,7 +1103,7 @@ stages:
       - "hello\n"
     model: profile/demo
     task-models:
-      Implement: cmd/stage-implement
+      Implement: openai/stage-implement
 "#;
 
     fn write_definition(sandbox: &Sandbox, yaml: &str) -> PathBuf {
@@ -1127,11 +1147,11 @@ stages:
             .expect("profile task-models must be inherited");
         assert_eq!(
             task_models.get("Scout").map(String::as_str),
-            Some("cmd/scout")
+            Some("openai/scout")
         );
         assert_eq!(
             task_models.get("Implement").map(String::as_str),
-            Some("cmd/stage-implement")
+            Some("openai/stage-implement")
         );
         match stage_model {
             Some(expected) => assert_eq!(stage.model().unwrap().to_string(), expected),
@@ -1149,7 +1169,7 @@ stages:
             "baked definition must carry the concrete default model: {yaml_str}"
         );
         assert!(
-            yaml_str.contains("cmd/scout") && yaml_str.contains("cmd/stage-implement"),
+            yaml_str.contains("openai/scout") && yaml_str.contains("openai/stage-implement"),
             "baked definition must carry resolved profile task-models: {yaml_str}"
         );
 
@@ -1166,11 +1186,11 @@ stages:
             .expect("reloaded definition must keep profile task-models");
         assert_eq!(
             reloaded_task_models.get("Scout").map(String::as_str),
-            Some("cmd/scout")
+            Some("openai/scout")
         );
         assert_eq!(
             reloaded_task_models.get("Implement").map(String::as_str),
-            Some("cmd/stage-implement")
+            Some("openai/stage-implement")
         );
         match stage_model {
             Some(expected) => assert_eq!(reloaded_stage.model().unwrap().to_string(), expected),
@@ -1569,6 +1589,78 @@ stages:
     }
 
     #[test]
+    fn yaml_task_models_rejects_invalid_specs_without_settings() {
+        for spec in ["no-slash", "fake/model", "cmd/true"] {
+            let mut mapping = Mapping::new();
+            let mut task_models = Mapping::new();
+            task_models.insert(Value::String("Scout".into()), Value::String(spec.into()));
+            mapping.insert(
+                Value::String("task-models".into()),
+                Value::Mapping(task_models),
+            );
+
+            let err = yaml_task_models(&mapping, None, None)
+                .expect_err("an invalid task-models spec must fail at definition load");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("invalid task-models entry"),
+                "error must name the bad entry, got: {msg}"
+            );
+            assert!(
+                msg.contains("Scout") && msg.contains(spec),
+                "error must name the offending key and spec, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn yaml_default_task_models_rejects_invalid_concrete_specs() {
+        for spec in ["no-slash", "fake/model", "cmd/true"] {
+            let mut root = Mapping::new();
+            let mut task_models = Mapping::new();
+            task_models.insert(Value::String("Scout".into()), Value::String(spec.into()));
+            root.insert(
+                Value::String("default_task_models".into()),
+                Value::Mapping(task_models),
+            );
+
+            let err = yaml_default_task_models(&root, None)
+                .expect_err("an invalid default_task_models spec must fail at definition load");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("invalid default_task_models entry"),
+                "error must name the bad entry, got: {msg}"
+            );
+            assert!(
+                msg.contains("Scout") && msg.contains(spec),
+                "error must name the offending key and spec, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_default_task_models_invalid_spec_fails_definition_load() {
+        for spec in ["no-slash", "fake/model", "cmd/true"] {
+            let settings = format!("default-task-models:\n  Scout: {spec}\n");
+            let sandbox = Sandbox::with_config(Some(&settings));
+            let definition_path =
+                write_definition(&sandbox, "default_model: 'cmd/true'\nstages: []\n");
+
+            let err = StaticDefinition::from_yaml_file(&definition_path, None, None)
+                .expect_err("an invalid settings default-task-models spec must fail the load");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("invalid default-task-models entry"),
+                "error must name the bad default-task-models entry, got: {msg}"
+            );
+            assert!(
+                msg.contains("Scout") && msg.contains(spec),
+                "error must name the offending key and spec, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
     fn yaml_loader_resolves_definition_default_profile_task_models() {
         let (_sandbox, def) =
             load_with_profile_settings(DEFINITION_WITH_DEFAULT_PROFILE, None, None);
@@ -1593,5 +1685,42 @@ stages:
     fn yaml_loader_resolves_per_stage_profile_task_models() {
         let (_sandbox, def) = load_with_profile_settings(DEFINITION_WITH_STAGE_PROFILE, None, None);
         assert_profile_definition_round_trips(&def, "cmd/default", Some("cmd/echo"));
+    }
+
+    #[test]
+    fn yaml_loader_rejects_invalid_profile_task_model_hidden_by_stage_override() {
+        let settings = r#"
+model-profiles:
+  demo:
+    model: cmd/echo
+    task-models:
+      Scout: cmd/true
+"#;
+        let definition = r#"
+default_model: profile/demo
+stages:
+  - name: plan
+    type: agent
+    prompt:
+      - "hello\n"
+    task-models:
+      Scout: openai/scout
+"#;
+
+        let sandbox = Sandbox::with_config(Some(settings));
+        let definition_path = write_definition(&sandbox, definition);
+
+        let err = StaticDefinition::from_yaml_file(&definition_path, None, None).expect_err(
+            "an invalid profile task-model overridden by a stage entry must still be rejected",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid task-models entry"),
+            "error must name the bad entry, got: {msg}"
+        );
+        assert!(
+            msg.contains("Scout") && msg.contains("cmd/true"),
+            "error must name the offending key and spec, got: {msg}"
+        );
     }
 }
