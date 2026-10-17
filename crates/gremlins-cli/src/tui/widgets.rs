@@ -4422,6 +4422,33 @@ mod tests {
     }
 
     #[test]
+    fn info_bar_shows_model_only_when_chat_model_is_some() {
+        let width = 80;
+        let height = 1;
+        let area = Rect::new(0, 0, width, height);
+
+        let mut with_model = input_ctx("", 0);
+        with_model.chat_model = Some("openai/gpt-4o");
+        let mut buf = Buffer::empty(area);
+        InfoBarWidget.render(area, &mut buf, &with_model);
+        let row = &rendered_rows(&buf, width, height)[0];
+        assert!(row.contains("model:"), "expected model segment: {row:?}");
+        assert!(
+            row.contains("openai/gpt-4o"),
+            "expected model value: {row:?}"
+        );
+
+        let without_model = input_ctx("", 0);
+        let mut buf = Buffer::empty(area);
+        InfoBarWidget.render(area, &mut buf, &without_model);
+        let row = &rendered_rows(&buf, width, height)[0];
+        assert!(
+            !row.contains("model:"),
+            "model segment must be omitted when None: {row:?}"
+        );
+    }
+
+    #[test]
     fn cursor_position_uses_display_width_for_wide_chars() {
         // "😀" is 2 cells wide; "é" is 1 cell. Prompt is 2 cells.
         // input = "😀" → cursor at end = col 2 + 2 = 4.
