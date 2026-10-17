@@ -109,8 +109,11 @@ layout engine over an ordered `Vec<&mut dyn LiveAreaWidget>`. For chat the
 order is transcript, reasoning, input bar, info bar; for any non-chat screen
 it is only the active `ScreenView` body. The engine performs `finalize →
 measure → allocate → drain overflow → paint`. Allocated widths are passed
-down as arguments (`finalize(width)`, `min_height(width, …)`, etc.); the
-parent owns margin policy and hands children the already-reduced inner width.
+down as arguments (`finalize(width)`, `min_height(width, …)`, etc.); a
+container owns margin policy and hands children the already-reduced inner
+width. Top-level siblings instead apply their own one-cell outer gutter so
+they align: the transcript insets its `render` by one cell, and the reasoning
+band mirrors that inset via `StreamingWidget::with_left_margin(1)`.
 The input and info bars are the last two chat widgets and are excluded from
 the scroll region; the reserved rows are derived from their allocated heights.
 The reasoning band sits immediately above them and is inside the scrollable

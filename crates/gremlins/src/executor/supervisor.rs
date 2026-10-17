@@ -3130,8 +3130,9 @@ fn add_usage_stats(baseline: &UsageStats, delta: &UsageStats) -> UsageStats {
         prompt_tokens: baseline.prompt_tokens + delta.prompt_tokens,
         completion_tokens: baseline.completion_tokens + delta.completion_tokens,
         cached_input_tokens: baseline.cached_input_tokens + delta.cached_input_tokens,
-        cache_creation_input_tokens: baseline.cache_creation_input_tokens
-            + delta.cache_creation_input_tokens,
+        cache_creation_input_tokens: baseline
+            .cache_creation_input_tokens
+            .saturating_add(delta.cache_creation_input_tokens),
         reasoning_tokens: baseline.reasoning_tokens + delta.reasoning_tokens,
         turns: baseline.turns + delta.turns,
     }

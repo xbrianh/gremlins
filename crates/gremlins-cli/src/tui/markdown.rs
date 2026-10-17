@@ -34,9 +34,36 @@ const OPTIONS: Options = Options::ENABLE_TABLES
 /// thematic break and code-block borders). Callers pass the transcript's
 /// content width (usually `width - 1` for the one-cell margin).
 pub fn render(markdown: &str, base: Style, rule_width: u16) -> Vec<Line<'static>> {
+    render_with(markdown, base, rule_width, false)
+}
+
+/// Render `markdown` into styled lines treating a `SoftBreak` (a single
+/// newline) as a hard line break everywhere, so literal newlines in the
+/// source are preserved.
+///
+/// This is the prompt path: the prompt is what the operator actually typed,
+/// so their hard newlines must survive markdown parsing. Fenced code blocks
+/// and other multi-line constructs still parse as one unit — only bare
+/// newlines between spaces become hard breaks. Blank lines remain paragraph
+/// separators.
+pub fn render_preserving_breaks(
+    markdown: &str,
+    base: Style,
+    rule_width: u16,
+) -> Vec<Line<'static>> {
+    render_with(markdown, base, rule_width, true)
+}
+
+fn render_with(
+    markdown: &str,
+    base: Style,
+    rule_width: u16,
+    soft_break_hard: bool,
+) -> Vec<Line<'static>> {
     let mut renderer = Renderer {
         base,
         rule_width,
+        soft_break_hard,
         lines: Vec::new(),
         current: Vec::new(),
         style_stack: vec![base],
@@ -56,6 +83,9 @@ struct Renderer {
     base: Style,
     /// Display width for full-width rules (thematic break, code borders).
     rule_width: u16,
+    /// Whether `SoftBreak` events are hard line breaks rather than a space.
+    /// The prompt renderer opts in so a user's literal newlines survive.
+    soft_break_hard: bool,
     lines: Vec<Line<'static>>,
     /// Spans accumulated for the current logical line.
     current: Vec<Span<'static>>,
@@ -359,8 +389,10 @@ impl Renderer {
 
     fn soft_break(&mut self) {
         // Inside a blockquote or list, a soft break is a hard line break so
-        // the block prefix/indentation is re-applied to the next line.
-        if self.quote_depth > 0 || !self.list_stack.is_empty() {
+        // the block prefix/indentation is re-applied to the next line. The
+        // prompt path also opts into treating every soft break as a hard
+        // break, preserving the operator's literal newlines.
+        if self.soft_break_hard || self.quote_depth > 0 || !self.list_stack.is_empty() {
             self.flush_line();
         } else {
             self.current.push(Span::raw(" "));
@@ -725,6 +757,21 @@ mod tests {
     fn renders_plain_paragraph() {
         let lines = render_default("hello world");
         assert_eq!(text_of(&lines), vec!["hello world"]);
+    }
+
+    #[test]
+    fn render_preserving_breaks_keeps_bare_newlines() {
+        let lines = render_preserving_breaks("one\ntwo", Style::default(), 40);
+        assert_eq!(text_of(&lines), vec!["one", "two"]);
+    }
+
+    #[test]
+    fn render_preserving_breaks_still_parses_fenced_blocks_as_one_unit() {
+        let lines = render_preserving_breaks("```\nlet x = 1;\n```", Style::default(), 40);
+        assert_eq!(
+            text_of(&lines),
+            vec![groove_top(40), " let x = 1;".to_string(), groove_bottom(40)]
+        );
     }
 
     #[test]

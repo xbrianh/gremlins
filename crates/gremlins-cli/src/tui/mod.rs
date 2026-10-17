@@ -571,6 +571,12 @@ fn usage_field(usage: Option<&serde_json::Value>, field: &str) -> Option<u64> {
     usage.and_then(|v| v.get(field)).and_then(|v| v.as_u64())
 }
 
+/// Placeholder reasoning title shown as soon as the first reasoning chunk of
+/// a turn arrives, and the fixed label prefix of the live stats title. Shared
+/// by [`stats_title`] here and the reasoning band in `screen.rs` so the
+/// placeholder→stats handoff can never drift between two hard-coded strings.
+pub(crate) const REASONING_PLACEHOLDER_TITLE: &str = "clanking";
+
 /// Format one usage object as the compact token/cache portion of the live
 /// stats title. Missing values render as dashes. The cache-hit rate is
 /// grouped inside the `in` field as a percentage of prompt tokens.
@@ -609,9 +615,9 @@ fn usage_title_part(usage: Option<&serde_json::Value>) -> String {
 }
 
 /// Format the conversation-wide Σ (total) portion of the stats title.
-/// Only completion and reasoning tokens are summed: prompt-token totals are
-/// not monotonic across conversation compaction, so they are reported as a
-/// separate per-turn `last prompt` field instead.
+/// Only completion and reasoning tokens are summed. Prompt-token totals are
+/// not monotonic across conversation compaction, so they are not summed; the
+/// per-turn prompt size is already shown in the `in` field.
 fn totals_title_part(total: Option<&serde_json::Value>) -> String {
     let num = |name: &str| match usage_field(total, name) {
         Some(v) => v.to_string(),
@@ -627,27 +633,18 @@ fn totals_title_part(total: Option<&serde_json::Value>) -> String {
 
 /// Build the reasoning-stream stats title shown on each `TurnComplete`:
 /// the `clanking` header label, the just-completed turn's delta, and the
-/// conversation-wide completion/reasoning total, plus the current turn's
-/// prompt-token size.
+/// conversation-wide completion/reasoning total.
 fn stats_title(stats: Option<&serde_json::Value>, total: Option<&serde_json::Value>) -> String {
     let turn = stats
         .and_then(|v| v.get("turn"))
         .and_then(|v| v.as_u64())
         .map(|v| v.to_string())
         .unwrap_or_else(|| "-".to_string());
-    let last_prompt = match usage_field(stats, "prompt_tokens") {
-        Some(v) => v.to_string(),
-        None => "-".to_string(),
-    };
-    let mut parts = [
-        format!("clanking · turn {turn}"),
+    let parts = [
+        format!("{REASONING_PLACEHOLDER_TITLE} · turn {turn}"),
         usage_title_part(stats),
         format!("Σ {}", totals_title_part(total)),
-        format!("last prompt {last_prompt}"),
     ];
-    if stats.is_none() {
-        parts[0] = "clanking · turn -".to_string();
-    }
     parts.join(" · ")
 }
 
@@ -2247,13 +2244,13 @@ mod tests {
 
         assert_eq!(
             title,
-            "clanking · turn 3 · in 100 (cache 40%, +5 new) · out 50 · reason 30 · Σ out 200 · reason 120 · last prompt 100",
+            "clanking · turn 3 · in 100 (cache 40%, +5 new) · out 50 · reason 30 · Σ out 200 · reason 120",
             "{title}"
         );
     }
 
     #[test]
-    fn stats_title_last_prompt_tracks_latest_turn_stats_not_the_conversation_total() {
+    fn stats_title_reports_per_turn_prompt_not_conversation_total() {
         let stats = serde_json::json!({
             "turn": 2,
             "prompt_tokens": 77,
@@ -2273,9 +2270,12 @@ mod tests {
 
         let title = stats_title(Some(&stats), Some(&total));
 
+        // The `in` figure is the per-turn prompt size (77), not the
+        // conversation-wide prompt total (999), which may drop across
+        // compaction and is therefore never summed.
         assert_eq!(
             title,
-            "clanking · turn 2 · in 77 (cache 0%, +3 new) · out 9 · reason 4 · Σ out 21 · reason 8 · last prompt 77",
+            "clanking · turn 2 · in 77 (cache 0%, +3 new) · out 9 · reason 4 · Σ out 21 · reason 8",
             "{title}"
         );
     }
@@ -2286,7 +2286,7 @@ mod tests {
 
         assert_eq!(
             title,
-            "clanking · turn - · in - · out - · reason - · Σ out - · reason - · last prompt -"
+            "clanking · turn - · in - · out - · reason - · Σ out - · reason -"
         );
     }
 
@@ -2305,7 +2305,7 @@ mod tests {
 
         assert_eq!(
             title,
-            "clanking · turn 1 · in 0 (cache -, +2 new) · out 7 · reason 1 · Σ out - · reason - · last prompt 0"
+            "clanking · turn 1 · in 0 (cache -, +2 new) · out 7 · reason 1 · Σ out - · reason -"
         );
     }
 

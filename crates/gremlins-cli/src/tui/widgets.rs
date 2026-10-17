@@ -946,10 +946,10 @@ fn render_prompt(prompt: &str, rule_width: u16) -> Vec<Line<'static>> {
         .bg(DEFAULT_THEME.prompt_bg);
 
     // Render the prompt once, as a single markdown document. A bare newline
-    // becomes a markdown soft break (a space), blank lines remain paragraph
-    // separators, and multi-line constructs such as fenced code blocks parse
-    // as one unit.
-    let rendered = markdown::render(prompt, text_style, rule_width);
+    // is preserved as a hard line break (the prompt is what the user typed),
+    // blank lines remain paragraph separators, and multi-line constructs such
+    // as fenced code blocks still parse as one unit.
+    let rendered = markdown::render_preserving_breaks(prompt, text_style, rule_width);
     if rendered.is_empty() {
         // Empty and whitespace-only prompts still show the first-line marker.
         return vec![Line::from(vec![
@@ -1428,9 +1428,10 @@ pub struct StreamingWidget {
     /// Left gutter, in cells, reserved before every streamed body line (e.g.
     /// a four-space indent for reasoning and tool output).
     body_indent: u16,
-    /// Whether the title row is rendered through the reasoning-specific
-    /// chrome/gold style rather than the shared tool-header style.
-    reasoning_title_style: bool,
+    /// Styler mapping (title prefix, title text) to the styled title
+    /// [`Line`]. Defaults to the shared tool chrome `◆` header; the
+    /// reasoning stream swaps in the gold/chrome `◈` header.
+    title_styler: fn(&str, &str) -> Line<'static>,
     row_cap: u16,
     size_priority: i32,
     /// When true, the widget keeps a sliding tail of completed lines (capped
@@ -1458,7 +1459,7 @@ impl StreamingWidget {
             render_title_when_empty: false,
             left_margin: 0,
             body_indent: 0,
-            reasoning_title_style: false,
+            title_styler: tool_chrome_line,
             row_cap,
             size_priority,
             retain_tail: false,
@@ -1521,11 +1522,12 @@ impl StreamingWidget {
         self
     }
 
-    /// Render the title row through the reasoning-specific chrome/gold
-    /// style. This is intentionally separate from `with_title_prefix` so the
-    /// shared tool `◆` header path is never altered by reasoning callers.
-    pub fn with_reasoning_title_style(mut self) -> Self {
-        self.reasoning_title_style = true;
+    /// Configure the styler used for the title row. It receives the title
+    /// prefix and the title text and returns the styled [`Line`]. The
+    /// default is the shared tool chrome `◆` header; the reasoning stream
+    /// installs the gold/chrome `◈` header via [`reasoning_chrome_line`].
+    pub fn with_title_styler(mut self, styler: fn(&str, &str) -> Line<'static>) -> Self {
+        self.title_styler = styler;
         self
     }
 
@@ -1560,7 +1562,7 @@ impl StreamingWidget {
         Self::new(reasoning_stream_line, row_cap, 20)
             .with_title_prefix(&format!("{} ", glyph::REASONING))
             .with_body_indent(4)
-            .with_reasoning_title_style()
+            .with_title_styler(reasoning_chrome_line)
             .retain_title_when_empty()
             .render_title_when_empty()
     }
@@ -1831,11 +1833,7 @@ impl StreamingWidget {
         if title.is_empty() {
             return None;
         }
-        let line = if self.reasoning_title_style {
-            reasoning_chrome_line(&self.title_prefix, title)
-        } else {
-            tool_chrome_line(&self.title_prefix, title)
-        };
+        let line = (self.title_styler)(&self.title_prefix, title);
         Some(line)
     }
 
@@ -2777,12 +2775,12 @@ mod tests {
     }
 
     #[test]
-    fn submit_prompt_soft_wraps_bare_newlines() {
+    fn submit_prompt_preserves_hard_line_breaks() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("one\ntwo".to_string());
         let lines = transcript.scrollable.visible_lines();
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-        assert_eq!(text, vec!["▍» one two"]);
+        assert_eq!(text, vec!["▍» one", "   two"]);
     }
 
     #[test]
