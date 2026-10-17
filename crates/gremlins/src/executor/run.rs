@@ -611,16 +611,7 @@ async fn run_agent(
     // array.
     if is_chat {
         if let Some(messages) = &completed.messages {
-            match serde_json::to_string(messages) {
-                Ok(json) => {
-                    if let Ok(uri) = Uri::parse("artifact://conversation.json") {
-                        let _ = gremlin.state.write_into_registry(&uri, &json).await;
-                    }
-                }
-                Err(e) => {
-                    log::warn!("chat: failed to serialize conversation artifact: {e}");
-                }
-            }
+            persist_chat_conversation(gremlin, messages).await;
         }
     }
 
@@ -1165,6 +1156,24 @@ pub(crate) fn messages_from_conversation(
         .map_err(|e| format!("chat: failed to parse conversation artifact: {e}"))
 }
 
+/// Persist the verbatim chat transcript as `artifact://conversation.json`.
+///
+/// The agent loop keeps `history` verbatim and never rewrites it, so callers
+/// pass `completed.messages` directly. On serialize failure, log and leave any
+/// prior artifact untouched rather than erasing it with an empty array.
+async fn persist_chat_conversation(gremlin: &Gremlin, messages: &[rig_core::completion::Message]) {
+    match serde_json::to_string(messages) {
+        Ok(json) => {
+            if let Ok(uri) = Uri::parse("artifact://conversation.json") {
+                let _ = gremlin.state.write_into_registry(&uri, &json).await;
+            }
+        }
+        Err(e) => {
+            log::warn!("chat: failed to serialize conversation artifact: {e}");
+        }
+    }
+}
+
 /// Clamp `text` to at most `max` bytes, cutting on a char boundary.
 ///
 /// The Python executor sliced the operator-facing reason (`reason[:200]`) for
@@ -1340,6 +1349,30 @@ mod tests {
     fn messages_from_conversation_rejects_malformed_json() {
         assert!(messages_from_conversation("not json").is_err());
         assert!(messages_from_conversation("{}").is_err());
+    }
+
+    #[tokio::test]
+    async fn chat_conversation_persists_verbatim_messages() {
+        use rig_core::completion::Message;
+
+        let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
+        let messages = vec![
+            Message::user("hello".to_string()),
+            Message::user("world".to_string()),
+        ];
+
+        persist_chat_conversation(&gremlin, &messages).await;
+
+        let json = gremlin
+            .state
+            .content("artifact://conversation.json", None)
+            .await
+            .expect("conversation artifact must be readable");
+        let round_tripped = messages_from_conversation(&json).expect("artifact must parse");
+        assert_eq!(
+            round_tripped, messages,
+            "the persisted artifact must be verbatim"
+        );
     }
 
     // --- agent ---

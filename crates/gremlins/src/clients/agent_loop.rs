@@ -2540,6 +2540,30 @@ mod tests {
         history
     }
 
+    fn bash_history(rounds: usize, output_len: usize) -> Vec<Message> {
+        let mut history = vec![Message::user("operator prompt")];
+        for index in 0..rounds {
+            let call = ToolCall::from_dual_wire(
+                "",
+                format!("bash_{index}"),
+                ToolFunction::new(
+                    ToolName::new("Bash".to_string()).unwrap(),
+                    serde_json::json!({"command": format!("cargo check {index}")}),
+                ),
+            );
+            history.push(assistant_tool_message("", &[], &[call]));
+            history.push(Message::tool_result(
+                CallId::from_wire(format!("bash_{index}")),
+                ToolName::new("Bash".to_string()).unwrap(),
+                format!("output for batch {index}\n{}", "x".repeat(output_len)),
+            ));
+            history.push(Message::user(format!(
+                "Actions taken this turn:\n- Bash cargo check {index}\n"
+            )));
+        }
+        history
+    }
+
     #[test]
     fn build_request_messages_compacts_mid_turn_with_sticky_prefix() {
         let mut history = padded_history(6, 3_000);
@@ -2576,6 +2600,66 @@ mod tests {
             expected.extend_from_slice(&history[cut_before..]);
             assert_eq!(request, expected);
         }
+    }
+
+    #[test]
+    fn build_request_messages_runs_two_passes_and_keeps_earlier_facts() {
+        let mut history = bash_history(6, 2_000);
+        let full_len = conversation::serialized_len(&history);
+        let opts = conversation::CompactionOpts {
+            threshold_bytes: full_len as u64 - 1,
+            target_bytes: full_len as u64 / 2,
+        };
+
+        let mut compacted = None;
+        let first = build_request_messages(&history, &mut compacted, 0, Some(opts), 0);
+        assert!(compacted.is_some(), "first pass must compact");
+        assert!(conversation::serialized_len(&first) < full_len);
+        let first_cut = compacted.as_ref().unwrap().cut;
+        let first_prefix = compacted.as_ref().unwrap().prefix.clone();
+        assert!(user_message_text(&first_prefix[0]).contains("Bash: cargo check 0"));
+
+        // Push the materialized view back over the soft threshold.
+        for batch in 6..12 {
+            let index = batch;
+            let call = ToolCall::from_dual_wire(
+                "",
+                format!("bash_{index}"),
+                ToolFunction::new(
+                    ToolName::new("Bash".to_string()).unwrap(),
+                    serde_json::json!({"command": format!("cargo check {index}")}),
+                ),
+            );
+            history.push(assistant_tool_message("", &[], &[call]));
+            history.push(Message::tool_result(
+                CallId::from_wire(format!("bash_{index}")),
+                ToolName::new("Bash".to_string()).unwrap(),
+                format!("output for batch {index}\n{}", "x".repeat(2_000)),
+            ));
+            history.push(Message::user(format!(
+                "Actions taken this turn:\n- Bash cargo check {index}\n"
+            )));
+        }
+
+        let second = build_request_messages(&history, &mut compacted, 0, Some(opts), 0);
+        let fresh = compacted
+            .as_ref()
+            .expect("a second compaction pass must be cached");
+        assert!(
+            fresh.cut != first_cut || fresh.prefix != first_prefix,
+            "the second over-threshold pass must choose a new sticky prefix"
+        );
+        assert!(conversation::serialized_len(&second) < conversation::serialized_len(&history));
+
+        let memory = user_message_text(&fresh.prefix[0]);
+        assert!(
+            memory.contains("Bash: cargo check 0"),
+            "facts from the first pass must survive into the second pass"
+        );
+        assert!(
+            memory.contains("Bash: cargo check 5"),
+            "facts from rounds before the second pass must be present"
+        );
     }
 
     #[test]

@@ -227,10 +227,14 @@ pub(crate) fn compact_working(
         return None;
     }
 
+    let current_turn_start = match granularity {
+        CutGranularity::Round { current_turn_start } => current_turn_start,
+        CutGranularity::Turn => history.len(),
+    };
+
     let message_lens: Vec<usize> = history.iter().map(serialized_message_len).collect();
     let ack =
         assistant_text("Prior context acknowledged. The retained verbatim conversation follows.");
-    let ack_len = serialized_message_len(&ack);
     let empty_memory_msg_len = serialized_message_len(&Message::user(String::new()));
     let cuts: Vec<usize> = plans.iter().map(|plan| plan.cut).collect();
     let window_keys = window_keys_by_boundary(history, &cuts);
@@ -245,17 +249,28 @@ pub(crate) fn compact_working(
         }
 
         if index > 0 {
-            let chunk_start = plans[index - 1].cut;
-            older.merge(extract_facts(&history[chunk_start..plan.cut]));
+            let archived_start = plans[index - 1].cut;
+            let archived_end = plan.cut;
+            if let Some(prior_start) = plan.prior_turn_start {
+                // The latest completed prior turn is retained verbatim for
+                // in-turn round cuts; do not fold its facts into memory too.
+                if archived_start < prior_start {
+                    older.merge(extract_facts(&history[archived_start..prior_start]));
+                }
+                if current_turn_start < archived_end {
+                    older.merge(extract_facts(&history[current_turn_start..archived_end]));
+                }
+            } else {
+                older.merge(extract_facts(&history[archived_start..archived_end]));
+            }
         }
 
-        let suffix_len = range_serialized_len(plan.cut, history.len(), &message_lens);
-        let protected_array_len = serialized_array_len_for_indices(&plan.protected, &message_lens);
+        let fixed_prefix = build_fixed_prefix(history, plan, current_turn_start, &ack);
+        let prefix_lens: Vec<usize> = fixed_prefix.iter().map(serialized_message_len).collect();
+        let window_lens = message_lens[plan.cut..].to_vec();
         let retained = RetainedPlan {
-            protected_count: plan.protected.len(),
-            protected_array_len,
-            window_array_len: suffix_len,
-            ack_len,
+            prefix_lens,
+            window_lens,
         };
 
         // The assembled transcript is linear in the memory message size:
@@ -278,10 +293,9 @@ pub(crate) fn compact_working(
             available,
             label,
         ) {
-            let mut prefix = Vec::with_capacity(2 + plan.protected.len());
+            let mut prefix = Vec::with_capacity(1 + fixed_prefix.len());
             prefix.push(Message::user(memory));
-            prefix.push(ack);
-            prefix.extend(plan.protected.iter().map(|&idx| history[idx].clone()));
+            prefix.extend(fixed_prefix);
             return Some(CompactedWorking {
                 prefix,
                 cut: plan.cut,
@@ -340,20 +354,21 @@ fn assembled_array_len(part_lens: &[usize]) -> usize {
 }
 
 struct RetainedPlan {
-    protected_count: usize,
-    protected_array_len: usize,
-    window_array_len: usize,
-    ack_len: usize,
+    /// Serialized lengths of every fixed prefix message after the memory
+    /// message: acknowledgement, protected prior-turn messages, merged
+    /// operator injections, and any role separator.
+    prefix_lens: Vec<usize>,
+    /// Serialized lengths of the verbatim window messages.
+    window_lens: Vec<usize>,
 }
 
 impl RetainedPlan {
     fn working_len(&self, memory_msg_len: usize) -> usize {
-        let mut parts = vec![memory_msg_len, self.ack_len];
-        if self.protected_count > 0 {
-            parts.push(self.protected_array_len);
-        }
-        parts.push(self.window_array_len);
-        assembled_array_len(&parts)
+        let mut lens = Vec::with_capacity(1 + self.prefix_lens.len() + self.window_lens.len());
+        lens.push(memory_msg_len);
+        lens.extend_from_slice(&self.prefix_lens);
+        lens.extend_from_slice(&self.window_lens);
+        assembled_array_len(&lens)
     }
 }
 
@@ -418,7 +433,12 @@ fn is_text_user_message(message: &Message) -> bool {
 #[derive(Clone, Debug)]
 struct CutPlan {
     cut: usize,
-    protected: Vec<usize>,
+    /// Start of the most recent completed prior turn to keep verbatim when
+    /// the cut is inside the current turn.
+    prior_turn_start: Option<usize>,
+    /// User-text messages in the current turn that are carried verbatim ahead
+    /// of the window: the operator prompt and `[operator]:` injections.
+    protected_user_indices: Vec<usize>,
 }
 
 fn cut_plans(history: &[Message], granularity: CutGranularity) -> Vec<CutPlan> {
@@ -427,21 +447,31 @@ fn cut_plans(history: &[Message], granularity: CutGranularity) -> Vec<CutPlan> {
             .into_iter()
             .map(|cut| CutPlan {
                 cut,
-                protected: Vec::new(),
+                prior_turn_start: None,
+                protected_user_indices: Vec::new(),
             })
             .collect(),
         CutGranularity::Round { current_turn_start } => {
+            let turn_boundaries = chat_turn_boundaries(history);
+            let latest_prior_turn = turn_boundaries
+                .iter()
+                .copied()
+                .filter(|&cut| cut < current_turn_start)
+                .max();
+
             let mut plans = vec![CutPlan {
                 cut: 0,
-                protected: Vec::new(),
+                prior_turn_start: None,
+                protected_user_indices: Vec::new(),
             }];
 
             // Prior turns are still cut at chat-turn granularity.
-            for cut in chat_turn_boundaries(history) {
+            for cut in turn_boundaries {
                 if cut > 0 && cut < current_turn_start {
                     plans.push(CutPlan {
                         cut,
-                        protected: Vec::new(),
+                        prior_turn_start: None,
+                        protected_user_indices: Vec::new(),
                     });
                 }
             }
@@ -454,7 +484,12 @@ fn cut_plans(history: &[Message], granularity: CutGranularity) -> Vec<CutPlan> {
                 {
                     plans.push(CutPlan {
                         cut: index,
-                        protected: round_protected_indices(history, current_turn_start, index),
+                        prior_turn_start: latest_prior_turn,
+                        protected_user_indices: round_protected_indices(
+                            history,
+                            current_turn_start,
+                            index,
+                        ),
                     });
                 }
             }
@@ -495,6 +530,41 @@ fn round_protected_indices(
     protected
 }
 
+fn build_fixed_prefix(
+    history: &[Message],
+    plan: &CutPlan,
+    current_turn_start: usize,
+    ack: &Message,
+) -> Vec<Message> {
+    let mut prefix = Vec::new();
+    prefix.push(ack.clone());
+
+    if let Some(prior_start) = plan.prior_turn_start {
+        prefix.extend_from_slice(&history[prior_start..current_turn_start]);
+    }
+
+    if !plan.protected_user_indices.is_empty() {
+        let mut texts = Vec::with_capacity(plan.protected_user_indices.len());
+        for &index in &plan.protected_user_indices {
+            let text = user_text(&history[index]);
+            if !text.is_empty() {
+                texts.push(text);
+            }
+        }
+        if !texts.is_empty() {
+            prefix.push(Message::user(texts.join("\n")));
+            // The verbatim window starts at a user-text round marker. Keep the
+            // role sequence valid by separating this retained user message
+            // from that following user message.
+            prefix.push(assistant_text(
+                "Context compacted; continuing with the current turn.",
+            ));
+        }
+    }
+
+    prefix
+}
+
 fn memory_label(granularity: CutGranularity) -> &'static str {
     match granularity {
         CutGranularity::Turn => "Conversation memory (compacted from earlier turns).\n",
@@ -502,14 +572,6 @@ fn memory_label(granularity: CutGranularity) -> &'static str {
             "Conversation memory (compacted from earlier context, including earlier rounds this turn).\n"
         }
     }
-}
-
-fn serialized_array_len_for_indices(indices: &[usize], message_lens: &[usize]) -> usize {
-    if indices.is_empty() {
-        return 2;
-    }
-    let body: usize = indices.iter().map(|&idx| message_lens[idx]).sum();
-    2 + body + indices.len() - 1
 }
 
 // ---------------------------------------------------------------------------
@@ -1048,6 +1110,7 @@ fn serialized_message_len(message: &Message) -> usize {
         .unwrap_or(usize::MAX)
 }
 
+#[cfg(test)]
 fn range_serialized_len(start: usize, end: usize, message_lens: &[usize]) -> usize {
     let count = end - start;
     if count == 0 {
@@ -1655,7 +1718,8 @@ mod tests {
         );
         let cuts: Vec<usize> = plans.iter().map(|plan| plan.cut).collect();
         assert_eq!(cuts, vec![0, 4]);
-        assert_eq!(plans[1].protected, vec![0, 3]);
+        assert_eq!(plans[1].protected_user_indices, vec![0, 3]);
+        assert_eq!(plans[1].prior_turn_start, None);
     }
 
     #[test]
@@ -1774,6 +1838,165 @@ mod tests {
             "a single oversized round must not be cut mid-round"
         );
         assert_eq!(compact_round(&history, 0, budget, 0), history);
+    }
+
+    #[test]
+    fn round_compaction_keeps_latest_prior_turn_verbatim() {
+        let mut history = vec![
+            user_prompt("prior operator"),
+            assistant_with_tools(&[tool_call(
+                "read_prior",
+                "Read",
+                serde_json::json!({"file_path": "prior.txt"}),
+            )]),
+            tool_result("Read", "read_prior", "prior contents"),
+        ];
+        let current_turn_start = history.len();
+        history.push(user_prompt("current operator"));
+        for batch in 0..3 {
+            let id = format!("bash_{batch}");
+            history.push(assistant_with_tools(&[tool_call(
+                &id,
+                "Bash",
+                serde_json::json!({"command": format!("cargo check {batch}")}),
+            )]));
+            history.push(tool_result(
+                "Bash",
+                &id,
+                &format!("output for batch {batch}\n{}", "x".repeat(1024)),
+            ));
+            history.push(user_prompt(&format!(
+                "Actions taken this turn:\n- Bash cargo check {batch}\n"
+            )));
+        }
+
+        let original_len = serialized_len(&history);
+        let working = compact_round(&history, current_turn_start, original_len as u64 - 1, 0);
+        assert!(
+            serialized_len(&working) < original_len,
+            "round compaction should shrink the transcript"
+        );
+
+        let prior = &history[0..current_turn_start];
+        assert!(
+            working.windows(prior.len()).any(|window| window == prior),
+            "the most recent completed prior turn must remain verbatim"
+        );
+    }
+
+    #[test]
+    fn round_compaction_separates_protected_users_from_tail() {
+        let mut history = vec![user_prompt("operator prompt")];
+        for batch in 0..4 {
+            let id = format!("bash_{batch}");
+            history.push(assistant_with_tools(&[tool_call(
+                &id,
+                "Bash",
+                serde_json::json!({"command": format!("cargo check {batch}")}),
+            )]));
+            history.push(tool_result(
+                "Bash",
+                &id,
+                &format!("output for batch {batch}\n{}", "x".repeat(1024)),
+            ));
+            history.push(user_prompt(&format!(
+                "Actions taken this turn:\n- Bash cargo check {batch}\n"
+            )));
+        }
+
+        let compacted = compact_working(
+            &history,
+            serialized_len(&history) as u64 - 1,
+            0,
+            CutGranularity::Round {
+                current_turn_start: 0,
+            },
+        )
+        .expect("round compaction must find a cut");
+
+        assert!(
+            matches!(compacted.prefix.last(), Some(Message::Assistant { .. })),
+            "the retained user messages must be separated from the user-text tail"
+        );
+        assert!(
+            is_text_user_message(&history[compacted.cut]),
+            "the cut must still land on a user-text round marker"
+        );
+
+        let working = compacted.materialize(&history);
+        let cut_in_working = compacted.prefix.len();
+        assert!(
+            matches!(working[cut_in_working - 1], Message::Assistant { .. }),
+            "the message immediately before the tail must not be user-role"
+        );
+        assert!(
+            is_text_user_message(&working[cut_in_working]),
+            "the tail must start on the user-text round marker"
+        );
+    }
+
+    #[test]
+    fn round_compaction_preserves_facts_across_two_passes() {
+        let mut history = vec![user_prompt("operator prompt")];
+        for batch in 0..4 {
+            let id = format!("bash_{batch}");
+            history.push(assistant_with_tools(&[tool_call(
+                &id,
+                "Bash",
+                serde_json::json!({"command": format!("cargo check {batch}")}),
+            )]));
+            history.push(tool_result(
+                "Bash",
+                &id,
+                &format!("output for batch {batch}\n{}", "x".repeat(1024)),
+            ));
+            history.push(user_prompt(&format!(
+                "Actions taken this turn:\n- Bash cargo check {batch}\n"
+            )));
+        }
+
+        let budget = serialized_len(&history) as u64 * 2 / 3;
+        let first = compact_round(&history, 0, budget, 0);
+        assert!(
+            serialized_len(&first) < serialized_len(&history),
+            "first pass must compact"
+        );
+        assert!(
+            user_text(&first[0]).contains("Bash: cargo check 0"),
+            "first pass must retain the earliest round fact"
+        );
+
+        for batch in 4..8 {
+            let id = format!("bash_{batch}");
+            history.push(assistant_with_tools(&[tool_call(
+                &id,
+                "Bash",
+                serde_json::json!({"command": format!("cargo check {batch}")}),
+            )]));
+            history.push(tool_result(
+                "Bash",
+                &id,
+                &format!("output for batch {batch}\n{}", "x".repeat(1024)),
+            ));
+            history.push(user_prompt(&format!(
+                "Actions taken this turn:\n- Bash cargo check {batch}\n"
+            )));
+        }
+
+        let second = compact_round(&history, 0, budget, 0);
+        assert!(
+            serialized_len(&second) < serialized_len(&history),
+            "second pass must compact"
+        );
+        let memory = user_text(&second[0]);
+        assert!(
+            memory.contains("Bash: cargo check 0"),
+            "facts from the first pass must survive into the second pass"
+        );
+        assert!(
+            memory.contains("Bash: cargo check 3"),
+            "facts extracted just before the second pass must be present"
+        );
     }
 
     #[test]
