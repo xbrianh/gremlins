@@ -12,6 +12,7 @@ use super::model::GremlinsModel;
 use super::params::ResolvedParams;
 use super::protocol::CompletedRun;
 use super::task::TaskModelSelector;
+use crate::executor::conversation::CompactionOpts;
 
 #[derive(Debug)]
 pub struct RunParams {
@@ -58,6 +59,10 @@ pub struct RunParams {
     /// roles) instead of building from a bare system-prompt + user-prompt pair.
     /// The user prompt is still appended as the next user message.
     pub prepopulated_messages: Option<Vec<Message>>,
+    /// Chat-only soft compaction settings. `Some` enables mid-loop compaction
+    /// (and the first-request/read-time pass inside the agent loop); `None`
+    /// keeps the loop's byte-accounting behavior unchanged.
+    pub(crate) compaction_opts: Option<CompactionOpts>,
 }
 
 impl Clone for RunParams {
@@ -84,6 +89,7 @@ impl Clone for RunParams {
             cancel_token: self.cancel_token.clone(),
             stream_events: self.stream_events.clone(),
             prepopulated_messages: self.prepopulated_messages.clone(),
+            compaction_opts: self.compaction_opts,
         }
     }
 }
