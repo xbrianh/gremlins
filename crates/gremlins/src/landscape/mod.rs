@@ -260,12 +260,79 @@ fn same_file(canonical_cache: &Path, path: &Path) -> bool {
     }
 }
 
+/// Format the captured outlines as the structural landscape block injected
+/// into an agent stage's system prompt.
+///
+/// An empty landscape (no recognized files, or no outlineable items) formats
+/// to an empty string so callers can skip the block entirely.
+pub(crate) fn format_landscape_block(outlines: &[FileOutline]) -> String {
+    if outlines.iter().all(|outline| outline.items.is_empty()) {
+        return String::new();
+    }
+
+    let mut block = String::new();
+    block.push_str("<!-- BEGIN LANDSCAPE BLOCK -->\n");
+    block.push_str(
+        "The block below is a structural outline captured by the harness at stage start.\n",
+    );
+    block.push_str("Line numbers are exact at capture time but may drift if files are edited.\n");
+    block.push_str("Use OutlineFile for current line numbers after edits.\n\n");
+
+    for outline in outlines {
+        if outline.items.is_empty() {
+            continue;
+        }
+        block.push_str(&format!("{}:\n", outline.path.display()));
+        for item in &outline.items {
+            block.push_str(&format!(
+                "{:>6}  {:<8} {}\n",
+                item.line, item.kind, item.name
+            ));
+        }
+        block.push('\n');
+    }
+
+    block.push_str("<!-- END LANDSCAPE BLOCK -->\n");
+    block
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn outline_items(explorer: &LandscapeExplorer, path: &Path) -> Vec<OutlineItem> {
         explorer.outline_file(path).unwrap()
+    }
+
+    #[test]
+    fn format_landscape_block_is_empty_without_outlines() {
+        assert_eq!(format_landscape_block(&[]), "");
+    }
+
+    #[test]
+    fn format_landscape_block_skips_empty_outlines() {
+        let outline = FileOutline {
+            path: PathBuf::from("src/main.rs"),
+            items: Vec::new(),
+        };
+        assert_eq!(format_landscape_block(std::slice::from_ref(&outline)), "");
+    }
+
+    #[test]
+    fn format_landscape_block_formats_files_and_items() {
+        let outline = FileOutline {
+            path: PathBuf::from("src/main.rs"),
+            items: vec![
+                OutlineItem::new(FN, "main", 12),
+                OutlineItem::new(STRUCT, "Config", 45),
+            ],
+        };
+        let block = format_landscape_block(std::slice::from_ref(&outline));
+        assert!(block.starts_with("<!-- BEGIN LANDSCAPE BLOCK -->\n"));
+        assert!(block.contains("src/main.rs:\n"));
+        assert!(block.contains("    12  fn       main\n"));
+        assert!(block.contains("    45  struct   Config\n"));
+        assert!(block.ends_with("<!-- END LANDSCAPE BLOCK -->\n"));
     }
 
     #[test]

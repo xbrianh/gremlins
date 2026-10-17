@@ -33,6 +33,7 @@ use crate::executor::parallel::run_parallel;
 use crate::executor::state;
 use crate::executor::state::{Checkout, Collision, FileSystemStateStore, StateStore};
 use crate::executor::supervisor::get_run_map;
+use crate::executor::system_prompt::{landscape_block, SystemPrompt};
 use crate::executor::vars;
 use crate::executor::RunError;
 use indexmap::IndexMap;
@@ -410,6 +411,13 @@ async fn run_agent(
 
     std::fs::create_dir_all(&artifact_dir)?;
 
+    // The landscape is recomputed before every agent stage. After an `exec`
+    // stage mutates files, the next agent stage therefore sees a fresh
+    // snapshot; the (mtime, size) cache keeps this incrementally cheap.
+    let system_prompt = SystemPrompt::new(prepared.system_prompt())
+        .with_landscape(landscape_block(gremlin).await)
+        .assemble();
+
     let stage_env = gremlin.env.clone();
 
     let task_models = crate::clients::task::build_task_selector(
@@ -494,7 +502,7 @@ async fn run_agent(
             .iter()
             .map(PathBuf::from)
             .collect(),
-        system_prompt: Some(prepared.system_prompt()),
+        system_prompt: Some(system_prompt),
         gremlin_id: Some(gremlin.id.to_string()),
         log_tx: gremlin.runtime_config.log_tx.clone(),
         base_env: Some(gremlin.env.clone()),
