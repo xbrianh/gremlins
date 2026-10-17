@@ -59,6 +59,8 @@ pub struct Theme {
     pub ivory: Color,
     /// Startup spire gold gradient step.
     pub sunburst: Color,
+    /// Wordmark banner blue glow — soft cornflower for a faint luminous impression.
+    pub wordmark: Color,
 }
 
 /// The default (dark) theme.
@@ -88,4 +90,5 @@ pub const DEFAULT_THEME: Theme = Theme {
     midnight: Color::Rgb(12, 14, 20),
     ivory: Color::Rgb(245, 240, 225),
     sunburst: Color::Rgb(232, 196, 88),
+    wordmark: Color::Rgb(120, 155, 215),
 };
