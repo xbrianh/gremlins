@@ -6,12 +6,14 @@ use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use rig_core::completion::message::{
-    AssistantContent, CallId, Reasoning, Sealed, ToolCall, ToolName,
+    AssistantContent, CallId, Reasoning, Sealed, ToolCall, ToolName, UserContent,
 };
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
 use rig_core::error::ProviderError;
 use rig_core::streaming::{Item, StreamEvent};
 use tokio::sync::{mpsc, Notify};
+
+use crate::executor::conversation;
 
 use super::backend::{ClientError, RunParams};
 use super::interactive::{
@@ -173,6 +175,8 @@ pub(crate) struct RunContext {
     pub(crate) stream_events: Option<StreamEventSender>,
     /// Pre-populated message history carried into the loop's internal history.
     pub(crate) prepopulated_messages: Option<Vec<Message>>,
+    /// Chat-only soft compaction settings (mirrors `RunParams`).
+    pub(crate) compaction_opts: Option<conversation::CompactionOpts>,
 }
 
 pub(crate) struct LoopOpts<'a> {
@@ -340,6 +344,7 @@ pub(crate) async fn run_agent_loop(
         ctx.stream_events.clone(),
         tool_output_rx,
         ctx.prepopulated_messages.clone(),
+        ctx.compaction_opts,
     )
     .await
 }
@@ -401,6 +406,7 @@ pub(crate) async fn run_agent_loop_nested(
         None,
         None,
         prepopulated_messages,
+        None,
     )
     .await;
     if let Some(ref tx) = log_tx {
@@ -583,6 +589,74 @@ fn artifact_reminder(missing: &[&PathBuf]) -> String {
     )
 }
 
+fn user_message_text(message: &Message) -> String {
+    match message {
+        Message::User { content } => content
+            .iter()
+            .filter_map(|item| match item {
+                UserContent::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => String::new(),
+    }
+}
+
+/// Build the message list for the next `CompletionRequest`.
+///
+/// `history` is the verbatim source of truth and is never mutated here. When
+/// compaction is enabled, a cached `CompactedWorking` keeps the request prefix
+/// byte-stable across rounds; a new pass is triggered only when the current
+/// materialized view exceeds the soft threshold.
+fn build_request_messages(
+    history: &[Message],
+    compacted: &mut Option<conversation::CompactedWorking>,
+    current_turn_start: usize,
+    opts: Option<conversation::CompactionOpts>,
+    overhead: usize,
+) -> Vec<Message> {
+    let Some(opts) = opts else {
+        return history.to_vec();
+    };
+
+    if let Some(cached) = compacted.as_ref() {
+        if cached.cut > history.len() {
+            // History was popped (for example a mid-tool pause re-run); the
+            // old cut no longer points into the verbatim transcript.
+            *compacted = None;
+        }
+    }
+
+    let working = match compacted.as_ref() {
+        Some(cached) => cached.materialize(history),
+        None => history.to_vec(),
+    };
+
+    if conversation::serialized_len(&working) + overhead <= opts.threshold_bytes as usize {
+        return working;
+    }
+
+    let granularity = if history.len() > current_turn_start {
+        conversation::CutGranularity::Round { current_turn_start }
+    } else {
+        conversation::CutGranularity::Turn
+    };
+
+    if let Some(fresh) =
+        conversation::compact_working(history, opts.target_bytes, overhead, granularity)
+    {
+        let request = fresh.materialize(history);
+        *compacted = Some(fresh);
+        request
+    } else {
+        // The newest round alone exceeds the target (or the transcript has no
+        // valid cut). Return the input unchanged and let the hard
+        // `max-prompt-bytes` ceiling fail the request; cutting mid-round would
+        // orphan an assistant tool-use from its results.
+        working
+    }
+}
+
 // ── agent loop ────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -608,6 +682,7 @@ async fn run_agent_loop_core(
     stream_events: Option<StreamEventSender>,
     tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
     prepopulated_messages: Option<Vec<Message>>,
+    compaction_opts: Option<conversation::CompactionOpts>,
 ) -> Result<CompletedRun, ClientError> {
     // Destructure the interactive session into its components so we can
     // thread them independently through the loop.
@@ -623,6 +698,10 @@ async fn run_agent_loop_core(
     let mut live_output_rx = tool_output_rx;
     let mut history: Vec<Message> = prepopulated_messages.unwrap_or_default();
     let mut next_prompt = Message::user(prompt.to_string());
+    // `history` is the verbatim source of truth for the whole loop. The
+    // compacted request view is rebuilt around it but never replaces it.
+    let current_turn_start = history.len();
+    let mut compacted: Option<conversation::CompactedWorking> = None;
     let mut turns: usize = 0;
     let mut turn_num: usize = 0;
     let mut turn_retries: usize = 0;
@@ -775,8 +854,22 @@ async fn run_agent_loop_core(
         // queue latency, not just server-side time-to-first-token.
         let turn_start = Instant::now();
 
+        let next_prompt_text = user_message_text(&next_prompt);
+        let overhead = conversation::completion_request_overhead(
+            &next_prompt_text,
+            system_prompt.as_deref(),
+            tool_defs,
+        );
+        let request_messages = build_request_messages(
+            &history,
+            &mut compacted,
+            current_turn_start,
+            compaction_opts,
+            overhead,
+        );
+
         let mut builder = CompletionRequest::new(next_prompt.clone())
-            .messages(history.clone())
+            .messages(request_messages)
             .tools(tool_defs.to_vec());
         if let Some(ref sys) = system_prompt {
             builder = builder.preamble(sys.clone());
@@ -2419,6 +2512,7 @@ mod tests {
                 cancel_token: None,
                 stream_events: None,
                 prepopulated_messages: None,
+                compaction_opts: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
@@ -2427,7 +2521,97 @@ mod tests {
             completion_nudge_budget: 0,
             stream_events: None,
             prepopulated_messages: None,
+            compaction_opts: None,
         }
+    }
+
+    fn padded_history(rounds: usize, assistant_text_len: usize) -> Vec<Message> {
+        let mut history = vec![Message::user("operator prompt")];
+        for index in 0..rounds {
+            history.push(assistant_tool_message(
+                &"x".repeat(assistant_text_len),
+                &[],
+                &[],
+            ));
+            history.push(Message::user(format!(
+                "Actions taken this turn:\n- round {index}\n"
+            )));
+        }
+        history
+    }
+
+    #[test]
+    fn build_request_messages_compacts_mid_turn_with_sticky_prefix() {
+        let mut history = padded_history(6, 3_000);
+        let full_len = conversation::serialized_len(&history);
+        let opts = conversation::CompactionOpts {
+            threshold_bytes: full_len as u64 - 1,
+            target_bytes: full_len as u64 / 2,
+        };
+
+        let mut compacted = None;
+        let first = build_request_messages(&history, &mut compacted, 0, Some(opts), 0);
+        assert!(
+            compacted.is_some(),
+            "an over-threshold multi-round turn must compact"
+        );
+        assert!(conversation::serialized_len(&first) < full_len);
+
+        let prefix_before = compacted.as_ref().unwrap().prefix.clone();
+        let cut_before = compacted.as_ref().unwrap().cut;
+
+        // Append several small rounds. The cached prefix must stay
+        // byte-identical and no second compaction pass may run while the view
+        // is under threshold.
+        for round in 0..5 {
+            history.push(assistant_tool_message("small", &[], &[]));
+            history.push(Message::user(format!(
+                "Actions taken this turn:\n- small {round}\n"
+            )));
+            let request = build_request_messages(&history, &mut compacted, 0, Some(opts), 0);
+            assert!(compacted.is_some());
+            assert_eq!(compacted.as_ref().unwrap().prefix, prefix_before);
+            assert_eq!(compacted.as_ref().unwrap().cut, cut_before);
+            let mut expected = prefix_before.clone();
+            expected.extend_from_slice(&history[cut_before..]);
+            assert_eq!(request, expected);
+        }
+    }
+
+    #[test]
+    fn build_request_messages_uses_verbatim_history_without_opts() {
+        let history = padded_history(3, 1_000);
+        let mut compacted = None;
+        let request = build_request_messages(&history, &mut compacted, 0, None, 0);
+        assert_eq!(request, history);
+        assert!(compacted.is_none());
+    }
+
+    #[test]
+    fn build_request_messages_resets_cached_cut_after_history_pop() {
+        let mut history = padded_history(6, 3_000);
+        let full_len = conversation::serialized_len(&history);
+        let opts = conversation::CompactionOpts {
+            threshold_bytes: full_len as u64 - 1,
+            target_bytes: full_len as u64 / 2,
+        };
+
+        let mut compacted = None;
+        let _ = build_request_messages(&history, &mut compacted, 0, Some(opts), 0);
+        assert!(compacted.is_some());
+
+        // Simulate a mid-tool pause re-run popping messages back below the cut.
+        while history.len() > compacted.as_ref().unwrap().cut {
+            history.pop();
+        }
+        history.pop();
+
+        let request = build_request_messages(&history, &mut compacted, 0, Some(opts), 0);
+        assert!(
+            compacted.is_none() || compacted.as_ref().is_some_and(|c| c.cut <= history.len()),
+            "a stale cached cut must not survive a history pop"
+        );
+        assert_eq!(request, history);
     }
 
     #[tokio::test]
@@ -5088,6 +5272,7 @@ mod tests {
                 Some(StreamEventSender::Broadcast(evt_tx_clone)),
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -5196,6 +5381,7 @@ mod tests {
                 Some(StreamEventSender::Broadcast(evt_tx_clone)),
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -5291,6 +5477,7 @@ mod tests {
                 Some(StreamEventSender::Broadcast(evt_tx_clone)),
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -5373,6 +5560,7 @@ mod tests {
                 &None,
                 Some(session),
                 Some(StreamEventSender::Broadcast(evt_tx_clone)),
+                None,
                 None,
                 None,
             )

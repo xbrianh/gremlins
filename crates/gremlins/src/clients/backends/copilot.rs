@@ -574,6 +574,7 @@ impl Backend for CopilotBackend {
             completion_nudge_budget: crate::config::completion_nudge_budget(),
             stream_events: params.stream_events.clone(),
             prepopulated_messages: params.prepopulated_messages.clone(),
+            compaction_opts: params.compaction_opts,
         };
         *self.state.last_ctx.lock().unwrap() = Some(ctx.clone());
 
