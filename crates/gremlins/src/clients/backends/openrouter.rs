@@ -146,15 +146,8 @@ impl Backend for OpenRouterBackend {
         run_openai_compat(&self.state, params, interactive, Some(classify), PROVIDER_NAME).await
     }
 
-    async fn resume(&self) -> Result<CompletedRun, ClientError> {
-        let params = {
-            let guard = self.state.last_ctx.lock().unwrap();
-            let ctx = guard.as_ref().ok_or_else(|| ClientError::Runtime {
-                message: "resume() called before run()".into(),
-            })?;
-            ctx.params.clone()
-        };
-        self.run(params, None).await
+    fn last_run_params(&self) -> Result<RunParams, ClientError> {
+        self.state.last_run_params()
     }
 
     fn reap_all(&self, gremlin_id: &str) {

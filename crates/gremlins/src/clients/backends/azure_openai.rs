@@ -12,6 +12,7 @@ use crate::clients::agent_loop::{
 };
 use crate::clients::azure_openai_responses_http::AzureResponsesHttpClient;
 use crate::clients::backend::{Backend, ClientError, RunParams};
+use crate::clients::cancels::CancelsMap;
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::model::GremlinsModel;
 use crate::clients::openai_protocol;
@@ -47,7 +48,7 @@ struct AzureOpenAiRunState {
     tool_filter: Option<Vec<String>>,
     resolved: ResolvedParams,
     last_ctx: Mutex<Option<RunContext>>,
-    cancels: Mutex<HashMap<String, HashMap<u64, Arc<CancelToken>>>>,
+    cancels: CancelsMap,
     next_id: AtomicU64,
     log_label: String,
 }
@@ -66,25 +67,7 @@ impl AzureOpenAiRunState {
 
     /// Build a [`RunContext`] from [`RunParams`] and stash it in `last_ctx` for resume.
     fn prepare_context(&self, params: RunParams) -> RunContext {
-        let idle_timeout = params
-            .idle_timeout
-            .unwrap_or_else(crate::config::stream_idle_timeout);
-        let prefix = if params.label.is_empty() {
-            String::new()
-        } else {
-            format!("[{}] ", params.label)
-        };
-        let ctx = RunContext {
-            params: params.clone(),
-            prefix: prefix.clone(),
-            idle_timeout,
-            expected_artifact_paths: params.expected_artifact_paths.clone(),
-            reminder_budget: crate::config::artifact_reminder_budget(),
-            completion_nudge_budget: crate::config::completion_nudge_budget(),
-            stream_events: params.stream_events.clone(),
-            prepopulated_messages: params.prepopulated_messages.clone(),
-            compaction_opts: params.compaction_opts,
-        };
+        let ctx = RunContext::from_params(params);
         *self.last_ctx.lock().unwrap() = Some(ctx.clone());
         ctx
     }
@@ -101,20 +84,7 @@ impl AzureOpenAiRunState {
         let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-        // Check+insert under the cancels lock so reap_all cannot
-        // remove the gremlin entry between the check and insert.
-        {
-            let mut guard = self.cancels.lock().unwrap();
-            if cancel.is_cancelled() {
-                return Err(ClientError::Runtime {
-                    message: "cancelled".into(),
-                });
-            }
-            guard
-                .entry(gremlin_id.clone())
-                .or_default()
-                .insert(id, cancel.clone());
-        }
+        self.cancels.insert(&gremlin_id, id, cancel.clone())?;
 
         let model_name = self.effective_model(ctx.params.model.as_deref());
 
@@ -193,14 +163,7 @@ impl AzureOpenAiRunState {
             }
         };
 
-        if let Ok(mut guard) = self.cancels.lock() {
-            if let Some(inner) = guard.get_mut(&gremlin_id) {
-                inner.remove(&id);
-                if inner.is_empty() {
-                    guard.remove(&gremlin_id);
-                }
-            }
-        }
+        self.cancels.remove(&gremlin_id, id);
         result
     }
 }
@@ -344,7 +307,7 @@ impl AzureOpenAiBackend {
                 tool_filter,
                 resolved,
                 last_ctx: Mutex::new(None),
-                cancels: Mutex::new(HashMap::new()),
+                cancels: CancelsMap::default(),
                 next_id: AtomicU64::new(1),
                 log_label: "AzureOpenAiBackend".to_string(),
             },
@@ -365,34 +328,16 @@ impl Backend for AzureOpenAiBackend {
         self.state.single_attempt(&params.prompt, ctx, cancel, interactive).await
     }
 
-    async fn resume(&self) -> Result<CompletedRun, ClientError> {
-        let params = {
-            let guard = self.state.last_ctx.lock().unwrap();
-            let ctx = guard.as_ref().ok_or_else(|| ClientError::Runtime {
-                message: "resume() called before run()".into(),
-            })?;
-            ctx.params.clone()
-        };
-        self.run(params, None).await
+    fn last_run_params(&self) -> Result<RunParams, ClientError> {
+        let guard = self.state.last_ctx.lock().unwrap();
+        let ctx = guard.as_ref().ok_or_else(|| ClientError::Runtime {
+            message: "resume() called before run()".into(),
+        })?;
+        Ok(ctx.params.clone())
     }
 
     fn reap_all(&self, gremlin_id: &str) {
-        if let Ok(mut guard) = self.state.cancels.lock() {
-            let tokens: Vec<_> = guard
-                .remove(gremlin_id)
-                .into_iter()
-                .flat_map(|m| m.into_values())
-                .collect();
-            let count = tokens.len();
-            log::debug!(
-                "{}::reap_all: cancelling {count} in-flight token(s) for gremlin_id={gremlin_id} (model={})",
-                self.state.log_label,
-                self.state.model,
-            );
-            for token in &tokens {
-                token.cancel();
-            }
-        }
+        self.state.cancels.reap_all(gremlin_id, &self.state.log_label, &self.state.model);
     }
 
     fn make_model(&self, spec: &str) -> Option<GremlinsModel> {
@@ -701,7 +646,7 @@ mod tests {
             tool_filter: None,
             resolved,
             last_ctx: Mutex::new(None),
-            cancels: Mutex::new(HashMap::new()),
+            cancels: CancelsMap::default(),
             next_id: AtomicU64::new(1),
             log_label: "test".into(),
         };
@@ -727,6 +672,14 @@ mod tests {
             .with_base_url("https://example.openai.azure.com")
             .client();
 
+        let backlog = CancelsMap::default();
+        let a = CancelToken::new();
+        let b = CancelToken::new();
+        let sibling = CancelToken::new();
+        backlog.insert("gr-test", 1, a.clone()).unwrap();
+        backlog.insert("gr-test", 2, b.clone()).unwrap();
+        backlog.insert("gr-sibling", 3, sibling.clone()).unwrap();
+
         let backend = AzureOpenAiBackend {
             state: AzureOpenAiRunState {
                 client_state: AzureOpenAiClientState::Static(Box::new(client)),
@@ -734,56 +687,15 @@ mod tests {
                 tool_filter: None,
                 resolved: ResolvedParams::default(),
                 last_ctx: Mutex::new(None),
-                cancels: Mutex::new(HashMap::new()),
+                cancels: backlog,
                 next_id: AtomicU64::new(1),
                 log_label: "test".into(),
             },
         };
-        let a = CancelToken::new();
-        let b = CancelToken::new();
-        let sibling = CancelToken::new();
-        backend
-            .state
-            .cancels
-            .lock()
-            .unwrap()
-            .entry("gr-test".to_string())
-            .or_default()
-            .insert(1, a.clone());
-        backend
-            .state
-            .cancels
-            .lock()
-            .unwrap()
-            .entry("gr-test".to_string())
-            .or_default()
-            .insert(2, b.clone());
-        backend
-            .state
-            .cancels
-            .lock()
-            .unwrap()
-            .entry("gr-sibling".to_string())
-            .or_default()
-            .insert(3, sibling.clone());
         backend.reap_all("gr-test");
         assert!(a.is_cancelled());
         assert!(b.is_cancelled());
-        assert!(backend
-            .state
-            .cancels
-            .lock()
-            .unwrap()
-            .get("gr-test")
-            .is_none());
         assert!(!sibling.is_cancelled());
-        assert!(backend
-            .state
-            .cancels
-            .lock()
-            .unwrap()
-            .get("gr-sibling")
-            .is_some());
     }
 
     // ── auth method tests ─────────────────────────────────────────────

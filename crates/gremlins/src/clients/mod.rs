@@ -3,6 +3,7 @@ pub(crate) mod anthropic_bearer_http;
 pub(crate) mod azure_openai_responses_http;
 pub mod backend;
 pub mod backends;
+pub(crate) mod cancels;
 pub mod client;
 pub(crate) mod config;
 pub(crate) mod interactive;

@@ -545,6 +545,15 @@ impl Backend for CmdBackend {
         }
     }
 
+    fn last_run_params(&self) -> Result<RunParams, ClientError> {
+        // CmdBackend uses its own resume() path with per-gremlin context
+        // tracked via self.ctx / self.last_gremlin_id, not via a single
+        // last_ctx field.  The default resume() is overridden below.
+        Err(ClientError::Runtime {
+            message: "CmdBackend does not expose last_run_params; use resume()".into(),
+        })
+    }
+
     async fn resume(&self) -> Result<CompletedRun, ClientError> {
         let (prompt, on_timeout_prompt, _prefix, last_session_id, gremlin_id) = {
             let gid = self.last_gremlin_id.lock().unwrap();

@@ -218,6 +218,31 @@ pub(crate) struct RunContext {
     pub(crate) compaction_opts: Option<conversation::CompactionOpts>,
 }
 
+impl RunContext {
+    pub(crate) fn from_params(params: RunParams) -> Self {
+        let idle_timeout = params
+            .idle_timeout
+            .unwrap_or_else(crate::config::stream_idle_timeout);
+        let prefix = if params.label.is_empty() {
+            String::new()
+        } else {
+            format!("[{}] ", params.label)
+        };
+        let compaction_opts = params.compaction_opts;
+        Self {
+            idle_timeout,
+            prefix,
+            expected_artifact_paths: params.expected_artifact_paths.clone(),
+            reminder_budget: crate::config::artifact_reminder_budget(),
+            completion_nudge_budget: crate::config::completion_nudge_budget(),
+            stream_events: params.stream_events.clone(),
+            prepopulated_messages: params.prepopulated_messages.clone(),
+            compaction_opts,
+            params,
+        }
+    }
+}
+
 pub(crate) struct LoopOpts<'a> {
     pub(crate) extra: Option<serde_json::Value>,
     pub(crate) tool_filter: Option<&'a [String]>,

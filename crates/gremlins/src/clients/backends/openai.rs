@@ -80,15 +80,8 @@ impl Backend for OpenAiBackend {
         run_openai_compat(&self.state, params, interactive, None, PROVIDER_NAME).await
     }
 
-    async fn resume(&self) -> Result<CompletedRun, ClientError> {
-        let params = {
-            let guard = self.state.last_ctx.lock().unwrap();
-            let ctx = guard.as_ref().ok_or_else(|| ClientError::Runtime {
-                message: "resume() called before run()".into(),
-            })?;
-            ctx.params.clone()
-        };
-        self.run(params, None).await
+    fn last_run_params(&self) -> Result<RunParams, ClientError> {
+        self.state.last_run_params()
     }
 
     fn reap_all(&self, gremlin_id: &str) {
@@ -124,6 +117,7 @@ impl Backend for OpenAiBackend {
 mod tests {
     use super::super::super::agent_loop::CancelToken;
     use super::*;
+    use crate::clients::cancels::CancelsMap;
 
     #[test]
     fn provider_constants() {
@@ -136,53 +130,19 @@ mod tests {
     #[test]
     fn reap_all_cancels_only_own_tokens() {
         let client = OpenAI::new("sk-test");
-        let backend = OpenAiBackend::new(client, "gpt-4o".into(), None, ResolvedParams::default());
+        let backlog = CancelsMap::default();
         let a = CancelToken::new();
         let b = CancelToken::new();
         let sibling = CancelToken::new();
-        backend
-            .state
-            .cancels
-            .lock()
-            .unwrap()
-            .entry("gr-test".to_string())
-            .or_default()
-            .insert(1, a.clone());
-        backend
-            .state
-            .cancels
-            .lock()
-            .unwrap()
-            .entry("gr-test".to_string())
-            .or_default()
-            .insert(2, b.clone());
-        backend
-            .state
-            .cancels
-            .lock()
-            .unwrap()
-            .entry("gr-sibling".to_string())
-            .or_default()
-            .insert(3, sibling.clone());
+        backlog.insert("gr-test", 1, a.clone()).unwrap();
+        backlog.insert("gr-test", 2, b.clone()).unwrap();
+        backlog.insert("gr-sibling", 3, sibling.clone()).unwrap();
+
+        let mut backend = OpenAiBackend::new(client, "gpt-4o".into(), None, ResolvedParams::default());
+        backend.state.cancels = backlog;
         backend.reap_all("gr-test");
         assert!(a.is_cancelled());
         assert!(b.is_cancelled());
-        // The gremlin entry is dropped when empty.
-        assert!(backend
-            .state
-            .cancels
-            .lock()
-            .unwrap()
-            .get("gr-test")
-            .is_none());
-        // Sibling tokens are untouched.
         assert!(!sibling.is_cancelled());
-        assert!(backend
-            .state
-            .cancels
-            .lock()
-            .unwrap()
-            .get("gr-sibling")
-            .is_some());
     }
 }
