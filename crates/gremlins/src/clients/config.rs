@@ -506,8 +506,12 @@ mod tests {
             "fork prompt must not list Task; got: {prompt}"
         );
         assert!(
-            prompt.contains("Do not call Task"),
+            prompt.contains("Do not call Task.\n"),
             "fork prompt must forbid further task calls; got: {prompt}"
+        );
+        assert!(
+            !prompt.contains("kind=") && !prompt.contains("Fork\""),
+            "fork prompt must not name a specific Task kind; got: {prompt}"
         );
         assert!(prompt.contains("/work"));
         assert!(prompt.contains("/scratch"));

@@ -83,6 +83,29 @@ mod tests {
     }
 
     #[test]
+    fn all_and_configurable_match_the_three_kind_set() {
+        assert_eq!(
+            TaskKind::ALL,
+            [TaskKind::Fork, TaskKind::Scout, TaskKind::Implement]
+        );
+        assert_eq!(
+            TaskKind::CONFIGURABLE,
+            [TaskKind::Scout, TaskKind::Implement]
+        );
+    }
+
+    #[test]
+    fn removed_spellings_no_longer_parse() {
+        for spelling in ["Research", "Verify", "Fix", "Review", "Write", "Refactor"] {
+            assert_eq!(
+                TaskKind::parse(spelling),
+                None,
+                "removed kind {spelling} must not parse"
+            );
+        }
+    }
+
+    #[test]
     fn configurable_excludes_fork() {
         assert_eq!(TaskKind::CONFIGURABLE.len(), 2);
         assert!(!TaskKind::CONFIGURABLE.contains(&TaskKind::Fork));
