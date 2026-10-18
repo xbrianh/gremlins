@@ -68,6 +68,26 @@ async fn send_stream_event_checked(
     }
 }
 
+impl AgentLoopTelemetry {
+    /// Send an event on the stream if there is an active receiver.
+    ///
+    /// No-ops (returns `Ok(())`) when there is no channel or the broadcast
+    /// subscriber has disconnected. Races against `cancel` so the caller can
+    /// propagate cancellation with `?`.
+    async fn send_stream_event(
+        &self,
+        event: InteractiveEvent,
+        cancel: &CancelToken,
+    ) -> Result<(), ClientError> {
+        if let Some(ref se) = self.stream_events {
+            if se.wants_events() {
+                return send_stream_event_checked(se, event, cancel).await;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Discard any tool-output lines currently queued in the live-output
 /// receiver. Used when leaving a tool batch without the normal post-batch
 /// drain so stale chunks cannot be replayed by a later batch.
@@ -1137,43 +1157,42 @@ async fn run_agent_loop_core(
                     // Nested loops must not emit text/reasoning deltas on the
                     // parent's stream — their output arrives as tool results.
                     if !nested {
-                        if let Some(ref se) = tool_ctx.telemetry.stream_events {
-                            if se.wants_events() {
-                                match &chunk {
-                                    Item::Event(StreamEvent::Text { ref text, .. }) => {
-                                        send_stream_event_checked(
-                                            se,
-                                            InteractiveEvent::StreamChunk { text: text.clone() },
-                                            cancel,
-                                        )
-                                        .await?;
-                                    }
-                                    Item::Event(StreamEvent::Reasoning { ref text, .. }) => {
-                                        send_stream_event_checked(
-                                            se,
-                                            InteractiveEvent::ReasoningChunk { text: text.clone() },
-                                            cancel,
-                                        )
-                                        .await?;
-                                    }
-                                    Item::Event(StreamEvent::End {
-                                        content: AssistantContent::ToolCall(tc),
-                                        ..
-                                    }) => {
-                                        // Emit tool calls as reasoning so they
-                                        // appear in the live thought stream.
-                                        send_stream_event_checked(
-                                            se,
-                                            InteractiveEvent::ReasoningChunk {
-                                                text: format_tool_call(tc),
-                                            },
-                                            cancel,
-                                        )
-                                        .await?;
-                                    }
-                                    _ => {}
-                                }
+                        match &chunk {
+                            Item::Event(StreamEvent::Text { ref text, .. }) => {
+                                tool_ctx
+                                    .telemetry
+                                    .send_stream_event(
+                                        InteractiveEvent::StreamChunk { text: text.clone() },
+                                        cancel,
+                                    )
+                                    .await?;
                             }
+                            Item::Event(StreamEvent::Reasoning { ref text, .. }) => {
+                                tool_ctx
+                                    .telemetry
+                                    .send_stream_event(
+                                        InteractiveEvent::ReasoningChunk { text: text.clone() },
+                                        cancel,
+                                    )
+                                    .await?;
+                            }
+                            Item::Event(StreamEvent::End {
+                                content: AssistantContent::ToolCall(tc),
+                                ..
+                            }) => {
+                                // Emit tool calls as reasoning so they
+                                // appear in the live thought stream.
+                                tool_ctx
+                                    .telemetry
+                                    .send_stream_event(
+                                        InteractiveEvent::ReasoningChunk {
+                                            text: format_tool_call(tc),
+                                        },
+                                        cancel,
+                                    )
+                                    .await?;
+                            }
+                            _ => {}
                         }
                     }
                     apply_chunk(
@@ -1209,12 +1228,10 @@ async fn run_agent_loop_core(
             // reasoning from the failed attempt. Nested loops skip this —
             // only the parent stream should be reset.
             if !nested {
-                if let Some(ref se) = tool_ctx.telemetry.stream_events {
-                    if se.wants_events() {
-                        send_stream_event_checked(se, InteractiveEvent::StreamReset, cancel)
-                            .await?;
-                    }
-                }
+                tool_ctx
+                    .telemetry
+                    .send_stream_event(InteractiveEvent::StreamReset, cancel)
+                    .await?;
             }
             continue;
         }
@@ -1272,23 +1289,20 @@ async fn run_agent_loop_core(
         // this — their child turn numbers restart at 0 and can collide with
         // the parent's.
         if !nested {
-            if let Some(ref se) = tool_ctx.telemetry.stream_events {
-                if se.wants_events() {
-                    log::debug!("agent_loop: broadcasting TurnComplete (turn={turn_num})");
-                    send_stream_event_checked(
-                        se,
-                        InteractiveEvent::TurnComplete {
-                            turn: turn_num,
-                            text: text.clone(),
-                            tool_calls: tool_calls.iter().map(format_tool_call).collect(),
-                            stats: turn_stats.clone(),
-                            totals: Some(totals),
-                        },
-                        cancel,
-                    )
-                    .await?;
-                }
-            }
+            log::debug!("agent_loop: broadcasting TurnComplete (turn={turn_num})");
+            tool_ctx
+                .telemetry
+                .send_stream_event(
+                    InteractiveEvent::TurnComplete {
+                        turn: turn_num,
+                        text: text.clone(),
+                        tool_calls: tool_calls.iter().map(format_tool_call).collect(),
+                        stats: turn_stats.clone(),
+                        totals: Some(totals),
+                    },
+                    cancel,
+                )
+                .await?;
         }
 
         if !reasoning.is_empty() {
@@ -1438,21 +1452,18 @@ async fn run_agent_loop_core(
                 // Emit Done via stream_events. Nested loops skip this —
                 // only the parent's Done signals completion.
                 if !nested {
-                    if let Some(ref se) = tool_ctx.telemetry.stream_events {
-                        if se.wants_events() {
-                            log::debug!("agent_loop: broadcasting Done (turn={turn_num})");
-                            send_stream_event_checked(
-                                se,
-                                InteractiveEvent::Done {
-                                    text: result_text.clone(),
-                                    summary: summary.clone(),
-                                    usage: Some(usage.clone()),
-                                },
-                                cancel,
-                            )
-                            .await?;
-                        }
-                    }
+                    log::debug!("agent_loop: broadcasting Done (turn={turn_num})");
+                    tool_ctx
+                        .telemetry
+                        .send_stream_event(
+                            InteractiveEvent::Done {
+                                text: result_text.clone(),
+                                summary: summary.clone(),
+                                usage: Some(usage.clone()),
+                            },
+                            cancel,
+                        )
+                        .await?;
                 }
                 // Capture the full message history (prior turns + this final
                 // user prompt + assistant message) so the chat gremlin can
@@ -1804,21 +1815,18 @@ async fn run_agent_loop_core(
         // sitting in the receiver before emitting ToolResult events.
         if let Some(rx) = live_output_rx.as_mut() {
             while let Ok(line) = rx.try_recv() {
-                if let Some(se) = &tool_ctx.telemetry.stream_events {
-                    if se.wants_events() {
-                        send_stream_event_checked(
-                            se,
-                            InteractiveEvent::ToolOutputChunk {
-                                id: line.id,
-                                name: line.name,
-                                call: line.call,
-                                text: line.text,
-                            },
-                            cancel,
-                        )
-                        .await?;
-                    }
-                }
+                tool_ctx
+                    .telemetry
+                    .send_stream_event(
+                        InteractiveEvent::ToolOutputChunk {
+                            id: line.id,
+                            name: line.name,
+                            call: line.call,
+                            text: line.text,
+                        },
+                        cancel,
+                    )
+                    .await?;
             }
         }
 
@@ -1836,27 +1844,24 @@ async fn run_agent_loop_core(
                 }
             }
             // Emit tool result via stream_events.
-            if let Some(ref se) = tool_ctx.telemetry.stream_events {
-                if se.wants_events() {
-                    // For Read, truncate to a reasonable preview.
-                    let display = if job.name == "Read" {
-                        trunc(&output, 500)
-                    } else {
-                        trunc(&output, 200)
-                    };
-                    send_stream_event_checked(
-                        se,
-                        InteractiveEvent::ToolResult {
-                            id: format!("{}{}", tool_ctx.id_prefix, job.id),
-                            name: job.name.clone(),
-                            call: job.call.clone(),
-                            output: display,
-                        },
-                        cancel,
-                    )
-                    .await?;
-                }
-            }
+            // For Read, truncate to a reasonable preview.
+            let display = if job.name == "Read" {
+                trunc(&output, 500)
+            } else {
+                trunc(&output, 200)
+            };
+            tool_ctx
+                .telemetry
+                .send_stream_event(
+                    InteractiveEvent::ToolResult {
+                        id: format!("{}{}", tool_ctx.id_prefix, job.id),
+                        name: job.name.clone(),
+                        call: job.call.clone(),
+                        output: display,
+                    },
+                    cancel,
+                )
+                .await?;
             ledger.push(ledger_line(&job.name, &job.key, &output));
             result_msgs.push(Message::tool_result(
                 CallId::from_wire(job.id.clone()),
