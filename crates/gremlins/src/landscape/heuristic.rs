@@ -116,8 +116,10 @@ fn scan_rust(content: &str, collapse_tests: bool) -> Vec<OutlineItem> {
             let has_cfg_test = prev_cfg_test || line.contains("#[cfg(test)]");
             if name == "tests" || has_cfg_test {
                 items.push(item(MOD, name, idx + 1));
-                test_mod_depth = brace_depth_after_line(&line[brace_idx + 1..], 1);
                 prev_cfg_test = false;
+                if collapse_tests {
+                    test_mod_depth = brace_depth_after_line(&line[brace_idx + 1..], 1);
+                }
                 continue;
             }
         }
@@ -530,10 +532,9 @@ fn real() {}
     }
 
     #[test]
-    fn rust_scanner_handles_cfg_test_on_separate_line_when_not_collapsed() {
+    fn rust_scanner_handles_single_line_cfg_test_when_not_collapsed() {
         let src = "\
-#[cfg(test)]
-mod integration {
+#[cfg(test)] mod integration {
     fn test_integration() {}
 }
 fn real() {}
