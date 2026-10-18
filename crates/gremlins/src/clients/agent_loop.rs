@@ -22,7 +22,7 @@ use super::interactive::{
 use super::log_util::trunc;
 use super::model::{GremlinsModel, GremlinsModelError};
 use super::protocol::{CompletedRun, TurnStats, UsageStats};
-use super::tools::{self, AgentLoopRuntime};
+use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
     if let Some(tx) = tx {
@@ -289,6 +289,10 @@ pub(crate) async fn run_agent_loop(
     } else {
         (None, None)
     };
+    let telemetry = AgentLoopTelemetry {
+        stream_events: ctx.stream_events.clone(),
+        tool_output: tool_output_tx,
+    };
     let mut tool_ctx = AgentLoopRuntime {
         cwd: cwd.clone(),
         extra_env,
@@ -299,7 +303,7 @@ pub(crate) async fn run_agent_loop(
         task_fn: None,
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
         parent_history: None,
-        tool_output: tool_output_tx,
+        telemetry,
     };
     let tool_defs = tools::tool_definitions(opts.tool_filter);
 
@@ -341,7 +345,7 @@ pub(crate) async fn run_agent_loop(
         ctx.completion_nudge_budget,
         &ctx.params.log_tx,
         interactive,
-        ctx.stream_events.clone(),
+        &tool_ctx.telemetry,
         tool_output_rx,
         ctx.prepopulated_messages.clone(),
         ctx.compaction_opts,
@@ -384,6 +388,10 @@ pub(crate) async fn run_agent_loop_nested(
     let tool_defs = tools::tool_definitions(tool_filter);
     let mut raw: Option<std::fs::File> = None;
     let mut captured: Option<Vec<serde_json::Value>> = None;
+    let nested_telemetry = AgentLoopTelemetry {
+        stream_events: tool_ctx.telemetry.stream_events.clone(),
+        tool_output: None,
+    };
     let result = run_agent_loop_core(
         &model,
         prompt,
@@ -403,7 +411,7 @@ pub(crate) async fn run_agent_loop_nested(
         completion_nudge_budget,
         &log_tx,
         None,
-        None,
+        &nested_telemetry,
         None,
         prepopulated_messages,
         None,
@@ -679,7 +687,7 @@ async fn run_agent_loop_core(
     mut completion_nudge_budget: usize,
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     interactive: Option<InteractiveSession>,
-    stream_events: Option<StreamEventSender>,
+    telemetry: &AgentLoopTelemetry,
     tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
     prepopulated_messages: Option<Vec<Message>>,
     compaction_opts: Option<conversation::CompactionOpts>,
@@ -1109,11 +1117,11 @@ async fn run_agent_loop_core(
                         first_token = Some(now);
                     }
                     last_token = Some(now);
-                    // Emit stream deltas via stream_events channel.
+                    // Emit stream deltas via telemetry.stream_events channel.
                     // Gate on wants_events() before building the event so
                     // unsubscribed broadcast senders avoid per-token
                     // allocation; mpsc senders always want events.
-                    if let Some(ref se) = stream_events {
+                    if let Some(ref se) = telemetry.stream_events {
                         if se.wants_events() {
                             match &chunk {
                                 Item::Event(StreamEvent::Text { ref text, .. }) => {
@@ -1182,7 +1190,7 @@ async fn run_agent_loop_core(
 
             // Send StreamReset so consumers discard partial text /
             // reasoning from the failed attempt.
-            if let Some(ref se) = stream_events {
+            if let Some(ref se) = telemetry.stream_events {
                 if se.wants_events() {
                     send_stream_event_checked(se, InteractiveEvent::StreamReset, cancel).await?;
                 }
@@ -1238,9 +1246,9 @@ async fn run_agent_loop_core(
 
         emit_turn_stats(prefix, turn_num, turn_stats.as_ref(), &totals, log_tx);
 
-        // Emit TurnComplete via stream_events, before text/tool_calls
+        // Emit TurnComplete via telemetry.stream_events, before text/tool_calls
         // are consumed by the rest of the turn processing.
-        if let Some(ref se) = stream_events {
+        if let Some(ref se) = telemetry.stream_events {
             if se.wants_events() {
                 log::debug!("agent_loop: broadcasting TurnComplete (turn={turn_num})");
                 send_stream_event_checked(
@@ -1403,7 +1411,7 @@ async fn run_agent_loop_core(
                     );
                 }
                 // Emit Done via stream_events.
-                if let Some(ref se) = stream_events {
+                if let Some(ref se) = telemetry.stream_events {
                     if se.wants_events() {
                         log::debug!("agent_loop: broadcasting Done (turn={turn_num})");
                         send_stream_event_checked(
@@ -1637,7 +1645,7 @@ async fn run_agent_loop_core(
         // dequeued, so the select dropping this branch at batch completion
         // can release an unused permit but can never drop an in-flight line.
         let forward_live_output = async {
-            if let (Some(se), Some(rx)) = (&stream_events, live_output_rx.as_mut()) {
+            if let (Some(se), Some(rx)) = (&telemetry.stream_events, live_output_rx.as_mut()) {
                 if se.wants_events() {
                     loop {
                         let permit = tokio::select! {
@@ -1766,7 +1774,7 @@ async fn run_agent_loop_core(
         // sitting in the receiver before emitting ToolResult events.
         if let Some(rx) = live_output_rx.as_mut() {
             while let Ok(line) = rx.try_recv() {
-                if let Some(se) = &stream_events {
+                if let Some(se) = &telemetry.stream_events {
                     if se.wants_events() {
                         send_stream_event_checked(
                             se,
@@ -1798,7 +1806,7 @@ async fn run_agent_loop_core(
                 }
             }
             // Emit tool result via stream_events.
-            if let Some(ref se) = stream_events {
+            if let Some(ref se) = telemetry.stream_events {
                 if se.wants_events() {
                     // For Read, truncate to a reasonable preview.
                     let display = if job.name == "Read" {
@@ -5298,7 +5306,10 @@ mod tests {
             task_fn: None,
             audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
             parent_history: None,
-            tool_output: None,
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
         }
     }
 
@@ -5334,6 +5345,10 @@ mod tests {
         let dyn_model = gm(model.erase());
         let evt_tx_clone = handle.evt_tx.clone();
         let agent = tokio::spawn(async move {
+            let telemetry = AgentLoopTelemetry {
+                stream_events: Some(StreamEventSender::Broadcast(evt_tx_clone)),
+                tool_output: None,
+            };
             run_agent_loop_core(
                 &dyn_model,
                 "hi",
@@ -5353,7 +5368,7 @@ mod tests {
                 0,
                 &None,
                 Some(session),
-                Some(StreamEventSender::Broadcast(evt_tx_clone)),
+                &telemetry,
                 None,
                 None,
                 None,
@@ -5443,6 +5458,10 @@ mod tests {
         let dyn_model = gm(model.erase());
         let evt_tx_clone = handle.evt_tx.clone();
         let agent = tokio::spawn(async move {
+            let telemetry = AgentLoopTelemetry {
+                stream_events: Some(StreamEventSender::Broadcast(evt_tx_clone)),
+                tool_output: None,
+            };
             run_agent_loop_core(
                 &dyn_model,
                 "hi",
@@ -5462,7 +5481,7 @@ mod tests {
                 0,
                 &None,
                 Some(session),
-                Some(StreamEventSender::Broadcast(evt_tx_clone)),
+                &telemetry,
                 None,
                 None,
                 None,
@@ -5539,6 +5558,10 @@ mod tests {
         let dyn_model = gm(model.erase());
         let evt_tx_clone = handle.evt_tx.clone();
         let agent = tokio::spawn(async move {
+            let telemetry = AgentLoopTelemetry {
+                stream_events: Some(StreamEventSender::Broadcast(evt_tx_clone)),
+                tool_output: None,
+            };
             run_agent_loop_core(
                 &dyn_model,
                 "hi",
@@ -5558,7 +5581,7 @@ mod tests {
                 0,
                 &None,
                 Some(session),
-                Some(StreamEventSender::Broadcast(evt_tx_clone)),
+                &telemetry,
                 None,
                 None,
                 None,
@@ -5624,6 +5647,10 @@ mod tests {
         let dyn_model = gm(model.erase());
         let evt_tx_clone = handle.evt_tx.clone();
         let agent = tokio::spawn(async move {
+            let telemetry = AgentLoopTelemetry {
+                stream_events: Some(StreamEventSender::Broadcast(evt_tx_clone)),
+                tool_output: None,
+            };
             run_agent_loop_core(
                 &dyn_model,
                 "hi",
@@ -5643,7 +5670,7 @@ mod tests {
                 0,
                 &None,
                 Some(session),
-                Some(StreamEventSender::Broadcast(evt_tx_clone)),
+                &telemetry,
                 None,
                 None,
                 None,

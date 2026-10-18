@@ -10,6 +10,7 @@ use rig_core::completion::ToolDefinition;
 use tokio::process::Command;
 
 use super::agent_loop::format_tool_call_parts;
+use super::interactive::StreamEventSender;
 use super::task_kind::TaskKind;
 use crate::landscape::{LandscapeError, LandscapeExplorer};
 
@@ -84,6 +85,17 @@ pub(crate) struct ToolOutputLine {
     pub(crate) text: String,
 }
 
+/// Bundled send-side telemetry channels for the agent loop: stream events
+/// (model deltas, tool results, turn-complete events) and live tool-output
+/// line forwarding (`Bash`/`WebSearch`).
+///
+/// Cloned cheaply — every nested loop inherits the parent's channels.
+#[derive(Clone)]
+pub(crate) struct AgentLoopTelemetry {
+    pub(crate) stream_events: Option<StreamEventSender>,
+    pub(crate) tool_output: Option<tokio::sync::mpsc::Sender<ToolOutputLine>>,
+}
+
 #[derive(Clone)]
 pub(crate) struct AgentLoopRuntime {
     pub cwd: Option<PathBuf>,
@@ -97,9 +109,8 @@ pub(crate) struct AgentLoopRuntime {
     /// Point-in-time snapshot of the parent conversation, available to Task
     /// tool calls (used only by `Fork`). `None` when unavailable.
     pub(crate) parent_history: Option<Vec<rig_core::completion::Message>>,
-    /// Optional live-output channel for streaming tool output lines from
-    /// `Bash` and `WebSearch` into the interactive TUI live pane.
-    pub(crate) tool_output: Option<tokio::sync::mpsc::Sender<ToolOutputLine>>,
+    /// Bundled send-side telemetry channels. Cloned into every nested loop.
+    pub(crate) telemetry: AgentLoopTelemetry,
 }
 
 impl AgentLoopRuntime {
@@ -111,7 +122,7 @@ impl AgentLoopRuntime {
     /// producing read loop rather than overflowing the buffer and silently
     /// dropping chunks from the live tool stream.
     pub(crate) async fn emit_output(&self, id: &str, name: &str, call: &str, text: &str) {
-        if let Some(tx) = &self.tool_output {
+        if let Some(tx) = &self.telemetry.tool_output {
             let _ = tx
                 .send(ToolOutputLine {
                     id: id.to_string(),
@@ -2870,7 +2881,10 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
-            tool_output: None,
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
         }
     }
 
@@ -3016,7 +3030,7 @@ mod tests {
         let dir = tmp();
         let mut c = ctx(&dir);
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ToolOutputLine>(8);
-        c.tool_output = Some(tx);
+        c.telemetry.tool_output = Some(tx);
 
         // No trailing newline: the final flush must emit the trailing partial
         // with an appended `\n`.
@@ -3150,7 +3164,10 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
-            tool_output: None,
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
         };
         let args = serde_json::json!({"command": "pwd; ls"}).to_string();
         let output = bash_invoke(&c, &args, "tool-test-id").await;
@@ -3178,7 +3195,10 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
-            tool_output: None,
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
         };
         let expected = std::env::current_dir().unwrap();
         let args = serde_json::json!({"command": "pwd"}).to_string();
@@ -4234,7 +4254,10 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
-            tool_output: None,
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
         };
         let write_args =
             serde_json::json!({"file_path": target.to_str().unwrap(), "content": "nope"})
@@ -4642,7 +4665,10 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
-            tool_output: None,
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -4668,7 +4694,10 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
-            tool_output: None,
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -4692,7 +4721,10 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
-            tool_output: None,
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": ""}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -4723,7 +4755,10 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
-            tool_output: None,
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
         };
         let args = serde_json::json!({"kind": "Bogus", "prompt": "go"}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -4749,7 +4784,10 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
-            tool_output: None,
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
         assert_eq!(
@@ -5130,7 +5168,10 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
-            tool_output: None,
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
@@ -5158,7 +5199,10 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
-            tool_output: None,
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
         }
     }
 

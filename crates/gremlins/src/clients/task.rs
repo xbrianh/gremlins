@@ -228,14 +228,6 @@ fn make_task_runner_at_depth(
             let tool_filter = tool_filter.clone();
             let cancel = cancel.clone();
             let mut child_ctx = ctx.clone();
-            // Nested loops run with `stream_events = None`, so their
-            // `ToolResult` events are never forwarded to the parent TUI. If
-            // the sub-agent's live Bash chunks were forwarded they would
-            // create tool slots with no matching `ToolResult`, which would
-            // linger until `TurnComplete` and then evaporate. Drop the
-            // inherited live-output sender so sub-agent output stays out of
-            // the parent's tool segment (see tui/AGENTS.md).
-            child_ctx.tool_output = None;
             let prefix = prefix.clone();
             let id_chain = id_chain.clone();
             let extra = extra.clone();
@@ -578,7 +570,10 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
-            tool_output: None,
+            telemetry: tools::AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
         }
     }
 
