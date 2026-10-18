@@ -2565,7 +2565,10 @@ pub(crate) async fn invoke(id: &str, name: &str, ctx: &ToolContext, args_json: &
     // Edit and Write always return tiny results.
     let cap = crate::config::max_tool_output_bytes();
     if cap > 0
-        && matches!(name, "Read" | "Bash" | "Grep" | "Glob" | "OutlineFile" | "WebSearch")
+        && matches!(
+            name,
+            "Read" | "Bash" | "Grep" | "Glob" | "OutlineFile" | "WebSearch"
+        )
         && res.len() as u64 > cap
     {
         return format!(

@@ -669,11 +669,20 @@ mod tests {
         // Newlines and pipes in repo-derived strings must be escaped so they
         // cannot break the line-oriented format or confuse the field separator.
         assert!(!block.contains("evil\npath.rs"), "path newline not escaped");
-        assert!(block.contains("evil\\npath.rs"), "expected escaped newline in path");
+        assert!(
+            block.contains("evil\\npath.rs"),
+            "expected escaped newline in path"
+        );
         assert!(!block.contains("line1\nline2"), "name newline not escaped");
-        assert!(block.contains("line1\\nline2"), "expected escaped newline in name");
+        assert!(
+            block.contains("line1\\nline2"),
+            "expected escaped newline in name"
+        );
         assert!(!block.contains("key|with|pipes"), "name pipe not escaped");
-        assert!(block.contains("key\u{00A6}with\u{00A6}pipes"), "expected broken bar in name");
+        assert!(
+            block.contains("key\u{00A6}with\u{00A6}pipes"),
+            "expected broken bar in name"
+        );
     }
 
     #[test]
@@ -1082,9 +1091,18 @@ mod tests {
         let block =
             format_landscape_block(std::slice::from_ref(&outline), root, budget, true).unwrap();
         assert!(block.len() <= budget);
-        assert!(block.contains("1|fn|n\n"), "short name 'n' must be untouched");
-        assert!(block.contains("2|fn|f\n"), "short name 'f' must be untouched");
-        assert!(block.contains(TRUNCATION_MARKER), "long names must be truncated");
+        assert!(
+            block.contains("1|fn|n\n"),
+            "short name 'n' must be untouched"
+        );
+        assert!(
+            block.contains("2|fn|f\n"),
+            "short name 'f' must be untouched"
+        );
+        assert!(
+            block.contains(TRUNCATION_MARKER),
+            "long names must be truncated"
+        );
     }
 
     #[test]
