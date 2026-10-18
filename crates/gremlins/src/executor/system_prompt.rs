@@ -108,17 +108,15 @@ async fn build_landscape_snapshot(cwd: PathBuf, cache_path: Option<PathBuf>) -> 
 
     let file_count = outlines.iter().filter(|o| !o.items.is_empty()).count();
     let item_count: usize = outlines.iter().map(|o| o.items.len()).sum();
-    let block = match crate::landscape::format_landscape_block(
-        &outlines,
-        &root,
-        crate::landscape::MAX_LANDSCAPE_BYTES,
-    ) {
+    let budget: u64 = crate::config::max_landscape_bytes();
+    let max_bytes: usize = usize::try_from(budget).unwrap_or(usize::MAX);
+    let block = match crate::landscape::format_landscape_block(&outlines, &root, max_bytes) {
         Ok(block) => block,
         Err(LandscapeError::BudgetExceeded) => {
             log::warn!(
                 "landscape block for {} could not be trimmed to fit the {} byte budget; omitting",
                 root.display(),
-                crate::landscape::MAX_LANDSCAPE_BYTES,
+                budget,
             );
             String::new()
         }

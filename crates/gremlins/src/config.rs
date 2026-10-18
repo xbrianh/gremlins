@@ -108,6 +108,7 @@ pub struct Config {
     max_tool_output_bytes: u64,
     chat_compaction_threshold_bytes: u64,
     max_prompt_bytes: u64,
+    max_landscape_bytes: u64,
     backoff: BackoffConfig,
 }
 
@@ -190,6 +191,8 @@ struct ConfigFile {
     chat_compaction_threshold_bytes: Option<u64>,
     #[serde(rename = "max-prompt-bytes", default)]
     max_prompt_bytes: Option<u64>,
+    #[serde(rename = "max-landscape-bytes", default)]
+    max_landscape_bytes: Option<u64>,
     backoff: Option<BackoffSection>,
 }
 
@@ -272,11 +275,16 @@ impl Config {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(DEFAULT_MAX_PROMPT_BYTES);
+                let max_landscape_bytes = std::env::var("GREMLINS_MAX_LANDSCAPE_BYTES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(DEFAULT_MAX_LANDSCAPE_BYTES);
                 return Ok(Config {
                     default_model: env_default_model(),
                     max_tool_output_bytes,
                     chat_compaction_threshold_bytes,
                     max_prompt_bytes,
+                    max_landscape_bytes,
                     ..Config::default()
                 });
             }
@@ -423,6 +431,15 @@ impl Config {
             })
             .unwrap_or(DEFAULT_MAX_PROMPT_BYTES);
 
+        let max_landscape_bytes = cfg_file
+            .max_landscape_bytes
+            .or_else(|| {
+                std::env::var("GREMLINS_MAX_LANDSCAPE_BYTES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+            })
+            .unwrap_or(DEFAULT_MAX_LANDSCAPE_BYTES);
+
         Ok(Config {
             default_model,
             tui_model,
@@ -436,6 +453,7 @@ impl Config {
             max_tool_output_bytes,
             chat_compaction_threshold_bytes,
             max_prompt_bytes,
+            max_landscape_bytes,
             backoff,
         })
     }
@@ -490,6 +508,10 @@ impl Config {
 
     pub fn max_prompt_bytes(&self) -> u64 {
         self.max_prompt_bytes
+    }
+
+    pub fn max_landscape_bytes(&self) -> u64 {
+        self.max_landscape_bytes
     }
 
     pub fn turn_retry_schedule(&self) -> &[f64] {
@@ -1035,6 +1057,9 @@ pub(crate) const DEFAULT_CHAT_COMPACTION_THRESHOLD_BYTES: u64 = 786_432;
 /// Default ceiling for a serialized prompt: 1 MiB.
 pub(crate) const DEFAULT_MAX_PROMPT_BYTES: u64 = 1_048_576;
 
+/// Default landscape block size budget: 250 KiB.
+pub(crate) const DEFAULT_MAX_LANDSCAPE_BYTES: u64 = 256000;
+
 /// GREMLINS_MAX_PROMPT_BYTES — cap a serialized prompt at this many bytes.
 /// Default 1 048 576 (1 MiB). Settings.yaml `max-prompt-bytes` takes
 /// precedence over the env var.
@@ -1047,6 +1072,24 @@ pub(crate) fn max_prompt_bytes() -> u64 {
                 .and_then(|v| v.parse().ok())
         })
         .unwrap_or(DEFAULT_MAX_PROMPT_BYTES)
+}
+
+/// GREMLINS_MAX_LANDSCAPE_BYTES — cap the landscape block injected into the
+/// agent system prompt at this many bytes. Default 256 000 (250 KiB).
+/// Settings.yaml `max-landscape-bytes` takes precedence over the env var.
+///
+/// Item names are truncated to fit the block within this budget. If the
+/// block still cannot be trimmed below the limit (including when the budget
+/// is zero), the landscape is omitted entirely.
+pub(crate) fn max_landscape_bytes() -> u64 {
+    get_global()
+        .map(|c| c.max_landscape_bytes())
+        .or_else(|| {
+            std::env::var("GREMLINS_MAX_LANDSCAPE_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(DEFAULT_MAX_LANDSCAPE_BYTES)
 }
 
 /// GREMLINS_MAX_TOOL_OUTPUT_BYTES — cap tool output at this many bytes.
@@ -2262,6 +2305,65 @@ model-profiles:
         // No settings.yaml, no env var — should get the 1_048_576 default.
         let cfg = Config::load().unwrap();
         assert_eq!(cfg.max_prompt_bytes(), DEFAULT_MAX_PROMPT_BYTES);
+    }
+
+    // --- max-landscape-bytes --------------------------------------------------
+
+    #[test]
+    fn test_max_landscape_bytes_default() {
+        let _env = EnvGuard::lock();
+        assert_eq!(max_landscape_bytes(), DEFAULT_MAX_LANDSCAPE_BYTES);
+    }
+
+    #[test]
+    fn test_max_landscape_bytes_from_env() {
+        let mut env = EnvGuard::lock();
+        env.set("GREMLINS_MAX_LANDSCAPE_BYTES", "512");
+        assert_eq!(max_landscape_bytes(), 512);
+    }
+
+    #[test]
+    fn test_max_landscape_bytes_from_settings_yaml() {
+        let _sandbox = Sandbox::with_config(Some(r#"{"max-landscape-bytes": 12345}"#));
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_landscape_bytes(), 12345);
+    }
+
+    #[test]
+    fn test_max_landscape_bytes_settings_overrides_env() {
+        let mut env = EnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("settings.yaml"),
+            r#"{"max-landscape-bytes": 77777}"#,
+        )
+        .unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
+        env.set("GREMLINS_MAX_LANDSCAPE_BYTES", "999");
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_landscape_bytes(), 77777);
+    }
+
+    #[test]
+    fn test_max_landscape_bytes_env_fallback_no_settings_file() {
+        let mut env = EnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
+        env.set("GREMLINS_MAX_LANDSCAPE_BYTES", "4242");
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_landscape_bytes(), 4242);
+    }
+
+    #[test]
+    fn test_max_landscape_bytes_default_no_settings_file() {
+        let mut env = EnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
+        // No settings.yaml, no env var — should get the 256000 default.
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_landscape_bytes(), DEFAULT_MAX_LANDSCAPE_BYTES);
     }
 
     #[test]

@@ -23,12 +23,6 @@ pub const METHOD: &str = "method";
 pub const HEADING: &str = "heading";
 pub const KEY: &str = "key";
 
-/// Maximum total byte size of the formatted landscape block injected into an
-/// agent system prompt. When the block exceeds this budget, per-item name
-/// truncation is applied; if the budget cannot be achieved even after
-/// truncation, the formatter returns [`LandscapeError::BudgetExceeded`].
-pub(crate) const MAX_LANDSCAPE_BYTES: usize = 65536;
-
 /// Marker appended to truncated names in the landscape block.
 const TRUNCATION_MARKER: &str = "\u{2026}";
 
