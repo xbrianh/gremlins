@@ -2842,7 +2842,7 @@ fn resolve_chat_env(
 
 async fn handle_chat(
     request: &Value,
-    state_root: &Path,
+    _state_root: &Path,
     writer: &SharedWriter,
     session: &SessionHandle,
 ) {
@@ -2927,35 +2927,10 @@ async fn handle_chat(
         }
     };
 
-    // 3. Build the Agent stage. The system prompt carries no history
-    //    transcript — prior turns flow through prepopulated_messages instead.
+    // 3. Build the system prompt. The supervisor queues the operator's
+    //    prompt text onto the ChatDefinition before each turn; the
+    //    definition constructs the Agent stage on demand via next_stage().
     let system_prompt = build_chat_system_prompt(context);
-    let stage = match crate::builders::AgentBuilder::new("chat")
-        .prompt(text)
-        .model(chat_model.clone())
-        .option("system_prompt", system_prompt)
-        .option(crate::executor::agent_runner::SANDBOX_ALLOW_ALL_KEY, true)
-        .build()
-    {
-        Ok(s) => s,
-        Err(e) => {
-            let resp = error_response(&format!("failed to build agent stage: {e}"));
-            let _ = writer.write_json_line(&resp).await;
-            return;
-        }
-    };
-
-    let definition = match crate::builders::DefinitionBuilder::new("chat", chat_model.clone())
-        .stage(stage)
-        .build()
-    {
-        Ok(d) => d,
-        Err(e) => {
-            let resp = error_response(&format!("failed to build definition: {e}"));
-            let _ = writer.write_json_line(&resp).await;
-            return;
-        }
-    };
 
     // 4. Get or create the session's chat gremlin. The session owns at most
     //    one chat gremlin today, but representations keep a map for multiple.
@@ -2978,20 +2953,15 @@ async fn handle_chat(
     let id = match id {
         Some(id) => id,
         None => {
-            let gremlin = match create_chat_gremlin(
-                &definition,
-                &chat_model,
-                state_root,
-                &project_root,
-                &env,
-            ) {
-                Ok(g) => g,
-                Err(e) => {
-                    let resp = error_response(&e);
-                    let _ = writer.write_json_line(&resp).await;
-                    return;
-                }
-            };
+            let gremlin =
+                match create_chat_gremlin(&chat_model, &system_prompt, &project_root, &env) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        let resp = error_response(&e);
+                        let _ = writer.write_json_line(&resp).await;
+                        return;
+                    }
+                };
             let id = gremlin.id.to_string();
             {
                 let mut s = session.lock().await;
@@ -3051,7 +3021,11 @@ async fn handle_chat(
         }
     };
     gremlin.client = client;
-    gremlin.definition = Box::new(definition);
+    // Queue this turn's prompt onto the ChatDefinition so that
+    // next_stage() builds the agent stage on demand.
+    gremlin
+        .definition
+        .set_pending(text, &chat_model, &system_prompt);
     // Keep the state.json `model` field in sync too: `/info` reads it from
     // the live state store rather than the in-memory client handle.
     let mut state_patch = serde_json::Map::new();
@@ -3502,13 +3476,19 @@ async fn run_chat_turn(
                                 // as the hard path rather than re-running.
                                 if !soft_cancel.load(Ordering::Relaxed) {
                                     drop(s);
-                                    // Restore pre-turn conversation so the
-                                    // cancelled turn does not leak into history.
-                                    crate::executor::run::persist_chat_conversation(
-                                        &gremlin,
-                                        &pre_turn_conversation,
-                                    )
-                                    .await;
+                                    // Clear the current turn's per-turn
+                                    // artifact so partial messages from the
+                                    // cancelled turn don't leak into the next
+                                    // turn's concatenated history.
+                                    if let Some(turn_num) = soft_parts
+                                        .as_ref()
+                                        .and_then(|p| crate::executor::run::chat_turn_from_stage_name(&p.0.name))
+                                    {
+                                        crate::executor::run::clear_chat_turn_artifact(
+                                            &gremlin, turn_num,
+                                        )
+                                        .await;
+                                    }
                                     reinsert_and_clear(
                                         &id,
                                         Some(gremlin),
@@ -3527,8 +3507,19 @@ async fn run_chat_turn(
                             }
 
                             // Safe to persist now: the hard-cancel race check
-                            // passed.
-                            crate::executor::run::append_chat_conversation(&gremlin, &partial).await;
+                            // passed.  Write partial messages to the current
+                            // turn's per-turn artifact so the re-run agent
+                            // can pick them up from `verbatim_history`.
+                            if let Some(turn_num) = crate::executor::run::chat_turn_from_stage_name(
+                                &soft_agent.name,
+                            ) {
+                                crate::executor::run::append_chat_conversation_turn(
+                                    &gremlin,
+                                    turn_num,
+                                    &partial,
+                                )
+                                .await;
+                            }
                             // Advance the prefix so a subsequent soft interrupt
                             // only appends messages added since this one.
                             soft_prefix_len += partial.len();
@@ -3590,11 +3581,16 @@ async fn run_chat_turn(
                 // re-insert the gremlin, and emit a single terminal `ended`.
                 match run_task.await {
                     Ok((_, gremlin)) => {
-                        crate::executor::run::persist_chat_conversation(
-                            &gremlin,
-                            &pre_turn_conversation,
-                        )
-                        .await;
+                        if let Some(turn_num) = soft_parts
+                            .as_ref()
+                            .and_then(|p| crate::executor::run::chat_turn_from_stage_name(&p.0.name))
+                        {
+                            crate::executor::run::clear_chat_turn_artifact(
+                                &gremlin,
+                                turn_num,
+                            )
+                            .await;
+                        }
                         reinsert_chat_gremlin(&id, gremlin, &session).await;
                     }
                     Err(e) => {
@@ -3647,11 +3643,16 @@ async fn run_chat_turn(
                 // from a soft-interrupt recovery don't leak into the next
                 // chat turn.
                 if let Some(g) = gremlin_for_reinsert {
-                    crate::executor::run::persist_chat_conversation(
-                        &g,
-                        &pre_turn_conversation,
-                    )
-                    .await;
+                    if let Some(turn_num) = soft_parts
+                        .as_ref()
+                        .and_then(|p| crate::executor::run::chat_turn_from_stage_name(&p.0.name))
+                    {
+                        crate::executor::run::clear_chat_turn_artifact(
+                            &g,
+                            turn_num,
+                        )
+                        .await;
+                    }
                     reinsert_chat_gremlin(&id, g, &session).await;
                 }
                 let mut s = session.lock().await;
@@ -3825,18 +3826,18 @@ async fn register_chat_gremlin(session: &SessionHandle, mut gremlin: Gremlin) {
 static CHAT_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 fn create_chat_gremlin(
-    definition: &crate::definition::StaticDefinition,
     default_model: &ModelURI,
-    _state_root: &Path,
+    system_prompt: &str,
     project_root: &Path,
     env: &HashMap<String, String>,
 ) -> Result<Gremlin, String> {
     use crate::clients::client::Client;
-    use crate::definition::GremlinDefinition;
+    use crate::definition::ChatDefinition;
     use crate::executor::gremlin::{validate_gremlin_id, Gremlin, RuntimeConfig, ScratchDir};
     use crate::executor::state::{self, BlobMode, StateData};
     use serde_json::{Map, Value};
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
     let project_root = project_root.to_path_buf();
 
@@ -3886,17 +3887,7 @@ fn create_chat_gremlin(
     let state = StateData::new(gremlin_id.as_str(), &initial, /* ephemeral */ true)
         .map_err(|e| format!("failed to write state: {e}"))?;
 
-    // Write definition.yaml via state blob.
-    let yaml_bytes = definition
-        .serialize()
-        .map_err(|e| format!("failed to serialize definition: {e}"))?;
-    {
-        let mut blob = state
-            .open_blob("definition.yaml", BlobMode::Write)
-            .map_err(|e| format!("failed to write definition: {e}"))?;
-        std::io::Write::write_all(&mut blob, &yaml_bytes)
-            .map_err(|e| format!("failed to write definition: {e}"))?;
-    }
+    // Chat definitions are never serialized — skip the definition.yaml blob.
 
     // Create empty log file via state blob.
     let _ = state
@@ -3915,7 +3906,12 @@ fn create_chat_gremlin(
         id: gremlin_id,
         definition_path: None,
         model_override: None,
-        definition: Box::new(definition.clone()),
+        definition: Box::new(ChatDefinition::new(
+            "chat".to_string(),
+            PathBuf::from("."),
+            default_model.clone(),
+            system_prompt.to_string(),
+        )),
         workdir: None,
         project_root,
         state,
@@ -4403,7 +4399,6 @@ mod tests {
         add_usage_stats, create_chat_gremlin, handle_artifact, handle_chat_model, handle_launch,
         handle_model, resolve_chat_env, resolve_filepath_source_values, usage_stats_from_state,
     };
-    use crate::builders::{AgentBuilder, DefinitionBuilder};
     use crate::clients::client::{Client, ModelURI};
     use crate::clients::protocol::UsageStats;
     use crate::executor::socket;
@@ -5458,9 +5453,9 @@ default-model-by-stage:
         let ack = read_until_type(&mut reader, "ok").await;
         let id = ack["id"].as_str().unwrap().to_string();
 
-        // The serialized chat definition must carry both the definition
-        // default and an explicit stage model, so execution cannot fall back
-        // to the `chat: cmd/echo` entry in `default-model-by-stage`.
+        // The chat gremlin's definition carries the resolved model in
+        // state.json. Chat definitions are never serialized as YAML, so
+        // we verify through the state store.
         let store = super::get_run_map()
             .lock()
             .unwrap()
@@ -5468,23 +5463,11 @@ default-model-by-stage:
             .unwrap()
             .store
             .clone();
-        let mut blob = store
-            .open("definition.yaml", crate::executor::state::BlobMode::Read)
-            .unwrap();
-        let mut serialized = Vec::new();
-        std::io::Read::read_to_end(&mut blob, &mut serialized).unwrap();
-        let yaml: serde_yaml::Value = serde_yaml::from_slice(&serialized).unwrap();
+        let state = store.read_str("model");
         assert_eq!(
-            yaml.get("default_model").and_then(|v| v.as_str()),
-            Some("cmd/true")
+            state, "cmd/true",
+            "chat definition must carry the TUI-resolved model, not the default-model-by-stage entry"
         );
-        let stage_model = yaml
-            .get("stages")
-            .and_then(|v| v.as_sequence())
-            .and_then(|stages| stages.first())
-            .and_then(|stage| stage.get("model"))
-            .and_then(|model| model.as_str());
-        assert_eq!(stage_model, Some("cmd/true"));
 
         super::teardown_session(&session, &state_root).await;
     }
@@ -5817,16 +5800,9 @@ model-profiles:
         let state_root = tmp.path().join("state");
         std::fs::create_dir_all(&state_root).unwrap();
 
-        let stage = AgentBuilder::new("chat").prompt("hello").build().unwrap();
-        let definition = DefinitionBuilder::new("chat", model("cmd/echo"))
-            .stage(stage)
-            .build()
-            .unwrap();
-
         let gremlin = create_chat_gremlin(
-            &definition,
             &model("cmd/echo"),
-            &state_root,
+            "you are helpful",
             &project_root,
             &HashMap::new(),
         )
@@ -5858,25 +5834,14 @@ model-profiles:
         let state_root = tmp.path().join("state");
         std::fs::create_dir_all(&state_root).unwrap();
 
-        let stage = AgentBuilder::new("chat").prompt("hello").build().unwrap();
-        let definition = DefinitionBuilder::new("chat", model("cmd/echo"))
-            .stage(stage)
-            .build()
-            .unwrap();
-
         let env = HashMap::from([
             ("PATH".to_string(), "/custom/bin".to_string()),
             ("HOME".to_string(), "/home/operator".to_string()),
         ]);
 
-        let gremlin = create_chat_gremlin(
-            &definition,
-            &model("cmd/echo"),
-            &state_root,
-            &project_root,
-            &env,
-        )
-        .unwrap();
+        let gremlin =
+            create_chat_gremlin(&model("cmd/echo"), "you are helpful", &project_root, &env)
+                .unwrap();
 
         assert_eq!(
             gremlin.env, env,

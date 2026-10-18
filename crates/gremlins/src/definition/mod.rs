@@ -22,6 +22,8 @@ pub use crate::stage_spec::exec::Exec;
 pub use crate::stage_spec::node::StageSpec;
 pub use crate::stage_spec::parallel::{ErrorPolicy, ForkSpec, JoinSpec};
 
+pub(crate) mod chat;
+pub use chat::ChatDefinition;
 pub(crate) mod r#static;
 pub use r#static::StaticDefinition;
 
@@ -212,6 +214,12 @@ pub trait GremlinDefinition: Send + Sync {
     /// Returns `Ok(ExecutorStage::Done)` when the definition has no more stages.
     async fn next_stage(&mut self) -> Result<ExecutorStage, DefinitionError>;
 
+    /// Queue a pending chat prompt for the next [`next_stage`](Self::next_stage) call.
+    ///
+    /// Default no-op for non-chat definitions. Only [`ChatDefinition`] consumes
+    /// this to build agent stages on demand.
+    fn set_pending(&mut self, _prompt: &str, _model: &ModelURI, _system_prompt: &str) {}
+
     /// Serialize this definition to bytes.
     ///
     /// Stub — returns `Err(DefinitionError::Message("not implemented"))`.
@@ -286,6 +294,10 @@ impl GremlinDefinition for Box<dyn GremlinDefinition> {
 
     async fn next_stage(&mut self) -> Result<ExecutorStage, DefinitionError> {
         self.as_mut().next_stage().await
+    }
+
+    fn set_pending(&mut self, prompt: &str, model: &ModelURI, system_prompt: &str) {
+        self.as_mut().set_pending(prompt, model, system_prompt)
     }
 
     fn serialize(&self) -> Result<Vec<u8>, DefinitionError> {
