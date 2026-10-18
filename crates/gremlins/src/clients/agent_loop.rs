@@ -1659,7 +1659,10 @@ async fn run_agent_loop_core(
             let tool_msg = format!(
                 "tool: {} {}",
                 tc.function.name,
-                trunc(&key_arg(&tc.function.arguments), 200)
+                trunc(
+                    &enrich_log_line(&tc.function.name, &tc.function.arguments),
+                    200
+                )
             );
             send_log(log_tx, prefix, &tool_msg);
             if !nested {
@@ -1999,17 +2002,17 @@ pub(crate) fn format_tool_call_parts(name: &str, args: &serde_json::Value) -> St
             .and_then(|v| v.as_str())
             .map(|s| format!("command={s:?}")),
         "Read" => args
-            .get("path")
+            .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|s| format!("path={s:?}")),
+            .map(|s| format!("file_path={s:?}")),
         "Write" => args
-            .get("path")
+            .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|s| format!("path={s:?}")),
+            .map(|s| format!("file_path={s:?}")),
         "Edit" => args
-            .get("path")
+            .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|s| format!("path={s:?}")),
+            .map(|s| format!("file_path={s:?}")),
         "Glob" => args
             .get("pattern")
             .and_then(|v| v.as_str())
@@ -2022,10 +2025,14 @@ pub(crate) fn format_tool_call_parts(name: &str, args: &serde_json::Value) -> St
             .get("url")
             .and_then(|v| v.as_str())
             .map(|s| format!("url={s:?}")),
-        "WebFetch" => args
-            .get("url")
+        "OutlineFile" => args
+            .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|s| format!("url={s:?}")),
+            .map(|s| format!("file_path={s:?}")),
+        "Done" => args
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("summary={s:?}")),
         "Task" => args
             .get("kind")
             .and_then(|v| v.as_str())
@@ -2080,14 +2087,7 @@ pub(crate) fn assistant_tool_message(
 
 pub(crate) fn key_arg(args: &serde_json::Value) -> String {
     if let Some(obj) = args.as_object() {
-        for k in [
-            "file_path",
-            "command",
-            "pattern",
-            "url",
-            "output_file",
-            "kind",
-        ] {
+        for k in ["file_path", "command", "pattern", "summary", "url", "kind"] {
             if let Some(v) = obj.get(k).and_then(|v| v.as_str()) {
                 if !v.is_empty() {
                     return v.to_string();
@@ -2098,6 +2098,51 @@ pub(crate) fn key_arg(args: &serde_json::Value) -> String {
     String::new()
 }
 
+/// Enrich the log line with secondary arguments beyond what `key_arg` returns.
+///
+/// `key_arg` picks a single primary key; this function appends any additional
+/// parameters that help operators understand the tool invocation at a glance.
+fn enrich_log_line(name: &str, args: &serde_json::Value) -> String {
+    let primary = key_arg(args);
+    let mut extras = Vec::new();
+
+    match name {
+        "Read" => {
+            if let Some(v) = args.get("offset").and_then(|v| v.as_u64()) {
+                extras.push(format!("offset={v}"));
+            }
+            if let Some(v) = args.get("limit").and_then(|v| v.as_u64()) {
+                extras.push(format!("limit={v}"));
+            }
+        }
+        "Bash" | "WebSearch" => {
+            if let Some(v) = args.get("timeout").and_then(|v| v.as_u64()) {
+                extras.push(format!("timeout={v}"));
+            }
+        }
+        "Grep" => {
+            if let Some(v) = args.get("max_matches").and_then(|v| v.as_u64()) {
+                extras.push(format!("max_matches={v}"));
+            }
+            if let Some(v) = args.get("glob").and_then(|v| v.as_str()) {
+                extras.push(format!("glob={v:?}"));
+            }
+        }
+        "Glob" => {
+            if let Some(v) = args.get("path").and_then(|v| v.as_str()) {
+                extras.push(format!("path={v:?}"));
+            }
+        }
+        _ => {}
+    }
+
+    if extras.is_empty() {
+        primary
+    } else {
+        format!("{primary} {}", extras.join(" "))
+    }
+}
+
 /// Compact label for a tool call in the per-turn action ledger.
 pub(crate) fn ledger_key_arg(args: &serde_json::Value) -> String {
     if let Some(obj) = args.as_object() {
@@ -2105,10 +2150,10 @@ pub(crate) fn ledger_key_arg(args: &serde_json::Value) -> String {
             "file_path",
             "command",
             "pattern",
+            "summary",
             "path",
             "kind",
             "url",
-            "output_file",
         ] {
             if let Some(v) = obj.get(k).and_then(|v| v.as_str()) {
                 if !v.is_empty() {
