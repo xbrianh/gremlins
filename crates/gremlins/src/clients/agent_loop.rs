@@ -2032,7 +2032,7 @@ pub(crate) fn format_tool_call_parts(name: &str, args: &serde_json::Value) -> St
         "Done" => args
             .get("summary")
             .and_then(|v| v.as_str())
-            .map(|s| format!("summary={s:?}")),
+            .map(|s| format!("summary={:?}", trunc(s, 120))),
         "Task" => args
             .get("kind")
             .and_then(|v| v.as_str())
@@ -2108,28 +2108,73 @@ fn enrich_log_line(name: &str, args: &serde_json::Value) -> String {
 
     match name {
         "Read" => {
-            if let Some(v) = args.get("offset").and_then(|v| v.as_u64()) {
+            if let Some(v) = args
+                .get("offset")
+                .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0)
+            {
                 extras.push(format!("offset={v}"));
             }
-            if let Some(v) = args.get("limit").and_then(|v| v.as_u64()) {
+            if let Some(v) = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0)
+            {
                 extras.push(format!("limit={v}"));
             }
         }
         "Bash" | "WebSearch" => {
-            if let Some(v) = args.get("timeout").and_then(|v| v.as_u64()) {
+            if let Some(v) = args
+                .get("timeout")
+                .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0)
+            {
                 extras.push(format!("timeout={v}"));
             }
         }
         "Grep" => {
-            if let Some(v) = args.get("max_matches").and_then(|v| v.as_u64()) {
+            if let Some(v) = args
+                .get("max_matches")
+                .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0)
+            {
                 extras.push(format!("max_matches={v}"));
             }
-            if let Some(v) = args.get("glob").and_then(|v| v.as_str()) {
+            if let Some(v) = args
+                .get("glob")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
                 extras.push(format!("glob={v:?}"));
+            }
+            if let Some(v) = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                extras.push(format!("path={v:?}"));
+            }
+            if let Some(v) = args
+                .get("context_before")
+                .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0)
+            {
+                extras.push(format!("context_before={v}"));
+            }
+            if let Some(v) = args
+                .get("context_after")
+                .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0)
+            {
+                extras.push(format!("context_after={v}"));
             }
         }
         "Glob" => {
-            if let Some(v) = args.get("path").and_then(|v| v.as_str()) {
+            if let Some(v) = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
                 extras.push(format!("path={v:?}"));
             }
         }
@@ -2139,7 +2184,12 @@ fn enrich_log_line(name: &str, args: &serde_json::Value) -> String {
     if extras.is_empty() {
         primary
     } else {
-        format!("{primary} {}", extras.join(" "))
+        // Truncate primary so extras aren't pushed past the outer 200-char cap.
+        let primary = trunc(&primary, 120);
+        // Debug-quote the primary so suffixes can't be mistaken for
+        // command/pattern text (e.g. "tool: Bash make test timeout=60" is
+        // ambiguous; "tool: Bash "make test" timeout=60" is not).
+        format!("{primary:?} {}", extras.join(" "))
     }
 }
 
@@ -2558,6 +2608,171 @@ mod tests {
         assert_eq!(
             ledger_line("Bash", "false", "[exit 1]\n"),
             "- Bash false (failed)"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_uses_file_path_key() {
+        // Read, Write, Edit must use file_path, not path.
+        let args = serde_json::json!({"file_path": "src/main.rs"});
+        assert_eq!(
+            format_tool_call_parts("Read", &args),
+            "Read(file_path=\"src/main.rs\")"
+        );
+        assert_eq!(
+            format_tool_call_parts("Write", &args),
+            "Write(file_path=\"src/main.rs\")"
+        );
+        assert_eq!(
+            format_tool_call_parts("Edit", &args),
+            "Edit(file_path=\"src/main.rs\")"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_outline_and_done() {
+        assert_eq!(
+            format_tool_call_parts(
+                "OutlineFile",
+                &serde_json::json!({"file_path": "Cargo.toml"})
+            ),
+            "OutlineFile(file_path=\"Cargo.toml\")"
+        );
+        assert_eq!(
+            format_tool_call_parts("Done", &serde_json::json!({"summary": "Fixed it"})),
+            "Done(summary=\"Fixed it\")"
+        );
+        // Long Done summary is truncated.
+        let long = format_tool_call_parts("Done", &serde_json::json!({"summary": "x".repeat(300)}));
+        assert!(long.len() < 200, "long summary must be truncated: {long}");
+        assert!(long.starts_with("Done(summary=\""));
+    }
+
+    #[test]
+    fn format_tool_call_parts_no_vestigial_web_fetch() {
+        // WebFetch no longer exists; unrecognized tools get bare name.
+        assert_eq!(
+            format_tool_call_parts("WebFetch", &serde_json::json!({"url": "https://x.com"})),
+            "WebFetch"
+        );
+    }
+
+    #[test]
+    fn enrich_log_line_secondary_args() {
+        // Read with offset and limit.
+        let line = enrich_log_line(
+            "Read",
+            &serde_json::json!({"file_path": "foo.rs", "offset": 100, "limit": 50}),
+        );
+        assert!(line.contains("offset=100"), "{line}");
+        assert!(line.contains("limit=50"), "{line}");
+
+        // Read with zero offset/limit — omitted.
+        let line = enrich_log_line(
+            "Read",
+            &serde_json::json!({"file_path": "foo.rs", "offset": 0, "limit": 0}),
+        );
+        assert!(!line.contains("offset"), "{line}");
+        assert!(!line.contains("limit"), "{line}");
+
+        // Bash with timeout.
+        let line = enrich_log_line(
+            "Bash",
+            &serde_json::json!({"command": "make test", "timeout": 60}),
+        );
+        assert!(line.contains("timeout=60"), "{line}");
+        assert!(
+            line.contains("\"make test\""),
+            "primary must be quoted when extras present: {line}"
+        );
+
+        // Bash with zero timeout — omitted, no quoting.
+        let line = enrich_log_line(
+            "Bash",
+            &serde_json::json!({"command": "make test", "timeout": 0}),
+        );
+        assert!(!line.contains("timeout"), "{line}");
+        assert!(!line.contains('"'), "no extras → no quoting: {line}");
+
+        // Grep with path, glob, max_matches, context_before, context_after.
+        let line = enrich_log_line(
+            "Grep",
+            &serde_json::json!({
+                "pattern": "fn run",
+                "path": "src/",
+                "glob": "*.rs",
+                "max_matches": 50,
+                "context_before": 2,
+                "context_after": 0,
+            }),
+        );
+        assert!(line.contains("path=\"src/\""), "{line}");
+        assert!(line.contains("glob=\"*.rs\""), "{line}");
+        assert!(line.contains("max_matches=50"), "{line}");
+        assert!(line.contains("context_before=2"), "{line}");
+        assert!(
+            !line.contains("context_after"),
+            "zero context_after omitted: {line}"
+        );
+
+        // Glob with path.
+        let line = enrich_log_line(
+            "Glob",
+            &serde_json::json!({"pattern": "**/*.rs", "path": "src/"}),
+        );
+        assert!(line.contains("path=\"src/\""), "{line}");
+
+        // Glob without path.
+        let line = enrich_log_line("Glob", &serde_json::json!({"pattern": "**/*.rs"}));
+        assert!(!line.contains("path="), "{line}");
+    }
+
+    #[test]
+    fn enrich_log_line_truncates_long_primary_before_extras() {
+        // A very long Bash command should be truncated so timeout fits.
+        let long_cmd = "echo ".repeat(50).trim().to_string();
+        let line = enrich_log_line(
+            "Bash",
+            &serde_json::json!({"command": long_cmd, "timeout": 30}),
+        );
+        assert!(line.contains("timeout=30"), "timeout lost: {line}");
+        assert!(
+            line.contains("...\""),
+            "long primary should be truncated: {line}"
+        );
+    }
+
+    #[test]
+    fn ledger_key_arg_includes_summary() {
+        assert_eq!(
+            ledger_key_arg(&serde_json::json!({"summary": "Fixed the bug"})),
+            "Fixed the bug"
+        );
+        // summary is lower priority than file_path, command, pattern.
+        assert_eq!(
+            ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x", "summary": "ignored"})),
+            "/tmp/x"
+        );
+        assert_eq!(
+            ledger_key_arg(&serde_json::json!({"command": "ls", "summary": "ignored"})),
+            "ls"
+        );
+        assert_eq!(
+            ledger_key_arg(&serde_json::json!({"pattern": "fn", "summary": "ignored"})),
+            "fn"
+        );
+    }
+
+    #[test]
+    fn key_arg_includes_summary() {
+        assert_eq!(
+            key_arg(&serde_json::json!({"summary": "Completed task"})),
+            "Completed task"
+        );
+        // summary is lower priority than file_path, command, pattern.
+        assert_eq!(
+            key_arg(&serde_json::json!({"file_path": "/tmp/x", "summary": "ignored"})),
+            "/tmp/x"
         );
     }
 
