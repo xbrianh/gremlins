@@ -109,6 +109,14 @@ pub(crate) struct AgentLoopRuntime {
     /// Point-in-time snapshot of the parent conversation, available to Task
     /// tool calls (used only by `Fork`). `None` when unavailable.
     pub(crate) parent_history: Option<Vec<rig_core::completion::Message>>,
+    /// Prefix prepended to tool call IDs emitted on the shared event stream.
+    ///
+    /// Nested Task conversations run on the parent's stream but reuse raw
+    /// provider call IDs (`call_0`, …). Two independent tasks would then share
+    /// one TUI live slot and the second result would be dropped, so each nested
+    /// loop sets its own task-chain prefix to keep IDs unique. Empty at the top
+    /// level, so top-level IDs are unchanged.
+    pub(crate) id_prefix: String,
     /// Bundled send-side telemetry channels. Cloned into every nested loop.
     pub(crate) telemetry: AgentLoopTelemetry,
 }
@@ -125,7 +133,7 @@ impl AgentLoopRuntime {
         if let Some(tx) = &self.telemetry.tool_output {
             let _ = tx
                 .send(ToolOutputLine {
-                    id: id.to_string(),
+                    id: format!("{}{id}", self.id_prefix),
                     name: name.to_string(),
                     call: call.to_string(),
                     text: text.to_string(),
@@ -2881,11 +2889,43 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
                 tool_output: None,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn emit_output_prefixes_the_tool_call_id() {
+        let dir = tmp();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ToolOutputLine>(4);
+        let mut c = ctx(&dir);
+        c.id_prefix = "a3f1.".to_string();
+        c.telemetry.tool_output = Some(tx);
+
+        c.emit_output("call_0", "Bash", "Bash echo hi", "hi\n")
+            .await;
+        let line = rx.recv().await.expect("a line was emitted");
+        assert_eq!(
+            line.id, "a3f1.call_0",
+            "id must carry the task-chain prefix"
+        );
+        assert_eq!(line.name, "Bash");
+        assert_eq!(line.text, "hi\n");
+    }
+
+    #[tokio::test]
+    async fn emit_output_without_prefix_keeps_the_raw_id() {
+        let dir = tmp();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ToolOutputLine>(4);
+        let mut c = ctx(&dir);
+        c.telemetry.tool_output = Some(tx);
+
+        c.emit_output("call_0", "Bash", "call", "x").await;
+        let line = rx.recv().await.expect("a line was emitted");
+        assert_eq!(line.id, "call_0", "top-level ids must stay unprefixed");
     }
 
     #[tokio::test]
@@ -3164,6 +3204,7 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
                 tool_output: None,
@@ -3195,6 +3236,7 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
                 tool_output: None,
@@ -4254,6 +4296,7 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
                 tool_output: None,
@@ -4665,6 +4708,7 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
                 tool_output: None,
@@ -4694,6 +4738,7 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
+            id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
                 tool_output: None,
@@ -4721,6 +4766,7 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
+            id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
                 tool_output: None,
@@ -4755,6 +4801,7 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
+            id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
                 tool_output: None,
@@ -4784,6 +4831,7 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
+            id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
                 tool_output: None,
@@ -5168,6 +5216,7 @@ mod tests {
             task_fn: Some(task_fn),
             audit_lock: None,
             parent_history: None,
+            id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
                 tool_output: None,
@@ -5199,6 +5248,7 @@ mod tests {
             task_fn: None,
             audit_lock: None,
             parent_history: None,
+            id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
                 tool_output: None,

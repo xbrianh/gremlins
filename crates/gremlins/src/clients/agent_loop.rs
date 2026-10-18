@@ -303,6 +303,7 @@ pub(crate) async fn run_agent_loop(
         task_fn: None,
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
         parent_history: None,
+        id_prefix: String::new(),
         telemetry,
     };
     let tool_defs = tools::tool_definitions(opts.tool_filter);
@@ -365,6 +366,7 @@ pub(crate) async fn run_agent_loop_nested(
     cancel: &CancelToken,
     tool_filter: Option<&[String]>,
     prefix: &str,
+    id_chain: &str,
     idle_timeout: f64,
     max_turns: usize,
     completion_nudge_budget: usize,
@@ -387,21 +389,23 @@ pub(crate) async fn run_agent_loop_nested(
     let tool_defs = tools::tool_definitions(tool_filter);
     let mut raw: Option<std::fs::File> = None;
     let mut captured: Option<Vec<serde_json::Value>> = None;
-    let (nested_tool_tx, nested_tool_rx) = if tool_ctx
-        .telemetry
-        .stream_events
-        .as_ref()
-        .is_some_and(|se| se.wants_events())
-    {
-        let (tx, rx) = mpsc::channel::<tools::ToolOutputLine>(1024);
-        (Some(tx), Some(rx))
-    } else {
-        (None, None)
-    };
     let mut nested_tool_ctx = tool_ctx.clone();
+    // Nested loops keep the parent's stream (so their `ToolResult` events reach
+    // the parent TUI) and inherit the parent's tool-output sender rather than
+    // owning a second forwarder. Only the top-level loop runs the live-output
+    // forwarder, so a child never competes with the parent for a bounded stream
+    // slot — the two-forwarder design could stall a small-capacity stream.
     nested_tool_ctx.telemetry = AgentLoopTelemetry {
         stream_events: tool_ctx.telemetry.stream_events.clone(),
-        tool_output: nested_tool_tx,
+        tool_output: tool_ctx.telemetry.tool_output.clone(),
+    };
+    // Prefix this task's tool call IDs with its chain so two tasks that reuse a
+    // raw provider ID (e.g. `call_0`) don't collide on the parent TUI's per-ID
+    // live slots. Model history keeps the original IDs.
+    nested_tool_ctx.id_prefix = if id_chain.is_empty() {
+        String::new()
+    } else {
+        format!("{id_chain}.")
     };
     let result = run_agent_loop_core(
         &model,
@@ -422,7 +426,7 @@ pub(crate) async fn run_agent_loop_nested(
         completion_nudge_budget,
         &log_tx,
         None,
-        nested_tool_rx,
+        None,
         prepopulated_messages,
         None,
     )
@@ -1843,7 +1847,7 @@ async fn run_agent_loop_core(
                     send_stream_event_checked(
                         se,
                         InteractiveEvent::ToolResult {
-                            id: job.id.clone(),
+                            id: format!("{}{}", tool_ctx.id_prefix, job.id),
                             name: job.name.clone(),
                             call: job.call.clone(),
                             output: display,
@@ -5169,6 +5173,134 @@ mod tests {
         }
     }
 
+    /// Regression for nested `Task` output sharing the parent's event stream.
+    ///
+    /// Two independent tasks reuse raw provider call IDs (`call_0`, …), so
+    /// nested loops must (a) inherit the parent's tool-output sender instead of
+    /// owning a second forwarder — otherwise the two forwarders contend for a
+    /// bounded stream slot — and (b) prefix their IDs with the task chain so a
+    /// child result can't collide on the parent TUI's per-ID live slots.
+    #[tokio::test]
+    async fn nested_task_shares_stream_and_prefixes_ids() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let mut ctx = test_ctx(None, None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        // Small bounded stream, mirroring the chat path's backpressure.
+        let (stream_tx, mut stream_rx) = mpsc::channel::<InteractiveEvent>(8);
+        ctx.stream_events = Some(StreamEventSender::Mpsc(stream_tx));
+
+        let collected = Arc::new(std::sync::Mutex::new(Vec::<InteractiveEvent>::new()));
+        let sink = collected.clone();
+        let drain = tokio::spawn(async move {
+            while let Some(ev) = stream_rx.recv().await {
+                sink.lock().unwrap().push(ev);
+            }
+        });
+
+        // parent turn 1 delegates, child runs a Bash command (live output)
+        // then finishes, parent turn 2 finishes.
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call(
+                    "t1",
+                    "Task",
+                    serde_json::json!({"kind": "Scout", "prompt": "go"}),
+                ),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                MockStreamEvent::tool_call(
+                    "call_0",
+                    "Bash",
+                    serde_json::json!({"command": "echo hello-from-child"}),
+                ),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                MockStreamEvent::tool_call(
+                    "call_1",
+                    "Done",
+                    serde_json::json!({"summary": "child done"}),
+                ),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                MockStreamEvent::tool_call(
+                    "t2",
+                    "Done",
+                    serde_json::json!({"summary": "parent done"}),
+                ),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+
+        let run = tokio::time::timeout(
+            Duration::from_secs(15),
+            run_agent_loop(
+                gm(model.erase()),
+                "go",
+                ctx,
+                CancelToken::new(),
+                loop_opts(None),
+                None,
+            ),
+        )
+        .await
+        .expect("nested Task must not stall on a bounded stream");
+        run.unwrap();
+        // Every sender drops once the loop returns, so the drain task ends.
+        let _ = tokio::time::timeout(Duration::from_secs(2), drain).await;
+
+        let events = collected.lock().unwrap().clone();
+
+        // The child's live Bash output must reach the parent stream, carrying
+        // the task-chain prefix rather than the raw provider id.
+        let child_chunk_id = events
+            .iter()
+            .find_map(|e| match e {
+                InteractiveEvent::ToolOutputChunk { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .expect("child Bash live output must be forwarded to the parent stream");
+        assert_ne!(
+            child_chunk_id, "call_0",
+            "child id must not reuse the raw provider id"
+        );
+        assert!(
+            child_chunk_id.ends_with(".call_0"),
+            "child id must carry the task-chain prefix, got {child_chunk_id}"
+        );
+
+        // The matching ToolResult must use the same prefixed id so the live
+        // slot and its committed block line up.
+        let child_result_id = events
+            .iter()
+            .find_map(|e| match e {
+                InteractiveEvent::ToolResult { id, name, .. }
+                    if name == "Bash" && id.ends_with("call_0") =>
+                {
+                    Some(id.clone())
+                }
+                _ => None,
+            })
+            .expect("child Bash ToolResult must be forwarded");
+        assert_eq!(
+            child_result_id, child_chunk_id,
+            "child chunk and result ids must match"
+        );
+
+        // The parent's own Task result keeps its raw, unprefixed id.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                InteractiveEvent::ToolResult { id, .. } if id == "t1"
+            )),
+            "parent ToolResult id must stay unprefixed"
+        );
+    }
+
     /// Regression: the agent loop must never inject a `temperature` field on
     /// its own. No `LoopOpts` knob exists for it, so every request — parent
     /// loop and nested Task alike — must leave `temperature` unset.
@@ -5332,6 +5464,7 @@ mod tests {
             task_fn: None,
             audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
             parent_history: None,
+            id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
                 tool_output: None,
