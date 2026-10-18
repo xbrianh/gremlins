@@ -1687,12 +1687,12 @@ mod tests {
         let info = lines.iter().position(|l| l.contains("◆ GREMLINS")).unwrap();
         let input = lines.iter().rposition(|l| l.contains("»")).unwrap();
         assert!(
-            prompt < tool
-                && tool < response
-                && response < reasoning
+            prompt < response
+                && response < tool
+                && tool < reasoning
                 && reasoning + 1 == input
                 && input + 1 == info,
-            "a turn must render transcript (prompt → tool → response), then the bottom reasoning band directly above the input bar, then the info bar.\nBuffer:\n{visible}"
+            "a turn must render transcript (prompt → response → tool), then the bottom reasoning band directly above the input bar, then the info bar.\nBuffer:\n{visible}"
         );
     }
 

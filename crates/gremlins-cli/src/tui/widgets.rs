@@ -200,6 +200,10 @@ pub struct TranscriptWidget {
     /// scrollback. When the response region is rebuilt, these leading lines
     /// are skipped so drained content is never emitted twice.
     response_drained_lines: usize,
+    /// Number of response-accumulator chars already sealed into the FIFO
+    /// (at tool boundaries). [`reconcile_response`] skips this prefix so the
+    /// sealed text is never duplicated.
+    sealed_response_len: usize,
     /// Cached wrapped desired height `(width, height)` for the FIFO,
     /// invalidated whenever the FIFO, accumulator, or width changes.
     desired_cache: Cell<Option<(u16, u16)>>,
@@ -227,6 +231,7 @@ impl TranscriptWidget {
             last_width: 40,
             response_dirty: false,
             response_drained_lines: 0,
+            sealed_response_len: 0,
             desired_cache: Cell::new(None),
         }
     }
@@ -238,9 +243,18 @@ impl TranscriptWidget {
 
     /// Append live tool output (may be a partial chunk) to the stream for
     /// the given tool-call id, creating the stream lazily on first use.
+    ///
+    /// On first chunk for a new tool, the response accumulator is sealed
+    /// into the FIFO so model text that arrived before this tool call
+    /// appears before the tool's `◆` line in the final transcript.
     pub fn push_tool_output_chunk(&mut self, id: &str, call: &str, text: &str) {
         if id.is_empty() && call.is_empty() {
             return;
+        }
+        // Seal the response accumulator on first chunk so text that
+        // arrived before this tool call appears before the tool's ◆ line.
+        if !self.tools.contains_key(id) {
+            self.seal_response();
         }
         let stream = self
             .tools
@@ -255,9 +269,11 @@ impl TranscriptWidget {
     }
 
     /// Commit a finished tool call into the transcript's permanent tool
-    /// segment. Streaming tools with a live slot commit their title plus the
-    /// retained 5-row tail; every other tool commits a single `◆` event line.
-    /// Each tool commits at most once, even if a completion event is repeated.
+    /// segment. Every tool — streaming or not — creates (or reuses) a
+    /// [`StreamingWidget`] and commits via [`commit_tool_stream_block`]
+    /// so the `◆` title-plus-tail block is uniform. Non-streaming tools
+    /// with an empty body commit a title-only block. Each tool commits at
+    /// most once, even if a completion event is repeated.
     pub fn commit_tool_result(&mut self, id: &str, call: &str) {
         if self.turn_start.is_none() || (id.is_empty() && call.is_empty()) {
             return;
@@ -270,27 +286,30 @@ impl TranscriptWidget {
         }
         self.note_committed_call(call);
 
-        if let Some(stream) = self.tools.remove(id) {
+        let stream = if let Some(stream) = self.tools.remove(id) {
             self.tool_calls_by_id.remove(id);
-            self.commit_tool_stream_block(stream);
+            stream
         } else if !call.is_empty() {
-            self.insert_tool_lines(vec![tool_line(call)]);
-        }
+            // Non-streaming tool: seal the accumulator so text that
+            // arrived before this tool call appears before the ◆ block.
+            self.seal_response();
+            Self::title_only_tool(call)
+        } else {
+            return;
+        };
+        self.commit_tool_stream_block(stream);
     }
 
     /// Seed the current turn's tool-call list for end-of-turn reconciliation.
-    /// Read/Edit calls stay filtered exactly as they were before. Later
-    /// `TurnComplete` events merge into the existing list, consuming any
-    /// already-committed result first so exactly-once holds regardless of
-    /// whether the result or the completion event arrived first.
+    /// Every tool participates uniformly. Later `TurnComplete` events merge
+    /// into the existing list, consuming any already-committed result first
+    /// so exactly-once holds regardless of whether the result or the
+    /// completion event arrived first.
     pub fn reconcile_tool_calls(&mut self, calls: &[String]) {
         if self.turn_start.is_none() {
             return;
         }
         for call in calls {
-            if call.starts_with("Read") || call.starts_with("Edit") {
-                continue;
-            }
             if let Some(count) = self.committed_unmatched.get_mut(call) {
                 if *count > 0 {
                     *count -= 1;
@@ -359,7 +378,8 @@ impl TranscriptWidget {
                 self.tool_calls_by_id.remove(&stream_id);
                 self.commit_tool_stream_block(stream);
             } else if !call.is_empty() {
-                self.insert_tool_lines(vec![tool_line(&call)]);
+                self.seal_response();
+                self.commit_tool_stream_block(Self::title_only_tool(&call));
             }
         }
     }
@@ -487,6 +507,34 @@ impl TranscriptWidget {
         self.insert_tool_lines(block);
     }
 
+    /// Create a title-only [`StreamingWidget`] for a tool that produced no
+    /// body output (e.g. Read, Edit, Write, Glob, Grep).
+    fn title_only_tool(call: &str) -> StreamingWidget {
+        let mut stream = StreamingWidget::tool(Self::STREAM_MAX_ROWS);
+        stream.set_title(call);
+        stream.flush();
+        stream
+    }
+
+    /// Seal the response accumulator: rebuild any accumulated model text
+    /// into the FIFO, clear the accumulator, and advance `response_start`
+    /// past the committed lines so subsequent tool blocks appear below the
+    /// text that arrived before them and the sealed prefix is never
+    /// duplicated by a later [`reconcile_response`].
+    fn seal_response(&mut self) {
+        if self.turn_start.is_none() || self.response_accumulator.is_empty() {
+            return;
+        }
+        self.sealed_response_len = self
+            .sealed_response_len
+            .saturating_add(self.response_accumulator.len());
+        self.response_dirty = true;
+        self.rebuild_response();
+        self.response_accumulator.clear();
+        self.response_start = Some(self.scrollable.len());
+        self.response_drained_lines = 0;
+    }
+
     /// Commit the reasoning stream's title line as the final FIFO line of
     /// the finished turn.
     ///
@@ -588,7 +636,7 @@ impl TranscriptWidget {
     /// Insert a single bare tool-call line into the active turn.
     #[cfg(test)]
     pub fn push_tool_line(&mut self, name: &str) {
-        let line = tool_line(name);
+        let line = tool_chrome_line(&format!("{} ", glyph::DIAMOND), name);
         self.invalidate_desired_cache();
         match self.turn_start {
             Some(_) => self.insert_tool_lines(vec![line]),
@@ -665,6 +713,7 @@ impl TranscriptWidget {
         self.response_accumulator.push_str(text);
         self.response_dirty = true;
         self.response_drained_lines = 0;
+        self.sealed_response_len = 0;
     }
 
     /// Whether the streaming response is empty.
@@ -680,6 +729,15 @@ impl TranscriptWidget {
 
     /// Reconcile the streamed response against authoritative full text.
     pub fn reconcile_response(&mut self, text: &str) {
+        // Skip any prefix already sealed into the FIFO at tool boundaries.
+        let text = if self.sealed_response_len > 0 && self.sealed_response_len < text.len() {
+            &text[self.sealed_response_len..]
+        } else if self.sealed_response_len > 0 {
+            // Entire text was already sealed — nothing to reconcile.
+            return;
+        } else {
+            text
+        };
         if text.is_empty() {
             return;
         }
@@ -740,6 +798,7 @@ impl TranscriptWidget {
         self.response_dirty = false;
         self.response_accumulator.clear();
         self.response_drained_lines = 0;
+        self.sealed_response_len = 0;
     }
 
     /// Discard the current turn: truncate the FIFO back to the turn start
@@ -767,6 +826,7 @@ impl TranscriptWidget {
         self.response_dirty = false;
         self.response_accumulator.clear();
         self.response_drained_lines = 0;
+        self.sealed_response_len = 0;
     }
 
     /// Clear the scrollable FIFO.
@@ -852,24 +912,13 @@ impl TranscriptWidget {
         })
     }
 
-    /// Re-run the recursive layout engine over the transcript's live tool
-    /// children, constrained to the outer allocation minus the FIFO's
-    /// one-row floor. Returns each live tool height in sorted-id order.
-    fn tool_heights(&mut self, available_rows: u16, width: u16, ctx: &RenderContext) -> Vec<u16> {
-        let child_budget = available_rows.saturating_sub(1);
-        let mut children: Vec<&mut dyn LiveAreaWidget> = Vec::with_capacity(self.tools.len());
-        for stream in self.tools.values_mut() {
-            children.push(stream);
-        }
-        let layout = layout_widgets(&mut children, width, child_budget, ctx);
-        layout.heights
-    }
-
     /// Drain the head of the transcript FIFO that does not fit in
-    /// `available_rows`. The embedded tool bands are allocated first by the
-    /// recursive layout engine, and the FIFO is drained unconditionally: an
-    /// in-progress turn overflows into terminal scrollback exactly like
-    /// completed history. Tool output is never returned as overflow.
+    /// `available_rows`. Live tool streams are allocated first with a flat
+    /// sum of their desired heights, then the FIFO is drained
+    /// unconditionally: an in-progress turn overflows into terminal
+    /// scrollback exactly like completed history. Tool output is never
+    /// returned as overflow. The tool budget is capped at one row below
+    /// `available_rows` to guarantee at least one FIFO row survives.
     pub fn take_overflow(
         &mut self,
         available_rows: u16,
@@ -878,10 +927,14 @@ impl TranscriptWidget {
     ) -> Vec<Line<'static>> {
         self.invalidate_desired_cache();
         let inner = width.saturating_sub(1);
+        let tool_budget = available_rows.saturating_sub(1);
         let tool_rows = self
-            .tool_heights(available_rows, inner, ctx)
-            .into_iter()
-            .fold(0u16, |acc, h| acc.saturating_add(h));
+            .tools
+            .values()
+            .fold(0u16, |acc, stream| {
+                acc.saturating_add(stream.desired_height(inner, ctx))
+            })
+            .min(tool_budget);
         let fifo_rows = available_rows.saturating_sub(tool_rows);
         let (_overflow_rows, overflow_lines): (_, Vec<_>) =
             split_overflow(&self.scrollable, fifo_rows, inner);
@@ -986,11 +1039,6 @@ fn reasoning_line(text: &str) -> Line<'static> {
             .fg(DEFAULT_THEME.subtle)
             .add_modifier(Modifier::ITALIC),
     )])
-}
-
-/// A single tool-event line: chrome diamond + nickel italic name.
-fn tool_line(name: &str) -> Line<'static> {
-    tool_chrome_line(&format!("{} ", glyph::DIAMOND), name)
 }
 
 /// Chrome-prefixed live header/body line matching the transcript's tool-event
@@ -2052,103 +2100,36 @@ impl LiveAreaWidget for TranscriptWidget {
             return;
         }
 
-        // Allocate the ephemeral tool band before borrowing the FIFO lines.
-        let tool_rows = self.tool_heights(area.height, width, ctx);
-        let tool_rows_total = tool_rows.iter().fold(0u16, |acc, h| acc.saturating_add(*h));
-        let fifo_rows = area.height.saturating_sub(tool_rows_total);
+        // Keep at least one FIFO row so the prompt is never hidden mid-turn.
+        let tool_budget = area.height.saturating_sub(1);
+        let tool_rows = self.tools_desired_height(width, ctx).min(tool_budget);
+        let fifo_budget = area.height.saturating_sub(tool_rows);
 
         let lines = self.scrollable.visible_lines();
-        if lines.is_empty() {
-            return;
-        }
-
-        // Three-slice split around the two pinned boundaries. Everything
-        // before `prompt_end` is the top-anchored prompt/history head; the
-        // middle slice is the permanent tool-call-event band; everything from
-        // `response_start` onward is the streaming response.
-        let prompt_end = self.prompt_end.min(lines.len());
-        let response_start = self
-            .response_start
-            .unwrap_or(lines.len())
-            .min(lines.len())
-            .max(prompt_end);
-        let pre = &lines[..prompt_end];
-        let events = &lines[prompt_end..response_start];
-        let tail = &lines[response_start..];
-
-        let pre_rows = wrapped_height(pre, width);
-        let event_rows = wrapped_height(events, width);
-        let tail_rows = wrapped_height(tail, width);
-
-        let (pre_band, event_band, tail_band) = if tail.is_empty() {
-            // No response yet: paint the prompt/history head and then the
-            // tool-call-event band, both top-anchored.
-            let pre_band = (pre_rows as u16).min(fifo_rows);
-            let event_band = (event_rows as u16).min(fifo_rows.saturating_sub(pre_band));
-            (pre_band, event_band, 0)
+        let fifo_h = if lines.is_empty() || fifo_budget == 0 {
+            0
         } else {
-            // The response keeps at least one FIFO row after the ephemeral
-            // bands. After overflow the only line that can still exceed the
-            // remaining FIFO rows is the final over-tall response line; the
-            // head slices are painted top-anchored and the tail renderer
-            // keeps the response's wrapped tail.
-            let tail_floor = fifo_rows.min(1);
-            let head_budget = fifo_rows.saturating_sub(tail_floor);
-            let pre_band = (pre_rows as u16).min(head_budget);
-            let event_band = (event_rows as u16).min(head_budget.saturating_sub(pre_band));
-            let tail_band = fifo_rows
-                .saturating_sub(pre_band)
-                .saturating_sub(event_band);
-            (pre_band, event_band, tail_band)
+            (wrapped_height(lines, width).min(fifo_budget as usize)) as u16
         };
-
-        let mut y = inner.y;
-        if pre_band > 0 && !pre.is_empty() {
-            let pre_area = Rect::new(inner.x, y, width, pre_band);
-            Paragraph::new(pre.to_vec())
-                .wrap(Wrap { trim: false })
-                .render(pre_area, buf);
+        if fifo_h > 0 {
+            let fifo_area = Rect::new(inner.x, inner.y, width, fifo_h);
+            render_wrapped_tail(lines, fifo_area, buf, fifo_h as usize);
         }
 
-        y = inner.y + pre_band;
-        if event_band > 0 && !events.is_empty() {
-            let event_area = Rect::new(inner.x, y, width, event_band);
-            Paragraph::new(events.to_vec())
-                .wrap(Wrap { trim: false })
-                .render(event_area, buf);
-        }
-
-        y = inner.y + pre_band + event_band;
-        for (stream, stream_rows) in self.tools.values_mut().zip(tool_rows) {
+        let mut y = inner.y + fifo_h;
+        for stream in self.tools.values_mut() {
+            if y >= inner.y + area.height {
+                break;
+            }
+            let stream_rows = stream.desired_height(width, ctx);
             if stream_rows == 0 {
                 continue;
             }
+            let remaining = area.height.saturating_sub(y.saturating_sub(inner.y));
+            let stream_rows = stream_rows.min(remaining);
             let tool_area = Rect::new(inner.x, y, width, stream_rows);
             LiveAreaWidget::render(stream, tool_area, buf, ctx);
             y += stream_rows;
-        }
-
-        if tail_band > 0 && !tail.is_empty() {
-            if tail_rows <= tail_band as usize && tool_rows_total > 0 {
-                // Bottom-anchor the short response inside its allocated band
-                // so the blank rows sit between the ephemeral slots and
-                // response.
-                let tail_area = Rect::new(
-                    inner.x,
-                    inner.y + area.height.saturating_sub(tail_rows as u16),
-                    width,
-                    tail_rows as u16,
-                );
-                Paragraph::new(tail.to_vec())
-                    .wrap(Wrap { trim: false })
-                    .render(tail_area, buf);
-            } else {
-                // Without ephemeral output the short response streams
-                // directly below the tool-call-event band with no blank gap;
-                // a tall response keeps its tail.
-                let tail_area = Rect::new(inner.x, y, width, tail_band);
-                render_wrapped_tail(tail, tail_area, buf, tail_band as usize);
-            }
         }
     }
 }
@@ -3744,32 +3725,27 @@ mod tests {
     }
 
     #[test]
-    fn transcript_tool_layout_shrinks_preserving_fifo_floor() {
+    fn transcript_tool_desired_height_caps_at_stream_max_rows() {
         let ctx = input_ctx("", 0);
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
         transcript.push_response("answer");
-        for i in 0..5 {
-            transcript.push_tool_output_chunk("b1", "", &format!("tool {i}\n"));
+        for i in 0..8 {
+            transcript.push_tool_output_chunk("b1", "bash", &format!("tool {i}\n"));
         }
 
         let cols = 40;
         LiveAreaWidget::finalize(&mut transcript, cols);
 
-        // The transcript re-runs the shared engine on its live tool children
-        // with the parent's already-reduced inner width. The tool stream
-        // wants 5 rows; the FIFO keeps its one-row floor first, so a 6-row
-        // transcript can host the full tool band and a 4-row transcript
-        // shrinks that band to its 3 ephemeral rows.
-        let tool_rows = transcript.tool_heights(6, cols - 1, &ctx);
-        assert_eq!(tool_rows, vec![5]);
-
-        let tool_rows = transcript.tool_heights(4, cols - 1, &ctx);
-        assert_eq!(tool_rows, vec![3]);
+        // The tool stream has 8 lines pushed but its body is capped at
+        // STREAM_MAX_ROWS (5). With the title "◆ bash", desired height is
+        // 1 (title) + 5 (body cap) = 6.
+        let tool_rows = transcript.tools_desired_height(cols - 1, &ctx);
+        assert_eq!(tool_rows, 6);
     }
 
     #[test]
-    fn transcript_render_orders_prompt_tool_events_tool_output_response() {
+    fn transcript_render_orders_fifo_then_live_tools() {
         let ctx = input_ctx("", 0);
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
@@ -3780,8 +3756,9 @@ mod tests {
         let cols = 40;
         LiveAreaWidget::finalize(&mut transcript, cols);
 
-        // Five rows are exactly enough for prompt + tool-call event + live
-        // tool title + live tool body + response.
+        // After finalize: FIFO = [▍» hi, ◆ grep, answer], live tool = [◆ bash, stdout line].
+        // The FIFO renders top-anchored, then live tools below.
+        // Five rows: 3 for FIFO + 2 for tool.
         let area = Rect::new(0, 0, cols, 5);
         let mut buf = Buffer::empty(area);
         LiveAreaWidget::render(&mut transcript, area, &mut buf, &ctx);
@@ -3789,20 +3766,20 @@ mod tests {
 
         let prompt_row = rows.iter().position(|r| r.contains("▍» hi")).unwrap();
         let tool_event_row = rows.iter().position(|r| r.contains("◆ grep")).unwrap();
-        let tool_output_row = rows.iter().position(|r| r.contains("stdout line")).unwrap();
         let response_row = rows.iter().position(|r| r.contains("answer")).unwrap();
+        let tool_output_row = rows.iter().position(|r| r.contains("stdout line")).unwrap();
 
         assert!(
             prompt_row < tool_event_row,
             "prompt must render above tool-call events: {rows:?}"
         );
         assert!(
-            tool_event_row < tool_output_row,
-            "tool-call events must render above live tool output: {rows:?}"
+            tool_event_row < response_row,
+            "tool-call events must render above the response: {rows:?}"
         );
         assert!(
-            tool_output_row < response_row,
-            "live tool output must render above the response: {rows:?}"
+            response_row < tool_output_row,
+            "response must render above live tool output: {rows:?}"
         );
     }
 
@@ -3912,8 +3889,8 @@ mod tests {
         let answer = text.iter().position(|l| l == "answer").unwrap();
         assert_eq!(text[0], "▍» hi");
         assert!(
-            title < answer,
-            "tool block must precede the response: {text:?}"
+            answer < title,
+            "response text sealed before tool chunk appears before tool block: {text:?}"
         );
         assert_eq!(text[title + 1], "    line 3");
         assert!(text.contains(&"    line 7".to_string()), "{text:?}");
@@ -4260,13 +4237,14 @@ mod tests {
     }
 
     #[test]
-    fn non_streaming_tool_commit_uses_diamond_line_and_filters_read_edit() {
+    fn all_tools_commit_uniformly_including_read_and_edit() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
         transcript.push_response("answer");
         let calls = vec![
             "Grep(pattern=\"fn main\")".to_string(),
             "Read(file_path=\"x\")".to_string(),
+            "Edit(file_path=\"y\")".to_string(),
         ];
         transcript.reconcile_tool_calls(&calls);
         transcript.commit_tool_result("g1", "Grep(pattern=\"fn main\")");
@@ -4285,9 +4263,88 @@ mod tests {
             1,
             "{text:?}"
         );
+        // Read is no longer filtered — all tools participate uniformly.
+        assert_eq!(
+            text.iter()
+                .filter(|l| *l == "◆ Read(file_path=\"x\")")
+                .count(),
+            1,
+            "Read must now appear in the transcript: {text:?}"
+        );
+        assert_eq!(
+            text.iter()
+                .filter(|l| *l == "◆ Edit(file_path=\"y\")")
+                .count(),
+            1,
+            "Edit must now appear in the transcript: {text:?}"
+        );
+    }
+
+    #[test]
+    fn non_streaming_tool_seals_accumulated_text_before_inserting_block() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        transcript.push_response("pre-tool text");
+        // Non-streaming: commit_tool_result with no prior chunk.
+        transcript.commit_tool_result("r1", "Read(file_path=\"x\")");
+        transcript.push_response("post-tool text");
+        let calls = vec!["Read(file_path=\"x\")".to_string()];
+        transcript.reconcile_tool_calls(&calls);
+        transcript.finish_turn();
+
+        let text: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        let pre = text.iter().position(|l| l.contains("pre-tool")).unwrap();
+        let read = text
+            .iter()
+            .position(|l| l == "◆ Read(file_path=\"x\")")
+            .unwrap();
+        let post = text.iter().position(|l| l.contains("post-tool")).unwrap();
         assert!(
-            !text.iter().any(|l| l.contains("Read")),
-            "Read/Edit must stay filtered: {text:?}"
+            pre < read && read < post,
+            "pre-tool text must appear before the ◆ Read block: {text:?}"
+        );
+    }
+
+    #[test]
+    fn multi_tool_render_clamped_to_area_keeps_fifo_row() {
+        let ctx = input_ctx("", 0);
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("hi".to_string());
+        // Two live tools whose combined desired height exceeds the area.
+        // No response — the prompt alone must survive the FIFO floor.
+        for i in 0..8 {
+            transcript.push_tool_output_chunk("t1", "Bash(command=\"one\")", &format!("one {i}\n"));
+            transcript.push_tool_output_chunk("t2", "Bash(command=\"two\")", &format!("two {i}\n"));
+        }
+        LiveAreaWidget::finalize(&mut transcript, 40);
+
+        // Render into a 10-row area — tools would want 6+6=12 rows, but
+        // the 1-row FIFO floor leaves at most 9 for tools.
+        let cols: u16 = 40;
+        let rows: u16 = 10;
+        let area = Rect::new(0, 0, cols, rows);
+        let mut buf = Buffer::empty(area);
+        LiveAreaWidget::render(&mut transcript, area, &mut buf, &ctx);
+
+        let visible = rendered_rows(&buf, cols, rows);
+        // The prompt must survive — at least one FIFO row.
+        assert!(
+            visible.iter().any(|r| r.contains("▍» hi")),
+            "prompt must survive: {visible:?}"
+        );
+
+        // Take overflow from a 6-row space: tools want 12 but capped at 5
+        // (6-1), FIFO gets 1, prompt is the only FIFO line and stays.
+        let overflow = transcript.take_overflow(6, cols, &ctx);
+        let overflow_texts: Vec<String> = overflow.iter().map(|l| l.to_string()).collect();
+        assert!(
+            overflow_texts.is_empty(),
+            "only FIFO line (prompt) must not be drained: {overflow_texts:?}"
         );
     }
 
