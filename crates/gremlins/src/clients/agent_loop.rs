@@ -2107,9 +2107,18 @@ pub(crate) fn format_tool_call_parts(name: &str, args: &serde_json::Value) -> St
         _ => None,
     };
 
-    match detail {
-        Some(d) => format!("{name}({d})"),
-        None => name.to_string(),
+    // Collect secondary parameters for Read and Grep.
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(d) = detail {
+        parts.push(d);
+    }
+    if name == "Read" || name == "Grep" {
+        parts.extend(tool_secondary_args(name, args));
+    }
+
+    match parts.as_slice() {
+        [] => name.to_string(),
+        [..] => format!("{name}({})", parts.join(", ")),
     }
 }
 
@@ -2165,12 +2174,12 @@ pub(crate) fn key_arg(args: &serde_json::Value) -> String {
     String::new()
 }
 
-/// Enrich the log line with secondary arguments beyond what `key_arg` returns.
+/// Collect non-empty secondary parameters for a tool invocation.
 ///
-/// `key_arg` picks a single primary key; this function appends any additional
-/// parameters that help operators understand the tool invocation at a glance.
-fn enrich_log_line(name: &str, args: &serde_json::Value) -> String {
-    let primary = key_arg(args);
+/// Returns ordered `key=value` strings for parameters beyond the primary
+/// argument that help operators understand the tool invocation at a glance.
+/// Absent, zero, or empty values are omitted.
+fn tool_secondary_args(name: &str, args: &serde_json::Value) -> Vec<String> {
     let mut extras = Vec::new();
 
     match name {
@@ -2247,6 +2256,17 @@ fn enrich_log_line(name: &str, args: &serde_json::Value) -> String {
         }
         _ => {}
     }
+
+    extras
+}
+
+/// Enrich the log line with secondary arguments beyond what `key_arg` returns.
+///
+/// `key_arg` picks a single primary key; this function appends any additional
+/// parameters that help operators understand the tool invocation at a glance.
+fn enrich_log_line(name: &str, args: &serde_json::Value) -> String {
+    let primary = key_arg(args);
+    let extras = tool_secondary_args(name, args);
 
     if extras.is_empty() {
         return primary;
