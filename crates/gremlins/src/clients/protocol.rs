@@ -5,11 +5,16 @@ use rig_core::completion::Message;
 /// Aggregated token usage summary from an agent run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageStats {
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub cached_input_tokens: u64,
-    pub cache_creation_input_tokens: u64,
-    pub reasoning_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
     pub turns: usize,
 }
 
@@ -21,11 +26,16 @@ pub struct UsageStats {
 pub struct TurnStats {
     /// The agent-loop turn index that produced this usage.
     pub turn: usize,
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub cached_input_tokens: u64,
-    pub cache_creation_input_tokens: u64,
-    pub reasoning_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -592,22 +592,25 @@ async fn run_agent(
 
     if let Some(usage) = &completed.token_usage {
         let delta = HashMap::from([
-            ("prompt_tokens".to_string(), usage.prompt_tokens as i64),
+            (
+                "prompt_tokens".to_string(),
+                usage.prompt_tokens.unwrap_or(0) as i64,
+            ),
             (
                 "completion_tokens".to_string(),
-                usage.completion_tokens as i64,
+                usage.completion_tokens.unwrap_or(0) as i64,
             ),
             (
                 "cached_input_tokens".to_string(),
-                usage.cached_input_tokens as i64,
+                usage.cached_input_tokens.unwrap_or(0) as i64,
             ),
             (
                 "cache_creation_input_tokens".to_string(),
-                usage.cache_creation_input_tokens as i64,
+                usage.cache_creation_input_tokens.unwrap_or(0) as i64,
             ),
             (
                 "reasoning_tokens".to_string(),
-                usage.reasoning_tokens as i64,
+                usage.reasoning_tokens.unwrap_or(0) as i64,
             ),
             ("turns".to_string(), usage.turns as i64),
         ]);

@@ -635,7 +635,10 @@ pub(crate) const REASONING_PLACEHOLDER_TITLE: &str = "clanking";
 
 /// Format one usage object as the compact token/cache portion of the live
 /// stats title. Missing values render as dashes. The cache-hit rate is
-/// grouped inside the `in` field as a percentage of prompt tokens.
+/// grouped inside the `in` field as a percentage of prompt tokens. When
+/// `cache_creation_input_tokens` is absent the `+… new` portion is omitted;
+/// when `cached_input_tokens` is also absent the entire `(cache …)` group
+/// is omitted.
 fn usage_title_part(usage: Option<&serde_json::Value>) -> String {
     let field = |name: &str| usage_field(usage, name);
     let num = |name: &str| match field(name) {
@@ -647,19 +650,37 @@ fn usage_title_part(usage: Option<&serde_json::Value>) -> String {
     let in_part = match prompt {
         Some(p) if p > 0 => {
             let cached = field("cached_input_tokens");
+            let cache_creation = field("cache_creation_input_tokens");
             let pct = match cached {
                 Some(c) => format!("{:.0}%", (c as f64 / p as f64) * 100.0),
                 None => "-".to_string(),
             };
-            format!(
-                "in {p} (cache {pct}, +{} new)",
-                num("cache_creation_input_tokens")
-            )
+            match (cached, cache_creation) {
+                (Some(_), Some(_)) => format!(
+                    "in {p} (cache {pct}, +{} new)",
+                    num("cache_creation_input_tokens")
+                ),
+                (Some(_), None) => format!("in {p} (cache {pct})"),
+                (None, Some(_)) => format!(
+                    "in {p} (cache -, +{} new)",
+                    num("cache_creation_input_tokens")
+                ),
+                (None, None) => format!("in {p}"),
+            }
         }
-        Some(_) => format!(
-            "in 0 (cache -, +{} new)",
-            num("cache_creation_input_tokens")
-        ),
+        Some(_) => {
+            let cache_creation = field("cache_creation_input_tokens");
+            let cached = field("cached_input_tokens");
+            match (cached, cache_creation) {
+                (Some(_), Some(_)) => format!(
+                    "in 0 (cache -, +{} new)",
+                    num("cache_creation_input_tokens")
+                ),
+                (Some(_), None) => "in 0 (cache -)".to_string(),
+                (None, Some(_)) => format!("in 0 (+{} new)", num("cache_creation_input_tokens")),
+                (None, None) => "in 0".to_string(),
+            }
+        }
         None => "in -".to_string(),
     };
 
