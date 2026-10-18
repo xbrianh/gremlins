@@ -37,6 +37,8 @@ use crate::executor::system_prompt::{landscape_block, SystemPrompt};
 use crate::executor::vars;
 use crate::executor::RunError;
 use indexmap::IndexMap;
+use rig_core::completion::message::{AssistantContent, UserContent};
+use rig_core::completion::Message;
 
 /// Send a log line through the per-gremlin channel if one is configured.
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: String) {
@@ -574,6 +576,13 @@ async fn run_agent(
         .await
         .map_err(|error| match error {
             ClientError::Bail { reason } => RunError::Bail { reason },
+            ClientError::Cancelled { message, messages } => {
+                RunError::Cancelled { message, messages }
+            }
+            ClientError::Runtime { message } if message == "cancelled" => RunError::Cancelled {
+                message,
+                messages: None,
+            },
             other => RunError::StageFailed {
                 stage: prepared.name.clone(),
                 message: other.to_string(),
@@ -1172,7 +1181,10 @@ pub(crate) fn messages_from_conversation(
 /// The agent loop keeps `history` verbatim and never rewrites it, so callers
 /// pass `completed.messages` directly. On serialize failure, log and leave any
 /// prior artifact untouched rather than erasing it with an empty array.
-async fn persist_chat_conversation(gremlin: &Gremlin, messages: &[rig_core::completion::Message]) {
+pub(crate) async fn persist_chat_conversation(
+    gremlin: &Gremlin,
+    messages: &[rig_core::completion::Message],
+) {
     match serde_json::to_string(messages) {
         Ok(json) => {
             if let Ok(uri) = Uri::parse("artifact://conversation.json") {
@@ -1181,6 +1193,89 @@ async fn persist_chat_conversation(gremlin: &Gremlin, messages: &[rig_core::comp
         }
         Err(e) => {
             log::warn!("chat: failed to serialize conversation artifact: {e}");
+        }
+    }
+}
+
+/// Read the chat gremlin's persisted conversation artifact, if present.
+///
+/// Missing or unreadable artifacts yield an empty history. Callers only use
+/// this after a successful turn or cancellation, so an unreadable artifact
+/// has already been reported by [`run_agent`] rather than silently dropped.
+pub(crate) async fn read_chat_conversation(gremlin: &Gremlin) -> Vec<Message> {
+    match gremlin
+        .state
+        .content("artifact://conversation.json", None)
+        .await
+    {
+        Ok(json) => messages_from_conversation(&json).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Append messages to the chat gremlin's persisted conversation artifact.
+///
+/// Thin composition of [`read_chat_conversation`] and
+/// [`persist_chat_conversation`]: the existing archive is preserved verbatim
+/// and the new messages follow it, so a re-run's `prepopulated_messages` sees
+/// the partial turn before the synthetic interruption prompt is submitted.
+pub(crate) async fn append_chat_conversation(gremlin: &Gremlin, messages: &[Message]) {
+    let mut history = read_chat_conversation(gremlin).await;
+    history.extend_from_slice(messages);
+    persist_chat_conversation(gremlin, &history).await;
+}
+
+/// Strip trailing messages left dangling by a mid-tool-call cancellation.
+///
+/// The agent loop pushes the assistant tool-use message before executing its
+/// tool batch, so cancelling during the batch can leave a trailing assistant
+/// message with no results. Cancellation can also race a tool-result send and
+/// leave a trailing tool-result message whose originating assistant tool-use
+/// message is absent. Both are invalid transcript suffixes and are dropped
+/// before the synthetic interruption message is injected.
+pub(crate) fn strip_unpaired_tool_messages(messages: &mut Vec<Message>) {
+    fn is_tool_result_user(message: &Message) -> bool {
+        match message {
+            Message::User { content } => content
+                .iter()
+                .any(|item| matches!(item, UserContent::ToolResult(_))),
+            _ => false,
+        }
+    }
+
+    fn assistant_has_tool_call(message: &Message) -> bool {
+        match message {
+            Message::Assistant { content, .. } => content
+                .iter()
+                .any(|item| matches!(item, AssistantContent::ToolCall(_))),
+            _ => false,
+        }
+    }
+
+    loop {
+        let before = messages.len();
+
+        if let Some(last) = messages.last() {
+            if assistant_has_tool_call(last) {
+                messages.pop();
+                continue;
+            }
+        }
+
+        if messages.last().is_some_and(is_tool_result_user) {
+            let mut idx = messages.len();
+            while idx > 0 && is_tool_result_user(&messages[idx - 1]) {
+                idx -= 1;
+            }
+            let paired = idx > 0 && assistant_has_tool_call(&messages[idx - 1]);
+            if !paired {
+                messages.truncate(idx);
+                continue;
+            }
+        }
+
+        if messages.len() == before {
+            break;
         }
     }
 }

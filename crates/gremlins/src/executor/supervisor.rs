@@ -27,6 +27,7 @@ use crate::config;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin, GremlinConfig};
 use crate::executor::socket::{self, GremlinsDaemonLock};
 use crate::executor::state::{self, FileSystemStateStore};
+use rig_core::completion::Message;
 
 // ---------------------------------------------------------------------------
 // SharedWriter — Arc<Mutex<WriteHalf>> for concurrent socket writes
@@ -96,6 +97,10 @@ struct CurrentTurn {
     /// it targets so a late cancel cannot hit a subsequent turn.
     turn: Option<String>,
     cancel: Arc<CancelToken>,
+    /// Set when the latest `cancel_chat` requested a soft interrupt. The
+    /// forwarding task reads this when its cancel token fires to decide
+    /// between recovering the partial turn and discarding it.
+    soft_cancel: Arc<AtomicBool>,
     /// Fired (with a stored permit) once the turn has re-inserted its
     /// gremlin (or dropped it). A follow-up `chat` for the same id waits on
     /// this so it never sees the gremlin as "unknown" mid-turn.
@@ -3065,12 +3070,14 @@ async fn handle_chat(
     //    unsolicited JSON lines to this connection while the dispatch
     //    loop stays live for cancel_chat and close_session.
     let done = Arc::new(tokio::sync::Notify::new());
+    let soft_cancel = Arc::new(AtomicBool::new(false));
     {
         let mut s = session.lock().await;
         s.current_turn = Some(CurrentTurn {
             id: id.clone(),
             turn: turn.clone(),
             cancel: turn_cancel.clone(),
+            soft_cancel: Arc::clone(&soft_cancel),
             done: Arc::clone(&done),
         });
     }
@@ -3080,6 +3087,7 @@ async fn handle_chat(
         id: id.clone(),
         turn: turn.clone(),
         turn_cancel: turn_cancel.clone(),
+        soft_cancel: Arc::clone(&soft_cancel),
         session: Arc::clone(session),
         done: Arc::clone(&done),
     };
@@ -3201,11 +3209,25 @@ fn chat_payload(turn: &Option<String>, fields: serde_json::Value) -> serde_json:
     serde_json::Value::Object(obj)
 }
 
+/// Prompt injected as the synthetic user turn after a soft interrupt.
+const SOFT_INTERRUPT_MESSAGE: &str =
+    "The user interrupted you. Do nothing further — call Done immediately.";
+
+/// Cloned pieces of a chat agent stage, kept so a soft interrupt can rebuild
+/// the stage with the synthetic acknowledgement prompt after the original run
+/// task has consumed the full [`ExecutorStage`].
+type SoftStageParts = (
+    crate::stage_spec::agent::Agent,
+    Option<ModelURI>,
+    Option<indexmap::IndexMap<String, String>>,
+);
+
 /// Shared context threaded through a chat turn's forwarding task.
 struct TurnCtx {
     id: String,
     turn: Option<String>,
     turn_cancel: Arc<CancelToken>,
+    soft_cancel: Arc<AtomicBool>,
     session: SessionHandle,
     done: Arc<tokio::sync::Notify>,
 }
@@ -3219,7 +3241,8 @@ async fn run_chat_turn(
 ) {
     let id = ctx.id;
     let turn = ctx.turn;
-    let turn_cancel = ctx.turn_cancel;
+    let mut turn_cancel = ctx.turn_cancel;
+    let soft_cancel = ctx.soft_cancel;
     let session = ctx.session;
     let done = ctx.done;
 
@@ -3230,9 +3253,26 @@ async fn run_chat_turn(
     // treated as zero.
     let baseline_usage = usage_stats_from_state(gremlin.state.read_field("token_usage").as_ref());
 
+    let mut soft_parts: Option<SoftStageParts> = None;
+    let run_stage = match stage {
+        crate::definition::ExecutorStage::Agent {
+            stage: agent,
+            model,
+            task_models,
+        } => {
+            soft_parts = Some((agent.clone(), model.clone(), task_models.clone()));
+            crate::definition::ExecutorStage::Agent {
+                stage: agent,
+                model,
+                task_models,
+            }
+        }
+        other => other,
+    };
+
     // Spawn the stage runner so we can select on it alongside stream events.
     let mut run_task = tokio::spawn(async move {
-        let result = crate::executor::run::run_stage(&stage, &mut gremlin).await;
+        let result = crate::executor::run::run_stage(&run_stage, &mut gremlin).await;
         (result, gremlin)
     });
 
@@ -3258,6 +3298,28 @@ async fn run_chat_turn(
         // Clear the in-flight turn so a late `cancel_chat` (racing a
         // just-finished `done`) is a no-op rather than cancelling a
         // subsequent turn.
+        let mut s = session.lock().await;
+        if let Some(cur) = &s.current_turn {
+            if Arc::ptr_eq(&cur.cancel, turn_cancel) {
+                s.current_turn = None;
+            }
+        }
+        done.notify_one();
+    }
+
+    // Re-insert a gremlin and clear the in-flight turn without awaiting a run
+    // task. Used by the soft-interrupt path when the original run task has
+    // already been awaited to completion and the re-run cannot proceed.
+    async fn reinsert_and_clear(
+        id: &str,
+        gremlin: Option<Gremlin>,
+        turn_cancel: &Arc<CancelToken>,
+        session: &SessionHandle,
+        done: &tokio::sync::Notify,
+    ) {
+        if let Some(gremlin) = gremlin {
+            reinsert_chat_gremlin(id, gremlin, session).await;
+        }
         let mut s = session.lock().await;
         if let Some(cur) = &s.current_turn {
             if Arc::ptr_eq(&cur.cancel, turn_cancel) {
@@ -3346,9 +3408,136 @@ async fn run_chat_turn(
                 }
             }
             _ = turn_cancel.cancelled() => {
-                // Esc/cancel: stop forwarding, re-insert the gremlin, and
-                // emit a single terminal `ended`. The stage's later
-                // done/error is suppressed because we return here.
+                // Soft interrupt: recover the partial transcript, append a
+                // synthetic interruption prompt, and re-run the agent stage
+                // so the model acknowledges and calls Done normally. The
+                // original user message stays intact because the re-run stage
+                // only contributes the synthetic user turn.
+                if soft_cancel.load(Ordering::Relaxed) {
+                    match run_task.await {
+                        Ok((Err(crate::executor::RunError::Cancelled { messages, .. }), recovered)) => {
+                            let Some((mut soft_agent, model, task_models)) = soft_parts.take()
+                            else {
+                                reinsert_and_clear(
+                                    &id,
+                                    Some(recovered),
+                                    &turn_cancel,
+                                    &session,
+                                    &done,
+                                )
+                                .await;
+                                let payload = chat_payload(
+                                    &turn,
+                                    serde_json::json!({"type": "ended", "id": id, "reason": "cancelled"}),
+                                );
+                                let _ = writer.write_json_line(&payload).await;
+                                return;
+                            };
+
+                            let original_text = soft_agent.prompts.join("\n");
+                            let existing =
+                                crate::executor::run::read_chat_conversation(&recovered).await;
+                            let mut partial = messages.unwrap_or_default();
+                            if partial.len() >= existing.len() {
+                                partial = partial.split_off(existing.len());
+                            } else {
+                                partial = Vec::new();
+                            }
+                            crate::executor::run::strip_unpaired_tool_messages(&mut partial);
+                            if partial.is_empty() {
+                                partial.push(Message::user(original_text));
+                            }
+                            crate::executor::run::append_chat_conversation(&recovered, &partial).await;
+
+                            let new_turn_cancel = CancelToken::new();
+                            let mut gremlin = recovered;
+                            gremlin.cancel_token = Some(new_turn_cancel.clone());
+                            if let Ok(mut map) = get_run_map().lock() {
+                                if let Some(handle) = map.get_mut(id.as_str()) {
+                                    handle.cancel = new_turn_cancel.clone();
+                                }
+                            }
+
+                            {
+                                let mut s = session.lock().await;
+                                if let Some(cur) = &mut s.current_turn {
+                                    if Arc::ptr_eq(&cur.cancel, &turn_cancel) {
+                                        cur.cancel = new_turn_cancel.clone();
+                                    }
+                                }
+                                // A hard cancel may have raced the recovery
+                                // and cleared the soft flag while we were
+                                // awaiting the original run task. Treat that
+                                // as the hard path rather than re-running.
+                                if !soft_cancel.load(Ordering::Relaxed) {
+                                    drop(s);
+                                    reinsert_and_clear(
+                                        &id,
+                                        Some(gremlin),
+                                        &new_turn_cancel,
+                                        &session,
+                                        &done,
+                                    )
+                                    .await;
+                                    let payload = chat_payload(
+                                        &turn,
+                                        serde_json::json!({"type": "ended", "id": id, "reason": "cancelled"}),
+                                    );
+                                    let _ = writer.write_json_line(&payload).await;
+                                    return;
+                                }
+                            }
+
+                            soft_agent.prompts = vec![SOFT_INTERRUPT_MESSAGE.to_string()];
+                            let soft_stage = crate::definition::ExecutorStage::Agent {
+                                stage: soft_agent,
+                                model,
+                                task_models,
+                            };
+                            turn_cancel = new_turn_cancel.clone();
+                            run_task = tokio::spawn(async move {
+                                let result =
+                                    crate::executor::run::run_stage(&soft_stage, &mut gremlin).await;
+                                (result, gremlin)
+                            });
+                            continue;
+                        }
+                        Ok((_, recovered)) => {
+                            reinsert_and_clear(
+                                &id,
+                                Some(recovered),
+                                &turn_cancel,
+                                &session,
+                                &done,
+                            )
+                            .await;
+                            let payload = chat_payload(
+                                &turn,
+                                serde_json::json!({"type": "ended", "id": id, "reason": "cancelled"}),
+                            );
+                            let _ = writer.write_json_line(&payload).await;
+                            return;
+                        }
+                        Err(join_err) => {
+                            let message = if join_err.is_panic() {
+                                "agent panicked".to_string()
+                            } else {
+                                format!("agent task cancelled: {join_err}")
+                            };
+                            reinsert_and_clear(&id, None, &turn_cancel, &session, &done).await;
+                            let payload = chat_payload(
+                                &turn,
+                                serde_json::json!({"type": "ended", "id": id, "reason": message}),
+                            );
+                            let _ = writer.write_json_line(&payload).await;
+                            return;
+                        }
+                    }
+                }
+
+                // Hard cancel (or a soft interrupt that arrived after the
+                // turn had already finished): stop forwarding, re-insert the
+                // gremlin, and emit a single terminal `ended`.
                 finish(&id, &mut run_task, &turn_cancel, &session, &done).await;
                 let payload = chat_payload(&turn, serde_json::json!({"type": "ended", "id": id, "reason": "cancelled"}));
                 let _ = writer.write_json_line(&payload).await;
@@ -3418,6 +3607,11 @@ async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &Se
         .get("turn")
         .and_then(|v| v.as_str())
         .map(String::from);
+    let mode = request
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("hard");
+    let soft = mode == "soft";
     let s = session.lock().await;
     let matches = match &s.current_turn {
         Some(cur) => turn
@@ -3432,6 +3626,7 @@ async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &Se
         // clears `current_turn` once the turn has completed and re-inserted
         // (or dropped) the gremlin.
         if let Some(cur) = &s.current_turn {
+            cur.soft_cancel.store(soft, Ordering::Relaxed);
             cur.cancel.cancel();
         }
     }
@@ -5114,6 +5309,7 @@ model-profiles:
                 id: id.clone(),
                 turn: Some("1".to_string()),
                 cancel: super::CancelToken::new(),
+                soft_cancel: Arc::new(AtomicBool::new(false)),
                 done: Arc::new(tokio::sync::Notify::new()),
             });
         }
@@ -5339,6 +5535,7 @@ model-profiles:
                 id: "chat-stop".to_string(),
                 turn: Some("1".to_string()),
                 cancel: cancel.clone(),
+                soft_cancel: Arc::new(AtomicBool::new(false)),
                 done: Arc::new(tokio::sync::Notify::new()),
             });
         }

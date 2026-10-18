@@ -30,6 +30,13 @@ fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &st
     }
 }
 
+fn cancelled_error(message: impl Into<String>, history: &[Message]) -> ClientError {
+    ClientError::Cancelled {
+        message: message.into(),
+        messages: Some(history.to_vec()),
+    }
+}
+
 /// Send one stream event with backpressure, while still observing
 /// cancellation. Returns `true` if the event was sent and `false` if
 /// cancellation won the race before the send completed.
@@ -62,8 +69,9 @@ async fn send_stream_event_checked(
     if send_stream_event(se, event, cancel).await {
         Ok(())
     } else {
-        Err(ClientError::Runtime {
+        Err(ClientError::Cancelled {
             message: "cancelled".into(),
+            messages: None,
         })
     }
 }
@@ -793,9 +801,7 @@ async fn run_agent_loop_core(
         if cancel.is_cancelled() {
             log::info!("agent_loop: cancelled before turn (label={})", prefix);
             send_log(log_tx, prefix, "exit: cancelled before turn");
-            return Err(ClientError::Runtime {
-                message: "cancelled".into(),
-            });
+            return Err(cancelled_error("cancelled", &history));
         }
 
         // ── interactive turn boundary ──────────────────────────────────
@@ -973,9 +979,7 @@ async fn run_agent_loop_core(
                             prefix
                         );
                         send_log(log_tx, prefix, "exit: cancelled during retry backoff");
-                        return Err(ClientError::Runtime {
-                            message: "cancelled".into(),
-                        });
+                        return Err(cancelled_error("cancelled", &history));
                     }
                     // Preserve the pending one-turn state only when
                     // already interactive — otherwise an unconditional
@@ -1013,9 +1017,7 @@ async fn run_agent_loop_core(
                     log::info!("agent_loop: cancelled mid-stream (label={})", prefix);
                     send_log(log_tx, prefix, "exit: cancelled mid-stream");
                     drop(response);
-                    return Err(ClientError::Runtime {
-                        message: "cancelled".into(),
-                    });
+                    return Err(cancelled_error("cancelled", &history));
                 }
                 _ = maybe_pause(&pause) => {
                     // Operator triggered debug — cancel the stream and enter
@@ -1105,9 +1107,7 @@ async fn run_agent_loop_core(
                                 prefix
                             );
                             send_log(log_tx, prefix, "exit: cancelled during timeout backoff");
-                            return Err(ClientError::Runtime {
-                                message: "cancelled".into(),
-                            });
+                            return Err(cancelled_error("cancelled", &history));
                         }
                         break;
                     }
@@ -1143,9 +1143,7 @@ async fn run_agent_loop_core(
                                 prefix
                             );
                             send_log(log_tx, prefix, "exit: cancelled during retry backoff");
-                            return Err(ClientError::Runtime {
-                                message: "cancelled".into(),
-                            });
+                            return Err(cancelled_error("cancelled", &history));
                         }
                         break;
                     }
@@ -1770,9 +1768,7 @@ async fn run_agent_loop_core(
                 log::info!("agent_loop: cancelled mid-tool (label={})", prefix);
                 send_log(log_tx, prefix, "exit: cancelled mid-tool");
                 discard_tool_output(&mut live_output_rx);
-                return Err(ClientError::Runtime {
-                    message: "cancelled".into(),
-                });
+                return Err(cancelled_error("cancelled", &history));
             }
             _ = maybe_pause(&pause) => {
                 // Operator triggered debug mid-tool — drop the join_all future
@@ -3271,8 +3267,8 @@ mod tests {
             .expect("cancel must unblock the agent loop promptly")
             .unwrap();
         match result {
-            Err(ClientError::Runtime { message }) => assert_eq!(message, "cancelled"),
-            other => panic!("expected Runtime cancelled, got: {other:?}"),
+            Err(ClientError::Cancelled { message, .. }) => assert_eq!(message, "cancelled"),
+            other => panic!("expected Cancelled, got: {other:?}"),
         }
 
         // The dropped join_all future must have killed the Bash child.
@@ -3884,7 +3880,7 @@ mod tests {
 
         let result = handle.await.unwrap();
         match result {
-            Err(ClientError::Runtime { message }) => {
+            Err(ClientError::Cancelled { message, .. }) => {
                 assert_eq!(message, "cancelled");
             }
             other => panic!("expected cancellation, got: {other:?}"),
@@ -4045,7 +4041,7 @@ mod tests {
 
         let result = handle.await.unwrap();
         match result {
-            Err(ClientError::Runtime { message }) => {
+            Err(ClientError::Cancelled { message, .. }) => {
                 assert_eq!(message, "cancelled");
             }
             other => panic!("expected cancellation, got: {other:?}"),

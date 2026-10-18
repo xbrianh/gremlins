@@ -152,6 +152,35 @@ fn ctrl_c_should_quit(pending_quit: &mut Option<Instant>, now: Instant) -> bool 
     quit
 }
 
+/// What a press should do while a chat turn is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterruptAction {
+    SendSoft,
+    SendHard,
+    NoOp,
+}
+
+/// Count an ESC/Ctrl+C press while `app.active_request` is true.
+///
+/// The first press requests a soft interrupt, the second press within
+/// [`PENDING_QUIT_WINDOW`] requests a hard cancel, and any further presses in
+/// the same window are no-ops. After the window expires the count resets.
+fn interrupt_press(count: &mut u8, window: &mut Option<Instant>, now: Instant) -> InterruptAction {
+    let within_window =
+        window.is_some_and(|first| now.duration_since(first) <= PENDING_QUIT_WINDOW);
+    if within_window {
+        *count = count.saturating_add(1);
+    } else {
+        *count = 1;
+        *window = Some(now);
+    }
+    match *count {
+        1 => InterruptAction::SendSoft,
+        2 => InterruptAction::SendHard,
+        _ => InterruptAction::NoOp,
+    }
+}
+
 /// Exit any non-chat screen and tear down its session-owned aux sockets.
 ///
 /// Returns `true` when a full-screen view was active and is now dropped.
@@ -188,7 +217,78 @@ fn exit_current_screen(
     true
 }
 
-/// Run the shared Esc / first-Ctrl+C reset path.
+/// Close any non-chat layer (watch pane first, then full-screen view).
+///
+/// Returns `true` when a layer was consumed. This runs before active-turn and
+/// idle routing for both ESC and Ctrl+C so the Runs/Debug screen behavior is
+/// unchanged.
+#[allow(clippy::too_many_arguments)]
+fn dismiss_non_chat_layer(
+    app: &mut App,
+    live_area: &mut LiveArea,
+    watch_follow_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    debug_task: &mut Option<tokio::task::JoinHandle<()>>,
+    debug_cmd_tx: &mut Option<mpsc::UnboundedSender<serde_json::Value>>,
+    debug_evt_rx: &mut Option<mpsc::UnboundedReceiver<DebugEvent>>,
+) -> bool {
+    if app.screen == Screen::Runs && app.watch_following.is_some() {
+        close_watch_follow(app, live_area, watch_follow_handle);
+        return true;
+    }
+    exit_current_screen(
+        app,
+        live_area,
+        watch_follow_handle,
+        debug_task,
+        debug_cmd_tx,
+        debug_evt_rx,
+    )
+}
+
+/// Fire a `cancel_chat` request at the daemon without blocking the event loop.
+fn send_cancel_chat(client: &Arc<client::DaemonClient>, active_turn: Option<&str>, mode: &str) {
+    let c = Arc::clone(client);
+    let cancel_turn = active_turn.map(String::from);
+    let mode = mode.to_string();
+    tokio::spawn(async move {
+        let mut req = serde_json::json!({"op": "cancel_chat", "mode": mode});
+        if let Some(t) = cancel_turn {
+            req["turn"] = serde_json::Value::String(t);
+        }
+        let _ = c.send_session_request(req).await;
+    });
+}
+
+/// Clear the input bar and retire the current turn after a hard cancel.
+fn clear_active_turn_ui(app: &mut App, live_area: &mut LiveArea, active_turn: &mut Option<String>) {
+    app.input.clear();
+    app.input_cursor = 0;
+    app.clear_completion();
+    live_area.reset_input_scroll();
+    live_area.clear_current_turn();
+    app.active_request = false;
+    *active_turn = None;
+}
+
+/// Request a soft interrupt for the active turn without tearing down the UI.
+fn soft_interrupt_active_turn(client: &Arc<client::DaemonClient>, active_turn: &Option<String>) {
+    send_cancel_chat(client, active_turn.as_deref(), "soft");
+}
+
+/// Hard-cancel the active turn: discard the turn, clear the input, and reset
+/// the request guard so the next submit can start cleanly.
+fn hard_cancel_active_turn(
+    app: &mut App,
+    live_area: &mut LiveArea,
+    turn_gen: &mut u64,
+    active_turn: &mut Option<String>,
+    client: &Arc<client::DaemonClient>,
+) {
+    *turn_gen += 1;
+    send_cancel_chat(client, active_turn.as_deref(), "hard");
+    clear_active_turn_ui(app, live_area, active_turn);
+}
+
 ///
 /// Ordering is deliberate: an open watch stream pane closes first, then any
 /// full-screen view returns to chat, then the main input bar is cleared and
@@ -215,15 +315,7 @@ fn handle_esc_reset(
     // front was wrong: Esc on the Runs screen (closing a pane or returning
     // to chat) while a turn streams in the background must not wipe that
     // turn's live tool streams.
-
-    // On the watch screen, Esc first closes an open stream pane and only
-    // then exits back to chat.
-    if app.screen == Screen::Runs && app.watch_following.is_some() {
-        close_watch_follow(app, live_area, watch_follow_handle);
-        return true;
-    }
-
-    if exit_current_screen(
+    if dismiss_non_chat_layer(
         app,
         live_area,
         watch_follow_handle,
@@ -234,29 +326,15 @@ fn handle_esc_reset(
         return true;
     }
 
-    app.input.clear();
-    app.input_cursor = 0;
-    app.clear_completion();
-    live_area.reset_input_scroll();
-    // If a chat request is in-flight, cancel it on the daemon. Do not abort
-    // `chat_task` — it may be inside `send_request`, and aborting mid-write
-    // would desync the response FIFO. The task finishes on its own once the
-    // ack arrives.
     if app.active_request {
         *turn_gen += 1;
-        let cancel_turn = active_turn.clone();
-        let c = Arc::clone(client);
-        tokio::spawn(async move {
-            let mut req = serde_json::json!({"op": "cancel_chat"});
-            if let Some(t) = cancel_turn {
-                req["turn"] = serde_json::Value::String(t);
-            }
-            let _ = c.send_session_request(req).await;
-        });
-        // Discard the current turn without committing to history.
-        live_area.clear_current_turn();
-        app.active_request = false;
-        *active_turn = None;
+        send_cancel_chat(client, active_turn.as_deref(), "hard");
+        clear_active_turn_ui(app, live_area, active_turn);
+    } else {
+        app.input.clear();
+        app.input_cursor = 0;
+        app.clear_completion();
+        live_area.reset_input_scroll();
     }
 
     false
@@ -1082,6 +1160,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
     // ── Ctrl+C pending-quit state (event-loop-local input routing) ──
     let mut pending_quit: Option<Instant> = None;
+    // ── Active-turn interrupt state (soft -> hard -> no-op) ──
+    let mut interrupt_count: u8 = 0;
+    let mut interrupt_window: Option<Instant> = None;
 
     // ── Event loop ────────────────────────────────────────────────
     loop {
@@ -1098,6 +1179,44 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
                             let now = Instant::now();
+
+                            if app.active_request {
+                                // Non-chat layering runs before the interrupt
+                                // routing: on the Runs screen, Ctrl+C closes
+                                // the pane / exits to chat rather than
+                                // interrupting the background turn.
+                                if dismiss_non_chat_layer(
+                                    &mut app,
+                                    live_area,
+                                    &mut watch_follow_handle,
+                                    &mut debug_task,
+                                    &mut debug_cmd_tx,
+                                    &mut debug_evt_rx,
+                                ) {
+                                    continue;
+                                }
+                                match interrupt_press(
+                                    &mut interrupt_count,
+                                    &mut interrupt_window,
+                                    now,
+                                ) {
+                                    InterruptAction::SendSoft => {
+                                        soft_interrupt_active_turn(&client, &active_turn);
+                                    }
+                                    InterruptAction::SendHard => {
+                                        hard_cancel_active_turn(
+                                            &mut app,
+                                            live_area,
+                                            &mut turn_gen,
+                                            &mut active_turn,
+                                            &client,
+                                        );
+                                    }
+                                    InterruptAction::NoOp => {}
+                                }
+                                continue;
+                            }
+
                             if ctrl_c_should_quit(&mut pending_quit, now) {
                                 break;
                             }
@@ -1244,17 +1363,41 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         }
 
                         KeyCode::Esc => {
-                            if handle_esc_reset(
+                            // Non-chat layering first (watch pane close ->
+                            // exit to chat); unchanged regardless of turn
+                            // state.
+                            if dismiss_non_chat_layer(
                                 &mut app,
                                 live_area,
                                 &mut watch_follow_handle,
                                 &mut debug_task,
                                 &mut debug_cmd_tx,
                                 &mut debug_evt_rx,
-                                &mut turn_gen,
-                                &mut active_turn,
-                                &client,
                             ) {
+                                continue;
+                            }
+
+                            // Idle ESC is inert — the input bar is left intact.
+                            if app.active_request {
+                                match interrupt_press(
+                                    &mut interrupt_count,
+                                    &mut interrupt_window,
+                                    Instant::now(),
+                                ) {
+                                    InterruptAction::SendSoft => {
+                                        soft_interrupt_active_turn(&client, &active_turn);
+                                    }
+                                    InterruptAction::SendHard => {
+                                        hard_cancel_active_turn(
+                                            &mut app,
+                                            live_area,
+                                            &mut turn_gen,
+                                            &mut active_turn,
+                                            &client,
+                                        );
+                                    }
+                                    InterruptAction::NoOp => {}
+                                }
                                 continue;
                             }
                         }
@@ -1530,6 +1673,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 // the request is discarded atomically before it
                                 // can execute in the new conversation.
                                 let session_generation = client.session_generation().await;
+                                interrupt_count = 0;
+                                interrupt_window = None;
                                 send_chat_input(
                                     live_area,
                                     &mut app,
