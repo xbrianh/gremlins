@@ -2113,7 +2113,7 @@ pub(crate) fn format_tool_call_parts(name: &str, args: &serde_json::Value) -> St
         parts.push(d);
     }
     if name == "Read" || name == "Grep" {
-        parts.extend(tool_secondary_args(name, args));
+        parts.extend(tool_secondary_args_with(name, args, Some(TITLE_VALUE_CAP)));
     }
 
     if parts.is_empty() {
@@ -2175,13 +2175,40 @@ pub(crate) fn key_arg(args: &serde_json::Value) -> String {
     String::new()
 }
 
-/// Collect non-empty secondary parameters for a tool invocation.
+/// Upper bound for long string values in TUI tool-call titles.
+///
+/// Log lines apply their own 200-char budget in `enrich_log_line`, so this cap
+/// is a display-only concern for the comparatively narrow tool-slot titles.
+const TITLE_VALUE_CAP: usize = 120;
+
+/// Collect non-empty secondary parameters for a tool invocation, without
+/// display truncation.
 ///
 /// Returns ordered `key=value` strings for parameters beyond the primary
 /// argument that help operators understand the tool invocation at a glance.
-/// Absent, zero, or empty values are omitted.
+/// Absent, zero, or empty values are omitted. Callers that need a display cap
+/// (such as TUI titles) should use [`tool_secondary_args_with`] instead.
 fn tool_secondary_args(name: &str, args: &serde_json::Value) -> Vec<String> {
+    tool_secondary_args_with(name, args, None)
+}
+
+/// Collect non-empty secondary parameters for a tool invocation.
+///
+/// When `string_value_cap` is `Some(n)`, string values longer than `n`
+/// characters are truncated with [`trunc`] before being debug-quoted. This is
+/// used for compact TUI titles; logging passes `None` and applies its own
+/// whole-line budget afterward.
+fn tool_secondary_args_with(
+    name: &str,
+    args: &serde_json::Value,
+    string_value_cap: Option<usize>,
+) -> Vec<String> {
     let mut extras = Vec::new();
+
+    let string_arg = |value: &str| match string_value_cap {
+        Some(cap) => format!("{:?}", trunc(value, cap)),
+        None => format!("{value:?}"),
+    };
 
     match name {
         "Read" => {
@@ -2222,14 +2249,14 @@ fn tool_secondary_args(name: &str, args: &serde_json::Value) -> Vec<String> {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
             {
-                extras.push(format!("glob={:?}", trunc(v, 120)));
+                extras.push(format!("glob={}", string_arg(v)));
             }
             if let Some(v) = args
                 .get("path")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
             {
-                extras.push(format!("path={:?}", trunc(v, 120)));
+                extras.push(format!("path={}", string_arg(v)));
             }
             if let Some(v) = args
                 .get("context_before")
@@ -2252,7 +2279,7 @@ fn tool_secondary_args(name: &str, args: &serde_json::Value) -> Vec<String> {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
             {
-                extras.push(format!("path={:?}", trunc(v, 120)));
+                extras.push(format!("path={}", string_arg(v)));
             }
         }
         _ => {}
@@ -2989,6 +3016,41 @@ mod tests {
         assert!(
             !line.contains("context_after=2"),
             "trailing context past the cap must be truncated: {line}"
+        );
+    }
+
+    #[test]
+    fn enrich_log_line_keeps_long_grep_glob_untruncated() {
+        // A glob that exceeds the title cap must still be logged verbatim:
+        // logging applies only its own whole-line 200-char budget.
+        let glob = "y".repeat(150);
+        let line = enrich_log_line(
+            "Grep",
+            &serde_json::json!({ "pattern": "fn run", "glob": glob }),
+        );
+        let expected = format!("\"fn run\" glob={glob:?}");
+        assert_eq!(line, expected);
+        assert!(
+            line.len() <= 200,
+            "enriched line must fit the 200-char cap, got {}: {line}",
+            line.len()
+        );
+    }
+
+    #[test]
+    fn enrich_log_line_keeps_long_glob_path_untruncated() {
+        // Same regression for Glob's path secondary value.
+        let path = "z".repeat(150);
+        let line = enrich_log_line(
+            "Glob",
+            &serde_json::json!({ "pattern": "**/*.rs", "path": path }),
+        );
+        let expected = format!("\"**/*.rs\" path={path:?}");
+        assert_eq!(line, expected);
+        assert!(
+            line.len() <= 200,
+            "enriched line must fit the 200-char cap, got {}: {line}",
+            line.len()
         );
     }
 
