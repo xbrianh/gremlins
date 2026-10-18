@@ -2458,7 +2458,12 @@ fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
     None
 }
 
-pub(crate) async fn invoke(id: &str, name: &str, ctx: &AgentLoopRuntime, args_json: &str) -> String {
+pub(crate) async fn invoke(
+    id: &str,
+    name: &str,
+    ctx: &AgentLoopRuntime,
+    args_json: &str,
+) -> String {
     if let Some(allowed) = &ctx.allowed_tools {
         if !always_available(name) && !allowed.iter().any(|n| n == name) {
             return format!("Error: unknown tool {name}");
