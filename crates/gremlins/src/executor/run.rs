@@ -591,26 +591,25 @@ async fn run_agent(
     );
 
     if let Some(usage) = &completed.token_usage {
-        let delta = HashMap::from([
-            ("prompt_tokens".to_string(), usage.prompt_tokens as i64),
+        // Persist only the counters the provider actually reported. Writing
+        // `unwrap_or(0)` here would turn an absent stat into a measured zero
+        // that later reads back as `Some(0)` and re-appears in chat totals.
+        let mut delta: HashMap<String, i64> = HashMap::new();
+        delta.insert("turns".to_string(), usage.turns as i64);
+        for (key, value) in [
+            ("prompt_tokens", usage.prompt_tokens),
+            ("completion_tokens", usage.completion_tokens),
+            ("cached_input_tokens", usage.cached_input_tokens),
             (
-                "completion_tokens".to_string(),
-                usage.completion_tokens as i64,
+                "cache_creation_input_tokens",
+                usage.cache_creation_input_tokens,
             ),
-            (
-                "cached_input_tokens".to_string(),
-                usage.cached_input_tokens as i64,
-            ),
-            (
-                "cache_creation_input_tokens".to_string(),
-                usage.cache_creation_input_tokens as i64,
-            ),
-            (
-                "reasoning_tokens".to_string(),
-                usage.reasoning_tokens as i64,
-            ),
-            ("turns".to_string(), usage.turns as i64),
-        ]);
+            ("reasoning_tokens", usage.reasoning_tokens),
+        ] {
+            if let Some(value) = value {
+                delta.insert(key.to_string(), value as i64);
+            }
+        }
         gremlin.state.accumulate_token_usage(&delta);
     }
 

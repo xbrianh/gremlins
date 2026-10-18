@@ -21,7 +21,7 @@ use super::interactive::{
 };
 use super::log_util::trunc;
 use super::model::{GremlinsModel, GremlinsModelError};
-use super::protocol::{CompletedRun, TurnStats, UsageStats};
+use super::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
@@ -564,11 +564,11 @@ enum InteractiveLoopResult {
 
 fn usage_stats(
     turns: usize,
-    prompt: u64,
-    completion: u64,
-    cached: u64,
-    cache_creation: u64,
-    reasoning: u64,
+    prompt: Option<u64>,
+    completion: Option<u64>,
+    cached: Option<u64>,
+    cache_creation: Option<u64>,
+    reasoning: Option<u64>,
 ) -> UsageStats {
     UsageStats {
         prompt_tokens: prompt,
@@ -597,11 +597,11 @@ fn turn_stats(turn: usize, usage: Option<&Usage>) -> Option<TurnStats> {
     }
     Some(TurnStats {
         turn,
-        prompt_tokens: u.input_tokens.unwrap_or(0),
-        completion_tokens: u.output_tokens.unwrap_or(0),
-        cached_input_tokens: u.cached_input_tokens.unwrap_or(0),
-        cache_creation_input_tokens: u.cache_creation_input_tokens.unwrap_or(0),
-        reasoning_tokens: u.reasoning_tokens.unwrap_or(0),
+        prompt_tokens: u.input_tokens,
+        completion_tokens: u.output_tokens,
+        cached_input_tokens: u.cached_input_tokens,
+        cache_creation_input_tokens: u.cache_creation_input_tokens,
+        reasoning_tokens: u.reasoning_tokens,
     })
 }
 
@@ -767,11 +767,11 @@ async fn run_agent_loop_core(
     let loop_start = Instant::now();
 
     // Accumulated token totals (summed across turns)
-    let mut total_prompt_tokens: u64 = 0;
-    let mut total_completion_tokens: u64 = 0;
-    let mut total_cached_tokens: u64 = 0;
-    let mut total_cache_creation_tokens: u64 = 0;
-    let mut total_reasoning_tokens: u64 = 0;
+    let mut total_prompt_tokens: Option<u64> = None;
+    let mut total_completion_tokens: Option<u64> = None;
+    let mut total_cached_tokens: Option<u64> = None;
+    let mut total_cache_creation_tokens: Option<u64> = None;
+    let mut total_reasoning_tokens: Option<u64> = None;
 
     struct Job {
         id: String,
@@ -1272,15 +1272,19 @@ async fn run_agent_loop_core(
         // Fold this turn's provider usage into the running totals before
         // building TurnComplete so the per-prompt totals include the
         // just-completed turn. Keep `turn_stats` None when the provider
-        // reported no usage (or the turn completed without a usage block),
-        // and treat every field as zero in that case.
+        // reported no usage (or the turn completed without a usage block).
+        // Absent fields stay `None` and are skipped during accumulation; a
+        // reported zero is preserved as `Some(0)`.
         let turn_stats = turn_stats(turn_num, turn_usage.as_ref());
         if let Some(ref u) = turn_usage {
-            total_prompt_tokens += u.input_tokens.unwrap_or(0);
-            total_completion_tokens += u.output_tokens.unwrap_or(0);
-            total_cached_tokens += u.cached_input_tokens.unwrap_or(0);
-            total_cache_creation_tokens += u.cache_creation_input_tokens.unwrap_or(0);
-            total_reasoning_tokens += u.reasoning_tokens.unwrap_or(0);
+            // Sum two present values, but keep the single `Some` value when
+            // either side is absent. Both sides `None` keeps the total absent.
+            total_prompt_tokens = add_opt(total_prompt_tokens, u.input_tokens);
+            total_completion_tokens = add_opt(total_completion_tokens, u.output_tokens);
+            total_cached_tokens = add_opt(total_cached_tokens, u.cached_input_tokens);
+            total_cache_creation_tokens =
+                add_opt(total_cache_creation_tokens, u.cache_creation_input_tokens);
+            total_reasoning_tokens = add_opt(total_reasoning_tokens, u.reasoning_tokens);
         }
         let totals = usage_stats(
             turn_num + 1,
@@ -2294,40 +2298,42 @@ fn emit_summary(
     prefix: &str,
     turns: usize,
     loop_start: Instant,
-    total_prompt: u64,
-    total_completion: u64,
-    total_cached: u64,
-    total_cache_creation: u64,
-    total_reasoning: u64,
+    total_prompt: Option<u64>,
+    total_completion: Option<u64>,
+    total_cached: Option<u64>,
+    total_cache_creation: Option<u64>,
+    total_reasoning: Option<u64>,
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) {
     let wall = loop_start.elapsed();
-    let token_total = total_prompt + total_completion;
+    let total_prompt_u = total_prompt.unwrap_or(0);
+    let total_completion_u = total_completion.unwrap_or(0);
+    let token_total = total_prompt_u + total_completion_u;
 
     let prompt_avg = if turns > 0 {
-        total_prompt / turns as u64
+        total_prompt_u / turns as u64
     } else {
         0
     };
     let completion_avg = if turns > 0 {
-        total_completion / turns as u64
+        total_completion_u / turns as u64
     } else {
         0
     };
-    let cached_avg = if total_prompt > 0 {
+    let cached_avg = if total_prompt_u > 0 {
         format!(
             "{:.0}%",
-            (total_cached as f64 / total_prompt as f64) * 100.0
+            (total_cached.unwrap_or(0) as f64 / total_prompt_u as f64) * 100.0
         )
     } else {
         "-".into()
     };
     // Reasoning tokens are a subset of completion/output tokens, so report the
     // ratio against completion — "how much of the model's output was reasoning".
-    let reasoning_pct = if total_completion > 0 {
+    let reasoning_pct = if total_completion_u > 0 {
         format!(
             "{:.0}%",
-            (total_reasoning as f64 / total_completion as f64) * 100.0
+            (total_reasoning.unwrap_or(0) as f64 / total_completion_u as f64) * 100.0
         )
     } else {
         "-".into()
@@ -2341,7 +2347,7 @@ fn emit_summary(
         prompt_avg,
         completion_avg,
         cached_avg,
-        total_cache_creation,
+        total_cache_creation.unwrap_or(0),
         reasoning_pct,
     );
     send_log(log_tx, prefix, &msg);
@@ -2370,6 +2376,44 @@ mod tests {
 
     fn gm(model: DynModel<Completion>) -> GremlinsModel {
         GremlinsModel::new(model, crate::config::DEFAULT_MAX_PROMPT_BYTES)
+    }
+
+    #[test]
+    fn turn_stats_passes_through_partial_usage_without_zero_filling() {
+        let usage = Usage {
+            input_tokens: Some(10),
+            output_tokens: None,
+            cached_input_tokens: Some(4),
+            cache_creation_input_tokens: None,
+            reasoning_tokens: Some(3),
+            tool_use_prompt_tokens: None,
+            total_tokens: None,
+        };
+
+        let stats = turn_stats(1, Some(&usage)).unwrap();
+
+        assert_eq!(stats.turn, 1);
+        assert_eq!(stats.prompt_tokens, Some(10));
+        assert_eq!(stats.completion_tokens, None);
+        assert_eq!(stats.cached_input_tokens, Some(4));
+        assert_eq!(stats.cache_creation_input_tokens, None);
+        assert_eq!(stats.reasoning_tokens, Some(3));
+    }
+
+    #[test]
+    fn turn_stats_none_when_usage_block_is_entirely_absent() {
+        let usage = Usage {
+            input_tokens: None,
+            output_tokens: None,
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            reasoning_tokens: None,
+            tool_use_prompt_tokens: None,
+            total_tokens: None,
+        };
+
+        assert!(turn_stats(0, Some(&usage)).is_none());
+        assert!(turn_stats(3, None).is_none());
     }
 
     #[test]

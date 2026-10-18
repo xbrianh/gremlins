@@ -22,7 +22,7 @@ use crate::clients::client::{Client, ModelURI};
 use crate::clients::interactive::{
     InteractiveChannels, InteractiveCommand, InteractiveEvent, InteractiveHandle, StreamEventSender,
 };
-use crate::clients::protocol::UsageStats;
+use crate::clients::protocol::{add_opt, UsageStats};
 use crate::config;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin, GremlinConfig};
 use crate::executor::socket::{self, GremlinsDaemonLock};
@@ -3158,26 +3158,13 @@ fn usage_stats_from_state(value: Option<&serde_json::Value>) -> UsageStats {
         .cloned()
         .unwrap_or_default();
     UsageStats {
-        prompt_tokens: obj
-            .get("prompt_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
-        completion_tokens: obj
-            .get("completion_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
-        cached_input_tokens: obj
-            .get("cached_input_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
+        prompt_tokens: obj.get("prompt_tokens").and_then(|v| v.as_u64()),
+        completion_tokens: obj.get("completion_tokens").and_then(|v| v.as_u64()),
+        cached_input_tokens: obj.get("cached_input_tokens").and_then(|v| v.as_u64()),
         cache_creation_input_tokens: obj
             .get("cache_creation_input_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
-        reasoning_tokens: obj
-            .get("reasoning_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
+            .and_then(|v| v.as_u64()),
+        reasoning_tokens: obj.get("reasoning_tokens").and_then(|v| v.as_u64()),
         turns: obj.get("turns").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
     }
 }
@@ -3185,13 +3172,14 @@ fn usage_stats_from_state(value: Option<&serde_json::Value>) -> UsageStats {
 /// Add a per-prompt usage delta to a conversation baseline.
 fn add_usage_stats(baseline: &UsageStats, delta: &UsageStats) -> UsageStats {
     UsageStats {
-        prompt_tokens: baseline.prompt_tokens + delta.prompt_tokens,
-        completion_tokens: baseline.completion_tokens + delta.completion_tokens,
-        cached_input_tokens: baseline.cached_input_tokens + delta.cached_input_tokens,
-        cache_creation_input_tokens: baseline
-            .cache_creation_input_tokens
-            .saturating_add(delta.cache_creation_input_tokens),
-        reasoning_tokens: baseline.reasoning_tokens + delta.reasoning_tokens,
+        prompt_tokens: add_opt(baseline.prompt_tokens, delta.prompt_tokens),
+        completion_tokens: add_opt(baseline.completion_tokens, delta.completion_tokens),
+        cached_input_tokens: add_opt(baseline.cached_input_tokens, delta.cached_input_tokens),
+        cache_creation_input_tokens: add_opt(
+            baseline.cache_creation_input_tokens,
+            delta.cache_creation_input_tokens,
+        ),
+        reasoning_tokens: add_opt(baseline.reasoning_tokens, delta.reasoning_tokens),
         turns: baseline.turns + delta.turns,
     }
 }
@@ -4240,29 +4228,87 @@ mod tests {
     #[test]
     fn add_usage_stats_sums_baseline_and_prompt_totals() {
         let baseline = UsageStats {
-            prompt_tokens: 10,
-            completion_tokens: 20,
-            cached_input_tokens: 30,
-            cache_creation_input_tokens: 40,
-            reasoning_tokens: 50,
+            prompt_tokens: Some(10),
+            completion_tokens: Some(20),
+            cached_input_tokens: Some(30),
+            cache_creation_input_tokens: Some(40),
+            reasoning_tokens: Some(50),
             turns: 2,
         };
         let delta = UsageStats {
-            prompt_tokens: 5,
-            completion_tokens: 6,
-            cached_input_tokens: 7,
-            cache_creation_input_tokens: 8,
-            reasoning_tokens: 9,
+            prompt_tokens: Some(5),
+            completion_tokens: Some(6),
+            cached_input_tokens: Some(7),
+            cache_creation_input_tokens: Some(8),
+            reasoning_tokens: Some(9),
             turns: 1,
         };
 
         let total = add_usage_stats(&baseline, &delta);
 
-        assert_eq!(total.prompt_tokens, 15);
-        assert_eq!(total.completion_tokens, 26);
-        assert_eq!(total.cached_input_tokens, 37);
-        assert_eq!(total.cache_creation_input_tokens, 48);
-        assert_eq!(total.reasoning_tokens, 59);
+        assert_eq!(total.prompt_tokens, Some(15));
+        assert_eq!(total.completion_tokens, Some(26));
+        assert_eq!(total.cached_input_tokens, Some(37));
+        assert_eq!(total.cache_creation_input_tokens, Some(48));
+        assert_eq!(total.reasoning_tokens, Some(59));
+        assert_eq!(total.turns, 3);
+    }
+
+    #[test]
+    fn add_usage_stats_propagates_mixed_absence_and_presence() {
+        let baseline = UsageStats {
+            prompt_tokens: Some(10),
+            completion_tokens: None,
+            cached_input_tokens: Some(0),
+            cache_creation_input_tokens: None,
+            reasoning_tokens: Some(50),
+            turns: 1,
+        };
+        let delta = UsageStats {
+            prompt_tokens: None,
+            completion_tokens: Some(6),
+            cached_input_tokens: None,
+            cache_creation_input_tokens: Some(8),
+            reasoning_tokens: Some(0),
+            turns: 1,
+        };
+
+        let total = add_usage_stats(&baseline, &delta);
+
+        assert_eq!(total.prompt_tokens, Some(10));
+        assert_eq!(total.completion_tokens, Some(6));
+        assert_eq!(total.cached_input_tokens, Some(0));
+        assert_eq!(total.cache_creation_input_tokens, Some(8));
+        assert_eq!(total.reasoning_tokens, Some(50));
+        assert_eq!(total.turns, 2);
+    }
+
+    #[test]
+    fn add_usage_stats_none_plus_none_stays_none() {
+        let baseline = UsageStats {
+            prompt_tokens: None,
+            completion_tokens: None,
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            reasoning_tokens: None,
+            turns: 1,
+        };
+        let delta = UsageStats {
+            prompt_tokens: None,
+            completion_tokens: None,
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            reasoning_tokens: None,
+            turns: 2,
+        };
+
+        let total = add_usage_stats(&baseline, &delta);
+
+        assert_eq!(total.prompt_tokens, None);
+        assert_eq!(total.completion_tokens, None);
+        assert_eq!(total.cached_input_tokens, None);
+        assert_eq!(total.cache_creation_input_tokens, None);
+        assert_eq!(total.reasoning_tokens, None);
         assert_eq!(total.turns, 3);
     }
 
@@ -4279,20 +4325,20 @@ mod tests {
 
         let stats = usage_stats_from_state(Some(&state));
 
-        assert_eq!(stats.prompt_tokens, 11);
-        assert_eq!(stats.completion_tokens, 12);
-        assert_eq!(stats.cached_input_tokens, 13);
-        assert_eq!(stats.cache_creation_input_tokens, 14);
-        assert_eq!(stats.reasoning_tokens, 15);
+        assert_eq!(stats.prompt_tokens, Some(11));
+        assert_eq!(stats.completion_tokens, Some(12));
+        assert_eq!(stats.cached_input_tokens, Some(13));
+        assert_eq!(stats.cache_creation_input_tokens, Some(14));
+        assert_eq!(stats.reasoning_tokens, Some(15));
         assert_eq!(stats.turns, 3);
 
         let stats = usage_stats_from_state(None);
 
-        assert_eq!(stats.prompt_tokens, 0);
-        assert_eq!(stats.completion_tokens, 0);
-        assert_eq!(stats.cached_input_tokens, 0);
-        assert_eq!(stats.cache_creation_input_tokens, 0);
-        assert_eq!(stats.reasoning_tokens, 0);
+        assert_eq!(stats.prompt_tokens, None);
+        assert_eq!(stats.completion_tokens, None);
+        assert_eq!(stats.cached_input_tokens, None);
+        assert_eq!(stats.cache_creation_input_tokens, None);
+        assert_eq!(stats.reasoning_tokens, None);
         assert_eq!(stats.turns, 0);
     }
 
