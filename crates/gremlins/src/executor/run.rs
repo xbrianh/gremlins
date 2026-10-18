@@ -1236,7 +1236,7 @@ pub(crate) async fn append_chat_conversation(gremlin: &Gremlin, messages: &[Mess
             .content("artifact://conversation.json", None)
             .await
         {
-            Ok(json) if !json.is_empty() => {
+            Ok(json) if messages_from_conversation(&json).is_err() => {
                 // Artifact exists with content but failed to parse as
                 // Message array.  Don't destroy the original.
                 log::warn!(
@@ -1246,7 +1246,7 @@ pub(crate) async fn append_chat_conversation(gremlin: &Gremlin, messages: &[Mess
                 return;
             }
             _ => {
-                // Artifact truly missing or empty — first turn.
+                // Artifact truly missing, empty, or a valid empty `[]` — first turn.
             }
         }
     }

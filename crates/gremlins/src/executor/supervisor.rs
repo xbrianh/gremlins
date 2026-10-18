@@ -3279,6 +3279,10 @@ async fn run_chat_turn(
     // Snapshot the pre-turn conversation artifact so soft interrupt recovery
     // can restore it when a hard cancel races the soft path.
     let pre_turn_conversation = crate::executor::run::read_chat_conversation(&gremlin).await;
+    // Track the prefix length for soft-interrupt recovery so subsequent
+    // soft interrupts only append messages added since the last append,
+    // avoiding duplication.
+    let mut soft_prefix_len = pre_turn_conversation.len();
 
     let mut soft_parts: Option<SoftStageParts> = None;
     let run_stage = match stage {
@@ -3443,7 +3447,7 @@ async fn run_chat_turn(
                 if soft_cancel.load(Ordering::Relaxed) {
                     match run_task.await {
                         Ok((Err(crate::executor::RunError::Cancelled { messages, .. }), recovered)) => {
-                            let Some((mut soft_agent, model, task_models)) = soft_parts.take()
+                            let Some((mut soft_agent, model, task_models)) = soft_parts.clone()
                             else {
                                 reinsert_and_clear(
                                     &id,
@@ -3462,11 +3466,12 @@ async fn run_chat_turn(
                             };
 
                             let original_text = soft_agent.prompts.join("\n");
-                            // Use the pre-turn snapshot (not a re-read) so the suffix
-                            // computation is stable.
+                            // Split off only messages that were already committed
+                            // before this soft interrupt, so subsequent soft interrupts
+                            // don't duplicate previously-appended partial messages.
                             let mut partial = messages.unwrap_or_default();
-                            if partial.len() >= pre_turn_conversation.len() {
-                                partial = partial.split_off(pre_turn_conversation.len());
+                            if partial.len() >= soft_prefix_len {
+                                partial = partial.split_off(soft_prefix_len);
                             } else {
                                 partial = Vec::new();
                             }
@@ -3524,6 +3529,9 @@ async fn run_chat_turn(
                             // Safe to persist now: the hard-cancel race check
                             // passed.
                             crate::executor::run::append_chat_conversation(&gremlin, &partial).await;
+                            // Advance the prefix so a subsequent soft interrupt
+                            // only appends messages added since this one.
+                            soft_prefix_len += partial.len();
 
                             soft_agent.prompts = vec![SOFT_INTERRUPT_MESSAGE.to_string()];
                             let soft_stage = crate::definition::ExecutorStage::Agent {
@@ -3576,9 +3584,32 @@ async fn run_chat_turn(
                 }
 
                 // Hard cancel (or a soft interrupt that arrived after the
-                // turn had already finished): stop forwarding, re-insert the
-                // gremlin, and emit a single terminal `ended`.
-                finish(&id, &mut run_task, &turn_cancel, &session, &done).await;
+                // turn had already finished): stop forwarding, restore the
+                // pre-turn conversation so partial messages from a soft-
+                // interrupt recovery don't leak into the next chat turn,
+                // re-insert the gremlin, and emit a single terminal `ended`.
+                match run_task.await {
+                    Ok((_, gremlin)) => {
+                        crate::executor::run::persist_chat_conversation(
+                            &gremlin,
+                            &pre_turn_conversation,
+                        )
+                        .await;
+                        reinsert_chat_gremlin(&id, gremlin, &session).await;
+                    }
+                    Err(e) => {
+                        log::warn!("handle_chat: run task panicked for {id}: {e}");
+                    }
+                }
+                {
+                    let mut s = session.lock().await;
+                    if let Some(cur) = &s.current_turn {
+                        if Arc::ptr_eq(&cur.cancel, &turn_cancel) {
+                            s.current_turn = None;
+                        }
+                    }
+                }
+                done.notify_one();
                 let payload = chat_payload(&turn, serde_json::json!({"type": "ended", "id": id, "reason": "cancelled"}));
                 let _ = writer.write_json_line(&payload).await;
                 return;
@@ -3612,7 +3643,15 @@ async fn run_chat_turn(
                 // in-flight turn. Do NOT call finish() here — run_task
                 // was already polled to completion by the select, and
                 // awaiting it again is undefined.
+                // Restore the pre-turn conversation so partial messages
+                // from a soft-interrupt recovery don't leak into the next
+                // chat turn.
                 if let Some(g) = gremlin_for_reinsert {
+                    crate::executor::run::persist_chat_conversation(
+                        &g,
+                        &pre_turn_conversation,
+                    )
+                    .await;
                     reinsert_chat_gremlin(&id, g, &session).await;
                 }
                 let mut s = session.lock().await;

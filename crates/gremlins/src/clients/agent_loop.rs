@@ -1010,13 +1010,23 @@ async fn run_agent_loop_core(
         let mut retry_turn = false;
         let mut retry_timeout_turn = false;
 
+        // Build a cancellation snapshot that includes the pending
+        // `next_prompt` and (as streaming progresses) accumulated
+        // assistant content.  Plain `history` omits both because they
+        // are only committed after a successful turn.
+        let mut stream_snapshot: Vec<Message> = {
+            let mut s = history.clone();
+            s.push(next_prompt.clone());
+            s
+        };
+
         loop {
             let item = tokio::select! {
                 _ = cancel.cancelled() => {
                     log::info!("agent_loop: cancelled mid-stream (label={})", prefix);
                     send_log(log_tx, prefix, "exit: cancelled mid-stream");
                     drop(response);
-                    return Err(cancelled_error("cancelled", &history));
+                    return Err(cancelled_error("cancelled", &stream_snapshot));
                 }
                 _ = maybe_pause(&pause) => {
                     // Operator triggered debug — cancel the stream and enter
@@ -1170,7 +1180,7 @@ async fn run_agent_loop_core(
                                     .send_stream_event(
                                         InteractiveEvent::StreamChunk { text: text.clone() },
                                         cancel,
-                                        &history,
+                                        &stream_snapshot,
                                     )
                                     .await?;
                             }
@@ -1180,7 +1190,7 @@ async fn run_agent_loop_core(
                                     .send_stream_event(
                                         InteractiveEvent::ReasoningChunk { text: text.clone() },
                                         cancel,
-                                        &history,
+                                        &stream_snapshot,
                                     )
                                     .await?;
                             }
@@ -1197,7 +1207,7 @@ async fn run_agent_loop_core(
                                             text: format_tool_call(tc),
                                         },
                                         cancel,
-                                        &history,
+                                        &stream_snapshot,
                                     )
                                     .await?;
                             }
@@ -1211,6 +1221,22 @@ async fn run_agent_loop_core(
                         &mut reasoning_items,
                         &mut tool_calls,
                     );
+                    // Keep the cancellation snapshot current with whatever
+                    // the model has produced so far so the supervisor can
+                    // reconstruct the full partial turn.
+                    while stream_snapshot
+                        .last()
+                        .is_some_and(|m| matches!(m, Message::Assistant { .. }))
+                    {
+                        stream_snapshot.pop();
+                    }
+                    if !text.is_empty() || !reasoning_items.is_empty() || !tool_calls.is_empty() {
+                        stream_snapshot.push(assistant_tool_message(
+                            &text,
+                            &reasoning_items,
+                            &tool_calls,
+                        ));
+                    }
                 }
             }
         }
