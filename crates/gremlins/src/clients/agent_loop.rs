@@ -22,7 +22,7 @@ use super::interactive::{
 use super::log_util::trunc;
 use super::model::{GremlinsModel, GremlinsModelError};
 use super::protocol::{CompletedRun, TurnStats, UsageStats};
-use super::tools::{self, ToolContext};
+use super::tools::{self, AgentLoopRuntime};
 
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
     if let Some(tx) = tx {
@@ -289,7 +289,7 @@ pub(crate) async fn run_agent_loop(
     } else {
         (None, None)
     };
-    let mut tool_ctx = ToolContext {
+    let mut tool_ctx = AgentLoopRuntime {
         cwd: cwd.clone(),
         extra_env,
         base_env: ctx.params.base_env.clone(),
@@ -358,7 +358,7 @@ pub(crate) async fn run_agent_loop_nested(
     model: GremlinsModel,
     prompt: &str,
     system_prompt: Option<String>,
-    tool_ctx: &ToolContext,
+    tool_ctx: &AgentLoopRuntime,
     cancel: &CancelToken,
     tool_filter: Option<&[String]>,
     prefix: &str,
@@ -664,7 +664,7 @@ async fn run_agent_loop_core(
     model: &GremlinsModel,
     prompt: &str,
     system_prompt: Option<String>,
-    tool_ctx: &ToolContext,
+    tool_ctx: &AgentLoopRuntime,
     tool_defs: &[ToolDefinition],
     cancel: &CancelToken,
     opts: &LoopOpts<'_>,
@@ -5286,9 +5286,9 @@ mod tests {
 
     // ── Interactive session tests ───────────────────────────────────────
 
-    /// Helper: build a minimal ToolContext for interactive tests.
-    fn test_tool_ctx() -> ToolContext {
-        ToolContext {
+    /// Helper: build a minimal AgentLoopRuntime for interactive tests.
+    fn test_tool_ctx() -> AgentLoopRuntime {
+        AgentLoopRuntime {
             cwd: None,
             extra_env: None,
             base_env: None,

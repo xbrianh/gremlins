@@ -38,7 +38,7 @@ pub struct RunParams {
     /// Whether this run's agent loop opts out of tool-path sandboxing.
     /// `false` (the default) enforces `allowed_roots` containment; the chat
     /// gremlin sets `true` to disable it. The agent loop translates this into
-    /// a [`super::tools::SandboxMode`] when assembling the `ToolContext`.
+    /// a [`super::tools::SandboxMode`] when assembling the `AgentLoopRuntime`.
     pub(crate) allow_all: bool,
     /// Task-client selector, built by the executor from
     /// `settings.yaml` `task-models` entries. `None` when no
