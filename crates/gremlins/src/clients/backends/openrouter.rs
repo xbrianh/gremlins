@@ -1,17 +1,9 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+//! OpenRouter backend — an OpenAI-protocol backend declared with
+//! [`crate::declare_openai_backend`].
 
-use async_trait::async_trait;
 use rig_core::error::ProviderError;
-use rig_core::providers::openai::{OpenAI, wire};
 
-use crate::clients::agent_loop::ErrorClassifier;
-use crate::clients::backend::{Backend, ClientError, RunParams};
-use crate::clients::interactive::InteractiveSession;
-use crate::clients::model::GremlinsModel;
-use crate::clients::openai_protocol::{self, reap_openai_compat, run_openai_compat, OpenAiRunState};
-use crate::clients::params::ResolvedParams;
-use crate::clients::protocol::CompletedRun;
+use crate::clients::backend::ClientError;
 
 /// Base URL for OpenRouter's OpenAI-compatible API.
 const BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -77,113 +69,15 @@ fn body_contains_transient(body: &str) -> bool {
     TRANSIENT_SUBSTRINGS.iter().any(|kw| body.contains(kw))
 }
 
-pub struct OpenRouterBackend {
-    state: OpenAiRunState,
-}
-
-impl OpenRouterBackend {
-    pub fn new(
-        client: OpenAI,
-        model: String,
-        tool_filter: Option<Vec<String>>,
-        resolved: ResolvedParams,
-    ) -> Self {
-        let model = if model.is_empty() {
-            "gpt-4o".to_string()
-        } else {
-            model
-        };
-        Self {
-            state: OpenAiRunState::new(
-                client,
-                model,
-                tool_filter,
-                resolved,
-                "OpenRouterBackend".to_string(),
-            ),
-        }
-    }
-
-    /// Build an OpenRouter backend. Resolves `OPENROUTER_API_KEY` → `providers.yaml`.
-    pub fn build(
-        model: &str,
-        native_block: &HashMap<String, Vec<String>>,
-        extra_params: &indexmap::IndexMap<String, String>,
-    ) -> Result<Arc<dyn Backend>, String> {
-        let key =
-            crate::clients::config::api_key(API_KEY_ENV, PROVIDER_NAME).ok_or_else(|| {
-                format!(
-                    "no API key for provider '{PROVIDER_NAME}': set {API_KEY_ENV} or add an entry in {}",
-                    crate::config::user_config_root()
-                        .join("providers.yaml")
-                        .display(),
-                )
-            })?;
-        let base_url = crate::clients::config::base_url("OPENROUTER_BASE_URL", PROVIDER_NAME, BASE_URL);
-        let client = openai_protocol::build_openai_client(&key, &base_url, &wire::OPENROUTER)?;
-        let model = if model.is_empty() {
-            "gpt-4o".to_string()
-        } else {
-            model.to_string()
-        };
-        Ok(Arc::new(Self::new(
-            client,
-            model,
-            openai_protocol::tool_filter(native_block),
-            Self::resolve_params(extra_params)?,
-        )))
-    }
-}
-
-#[async_trait]
-impl Backend for OpenRouterBackend {
-    async fn run(
-        &self,
-        params: RunParams,
-        interactive: Option<InteractiveSession>,
-    ) -> Result<CompletedRun, ClientError> {
-        let classify: ErrorClassifier = classify_openrouter_error;
-        run_openai_compat(&self.state, params, interactive, Some(classify), PROVIDER_NAME).await
-    }
-
-    async fn resume(&self) -> Result<CompletedRun, ClientError> {
-        let params = {
-            let guard = self.state.last_ctx.lock().unwrap();
-            let ctx = guard.as_ref().ok_or_else(|| ClientError::Runtime {
-                message: "resume() called before run()".into(),
-            })?;
-            ctx.params.clone()
-        };
-        self.run(params, None).await
-    }
-
-    fn reap_all(&self, gremlin_id: &str) {
-        reap_openai_compat(&self.state, gremlin_id);
-    }
-
-    fn total_cost_usd(&self) -> Option<f64> {
-        None
-    }
-
-    fn resolved_params(&self) -> Option<ResolvedParams> {
-        Some(self.state.resolved.clone())
-    }
-
-    fn make_model(&self, spec: &str) -> Option<GremlinsModel> {
-        let (provider, model) = openai_protocol::provider_and_model(spec)?;
-        if provider == PROVIDER_NAME {
-            Some(GremlinsModel::new(
-                self.state.client.completion(&model).erase(),
-                crate::config::max_prompt_bytes(),
-            ))
-        } else {
-            None
-        }
-    }
-
-    fn resolve_params(raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
-        openai_protocol::resolve_openai_protocol(PROVIDER_NAME, raw)
-    }
+super::declare_openai_backend! {
+    struct OpenRouterBackend,
+    provider: PROVIDER_NAME,
+    api_key_env: API_KEY_ENV,
+    base_url_env: "OPENROUTER_BASE_URL",
+    base_url: BASE_URL,
+    default_model: "gpt-4o",
+    dialect: rig_core::providers::openai::wire::OPENROUTER,
+    classifier: Some(classify_openrouter_error),
 }
 
 #[cfg(test)]

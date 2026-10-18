@@ -169,7 +169,20 @@ pub trait Backend: Send + Sync {
         None
     }
 
-    async fn resume(&self) -> Result<CompletedRun, ClientError>;
+    /// Return the [`RunParams`] from the most recent [`Backend::run`] call.
+    ///
+    /// Every backend that stores a `last_ctx` implements this by reading it
+    /// under lock.  The default [`Backend::resume`] delegates to this.
+    fn last_run_params(&self) -> Result<RunParams, ClientError>;
+
+    /// Resume the last run by re-constructing its parameters and re-running.
+    ///
+    /// The default implementation calls `self.run(self.last_run_params()?, None).await`.
+    /// Backends with a custom resumption path (e.g. the command backend) may
+    /// override this.
+    async fn resume(&self) -> Result<CompletedRun, ClientError> {
+        self.run(self.last_run_params()?, None).await
+    }
 
     fn reap_all(&self, gremlin_id: &str);
 

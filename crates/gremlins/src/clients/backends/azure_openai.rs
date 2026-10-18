@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -7,13 +7,14 @@ use rig_core::http_client::DynHttpClient;
 use rig_core::providers::openai::{OpenAI, OpenAIConfig, Route};
 use rig_core::providers::openai::wire::AZURE;
 
-use crate::clients::agent_loop::{
-    default_classify, run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext,
-};
+use crate::clients::agent_loop::CancelToken;
 use crate::clients::azure_openai_responses_http::AzureResponsesHttpClient;
 use crate::clients::backend::{Backend, ClientError, RunParams};
+use crate::clients::cancels::CancelsMap;
 use crate::clients::interactive::InteractiveSession;
+use crate::clients::lazy_auth_http::{ApiKeyStrategy, LazyAuthHttpClient};
 use crate::clients::model::GremlinsModel;
+use crate::clients::native::NativeRunState;
 use crate::clients::openai_protocol;
 use crate::clients::params::ResolvedParams;
 use crate::clients::protocol::CompletedRun;
@@ -39,176 +40,10 @@ enum AzureOpenAiClientState {
     },
 }
 
-// ── AzureOpenAiRunState ──────────────────────────────────────────────────
-
-struct AzureOpenAiRunState {
-    client_state: AzureOpenAiClientState,
-    model: String,
-    tool_filter: Option<Vec<String>>,
-    resolved: ResolvedParams,
-    last_ctx: Mutex<Option<RunContext>>,
-    cancels: Mutex<HashMap<String, HashMap<u64, Arc<CancelToken>>>>,
-    next_id: AtomicU64,
-    log_label: String,
-}
-
-impl AzureOpenAiRunState {
-    fn extra_params(&self) -> Option<serde_json::Value> {
-        self.resolved.additional_value()
-    }
-
-    fn effective_model(&self, override_model: Option<&str>) -> String {
-        match override_model {
-            Some(m) if !m.is_empty() => m.to_string(),
-            _ => self.model.clone(),
-        }
-    }
-
-    /// Build a [`RunContext`] from [`RunParams`] and stash it in `last_ctx` for resume.
-    fn prepare_context(&self, params: RunParams) -> RunContext {
-        let idle_timeout = params
-            .idle_timeout
-            .unwrap_or_else(crate::config::stream_idle_timeout);
-        let prefix = if params.label.is_empty() {
-            String::new()
-        } else {
-            format!("[{}] ", params.label)
-        };
-        let ctx = RunContext {
-            params: params.clone(),
-            prefix: prefix.clone(),
-            idle_timeout,
-            expected_artifact_paths: params.expected_artifact_paths.clone(),
-            reminder_budget: crate::config::artifact_reminder_budget(),
-            completion_nudge_budget: crate::config::completion_nudge_budget(),
-            stream_events: params.stream_events.clone(),
-            prepopulated_messages: params.prepopulated_messages.clone(),
-            compaction_opts: params.compaction_opts,
-        };
-        *self.last_ctx.lock().unwrap() = Some(ctx.clone());
-        ctx
-    }
-
-    /// Execute a single agent-loop attempt, registering and cleaning up a
-    /// cancel token for the given `gremlin_id`.
-    async fn single_attempt(
-        &self,
-        prompt: &str,
-        ctx: RunContext,
-        cancel: Arc<CancelToken>,
-        interactive: Option<InteractiveSession>,
-    ) -> Result<CompletedRun, ClientError> {
-        let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-
-        // Check+insert under the cancels lock so reap_all cannot
-        // remove the gremlin entry between the check and insert.
-        {
-            let mut guard = self.cancels.lock().unwrap();
-            if cancel.is_cancelled() {
-                return Err(ClientError::Runtime {
-                    message: "cancelled".into(),
-                });
-            }
-            guard
-                .entry(gremlin_id.clone())
-                .or_default()
-                .insert(id, cancel.clone());
-        }
-
-        let model_name = self.effective_model(ctx.params.model.as_deref());
-
-        // For static auth we use the pre-built client; for dynamic auth
-        // we acquire a fresh token and build a client per attempt.
-        let result = match &self.client_state {
-            AzureOpenAiClientState::Static(client) => {
-                let model = GremlinsModel::new(
-                    client.completion(&model_name).erase(),
-                    crate::config::max_prompt_bytes(),
-                );
-                run_agent_loop(
-                    model,
-                    prompt,
-                    ctx,
-                    cancel,
-                    LoopOpts {
-                        extra: self.extra_params(),
-                        tool_filter: self.tool_filter.as_deref(),
-                        classify_error: Some(default_classify as ErrorClassifier),
-                        temperature: self.resolved.temperature,
-                        max_tokens: self.resolved.max_tokens,
-                    },
-                    interactive,
-                )
-                .await
-            }
-            AzureOpenAiClientState::Dynamic {
-                token_provider,
-                endpoint,
-                api_version,
-                http_client,
-                auth_scope,
-            } => {
-                // Capture errors into a local so execution always flows
-                // through the cancellation-map cleanup below.
-                let dyn_result = async {
-                    let scope = &auth_scope;
-                    let token = token_provider
-                        .get_token(scope)
-                        .await
-                        .map_err(|e| ClientError::Runtime {
-                            message: format!("Azure OpenAI token acquisition failed: {e}"),
-                        })?;
-                    let client = OpenAIConfig::with_alternate_key(&AZURE, token)
-                        .with_route(Route::Responses)
-                        .with_api_version(api_version)
-                        .with_base_url(endpoint)
-                        .connect(AzureResponsesHttpClient::new(
-                            http_client.clone(),
-                            endpoint,
-                            api_version,
-                        ));
-                    let model = GremlinsModel::new(
-                        client.completion(&model_name).erase(),
-                        crate::config::max_prompt_bytes(),
-                    );
-                    run_agent_loop(
-                        model,
-                        prompt,
-                        ctx,
-                        cancel,
-                        LoopOpts {
-                            extra: self.extra_params(),
-                            tool_filter: self.tool_filter.as_deref(),
-                            classify_error: Some(default_classify as ErrorClassifier),
-                            temperature: self.resolved.temperature,
-                            max_tokens: self.resolved.max_tokens,
-                        },
-                        interactive,
-                    )
-                    .await
-                }
-                .await;
-                dyn_result
-            }
-        };
-
-        if let Ok(mut guard) = self.cancels.lock() {
-            if let Some(inner) = guard.get_mut(&gremlin_id) {
-                inner.remove(&id);
-                if inner.is_empty() {
-                    guard.remove(&gremlin_id);
-                }
-            }
-        }
-        result
-    }
-}
-
 // ── AzureOpenAiBackend ───────────────────────────────────────────────────
 
 pub struct AzureOpenAiBackend {
-    state: AzureOpenAiRunState,
+    state: NativeRunState<AzureOpenAiClientState>,
 }
 
 impl AzureOpenAiBackend {
@@ -338,13 +173,13 @@ impl AzureOpenAiBackend {
         };
 
         Ok(Arc::new(Self {
-            state: AzureOpenAiRunState {
+            state: NativeRunState {
                 client_state,
                 model,
                 tool_filter,
                 resolved,
                 last_ctx: Mutex::new(None),
-                cancels: Mutex::new(HashMap::new()),
+                cancels: CancelsMap::default(),
                 next_id: AtomicU64::new(1),
                 log_label: "AzureOpenAiBackend".to_string(),
             },
@@ -361,38 +196,57 @@ impl Backend for AzureOpenAiBackend {
     ) -> Result<CompletedRun, ClientError> {
         let ctx = self.state.prepare_context(params.clone());
         let cancel = params.cancel_token.clone().unwrap_or_else(CancelToken::new);
+        let model_name = self.state.effective_model(ctx.params.model.as_deref());
 
-        self.state.single_attempt(&params.prompt, ctx, cancel, interactive).await
+        let make_model = async {
+            match &self.state.client_state {
+                AzureOpenAiClientState::Static(client) => Ok(GremlinsModel::new(
+                    client.completion(&model_name).erase(),
+                    crate::config::max_prompt_bytes(),
+                )),
+                AzureOpenAiClientState::Dynamic {
+                    token_provider,
+                    endpoint,
+                    api_version,
+                    http_client,
+                    auth_scope,
+                } => {
+                    let token =
+                        token_provider.get_token(auth_scope).await.map_err(|e| {
+                            ClientError::Runtime {
+                                message: format!(
+                                    "Azure OpenAI token acquisition failed: {e}"
+                                ),
+                            }
+                        })?;
+                    let client = OpenAIConfig::with_alternate_key(&AZURE, token)
+                        .with_route(Route::Responses)
+                        .with_api_version(api_version)
+                        .with_base_url(endpoint)
+                        .connect(AzureResponsesHttpClient::new(
+                            http_client.clone(),
+                            endpoint,
+                            api_version,
+                        ));
+                    Ok(GremlinsModel::new(
+                        client.completion(&model_name).erase(),
+                        crate::config::max_prompt_bytes(),
+                    ))
+                }
+            }
+        };
+
+        self.state
+            .single_attempt(&params.prompt, ctx, cancel, interactive, make_model)
+            .await
     }
 
-    async fn resume(&self) -> Result<CompletedRun, ClientError> {
-        let params = {
-            let guard = self.state.last_ctx.lock().unwrap();
-            let ctx = guard.as_ref().ok_or_else(|| ClientError::Runtime {
-                message: "resume() called before run()".into(),
-            })?;
-            ctx.params.clone()
-        };
-        self.run(params, None).await
+    fn last_run_params(&self) -> Result<RunParams, ClientError> {
+        self.state.last_run_params()
     }
 
     fn reap_all(&self, gremlin_id: &str) {
-        if let Ok(mut guard) = self.state.cancels.lock() {
-            let tokens: Vec<_> = guard
-                .remove(gremlin_id)
-                .into_iter()
-                .flat_map(|m| m.into_values())
-                .collect();
-            let count = tokens.len();
-            log::debug!(
-                "{}::reap_all: cancelling {count} in-flight token(s) for gremlin_id={gremlin_id} (model={})",
-                self.state.log_label,
-                self.state.model,
-            );
-            for token in &tokens {
-                token.cancel();
-            }
-        }
+        self.state.reap(gremlin_id);
     }
 
     fn make_model(&self, spec: &str) -> Option<GremlinsModel> {
@@ -412,7 +266,7 @@ impl Backend for AzureOpenAiBackend {
                     ref token_provider,
                     ref auth_scope,
                 } => {
-                    let wrapped = crate::clients::lazy_auth_http::LazyApiKeyHttpClient::new(
+                    let wrapped = LazyAuthHttpClient::<ApiKeyStrategy>::new(
                         http_client.clone(),
                         token_provider.clone(),
                         auth_scope.clone(),
@@ -689,7 +543,7 @@ mod tests {
         extra.insert("temperature".into(), "0.7".into());
 
         let resolved = AzureOpenAiBackend::resolve_params(&extra).unwrap();
-        let state = AzureOpenAiRunState {
+        let state = NativeRunState {
             client_state: AzureOpenAiClientState::Static(Box::new(
                 OpenAIConfig::with_key(&AZURE, "fake-key")
             .with_route(Route::Responses)
@@ -701,7 +555,7 @@ mod tests {
             tool_filter: None,
             resolved,
             last_ctx: Mutex::new(None),
-            cancels: Mutex::new(HashMap::new()),
+            cancels: CancelsMap::default(),
             next_id: AtomicU64::new(1),
             log_label: "test".into(),
         };
@@ -727,63 +581,30 @@ mod tests {
             .with_base_url("https://example.openai.azure.com")
             .client();
 
+        let backlog = CancelsMap::default();
+        let a = CancelToken::new();
+        let b = CancelToken::new();
+        let sibling = CancelToken::new();
+        backlog.insert("gr-test", 1, a.clone()).unwrap();
+        backlog.insert("gr-test", 2, b.clone()).unwrap();
+        backlog.insert("gr-sibling", 3, sibling.clone()).unwrap();
+
         let backend = AzureOpenAiBackend {
-            state: AzureOpenAiRunState {
+            state: NativeRunState {
                 client_state: AzureOpenAiClientState::Static(Box::new(client)),
                 model: "gpt-4o".into(),
                 tool_filter: None,
                 resolved: ResolvedParams::default(),
                 last_ctx: Mutex::new(None),
-                cancels: Mutex::new(HashMap::new()),
+                cancels: backlog,
                 next_id: AtomicU64::new(1),
                 log_label: "test".into(),
             },
         };
-        let a = CancelToken::new();
-        let b = CancelToken::new();
-        let sibling = CancelToken::new();
-        backend
-            .state
-            .cancels
-            .lock()
-            .unwrap()
-            .entry("gr-test".to_string())
-            .or_default()
-            .insert(1, a.clone());
-        backend
-            .state
-            .cancels
-            .lock()
-            .unwrap()
-            .entry("gr-test".to_string())
-            .or_default()
-            .insert(2, b.clone());
-        backend
-            .state
-            .cancels
-            .lock()
-            .unwrap()
-            .entry("gr-sibling".to_string())
-            .or_default()
-            .insert(3, sibling.clone());
         backend.reap_all("gr-test");
         assert!(a.is_cancelled());
         assert!(b.is_cancelled());
-        assert!(backend
-            .state
-            .cancels
-            .lock()
-            .unwrap()
-            .get("gr-test")
-            .is_none());
         assert!(!sibling.is_cancelled());
-        assert!(backend
-            .state
-            .cancels
-            .lock()
-            .unwrap()
-            .get("gr-sibling")
-            .is_some());
     }
 
     // ── auth method tests ─────────────────────────────────────────────

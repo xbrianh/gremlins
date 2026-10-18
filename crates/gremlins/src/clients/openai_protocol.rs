@@ -9,6 +9,7 @@ use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 
 use super::agent_loop::{run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext};
 use super::backend::{ClientError, RunParams};
+use super::cancels::CancelsMap;
 use super::interactive::InteractiveSession;
 use super::model::GremlinsModel;
 use super::params::{self, ResolvedParams};
@@ -26,7 +27,7 @@ pub(crate) struct OpenAiRunState {
     pub(crate) tool_filter: Option<Vec<String>>,
     pub(crate) resolved: ResolvedParams,
     pub(crate) last_ctx: Mutex<Option<RunContext>>,
-    pub(crate) cancels: Mutex<HashMap<String, HashMap<u64, Arc<CancelToken>>>>,
+    pub(crate) cancels: CancelsMap,
     pub(crate) next_id: AtomicU64,
     pub(crate) log_label: String,
 }
@@ -45,7 +46,7 @@ impl OpenAiRunState {
             tool_filter,
             resolved,
             last_ctx: Mutex::new(None),
-            cancels: Mutex::new(HashMap::new()),
+            cancels: CancelsMap::default(),
             next_id: AtomicU64::new(1),
             log_label,
         }
@@ -53,6 +54,14 @@ impl OpenAiRunState {
 
     pub(crate) fn extra_params(&self) -> Option<serde_json::Value> {
         self.resolved.additional_value()
+    }
+
+    pub(crate) fn last_run_params(&self) -> Result<RunParams, ClientError> {
+        let guard = self.last_ctx.lock().unwrap();
+        let ctx = guard.as_ref().ok_or_else(|| ClientError::Runtime {
+            message: "resume() called before run()".into(),
+        })?;
+        Ok(ctx.params.clone())
     }
 
     pub(crate) fn effective_model(&self, override_model: Option<&str>) -> String {
@@ -79,45 +88,15 @@ pub(crate) async fn run_openai_compat(
     classify_error: Option<ErrorClassifier>,
     _provider_name: &str, // kept for logging; unused after task-models moved to Backend trait
 ) -> Result<CompletedRun, ClientError> {
-    let idle_timeout = params
-        .idle_timeout
-        .unwrap_or_else(crate::config::stream_idle_timeout);
-    let prefix = if params.label.is_empty() {
-        String::new()
-    } else {
-        format!("[{}] ", params.label)
-    };
-    let ctx = RunContext {
-        params: params.clone(),
-        prefix: prefix.clone(),
-        idle_timeout,
-        expected_artifact_paths: params.expected_artifact_paths.clone(),
-        reminder_budget: crate::config::artifact_reminder_budget(),
-        completion_nudge_budget: crate::config::completion_nudge_budget(),
-        stream_events: params.stream_events.clone(),
-        prepopulated_messages: params.prepopulated_messages.clone(),
-        compaction_opts: params.compaction_opts,
-    };
+    let ctx = RunContext::from_params(params.clone());
     *state.last_ctx.lock().unwrap() = Some(ctx.clone());
 
     // Use the supervisor's cancel token when available; otherwise create one.
     let cancel = params.cancel_token.clone().unwrap_or_else(CancelToken::new);
 
-    if cancel.is_cancelled() {
-        return Err(ClientError::Runtime {
-            message: "cancelled".into(),
-        });
-    }
-
     let gremlin_id = params.gremlin_id.clone().unwrap_or_default();
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-    state
-        .cancels
-        .lock()
-        .unwrap()
-        .entry(gremlin_id.clone())
-        .or_default()
-        .insert(id, cancel.clone());
+    state.cancels.insert(&gremlin_id, id, cancel.clone())?;
 
     let model_name = state.effective_model(params.model.as_deref());
     let result = run_with_agent_loop(
@@ -135,35 +114,15 @@ pub(crate) async fn run_openai_compat(
     )
     .await;
 
-    if let Ok(mut guard) = state.cancels.lock() {
-        if let Some(inner) = guard.get_mut(&gremlin_id) {
-            inner.remove(&id);
-            if inner.is_empty() {
-                guard.remove(&gremlin_id);
-            }
-        }
-    }
+    state.cancels.remove(&gremlin_id, id);
     result
 }
 
 /// Cancel every in-flight token for `gremlin_id`.
 pub(crate) fn reap_openai_compat(state: &OpenAiRunState, gremlin_id: &str) {
-    if let Ok(mut guard) = state.cancels.lock() {
-        let tokens: Vec<_> = guard
-            .remove(gremlin_id)
-            .into_iter()
-            .flat_map(|m| m.into_values())
-            .collect();
-        let count = tokens.len();
-        log::debug!(
-            "{}::reap_all: cancelling {count} in-flight token(s) for gremlin_id={gremlin_id} (model={})",
-            state.log_label,
-            state.model,
-        );
-        for token in &tokens {
-            token.cancel();
-        }
-    }
+    state
+        .cancels
+        .reap_all(gremlin_id, &state.log_label, &state.model);
 }
 
 // ── HTTP client pool + builder ──────────────────────────────────────────
@@ -361,6 +320,27 @@ pub(crate) async fn run_with_agent_loop(
 pub(crate) fn provider_and_model(spec: &str) -> Option<(String, String)> {
     let uri = crate::clients::client::ModelURI::parse(spec).ok()?;
     Some((uri.provider().to_string(), uri.model().to_string()))
+}
+
+/// Build a [`GremlinsModel`] for `spec` when it names this provider.
+///
+/// This is the single implementation shared by every OpenAI-protocol backend;
+/// the generated `Backend::make_model` impls just delegate here with their
+/// provider name.
+pub(crate) fn make_model(
+    state: &OpenAiRunState,
+    provider: &str,
+    spec: &str,
+) -> Option<GremlinsModel> {
+    let (parsed_provider, model) = provider_and_model(spec)?;
+    if parsed_provider == provider {
+        Some(GremlinsModel::new(
+            state.client.completion(&model).erase(),
+            crate::config::max_prompt_bytes(),
+        ))
+    } else {
+        None
+    }
 }
 
 // ── tests ────────────────────────────────────────────────────────────────
@@ -624,5 +604,49 @@ mod tests {
         assert_eq!(provider_and_model("only"), None);
         assert_eq!(provider_and_model(LEGACY_COLON_SPEC), None);
         assert_eq!(provider_and_model("openai/"), None);
+    }
+
+    #[test]
+    fn reap_all_cancels_only_own_tokens() {
+        let client = OpenAI::new("sk-test");
+        let backlog = CancelsMap::default();
+        let a = CancelToken::new();
+        let b = CancelToken::new();
+        let sibling = CancelToken::new();
+        backlog.insert("gr-test", 1, a.clone()).unwrap();
+        backlog.insert("gr-test", 2, b.clone()).unwrap();
+        backlog.insert("gr-sibling", 3, sibling.clone()).unwrap();
+
+        let mut state = OpenAiRunState::new(
+            client,
+            "gpt-4o".into(),
+            None,
+            ResolvedParams::default(),
+            "test".into(),
+        );
+        state.cancels = backlog;
+        reap_openai_compat(&state, "gr-test");
+        assert!(a.is_cancelled());
+        assert!(b.is_cancelled());
+        assert!(!sibling.is_cancelled());
+    }
+
+    #[test]
+    fn make_model_guards_provider_name() {
+        let client = OpenAI::new("sk-test");
+        let state = OpenAiRunState::new(
+            client,
+            "gpt-4o".into(),
+            None,
+            ResolvedParams::default(),
+            "test".into(),
+        );
+        // Matching provider.
+        assert!(make_model(&state, "openai", "openai/gpt-4o").is_some());
+        // Wrong provider.
+        assert!(make_model(&state, "openai", "xai/grok-4").is_none());
+        // Malformed spec.
+        assert!(make_model(&state, "openai", "").is_none());
+        assert!(make_model(&state, "openai", "garbage").is_none());
     }
 }
