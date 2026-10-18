@@ -10,9 +10,9 @@ use regex::Regex;
 
 use super::{OutlineItem, CLASS, ENUM, FN, HEADING, IMPL, KEY, METHOD, MOD, STRUCT, TRAIT};
 
-pub(crate) fn scan(extension: &str, content: &str) -> Vec<OutlineItem> {
+pub(crate) fn scan(extension: &str, content: &str, collapse_tests: bool) -> Vec<OutlineItem> {
     match extension {
-        "rs" => scan_rust(content),
+        "rs" => scan_rust(content, collapse_tests),
         "md" | "markdown" => scan_markdown(content),
         "json" => scan_json_keys(content),
         "toml" | "ini" | "cfg" | "conf" => scan_config_sections(content),
@@ -67,7 +67,7 @@ fn kind_for(kind: &str) -> Option<&'static str> {
     }
 }
 
-fn scan_rust(content: &str) -> Vec<OutlineItem> {
+fn scan_rust(content: &str, collapse_tests: bool) -> Vec<OutlineItem> {
     static ITEM_RE: OnceLock<Regex> = OnceLock::new();
     static MOD_OPEN_RE: OnceLock<Regex> = OnceLock::new();
     let item_re = ITEM_RE.get_or_init(|| {
@@ -97,7 +97,7 @@ fn scan_rust(content: &str) -> Vec<OutlineItem> {
     let mut prev_cfg_test = false;
 
     for (idx, line) in content.lines().enumerate() {
-        if test_mod_depth > 0 {
+        if collapse_tests && test_mod_depth > 0 {
             test_mod_depth = brace_depth_after_line(line, test_mod_depth);
             continue;
         }
@@ -464,7 +464,7 @@ pub trait Shape {
 mod inner;
 pub enum Color {}
 ";
-        let items = scan("rs", src);
+        let items = scan("rs", src, false);
         let kinds: Vec<&str> = items.iter().map(|i| i.kind).collect();
         assert_eq!(kinds, vec![FN, STRUCT, IMPL, FN, TRAIT, FN, MOD, ENUM]);
         assert_eq!(items[0].line, 1);
@@ -482,7 +482,7 @@ unsafe async fn b() {}
 #[inline]
 pub(crate) async fn c() {}
 ";
-        let items = scan("rs", src);
+        let items = scan("rs", src, false);
         assert_eq!(items[0].name, "Foo");
         assert_eq!(items[1].name, "Iterator for Foo");
         assert_eq!(items[2].kind, FN);
@@ -503,11 +503,47 @@ mod tests {
 }
 fn real() {}
 ";
-        let items = scan("rs", src);
+        let items = scan("rs", src, true);
         let kinds: Vec<&str> = items.iter().map(|i| i.kind).collect();
         assert_eq!(kinds, vec![MOD, FN]);
         assert_eq!(items[0].name, "tests");
         assert_eq!(items[1].name, "real");
+    }
+
+    #[test]
+    fn rust_scanner_shows_test_functions_when_not_collapsed() {
+        let src = "\
+#[cfg(test)]
+mod tests {
+    fn test_foo() {}
+    fn test_bar() {}
+}
+fn real() {}
+";
+        let items = scan("rs", src, false);
+        let kinds: Vec<&str> = items.iter().map(|i| i.kind).collect();
+        assert_eq!(kinds, vec![MOD, FN, FN, FN]);
+        assert_eq!(items[0].name, "tests");
+        assert_eq!(items[1].name, "test_foo");
+        assert_eq!(items[2].name, "test_bar");
+        assert_eq!(items[3].name, "real");
+    }
+
+    #[test]
+    fn rust_scanner_handles_cfg_test_on_separate_line_when_not_collapsed() {
+        let src = "\
+#[cfg(test)]
+mod integration {
+    fn test_integration() {}
+}
+fn real() {}
+";
+        let items = scan("rs", src, false);
+        let kinds: Vec<&str> = items.iter().map(|i| i.kind).collect();
+        assert_eq!(kinds, vec![MOD, FN, FN]);
+        assert_eq!(items[0].name, "integration");
+        assert_eq!(items[1].name, "test_integration");
+        assert_eq!(items[2].name, "real");
     }
 
     #[test]
@@ -516,7 +552,7 @@ fn real() {}
 impl<F: Fn() -> u8> StateBlob {}
 impl<F: Fn() -> u8> StateBlob for T {}
 ";
-        let items = scan("rs", src);
+        let items = scan("rs", src, false);
         assert_eq!(items[0].name, "StateBlob");
         assert_eq!(items[1].name, "StateBlob for T");
     }
@@ -524,14 +560,14 @@ impl<F: Fn() -> u8> StateBlob for T {}
     #[test]
     fn rust_scanner_skips_items_inside_multiline_strings() {
         let src = "let src = \"\\\nfn main() {}\nstruct Foo;\n\";\nfn real() {}\n";
-        let items = scan("rs", src);
+        let items = scan("rs", src, false);
         let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(names, vec!["real"]);
     }
 
     #[test]
     fn markdown_scanner_finds_headings() {
-        let items = scan("md", "# Title\nsome text\n## Subtitle\n");
+        let items = scan("md", "# Title\nsome text\n## Subtitle\n", false);
         assert_eq!(items.len(), 2);
         assert!(items.iter().all(|i| i.kind == HEADING));
         assert_eq!(items[0].name, "Title");
@@ -553,7 +589,7 @@ impl<F: Fn() -> u8> StateBlob for T {}
 ~~~
 ### C
 ";
-        let items = scan("md", src);
+        let items = scan("md", src, false);
         let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(names, vec!["A", "B", "C"]);
     }
@@ -563,6 +599,7 @@ impl<F: Fn() -> u8> StateBlob for T {}
         let pretty = scan(
             "json",
             "{\n  \"name\": \"x\",\n  \"deps\": {\n    \"nested\": 1\n  }\n}\n",
+            false,
         );
         assert_eq!(pretty.len(), 2);
         assert!(pretty.iter().all(|i| i.kind == KEY));
@@ -572,12 +609,13 @@ impl<F: Fn() -> u8> StateBlob for T {}
         let indented = scan(
             "json",
             "{\n    \"name\": \"x\",\n    \"deps\": {\n        \"nested\": 1\n    }\n}\n",
+            false,
         );
         assert_eq!(indented.len(), 2);
         assert_eq!(indented[0].name, "name");
         assert_eq!(indented[1].name, "deps");
 
-        let minified = scan("json", r#"{"name":"x","deps":{"nested":1}}"#);
+        let minified = scan("json", r#"{"name":"x","deps":{"nested":1}}"#, false);
         assert_eq!(minified.len(), 2);
         assert_eq!(minified[0].name, "name");
         assert_eq!(minified[1].name, "deps");
@@ -588,6 +626,7 @@ impl<F: Fn() -> u8> StateBlob for T {}
         let items = scan(
             "toml",
             "[package]\nname = \"g\"\n\n[[bin]]\npath = \"main.rs\"\n\n[dependencies]\nregex = \"1\"\n",
+            false,
         );
         assert_eq!(items.len(), 3);
         assert!(items.iter().all(|i| i.kind == KEY));
@@ -601,6 +640,7 @@ impl<F: Fn() -> u8> StateBlob for T {}
         let items = scan(
             "py",
             "class A:\n    def run(self):\n        pass\n\nasync def helper():\n    pass\n",
+            false,
         );
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].kind, CLASS);
@@ -611,6 +651,6 @@ impl<F: Fn() -> u8> StateBlob for T {}
 
     #[test]
     fn unknown_extension_scans_empty() {
-        assert!(scan("txt", "hello\nworld\n").is_empty());
+        assert!(scan("txt", "hello\nworld\n", false).is_empty());
     }
 }

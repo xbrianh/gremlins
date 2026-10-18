@@ -82,7 +82,11 @@ pub struct LandscapeExplorer;
 impl LandscapeExplorer {
     /// Outline a single file. Unknown extensions yield an empty outline, not an
     /// error. Non-UTF-8 files yield [`LandscapeError::Utf8`].
-    pub fn outline_file(&self, path: &Path) -> Result<Vec<OutlineItem>, LandscapeError> {
+    pub fn outline_file(
+        &self,
+        path: &Path,
+        collapse_tests: bool,
+    ) -> Result<Vec<OutlineItem>, LandscapeError> {
         let extension = path_extension(path);
         if !heuristic::recognizes(&extension) {
             return Ok(Vec::new());
@@ -90,7 +94,7 @@ impl LandscapeExplorer {
 
         let bytes = std::fs::read(path)?;
         let content = std::str::from_utf8(&bytes)?;
-        Ok(heuristic::scan(&extension, content))
+        Ok(heuristic::scan(&extension, content, collapse_tests))
     }
 
     /// Walk a directory tree and collect outlines for every recognized file.
@@ -158,7 +162,7 @@ impl LandscapeExplorer {
         let fresh: Vec<FreshEntry> = misses
             .into_par_iter()
             .map(|(path, fingerprint)| {
-                let result = self.outline_file(&path);
+                let result = self.outline_file(&path, true);
                 (path, fingerprint, result)
             })
             .collect();
@@ -554,7 +558,7 @@ mod tests {
     use super::*;
 
     fn outline_items(explorer: &LandscapeExplorer, path: &Path) -> Vec<OutlineItem> {
-        explorer.outline_file(path).unwrap()
+        explorer.outline_file(path, false).unwrap()
     }
 
     #[test]
@@ -802,7 +806,7 @@ mod tests {
     #[test]
     fn outline_missing_file_is_read_error() {
         let path = PathBuf::from("/definitely/not/present/outline-test.rs");
-        let result = LandscapeExplorer.outline_file(&path);
+        let result = LandscapeExplorer.outline_file(&path, false);
         assert!(matches!(result, Err(LandscapeError::Read(_))));
     }
 
@@ -811,7 +815,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("binary.rs");
         std::fs::write(&path, [0xff, 0xfe, 0x00, 0x01]).unwrap();
-        let result = LandscapeExplorer.outline_file(&path);
+        let result = LandscapeExplorer.outline_file(&path, false);
         assert!(matches!(result, Err(LandscapeError::Utf8(_))));
     }
 
