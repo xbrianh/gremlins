@@ -1392,6 +1392,21 @@ async fn run_agent_loop_core(
             }
             (Some(done_tc), false) => {
                 // Solo Done — validate expected artifacts before accepting.
+                // Extract the summary up front so it can be logged and recorded
+                // in the action ledger whether the call is accepted or rejected
+                // below (Done never reaches the normal tool-execution path).
+                let done_summary = done_tc
+                    .function
+                    .arguments
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                send_log(
+                    log_tx,
+                    prefix,
+                    &format!("tool: Done {}", trunc(&done_summary, 200)),
+                );
                 if !nested && !expected_artifact_paths.is_empty() {
                     let missing = missing_artifacts(expected_artifact_paths);
                     if !missing.is_empty() {
@@ -1413,7 +1428,10 @@ async fn run_agent_loop_core(
                                 done_tc.function.name.clone(),
                                 reminder.clone(),
                             ));
-                            next_prompt = Message::user(reminder);
+                            next_prompt = Message::user(format!(
+                                "Actions taken this turn:\n- Done {} (rejected)\n\n{}",
+                                done_summary, reminder
+                            ));
                             continue;
                         }
                         // Budget exhausted — accept anyway. Python
@@ -1428,15 +1446,8 @@ async fn run_agent_loop_core(
                 }
 
                 // Accept completion.
-                let summary = done_tc
-                    .function
-                    .arguments
-                    .get("summary")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let result_text = if text.trim().is_empty() && !summary.is_empty() {
-                    summary.clone()
+                let result_text = if text.trim().is_empty() && !done_summary.is_empty() {
+                    done_summary.clone()
                 } else {
                     text.clone()
                 };
@@ -1471,7 +1482,7 @@ async fn run_agent_loop_core(
                         .send_stream_event(
                             InteractiveEvent::Done {
                                 text: result_text.clone(),
-                                summary: summary.clone(),
+                                summary: done_summary.clone(),
                                 usage: Some(usage.clone()),
                             },
                             cancel,
@@ -1493,6 +1504,9 @@ async fn run_agent_loop_core(
                     &reasoning_items,
                     std::slice::from_ref(done_tc),
                 ));
+                // Prepend the action ledger so Done is visible in persisted history.
+                let done_ledger = format!("Actions taken this turn:\n- Done {}\n", done_summary);
+                messages.push(Message::user(done_ledger));
                 messages.push(Message::tool_result(
                     done_tc.id.clone(),
                     done_tc.function.name.clone(),
@@ -1500,7 +1514,7 @@ async fn run_agent_loop_core(
                 ));
                 return Ok(completed_run(
                     Some(result_text),
-                    Some(summary),
+                    Some(done_summary),
                     captured,
                     usage,
                     Some(messages),
@@ -2182,15 +2196,34 @@ fn enrich_log_line(name: &str, args: &serde_json::Value) -> String {
     }
 
     if extras.is_empty() {
-        primary
-    } else {
-        // Truncate primary so extras aren't pushed past the outer 200-char cap.
-        let primary = trunc(&primary, 120);
-        // Debug-quote the primary so suffixes can't be mistaken for
-        // command/pattern text (e.g. "tool: Bash make test timeout=60" is
-        // ambiguous; "tool: Bash "make test" timeout=60" is not).
-        format!("{primary:?} {}", extras.join(" "))
+        return primary;
     }
+
+    let suffix = extras.join(" ");
+
+    // The rendered line is `"{primary:?} {suffix}"`. Debug-quoting adds a `"`
+    // at each end (2 chars) and `trunc()` appends `...` (3 chars) whenever it
+    // cuts, so the primary must be budgeted against the suffix length plus
+    // both of those markers — otherwise the outer `trunc(..., 200)` masks the
+    // secondary arguments this helper exists to surface.
+    const CAP: usize = 200;
+    const SPACE: usize = 1;
+    const QUOTE_OVERHEAD: usize = 2; // opening and closing " from :?
+    const TRUNC_MARKER: usize = 3; // "..." appended by trunc() when it cuts
+
+    let suffix_len = suffix.len();
+
+    if suffix_len + SPACE + QUOTE_OVERHEAD >= CAP {
+        // The suffix alone fills the budget — render it behind a quoted "..."
+        // placeholder and truncate so the whole line still fits within CAP.
+        let max_suffix = CAP.saturating_sub(QUOTE_OVERHEAD + TRUNC_MARKER + SPACE + TRUNC_MARKER);
+        let suffix = trunc(&suffix, max_suffix);
+        return format!("\"...\" {}", suffix);
+    }
+
+    let max_primary = CAP - suffix_len - SPACE - QUOTE_OVERHEAD - TRUNC_MARKER;
+    let primary = trunc(&primary, max_primary);
+    format!("{primary:?} {suffix}")
 }
 
 /// Compact label for a tool call in the per-turn action ledger.
@@ -2739,6 +2772,47 @@ mod tests {
         assert!(
             line.contains("...\""),
             "long primary should be truncated: {line}"
+        );
+        assert!(
+            line.len() <= 200,
+            "enriched line must fit the 200-char cap, got {}: {line}",
+            line.len()
+        );
+    }
+
+    /// Fix 2 regression: a Grep whose secondary args alone exceed the cap must
+    /// truncate the suffix and still fit the final 200-char log line, keeping
+    /// the leading context values visible instead of losing them to the outer
+    /// `trunc(..., 200)`.
+    #[test]
+    fn enrich_log_line_suffix_exceeds_cap() {
+        let line = enrich_log_line(
+            "Grep",
+            &serde_json::json!({
+                "pattern": "fn run",
+                "max_matches": 50,
+                "glob": format!("*{}.rs", "x".repeat(300)),
+                "path": "crates/gremlins/src/clients",
+                "context_before": 2,
+                "context_after": 2,
+            }),
+        );
+        assert!(
+            line.starts_with("\"...\" "),
+            "oversized suffix must use the quoted placeholder: {line}"
+        );
+        assert!(
+            line.len() <= 200,
+            "enriched line must fit the 200-char cap, got {}: {line}",
+            line.len()
+        );
+        assert!(
+            line.contains("max_matches=50"),
+            "leading context values should survive truncation: {line}"
+        );
+        assert!(
+            !line.contains("context_after=2"),
+            "trailing context past the cap must be truncated: {line}"
         );
     }
 
@@ -6258,5 +6332,88 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("ok"));
+    }
+
+    /// Fix 1 regression: a solo `Done` never flows through the normal
+    /// tool-execution path, so the completion handler must itself emit the
+    /// `tool: Done <summary>` log line and record the Done action-ledger entry
+    /// in the returned history. Both are asserted here at the loop level.
+    #[tokio::test]
+    async fn loop_done_emits_log_and_ledger() {
+        let model = gm(
+            rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
+                rig_core::test_utils::MockStreamEvent::text("all finished"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "implemented the fix"}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ]])
+            .erase(),
+        );
+
+        let tool_ctx = test_tool_ctx();
+        let tool_defs = tools::tool_definitions(None);
+        let cancel = CancelToken::new();
+        let opts = loop_opts(None);
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let log_slot = Some(log_tx);
+
+        let result = run_agent_loop_core(
+            &model,
+            "do the thing",
+            None,
+            &tool_ctx,
+            &tool_defs,
+            &cancel,
+            &opts,
+            "[t] ",
+            10,
+            5.0,
+            &mut None,
+            &mut None,
+            false,
+            &[],
+            0,
+            0,
+            &log_slot,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // The Done summary must reach the `tool:` log line.
+        let mut logs = Vec::new();
+        while let Ok(line) = log_rx.try_recv() {
+            logs.push(line);
+        }
+        assert!(
+            logs.iter()
+                .any(|l| l.contains("tool: Done implemented the fix")),
+            "Done must reach the tool log line, got: {logs:#?}"
+        );
+
+        // The Done action ledger must be persisted in the returned history.
+        let messages = result.messages.expect("Done run must return messages");
+        let ledger = messages
+            .iter()
+            .find_map(|m| match m {
+                Message::User { content } => content.iter().find_map(|c| match c {
+                    UserContent::Text(t)
+                        if t.text.starts_with("Actions taken this turn:")
+                            && t.text.contains("- Done implemented the fix") =>
+                    {
+                        Some(t.text.clone())
+                    }
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("Done ledger entry must be present in returned history");
+        assert!(ledger.contains("- Done implemented the fix"), "{ledger}");
     }
 }
