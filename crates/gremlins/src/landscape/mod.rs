@@ -344,14 +344,21 @@ fn truncate_name(name: &str, max_bytes: usize) -> Result<String, LandscapeError>
     Ok(out)
 }
 
-/// Escape the block delimiters used to wrap the landscape so repo-controlled
-/// strings (markdown headings, JSON keys, identifiers, paths) cannot close the
-/// block early and smuggle their own instructions into the system prompt.
+/// Escape block delimiters, control characters, and the field separator in
+/// repo-controlled strings (markdown headings, JSON keys, identifiers, paths)
+/// so they cannot close the block early, inject new lines, or confuse the
+/// pipe-delimited format.
 ///
 /// Only the comment-opening/closing sequences are rewritten; ordinary angle
-/// brackets (e.g. `From<T> for String`) stay readable.
+/// brackets (e.g. `From<T> for String`) stay readable. Newlines become their
+/// visible escape form and `|` is replaced with the visually-similar broken bar
+/// so the three-field `line|kind|name` format stays unambiguous.
 fn escape_landscape_delimiters(text: &str) -> String {
-    text.replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+    text.replace("<!--", "&lt;!--")
+        .replace("-->", "--&gt;")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('|', "\u{00A6}")
 }
 
 /// Truncate a name to at most `cap` bytes, leaving short names unchanged.
@@ -644,6 +651,29 @@ mod tests {
         assert!(block.contains(TRUNCATION_MARKER));
         // Short names survive byte-identically.
         assert!(block.contains("1|fn|s\n"));
+    }
+
+    #[test]
+    fn format_landscape_block_escapes_newlines_and_pipes_in_names_and_paths() {
+        let root = Path::new("/repo");
+        let outline = FileOutline {
+            path: root.join("src/evil\npath.rs"),
+            items: vec![
+                OutlineItem::new(FN, "normal", 1),
+                OutlineItem::new(HEADING, "line1\nline2", 2),
+                OutlineItem::new(KEY, "key|with|pipes", 3),
+            ],
+        };
+        let block =
+            format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
+        // Newlines and pipes in repo-derived strings must be escaped so they
+        // cannot break the line-oriented format or confuse the field separator.
+        assert!(!block.contains("evil\npath.rs"), "path newline not escaped");
+        assert!(block.contains("evil\\npath.rs"), "expected escaped newline in path");
+        assert!(!block.contains("line1\nline2"), "name newline not escaped");
+        assert!(block.contains("line1\\nline2"), "expected escaped newline in name");
+        assert!(!block.contains("key|with|pipes"), "name pipe not escaped");
+        assert!(block.contains("key\u{00A6}with\u{00A6}pipes"), "expected broken bar in name");
     }
 
     #[test]
@@ -1024,6 +1054,37 @@ mod tests {
         assert!(!block.contains("shortened"));
         assert!(block.contains("1|fn|new\n"));
         assert!(block.contains("2|fn|fmt\n"));
+    }
+
+    #[test]
+    fn format_landscape_block_mixed_names_tight_budget_truncates_long() {
+        // Regression test for the over-budget mixed-name case: short names
+        // that cannot give up any more bytes must not block trimming of the
+        // long names. The water-fill cap search must find a cap that fits
+        // without touching the short names.
+        let root = Path::new("/repo");
+        let long = "a_very_very_very_long_name_specifically_designed_to_overflow_the_budget";
+        let outline = FileOutline {
+            path: root.join("lib.rs"),
+            items: vec![
+                OutlineItem::new(FN, "n", 1),
+                OutlineItem::new(FN, "f", 2),
+                OutlineItem::new(STRUCT, long, 3),
+                OutlineItem::new(IMPL, long, 4),
+            ],
+        };
+        let full =
+            format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
+        // Trim enough to force truncation but not so much that even the floor
+        // block can't fit. The two short names ("n", "f") can't shrink further;
+        // the two long names must absorb all the reduction.
+        let budget = full.len() - 20;
+        let block =
+            format_landscape_block(std::slice::from_ref(&outline), root, budget, true).unwrap();
+        assert!(block.len() <= budget);
+        assert!(block.contains("1|fn|n\n"), "short name 'n' must be untouched");
+        assert!(block.contains("2|fn|f\n"), "short name 'f' must be untouched");
+        assert!(block.contains(TRUNCATION_MARKER), "long names must be truncated");
     }
 
     #[test]

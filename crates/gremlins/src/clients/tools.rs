@@ -2565,7 +2565,7 @@ pub(crate) async fn invoke(id: &str, name: &str, ctx: &ToolContext, args_json: &
     // Edit and Write always return tiny results.
     let cap = crate::config::max_tool_output_bytes();
     if cap > 0
-        && matches!(name, "Read" | "Bash" | "Grep" | "Glob" | "WebSearch")
+        && matches!(name, "Read" | "Bash" | "Grep" | "Glob" | "OutlineFile" | "WebSearch")
         && res.len() as u64 > cap
     {
         return format!(
@@ -5042,6 +5042,31 @@ mod tests {
         assert!(
             !result.contains("xxx"),
             "file content must not leak through cap message"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_caps_oversized_outline_file_result() {
+        let _env = crate::test_support::EnvGuard::lock();
+        let dir = tmp();
+        let c = ctx(&dir);
+        // Generate a Rust file with many long-named functions so the outline
+        // output comfortably exceeds a 10-byte cap.
+        let mut src = String::new();
+        for i in 0..20 {
+            src.push_str(&format!("fn very_long_function_name_{i:03}() {{}}\n"));
+        }
+        std::fs::write(dir.join("big.rs"), &src).unwrap();
+        let args = serde_json::json!({"file_path": "big.rs"}).to_string();
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
+        let result = invoke("tool-test-id", "OutlineFile", &c, &args).await;
+        assert!(
+            result.contains("Tool output exceeded the limit"),
+            "oversized OutlineFile must be capped, got: {result}"
+        );
+        assert!(
+            !result.contains("very_long_function_name"),
+            "outline content must not leak through cap message"
         );
     }
 
