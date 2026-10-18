@@ -86,6 +86,18 @@ impl AgentLoopTelemetry {
         }
         Ok(())
     }
+
+    /// True when there is an active subscriber that will receive events.
+    ///
+    /// Callers use this to avoid building event payloads when no one is
+    /// listening — the `send_stream_event` method already no-ops, but
+    /// skipping the clone / format / truncate work saves allocation and
+    /// CPU on non-interactive runs.
+    fn wants_stream_events(&self) -> bool {
+        self.stream_events
+            .as_ref()
+            .is_some_and(|se| se.wants_events())
+    }
 }
 
 /// Discard any tool-output lines currently queued in the live-output
@@ -1151,12 +1163,9 @@ async fn run_agent_loop_core(
                     }
                     last_token = Some(now);
                     // Emit stream deltas via tool_ctx.telemetry.stream_events channel.
-                    // Gate on wants_events() before building the event so
-                    // unsubscribed broadcast senders avoid per-token
-                    // allocation; mpsc senders always want events.
                     // Nested loops must not emit text/reasoning deltas on the
                     // parent's stream — their output arrives as tool results.
-                    if !nested {
+                    if !nested && tool_ctx.telemetry.wants_stream_events() {
                         match &chunk {
                             Item::Event(StreamEvent::Text { ref text, .. }) => {
                                 tool_ctx
@@ -1288,7 +1297,7 @@ async fn run_agent_loop_core(
         // are consumed by the rest of the turn processing. Nested loops skip
         // this — their child turn numbers restart at 0 and can collide with
         // the parent's.
-        if !nested {
+        if !nested && tool_ctx.telemetry.wants_stream_events() {
             log::debug!("agent_loop: broadcasting TurnComplete (turn={turn_num})");
             tool_ctx
                 .telemetry
@@ -1451,7 +1460,7 @@ async fn run_agent_loop_core(
                 }
                 // Emit Done via stream_events. Nested loops skip this —
                 // only the parent's Done signals completion.
-                if !nested {
+                if !nested && tool_ctx.telemetry.wants_stream_events() {
                     log::debug!("agent_loop: broadcasting Done (turn={turn_num})");
                     tool_ctx
                         .telemetry
@@ -1843,25 +1852,27 @@ async fn run_agent_loop_core(
                     evts.push(result_evt);
                 }
             }
-            // Emit tool result via stream_events.
-            // For Read, truncate to a reasonable preview.
-            let display = if job.name == "Read" {
-                trunc(&output, 500)
-            } else {
-                trunc(&output, 200)
-            };
-            tool_ctx
-                .telemetry
-                .send_stream_event(
-                    InteractiveEvent::ToolResult {
-                        id: format!("{}{}", tool_ctx.id_prefix, job.id),
-                        name: job.name.clone(),
-                        call: job.call.clone(),
-                        output: display,
-                    },
-                    cancel,
-                )
-                .await?;
+            // Emit tool result via stream_events when there is a listener.
+            if tool_ctx.telemetry.wants_stream_events() {
+                // For Read, truncate to a reasonable preview.
+                let display = if job.name == "Read" {
+                    trunc(&output, 500)
+                } else {
+                    trunc(&output, 200)
+                };
+                tool_ctx
+                    .telemetry
+                    .send_stream_event(
+                        InteractiveEvent::ToolResult {
+                            id: format!("{}{}", tool_ctx.id_prefix, job.id),
+                            name: job.name.clone(),
+                            call: job.call.clone(),
+                            output: display,
+                        },
+                        cancel,
+                    )
+                    .await?;
+            }
             ledger.push(ledger_line(&job.name, &job.key, &output));
             result_msgs.push(Message::tool_result(
                 CallId::from_wire(job.id.clone()),
