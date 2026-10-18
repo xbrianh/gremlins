@@ -214,11 +214,13 @@ pub trait GremlinDefinition: Send + Sync {
     /// Returns `Ok(ExecutorStage::Done)` when the definition has no more stages.
     async fn next_stage(&mut self) -> Result<ExecutorStage, DefinitionError>;
 
-    /// Queue a pending chat prompt for the next [`next_stage`](Self::next_stage) call.
+    /// Escape hatch for downcasting to concrete definition types.
     ///
-    /// Default no-op for non-chat definitions. Only [`ChatDefinition`] consumes
-    /// this to build agent stages on demand.
-    fn set_pending(&mut self, _prompt: &str, _model: &ModelURI, _system_prompt: &str) {}
+    /// Defaults to `None`. Override in definition types that need
+    /// concrete access from callers that know the type at compile time.
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
 
     /// Serialize this definition to bytes.
     ///
@@ -296,8 +298,8 @@ impl GremlinDefinition for Box<dyn GremlinDefinition> {
         self.as_mut().next_stage().await
     }
 
-    fn set_pending(&mut self, prompt: &str, model: &ModelURI, system_prompt: &str) {
-        self.as_mut().set_pending(prompt, model, system_prompt)
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        self.as_mut().as_any_mut()
     }
 
     fn serialize(&self) -> Result<Vec<u8>, DefinitionError> {

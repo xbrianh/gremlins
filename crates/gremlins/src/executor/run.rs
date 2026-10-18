@@ -1295,12 +1295,26 @@ pub(crate) async fn clear_chat_turn_artifact(gremlin: &Gremlin, turn: usize) {
 /// Read the chat gremlin's persisted conversation from per-turn artifacts.
 ///
 /// Walks `artifact://conversation/0001.json`, `0002.json`, ... until a
-/// missing artifact is encountered, concatenating their message arrays.
-/// Missing or unparseable artifacts after the first missing one are
-/// treated as end-of-list; gaps are tolerated but shouldn't occur.
-pub(crate) async fn read_chat_conversation(gremlin: &Gremlin) -> Vec<Message> {
+/// missing artifact is encountered or `max_turn` is reached, concatenating
+/// their message arrays. Missing or unparseable artifacts after the first
+/// missing one are treated as end-of-list; gaps are tolerated but shouldn't
+/// occur.
+///
+/// `max_turn` caps the walk at the given 1-based turn number (inclusive).
+/// Pass `None` to walk all available artifacts. After rollback via `goto`,
+/// pass the turn number of the stage about to run minus one so abandoned
+/// future artifacts are excluded from the baseline.
+pub(crate) async fn read_chat_conversation(
+    gremlin: &Gremlin,
+    max_turn: Option<usize>,
+) -> Vec<Message> {
     let mut all_msgs = Vec::new();
     for t in 1.. {
+        if let Some(max) = max_turn {
+            if t > max {
+                break;
+            }
+        }
         let uri = format!("artifact://conversation/{:04}.json", t);
         match gremlin.state.content(&uri, None).await {
             Ok(json) => {
@@ -1349,7 +1363,20 @@ pub(crate) async fn append_chat_conversation_turn(
     }
     let uri_str = format!("artifact://conversation/{:04}.json", turn);
     let mut existing = match gremlin.state.content(&uri_str, None).await {
-        Ok(json) => messages_from_conversation(&json).unwrap_or_default(),
+        Ok(json) => match messages_from_conversation(&json) {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                // Unparseable current-turn artifact — do not overwrite it
+                // with a partial suffix; the prior artifact may still hold
+                // recoverable messages.
+                log::warn!(
+                    "chat: current-turn artifact {} unparseable; refusing to append: {}",
+                    uri_str,
+                    e
+                );
+                return;
+            }
+        },
         Err(e) => {
             if e.downcast_ref::<crate::executor::state::MissingArtifact>()
                 .is_some()
@@ -1360,7 +1387,7 @@ pub(crate) async fn append_chat_conversation_turn(
                     "chat: failed to read current-turn artifact for append: {}",
                     e
                 );
-                Vec::new()
+                return;
             }
         }
     };
@@ -1665,7 +1692,7 @@ mod tests {
         persist_chat_conversation_turn(&gremlin, 1, &turn1).await;
         persist_chat_conversation_turn(&gremlin, 2, &turn2).await;
 
-        let history = read_chat_conversation(&gremlin).await;
+        let history = read_chat_conversation(&gremlin, None).await;
         assert_eq!(history.len(), 2);
         assert_eq!(history[0], turn1[0]);
         assert_eq!(history[1], turn2[0]);

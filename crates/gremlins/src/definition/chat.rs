@@ -126,6 +126,10 @@ impl GremlinDefinition for ChatDefinition {
         self.default_model = model.clone();
     }
 
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
     /// Deep-clone including the turn counter and pending state. The gremlin is
     /// taken from and re-inserted into the session map between turns; a shallow
     /// clone would lose state.
@@ -374,5 +378,38 @@ mod tests {
             "sys".into(),
         );
         assert_eq!(def.name(), "chat");
+    }
+
+    /// Regression: `set_pending` must dispatch to the concrete `ChatDefinition`
+    /// when the caller only has a `Box<dyn GremlinDefinition>`. The definition
+    /// is boxed, the concrete factory path is used (downcast via `as_any_mut`),
+    /// and `next_stage()` on the boxed trait must produce an agent stage from
+    /// the queued prompt rather than immediately returning `Done`.
+    #[tokio::test]
+    async fn set_pending_through_boxed_trait_dispatches_to_chat_definition() {
+        let mut def: Box<dyn GremlinDefinition> = Box::new(ChatDefinition::new(
+            "chat".into(),
+            PathBuf::from("."),
+            model("openai/gpt-4"),
+            "sys".into(),
+        ));
+
+        // Downcast to the concrete ChatDefinition — this is the
+        // production path used by the supervisor.
+        let chat = def
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<ChatDefinition>())
+            .expect("must downcast to ChatDefinition");
+        chat.set_pending("hello", &model("openai/gpt-4"), "sys");
+
+        // Now call next_stage() through the boxed trait — it must
+        // consume the pending prompt and produce chat-0001.
+        let stage = def.next_stage().await.unwrap();
+        assert_eq!(stage.name(), "chat-0001");
+        assert_eq!(stage.stage_type(), "agent");
+
+        // No more pending — the next call returns Done.
+        let stage = def.next_stage().await.unwrap();
+        assert!(matches!(stage, ExecutorStage::Done));
     }
 }

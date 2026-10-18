@@ -24,6 +24,7 @@ use crate::clients::interactive::{
 };
 use crate::clients::protocol::{add_opt, UsageStats};
 use crate::config;
+use crate::definition::ChatDefinition;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin, GremlinConfig};
 use crate::executor::socket::{self, GremlinsDaemonLock};
 use crate::executor::state::{self, FileSystemStateStore};
@@ -3025,6 +3026,9 @@ async fn handle_chat(
     // next_stage() builds the agent stage on demand.
     gremlin
         .definition
+        .as_any_mut()
+        .and_then(|a| a.downcast_mut::<ChatDefinition>())
+        .expect("chat gremlin must carry a ChatDefinition")
         .set_pending(text, &chat_model, &system_prompt);
     // Keep the state.json `model` field in sync too: `/info` reads it from
     // the live state store rather than the in-memory client handle.
@@ -3062,6 +3066,17 @@ async fn handle_chat(
             return;
         }
     };
+
+    // Invalidate the current turn's per-turn artifact for a fresh turn.
+    // After rollback via `goto("chat-0003")`, a stale `conversation/0004.json`
+    // from the abandoned branch would otherwise be loaded by `run_agent` and
+    // leak discarded messages into the replacement turn's context. During
+    // soft-interrupt recovery this artifact is repopulated by
+    // `append_chat_conversation_turn` before the agent re-run, so clearing
+    // here only affects fresh turns.
+    if let Some(turn_num) = crate::executor::run::chat_turn_from_stage_name(stage.name()) {
+        crate::executor::run::clear_chat_turn_artifact(&gremlin, turn_num).await;
+    }
 
     // 6. Run the stage in the background. Events are forwarded as
     //    unsolicited JSON lines to this connection while the dispatch
@@ -3256,8 +3271,14 @@ async fn run_chat_turn(
     let baseline_usage = usage_stats_from_state(gremlin.state.read_field("token_usage").as_ref());
 
     // Snapshot the pre-turn conversation artifact so soft interrupt recovery
-    // can restore it when a hard cancel races the soft path.
-    let pre_turn_conversation = crate::executor::run::read_chat_conversation(&gremlin).await;
+    // can restore it when a hard cancel races the soft path. Bound the walk
+    // at the stage's turn number minus one so abandoned future artifacts
+    // from a prior rollback are excluded.
+    let pre_turn_conversation = crate::executor::run::read_chat_conversation(
+        &gremlin,
+        chat_turn_num.map(|n| n.saturating_sub(1)),
+    )
+    .await;
     // Track the prefix length for soft-interrupt recovery so subsequent
     // soft interrupts only append messages added since the last append,
     // avoiding duplication.
