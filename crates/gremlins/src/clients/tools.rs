@@ -85,7 +85,7 @@ pub(crate) struct ToolOutputLine {
 }
 
 #[derive(Clone)]
-pub(crate) struct ToolContext {
+pub(crate) struct AgentLoopRuntime {
     pub cwd: Option<PathBuf>,
     pub extra_env: Option<HashMap<String, String>>,
     pub(crate) base_env: Option<HashMap<String, String>>,
@@ -102,7 +102,7 @@ pub(crate) struct ToolContext {
     pub(crate) tool_output: Option<tokio::sync::mpsc::Sender<ToolOutputLine>>,
 }
 
-impl ToolContext {
+impl AgentLoopRuntime {
     /// Send one completed live-output line for the tool call identified by
     /// `id` to the optional display channel. Tool results returned to the
     /// model are unaffected.
@@ -1173,7 +1173,7 @@ pub(crate) fn result_status(res: &str) -> &'static str {
     }
 }
 
-fn check_tool(name: &str, ctx: &ToolContext, args: &serde_json::Value) -> Option<String> {
+fn check_tool(name: &str, ctx: &AgentLoopRuntime, args: &serde_json::Value) -> Option<String> {
     // AllowAll disables every containment check — no path is ever denied.
     let roots = ctx.sandbox.roots()?;
     match name {
@@ -1225,7 +1225,7 @@ fn req_str<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, String
         .ok_or_else(|| format!("Error: missing '{key}'"))
 }
 
-pub(crate) async fn read_invoke(ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn read_invoke(ctx: &AgentLoopRuntime, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
     let roots = ctx.sandbox.roots().map(|r| r.to_vec());
     let args_json = args_json.to_string();
@@ -1275,7 +1275,7 @@ fn read_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
     numbered
 }
 
-pub(crate) async fn outline_file_invoke(ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn outline_file_invoke(ctx: &AgentLoopRuntime, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
     let roots = ctx.sandbox.roots().map(|r| r.to_vec());
     let args_json = args_json.to_string();
@@ -1323,7 +1323,7 @@ fn render_outline(items: &[crate::landscape::OutlineItem]) -> String {
         .join("\n")
 }
 
-pub(crate) async fn edit_invoke(ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn edit_invoke(ctx: &AgentLoopRuntime, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
     let roots = ctx.sandbox.roots().map(|r| r.to_vec());
     let args_json = args_json.to_string();
@@ -1532,7 +1532,7 @@ async fn emit_live_lines(
     id: &str,
     name: &str,
     call: &str,
-    ctx: &ToolContext,
+    ctx: &AgentLoopRuntime,
     bytes: &[u8],
     scanner: &mut LineScanner,
     flush: bool,
@@ -1573,7 +1573,7 @@ async fn emit_live_lines(
     }
 }
 
-pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str, id: &str) -> String {
+pub(crate) async fn bash_invoke(ctx: &AgentLoopRuntime, args_json: &str, id: &str) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1725,13 +1725,13 @@ pub(crate) async fn bash_invoke(ctx: &ToolContext, args_json: &str, id: &str) ->
     }
 }
 
-pub(crate) async fn websearch_invoke(ctx: &ToolContext, args_json: &str, id: &str) -> String {
+pub(crate) async fn websearch_invoke(ctx: &AgentLoopRuntime, args_json: &str, id: &str) -> String {
     let cap = crate::config::max_tool_output_bytes();
     websearch_invoke_with_cap(ctx, args_json, cap, id).await
 }
 
 async fn websearch_invoke_with_cap(
-    ctx: &ToolContext,
+    ctx: &AgentLoopRuntime,
     args_json: &str,
     cap: u64,
     id: &str,
@@ -1946,7 +1946,7 @@ async fn websearch_invoke_with_cap(
     }
 }
 
-pub(crate) async fn write_invoke(ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn write_invoke(ctx: &AgentLoopRuntime, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
     let roots = ctx.sandbox.roots().map(|r| r.to_vec());
     let args_json = args_json.to_string();
@@ -2191,7 +2191,7 @@ fn walk_grep(
     }
 }
 
-pub(crate) async fn grep_invoke(ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn grep_invoke(ctx: &AgentLoopRuntime, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
     let roots = ctx.sandbox.roots().map(|r| r.to_vec());
     let args_json = args_json.to_string();
@@ -2271,7 +2271,7 @@ fn grep_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
     result
 }
 
-pub(crate) async fn glob_invoke(ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn glob_invoke(ctx: &AgentLoopRuntime, args_json: &str) -> String {
     let cwd = ctx.cwd.clone();
     let roots = ctx.sandbox.roots().map(|r| r.to_vec());
     let args_json = args_json.to_string();
@@ -2458,7 +2458,7 @@ fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
     None
 }
 
-pub(crate) async fn invoke(id: &str, name: &str, ctx: &ToolContext, args_json: &str) -> String {
+pub(crate) async fn invoke(id: &str, name: &str, ctx: &AgentLoopRuntime, args_json: &str) -> String {
     if let Some(allowed) = &ctx.allowed_tools {
         if !always_available(name) && !allowed.iter().any(|n| n == name) {
             return format!("Error: unknown tool {name}");
@@ -2854,8 +2854,8 @@ mod tests {
         p
     }
 
-    fn ctx(cwd: &Path) -> ToolContext {
-        ToolContext {
+    fn ctx(cwd: &Path) -> AgentLoopRuntime {
+        AgentLoopRuntime {
             cwd: Some(cwd.to_path_buf()),
             extra_env: None,
             base_env: None,
@@ -3135,7 +3135,7 @@ mod tests {
         let dir = tmp();
         let marker = "gremlins-cwd-test-marker";
         std::fs::write(dir.join(marker), "ok").unwrap();
-        let c = ToolContext {
+        let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
@@ -3163,7 +3163,7 @@ mod tests {
     #[tokio::test]
     async fn bash_invoke_cwd_none_uses_process_cwd() {
         // When cwd is None, the command inherits the process current directory.
-        let c = ToolContext {
+        let c = AgentLoopRuntime {
             cwd: None,
             extra_env: None,
             base_env: None,
@@ -4219,7 +4219,7 @@ mod tests {
     async fn filtered_tool_does_not_mutate_or_spawn() {
         let dir = tmp();
         let target = dir.join("must-not-exist.txt");
-        let c = ToolContext {
+        let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
@@ -4627,7 +4627,7 @@ mod tests {
     #[tokio::test]
     async fn task_no_callback_returns_error() {
         let dir = tmp();
-        let c = ToolContext {
+        let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
@@ -4653,7 +4653,7 @@ mod tests {
             *called2.lock().unwrap() = true;
             Box::pin(async move { format!("task result: {kind} / {prompt}") })
         });
-        let c = ToolContext {
+        let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
@@ -4677,7 +4677,7 @@ mod tests {
         let task_fn: TaskFn = Arc::new(|_kind, _prompt, _history| {
             Box::pin(async move { "should not be called".to_string() })
         });
-        let c = ToolContext {
+        let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
@@ -4708,7 +4708,7 @@ mod tests {
             *called2.lock().unwrap() = true;
             Box::pin(async move { "should not be called".to_string() })
         });
-        let c = ToolContext {
+        let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
@@ -4734,7 +4734,7 @@ mod tests {
         let dir = tmp();
         let task_fn: TaskFn =
             Arc::new(|_k, _p, _history| Box::pin(async move { "body".to_string() }));
-        let c = ToolContext {
+        let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
@@ -5115,7 +5115,7 @@ mod tests {
         let _env = crate::test_support::EnvGuard::lock();
         let dir = tmp();
         let task_fn: TaskFn = Arc::new(|_k, _p, _history| Box::pin(async move { "x".repeat(500) }));
-        let c = ToolContext {
+        let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
@@ -5142,8 +5142,8 @@ mod tests {
 
     // --- Part 6: SandboxMode (AllowAll) tests ---
 
-    fn allow_all_ctx(cwd: &Path) -> ToolContext {
-        ToolContext {
+    fn allow_all_ctx(cwd: &Path) -> AgentLoopRuntime {
+        AgentLoopRuntime {
             cwd: Some(cwd.to_path_buf()),
             extra_env: None,
             base_env: None,

@@ -6,7 +6,7 @@ use rig_core::completion::Message;
 
 use super::model::GremlinsModel;
 use super::task_kind::TaskKind;
-use super::tools::{self, ToolContext};
+use super::tools::{self, AgentLoopRuntime};
 
 /// Build a [`TaskModelSelector`] from the raw `task-models` config map and a
 /// provider-agnostic model factory.
@@ -153,7 +153,7 @@ fn task_prefix(base: &str, chain: &str) -> String {
 
 /// Build a task runner closure. Called once per backend before the agent loop.
 /// The returned closure captures the model, tool filter, cancel token,
-/// context prefix, and the original `ToolContext` — everything needed to run
+/// context prefix, and the original `AgentLoopRuntime` — everything needed to run
 /// a nested agent loop.
 ///
 /// `task_model_selector` carries the `task-models` configuration, so each
@@ -171,7 +171,7 @@ pub(crate) fn make_task_runner(
     task_model_selector: Option<TaskModelSelector>,
     tool_filter: Option<Vec<String>>,
     cancel: Arc<super::agent_loop::CancelToken>,
-    ctx: ToolContext,
+    ctx: AgentLoopRuntime,
     prefix: String,
     parent_model_name: String,
     idle_timeout: f64,
@@ -208,7 +208,7 @@ fn make_task_runner_at_depth(
     task_model_selector: Option<TaskModelSelector>,
     tool_filter: Option<Vec<String>>,
     cancel: Arc<super::agent_loop::CancelToken>,
-    ctx: ToolContext,
+    ctx: AgentLoopRuntime,
     prefix: String,
     _parent_model_name: String,
     idle_timeout: f64,
@@ -558,7 +558,7 @@ mod tests {
         );
     }
 
-    fn depth_test_ctx() -> ToolContext {
+    fn depth_test_ctx() -> AgentLoopRuntime {
         let dir = std::env::temp_dir().join(format!(
             "gremlins-sub-depth-{}-{}",
             std::process::id(),
@@ -568,7 +568,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        ToolContext {
+        AgentLoopRuntime {
             cwd: Some(dir.clone()),
             extra_env: None,
             base_env: None,
