@@ -322,6 +322,27 @@ pub(crate) fn provider_and_model(spec: &str) -> Option<(String, String)> {
     Some((uri.provider().to_string(), uri.model().to_string()))
 }
 
+/// Build a [`GremlinsModel`] for `spec` when it names this provider.
+///
+/// This is the single implementation shared by every OpenAI-protocol backend;
+/// the generated `Backend::make_model` impls just delegate here with their
+/// provider name.
+pub(crate) fn make_model(
+    state: &OpenAiRunState,
+    provider: &str,
+    spec: &str,
+) -> Option<GremlinsModel> {
+    let (parsed_provider, model) = provider_and_model(spec)?;
+    if parsed_provider == provider {
+        Some(GremlinsModel::new(
+            state.client.completion(&model).erase(),
+            crate::config::max_prompt_bytes(),
+        ))
+    } else {
+        None
+    }
+}
+
 // ── tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -583,5 +604,49 @@ mod tests {
         assert_eq!(provider_and_model("only"), None);
         assert_eq!(provider_and_model(LEGACY_COLON_SPEC), None);
         assert_eq!(provider_and_model("openai/"), None);
+    }
+
+    #[test]
+    fn reap_all_cancels_only_own_tokens() {
+        let client = OpenAI::new("sk-test");
+        let backlog = CancelsMap::default();
+        let a = CancelToken::new();
+        let b = CancelToken::new();
+        let sibling = CancelToken::new();
+        backlog.insert("gr-test", 1, a.clone()).unwrap();
+        backlog.insert("gr-test", 2, b.clone()).unwrap();
+        backlog.insert("gr-sibling", 3, sibling.clone()).unwrap();
+
+        let mut state = OpenAiRunState::new(
+            client,
+            "gpt-4o".into(),
+            None,
+            ResolvedParams::default(),
+            "test".into(),
+        );
+        state.cancels = backlog;
+        reap_openai_compat(&state, "gr-test");
+        assert!(a.is_cancelled());
+        assert!(b.is_cancelled());
+        assert!(!sibling.is_cancelled());
+    }
+
+    #[test]
+    fn make_model_guards_provider_name() {
+        let client = OpenAI::new("sk-test");
+        let state = OpenAiRunState::new(
+            client,
+            "gpt-4o".into(),
+            None,
+            ResolvedParams::default(),
+            "test".into(),
+        );
+        // Matching provider.
+        assert!(make_model(&state, "openai", "openai/gpt-4o").is_some());
+        // Wrong provider.
+        assert!(make_model(&state, "openai", "xai/grok-4").is_none());
+        // Malformed spec.
+        assert!(make_model(&state, "openai", "").is_none());
+        assert!(make_model(&state, "openai", "garbage").is_none());
     }
 }
