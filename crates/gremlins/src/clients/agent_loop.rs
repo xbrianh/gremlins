@@ -1392,6 +1392,21 @@ async fn run_agent_loop_core(
             }
             (Some(done_tc), false) => {
                 // Solo Done — validate expected artifacts before accepting.
+                // Extract the summary up front so it can be logged and recorded
+                // in the action ledger whether the call is accepted or rejected
+                // below (Done never reaches the normal tool-execution path).
+                let done_summary = done_tc
+                    .function
+                    .arguments
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                send_log(
+                    log_tx,
+                    prefix,
+                    &format!("tool: Done {}", trunc(&done_summary, 200)),
+                );
                 if !nested && !expected_artifact_paths.is_empty() {
                     let missing = missing_artifacts(expected_artifact_paths);
                     if !missing.is_empty() {
@@ -1413,7 +1428,10 @@ async fn run_agent_loop_core(
                                 done_tc.function.name.clone(),
                                 reminder.clone(),
                             ));
-                            next_prompt = Message::user(reminder);
+                            next_prompt = Message::user(format!(
+                                "Actions taken this turn:\n- Done {} (rejected)\n\n{}",
+                                done_summary, reminder
+                            ));
                             continue;
                         }
                         // Budget exhausted — accept anyway. Python
@@ -1428,15 +1446,8 @@ async fn run_agent_loop_core(
                 }
 
                 // Accept completion.
-                let summary = done_tc
-                    .function
-                    .arguments
-                    .get("summary")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let result_text = if text.trim().is_empty() && !summary.is_empty() {
-                    summary.clone()
+                let result_text = if text.trim().is_empty() && !done_summary.is_empty() {
+                    done_summary.clone()
                 } else {
                     text.clone()
                 };
@@ -1471,7 +1482,7 @@ async fn run_agent_loop_core(
                         .send_stream_event(
                             InteractiveEvent::Done {
                                 text: result_text.clone(),
-                                summary: summary.clone(),
+                                summary: done_summary.clone(),
                                 usage: Some(usage.clone()),
                             },
                             cancel,
@@ -1493,6 +1504,9 @@ async fn run_agent_loop_core(
                     &reasoning_items,
                     std::slice::from_ref(done_tc),
                 ));
+                // Prepend the action ledger so Done is visible in persisted history.
+                let done_ledger = format!("Actions taken this turn:\n- Done {}\n", done_summary);
+                messages.push(Message::user(done_ledger));
                 messages.push(Message::tool_result(
                     done_tc.id.clone(),
                     done_tc.function.name.clone(),
@@ -1500,7 +1514,7 @@ async fn run_agent_loop_core(
                 ));
                 return Ok(completed_run(
                     Some(result_text),
-                    Some(summary),
+                    Some(done_summary),
                     captured,
                     usage,
                     Some(messages),
@@ -1659,7 +1673,10 @@ async fn run_agent_loop_core(
             let tool_msg = format!(
                 "tool: {} {}",
                 tc.function.name,
-                trunc(&key_arg(&tc.function.arguments), 200)
+                trunc(
+                    &enrich_log_line(&tc.function.name, &tc.function.arguments),
+                    200
+                )
             );
             send_log(log_tx, prefix, &tool_msg);
             if !nested {
@@ -1999,17 +2016,17 @@ pub(crate) fn format_tool_call_parts(name: &str, args: &serde_json::Value) -> St
             .and_then(|v| v.as_str())
             .map(|s| format!("command={s:?}")),
         "Read" => args
-            .get("path")
+            .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|s| format!("path={s:?}")),
+            .map(|s| format!("file_path={s:?}")),
         "Write" => args
-            .get("path")
+            .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|s| format!("path={s:?}")),
+            .map(|s| format!("file_path={s:?}")),
         "Edit" => args
-            .get("path")
+            .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|s| format!("path={s:?}")),
+            .map(|s| format!("file_path={s:?}")),
         "Glob" => args
             .get("pattern")
             .and_then(|v| v.as_str())
@@ -2022,10 +2039,14 @@ pub(crate) fn format_tool_call_parts(name: &str, args: &serde_json::Value) -> St
             .get("url")
             .and_then(|v| v.as_str())
             .map(|s| format!("url={s:?}")),
-        "WebFetch" => args
-            .get("url")
+        "OutlineFile" => args
+            .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|s| format!("url={s:?}")),
+            .map(|s| format!("file_path={s:?}")),
+        "Done" => args
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("summary={:?}", trunc(s, 120))),
         "Task" => args
             .get("kind")
             .and_then(|v| v.as_str())
@@ -2080,14 +2101,7 @@ pub(crate) fn assistant_tool_message(
 
 pub(crate) fn key_arg(args: &serde_json::Value) -> String {
     if let Some(obj) = args.as_object() {
-        for k in [
-            "file_path",
-            "command",
-            "pattern",
-            "url",
-            "output_file",
-            "kind",
-        ] {
+        for k in ["file_path", "command", "pattern", "summary", "url", "kind"] {
             if let Some(v) = obj.get(k).and_then(|v| v.as_str()) {
                 if !v.is_empty() {
                     return v.to_string();
@@ -2098,6 +2112,120 @@ pub(crate) fn key_arg(args: &serde_json::Value) -> String {
     String::new()
 }
 
+/// Enrich the log line with secondary arguments beyond what `key_arg` returns.
+///
+/// `key_arg` picks a single primary key; this function appends any additional
+/// parameters that help operators understand the tool invocation at a glance.
+fn enrich_log_line(name: &str, args: &serde_json::Value) -> String {
+    let primary = key_arg(args);
+    let mut extras = Vec::new();
+
+    match name {
+        "Read" => {
+            if let Some(v) = args
+                .get("offset")
+                .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0)
+            {
+                extras.push(format!("offset={v}"));
+            }
+            if let Some(v) = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0)
+            {
+                extras.push(format!("limit={v}"));
+            }
+        }
+        "Bash" | "WebSearch" => {
+            if let Some(v) = args
+                .get("timeout")
+                .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0)
+            {
+                extras.push(format!("timeout={v}"));
+            }
+        }
+        "Grep" => {
+            if let Some(v) = args
+                .get("max_matches")
+                .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0)
+            {
+                extras.push(format!("max_matches={v}"));
+            }
+            if let Some(v) = args
+                .get("glob")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                extras.push(format!("glob={v:?}"));
+            }
+            if let Some(v) = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                extras.push(format!("path={v:?}"));
+            }
+            if let Some(v) = args
+                .get("context_before")
+                .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0)
+            {
+                extras.push(format!("context_before={v}"));
+            }
+            if let Some(v) = args
+                .get("context_after")
+                .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0)
+            {
+                extras.push(format!("context_after={v}"));
+            }
+        }
+        "Glob" => {
+            if let Some(v) = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                extras.push(format!("path={v:?}"));
+            }
+        }
+        _ => {}
+    }
+
+    if extras.is_empty() {
+        return primary;
+    }
+
+    let suffix = extras.join(" ");
+
+    // The rendered line is `"{primary:?} {suffix}"`. Debug-quoting adds a `"`
+    // at each end (2 chars) and `trunc()` appends `...` (3 chars) whenever it
+    // cuts, so the primary must be budgeted against the suffix length plus
+    // both of those markers — otherwise the outer `trunc(..., 200)` masks the
+    // secondary arguments this helper exists to surface.
+    const CAP: usize = 200;
+    const SPACE: usize = 1;
+    const QUOTE_OVERHEAD: usize = 2; // opening and closing " from :?
+    const TRUNC_MARKER: usize = 3; // "..." appended by trunc() when it cuts
+
+    let suffix_len = suffix.len();
+
+    if suffix_len + SPACE + QUOTE_OVERHEAD >= CAP {
+        // The suffix alone fills the budget — render it behind a quoted "..."
+        // placeholder and truncate so the whole line still fits within CAP.
+        let max_suffix = CAP.saturating_sub(QUOTE_OVERHEAD + TRUNC_MARKER + SPACE + TRUNC_MARKER);
+        let suffix = trunc(&suffix, max_suffix);
+        return format!("\"...\" {}", suffix);
+    }
+
+    let max_primary = CAP - suffix_len - SPACE - QUOTE_OVERHEAD - TRUNC_MARKER;
+    let primary = trunc(&primary, max_primary);
+    format!("{primary:?} {suffix}")
+}
+
 /// Compact label for a tool call in the per-turn action ledger.
 pub(crate) fn ledger_key_arg(args: &serde_json::Value) -> String {
     if let Some(obj) = args.as_object() {
@@ -2105,10 +2233,10 @@ pub(crate) fn ledger_key_arg(args: &serde_json::Value) -> String {
             "file_path",
             "command",
             "pattern",
+            "summary",
             "path",
             "kind",
             "url",
-            "output_file",
         ] {
             if let Some(v) = obj.get(k).and_then(|v| v.as_str()) {
                 if !v.is_empty() {
@@ -2513,6 +2641,212 @@ mod tests {
         assert_eq!(
             ledger_line("Bash", "false", "[exit 1]\n"),
             "- Bash false (failed)"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_uses_file_path_key() {
+        // Read, Write, Edit must use file_path, not path.
+        let args = serde_json::json!({"file_path": "src/main.rs"});
+        assert_eq!(
+            format_tool_call_parts("Read", &args),
+            "Read(file_path=\"src/main.rs\")"
+        );
+        assert_eq!(
+            format_tool_call_parts("Write", &args),
+            "Write(file_path=\"src/main.rs\")"
+        );
+        assert_eq!(
+            format_tool_call_parts("Edit", &args),
+            "Edit(file_path=\"src/main.rs\")"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_outline_and_done() {
+        assert_eq!(
+            format_tool_call_parts(
+                "OutlineFile",
+                &serde_json::json!({"file_path": "Cargo.toml"})
+            ),
+            "OutlineFile(file_path=\"Cargo.toml\")"
+        );
+        assert_eq!(
+            format_tool_call_parts("Done", &serde_json::json!({"summary": "Fixed it"})),
+            "Done(summary=\"Fixed it\")"
+        );
+        // Long Done summary is truncated.
+        let long = format_tool_call_parts("Done", &serde_json::json!({"summary": "x".repeat(300)}));
+        assert!(long.len() < 200, "long summary must be truncated: {long}");
+        assert!(long.starts_with("Done(summary=\""));
+    }
+
+    #[test]
+    fn format_tool_call_parts_no_vestigial_web_fetch() {
+        // WebFetch no longer exists; unrecognized tools get bare name.
+        assert_eq!(
+            format_tool_call_parts("WebFetch", &serde_json::json!({"url": "https://x.com"})),
+            "WebFetch"
+        );
+    }
+
+    #[test]
+    fn enrich_log_line_secondary_args() {
+        // Read with offset and limit.
+        let line = enrich_log_line(
+            "Read",
+            &serde_json::json!({"file_path": "foo.rs", "offset": 100, "limit": 50}),
+        );
+        assert!(line.contains("offset=100"), "{line}");
+        assert!(line.contains("limit=50"), "{line}");
+
+        // Read with zero offset/limit — omitted.
+        let line = enrich_log_line(
+            "Read",
+            &serde_json::json!({"file_path": "foo.rs", "offset": 0, "limit": 0}),
+        );
+        assert!(!line.contains("offset"), "{line}");
+        assert!(!line.contains("limit"), "{line}");
+
+        // Bash with timeout.
+        let line = enrich_log_line(
+            "Bash",
+            &serde_json::json!({"command": "make test", "timeout": 60}),
+        );
+        assert!(line.contains("timeout=60"), "{line}");
+        assert!(
+            line.contains("\"make test\""),
+            "primary must be quoted when extras present: {line}"
+        );
+
+        // Bash with zero timeout — omitted, no quoting.
+        let line = enrich_log_line(
+            "Bash",
+            &serde_json::json!({"command": "make test", "timeout": 0}),
+        );
+        assert!(!line.contains("timeout"), "{line}");
+        assert!(!line.contains('"'), "no extras → no quoting: {line}");
+
+        // Grep with path, glob, max_matches, context_before, context_after.
+        let line = enrich_log_line(
+            "Grep",
+            &serde_json::json!({
+                "pattern": "fn run",
+                "path": "src/",
+                "glob": "*.rs",
+                "max_matches": 50,
+                "context_before": 2,
+                "context_after": 0,
+            }),
+        );
+        assert!(line.contains("path=\"src/\""), "{line}");
+        assert!(line.contains("glob=\"*.rs\""), "{line}");
+        assert!(line.contains("max_matches=50"), "{line}");
+        assert!(line.contains("context_before=2"), "{line}");
+        assert!(
+            !line.contains("context_after"),
+            "zero context_after omitted: {line}"
+        );
+
+        // Glob with path.
+        let line = enrich_log_line(
+            "Glob",
+            &serde_json::json!({"pattern": "**/*.rs", "path": "src/"}),
+        );
+        assert!(line.contains("path=\"src/\""), "{line}");
+
+        // Glob without path.
+        let line = enrich_log_line("Glob", &serde_json::json!({"pattern": "**/*.rs"}));
+        assert!(!line.contains("path="), "{line}");
+    }
+
+    #[test]
+    fn enrich_log_line_truncates_long_primary_before_extras() {
+        // A very long Bash command should be truncated so timeout fits.
+        let long_cmd = "echo ".repeat(50).trim().to_string();
+        let line = enrich_log_line(
+            "Bash",
+            &serde_json::json!({"command": long_cmd, "timeout": 30}),
+        );
+        assert!(line.contains("timeout=30"), "timeout lost: {line}");
+        assert!(
+            line.contains("...\""),
+            "long primary should be truncated: {line}"
+        );
+        assert!(
+            line.len() <= 200,
+            "enriched line must fit the 200-char cap, got {}: {line}",
+            line.len()
+        );
+    }
+
+    /// Fix 2 regression: a Grep whose secondary args alone exceed the cap must
+    /// truncate the suffix and still fit the final 200-char log line, keeping
+    /// the leading context values visible instead of losing them to the outer
+    /// `trunc(..., 200)`.
+    #[test]
+    fn enrich_log_line_suffix_exceeds_cap() {
+        let line = enrich_log_line(
+            "Grep",
+            &serde_json::json!({
+                "pattern": "fn run",
+                "max_matches": 50,
+                "glob": format!("*{}.rs", "x".repeat(300)),
+                "path": "crates/gremlins/src/clients",
+                "context_before": 2,
+                "context_after": 2,
+            }),
+        );
+        assert!(
+            line.starts_with("\"...\" "),
+            "oversized suffix must use the quoted placeholder: {line}"
+        );
+        assert!(
+            line.len() <= 200,
+            "enriched line must fit the 200-char cap, got {}: {line}",
+            line.len()
+        );
+        assert!(
+            line.contains("max_matches=50"),
+            "leading context values should survive truncation: {line}"
+        );
+        assert!(
+            !line.contains("context_after=2"),
+            "trailing context past the cap must be truncated: {line}"
+        );
+    }
+
+    #[test]
+    fn ledger_key_arg_includes_summary() {
+        assert_eq!(
+            ledger_key_arg(&serde_json::json!({"summary": "Fixed the bug"})),
+            "Fixed the bug"
+        );
+        // summary is lower priority than file_path, command, pattern.
+        assert_eq!(
+            ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x", "summary": "ignored"})),
+            "/tmp/x"
+        );
+        assert_eq!(
+            ledger_key_arg(&serde_json::json!({"command": "ls", "summary": "ignored"})),
+            "ls"
+        );
+        assert_eq!(
+            ledger_key_arg(&serde_json::json!({"pattern": "fn", "summary": "ignored"})),
+            "fn"
+        );
+    }
+
+    #[test]
+    fn key_arg_includes_summary() {
+        assert_eq!(
+            key_arg(&serde_json::json!({"summary": "Completed task"})),
+            "Completed task"
+        );
+        // summary is lower priority than file_path, command, pattern.
+        assert_eq!(
+            key_arg(&serde_json::json!({"file_path": "/tmp/x", "summary": "ignored"})),
+            "/tmp/x"
         );
     }
 
@@ -5998,5 +6332,88 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(result.text_result.as_deref(), Some("ok"));
+    }
+
+    /// Fix 1 regression: a solo `Done` never flows through the normal
+    /// tool-execution path, so the completion handler must itself emit the
+    /// `tool: Done <summary>` log line and record the Done action-ledger entry
+    /// in the returned history. Both are asserted here at the loop level.
+    #[tokio::test]
+    async fn loop_done_emits_log_and_ledger() {
+        let model = gm(
+            rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
+                rig_core::test_utils::MockStreamEvent::text("all finished"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "implemented the fix"}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ]])
+            .erase(),
+        );
+
+        let tool_ctx = test_tool_ctx();
+        let tool_defs = tools::tool_definitions(None);
+        let cancel = CancelToken::new();
+        let opts = loop_opts(None);
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let log_slot = Some(log_tx);
+
+        let result = run_agent_loop_core(
+            &model,
+            "do the thing",
+            None,
+            &tool_ctx,
+            &tool_defs,
+            &cancel,
+            &opts,
+            "[t] ",
+            10,
+            5.0,
+            &mut None,
+            &mut None,
+            false,
+            &[],
+            0,
+            0,
+            &log_slot,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // The Done summary must reach the `tool:` log line.
+        let mut logs = Vec::new();
+        while let Ok(line) = log_rx.try_recv() {
+            logs.push(line);
+        }
+        assert!(
+            logs.iter()
+                .any(|l| l.contains("tool: Done implemented the fix")),
+            "Done must reach the tool log line, got: {logs:#?}"
+        );
+
+        // The Done action ledger must be persisted in the returned history.
+        let messages = result.messages.expect("Done run must return messages");
+        let ledger = messages
+            .iter()
+            .find_map(|m| match m {
+                Message::User { content } => content.iter().find_map(|c| match c {
+                    UserContent::Text(t)
+                        if t.text.starts_with("Actions taken this turn:")
+                            && t.text.contains("- Done implemented the fix") =>
+                    {
+                        Some(t.text.clone())
+                    }
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("Done ledger entry must be present in returned history");
+        assert!(ledger.contains("- Done implemented the fix"), "{ledger}");
     }
 }
