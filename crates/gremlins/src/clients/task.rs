@@ -432,7 +432,7 @@ mod tests {
             Some("openai/gpt-4o")
         );
         // Nothing matches.
-        assert_eq!(overrides.spec_for(TaskKind::Review), None);
+        assert_eq!(overrides.spec_for(TaskKind::Fork), None);
     }
 
     #[test]
@@ -465,9 +465,7 @@ mod tests {
         );
 
         // No match — the default model and its options stand.
-        let (selected, spec) = selector
-            .model_for(TaskKind::Review, &gm_mock_task())
-            .unwrap();
+        let (selected, spec) = selector.model_for(TaskKind::Fork, &gm_mock_task()).unwrap();
         assert_eq!(spec, None);
         assert_eq!(selected.temperature, None);
         assert_eq!(selected.max_tokens, None);
@@ -494,9 +492,7 @@ mod tests {
         );
 
         // No match still returns the default.
-        let (selected, spec) = selector
-            .model_for(TaskKind::Review, &gm_mock_task())
-            .unwrap();
+        let (selected, spec) = selector.model_for(TaskKind::Fork, &gm_mock_task()).unwrap();
         assert_eq!(spec, None);
         assert_eq!(selected.temperature, None);
         assert_eq!(selected.max_tokens, None);

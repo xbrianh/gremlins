@@ -72,7 +72,7 @@ replacements), Grep (regex search), Glob (find files \
 by pattern), Bash (shell commands), Done\n\
 </tools>\n\
 This is a forked child agent with the parent's full context. Do not call \
-Task(kind=\"Fork\") again.\n\
+Task.\n\
 Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Work root:     {work}\n\
@@ -506,8 +506,8 @@ mod tests {
             "fork prompt must not list Task; got: {prompt}"
         );
         assert!(
-            prompt.contains("Do not call Task(kind=\"Fork\") again"),
-            "fork prompt must forbid further forking; got: {prompt}"
+            prompt.contains("Do not call Task"),
+            "fork prompt must forbid further task calls; got: {prompt}"
         );
         assert!(prompt.contains("/work"));
         assert!(prompt.contains("/scratch"));
