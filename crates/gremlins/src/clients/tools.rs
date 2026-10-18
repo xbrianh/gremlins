@@ -11,6 +11,7 @@ use tokio::process::Command;
 
 use super::agent_loop::format_tool_call_parts;
 use super::task_kind::TaskKind;
+use crate::landscape::{LandscapeError, LandscapeExplorer};
 
 const GREP_MAX_LINES: usize = 2000;
 const BASH_TIMEOUT_SECS: u64 = 120;
@@ -1176,7 +1177,7 @@ fn check_tool(name: &str, ctx: &ToolContext, args: &serde_json::Value) -> Option
     // AllowAll disables every containment check — no path is ever denied.
     let roots = ctx.sandbox.roots()?;
     match name {
-        "Read" | "Edit" | "Write" => enforce(
+        "Read" | "Edit" | "Write" | "OutlineFile" => enforce(
             roots,
             args.get("file_path")
                 .and_then(|v| v.as_str())
@@ -1272,6 +1273,54 @@ fn read_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
         numbered.push_str(&format!("{}|{line}", offset + idx + 1));
     }
     numbered
+}
+
+pub(crate) async fn outline_file_invoke(ctx: &ToolContext, args_json: &str) -> String {
+    let cwd = ctx.cwd.clone();
+    let roots = ctx.sandbox.roots().map(|r| r.to_vec());
+    let args_json = args_json.to_string();
+    blocking_string(move || outline_file_sync(cwd.as_deref(), roots.as_deref(), &args_json)).await
+}
+
+fn outline_file_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
+    let args = match parse_args(args_json) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let file_path = match req_str(&args, "file_path") {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let path = resolve(file_path, cwd);
+    if let Some(roots) = roots {
+        if let Some(err) = io_enforce(&path, roots) {
+            return err;
+        }
+    }
+    match LandscapeExplorer.outline_file(&path) {
+        Ok(items) => render_outline(&items),
+        Err(LandscapeError::Utf8(e)) => format!("Error: file is not valid UTF-8: {e}"),
+        Err(LandscapeError::Read(e)) => format!("Error: {e}"),
+        Err(LandscapeError::BudgetExceeded) => {
+            // `outline_file` never returns BudgetExceeded (that variant only
+            // comes from `format_landscape_block`), but the match must be
+            // exhaustive. Returning an error string is just as short and keeps
+            // a future refactor from turning this into a panic in a blocking
+            // task.
+            String::from("Error: budget exceeded")
+        }
+    }
+}
+
+fn render_outline(items: &[crate::landscape::OutlineItem]) -> String {
+    if items.is_empty() {
+        return "(no outline items)".to_string();
+    }
+    items
+        .iter()
+        .map(|item| format!("{:>6}  {:<8} {}", item.line, item.kind, item.name))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub(crate) async fn edit_invoke(ctx: &ToolContext, args_json: &str) -> String {
@@ -2270,6 +2319,7 @@ fn glob_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
 fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool)>> {
     match name {
         "Read" => Some(vec![("file_path", "string", true)]),
+        "OutlineFile" => Some(vec![("file_path", "string", true)]),
         "Edit" => Some(vec![
             ("file_path", "string", true),
             ("edits", "array", true),
@@ -2458,6 +2508,7 @@ pub(crate) async fn invoke(id: &str, name: &str, ctx: &ToolContext, args_json: &
         "Write" => write_invoke(ctx, args_json).await,
         "Grep" => grep_invoke(ctx, args_json).await,
         "Glob" => glob_invoke(ctx, args_json).await,
+        "OutlineFile" => outline_file_invoke(ctx, args_json).await,
         "WebSearch" => websearch_invoke(ctx, args_json, id).await,
         "Task" => {
             if let Some(f) = &ctx.task_fn {
@@ -2514,7 +2565,10 @@ pub(crate) async fn invoke(id: &str, name: &str, ctx: &ToolContext, args_json: &
     // Edit and Write always return tiny results.
     let cap = crate::config::max_tool_output_bytes();
     if cap > 0
-        && matches!(name, "Read" | "Bash" | "Grep" | "Glob" | "WebSearch")
+        && matches!(
+            name,
+            "Read" | "Bash" | "Grep" | "Glob" | "OutlineFile" | "WebSearch"
+        )
         && res.len() as u64 > cap
     {
         return format!(
@@ -2549,6 +2603,21 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
                     "offset": {
                         "type": "integer",
                         "description": "Number of lines to skip from the start of the file (0-indexed, default 0)"
+                    }
+                },
+                "required": ["file_path"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: "OutlineFile".into(),
+            description: "Show the structural outline of a single file without reading the body. Returns one item per line with its 1-based line number, kind, and name. Kinds include fn, struct, impl, trait, enum, mod, class, method, heading, and key. Unknown file extensions yield an empty outline. Paths outside the sandbox are rejected.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the file to outline (relative or absolute)"
                     }
                 },
                 "required": ["file_path"],
@@ -2833,6 +2902,64 @@ mod tests {
         std::fs::write(dir.join("empty.txt"), "").unwrap();
         let args = serde_json::json!({"file_path": "empty.txt"}).to_string();
         assert_eq!(read_invoke(&c, &args).await, "");
+    }
+
+    #[tokio::test]
+    async fn outline_file_renders_rust_items() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        std::fs::write(
+            dir.join("lib.rs"),
+            "fn main() {}\nstruct Foo;\nimpl Foo {}\ntrait Shape {}\npub enum Color {}\n",
+        )
+        .unwrap();
+        let args = serde_json::json!({"file_path": "lib.rs"}).to_string();
+        let out = outline_file_invoke(&c, &args).await;
+        assert!(out.contains("fn") && out.contains("main"), "got: {out:?}");
+        assert!(
+            out.contains("struct") && out.contains("Foo"),
+            "got: {out:?}"
+        );
+        assert!(out.contains("impl"), "got: {out:?}");
+        assert!(
+            out.contains("     1  fn       main"),
+            "line numbers must be aligned: {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn outline_file_renders_markdown_headings() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        std::fs::write(dir.join("README.md"), "# Title\n\n## Subtitle\n").unwrap();
+        let args = serde_json::json!({"file_path": "README.md"}).to_string();
+        let out = outline_file_invoke(&c, &args).await;
+        assert!(out.contains("heading"), "got: {out:?}");
+        assert!(
+            out.contains("Title") && out.contains("Subtitle"),
+            "got: {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn outline_file_missing_file_is_error() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let args = serde_json::json!({"file_path": "missing.rs"}).to_string();
+        let out = outline_file_invoke(&c, &args).await;
+        assert!(out.starts_with("Error:"), "got: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn outline_file_outside_sandbox_is_denied() {
+        let dir = tmp();
+        let outside = tmp();
+        let c = ctx(&dir);
+        std::fs::write(outside.join("outside.rs"), "fn outside() {}\n").unwrap();
+        let args = serde_json::json!({"file_path": outside.join("outside.rs").to_str().unwrap()})
+            .to_string();
+        let out = outline_file_invoke(&c, &args).await;
+        assert!(out.contains("outside sandbox"), "got: {out:?}");
     }
 
     #[tokio::test]
@@ -3430,8 +3557,9 @@ mod tests {
     #[test]
     fn tool_definitions_filter() {
         let all = tool_definitions(None);
-        assert_eq!(all.len(), 9);
+        assert_eq!(all.len(), 10);
         let all_names: Vec<_> = all.iter().map(|t| t.name.as_str()).collect();
+        assert!(all_names.contains(&"OutlineFile"), "got: {all_names:?}");
         assert!(all_names.contains(&"WebSearch"), "got: {all_names:?}");
         let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]));
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
@@ -4917,6 +5045,31 @@ mod tests {
         assert!(
             !result.contains("xxx"),
             "file content must not leak through cap message"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_caps_oversized_outline_file_result() {
+        let _env = crate::test_support::EnvGuard::lock();
+        let dir = tmp();
+        let c = ctx(&dir);
+        // Generate a Rust file with many long-named functions so the outline
+        // output comfortably exceeds a 10-byte cap.
+        let mut src = String::new();
+        for i in 0..20 {
+            src.push_str(&format!("fn very_long_function_name_{i:03}() {{}}\n"));
+        }
+        std::fs::write(dir.join("big.rs"), &src).unwrap();
+        let args = serde_json::json!({"file_path": "big.rs"}).to_string();
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
+        let result = invoke("tool-test-id", "OutlineFile", &c, &args).await;
+        assert!(
+            result.contains("Tool output exceeded the limit"),
+            "oversized OutlineFile must be capped, got: {result}"
+        );
+        assert!(
+            !result.contains("very_long_function_name"),
+            "outline content must not leak through cap message"
         );
     }
 

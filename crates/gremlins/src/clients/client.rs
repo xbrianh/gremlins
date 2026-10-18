@@ -21,7 +21,7 @@ use crate::clients::backends;
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::protocol::CompletedRun;
 
-/// The six tools every native agent may call.
+/// The seven tools every native agent may call.
 ///
 /// The allowlist is deliberately fixed per-client rather than configurable:
 /// the harness's safety story is that a native agent can edit the worktree and
@@ -36,6 +36,7 @@ pub fn default_native_block() -> HashMap<String, Vec<String>> {
             "Write".to_string(),
             "Grep".to_string(),
             "Glob".to_string(),
+            "OutlineFile".to_string(),
         ],
     )])
 }
@@ -530,6 +531,21 @@ impl Client {
     pub fn extra_params(&self) -> &IndexMap<String, String> {
         self.uri.extra_params()
     }
+
+    /// Whether the effective allowlist permits `name`.
+    ///
+    /// The `cmd` backend has no native tool layer (its model is the shell
+    /// command itself), so even though its `native_block` looks like the
+    /// native backend's, none of the native tools are present.
+    pub fn has_tool(&self, name: &str) -> bool {
+        if self.uri.provider() == "cmd" {
+            return false;
+        }
+        self.native_block
+            .get("allowed_tools")
+            .map(|tools| tools.iter().any(|tool| tool == name))
+            .unwrap_or(false)
+    }
 }
 
 impl std::fmt::Display for Client {
@@ -832,11 +848,19 @@ mod tests {
     }
 
     #[test]
-    fn default_allowlist_has_six_tools() {
+    fn default_allowlist_has_seven_tools() {
         let block = default_native_block();
         let tools = block.get("allowed_tools").unwrap();
-        assert_eq!(tools.len(), 6);
-        for name in ["Bash", "Edit", "Read", "Write", "Grep", "Glob"] {
+        assert_eq!(tools.len(), 7);
+        for name in [
+            "Bash",
+            "Edit",
+            "Read",
+            "Write",
+            "Grep",
+            "Glob",
+            "OutlineFile",
+        ] {
             assert!(tools.contains(&name.to_string()), "missing {name}");
         }
     }

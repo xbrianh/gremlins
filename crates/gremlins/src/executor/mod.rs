@@ -21,6 +21,7 @@ pub mod run;
 pub mod socket;
 pub mod state;
 pub mod supervisor;
+pub(crate) mod system_prompt;
 pub use supervisor::DaemonEvent;
 pub mod vars;
 
