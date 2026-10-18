@@ -1,6 +1,6 @@
 //! The fixed set of task kinds a `Task` tool invocation can name.
 //!
-//! `TaskKind` is the single source of truth for the nine allowed spellings.
+//! `TaskKind` is the single source of truth for the three allowed spellings.
 //! Tool dispatch, `task-models` config parsing, and task-model
 //! selection all validate through this one enum — none of them keep an
 //! independent string list.
@@ -13,30 +13,18 @@
 /// unknown value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaskKind {
+    Fork,
     Scout,
     Implement,
-    Research,
-    Verify,
-    Fix,
-    Review,
-    Write,
-    Refactor,
-    Fork,
 }
 
 impl TaskKind {
     /// The canonical string form of this kind.
     pub fn as_str(self) -> &'static str {
         match self {
+            TaskKind::Fork => "Fork",
             TaskKind::Scout => "Scout",
             TaskKind::Implement => "Implement",
-            TaskKind::Research => "Research",
-            TaskKind::Verify => "Verify",
-            TaskKind::Fix => "Fix",
-            TaskKind::Review => "Review",
-            TaskKind::Write => "Write",
-            TaskKind::Refactor => "Refactor",
-            TaskKind::Fork => "Fork",
         }
     }
 
@@ -46,15 +34,9 @@ impl TaskKind {
     /// and arbitrary description text.
     pub fn parse(s: &str) -> Option<TaskKind> {
         match s {
+            "Fork" => Some(TaskKind::Fork),
             "Scout" => Some(TaskKind::Scout),
             "Implement" => Some(TaskKind::Implement),
-            "Research" => Some(TaskKind::Research),
-            "Verify" => Some(TaskKind::Verify),
-            "Fix" => Some(TaskKind::Fix),
-            "Review" => Some(TaskKind::Review),
-            "Write" => Some(TaskKind::Write),
-            "Refactor" => Some(TaskKind::Refactor),
-            "Fork" => Some(TaskKind::Fork),
             _ => None,
         }
     }
@@ -62,29 +44,10 @@ impl TaskKind {
     /// The canonical spellings that may be configured through `task-models`.
     /// `Fork` is intentionally excluded: it always inherits the parent model
     /// and is rejected as a configuration key.
-    pub const CONFIGURABLE: [TaskKind; 8] = [
-        TaskKind::Scout,
-        TaskKind::Implement,
-        TaskKind::Research,
-        TaskKind::Verify,
-        TaskKind::Fix,
-        TaskKind::Review,
-        TaskKind::Write,
-        TaskKind::Refactor,
-    ];
+    pub const CONFIGURABLE: [TaskKind; 2] = [TaskKind::Scout, TaskKind::Implement];
 
-    /// The nine canonical spellings, in declaration order.
-    pub const ALL: [TaskKind; 9] = [
-        TaskKind::Scout,
-        TaskKind::Implement,
-        TaskKind::Research,
-        TaskKind::Verify,
-        TaskKind::Fix,
-        TaskKind::Review,
-        TaskKind::Write,
-        TaskKind::Refactor,
-        TaskKind::Fork,
-    ];
+    /// The three canonical spellings, in declaration order.
+    pub const ALL: [TaskKind; 3] = [TaskKind::Fork, TaskKind::Scout, TaskKind::Implement];
 }
 
 impl std::fmt::Display for TaskKind {
@@ -120,8 +83,31 @@ mod tests {
     }
 
     #[test]
+    fn all_and_configurable_match_the_three_kind_set() {
+        assert_eq!(
+            TaskKind::ALL,
+            [TaskKind::Fork, TaskKind::Scout, TaskKind::Implement]
+        );
+        assert_eq!(
+            TaskKind::CONFIGURABLE,
+            [TaskKind::Scout, TaskKind::Implement]
+        );
+    }
+
+    #[test]
+    fn removed_spellings_no_longer_parse() {
+        for spelling in ["Research", "Verify", "Fix", "Review", "Write", "Refactor"] {
+            assert_eq!(
+                TaskKind::parse(spelling),
+                None,
+                "removed kind {spelling} must not parse"
+            );
+        }
+    }
+
+    #[test]
     fn configurable_excludes_fork() {
-        assert_eq!(TaskKind::CONFIGURABLE.len(), 8);
+        assert_eq!(TaskKind::CONFIGURABLE.len(), 2);
         assert!(!TaskKind::CONFIGURABLE.contains(&TaskKind::Fork));
         for kind in TaskKind::CONFIGURABLE {
             assert_eq!(TaskKind::parse(kind.as_str()), Some(kind));

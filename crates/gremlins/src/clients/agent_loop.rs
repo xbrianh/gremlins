@@ -2710,7 +2710,10 @@ mod tests {
     #[test]
     fn ledger_key_arg_covers_extra_fields_and_truncates() {
         assert_eq!(ledger_key_arg(&serde_json::json!({"path": "/tmp"})), "/tmp");
-        assert_eq!(ledger_key_arg(&serde_json::json!({"kind": "Fix"})), "Fix");
+        assert_eq!(
+            ledger_key_arg(&serde_json::json!({"kind": "Scout"})),
+            "Scout"
+        );
         assert_eq!(ledger_key_arg(&serde_json::json!({"pattern": ""})), "");
         let long = ledger_key_arg(&serde_json::json!({"command": "x".repeat(200)}));
         assert_eq!(long.chars().count(), 80);

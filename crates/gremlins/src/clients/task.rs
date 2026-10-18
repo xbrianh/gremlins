@@ -420,19 +420,12 @@ mod tests {
     #[test]
     fn task_model_overrides_match_by_kind() {
         let overrides = TaskModelOverrides {
-            by_kind: HashMap::from([
-                (TaskKind::Scout, "openai/mini".into()),
-                (TaskKind::Implement, "openai/gpt-4o".into()),
-            ]),
+            by_kind: HashMap::from([(TaskKind::Scout, "openai/mini".into())]),
         };
 
         assert_eq!(overrides.spec_for(TaskKind::Scout), Some("openai/mini"));
-        assert_eq!(
-            overrides.spec_for(TaskKind::Implement),
-            Some("openai/gpt-4o")
-        );
-        // Nothing matches.
-        assert_eq!(overrides.spec_for(TaskKind::Review), None);
+        // A configurable kind without an override falls through to `None`.
+        assert_eq!(overrides.spec_for(TaskKind::Implement), None);
     }
 
     #[test]
@@ -466,7 +459,7 @@ mod tests {
 
         // No match — the default model and its options stand.
         let (selected, spec) = selector
-            .model_for(TaskKind::Review, &gm_mock_task())
+            .model_for(TaskKind::Implement, &gm_mock_task())
             .unwrap();
         assert_eq!(spec, None);
         assert_eq!(selected.temperature, None);
@@ -495,7 +488,7 @@ mod tests {
 
         // No match still returns the default.
         let (selected, spec) = selector
-            .model_for(TaskKind::Review, &gm_mock_task())
+            .model_for(TaskKind::Implement, &gm_mock_task())
             .unwrap();
         assert_eq!(spec, None);
         assert_eq!(selected.temperature, None);
