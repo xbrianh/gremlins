@@ -37,6 +37,8 @@ use crate::executor::system_prompt::{landscape_block, SystemPrompt};
 use crate::executor::vars;
 use crate::executor::RunError;
 use indexmap::IndexMap;
+use rig_core::completion::message::{AssistantContent, UserContent};
+use rig_core::completion::Message;
 
 /// Send a log line through the per-gremlin channel if one is configured.
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: String) {
@@ -574,6 +576,13 @@ async fn run_agent(
         .await
         .map_err(|error| match error {
             ClientError::Bail { reason } => RunError::Bail { reason },
+            ClientError::Cancelled { message, messages } => {
+                RunError::Cancelled { message, messages }
+            }
+            ClientError::Runtime { message } if message == "cancelled" => RunError::Cancelled {
+                message,
+                messages: None,
+            },
             other => RunError::StageFailed {
                 stage: prepared.name.clone(),
                 message: other.to_string(),
@@ -1172,7 +1181,10 @@ pub(crate) fn messages_from_conversation(
 /// The agent loop keeps `history` verbatim and never rewrites it, so callers
 /// pass `completed.messages` directly. On serialize failure, log and leave any
 /// prior artifact untouched rather than erasing it with an empty array.
-async fn persist_chat_conversation(gremlin: &Gremlin, messages: &[rig_core::completion::Message]) {
+pub(crate) async fn persist_chat_conversation(
+    gremlin: &Gremlin,
+    messages: &[rig_core::completion::Message],
+) {
     match serde_json::to_string(messages) {
         Ok(json) => {
             if let Ok(uri) = Uri::parse("artifact://conversation.json") {
@@ -1181,6 +1193,147 @@ async fn persist_chat_conversation(gremlin: &Gremlin, messages: &[rig_core::comp
         }
         Err(e) => {
             log::warn!("chat: failed to serialize conversation artifact: {e}");
+        }
+    }
+}
+
+/// Read the chat gremlin's persisted conversation artifact, if present.
+///
+/// Missing or unreadable artifacts yield an empty history. Callers only use
+/// this after a successful turn or cancellation, so an unreadable artifact
+/// has already been reported by [`run_agent`] rather than silently dropped.
+pub(crate) async fn read_chat_conversation(gremlin: &Gremlin) -> Vec<Message> {
+    match gremlin
+        .state
+        .content("artifact://conversation.json", None)
+        .await
+    {
+        Ok(json) => messages_from_conversation(&json).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Append messages to the chat gremlin's persisted conversation artifact.
+///
+/// Thin composition of [`read_chat_conversation`] and
+/// [`persist_chat_conversation`]: the existing archive is preserved verbatim
+/// and the new messages follow it, so a re-run's `prepopulated_messages` sees
+/// the partial turn before the synthetic interruption prompt is submitted.
+///
+/// When the artifact exists but cannot be parsed, the append is skipped to
+/// avoid replacing a valid history with partial data. A missing artifact
+/// (first turn) is fine and the new messages become the initial archive.
+pub(crate) async fn append_chat_conversation(gremlin: &Gremlin, messages: &[Message]) {
+    let mut history = read_chat_conversation(gremlin).await;
+    // Guard: if read returned empty but the artifact file actually exists
+    // (unparseable JSON), don't overwrite it with just the suffix.
+    if history.is_empty() && !messages.is_empty() {
+        // Check whether the artifact exists on disk by attempting a read
+        // with a dedicated check — `read_chat_conversation` conflates
+        // "not found" and "parse error" into `Vec::new()`.
+        match gremlin
+            .state
+            .content("artifact://conversation.json", None)
+            .await
+        {
+            Ok(json) if messages_from_conversation(&json).is_err() => {
+                // Artifact exists with content but failed to parse as
+                // Message array.  Don't destroy the original.
+                log::warn!(
+                    "chat: conversation artifact exists but could not be parsed; \
+                     refusing to append"
+                );
+                return;
+            }
+            _ => {
+                // Artifact truly missing, empty, or a valid empty `[]` — first turn.
+            }
+        }
+    }
+    history.extend_from_slice(messages);
+    persist_chat_conversation(gremlin, &history).await;
+}
+
+/// Strip trailing messages left dangling by a mid-tool-call cancellation.
+///
+/// The agent loop pushes the assistant tool-use message before executing its
+/// tool batch, so cancelling during the batch can leave a trailing assistant
+/// message with no results. Cancellation can also race a tool-result send and
+/// leave a trailing tool-result message whose originating assistant tool-use
+/// message is absent. Both are invalid transcript suffixes and are dropped
+/// before the synthetic interruption message is injected.
+pub(crate) fn strip_unpaired_tool_messages(messages: &mut Vec<Message>) {
+    fn is_tool_result_user(message: &Message) -> bool {
+        match message {
+            Message::User { content } => content
+                .iter()
+                .any(|item| matches!(item, UserContent::ToolResult(_))),
+            _ => false,
+        }
+    }
+
+    fn assistant_has_tool_call(message: &Message) -> bool {
+        match message {
+            Message::Assistant { content, .. } => content
+                .iter()
+                .any(|item| matches!(item, AssistantContent::ToolCall(_))),
+            _ => false,
+        }
+    }
+
+    fn count_tool_calls(message: &Message) -> usize {
+        match message {
+            Message::Assistant { content, .. } => content
+                .iter()
+                .filter(|item| matches!(item, AssistantContent::ToolCall(_)))
+                .count(),
+            _ => 0,
+        }
+    }
+
+    fn count_tool_results(message: &Message) -> usize {
+        match message {
+            Message::User { content } => content
+                .iter()
+                .filter(|item| matches!(item, UserContent::ToolResult(_)))
+                .count(),
+            _ => 0,
+        }
+    }
+
+    loop {
+        let before = messages.len();
+
+        if let Some(last) = messages.last() {
+            if assistant_has_tool_call(last) {
+                messages.pop();
+                continue;
+            }
+        }
+
+        if messages.last().is_some_and(is_tool_result_user) {
+            let mut idx = messages.len();
+            let mut result_count = 0usize;
+            while idx > 0 && is_tool_result_user(&messages[idx - 1]) {
+                result_count += count_tool_results(&messages[idx - 1]);
+                idx -= 1;
+            }
+            if idx > 0 && assistant_has_tool_call(&messages[idx - 1]) {
+                let call_count = count_tool_calls(&messages[idx - 1]);
+                if call_count == result_count {
+                    // Paired: every tool call has a matching result.
+                    break;
+                }
+                // Partial results: drop the assistant message AND the
+                // orphaned tool results.
+                idx -= 1;
+            }
+            messages.truncate(idx);
+            continue;
+        }
+
+        if messages.len() == before {
+            break;
         }
     }
 }
@@ -2221,5 +2374,103 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(raw["status"], "done");
         assert_eq!(raw["exit_code"], 0);
+    }
+
+    // ── strip_unpaired_tool_messages ──
+
+    use rig_core::completion::message::{CallId, ToolCall, ToolFunction, ToolName};
+
+    fn tool_call_msg(id: &str, name: &str, args: serde_json::Value) -> Message {
+        let tc = ToolCall::from_dual_wire(
+            "".to_string(),
+            id.to_string(),
+            ToolFunction::new(ToolName::new(name.to_string()).unwrap(), args),
+        );
+        Message::Assistant {
+            id: None,
+            content: vec![AssistantContent::ToolCall(tc)],
+        }
+    }
+
+    fn tool_result_msg(call_id: &str, name: &str, output: &str) -> Message {
+        Message::tool_result(
+            CallId::from_wire(call_id.to_string()),
+            ToolName::new(name.to_string()).unwrap(),
+            output.to_string(),
+        )
+    }
+
+    #[test]
+    fn strip_unpaired_empty_is_noop() {
+        let mut messages: Vec<Message> = Vec::new();
+        super::strip_unpaired_tool_messages(&mut messages);
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn strip_unpaired_paired_calls_and_results_are_kept() {
+        let mut messages = vec![
+            Message::user("hello".to_string()),
+            tool_call_msg("call_1", "bash", serde_json::json!({"cmd": "ls"})),
+            tool_result_msg("call_1", "bash", "ok"),
+        ];
+        let len_before = messages.len();
+        super::strip_unpaired_tool_messages(&mut messages);
+        assert_eq!(messages.len(), len_before);
+    }
+
+    #[test]
+    fn strip_unpaired_trailing_assistant_with_tool_calls_is_removed() {
+        let mut messages = vec![
+            Message::user("hello".to_string()),
+            tool_call_msg("call_1", "bash", serde_json::json!({"cmd": "ls"})),
+        ];
+        super::strip_unpaired_tool_messages(&mut messages);
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn strip_unpaired_orphaned_tool_results_are_removed() {
+        let mut messages = vec![
+            Message::user("hello".to_string()),
+            Message::assistant("done".to_string()),
+            tool_result_msg("call_orphan", "bash", "orphan"),
+        ];
+        super::strip_unpaired_tool_messages(&mut messages);
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn strip_unpaired_partial_results_are_removed() {
+        let tc1 = ToolCall::from_dual_wire(
+            "".to_string(),
+            "call_1".to_string(),
+            ToolFunction::new(
+                ToolName::new("bash".to_string()).unwrap(),
+                serde_json::json!({"cmd": "ls"}),
+            ),
+        );
+        let tc2 = ToolCall::from_dual_wire(
+            "".to_string(),
+            "call_2".to_string(),
+            ToolFunction::new(
+                ToolName::new("read".to_string()).unwrap(),
+                serde_json::json!({"path": "f.txt"}),
+            ),
+        );
+        let mut messages = vec![
+            Message::user("hello".to_string()),
+            Message::Assistant {
+                id: None,
+                content: vec![
+                    AssistantContent::ToolCall(tc1),
+                    AssistantContent::ToolCall(tc2),
+                ],
+            },
+            tool_result_msg("call_1", "bash", "ok"),
+        ];
+        assert_eq!(messages.len(), 3);
+        super::strip_unpaired_tool_messages(&mut messages);
+        assert_eq!(messages.len(), 1);
     }
 }
