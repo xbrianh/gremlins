@@ -289,7 +289,7 @@ fn hard_cancel_active_turn(
     clear_active_turn_ui(app, live_area, active_turn);
 }
 
-///
+/// Run the shared Esc / first-Ctrl+C reset path.
 /// Ordering is deliberate: an open watch stream pane closes first, then any
 /// full-screen view returns to chat, then the main input bar is cleared and
 /// any in-flight chat turn is cancelled.
@@ -306,9 +306,6 @@ fn handle_esc_reset(
     debug_task: &mut Option<tokio::task::JoinHandle<()>>,
     debug_cmd_tx: &mut Option<mpsc::UnboundedSender<serde_json::Value>>,
     debug_evt_rx: &mut Option<mpsc::UnboundedReceiver<DebugEvent>>,
-    turn_gen: &mut u64,
-    active_turn: &mut Option<String>,
-    client: &Arc<client::DaemonClient>,
 ) -> bool {
     // Note: Esc only clears the ephemeral tool slot when it actually cancels
     // an in-flight turn (via `clear_current_turn` below). Clearing it up
@@ -326,16 +323,14 @@ fn handle_esc_reset(
         return true;
     }
 
-    if app.active_request {
-        *turn_gen += 1;
-        send_cancel_chat(client, active_turn.as_deref(), "hard");
-        clear_active_turn_ui(app, live_area, active_turn);
-    } else {
-        app.input.clear();
-        app.input_cursor = 0;
-        app.clear_completion();
-        live_area.reset_input_scroll();
-    }
+    // Idle Esc is now handled by the event-loop-level routing (it is inert
+    // when no turn is active). This path is only reached for the idle
+    // Ctrl+C first-press fall-through; clear the prompt to match the
+    // historical behaviour.
+    app.input.clear();
+    app.input_cursor = 0;
+    app.clear_completion();
+    live_area.reset_input_scroll();
 
     false
 }
@@ -1217,6 +1212,18 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
 
+                            // After a hard cancel cleared `active_request`,
+                            // the interrupt window may still be open.  Treat
+                            // any press inside it as a no-op so Ctrl+C never
+                            // arms the quit path while the turn is being
+                            // torn down.
+                            if interrupt_window
+                                .is_some_and(|first| now.duration_since(first) <= PENDING_QUIT_WINDOW)
+                                && interrupt_count >= 2
+                            {
+                                continue;
+                            }
+
                             if ctrl_c_should_quit(&mut pending_quit, now) {
                                 break;
                             }
@@ -1230,9 +1237,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 &mut debug_task,
                                 &mut debug_cmd_tx,
                                 &mut debug_evt_rx,
-                                &mut turn_gen,
-                                &mut active_turn,
-                                &client,
                             ) {
                                 continue;
                             }
@@ -2459,8 +2463,8 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_chat_request, ctrl_c_should_quit, format_socket_response, stats_title, usage_field,
-        usage_title_part,
+        build_chat_request, ctrl_c_should_quit, format_socket_response, interrupt_press,
+        stats_title, usage_field, usage_title_part, InterruptAction,
     };
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
@@ -2719,5 +2723,55 @@ mod tests {
         let mut pending = Some(Instant::now() - Duration::from_secs(2));
         assert!(!ctrl_c_should_quit(&mut pending, Instant::now()));
         assert!(pending.is_some());
+    }
+
+    // ── interrupt_press ──
+
+    #[test]
+    fn interrupt_first_press_is_soft() {
+        let mut count: u8 = 0;
+        let mut window = None;
+        assert_eq!(
+            interrupt_press(&mut count, &mut window, Instant::now()),
+            InterruptAction::SendSoft
+        );
+        assert_eq!(count, 1);
+        assert!(window.is_some());
+    }
+
+    #[test]
+    fn interrupt_second_press_within_window_is_hard() {
+        let first = Instant::now();
+        let mut count: u8 = 1;
+        let mut window = Some(first);
+        assert_eq!(
+            interrupt_press(&mut count, &mut window, first + Duration::from_millis(500),),
+            InterruptAction::SendHard
+        );
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn interrupt_third_press_within_window_is_noop() {
+        let first = Instant::now();
+        let mut count: u8 = 2;
+        let mut window = Some(first);
+        assert_eq!(
+            interrupt_press(&mut count, &mut window, first + Duration::from_millis(700),),
+            InterruptAction::NoOp
+        );
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn interrupt_after_window_expires_is_soft_again() {
+        let mut count: u8 = 2;
+        let mut window = Some(Instant::now() - Duration::from_secs(2));
+        assert_eq!(
+            interrupt_press(&mut count, &mut window, Instant::now()),
+            InterruptAction::SendSoft
+        );
+        assert_eq!(count, 1);
+        assert!(window.is_some());
     }
 }

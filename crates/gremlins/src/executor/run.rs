@@ -1219,8 +1219,37 @@ pub(crate) async fn read_chat_conversation(gremlin: &Gremlin) -> Vec<Message> {
 /// [`persist_chat_conversation`]: the existing archive is preserved verbatim
 /// and the new messages follow it, so a re-run's `prepopulated_messages` sees
 /// the partial turn before the synthetic interruption prompt is submitted.
+///
+/// When the artifact exists but cannot be parsed, the append is skipped to
+/// avoid replacing a valid history with partial data. A missing artifact
+/// (first turn) is fine and the new messages become the initial archive.
 pub(crate) async fn append_chat_conversation(gremlin: &Gremlin, messages: &[Message]) {
     let mut history = read_chat_conversation(gremlin).await;
+    // Guard: if read returned empty but the artifact file actually exists
+    // (unparseable JSON), don't overwrite it with just the suffix.
+    if history.is_empty() && !messages.is_empty() {
+        // Check whether the artifact exists on disk by attempting a read
+        // with a dedicated check — `read_chat_conversation` conflates
+        // "not found" and "parse error" into `Vec::new()`.
+        match gremlin
+            .state
+            .content("artifact://conversation.json", None)
+            .await
+        {
+            Ok(json) if !json.is_empty() => {
+                // Artifact exists with content but failed to parse as
+                // Message array.  Don't destroy the original.
+                log::warn!(
+                    "chat: conversation artifact exists but could not be parsed; \
+                     refusing to append"
+                );
+                return;
+            }
+            _ => {
+                // Artifact truly missing or empty — first turn.
+            }
+        }
+    }
     history.extend_from_slice(messages);
     persist_chat_conversation(gremlin, &history).await;
 }
@@ -1252,6 +1281,26 @@ pub(crate) fn strip_unpaired_tool_messages(messages: &mut Vec<Message>) {
         }
     }
 
+    fn count_tool_calls(message: &Message) -> usize {
+        match message {
+            Message::Assistant { content, .. } => content
+                .iter()
+                .filter(|item| matches!(item, AssistantContent::ToolCall(_)))
+                .count(),
+            _ => 0,
+        }
+    }
+
+    fn count_tool_results(message: &Message) -> usize {
+        match message {
+            Message::User { content } => content
+                .iter()
+                .filter(|item| matches!(item, UserContent::ToolResult(_)))
+                .count(),
+            _ => 0,
+        }
+    }
+
     loop {
         let before = messages.len();
 
@@ -1264,14 +1313,23 @@ pub(crate) fn strip_unpaired_tool_messages(messages: &mut Vec<Message>) {
 
         if messages.last().is_some_and(is_tool_result_user) {
             let mut idx = messages.len();
+            let mut result_count = 0usize;
             while idx > 0 && is_tool_result_user(&messages[idx - 1]) {
+                result_count += count_tool_results(&messages[idx - 1]);
                 idx -= 1;
             }
-            let paired = idx > 0 && assistant_has_tool_call(&messages[idx - 1]);
-            if !paired {
-                messages.truncate(idx);
-                continue;
+            if idx > 0 && assistant_has_tool_call(&messages[idx - 1]) {
+                let call_count = count_tool_calls(&messages[idx - 1]);
+                if call_count == result_count {
+                    // Paired: every tool call has a matching result.
+                    break;
+                }
+                // Partial results: drop the assistant message AND the
+                // orphaned tool results.
+                idx -= 1;
             }
+            messages.truncate(idx);
+            continue;
         }
 
         if messages.len() == before {
@@ -2316,5 +2374,103 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(raw["status"], "done");
         assert_eq!(raw["exit_code"], 0);
+    }
+
+    // ── strip_unpaired_tool_messages ──
+
+    use rig_core::completion::message::{CallId, ToolCall, ToolFunction, ToolName};
+
+    fn tool_call_msg(id: &str, name: &str, args: serde_json::Value) -> Message {
+        let tc = ToolCall::from_dual_wire(
+            "".to_string(),
+            id.to_string(),
+            ToolFunction::new(ToolName::new(name.to_string()).unwrap(), args),
+        );
+        Message::Assistant {
+            id: None,
+            content: vec![AssistantContent::ToolCall(tc)],
+        }
+    }
+
+    fn tool_result_msg(call_id: &str, name: &str, output: &str) -> Message {
+        Message::tool_result(
+            CallId::from_wire(call_id.to_string()),
+            ToolName::new(name.to_string()).unwrap(),
+            output.to_string(),
+        )
+    }
+
+    #[test]
+    fn strip_unpaired_empty_is_noop() {
+        let mut messages: Vec<Message> = Vec::new();
+        super::strip_unpaired_tool_messages(&mut messages);
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn strip_unpaired_paired_calls_and_results_are_kept() {
+        let mut messages = vec![
+            Message::user("hello".to_string()),
+            tool_call_msg("call_1", "bash", serde_json::json!({"cmd": "ls"})),
+            tool_result_msg("call_1", "bash", "ok"),
+        ];
+        let len_before = messages.len();
+        super::strip_unpaired_tool_messages(&mut messages);
+        assert_eq!(messages.len(), len_before);
+    }
+
+    #[test]
+    fn strip_unpaired_trailing_assistant_with_tool_calls_is_removed() {
+        let mut messages = vec![
+            Message::user("hello".to_string()),
+            tool_call_msg("call_1", "bash", serde_json::json!({"cmd": "ls"})),
+        ];
+        super::strip_unpaired_tool_messages(&mut messages);
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn strip_unpaired_orphaned_tool_results_are_removed() {
+        let mut messages = vec![
+            Message::user("hello".to_string()),
+            Message::assistant("done".to_string()),
+            tool_result_msg("call_orphan", "bash", "orphan"),
+        ];
+        super::strip_unpaired_tool_messages(&mut messages);
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn strip_unpaired_partial_results_are_removed() {
+        let tc1 = ToolCall::from_dual_wire(
+            "".to_string(),
+            "call_1".to_string(),
+            ToolFunction::new(
+                ToolName::new("bash".to_string()).unwrap(),
+                serde_json::json!({"cmd": "ls"}),
+            ),
+        );
+        let tc2 = ToolCall::from_dual_wire(
+            "".to_string(),
+            "call_2".to_string(),
+            ToolFunction::new(
+                ToolName::new("read".to_string()).unwrap(),
+                serde_json::json!({"path": "f.txt"}),
+            ),
+        );
+        let mut messages = vec![
+            Message::user("hello".to_string()),
+            Message::Assistant {
+                id: None,
+                content: vec![
+                    AssistantContent::ToolCall(tc1),
+                    AssistantContent::ToolCall(tc2),
+                ],
+            },
+            tool_result_msg("call_1", "bash", "ok"),
+        ];
+        assert_eq!(messages.len(), 3);
+        super::strip_unpaired_tool_messages(&mut messages);
+        assert_eq!(messages.len(), 1);
     }
 }

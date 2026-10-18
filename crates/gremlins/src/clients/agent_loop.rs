@@ -65,14 +65,12 @@ async fn send_stream_event_checked(
     se: &StreamEventSender,
     event: InteractiveEvent,
     cancel: &CancelToken,
+    history: &[Message],
 ) -> Result<(), ClientError> {
     if send_stream_event(se, event, cancel).await {
         Ok(())
     } else {
-        Err(ClientError::Cancelled {
-            message: "cancelled".into(),
-            messages: None,
-        })
+        Err(cancelled_error("cancelled", history))
     }
 }
 
@@ -86,10 +84,11 @@ impl AgentLoopTelemetry {
         &self,
         event: InteractiveEvent,
         cancel: &CancelToken,
+        history: &[Message],
     ) -> Result<(), ClientError> {
         if let Some(ref se) = self.stream_events {
             if se.wants_events() {
-                return send_stream_event_checked(se, event, cancel).await;
+                return send_stream_event_checked(se, event, cancel, history).await;
             }
         }
         Ok(())
@@ -1171,6 +1170,7 @@ async fn run_agent_loop_core(
                                     .send_stream_event(
                                         InteractiveEvent::StreamChunk { text: text.clone() },
                                         cancel,
+                                        &history,
                                     )
                                     .await?;
                             }
@@ -1180,6 +1180,7 @@ async fn run_agent_loop_core(
                                     .send_stream_event(
                                         InteractiveEvent::ReasoningChunk { text: text.clone() },
                                         cancel,
+                                        &history,
                                     )
                                     .await?;
                             }
@@ -1196,6 +1197,7 @@ async fn run_agent_loop_core(
                                             text: format_tool_call(tc),
                                         },
                                         cancel,
+                                        &history,
                                     )
                                     .await?;
                             }
@@ -1237,7 +1239,7 @@ async fn run_agent_loop_core(
             if !nested {
                 tool_ctx
                     .telemetry
-                    .send_stream_event(InteractiveEvent::StreamReset, cancel)
+                    .send_stream_event(InteractiveEvent::StreamReset, cancel, &history)
                     .await?;
             }
             continue;
@@ -1312,6 +1314,7 @@ async fn run_agent_loop_core(
                         totals: Some(totals),
                     },
                     cancel,
+                    &history,
                 )
                 .await?;
         }
@@ -1484,6 +1487,7 @@ async fn run_agent_loop_core(
                                 usage: Some(usage.clone()),
                             },
                             cancel,
+                            &history,
                         )
                         .await?;
                 }
@@ -1851,6 +1855,7 @@ async fn run_agent_loop_core(
                             text: line.text,
                         },
                         cancel,
+                        &history,
                     )
                     .await?;
             }
@@ -1887,6 +1892,7 @@ async fn run_agent_loop_core(
                             output: display,
                         },
                         cancel,
+                        &history,
                     )
                     .await?;
             }

@@ -912,6 +912,7 @@ async fn teardown_session_impl(session: &SessionHandle, state_root: &Path, abort
         s.closed = true;
 
         let turn_done = if let Some(cur) = &s.current_turn {
+            cur.soft_cancel.store(false, Ordering::Relaxed);
             cur.cancel.cancel();
             Some(Arc::clone(&cur.done))
         } else {
@@ -1129,6 +1130,7 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
         s.chat_gremlins.remove(id);
         if let Some(cur) = &s.current_turn {
             if cur.id == id {
+                cur.soft_cancel.store(false, Ordering::Relaxed);
                 cur.cancel.cancel();
             }
         }
@@ -1148,10 +1150,27 @@ async fn stop_session_chat_gremlin(id: &str) {
             s.chat_gremlins.remove(id);
             if let Some(cur) = &s.current_turn {
                 if cur.id == id {
+                    cur.soft_cancel.store(false, Ordering::Relaxed);
                     cur.cancel.cancel();
                 }
             }
             return;
+        }
+    }
+}
+
+/// Clear the `soft_cancel` flag for a chat gremlin's in-flight turn across
+/// all sessions. Called from [`handle_stop`] before cancelling the run-map
+/// token so a `gremlins stop` always forces a hard cancel even when a soft
+/// interrupt is in progress.
+async fn clear_soft_cancel_for(id: &str) {
+    let sessions: Vec<SessionHandle> = session_map().lock().unwrap().values().cloned().collect();
+    for session in sessions {
+        let s = session.lock().await;
+        if let Some(cur) = &s.current_turn {
+            if cur.id == id {
+                cur.soft_cancel.store(false, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -1378,6 +1397,10 @@ async fn handle_stop(request: &Value, _shutdown_tx: &watch::Sender<bool>) -> Val
     if validate_gremlin_id(id).is_err() {
         return error_response(&format!("invalid gremlin id {id:?}"));
     }
+
+    // Clear soft_cancel on any session that owns this chat gremlin so
+    // `gremlins stop` always produces a hard cancel.
+    clear_soft_cancel_for(id).await;
 
     let run_map = get_run_map();
 
@@ -3253,6 +3276,10 @@ async fn run_chat_turn(
     // treated as zero.
     let baseline_usage = usage_stats_from_state(gremlin.state.read_field("token_usage").as_ref());
 
+    // Snapshot the pre-turn conversation artifact so soft interrupt recovery
+    // can restore it when a hard cancel races the soft path.
+    let pre_turn_conversation = crate::executor::run::read_chat_conversation(&gremlin).await;
+
     let mut soft_parts: Option<SoftStageParts> = None;
     let run_stage = match stage {
         crate::definition::ExecutorStage::Agent {
@@ -3435,11 +3462,11 @@ async fn run_chat_turn(
                             };
 
                             let original_text = soft_agent.prompts.join("\n");
-                            let existing =
-                                crate::executor::run::read_chat_conversation(&recovered).await;
+                            // Use the pre-turn snapshot (not a re-read) so the suffix
+                            // computation is stable.
                             let mut partial = messages.unwrap_or_default();
-                            if partial.len() >= existing.len() {
-                                partial = partial.split_off(existing.len());
+                            if partial.len() >= pre_turn_conversation.len() {
+                                partial = partial.split_off(pre_turn_conversation.len());
                             } else {
                                 partial = Vec::new();
                             }
@@ -3447,7 +3474,6 @@ async fn run_chat_turn(
                             if partial.is_empty() {
                                 partial.push(Message::user(original_text));
                             }
-                            crate::executor::run::append_chat_conversation(&recovered, &partial).await;
 
                             let new_turn_cancel = CancelToken::new();
                             let mut gremlin = recovered;
@@ -3471,6 +3497,13 @@ async fn run_chat_turn(
                                 // as the hard path rather than re-running.
                                 if !soft_cancel.load(Ordering::Relaxed) {
                                     drop(s);
+                                    // Restore pre-turn conversation so the
+                                    // cancelled turn does not leak into history.
+                                    crate::executor::run::persist_chat_conversation(
+                                        &gremlin,
+                                        &pre_turn_conversation,
+                                    )
+                                    .await;
                                     reinsert_and_clear(
                                         &id,
                                         Some(gremlin),
@@ -3488,12 +3521,19 @@ async fn run_chat_turn(
                                 }
                             }
 
+                            // Safe to persist now: the hard-cancel race check
+                            // passed.
+                            crate::executor::run::append_chat_conversation(&gremlin, &partial).await;
+
                             soft_agent.prompts = vec![SOFT_INTERRUPT_MESSAGE.to_string()];
                             let soft_stage = crate::definition::ExecutorStage::Agent {
                                 stage: soft_agent,
                                 model,
                                 task_models,
                             };
+                            // Clear soft_cancel now that the re-run is committed —
+                            // a subsequent cancel must be hard.
+                            soft_cancel.store(false, Ordering::Relaxed);
                             turn_cancel = new_turn_cancel.clone();
                             run_task = tokio::spawn(async move {
                                 let result =
@@ -3626,8 +3666,20 @@ async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &Se
         // clears `current_turn` once the turn has completed and re-inserted
         // (or dropped) the gremlin.
         if let Some(cur) = &s.current_turn {
-            cur.soft_cancel.store(soft, Ordering::Relaxed);
-            cur.cancel.cancel();
+            let already_cancelled = cur.cancel.is_cancelled();
+            if soft {
+                // Only honour a soft request when the token has not yet
+                // been cancelled — a hard cancel that arrived first
+                // must not be overwritten by a late soft request.
+                if !already_cancelled {
+                    cur.soft_cancel.store(true, Ordering::Relaxed);
+                }
+            } else {
+                cur.soft_cancel.store(false, Ordering::Relaxed);
+            }
+            if !already_cancelled {
+                cur.cancel.cancel();
+            }
         }
     }
     let _ = writer
