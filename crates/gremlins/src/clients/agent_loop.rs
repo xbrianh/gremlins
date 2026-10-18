@@ -2116,9 +2116,10 @@ pub(crate) fn format_tool_call_parts(name: &str, args: &serde_json::Value) -> St
         parts.extend(tool_secondary_args(name, args));
     }
 
-    match parts.as_slice() {
-        [] => name.to_string(),
-        [..] => format!("{name}({})", parts.join(", ")),
+    if parts.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}({})", parts.join(", "))
     }
 }
 
@@ -2221,14 +2222,14 @@ fn tool_secondary_args(name: &str, args: &serde_json::Value) -> Vec<String> {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
             {
-                extras.push(format!("glob={v:?}"));
+                extras.push(format!("glob={:?}", trunc(v, 120)));
             }
             if let Some(v) = args
                 .get("path")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
             {
-                extras.push(format!("path={v:?}"));
+                extras.push(format!("path={:?}", trunc(v, 120)));
             }
             if let Some(v) = args
                 .get("context_before")
@@ -2251,7 +2252,7 @@ fn tool_secondary_args(name: &str, args: &serde_json::Value) -> Vec<String> {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
             {
-                extras.push(format!("path={v:?}"));
+                extras.push(format!("path={:?}", trunc(v, 120)));
             }
         }
         _ => {}
@@ -2714,6 +2715,108 @@ mod tests {
         assert_eq!(
             ledger_line("Bash", "false", "[exit 1]\n"),
             "- Bash false (failed)"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_read_with_offset_limit() {
+        // Read with offset and limit.
+        let args = serde_json::json!({"file_path": "src/main.rs", "offset": 100, "limit": 50});
+        assert_eq!(
+            format_tool_call_parts("Read", &args),
+            "Read(file_path=\"src/main.rs\", offset=100, limit=50)"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_read_bare_no_secondaries() {
+        // Read with no offset/limit renders same as today.
+        let args = serde_json::json!({"file_path": "src/main.rs"});
+        assert_eq!(
+            format_tool_call_parts("Read", &args),
+            "Read(file_path=\"src/main.rs\")"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_read_zero_secondaries_omitted() {
+        // Read with offset=0, limit=0 — both omitted.
+        let args = serde_json::json!({"file_path": "src/main.rs", "offset": 0, "limit": 0});
+        assert_eq!(
+            format_tool_call_parts("Read", &args),
+            "Read(file_path=\"src/main.rs\")"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_grep_with_all_secondaries() {
+        let args = serde_json::json!({
+            "pattern": "fn run",
+            "path": "src/",
+            "glob": "*.rs",
+            "max_matches": 50,
+            "context_before": 2,
+            "context_after": 3
+        });
+        let title = format_tool_call_parts("Grep", &args);
+        assert!(title.starts_with("Grep(pattern=\"fn run\""), "{title}");
+        assert!(title.contains("path=\"src/\""), "{title}");
+        assert!(title.contains("glob=\"*.rs\""), "{title}");
+        assert!(title.contains("max_matches=50"), "{title}");
+        assert!(title.contains("context_before=2"), "{title}");
+        assert!(title.contains("context_after=3"), "{title}");
+    }
+
+    #[test]
+    fn format_tool_call_parts_grep_bare_pattern_only() {
+        // Grep with only pattern — no secondaries.
+        let args = serde_json::json!({"pattern": "fn run"});
+        assert_eq!(
+            format_tool_call_parts("Grep", &args),
+            "Grep(pattern=\"fn run\")"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_grep_zero_secondaries_omitted() {
+        // Grep with zero context values — omitted.
+        let args = serde_json::json!({
+            "pattern": "fn run",
+            "context_before": 0,
+            "context_after": 0,
+            "max_matches": 0
+        });
+        assert_eq!(
+            format_tool_call_parts("Grep", &args),
+            "Grep(pattern=\"fn run\")"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_grep_empty_string_secondaries_omitted() {
+        // Grep with empty glob/path — omitted.
+        let args = serde_json::json!({
+            "pattern": "fn run",
+            "glob": "",
+            "path": ""
+        });
+        assert_eq!(
+            format_tool_call_parts("Grep", &args),
+            "Grep(pattern=\"fn run\")"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_long_grep_glob_truncated() {
+        let long_glob = format!("*{}.rs", "x".repeat(300));
+        let args = serde_json::json!({"pattern": "fn run", "glob": &long_glob});
+        let title = format_tool_call_parts("Grep", &args);
+        assert!(title.starts_with("Grep(pattern=\"fn run\""), "{title}");
+        assert!(title.contains("glob=\""), "{title}");
+        // The glob value must be truncated; the full 300+ chars won't appear.
+        assert!(
+            !title.contains(&long_glob),
+            "long glob must be truncated: {title}"
         );
     }
 
