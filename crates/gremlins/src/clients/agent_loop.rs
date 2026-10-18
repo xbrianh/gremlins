@@ -2107,9 +2107,19 @@ pub(crate) fn format_tool_call_parts(name: &str, args: &serde_json::Value) -> St
         _ => None,
     };
 
-    match detail {
-        Some(d) => format!("{name}({d})"),
-        None => name.to_string(),
+    // Collect secondary parameters for Read and Grep.
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(d) = detail {
+        parts.push(d);
+    }
+    if name == "Read" || name == "Grep" {
+        parts.extend(tool_secondary_args_with(name, args, Some(TITLE_VALUE_CAP)));
+    }
+
+    if parts.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}({})", parts.join(", "))
     }
 }
 
@@ -2165,13 +2175,40 @@ pub(crate) fn key_arg(args: &serde_json::Value) -> String {
     String::new()
 }
 
-/// Enrich the log line with secondary arguments beyond what `key_arg` returns.
+/// Upper bound for long string values in TUI tool-call titles.
 ///
-/// `key_arg` picks a single primary key; this function appends any additional
-/// parameters that help operators understand the tool invocation at a glance.
-fn enrich_log_line(name: &str, args: &serde_json::Value) -> String {
-    let primary = key_arg(args);
+/// Log lines apply their own 200-char budget in `enrich_log_line`, so this cap
+/// is a display-only concern for the comparatively narrow tool-slot titles.
+const TITLE_VALUE_CAP: usize = 120;
+
+/// Collect non-empty secondary parameters for a tool invocation, without
+/// display truncation.
+///
+/// Returns ordered `key=value` strings for parameters beyond the primary
+/// argument that help operators understand the tool invocation at a glance.
+/// Absent, zero, or empty values are omitted. Callers that need a display cap
+/// (such as TUI titles) should use [`tool_secondary_args_with`] instead.
+fn tool_secondary_args(name: &str, args: &serde_json::Value) -> Vec<String> {
+    tool_secondary_args_with(name, args, None)
+}
+
+/// Collect non-empty secondary parameters for a tool invocation.
+///
+/// When `string_value_cap` is `Some(n)`, string values longer than `n`
+/// characters are truncated with [`trunc`] before being debug-quoted. This is
+/// used for compact TUI titles; logging passes `None` and applies its own
+/// whole-line budget afterward.
+fn tool_secondary_args_with(
+    name: &str,
+    args: &serde_json::Value,
+    string_value_cap: Option<usize>,
+) -> Vec<String> {
     let mut extras = Vec::new();
+
+    let string_arg = |value: &str| match string_value_cap {
+        Some(cap) => format!("{:?}", trunc(value, cap)),
+        None => format!("{value:?}"),
+    };
 
     match name {
         "Read" => {
@@ -2212,14 +2249,14 @@ fn enrich_log_line(name: &str, args: &serde_json::Value) -> String {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
             {
-                extras.push(format!("glob={v:?}"));
+                extras.push(format!("glob={}", string_arg(v)));
             }
             if let Some(v) = args
                 .get("path")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
             {
-                extras.push(format!("path={v:?}"));
+                extras.push(format!("path={}", string_arg(v)));
             }
             if let Some(v) = args
                 .get("context_before")
@@ -2242,11 +2279,22 @@ fn enrich_log_line(name: &str, args: &serde_json::Value) -> String {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
             {
-                extras.push(format!("path={v:?}"));
+                extras.push(format!("path={}", string_arg(v)));
             }
         }
         _ => {}
     }
+
+    extras
+}
+
+/// Enrich the log line with secondary arguments beyond what `key_arg` returns.
+///
+/// `key_arg` picks a single primary key; this function appends any additional
+/// parameters that help operators understand the tool invocation at a glance.
+fn enrich_log_line(name: &str, args: &serde_json::Value) -> String {
+    let primary = key_arg(args);
+    let extras = tool_secondary_args(name, args);
 
     if extras.is_empty() {
         return primary;
@@ -2698,6 +2746,108 @@ mod tests {
     }
 
     #[test]
+    fn format_tool_call_parts_read_with_offset_limit() {
+        // Read with offset and limit.
+        let args = serde_json::json!({"file_path": "src/main.rs", "offset": 100, "limit": 50});
+        assert_eq!(
+            format_tool_call_parts("Read", &args),
+            "Read(file_path=\"src/main.rs\", offset=100, limit=50)"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_read_bare_no_secondaries() {
+        // Read with no offset/limit renders same as today.
+        let args = serde_json::json!({"file_path": "src/main.rs"});
+        assert_eq!(
+            format_tool_call_parts("Read", &args),
+            "Read(file_path=\"src/main.rs\")"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_read_zero_secondaries_omitted() {
+        // Read with offset=0, limit=0 — both omitted.
+        let args = serde_json::json!({"file_path": "src/main.rs", "offset": 0, "limit": 0});
+        assert_eq!(
+            format_tool_call_parts("Read", &args),
+            "Read(file_path=\"src/main.rs\")"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_grep_with_all_secondaries() {
+        let args = serde_json::json!({
+            "pattern": "fn run",
+            "path": "src/",
+            "glob": "*.rs",
+            "max_matches": 50,
+            "context_before": 2,
+            "context_after": 3
+        });
+        let title = format_tool_call_parts("Grep", &args);
+        assert!(title.starts_with("Grep(pattern=\"fn run\""), "{title}");
+        assert!(title.contains("path=\"src/\""), "{title}");
+        assert!(title.contains("glob=\"*.rs\""), "{title}");
+        assert!(title.contains("max_matches=50"), "{title}");
+        assert!(title.contains("context_before=2"), "{title}");
+        assert!(title.contains("context_after=3"), "{title}");
+    }
+
+    #[test]
+    fn format_tool_call_parts_grep_bare_pattern_only() {
+        // Grep with only pattern — no secondaries.
+        let args = serde_json::json!({"pattern": "fn run"});
+        assert_eq!(
+            format_tool_call_parts("Grep", &args),
+            "Grep(pattern=\"fn run\")"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_grep_zero_secondaries_omitted() {
+        // Grep with zero context values — omitted.
+        let args = serde_json::json!({
+            "pattern": "fn run",
+            "context_before": 0,
+            "context_after": 0,
+            "max_matches": 0
+        });
+        assert_eq!(
+            format_tool_call_parts("Grep", &args),
+            "Grep(pattern=\"fn run\")"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_grep_empty_string_secondaries_omitted() {
+        // Grep with empty glob/path — omitted.
+        let args = serde_json::json!({
+            "pattern": "fn run",
+            "glob": "",
+            "path": ""
+        });
+        assert_eq!(
+            format_tool_call_parts("Grep", &args),
+            "Grep(pattern=\"fn run\")"
+        );
+    }
+
+    #[test]
+    fn format_tool_call_parts_long_grep_glob_truncated() {
+        let long_glob = format!("*{}.rs", "x".repeat(300));
+        let args = serde_json::json!({"pattern": "fn run", "glob": &long_glob});
+        let title = format_tool_call_parts("Grep", &args);
+        assert!(title.starts_with("Grep(pattern=\"fn run\""), "{title}");
+        assert!(title.contains("glob=\""), "{title}");
+        // The glob value must be truncated; the full 300+ chars won't appear.
+        assert!(
+            !title.contains(&long_glob),
+            "long glob must be truncated: {title}"
+        );
+    }
+
+    #[test]
     fn format_tool_call_parts_uses_file_path_key() {
         // Read, Write, Edit must use file_path, not path.
         let args = serde_json::json!({"file_path": "src/main.rs"});
@@ -2866,6 +3016,41 @@ mod tests {
         assert!(
             !line.contains("context_after=2"),
             "trailing context past the cap must be truncated: {line}"
+        );
+    }
+
+    #[test]
+    fn enrich_log_line_keeps_long_grep_glob_untruncated() {
+        // A glob that exceeds the title cap must still be logged verbatim:
+        // logging applies only its own whole-line 200-char budget.
+        let glob = "y".repeat(150);
+        let line = enrich_log_line(
+            "Grep",
+            &serde_json::json!({ "pattern": "fn run", "glob": glob }),
+        );
+        let expected = format!("\"fn run\" glob={glob:?}");
+        assert_eq!(line, expected);
+        assert!(
+            line.len() <= 200,
+            "enriched line must fit the 200-char cap, got {}: {line}",
+            line.len()
+        );
+    }
+
+    #[test]
+    fn enrich_log_line_keeps_long_glob_path_untruncated() {
+        // Same regression for Glob's path secondary value.
+        let path = "z".repeat(150);
+        let line = enrich_log_line(
+            "Glob",
+            &serde_json::json!({ "pattern": "**/*.rs", "path": path }),
+        );
+        let expected = format!("\"**/*.rs\" path={path:?}");
+        assert_eq!(line, expected);
+        assert!(
+            line.len() <= 200,
+            "enriched line must fit the 200-char cap, got {}: {line}",
+            line.len()
         );
     }
 
