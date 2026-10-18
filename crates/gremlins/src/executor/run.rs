@@ -441,13 +441,12 @@ async fn run_agent(
     // exists but fails to parse is fatal: running without it would
     // destroy recoverable history.
     let is_chat = gremlin.state.read_str("kind") == "chat";
-    let chat_turn: Option<usize> = agent
-        .name
-        .strip_prefix("chat-")
-        .and_then(|s| s.parse().ok());
-    // Number of messages from turns *before* the current one — the
-    // canonical baseline used for diff computation.
-    let mut canonical_prefix_len: usize = 0;
+    let chat_turn: Option<usize> = chat_turn_from_stage_name(&agent.name);
+    // Messages from turns *before* the current one — the canonical baseline
+    // used for diff computation. Stored as a Vec (not just a length) so the
+    // rollback-baseline check can compare the loaded prefix against
+    // completed.messages rather than comparing a slice with itself.
+    let mut canonical_prefix: Vec<Message> = Vec::new();
     let verbatim_history = if is_chat {
         let Some(current_turn) = chat_turn else {
             return Err(RunError::Message(format!(
@@ -455,52 +454,62 @@ async fn run_agent(
                 agent.name
             )));
         };
-        let mut all_msgs = Vec::new();
-        for t in 1.. {
+
+        // Load baseline: turns 1..current_turn-1. Each must exist and parse.
+        // A missing or unparseable prior-turn artifact is fatal — running
+        // without it would silently drop history context.
+        for t in 1..current_turn {
             let uri = format!("artifact://conversation/{:04}.json", t);
             match gremlin.state.content(&uri, None).await {
                 Ok(json) => match messages_from_conversation(&json) {
-                    Ok(msgs) => {
-                        all_msgs.extend(msgs);
-                        if t < current_turn {
-                            canonical_prefix_len = all_msgs.len();
-                        }
-                    }
+                    Ok(msgs) => canonical_prefix.extend(msgs),
                     Err(e) => {
-                        if t < current_turn {
-                            return Err(RunError::Message(format!(
-                                "conversation artifact {} unparseable; refusing to overwrite with empty history: {}",
-                                uri, e
-                            )));
-                        }
-                        // Current or future turn artifact unparseable —
-                        // treat as end-of-list.
-                        break;
+                        return Err(RunError::Message(format!(
+                            "conversation artifact {} unparseable: {}",
+                            uri, e
+                        )));
                     }
                 },
                 Err(e) => {
-                    if e.downcast_ref::<crate::executor::state::MissingArtifact>()
-                        .is_some()
-                    {
-                        if t < current_turn {
-                            // Missing artifact for a prior turn is unexpected —
-                            // treat as empty rather than failing.
-                            continue;
-                        }
-                        // No more turn artifacts — end of list.
-                        break;
-                    } else {
-                        if t < current_turn {
-                            return Err(RunError::Message(format!(
-                                "failed to read conversation artifact {}: {}",
-                                uri, e
-                            )));
-                        }
-                        break;
-                    }
+                    return Err(RunError::Message(format!(
+                        "failed to read conversation artifact {}: {}",
+                        uri, e
+                    )));
                 }
             }
         }
+
+        let mut all_msgs = canonical_prefix.clone();
+
+        // Soft-interrupt recovery: the current turn's artifact may already
+        // contain partial messages from a prior attempt. Load it if present.
+        let cur_uri = format!("artifact://conversation/{:04}.json", current_turn);
+        match gremlin.state.content(&cur_uri, None).await {
+            Ok(json) => match messages_from_conversation(&json) {
+                Ok(msgs) => {
+                    all_msgs.extend(msgs);
+                }
+                Err(e) => {
+                    return Err(RunError::Message(format!(
+                        "current-turn conversation artifact {} unparseable: {}",
+                        cur_uri, e
+                    )));
+                }
+            },
+            Err(e) => {
+                if e.downcast_ref::<crate::executor::state::MissingArtifact>()
+                    .is_some()
+                {
+                    // First attempt at this turn — no artifact yet.
+                } else {
+                    return Err(RunError::Message(format!(
+                        "failed to read current-turn conversation artifact {}: {}",
+                        cur_uri, e
+                    )));
+                }
+            }
+        }
+
         if all_msgs.is_empty() {
             None
         } else {
@@ -674,30 +683,27 @@ async fn run_agent(
     // as the diff and overwrite the turn artifact.
     if is_chat {
         if let (Some(messages), Some(turn_num)) = (&completed.messages, chat_turn) {
-            let diff: Vec<Message> = if canonical_prefix_len > 0
-                && messages.len() >= canonical_prefix_len
-            {
-                // Compare the prefix via JSON to detect rollback where
-                // the artifact baseline changed.
+            let diff: Vec<Message> = if canonical_prefix.is_empty() {
+                messages.clone()
+            } else if messages.len() >= canonical_prefix.len() {
+                let completed_prefix = &messages[..canonical_prefix.len()];
+                // Compare the artifact-loaded canonical prefix against the
+                // actual prefix of completed.messages (not against itself).
                 let completed_prefix_json =
-                    serde_json::to_string(&messages[..canonical_prefix_len]).unwrap_or_default();
-                let canonical_prefix = &messages[..canonical_prefix_len];
+                    serde_json::to_string(completed_prefix).unwrap_or_default();
                 let canonical_prefix_json =
-                    serde_json::to_string(canonical_prefix).unwrap_or_default();
-                // The canonical prefix is built from the messages we just
-                // read; re-serialize the same slice to compare with the
-                // completed prefix.
+                    serde_json::to_string(&canonical_prefix).unwrap_or_default();
                 if canonical_prefix_json == completed_prefix_json {
-                    messages[canonical_prefix_len..].to_vec()
+                    messages[canonical_prefix.len()..].to_vec()
                 } else {
                     messages.clone()
                 }
             } else {
                 messages.clone()
             };
-            if !diff.is_empty() {
-                persist_chat_conversation_turn(gremlin, turn_num, &diff).await;
-            }
+            // Always write — an empty diff `[]` overwrites a stale artifact
+            // from an abandoned rollback branch.
+            persist_chat_conversation_turn(gremlin, turn_num, &diff).await;
         }
     }
 
@@ -1251,9 +1257,6 @@ pub(crate) async fn persist_chat_conversation_turn(
     turn: usize,
     messages: &[rig_core::completion::Message],
 ) {
-    if messages.is_empty() {
-        return;
-    }
     let uri_str = format!("artifact://conversation/{:04}.json", turn);
     match serde_json::to_string(messages) {
         Ok(json) => {
@@ -1303,9 +1306,14 @@ pub(crate) async fn read_chat_conversation(gremlin: &Gremlin) -> Vec<Message> {
             Ok(json) => {
                 match messages_from_conversation(&json) {
                     Ok(msgs) => all_msgs.extend(msgs),
-                    Err(_) => {
-                        // Unparseable — skip but keep walking.
-                        continue;
+                    Err(_e) => {
+                        // Unparseable — log and stop; with per-turn
+                        // artifacts there should be no gaps.
+                        log::warn!(
+                            "chat: conversation artifact {} unparseable; stopping walk",
+                            uri
+                        );
+                        break;
                     }
                 }
             }
@@ -1326,11 +1334,11 @@ pub(crate) async fn read_chat_conversation(gremlin: &Gremlin) -> Vec<Message> {
 
 /// Append messages to a specific turn's conversation artifact.
 ///
-/// Reads the full history from all per-turn artifacts, appends the given
-/// messages, and writes the complete result to
-/// `artifact://conversation/{turn:04}.json`. This is used by the
-/// soft-interrupt recovery path to make partial turn messages available
-/// to the re-run agent.
+/// Reads only the current turn's artifact (`conversation/{turn:04}.json`),
+/// appends the given messages, and writes the result back. This is used by
+/// the soft-interrupt recovery path to make partial turn messages available
+/// to the re-run agent without duplicating earlier-turn history into this
+/// turn's file.
 pub(crate) async fn append_chat_conversation_turn(
     gremlin: &Gremlin,
     turn: usize,
@@ -1339,9 +1347,25 @@ pub(crate) async fn append_chat_conversation_turn(
     if messages.is_empty() {
         return;
     }
-    let mut history = read_chat_conversation(gremlin).await;
-    history.extend_from_slice(messages);
-    persist_chat_conversation_turn(gremlin, turn, &history).await;
+    let uri_str = format!("artifact://conversation/{:04}.json", turn);
+    let mut existing = match gremlin.state.content(&uri_str, None).await {
+        Ok(json) => messages_from_conversation(&json).unwrap_or_default(),
+        Err(e) => {
+            if e.downcast_ref::<crate::executor::state::MissingArtifact>()
+                .is_some()
+            {
+                Vec::new()
+            } else {
+                log::warn!(
+                    "chat: failed to read current-turn artifact for append: {}",
+                    e
+                );
+                Vec::new()
+            }
+        }
+    };
+    existing.extend_from_slice(messages);
+    persist_chat_conversation_turn(gremlin, turn, &existing).await;
 }
 
 /// Strip trailing messages left dangling by a mid-tool-call cancellation.
@@ -1645,6 +1669,98 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0], turn1[0]);
         assert_eq!(history[1], turn2[0]);
+    }
+
+    #[tokio::test]
+    async fn persist_chat_conversation_turn_writes_empty_array() {
+        use rig_core::completion::Message;
+
+        let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
+
+        // Write an empty diff — this must produce a valid [] artifact so
+        // a rollback's stale artifact is overwritten rather than preserved.
+        let empty: Vec<Message> = vec![];
+        persist_chat_conversation_turn(&gremlin, 1, &empty).await;
+
+        let json = gremlin
+            .state
+            .content("artifact://conversation/0001.json", None)
+            .await
+            .expect("empty per-turn artifact must be readable");
+        let round_tripped: Vec<Message> =
+            serde_json::from_str(&json).expect("empty artifact must parse");
+        assert!(
+            round_tripped.is_empty(),
+            "empty diff must produce an empty artifact array"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_chat_conversation_turn_only_writes_to_current_turn() {
+        use rig_core::completion::Message;
+
+        let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
+
+        // Write turn 1 with one message.
+        let turn1 = vec![Message::user("hello".to_string())];
+        persist_chat_conversation_turn(&gremlin, 1, &turn1).await;
+
+        // Append a partial message to turn 2 only.
+        let partial = vec![Message::user("partial".to_string())];
+        append_chat_conversation_turn(&gremlin, 2, &partial).await;
+
+        // Turn 1 must be unchanged.
+        let json1 = gremlin
+            .state
+            .content("artifact://conversation/0001.json", None)
+            .await
+            .expect("turn 1 must be readable");
+        let msgs1: Vec<Message> = serde_json::from_str(&json1).unwrap();
+        assert_eq!(msgs1.len(), 1, "turn 1 must not have duplicated messages");
+        assert_eq!(msgs1[0], turn1[0]);
+
+        // Turn 2 must have only the partial message (no turn 1 messages).
+        let json2 = gremlin
+            .state
+            .content("artifact://conversation/0002.json", None)
+            .await
+            .expect("turn 2 must be readable");
+        let msgs2: Vec<Message> = serde_json::from_str(&json2).unwrap();
+        assert_eq!(msgs2.len(), 1, "turn 2 must have only its own messages");
+        assert_eq!(msgs2[0], partial[0]);
+    }
+
+    #[tokio::test]
+    async fn clear_chat_turn_artifact_writes_empty_array() {
+        use rig_core::completion::Message;
+
+        let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
+
+        let t1 = vec![Message::user("ghost".to_string())];
+        persist_chat_conversation_turn(&gremlin, 1, &t1).await;
+
+        // Clear must overwrite the ghost.
+        clear_chat_turn_artifact(&gremlin, 1).await;
+
+        let json = gremlin
+            .state
+            .content("artifact://conversation/0001.json", None)
+            .await
+            .expect("cleared artifact must be readable");
+        let msgs: Vec<Message> = serde_json::from_str(&json).unwrap();
+        assert!(
+            msgs.is_empty(),
+            "cleared turn artifact must be an empty array"
+        );
+    }
+
+    #[test]
+    fn chat_turn_from_stage_name_parses_turn() {
+        assert_eq!(chat_turn_from_stage_name("chat-0001"), Some(1));
+        assert_eq!(chat_turn_from_stage_name("chat-0042"), Some(42));
+        assert_eq!(chat_turn_from_stage_name("not-chat-3"), None);
+        assert_eq!(chat_turn_from_stage_name("chat-"), None);
+        assert_eq!(chat_turn_from_stage_name(""), None);
     }
 
     // --- agent ---

@@ -3243,6 +3243,11 @@ async fn run_chat_turn(
     let session = ctx.session;
     let done = ctx.done;
 
+    // Capture the turn number from the stage name so hard-cancel cleanup
+    // can always clear the per-turn artifact, even when `soft_parts` has
+    // already been consumed by the soft-interrupt recovery path.
+    let chat_turn_num = crate::executor::run::chat_turn_from_stage_name(stage.name());
+
     // Capture the conversation baseline from the gremlin's persisted state
     // *before* moving it into the stage runner. `run_stage` accumulates the
     // current prompt's usage into the same state after completion, so this
@@ -3480,10 +3485,7 @@ async fn run_chat_turn(
                                     // artifact so partial messages from the
                                     // cancelled turn don't leak into the next
                                     // turn's concatenated history.
-                                    if let Some(turn_num) = soft_parts
-                                        .as_ref()
-                                        .and_then(|p| crate::executor::run::chat_turn_from_stage_name(&p.0.name))
-                                    {
+                                    if let Some(turn_num) = chat_turn_num {
                                         crate::executor::run::clear_chat_turn_artifact(
                                             &gremlin, turn_num,
                                         )
@@ -3510,9 +3512,7 @@ async fn run_chat_turn(
                             // passed.  Write partial messages to the current
                             // turn's per-turn artifact so the re-run agent
                             // can pick them up from `verbatim_history`.
-                            if let Some(turn_num) = crate::executor::run::chat_turn_from_stage_name(
-                                &soft_agent.name,
-                            ) {
+                            if let Some(turn_num) = chat_turn_num {
                                 crate::executor::run::append_chat_conversation_turn(
                                     &gremlin,
                                     turn_num,
@@ -3581,10 +3581,7 @@ async fn run_chat_turn(
                 // re-insert the gremlin, and emit a single terminal `ended`.
                 match run_task.await {
                     Ok((_, gremlin)) => {
-                        if let Some(turn_num) = soft_parts
-                            .as_ref()
-                            .and_then(|p| crate::executor::run::chat_turn_from_stage_name(&p.0.name))
-                        {
+                        if let Some(turn_num) = chat_turn_num {
                             crate::executor::run::clear_chat_turn_artifact(
                                 &gremlin,
                                 turn_num,
@@ -3643,10 +3640,7 @@ async fn run_chat_turn(
                 // from a soft-interrupt recovery don't leak into the next
                 // chat turn.
                 if let Some(g) = gremlin_for_reinsert {
-                    if let Some(turn_num) = soft_parts
-                        .as_ref()
-                        .and_then(|p| crate::executor::run::chat_turn_from_stage_name(&p.0.name))
-                    {
+                    if let Some(turn_num) = chat_turn_num {
                         crate::executor::run::clear_chat_turn_artifact(
                             &g,
                             turn_num,
@@ -5453,9 +5447,13 @@ default-model-by-stage:
         let ack = read_until_type(&mut reader, "ok").await;
         let id = ack["id"].as_str().unwrap().to_string();
 
-        // The chat gremlin's definition carries the resolved model in
-        // state.json. Chat definitions are never serialized as YAML, so
-        // we verify through the state store.
+        // The chat gremlin's definition carries the TUI-resolved model.
+        // Chat definitions are never serialized as YAML, so we verify
+        // through the state store.  The `model` field is patched by
+        // handle_chat from the same `chat_model` value that set_pending
+        // passes to next_stage, so this verifies both the state.json
+        // entry and the stage's effective model (which is never the
+        // default-model-by-stage fallback).
         let store = super::get_run_map()
             .lock()
             .unwrap()

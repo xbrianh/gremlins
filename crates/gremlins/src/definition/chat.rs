@@ -39,9 +39,10 @@ pub struct ChatDefinition {
     /// The model used unless the stage declares its own.
     default_model: ModelURI,
     /// The base system prompt, carrying the repository-context block.
-    #[allow(dead_code)]
-    system_prompt: String,
-    /// Zero-based turn counter. Incremented by `next_stage`.
+    /// Kept for potential fallback use; currently the supervisor always
+    /// provides a per-turn system prompt via [`set_pending`].
+    _system_prompt: String,
+    /// Zero-based turn counter. Incremented by [`next_stage`].
     turn: usize,
     /// Operator input queued by the supervisor, consumed by the next
     /// `next_stage` call: `(prompt_text, model, system_prompt)`.
@@ -60,7 +61,7 @@ impl ChatDefinition {
             name,
             path,
             default_model,
-            system_prompt,
+            _system_prompt: system_prompt,
             turn: 0,
             pending: None,
         }
@@ -68,10 +69,9 @@ impl ChatDefinition {
 
     /// Store an operator prompt for consumption by the next [`next_stage`] call.
     ///
-    /// The `model` and `system_prompt` override the defaults stored on the
-    /// definition for this turn only — the stored defaults are left unchanged
-    /// so a [`with_model`](GremlinDefinition::with_model) call takes effect
-    /// on subsequent turns.
+    /// The `model` and `system_prompt` are consumed by the next
+    /// [`next_stage`](GremlinDefinition::next_stage) call to build the agent
+    /// stage. The stored `default_model` on the definition is left unchanged.
     pub fn set_pending(&mut self, prompt: &str, model: &ModelURI, system_prompt: &str) {
         self.pending = Some((prompt.to_string(), model.clone(), system_prompt.to_string()));
     }
@@ -151,7 +151,7 @@ impl GremlinDefinition for ChatDefinition {
             if let Ok(num) = num_str.parse::<usize>() {
                 if num > 0 {
                     // Stage names are 1-based; internal counter is 0-based.
-                    // `goto("chat-0003")` sets turn=2 so the *next*
+                    // `goto("chat-0003")` sets turn=3 so the *next*
                     // `next_stage` call produces `chat-0004`.
                     self.turn = num;
                     return;
