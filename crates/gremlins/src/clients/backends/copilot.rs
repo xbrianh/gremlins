@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -13,13 +13,12 @@ use rig_core::providers::copilot::{Copilot, CopilotConfig, CopilotIntent};
 use rig_core::wasm_compat::WasmBoxedFuture;
 use serde::Deserialize;
 
-use crate::clients::agent_loop::{
-    default_classify, run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext,
-};
+use crate::clients::agent_loop::CancelToken;
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::cancels::CancelsMap;
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::model::GremlinsModel;
+use crate::clients::native::NativeRunState;
 use crate::clients::openai_protocol;
 use crate::clients::params::{self, ResolvedParams};
 use crate::clients::protocol::CompletedRun;
@@ -405,16 +404,10 @@ fn copilot_client_with_session(
 
 struct CopilotRunState {
     client: Copilot,
-    model: String,
-    tool_filter: Option<Vec<String>>,
     intent: Option<CopilotIntent>,
     strict_tools: bool,
     tool_result_array_content: bool,
-    resolved: ResolvedParams,
-    last_ctx: Mutex<Option<RunContext>>,
-    cancels: CancelsMap,
-    next_id: AtomicU64,
-    log_label: String,
+    native: NativeRunState<()>,
 }
 
 /// Parse Copilot-specific typed flags from the model-spec parameter map.
@@ -446,26 +439,6 @@ fn parse_extra_params(
         None => false,
     };
     Ok((intent, strict_tools, tool_result_array_content))
-}
-
-impl CopilotRunState {
-    fn make_model(&self, override_model: Option<&str>) -> GremlinsModel {
-        let model_name = match override_model {
-            Some(m) if !m.is_empty() => m.to_string(),
-            _ => self.model.clone(),
-        };
-        let mut mdl = self.client.completion(&model_name);
-        if let Some(intent) = self.intent {
-            mdl.wire = mdl.wire.with_intent(intent);
-        }
-        if self.strict_tools {
-            mdl.wire = mdl.wire.with_strict_tools();
-        }
-        if self.tool_result_array_content {
-            mdl.wire = mdl.wire.with_tool_result_array_content();
-        }
-        GremlinsModel::new(mdl.erase(), crate::config::max_prompt_bytes())
-    }
 }
 
 // ── CopilotBackend ───────────────────────────────────────────────────────
@@ -524,16 +497,19 @@ impl CopilotBackend {
         Ok(Arc::new(Self {
             state: CopilotRunState {
                 client,
-                model,
-                tool_filter,
                 intent,
                 strict_tools,
                 tool_result_array_content,
-                resolved,
-                last_ctx: Mutex::new(None),
-                cancels: CancelsMap::default(),
-                next_id: AtomicU64::new(1),
-                log_label: "CopilotBackend".to_string(),
+                native: NativeRunState {
+                    client_state: (),
+                    model,
+                    tool_filter,
+                    resolved,
+                    last_ctx: Mutex::new(None),
+                    cancels: CancelsMap::default(),
+                    next_id: AtomicU64::new(1),
+                    log_label: "CopilotBackend".to_string(),
+                },
             },
         }))
     }
@@ -544,8 +520,18 @@ impl Backend for CopilotBackend {
     fn make_model(&self, spec: &str) -> Option<GremlinsModel> {
         let (provider, model) = openai_protocol::provider_and_model(spec)?;
         if provider == PROVIDER_NAME {
+            let mut mdl = self.state.client.completion(&model);
+            if let Some(intent) = self.state.intent {
+                mdl.wire = mdl.wire.with_intent(intent);
+            }
+            if self.state.strict_tools {
+                mdl.wire = mdl.wire.with_strict_tools();
+            }
+            if self.state.tool_result_array_content {
+                mdl.wire = mdl.wire.with_tool_result_array_content();
+            }
             Some(GremlinsModel::new(
-                self.state.client.completion(&model).erase(),
+                mdl.erase(),
                 crate::config::max_prompt_bytes(),
             ))
         } else {
@@ -558,46 +544,44 @@ impl Backend for CopilotBackend {
         params: RunParams,
         interactive: Option<InteractiveSession>,
     ) -> Result<CompletedRun, ClientError> {
-        let ctx = RunContext::from_params(params.clone());
-        *self.state.last_ctx.lock().unwrap() = Some(ctx.clone());
-
+        let ctx = self.state.native.prepare_context(params.clone());
         let cancel = params.cancel_token.clone().unwrap_or_else(CancelToken::new);
+        let model_name = self.state.native.effective_model(ctx.params.model.as_deref());
 
-        let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
-        let id = self.state.next_id.fetch_add(1, Ordering::Relaxed);
-        self.state.cancels.insert(&gremlin_id, id, cancel.clone())?;
+        let client = &self.state.client;
+        let intent = self.state.intent;
+        let strict_tools = self.state.strict_tools;
+        let tool_result_array_content = self.state.tool_result_array_content;
 
-        let model = self.state.make_model(ctx.params.model.as_deref());
-        let result = run_agent_loop(
-            model,
-            &params.prompt,
-            ctx,
-            cancel.clone(),
-            LoopOpts {
-                extra: self.state.resolved.additional_value(),
-                tool_filter: self.state.tool_filter.as_deref(),
-                classify_error: Some(default_classify as ErrorClassifier),
-                temperature: self.state.resolved.temperature,
-                max_tokens: self.state.resolved.max_tokens,
-            },
-            interactive,
-        )
-        .await;
+        let make_model = async move {
+            let mut mdl = client.completion(&model_name);
+            if let Some(intent) = intent {
+                mdl.wire = mdl.wire.with_intent(intent);
+            }
+            if strict_tools {
+                mdl.wire = mdl.wire.with_strict_tools();
+            }
+            if tool_result_array_content {
+                mdl.wire = mdl.wire.with_tool_result_array_content();
+            }
+            Ok(GremlinsModel::new(
+                mdl.erase(),
+                crate::config::max_prompt_bytes(),
+            ))
+        };
 
-        self.state.cancels.remove(&gremlin_id, id);
-        result
+        self.state
+            .native
+            .single_attempt(&params.prompt, ctx, cancel, interactive, make_model)
+            .await
     }
 
     fn last_run_params(&self) -> Result<RunParams, ClientError> {
-        let guard = self.state.last_ctx.lock().unwrap();
-        let ctx = guard.as_ref().ok_or_else(|| ClientError::Runtime {
-            message: "resume() called before run()".into(),
-        })?;
-        Ok(ctx.params.clone())
+        self.state.native.last_run_params()
     }
 
     fn reap_all(&self, gremlin_id: &str) {
-        self.state.cancels.reap_all(gremlin_id, &self.state.log_label, &self.state.model);
+        self.state.native.reap(gremlin_id);
     }
 
     fn total_cost_usd(&self) -> Option<f64> {
@@ -605,7 +589,7 @@ impl Backend for CopilotBackend {
     }
 
     fn resolved_params(&self) -> Option<ResolvedParams> {
-        Some(self.state.resolved.clone())
+        Some(self.state.native.resolved.clone())
     }
 
     fn resolve_params(raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
@@ -773,16 +757,19 @@ mod tests {
         let backend = CopilotBackend {
             state: CopilotRunState {
                 client,
-                model: "gpt-4o".into(),
-                tool_filter: None,
                 intent: None,
                 strict_tools: false,
                 tool_result_array_content: false,
-                resolved: ResolvedParams::default(),
-                last_ctx: Mutex::new(None),
-                cancels: backlog,
-                next_id: AtomicU64::new(1),
-                log_label: "test".into(),
+                native: NativeRunState {
+                    client_state: (),
+                    model: "gpt-4o".into(),
+                    tool_filter: None,
+                    resolved: ResolvedParams::default(),
+                    last_ctx: Mutex::new(None),
+                    cancels: backlog,
+                    next_id: AtomicU64::new(1),
+                    log_label: "test".into(),
+                },
             },
         };
         backend.reap_all("gr-test");

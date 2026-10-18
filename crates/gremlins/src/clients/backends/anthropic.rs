@@ -1,25 +1,24 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rig_core::http_client::DynHttpClient;
 use rig_core::providers::anthropic::{Anthropic, AnthropicConfig};
 
-use crate::clients::agent_loop::{
-    default_classify, run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext,
-};
+use crate::clients::agent_loop::CancelToken;
+use crate::clients::anthropic_bearer_http::BearerHttpClient;
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::cancels::CancelsMap;
+use crate::clients::config::ProviderAuth;
 use crate::clients::interactive::InteractiveSession;
-use crate::clients::lazy_auth_http::LazyBearerHttpClient;
+use crate::clients::lazy_auth_http::{BearerStrategy, LazyAuthHttpClient};
 use crate::clients::model::GremlinsModel;
+use crate::clients::native::NativeRunState;
 use crate::clients::openai_protocol;
 use crate::clients::params::{self, ResolvedParams};
 use crate::clients::protocol::CompletedRun;
 use crate::clients::token_provider::{self, TokenProvider};
-use crate::clients::config::ProviderAuth;
-use crate::clients::anthropic_bearer_http::BearerHttpClient;
 use rig_reqwest::ReqwestClient;
 
 /// Default `max_tokens` for Anthropic requests.
@@ -40,135 +39,10 @@ enum AnthropicClientState {
     },
 }
 
-// ── AnthropicRunState ────────────────────────────────────────────────────
-
-struct AnthropicRunState {
-    client_state: AnthropicClientState,
-    model: String,
-    tool_filter: Option<Vec<String>>,
-    resolved: ResolvedParams,
-    last_ctx: Mutex<Option<RunContext>>,
-    cancels: CancelsMap,
-    next_id: AtomicU64,
-    log_label: String,
-}
-
-impl AnthropicRunState {
-    fn extra_params(&self) -> Option<serde_json::Value> {
-        self.resolved.additional_value()
-    }
-
-    fn effective_model(&self, override_model: Option<&str>) -> String {
-        match override_model {
-            Some(m) if !m.is_empty() => m.to_string(),
-            _ => self.model.clone(),
-        }
-    }
-
-    /// Build a [`RunContext`] from [`RunParams`] and stash it in `last_ctx` for resume.
-    fn prepare_context(&self, params: RunParams) -> RunContext {
-        let ctx = RunContext::from_params(params);
-        *self.last_ctx.lock().unwrap() = Some(ctx.clone());
-        ctx
-    }
-
-    /// Execute a single agent-loop attempt, registering and cleaning up a
-    /// cancel token for the given `gremlin_id`.
-    async fn single_attempt(
-        &self,
-        prompt: &str,
-        ctx: RunContext,
-        cancel: Arc<CancelToken>,
-        interactive: Option<InteractiveSession>,
-    ) -> Result<CompletedRun, ClientError> {
-        let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-
-        self.cancels.insert(&gremlin_id, id, cancel.clone())?;
-
-        let model_name = self.effective_model(ctx.params.model.as_deref());
-
-        // For static auth we use the pre-built client; for dynamic auth
-        // we acquire a fresh token and build a client per attempt.
-        let result = match &self.client_state {
-            AnthropicClientState::Static(client) => {
-                let model = GremlinsModel::new(
-                    client.completion(&model_name).erase(),
-                    crate::config::max_prompt_bytes(),
-                );
-                run_agent_loop(
-                    model,
-                    prompt,
-                    ctx,
-                    cancel,
-                    LoopOpts {
-                        extra: self.extra_params(),
-                        tool_filter: self.tool_filter.as_deref(),
-                        classify_error: Some(default_classify as ErrorClassifier),
-                        temperature: self.resolved.temperature,
-                        max_tokens: self.resolved.max_tokens,
-                    },
-                    interactive,
-                )
-                .await
-            }
-            AnthropicClientState::Dynamic {
-                token_provider,
-                base_url,
-                http_client,
-                auth_scope,
-            } => {
-                // Capture errors into a local so execution always flows
-                // through the cancellation-map cleanup below.
-                let dyn_result = async {
-                    let scope = auth_scope.as_str();
-                    let token = token_provider
-                        .get_token(scope)
-                        .await
-                        .map_err(|e| ClientError::Runtime {
-                            message: format!("Anthropic token acquisition failed: {e}"),
-                        })?;
-                    let wrapped = BearerHttpClient::new(http_client.clone(), token)
-                        .map_err(|e| ClientError::Runtime {
-                            message: format!("failed to build bearer HTTP client: {e}"),
-                        })?;
-                    let client = AnthropicConfig::new("unused")
-                        .with_base_url(base_url)
-                        .connect(wrapped);
-                    let model = GremlinsModel::new(
-                        client.completion(&model_name).erase(),
-                        crate::config::max_prompt_bytes(),
-                    );
-                    run_agent_loop(
-                        model,
-                        prompt,
-                        ctx,
-                        cancel,
-                        LoopOpts {
-                            extra: self.extra_params(),
-                            tool_filter: self.tool_filter.as_deref(),
-                            classify_error: Some(default_classify as ErrorClassifier),
-                            temperature: self.resolved.temperature,
-                            max_tokens: self.resolved.max_tokens,
-                        },
-                        interactive,
-                    )
-                    .await
-                }
-                .await;
-                dyn_result
-            }
-        };
-
-        self.cancels.remove(&gremlin_id, id);
-        result
-    }
-}
-
 // ── AnthropicBackend ─────────────────────────────────────────────────────
 
 pub struct AnthropicBackend {
-    state: AnthropicRunState,
+    state: NativeRunState<AnthropicClientState>,
 }
 
 impl AnthropicBackend {
@@ -269,7 +143,7 @@ impl AnthropicBackend {
         };
 
         Ok(Self {
-            state: AnthropicRunState {
+            state: NativeRunState {
                 client_state,
                 model,
                 tool_filter,
@@ -304,7 +178,7 @@ impl Backend for AnthropicBackend {
                     // Wrap the HTTP client so the bearer token is acquired
                     // lazily on the first request — make_model is synchronous
                     // and cannot block on token acquisition.
-                    let wrapped = LazyBearerHttpClient::new(
+                    let wrapped = LazyAuthHttpClient::<BearerStrategy>::new(
                         http_client.clone(),
                         token_provider.clone(),
                         auth_scope.clone(),
@@ -330,20 +204,56 @@ impl Backend for AnthropicBackend {
     ) -> Result<CompletedRun, ClientError> {
         let ctx = self.state.prepare_context(params.clone());
         let cancel = params.cancel_token.clone().unwrap_or_else(CancelToken::new);
+        let model_name = self.state.effective_model(ctx.params.model.as_deref());
 
-        self.state.single_attempt(&params.prompt, ctx, cancel, interactive).await
+        let make_model = async {
+            match &self.state.client_state {
+                AnthropicClientState::Static(client) => {
+                    Ok(GremlinsModel::new(
+                        client.completion(&model_name).erase(),
+                        crate::config::max_prompt_bytes(),
+                    ))
+                }
+                AnthropicClientState::Dynamic {
+                    token_provider,
+                    base_url,
+                    http_client,
+                    auth_scope,
+                } => {
+                    let token =
+                        token_provider.get_token(auth_scope.as_str()).await.map_err(
+                            |e| ClientError::Runtime {
+                                message: format!("Anthropic token acquisition failed: {e}"),
+                            },
+                        )?;
+                    let wrapped =
+                        BearerHttpClient::new(http_client.clone(), token).map_err(|e| {
+                            ClientError::Runtime {
+                                message: format!("failed to build bearer HTTP client: {e}"),
+                            }
+                        })?;
+                    let client = AnthropicConfig::new("unused")
+                        .with_base_url(base_url)
+                        .connect(wrapped);
+                    Ok(GremlinsModel::new(
+                        client.completion(&model_name).erase(),
+                        crate::config::max_prompt_bytes(),
+                    ))
+                }
+            }
+        };
+
+        self.state
+            .single_attempt(&params.prompt, ctx, cancel, interactive, make_model)
+            .await
     }
 
     fn last_run_params(&self) -> Result<RunParams, ClientError> {
-        let guard = self.state.last_ctx.lock().unwrap();
-        let ctx = guard.as_ref().ok_or_else(|| ClientError::Runtime {
-            message: "resume() called before run()".into(),
-        })?;
-        Ok(ctx.params.clone())
+        self.state.last_run_params()
     }
 
     fn reap_all(&self, gremlin_id: &str) {
-        self.state.cancels.reap_all(gremlin_id, &self.state.log_label, &self.state.model);
+        self.state.reap(gremlin_id)
     }
 
     fn total_cost_usd(&self) -> Option<f64> {
@@ -611,7 +521,7 @@ mod tests {
         backlog.insert("gr-sibling", 3, sibling.clone()).unwrap();
 
         let backend = AnthropicBackend {
-            state: AnthropicRunState {
+            state: NativeRunState {
                 client_state: AnthropicClientState::Static(client),
                 model: "claude-sonnet-4-6".into(),
                 tool_filter: None,
