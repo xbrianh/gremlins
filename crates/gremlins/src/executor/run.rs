@@ -413,9 +413,13 @@ async fn run_agent(
 
     // The landscape is recomputed before every agent stage. After an `exec`
     // stage mutates files, the next agent stage therefore sees a fresh
-    // snapshot; the (mtime, size) cache keeps this incrementally cheap.
+    // snapshot; the (mtime, size) cache keeps this incrementally cheap and,
+    // after the changes in `landscape/cache.rs`, an unchanged tree skips the
+    // JSON write entirely. Chat still rebuilds once per turn (every edit
+    // shifts line numbers, so a per-session memo would go stale quickly), but
+    // the cache keeps the rebuild to touched files only.
     let system_prompt = SystemPrompt::new(prepared.system_prompt())
-        .with_landscape(landscape_block(gremlin).await)
+        .with_landscape(landscape_block(gremlin, client.has_tool("OutlineFile")).await)
         .assemble();
 
     let stage_env = gremlin.env.clone();

@@ -22,6 +22,7 @@ semantics. Keep those seams intact.
 | `run.rs` | The sequential stage loop. `Gremlin::run` walks `next_stage()` in declaration order, drives each through `run_stage_scoped`, and owns attempt/`loop_iter`/bail bookkeeping. `run_stage` dispatches by `ExecutorStage` variant. |
 | `parallel.rs` | Parallel fan-out/fan-in. Forks one child gremlin per child stage, launches via supervisor, awaits `RunState` channels, applies `ErrorPolicy`, merges artifacts, and cleans up children. |
 | `supervisor.rs` | Single-instance daemon. Owns the global `RUN_MAP` (`HashMap<String, RunHandle>`), the socket accept loop and op dispatch (`launch`/`stop`/`resume`/`ls`/`status`/`info`/`log`/`debug`/`chat`), `DaemonEvent` broadcast, and `launch_child`/`stop_child`. |
+| `system_prompt.rs` | The single place that composes a stage's base prompt with the structural landscape block. Runs the landscape build on a blocking thread, formats it under the byte budget, and reports `[landscape] …` plus failure warnings to the gremlin's `log_tx`. |
 | `socket.rs` | Unix-domain socket + daemon lock helpers (`GremlinsDaemonLock`, `bind_socket`, `connect_socket`, JSON-line read/write). The socket lives at `$state_root/executor.sock`. |
 | `agent_runner.rs` | Agent leaf execution: `prepare_agent` (resolve everything without touching the client) and `commit_agent` (verify outputs were produced). |
 | `exec_runner.rs` | Exec leaf execution: `prepare_exec`, `run_shell`, and `commit_exec`. Owns `ExecPrepared` and `ExecError`. |
@@ -70,6 +71,13 @@ scoped store.
 The registry is URI-based (`artifact://scope/key`). `is_registered_uri`
 accepts both a bare key and its `artifact://` form because pipelines
 spell guards/stop conditions either way.
+
+Landscape caching writes `landscape.cache.json` into the filesystem state
+root (only when the concrete store is a `FileSystemStateStore`). It is an
+optimization: a corrupt or unwritable cache degrades to a fresh rebuild and is
+never a failure. The walker (`landscape/mod.rs`) builds the outline, and
+`system_prompt.rs` decides how to inject it; run-loop code in `run.rs` only
+passes the `client.has_tool("OutlineFile")` flag through.
 
 ### Supervisor
 
@@ -127,6 +135,7 @@ reconstructs the lock from the inherited fd (`socket.rs`).
 | Change the daemon socket/lock protocol | `socket.rs::GremlinsDaemonLock`, `bind_socket`, `connect_socket` |
 | Change bootstrap behavior / DSL | `bootstrap.rs::run_definition_bootstrap`, `parse_gremlins_command`, `bind_artifact` |
 | Change exec/agent leaf execution | `exec_runner.rs` / `agent_runner.rs` (`prepare_*` + `commit_*`) |
+| Change agent system prompt / landscape injection | `system_prompt.rs` (`landscape_block`, `build_landscape_snapshot`, `SystemPrompt`) and `landscape/mod.rs` (`format_landscape_block`) |
 | Change `{var}` substitution | `vars.rs::substitute_vars`, `substitute_vars_to_env` |
 
 ## Error taxonomy

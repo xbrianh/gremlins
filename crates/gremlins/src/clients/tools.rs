@@ -1304,8 +1304,10 @@ fn outline_file_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &
         Err(LandscapeError::BudgetExceeded) => {
             // `outline_file` never returns BudgetExceeded (that variant only
             // comes from `format_landscape_block`), but the match must be
-            // exhaustive.
-            unreachable!("outline_file never returns BudgetExceeded");
+            // exhaustive. Returning an error string is just as short and keeps
+            // a future refactor from turning this into a panic in a blocking
+            // task.
+            String::from("Error: budget exceeded")
         }
     }
 }

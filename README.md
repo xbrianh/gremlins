@@ -653,6 +653,7 @@ The boss resumes from its child-spawn stage and proceeds with the next iteration
 | `GREMLINS_TELEMETRY` | *(unset)* | Set to `1` or `true` to enable per-turn telemetry (TTFT, token counts, cache hit ratio) in the gremlin log. Equivalent to the `--telemetry` / `-v` CLI flag. |
 | `GREMLINS_ARTIFACT_REMINDER_BUDGET` | `3` | How many times the agent loop will nudge the model when expected output artifacts have not been bound yet. |
 | `GREMLINS_COMPLETION_NUDGE_BUDGET` | `11` | How many empty-turn nudges to inject before giving up on a stuck agent loop. |
+| `GREMLINS_MAX_LANDSCAPE_BYTES` | `256000` | Cap the structural landscape block injected into agent system prompts at this many bytes. `settings.yaml` `max-landscape-bytes` takes precedence. |
 
 ### settings.yaml backoff schedules
 
@@ -672,6 +673,28 @@ backoff:
 |---|---|---|
 | `turn-retry` | `[2.0, 5.0, 10.0, 60.0, 120.0]` | Per-attempt backoff, in seconds, for retryable stream errors (429 / 5xx / no-HTTP-status) retried against the same turn. |
 | `timeout-retry` | `[5.0, 15.0, 30.0]` | Per-attempt backoff, in seconds, for stream idle-timeout retries. |
+
+### Structural landscape and size budgets
+
+Every agent stage's system prompt carries a **structural landscape block**: a
+captured outline of the workspace's recognized files (Rust/Markdown/JSON/…
+items with 1-based line numbers) so the agent can navigate without reading
+whole files first. The block is wrapped in `<!-- BEGIN LANDSCAPE BLOCK -->` /
+`<!-- END LANDSCAPE BLOCK -->`, labelled as untrusted repository metadata,
+and its item names/paths have comment delimiters escaped.
+
+- The size budget is a **byte** count (UTF-8), not a token count.
+- Cap it with `settings.yaml` `max-landscape-bytes` or
+  `GREMLINS_MAX_LANDSCAPE_BYTES` (default `256000`, i.e. 250 KiB).
+- When the block exceeds the budget, item names are shortened to fit; if even
+  floor-length names don't fit, the block is dropped rather than failing the
+  stage, and the `[landscape]` log line reports the drop.
+- Native agents also have the `OutlineFile` tool for current line numbers after
+  edits; the block only advertises it when the stage's effective tool list
+  actually includes that tool.
+- A `landscape.cache.json` lives in filesystem-backed state directories and
+  makes per-stage rebuilds incremental; it is an optimization and corrupt or
+  unwritable caches degrade silently to fresh builds.
 
 ### Model specifier syntax
 
@@ -772,7 +795,7 @@ These are set by the launcher or executor and should not be set manually:
 ## What can a gremlin do to my machine?
 
 Gremlins are restricted to an allowlist of tools (Read, Edit, Write, Bash,
-Grep, Glob) and their Bash commands are path-scoped to the gremlin's git
+Grep, Glob, OutlineFile) and their Bash commands are path-scoped to the gremlin's git
 worktree. They can read and modify files inside that worktree and block direct
 path references outside it. This is a best-effort token check, not a full
 sandbox — indirect references (heredocs, computed paths) may not be caught.

@@ -69,6 +69,7 @@ fn kind_for(kind: &str) -> Option<&'static str> {
 
 fn scan_rust(content: &str) -> Vec<OutlineItem> {
     static ITEM_RE: OnceLock<Regex> = OnceLock::new();
+    static MOD_OPEN_RE: OnceLock<Regex> = OnceLock::new();
     let item_re = ITEM_RE.get_or_init(|| {
         // Qualifiers may appear in any order and an attribute may share the
         // line with the item. `impl` is matched here too, but its display name
@@ -78,33 +79,129 @@ fn scan_rust(content: &str) -> Vec<OutlineItem> {
         )
         .expect("valid rust outline regex")
     });
+    let mod_open_re = MOD_OPEN_RE.get_or_init(|| {
+        Regex::new(r#"^\s*mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<brace>\{)"#)
+            .expect("valid rust mod-open regex")
+    });
 
     let mut items = Vec::new();
+    // Depth of an open `#[cfg(test)] mod tests { ... }` body. While positive,
+    // every line is skipped so test fixtures don't flood the block with
+    // hundreds of `fn test_*` rows; the body collapses to one `mod|tests` item.
+    let mut test_mod_depth = 0usize;
+    // A backslash-continued (or otherwise multi-line) string literal. Structure
+    // found on its interior lines is test-fixture text, not real items.
+    let mut in_multiline_string = false;
+    // The immediately preceding line was `#[cfg(test)]`, so a following
+    // `mod NAME {` is a test module even when it isn't named `tests`.
+    let mut prev_cfg_test = false;
+
     for (idx, line) in content.lines().enumerate() {
-        let Some(caps) = item_re.captures(line) else {
+        if test_mod_depth > 0 {
+            test_mod_depth = brace_depth_after_line(line, test_mod_depth);
             continue;
-        };
-        let kind = caps
-            .name("kind")
-            .and_then(|m| kind_for(m.as_str()))
-            .unwrap_or(KEY);
-        let rest = &line[caps.get(0).unwrap().end()..];
-        if let Some(name) = rust_item_name(kind, rest) {
-            items.push(item(kind, name, idx + 1));
         }
+
+        if in_multiline_string {
+            // A line with an odd number of unescaped quotes closes the string.
+            if count_unescaped_quotes(line) % 2 == 1 {
+                in_multiline_string = false;
+            }
+            continue;
+        }
+
+        if let Some(caps) = mod_open_re.captures(line) {
+            let name = caps.name("name").unwrap().as_str();
+            let brace_idx = caps.name("brace").unwrap().start();
+            let has_cfg_test = prev_cfg_test || line.contains("#[cfg(test)]");
+            if name == "tests" || has_cfg_test {
+                items.push(item(MOD, name, idx + 1));
+                test_mod_depth = brace_depth_after_line(&line[brace_idx + 1..], 1);
+                prev_cfg_test = false;
+                continue;
+            }
+        }
+
+        // A line with an odd number of unescaped quotes opens a multi-line
+        // string (Rust only continues normal strings across lines when the
+        // newline is escaped, so this is rare outside test fixtures). Lines
+        // inside that string are deliberately not scanned for items.
+        if count_unescaped_quotes(line) % 2 == 1 {
+            in_multiline_string = true;
+            prev_cfg_test = line.trim() == "#[cfg(test)]";
+            continue;
+        }
+
+        if let Some(caps) = item_re.captures(line) {
+            let kind = caps
+                .name("kind")
+                .and_then(|m| kind_for(m.as_str()))
+                .unwrap_or(KEY);
+            let rest = &line[caps.get(0).unwrap().end()..];
+            if let Some(name) = rust_item_name(kind, rest) {
+                items.push(item(kind, &name, idx + 1));
+            }
+        }
+
+        prev_cfg_test = line.trim() == "#[cfg(test)]";
     }
     items
 }
 
-fn rust_item_name<'a>(kind: &'static str, rest: &'a str) -> Option<&'a str> {
+/// Count `"` characters not preceded by a backslash escape.
+fn count_unescaped_quotes(line: &str) -> usize {
+    let bytes = line.as_bytes();
+    let mut count = 0usize;
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'\\' => idx += 2,
+            b'"' => {
+                count += 1;
+                idx += 1;
+            }
+            _ => idx += 1,
+        }
+    }
+    count
+}
+
+/// Update a brace-depth counter from one line, returning 0 once the body
+/// closes on this line.
+fn brace_depth_after_line(line: &str, mut depth: usize) -> usize {
+    for ch in line.chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return 0;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth
+}
+
+fn rust_item_name(kind: &'static str, rest: &str) -> Option<String> {
     if kind == IMPL {
         let rest = skip_angle_group(rest).unwrap_or(rest);
         if let Some(for_idx) = rest.find(" for ") {
-            return leading_identifier(&rest[for_idx + 5..]);
+            // `impl Trait for Type`: emit `Trait for Type` rather than just
+            // the target type, so `From<T> for String` and `GremlinDefinition
+            // for Box<dyn ...>` stay distinguishable rows instead of many
+            // identical `impl|String` / `impl|Box` rows.
+            let trait_part = rest[..for_idx].trim();
+            let type_part = leading_identifier(&rest[for_idx + 5..])?;
+            if trait_part.is_empty() {
+                return Some(type_part.to_string());
+            }
+            return Some(format!("{trait_part} for {type_part}"));
         }
-        return leading_identifier(rest);
+        return leading_identifier(rest).map(str::to_string);
     }
-    leading_identifier(rest)
+    leading_identifier(rest).map(str::to_string)
 }
 
 fn skip_angle_group(rest: &str) -> Option<&str> {
@@ -114,7 +211,14 @@ fn skip_angle_group(rest: &str) -> Option<&str> {
     }
 
     let mut depth = 0usize;
+    let mut prev_dash = false;
     for (idx, ch) in rest.char_indices() {
+        // A `>` immediately after `-` is the `->` operator inside a bound
+        // (`impl<F: Fn() -> u8>`), not the generic group's closing bracket.
+        if ch == '>' && prev_dash {
+            prev_dash = false;
+            continue;
+        }
         match ch {
             '<' => depth += 1,
             '>' => {
@@ -125,6 +229,7 @@ fn skip_angle_group(rest: &str) -> Option<&str> {
             }
             _ => {}
         }
+        prev_dash = ch == '-';
     }
     None
 }
@@ -156,12 +261,44 @@ fn scan_markdown(content: &str) -> Vec<OutlineItem> {
     });
 
     let mut items = Vec::new();
+    let mut in_fence = false;
+    let mut fence_char: Option<char> = None;
     for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if in_fence {
+            if let Some(ch) = fence_char {
+                if fence_run_len(trimmed, ch) >= 3 {
+                    in_fence = false;
+                    fence_char = None;
+                }
+            }
+            // Headings (and the closing fence itself) inside fenced code are
+            // code, not document structure.
+            continue;
+        }
+        if let Some(ch) = fence_opening_char(trimmed) {
+            in_fence = true;
+            fence_char = Some(ch);
+            continue;
+        }
         if let Some(caps) = pattern.captures(line) {
             items.push(item(HEADING, &caps["name"], idx + 1));
         }
     }
     items
+}
+
+/// Detect a CommonMark fenced-code opener: a run of three or more ``` or ~~~.
+fn fence_opening_char(trimmed: &str) -> Option<char> {
+    let ch = trimmed.chars().next()?;
+    if ch != '`' && ch != '~' {
+        return None;
+    }
+    (fence_run_len(trimmed, ch) >= 3).then_some(ch)
+}
+
+fn fence_run_len(trimmed: &str, ch: char) -> usize {
+    trimmed.chars().take_while(|c| *c == ch).count()
 }
 
 fn scan_json_keys(content: &str) -> Vec<OutlineItem> {
@@ -347,13 +484,49 @@ pub(crate) async fn c() {}
 ";
         let items = scan("rs", src);
         assert_eq!(items[0].name, "Foo");
-        assert_eq!(items[1].name, "Foo");
+        assert_eq!(items[1].name, "Iterator for Foo");
         assert_eq!(items[2].kind, FN);
         assert_eq!(items[2].name, "a");
         assert_eq!(items[3].kind, FN);
         assert_eq!(items[3].name, "b");
         assert_eq!(items[4].kind, FN);
         assert_eq!(items[4].name, "c");
+    }
+
+    #[test]
+    fn rust_scanner_collapses_cfg_test_module_bodies() {
+        let src = "\
+#[cfg(test)]
+mod tests {
+    fn test_foo() {}
+    fn test_bar() {}
+}
+fn real() {}
+";
+        let items = scan("rs", src);
+        let kinds: Vec<&str> = items.iter().map(|i| i.kind).collect();
+        assert_eq!(kinds, vec![MOD, FN]);
+        assert_eq!(items[0].name, "tests");
+        assert_eq!(items[1].name, "real");
+    }
+
+    #[test]
+    fn rust_scanner_handles_arrow_in_generic_bounds() {
+        let src = "\
+impl<F: Fn() -> u8> StateBlob {}
+impl<F: Fn() -> u8> StateBlob for T {}
+";
+        let items = scan("rs", src);
+        assert_eq!(items[0].name, "StateBlob");
+        assert_eq!(items[1].name, "StateBlob for T");
+    }
+
+    #[test]
+    fn rust_scanner_skips_items_inside_multiline_strings() {
+        let src = "let src = \"\\\nfn main() {}\nstruct Foo;\n\";\nfn real() {}\n";
+        let items = scan("rs", src);
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["real"]);
     }
 
     #[test]
@@ -365,6 +538,24 @@ pub(crate) async fn c() {}
         assert_eq!(items[0].line, 1);
         assert_eq!(items[1].name, "Subtitle");
         assert_eq!(items[1].line, 3);
+    }
+
+    #[test]
+    fn markdown_scanner_skips_fenced_code_block_headings() {
+        let src = "\
+# A
+```rust
+# inside code
+```
+## B
+~~~python
+# also inside code
+~~~
+### C
+";
+        let items = scan("md", src);
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["A", "B", "C"]);
     }
 
     #[test]

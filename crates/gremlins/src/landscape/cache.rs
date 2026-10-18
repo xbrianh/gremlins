@@ -11,7 +11,7 @@
 //! tree-sitter lands behind the same outline interface, the cache format needs
 //! no changes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,13 @@ use super::{OutlineItem, CLASS, ENUM, FN, HEADING, IMPL, KEY, METHOD, MOD, STRUC
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LandscapeCache {
     entries: BTreeMap<String, Entry>,
+    /// Keys visited on the build that produced this cache. On save, entries no
+    /// longer present in this set (deleted files) are pruned so the blob does
+    /// not grow monotonically for the life of a state dir.
+    visited: BTreeSet<String>,
+    /// True when an entry was inserted or removed (a real content change),
+    /// as opposed to a build that only served cache hits.
+    dirty: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +76,9 @@ impl LandscapeCache {
     }
 
     /// Atomically replace the cache file at `path` with the current contents.
+    ///
+    /// Deleted-file entries are pruned before serializing by keeping only the
+    /// keys visited on the last build.
     pub(crate) fn save(&self, path: &Path) -> std::io::Result<()> {
         let name = path
             .file_name()
@@ -79,14 +89,37 @@ impl LandscapeCache {
         let entries: BTreeMap<String, RawEntry> = self
             .entries
             .iter()
+            .filter(|(key, _)| self.visited.contains(key.as_str()))
             .map(|(key, entry)| (key.clone(), Entry::from_entry(entry)))
             .collect();
         let json = serde_json::to_string(&entries)
             .map_err(|err| std::io::Error::other(err.to_string()))?;
 
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, path)?;
+        // A failed write or rename can leave the temporary blob behind; remove
+        // it so the state dir doesn't accumulate `landscape.cache.json.*.tmp`.
+        if let Err(error) = std::fs::write(&tmp, json) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
+        if let Err(error) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
         Ok(())
+    }
+
+    /// Whether `save` has anything to do for this build.
+    ///
+    /// True when an entry was inserted or removed, or when the cache contains
+    /// entries for files that were not visited (deleted files that should be
+    /// pruned). A build that serves only cache hits skips the write entirely.
+    pub(crate) fn needs_save(&self) -> bool {
+        self.dirty || self.entries.keys().any(|k| !self.visited.contains(k))
+    }
+
+    /// Record that `path` was visited in the current build.
+    pub(crate) fn mark_visited(&mut self, path: &Path) {
+        self.visited.insert(path_key(path));
     }
 
     /// Look up a path by its current fingerprint. Returns the cached items on
@@ -104,7 +137,9 @@ impl LandscapeCache {
     /// Called after a failed reparse so a stale entry whose fingerprint later
     /// matches can never resurrect items for content that no longer parses.
     pub(crate) fn remove(&mut self, path: &Path) {
+        self.visited.insert(path_key(path));
         self.entries.remove(&path_key(path));
+        self.dirty = true;
     }
 
     /// Record freshly parsed items for `path`, keyed by their fingerprint.
@@ -116,6 +151,7 @@ impl LandscapeCache {
         items: Vec<OutlineItem>,
     ) {
         let key = path_key(path);
+        self.visited.insert(key.clone());
         self.entries.insert(
             key,
             Entry {
@@ -124,6 +160,7 @@ impl LandscapeCache {
                 items,
             },
         );
+        self.dirty = true;
     }
 }
 

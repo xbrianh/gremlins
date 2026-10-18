@@ -22,7 +22,6 @@ struct LandscapeSnapshot {
 }
 
 /// Assembles the final system prompt for one agent stage.
-#[derive(Debug, Clone)]
 pub(crate) struct SystemPrompt {
     /// The base harness prompt (`agent_system_prompt`, `chat_system.md`, or a
     /// stage-supplied `system_prompt` override).
@@ -60,14 +59,27 @@ impl SystemPrompt {
 ///
 /// The block is a one-shot snapshot of `gremlin.cwd()` at call time. A missing
 /// workspace degrades to an empty block, never an error; any other build
-/// failure is logged before degrading the same way.
+/// failure is logged (to both the daemon log and the gremlin's `log_tx` so the
+/// operator sees it in `gremlins log`) before degrading the same way.
+///
+/// `has_outline_tool` controls whether the block advertises the `OutlineFile`
+/// tool; stages/backends without that tool must not be told to use it.
 ///
 /// The synchronous directory walk runs on a blocking thread pool so the tokio
 /// runtime is never stalled on filesystem I/O.
-pub(crate) async fn landscape_block(gremlin: &Gremlin) -> String {
-    let snapshot = build_landscape_snapshot(gremlin.cwd(), landscape_cache_path(gremlin)).await;
+pub(crate) async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -> String {
+    let snapshot = build_landscape_snapshot(
+        gremlin.cwd(),
+        landscape_cache_path(gremlin),
+        gremlin.runtime_config.log_tx.clone(),
+        has_outline_tool,
+    )
+    .await;
 
-    // Emit a log line so the operator can see the landscape is working.
+    // Emit a log line so the operator can see the landscape working. A dropped
+    // block has `file_count == 0`, and its warning is sent to `log_tx` by
+    // `build_landscape_snapshot`, so an operator sees the failure rather than
+    // a line that looks identical to a disabled landscape.
     if snapshot.file_count > 0 {
         let kb = snapshot.block.len() as f64 / 1024.0;
         if let Some(tx) = &gremlin.runtime_config.log_tx {
@@ -85,9 +97,21 @@ pub(crate) async fn landscape_block(gremlin: &Gremlin) -> String {
 ///
 /// `cwd` and `cache_path` are owned up front so the blocking closure needs no
 /// borrow of the gremlin. A missing workspace produces an empty snapshot; any
-/// other failure is logged and also degrades to an empty snapshot.
-async fn build_landscape_snapshot(cwd: PathBuf, cache_path: Option<PathBuf>) -> LandscapeSnapshot {
+/// other failure is logged (daemon + `log_tx`) and also degrades to an empty
+/// snapshot.
+///
+/// `file_count`/`item_count` are computed from the files that actually enter
+/// the formatted block (files need at least three outline items), so the log
+/// line never reports a `[landscape] 538 files, …` summary for a block that was
+/// trimmed to nothing.
+async fn build_landscape_snapshot(
+    cwd: PathBuf,
+    cache_path: Option<PathBuf>,
+    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    has_outline_tool: bool,
+) -> LandscapeSnapshot {
     let root = cwd.clone();
+    let walk_log_tx = log_tx.clone();
     let outlines = tokio::task::spawn_blocking(move || {
         match LandscapeExplorer.build(&cwd, usize::MAX, cache_path.as_deref()) {
             Ok(outlines) => outlines,
@@ -95,34 +119,52 @@ async fn build_landscape_snapshot(cwd: PathBuf, cache_path: Option<PathBuf>) -> 
                 Vec::new()
             }
             Err(error) => {
-                log::warn!("landscape build failed for {}: {error}", cwd.display());
+                let msg = format!("landscape build failed for {}: {error}", cwd.display());
+                send_log(&walk_log_tx, &msg);
                 Vec::new()
             }
         }
     })
     .await
     .unwrap_or_else(|error| {
-        log::warn!("landscape build task failed: {error}");
+        let msg = format!("landscape build task failed: {error}");
+        send_log(&log_tx, &msg);
         Vec::new()
     });
 
-    let file_count = outlines.iter().filter(|o| !o.items.is_empty()).count();
-    let item_count: usize = outlines.iter().map(|o| o.items.len()).sum();
     let budget: u64 = crate::config::max_landscape_bytes();
     let max_bytes: usize = usize::try_from(budget).unwrap_or(usize::MAX);
-    let block = match crate::landscape::format_landscape_block(&outlines, &root, max_bytes) {
-        Ok(block) => block,
+    let (block, file_count, item_count) = match crate::landscape::format_landscape_block(
+        &outlines,
+        &root,
+        max_bytes,
+        has_outline_tool,
+    ) {
+        Ok(block) if !block.is_empty() => {
+            let file_count = outlines.iter().filter(|o| o.items.len() >= 3).count();
+            let item_count = outlines
+                .iter()
+                .filter(|o| o.items.len() >= 3)
+                .map(|o| o.items.len())
+                .sum();
+            (block, file_count, item_count)
+        }
+        Ok(_) => (String::new(), 0, 0),
         Err(LandscapeError::BudgetExceeded) => {
-            log::warn!(
-                "landscape block for {} could not be trimmed to fit the {} byte budget; omitting",
+            let msg = format!(
+                "[landscape] block for {} could not be trimmed to fit the {} byte budget; omitting",
                 root.display(),
                 budget,
             );
-            String::new()
+            send_log(&log_tx, &msg);
+            (String::new(), 0, 0)
         }
         Err(other) => {
-            log::warn!("landscape block formatting failed: {other}");
-            String::new()
+            send_log(
+                &log_tx,
+                &format!("landscape block formatting failed: {other}"),
+            );
+            (String::new(), 0, 0)
         }
     };
 
@@ -133,26 +175,26 @@ async fn build_landscape_snapshot(cwd: PathBuf, cache_path: Option<PathBuf>) -> 
     }
 }
 
+fn send_log(log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: &str) {
+    if let Some(tx) = log_tx {
+        let _ = tx.send(msg.to_string());
+    }
+    log::warn!("{msg}");
+}
+
 /// Resolve the on-disk cache blob path for landscape builds.
 ///
-/// Prefer the concrete filesystem store's real root (ephemeral runs live in a
-/// `TempDir`); otherwise fall back to the `StateData` display path when it is
-/// non-empty.
+/// Cache I/O is only valid for a concrete filesystem state store. Other store
+/// backends (and the fallback `state_uri_display()` value, which may be a URI
+/// rather than a filesystem path) simply don't get a persistent cache, so
+/// returning `None` on a failed downcast is safer than treating a URI as a
+/// `PathBuf`.
 fn landscape_cache_path(gremlin: &Gremlin) -> Option<PathBuf> {
     let store = gremlin.state.store_ref();
-    if let Some(fs) = store
+    store
         .as_any()
         .and_then(|any| any.downcast_ref::<FileSystemStateStore>())
-    {
-        return Some(fs.root_dir().join(LANDSCAPE_CACHE_FILE));
-    }
-
-    let display = gremlin.state.state_uri_display();
-    if display.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(display).join(LANDSCAPE_CACHE_FILE))
-    }
+        .map(|fs| fs.root_dir().join(LANDSCAPE_CACHE_FILE))
 }
 
 #[cfg(test)]
@@ -216,9 +258,28 @@ mod tests {
 
     #[tokio::test]
     async fn missing_cwd_produces_empty_block() {
-        let snapshot =
-            build_landscape_snapshot(PathBuf::from("/definitely/not/present/landscape-cwd"), None)
-                .await;
+        let snapshot = build_landscape_snapshot(
+            PathBuf::from("/definitely/not/present/landscape-cwd"),
+            None,
+            None,
+            true,
+        )
+        .await;
+        assert_eq!(snapshot.block, "");
+        assert_eq!(snapshot.file_count, 0);
+        assert_eq!(snapshot.item_count, 0);
+    }
+
+    #[tokio::test]
+    async fn dropped_block_reports_zero_stats() {
+        // A file with only one outline item is below the three-item threshold:
+        // the formatted block is empty, and the stats must report 0 rather
+        // than a `[landscape] 1 files, 1 items, 0.0 KB`-style line that hides
+        // the fact that nothing was injected.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("thin.rs"), "fn only() {}\n").unwrap();
+
+        let snapshot = build_landscape_snapshot(dir.path().to_path_buf(), None, None, true).await;
         assert_eq!(snapshot.block, "");
         assert_eq!(snapshot.file_count, 0);
         assert_eq!(snapshot.item_count, 0);
@@ -233,7 +294,7 @@ mod tests {
         )
         .unwrap();
 
-        let snapshot = build_landscape_snapshot(dir.path().to_path_buf(), None).await;
+        let snapshot = build_landscape_snapshot(dir.path().to_path_buf(), None, None, true).await;
         assert!(snapshot.block.contains("<!-- BEGIN LANDSCAPE BLOCK -->"));
         assert!(snapshot
             .block
