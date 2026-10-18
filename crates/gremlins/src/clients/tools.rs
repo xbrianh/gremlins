@@ -11,7 +11,7 @@ use tokio::process::Command;
 
 use super::agent_loop::format_tool_call_parts;
 use super::task_kind::TaskKind;
-use crate::landscape::{LandscapeExplorer, OutlineError};
+use crate::landscape::{LandscapeError, LandscapeExplorer};
 
 const GREP_MAX_LINES: usize = 2000;
 const BASH_TIMEOUT_SECS: u64 = 120;
@@ -1299,8 +1299,14 @@ fn outline_file_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &
     }
     match LandscapeExplorer.outline_file(&path) {
         Ok(items) => render_outline(&items),
-        Err(OutlineError::Utf8(e)) => format!("Error: file is not valid UTF-8: {e}"),
-        Err(OutlineError::Read(e)) => format!("Error: {e}"),
+        Err(LandscapeError::Utf8(e)) => format!("Error: file is not valid UTF-8: {e}"),
+        Err(LandscapeError::Read(e)) => format!("Error: {e}"),
+        Err(LandscapeError::BudgetExceeded) => {
+            // `outline_file` never returns BudgetExceeded (that variant only
+            // comes from `format_landscape_block`), but the match must be
+            // exhaustive.
+            unreachable!("outline_file never returns BudgetExceeded");
+        }
     }
 }
 

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state::FileSystemStateStore;
-use crate::landscape::{LandscapeExplorer, OutlineError};
+use crate::landscape::{LandscapeError, LandscapeExplorer};
 
 const LANDSCAPE_CACHE_FILE: &str = "landscape.cache.json";
 
@@ -91,7 +91,7 @@ async fn build_landscape_snapshot(cwd: PathBuf, cache_path: Option<PathBuf>) -> 
     let outlines = tokio::task::spawn_blocking(move || {
         match LandscapeExplorer.build(&cwd, usize::MAX, cache_path.as_deref()) {
             Ok(outlines) => outlines,
-            Err(OutlineError::Read(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(LandscapeError::Read(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 Vec::new()
             }
             Err(error) => {
@@ -108,7 +108,25 @@ async fn build_landscape_snapshot(cwd: PathBuf, cache_path: Option<PathBuf>) -> 
 
     let file_count = outlines.iter().filter(|o| !o.items.is_empty()).count();
     let item_count: usize = outlines.iter().map(|o| o.items.len()).sum();
-    let block = crate::landscape::format_landscape_block(&outlines, &root);
+    let block = match crate::landscape::format_landscape_block(
+        &outlines,
+        &root,
+        crate::landscape::MAX_LANDSCAPE_BYTES,
+    ) {
+        Ok(block) => block,
+        Err(LandscapeError::BudgetExceeded) => {
+            log::warn!(
+                "landscape block for {} could not be trimmed to fit the {} byte budget; omitting",
+                root.display(),
+                crate::landscape::MAX_LANDSCAPE_BYTES,
+            );
+            String::new()
+        }
+        Err(other) => {
+            log::warn!("landscape block formatting failed: {other}");
+            String::new()
+        }
+    };
 
     LandscapeSnapshot {
         block,
