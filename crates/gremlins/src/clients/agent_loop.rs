@@ -21,7 +21,7 @@ use super::interactive::{
 };
 use super::log_util::trunc;
 use super::model::{GremlinsModel, GremlinsModelError};
-use super::protocol::{CompletedRun, TurnStats, UsageStats};
+use super::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
@@ -1246,34 +1246,19 @@ async fn run_agent_loop_core(
         // Fold this turn's provider usage into the running totals before
         // building TurnComplete so the per-prompt totals include the
         // just-completed turn. Keep `turn_stats` None when the provider
-        // reported no usage (or the turn completed without a usage block),
-        // and treat every field as zero in that case.
+        // reported no usage (or the turn completed without a usage block).
+        // Absent fields stay `None` and are skipped during accumulation; a
+        // reported zero is preserved as `Some(0)`.
         let turn_stats = turn_stats(turn_num, turn_usage.as_ref());
         if let Some(ref u) = turn_usage {
-            // Accumulate each stat only when both the running total and the
-            // new delta are Some; when either is None, propagate the Some
-            // value (or keep None when both are absent).
-            total_prompt_tokens = match (total_prompt_tokens, u.input_tokens) {
-                (Some(a), Some(b)) => Some(a + b),
-                (a, b) => a.or(b),
-            };
-            total_completion_tokens = match (total_completion_tokens, u.output_tokens) {
-                (Some(a), Some(b)) => Some(a + b),
-                (a, b) => a.or(b),
-            };
-            total_cached_tokens = match (total_cached_tokens, u.cached_input_tokens) {
-                (Some(a), Some(b)) => Some(a + b),
-                (a, b) => a.or(b),
-            };
+            // Sum two present values, but keep the single `Some` value when
+            // either side is absent. Both sides `None` keeps the total absent.
+            total_prompt_tokens = add_opt(total_prompt_tokens, u.input_tokens);
+            total_completion_tokens = add_opt(total_completion_tokens, u.output_tokens);
+            total_cached_tokens = add_opt(total_cached_tokens, u.cached_input_tokens);
             total_cache_creation_tokens =
-                match (total_cache_creation_tokens, u.cache_creation_input_tokens) {
-                    (Some(a), Some(b)) => Some(a + b),
-                    (a, b) => a.or(b),
-                };
-            total_reasoning_tokens = match (total_reasoning_tokens, u.reasoning_tokens) {
-                (Some(a), Some(b)) => Some(a + b),
-                (a, b) => a.or(b),
-            };
+                add_opt(total_cache_creation_tokens, u.cache_creation_input_tokens);
+            total_reasoning_tokens = add_opt(total_reasoning_tokens, u.reasoning_tokens);
         }
         let totals = usage_stats(
             turn_num + 1,
@@ -2375,6 +2360,44 @@ mod tests {
 
     fn gm(model: DynModel<Completion>) -> GremlinsModel {
         GremlinsModel::new(model, crate::config::DEFAULT_MAX_PROMPT_BYTES)
+    }
+
+    #[test]
+    fn turn_stats_passes_through_partial_usage_without_zero_filling() {
+        let usage = Usage {
+            input_tokens: Some(10),
+            output_tokens: None,
+            cached_input_tokens: Some(4),
+            cache_creation_input_tokens: None,
+            reasoning_tokens: Some(3),
+            tool_use_prompt_tokens: None,
+            total_tokens: None,
+        };
+
+        let stats = turn_stats(1, Some(&usage)).unwrap();
+
+        assert_eq!(stats.turn, 1);
+        assert_eq!(stats.prompt_tokens, Some(10));
+        assert_eq!(stats.completion_tokens, None);
+        assert_eq!(stats.cached_input_tokens, Some(4));
+        assert_eq!(stats.cache_creation_input_tokens, None);
+        assert_eq!(stats.reasoning_tokens, Some(3));
+    }
+
+    #[test]
+    fn turn_stats_none_when_usage_block_is_entirely_absent() {
+        let usage = Usage {
+            input_tokens: None,
+            output_tokens: None,
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            reasoning_tokens: None,
+            tool_use_prompt_tokens: None,
+            total_tokens: None,
+        };
+
+        assert!(turn_stats(0, Some(&usage)).is_none());
+        assert!(turn_stats(3, None).is_none());
     }
 
     #[test]

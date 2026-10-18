@@ -650,37 +650,24 @@ fn usage_title_part(usage: Option<&serde_json::Value>) -> String {
     let in_part = match prompt {
         Some(p) if p > 0 => {
             let cached = field("cached_input_tokens");
-            let cache_creation = field("cache_creation_input_tokens");
-            let pct = match cached {
-                Some(c) => format!("{:.0}%", (c as f64 / p as f64) * 100.0),
-                None => "-".to_string(),
-            };
-            match (cached, cache_creation) {
-                (Some(_), Some(_)) => format!(
-                    "in {p} (cache {pct}, +{} new)",
-                    num("cache_creation_input_tokens")
-                ),
-                (Some(_), None) => format!("in {p} (cache {pct})"),
-                (None, Some(_)) => format!(
-                    "in {p} (cache -, +{} new)",
-                    num("cache_creation_input_tokens")
-                ),
-                (None, None) => format!("in {p}"),
+            match cached {
+                Some(c) => {
+                    let pct = format!("{:.0}%", (c as f64 / p as f64) * 100.0);
+                    match field("cache_creation_input_tokens") {
+                        Some(new) => format!("in {p} (cache {pct}, +{new} new)"),
+                        None => format!("in {p} (cache {pct})"),
+                    }
+                }
+                None => format!("in {p}"),
             }
         }
-        Some(_) => {
-            let cache_creation = field("cache_creation_input_tokens");
-            let cached = field("cached_input_tokens");
-            match (cached, cache_creation) {
-                (Some(_), Some(_)) => format!(
-                    "in 0 (cache -, +{} new)",
-                    num("cache_creation_input_tokens")
-                ),
-                (Some(_), None) => "in 0 (cache -)".to_string(),
-                (None, Some(_)) => format!("in 0 (+{} new)", num("cache_creation_input_tokens")),
-                (None, None) => "in 0".to_string(),
-            }
-        }
+        Some(_) => match field("cached_input_tokens") {
+            Some(_) => match field("cache_creation_input_tokens") {
+                Some(new) => format!("in 0 (cache -, +{new} new)"),
+                None => "in 0 (cache -)".to_string(),
+            },
+            None => "in 0".to_string(),
+        },
         None => "in -".to_string(),
     };
 
@@ -2333,7 +2320,10 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_chat_request, ctrl_c_should_quit, format_socket_response, stats_title};
+    use super::{
+        build_chat_request, ctrl_c_should_quit, format_socket_response, stats_title, usage_field,
+        usage_title_part,
+    };
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
@@ -2423,6 +2413,81 @@ mod tests {
             title,
             "clanking · turn 1 · in 0 (cache -, +2 new) · out 7 · reason 1 · Σ out - · reason -"
         );
+    }
+
+    #[test]
+    fn usage_title_part_omits_new_when_cache_creation_absent() {
+        let usage = serde_json::json!({
+            "prompt_tokens": 46884,
+            "cached_input_tokens": 46415,
+            "completion_tokens": 500,
+            "reasoning_tokens": 200
+        });
+
+        assert_eq!(
+            usage_title_part(Some(&usage)),
+            "in 46884 (cache 99%) · out 500 · reason 200"
+        );
+    }
+
+    #[test]
+    fn usage_title_part_omits_cache_group_when_cached_absent() {
+        let usage = serde_json::json!({
+            "prompt_tokens": 46884,
+            "cache_creation_input_tokens": 80,
+            "completion_tokens": 500,
+            "reasoning_tokens": 200
+        });
+
+        assert_eq!(
+            usage_title_part(Some(&usage)),
+            "in 46884 · out 500 · reason 200"
+        );
+    }
+
+    #[test]
+    fn usage_title_part_prompt_only_renders_dashes_for_missing_stats() {
+        let usage = serde_json::json!({"prompt_tokens": 46884});
+
+        assert_eq!(
+            usage_title_part(Some(&usage)),
+            "in 46884 · out - · reason -"
+        );
+    }
+
+    #[test]
+    fn usage_title_part_zero_prompt_omits_new_when_cache_creation_absent() {
+        let usage = serde_json::json!({
+            "prompt_tokens": 0,
+            "cached_input_tokens": 0,
+            "completion_tokens": 7,
+            "reasoning_tokens": 1
+        });
+
+        assert_eq!(
+            usage_title_part(Some(&usage)),
+            "in 0 (cache -) · out 7 · reason 1"
+        );
+    }
+
+    #[test]
+    fn usage_title_part_zero_prompt_omits_cache_group_when_cached_absent() {
+        let usage = serde_json::json!({
+            "prompt_tokens": 0,
+            "cache_creation_input_tokens": 2,
+            "completion_tokens": 7,
+            "reasoning_tokens": 1
+        });
+
+        assert_eq!(usage_title_part(Some(&usage)), "in 0 · out 7 · reason 1");
+    }
+
+    #[test]
+    fn usage_field_reads_optional_counter_values() {
+        let usage = serde_json::json!({"prompt_tokens": 5});
+        assert_eq!(usage_field(Some(&usage), "prompt_tokens"), Some(5));
+        assert_eq!(usage_field(Some(&usage), "completion_tokens"), None);
+        assert_eq!(usage_field(None, "prompt_tokens"), None);
     }
 
     #[test]

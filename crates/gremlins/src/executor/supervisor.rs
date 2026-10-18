@@ -22,7 +22,7 @@ use crate::clients::client::{Client, ModelURI};
 use crate::clients::interactive::{
     InteractiveChannels, InteractiveCommand, InteractiveEvent, InteractiveHandle, StreamEventSender,
 };
-use crate::clients::protocol::UsageStats;
+use crate::clients::protocol::{add_opt, UsageStats};
 use crate::config;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin, GremlinConfig};
 use crate::executor::socket::{self, GremlinsDaemonLock};
@@ -3172,29 +3172,14 @@ fn usage_stats_from_state(value: Option<&serde_json::Value>) -> UsageStats {
 /// Add a per-prompt usage delta to a conversation baseline.
 fn add_usage_stats(baseline: &UsageStats, delta: &UsageStats) -> UsageStats {
     UsageStats {
-        prompt_tokens: match (baseline.prompt_tokens, delta.prompt_tokens) {
-            (Some(a), Some(b)) => Some(a + b),
-            (a, b) => a.or(b),
-        },
-        completion_tokens: match (baseline.completion_tokens, delta.completion_tokens) {
-            (Some(a), Some(b)) => Some(a + b),
-            (a, b) => a.or(b),
-        },
-        cached_input_tokens: match (baseline.cached_input_tokens, delta.cached_input_tokens) {
-            (Some(a), Some(b)) => Some(a + b),
-            (a, b) => a.or(b),
-        },
-        cache_creation_input_tokens: match (
+        prompt_tokens: add_opt(baseline.prompt_tokens, delta.prompt_tokens),
+        completion_tokens: add_opt(baseline.completion_tokens, delta.completion_tokens),
+        cached_input_tokens: add_opt(baseline.cached_input_tokens, delta.cached_input_tokens),
+        cache_creation_input_tokens: add_opt(
             baseline.cache_creation_input_tokens,
             delta.cache_creation_input_tokens,
-        ) {
-            (Some(a), Some(b)) => Some(a + b),
-            (a, b) => a.or(b),
-        },
-        reasoning_tokens: match (baseline.reasoning_tokens, delta.reasoning_tokens) {
-            (Some(a), Some(b)) => Some(a + b),
-            (a, b) => a.or(b),
-        },
+        ),
+        reasoning_tokens: add_opt(baseline.reasoning_tokens, delta.reasoning_tokens),
         turns: baseline.turns + delta.turns,
     }
 }
@@ -4266,6 +4251,64 @@ mod tests {
         assert_eq!(total.cached_input_tokens, Some(37));
         assert_eq!(total.cache_creation_input_tokens, Some(48));
         assert_eq!(total.reasoning_tokens, Some(59));
+        assert_eq!(total.turns, 3);
+    }
+
+    #[test]
+    fn add_usage_stats_propagates_mixed_absence_and_presence() {
+        let baseline = UsageStats {
+            prompt_tokens: Some(10),
+            completion_tokens: None,
+            cached_input_tokens: Some(0),
+            cache_creation_input_tokens: None,
+            reasoning_tokens: Some(50),
+            turns: 1,
+        };
+        let delta = UsageStats {
+            prompt_tokens: None,
+            completion_tokens: Some(6),
+            cached_input_tokens: None,
+            cache_creation_input_tokens: Some(8),
+            reasoning_tokens: Some(0),
+            turns: 1,
+        };
+
+        let total = add_usage_stats(&baseline, &delta);
+
+        assert_eq!(total.prompt_tokens, Some(10));
+        assert_eq!(total.completion_tokens, Some(6));
+        assert_eq!(total.cached_input_tokens, Some(0));
+        assert_eq!(total.cache_creation_input_tokens, Some(8));
+        assert_eq!(total.reasoning_tokens, Some(50));
+        assert_eq!(total.turns, 2);
+    }
+
+    #[test]
+    fn add_usage_stats_none_plus_none_stays_none() {
+        let baseline = UsageStats {
+            prompt_tokens: None,
+            completion_tokens: None,
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            reasoning_tokens: None,
+            turns: 1,
+        };
+        let delta = UsageStats {
+            prompt_tokens: None,
+            completion_tokens: None,
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            reasoning_tokens: None,
+            turns: 2,
+        };
+
+        let total = add_usage_stats(&baseline, &delta);
+
+        assert_eq!(total.prompt_tokens, None);
+        assert_eq!(total.completion_tokens, None);
+        assert_eq!(total.cached_input_tokens, None);
+        assert_eq!(total.cache_creation_input_tokens, None);
+        assert_eq!(total.reasoning_tokens, None);
         assert_eq!(total.turns, 3);
     }
 
