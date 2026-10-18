@@ -1965,13 +1965,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             "ToolResult id={id} name={name} output_len={}",
                             output.len()
                         );
-                        // Read/Edit are filtered exactly as in the TurnComplete
-                        // reconciliation list: noisy file-access tools whose
-                        // output belongs in the model history, not the live
-                        // tool segment.
-                        if name == "Read" || name == "Edit" {
-                            continue;
-                        }
+                        // All tools participate uniformly in the transcript.
                         live_area.commit_tool_result(&id, &call);
                     }
                     ChatEvent::TurnComplete { text, tool_calls, stats, total, .. } => {
@@ -1985,10 +1979,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // loop, so only the current turn's trailing slice is repaired.
                         live_area.reconcile_response(&text);
                         // Seed the current turn's tool-call list. ToolResult events
-                        // commit each call as it finishes (streaming tools as
-                        // title+tail, non-streaming tools as a `◆` event line); this
-                        // list is the safety net that reconciles anything still
-                        // uncommitted when the turn finishes.
+                        // commit each call as it finishes; this list is the safety net
+                        // that reconciles anything still uncommitted when the turn
+                        // finishes. All tools participate uniformly.
                         live_area.reconcile_tool_calls(&tool_calls);
                         // The reasoning stream's title row is the live stats line:
                         // per-turn delta plus the conversation-wide total.
