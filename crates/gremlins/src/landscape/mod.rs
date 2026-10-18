@@ -12,6 +12,8 @@ pub use error::LandscapeError;
 
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
+
 pub const FN: &str = "fn";
 pub const STRUCT: &str = "struct";
 pub const IMPL: &str = "impl";
@@ -103,6 +105,10 @@ impl LandscapeExplorer {
     /// `size`) are served from the cache file at that path and the refreshed
     /// cache is written back after the walk. When it is `None`, behavior is
     /// exactly as before: every recognized file is parsed.
+    ///
+    /// Parsing fans out on rayon's global thread pool and blocks the calling
+    /// thread. Async callers must call this from `spawn_blocking`, as
+    /// `build_landscape_snapshot` does.
     pub fn build(
         &self,
         root: &Path,
@@ -111,16 +117,78 @@ impl LandscapeExplorer {
     ) -> Result<Vec<FileOutline>, LandscapeError> {
         let mut cache = cache_path.map(cache::LandscapeCache::load);
         let canonical_cache = cache_path.and_then(|path| std::fs::canonicalize(path).ok());
-        let mut out = Vec::new();
-        self.build_dir(
-            root,
-            0,
-            depth_limit,
-            cache.as_mut(),
-            canonical_cache.as_deref(),
-            &mut out,
-        )?;
-        out.sort_by(|a, b| a.path.cmp(&b.path));
+
+        // ── Phase 1: collect paths (sequential) ──
+        let paths = collect_paths(root, depth_limit, canonical_cache.as_deref())?;
+
+        // ── Phase 2: partition into cache hits and misses ──
+        let mut results: Vec<FileOutline> = Vec::new();
+        // Each miss carries the fingerprint taken *before* parsing so a
+        // concurrent write during the parse window cannot stick stale items
+        // under the new fingerprint.
+        let mut misses: Vec<(PathBuf, Option<(u64, u64)>)> = Vec::new();
+
+        for path in &paths {
+            if let Some(ref mut cache) = cache {
+                cache.mark_visited(path);
+                let fingerprint = file_fingerprint(path);
+                if let Some((mtime_ns, size)) = fingerprint {
+                    if let Some(items) = cache.get(path, mtime_ns, size) {
+                        if !items.is_empty() {
+                            results.push(FileOutline {
+                                path: path.clone(),
+                                items,
+                            });
+                        }
+                        continue;
+                    }
+                }
+                misses.push((path.clone(), fingerprint));
+            } else {
+                misses.push((path.clone(), None));
+            }
+        }
+
+        // ── Phase 3: parallel parse ──
+        type FreshEntry = (
+            PathBuf,
+            Option<(u64, u64)>,
+            Result<Vec<OutlineItem>, LandscapeError>,
+        );
+        let fresh: Vec<FreshEntry> = misses
+            .into_par_iter()
+            .map(|(path, fingerprint)| {
+                let result = self.outline_file(&path);
+                (path, fingerprint, result)
+            })
+            .collect();
+
+        // ── Phase 4: process results and update cache ──
+        for (path, fingerprint, result) in fresh {
+            match result {
+                Ok(items) => {
+                    // Cache every successful parse, even one with no items,
+                    // so an unchanged empty file is not re-parsed on the
+                    // next build.
+                    if let Some(ref mut cache) = cache {
+                        if let Some((mtime_ns, size)) = fingerprint {
+                            cache.insert(&path, mtime_ns, size, items.clone());
+                        }
+                    }
+                    if !items.is_empty() {
+                        results.push(FileOutline { path, items });
+                    }
+                }
+                Err(_) => {
+                    if let Some(ref mut cache) = cache {
+                        cache.remove(&path);
+                    }
+                }
+            }
+        }
+
+        // ── Phase 5: sort, save, return ──
+        results.sort_by(|a, b| a.path.cmp(&b.path));
         if let (Some(cache), Some(path)) = (cache, cache_path) {
             // Caching is an optimization: a failed write never fails the
             // build. Skip the write entirely when nothing changed (a pure
@@ -131,124 +199,81 @@ impl LandscapeExplorer {
                 let _ = cache.save(path);
             }
         }
-        Ok(out)
+        Ok(results)
+    }
+}
+
+/// Walk the directory tree, collecting every outlineable file path.
+///
+/// Applies the same filters as `build`: depth limit, hidden/skip dirs,
+/// file extension, file size, and cache-blob exclusion. Returns paths in
+/// alphabetical order.
+fn collect_paths(
+    root: &Path,
+    depth_limit: usize,
+    canonical_cache: Option<&Path>,
+) -> Result<Vec<PathBuf>, LandscapeError> {
+    let mut paths = Vec::new();
+    collect_paths_recursive(root, 0, depth_limit, canonical_cache, &mut paths)?;
+    paths.sort();
+    Ok(paths)
+}
+
+fn collect_paths_recursive(
+    dir: &Path,
+    depth: usize,
+    depth_limit: usize,
+    canonical_cache: Option<&Path>,
+    paths: &mut Vec<PathBuf>,
+) -> Result<(), LandscapeError> {
+    if depth > depth_limit {
+        return Ok(());
     }
 
-    fn build_dir(
-        &self,
-        dir: &Path,
-        depth: usize,
-        depth_limit: usize,
-        mut cache: Option<&mut cache::LandscapeCache>,
-        canonical_cache: Option<&Path>,
-        out: &mut Vec<FileOutline>,
-    ) -> Result<(), LandscapeError> {
-        if depth > depth_limit {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            // Only a missing root is fatal: it means the workspace itself
+            // is gone. An unreadable nested directory (EACCES on a
+            // cache with odd permissions, a docker-owned dir, or one that
+            // is deleted mid-walk) is skipped so a single bad subdirectory
+            // cannot wipe out the whole landscape.
+            if depth == 0 {
+                return Err(LandscapeError::Read(error));
+            }
+            log::debug!(
+                "landscape: skipping unreadable directory {}: {error}",
+                dir.display()
+            );
             return Ok(());
         }
+    };
+    let mut dir_paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .collect();
+    dir_paths.sort();
 
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(error) => {
-                // Only a missing root is fatal: it means the workspace itself
-                // is gone. An unreadable nested directory (EACCES on a
-                // cache with odd permissions, a docker-owned dir, or one that
-                // is deleted mid-walk) is skipped so a single bad subdirectory
-                // cannot wipe out the whole landscape.
-                if depth == 0 {
-                    return Err(LandscapeError::Read(error));
-                }
-                log::debug!(
-                    "landscape: skipping unreadable directory {}: {error}",
-                    dir.display()
-                );
-                return Ok(());
-            }
+    for path in dir_paths {
+        let Ok(metadata) = path.symlink_metadata() else {
+            continue;
         };
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .collect();
-        paths.sort();
-
-        for path in paths {
-            let Ok(metadata) = path.symlink_metadata() else {
+        if metadata.is_dir() {
+            if should_skip_dir(&path) {
                 continue;
-            };
-            if metadata.is_dir() {
-                if should_skip_dir(&path) {
-                    continue;
-                }
-                self.build_dir(
-                    &path,
-                    depth + 1,
-                    depth_limit,
-                    cache.as_deref_mut(),
-                    canonical_cache,
-                    out,
-                )?;
-            } else if metadata.is_file() {
-                if !is_outlineable_file(&path) || metadata.len() > MAX_OUTLINE_BYTES {
-                    continue;
-                }
-                if canonical_cache.is_some_and(|canonical| same_file(canonical, &path)) {
-                    continue;
-                }
-                self.collect_file(&path, cache.as_deref_mut(), out);
             }
-        }
-        Ok(())
-    }
-
-    /// Add `path` to `out`, using the cache when its fingerprint is known and
-    /// matches, and reparsing otherwise.
-    fn collect_file(
-        &self,
-        path: &Path,
-        cache: Option<&mut cache::LandscapeCache>,
-        out: &mut Vec<FileOutline>,
-    ) {
-        if let Some(cache) = cache {
-            cache.mark_visited(path);
-            let fingerprint = file_fingerprint(path);
-            if let Some((mtime_ns, size)) = fingerprint {
-                if let Some(items) = cache.get(path, mtime_ns, size) {
-                    if !items.is_empty() {
-                        out.push(FileOutline {
-                            path: path.to_path_buf(),
-                            items,
-                        });
-                    }
-                    return;
-                }
+            collect_paths_recursive(&path, depth + 1, depth_limit, canonical_cache, paths)?;
+        } else if metadata.is_file() {
+            if !is_outlineable_file(&path) || metadata.len() > MAX_OUTLINE_BYTES {
+                continue;
             }
-
-            let Ok(items) = self.outline_file(path) else {
-                cache.remove(path);
-                return;
-            };
-            // Cache every successful parse, even one with no items, so an
-            // unchanged empty file is not re-parsed on the next build.
-            if let Some((mtime_ns, size)) = fingerprint {
-                cache.insert(path, mtime_ns, size, items.clone());
+            if canonical_cache.is_some_and(|canonical| same_file(canonical, &path)) {
+                continue;
             }
-            if !items.is_empty() {
-                out.push(FileOutline {
-                    path: path.to_path_buf(),
-                    items,
-                });
-            }
-        } else {
-            if let Ok(items) = self.outline_file(path) {
-                if !items.is_empty() {
-                    out.push(FileOutline {
-                        path: path.to_path_buf(),
-                        items,
-                    });
-                }
-            }
+            paths.push(path);
         }
     }
+    Ok(())
 }
 
 fn path_extension(path: &Path) -> String {
@@ -922,6 +947,50 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&cache_path).unwrap()).unwrap();
         assert!(value.is_object());
+    }
+
+    #[test]
+    fn build_cached_file_corrupted_to_non_utf8_is_evicted() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a.rs");
+        std::fs::write(&a, "fn a() {}\n").unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache_path = cache_dir.path().join("landscape.cache.json");
+
+        // Prime the cache.
+        let first = LandscapeExplorer
+            .build(root.path(), 10, Some(&cache_path))
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(cache_path.exists());
+
+        // Corrupt the file to non-UTF-8.
+        std::fs::write(&a, [0xff, 0xfe, 0x00, 0x01]).unwrap();
+
+        // Rebuild: file must be absent from results and evicted from cache.
+        let second = LandscapeExplorer
+            .build(root.path(), 10, Some(&cache_path))
+            .unwrap();
+        assert!(
+            second.is_empty(),
+            "corrupted file must not appear in results"
+        );
+
+        // The cache blob must no longer contain the evicted entry.
+        let cache_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cache_path).unwrap()).unwrap();
+        let entries = cache_json.as_object().unwrap();
+        let key = a.to_string_lossy();
+        assert!(
+            !entries.contains_key(key.as_ref()),
+            "evicted file must not remain in cache"
+        );
+
+        // A third build with the still-corrupted file is also empty.
+        let third = LandscapeExplorer
+            .build(root.path(), 10, Some(&cache_path))
+            .unwrap();
+        assert!(third.is_empty());
     }
 
     // ── truncation tests ──
