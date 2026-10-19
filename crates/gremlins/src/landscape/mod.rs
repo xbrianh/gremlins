@@ -143,12 +143,10 @@ impl LandscapeExplorer {
                 let fingerprint = file_fingerprint(path);
                 if let Some((mtime_ns, size)) = fingerprint {
                     if let Some(items) = cache.get(path, mtime_ns, size) {
-                        if !items.is_empty() {
-                            results.push(FileOutline {
-                                path: path.clone(),
-                                items,
-                            });
-                        }
+                        results.push(FileOutline {
+                            path: path.clone(),
+                            items,
+                        });
                         continue;
                     }
                 }
@@ -1098,6 +1096,45 @@ mod tests {
             .build(root.path(), 10, Some(&cache_path))
             .unwrap();
         assert!(third.is_empty());
+    }
+
+    #[test]
+    fn build_cache_retains_zero_item_files_across_builds() {
+        // Empty `.rs` and headingless `.md` files must survive a cache-hit
+        // rebuild and not disappear from the snapshot.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("empty.rs"), "").unwrap();
+        std::fs::write(root.path().join("headingless.md"), "just a paragraph\n").unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache_path = cache_dir.path().join("landscape.cache.json");
+
+        let first = LandscapeExplorer
+            .build(root.path(), 10, Some(&cache_path))
+            .unwrap();
+        let first_paths: Vec<&Path> = first.iter().map(|f| f.path.as_path()).collect();
+        assert!(
+            first_paths.contains(&root.path().join("empty.rs").as_path()),
+            "empty.rs must appear in first build"
+        );
+        assert!(
+            first_paths.contains(&root.path().join("headingless.md").as_path()),
+            "headingless.md must appear in first build"
+        );
+
+        // Second build with unchanged files — cache hit for both.
+        let second = LandscapeExplorer
+            .build(root.path(), 10, Some(&cache_path))
+            .unwrap();
+        let second_paths: Vec<&Path> = second.iter().map(|f| f.path.as_path()).collect();
+        assert!(
+            second_paths.contains(&root.path().join("empty.rs").as_path()),
+            "empty.rs must survive cache-hit rebuild"
+        );
+        assert!(
+            second_paths.contains(&root.path().join("headingless.md").as_path()),
+            "headingless.md must survive cache-hit rebuild"
+        );
+        assert_eq!(first.len(), second.len());
     }
 
     // ── truncation tests ──
