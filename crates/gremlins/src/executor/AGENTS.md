@@ -77,7 +77,7 @@ root (only when the concrete store is a `FileSystemStateStore`). It is an
 optimization: a corrupt or unwritable cache degrades to a fresh rebuild and is
 never a failure. The walker (`landscape/mod.rs`) builds the outline, and
 `system_prompt.rs` decides how to inject it; run-loop code in `run.rs` only
-passes the `client.has_tool("OutlineFile")` flag through.
+passes the `client.has_tool("Landscape")` flag through.
 
 ### Supervisor
 

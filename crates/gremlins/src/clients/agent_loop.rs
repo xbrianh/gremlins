@@ -2092,7 +2092,7 @@ pub(crate) fn format_tool_call_parts(name: &str, args: &serde_json::Value) -> St
             .get("url")
             .and_then(|v| v.as_str())
             .map(|s| format!("url={s:?}")),
-        "OutlineFile" => args
+        "OutlineFile" | "Landscape" => args
             .get("file_path")
             .and_then(|v| v.as_str())
             .map(|s| format!("file_path={s:?}")),
@@ -2869,13 +2869,10 @@ mod tests {
     }
 
     #[test]
-    fn format_tool_call_parts_outline_and_done() {
+    fn format_tool_call_parts_landscape_and_done() {
         assert_eq!(
-            format_tool_call_parts(
-                "OutlineFile",
-                &serde_json::json!({"file_path": "Cargo.toml"})
-            ),
-            "OutlineFile(file_path=\"Cargo.toml\")"
+            format_tool_call_parts("Landscape", &serde_json::json!({"file_path": "Cargo.toml"})),
+            "Landscape(file_path=\"Cargo.toml\")"
         );
         assert_eq!(
             format_tool_call_parts("Done", &serde_json::json!({"summary": "Fixed it"})),
