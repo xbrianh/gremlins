@@ -1128,6 +1128,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     let mut turn_gen: u64 = 0;
     // The turn id of the currently active turn, if any.
     let mut active_turn: Option<String> = None;
+    // A turn that was soft-interrupted and is awaiting a possible hard
+    // cancel escalation within the double-press window.
+    let mut interrupted_turn: Option<String> = None;
     let (log_tx, mut log_rx) = mpsc::unbounded_channel::<serde_json::Value>();
 
     // ── Debug session state ────────────────────────────────────────
@@ -1392,6 +1395,34 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     }
                                     InterruptAction::NoOp => {}
                                 }
+                                continue;
+                            }
+
+                            // Post-interrupt escalation: a turn that was
+                            // soft-interrupted can still be hard-cancelled
+                            // within the double-press window.  Only
+                            // `SendHard` is meaningful here — a soft
+                            // cancel on an already-interrupted turn is a
+                            // no-op (the supervisor ignores it).
+                            if interrupted_turn.is_some()
+                                && interrupt_press(
+                                    &mut interrupt_count,
+                                    &mut interrupt_window,
+                                    Instant::now(),
+                                ) == InterruptAction::SendHard
+                            {
+                                send_cancel_chat(
+                                    &client,
+                                    interrupted_turn.as_deref(),
+                                    "hard",
+                                );
+                                clear_active_turn_ui(
+                                    &mut app,
+                                    live_area,
+                                    &mut interrupted_turn,
+                                );
+                            }
+                            if interrupted_turn.is_some() {
                                 continue;
                             }
                         }
@@ -1669,6 +1700,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 let session_generation = client.session_generation().await;
                                 interrupt_count = 0;
                                 interrupt_window = None;
+                                interrupted_turn = None;
                                 send_chat_input(
                                     live_area,
                                     &mut app,
@@ -2076,7 +2108,11 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     // No active turn means `/clear` or Esc has retired the
                     // conversation; any queued turn-tagged terminal events
                     // belong to the dead session and must not be applied.
-                    (None, Some(ev)) => {
+                    // Exception: events for a recently-interrupted turn
+                    // (from a hard-cancel escalation) are allowed through.
+                    (None, Some(ev))
+                        if interrupted_turn.as_deref() != Some(ev.as_str()) =>
+                    {
                         log::debug!("dropping retired-session chat event for turn {ev}");
                         continue;
                     }
@@ -2167,11 +2203,24 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             continue;
                         }
                         app.active_request = false;
-                        active_turn = None;
                         let msg = format!("chat ended: {reason}");
                         live_area.finish_turn();
                         live_area.clear_tool_output();
                         live_area.push_transcript_line(msg);
+
+                        // When the turn was soft-interrupted, keep the
+                        // turn id alive so a second ESC within the
+                        // double-press window can escalate to a hard
+                        // cancel that cleans up the partial artifact
+                        // and the interrupt flag.
+                        if reason == "interrupted" {
+                            interrupted_turn = active_turn.take();
+                        } else {
+                            active_turn = None;
+                            // Also clear a lingering interrupted turn
+                            // when a hard-cancel escalation completes.
+                            interrupted_turn = None;
+                        }
 
                         // Repaint immediately so the ended state is visible
                         // without waiting for the next input event.

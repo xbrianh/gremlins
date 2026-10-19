@@ -47,6 +47,9 @@ pub struct ChatDefinition {
     /// Operator input queued by the supervisor, consumed by the next
     /// `next_stage` call: `(prompt_text, model, system_prompt)`.
     pending: Option<(String, ModelURI, String)>,
+    /// Set when a soft interrupt ends the current turn. Cleared when the
+    /// next `set_pending` call prepends the interrupt notice.
+    interrupted: bool,
 }
 
 impl ChatDefinition {
@@ -64,6 +67,7 @@ impl ChatDefinition {
             _system_prompt: system_prompt,
             turn: 0,
             pending: None,
+            interrupted: false,
         }
     }
 
@@ -72,8 +76,30 @@ impl ChatDefinition {
     /// The `model` and `system_prompt` are consumed by the next
     /// [`next_stage`](GremlinDefinition::next_stage) call to build the agent
     /// stage. The stored `default_model` on the definition is left unchanged.
+    ///
+    /// When the `interrupted` flag is set (from a preceding soft interrupt),
+    /// an interrupt notice is prepended to the prompt and the flag is cleared.
     pub fn set_pending(&mut self, prompt: &str, model: &ModelURI, system_prompt: &str) {
-        self.pending = Some((prompt.to_string(), model.clone(), system_prompt.to_string()));
+        let text = if self.interrupted {
+            self.interrupted = false;
+            format!("Your previous response was interrupted.\n\n{prompt}")
+        } else {
+            prompt.to_string()
+        };
+        self.pending = Some((text, model.clone(), system_prompt.to_string()));
+    }
+
+    /// Mark the definition as interrupted so the next [`set_pending`] call
+    /// prepends an interrupt notice to the operator's prompt.
+    pub fn mark_interrupted(&mut self) {
+        self.interrupted = true;
+    }
+
+    /// Clear the interrupted flag without injecting a notice.
+    /// Used when a hard cancel escalates after a soft interrupt to discard
+    /// the partial turn entirely.
+    pub fn clear_interrupted(&mut self) {
+        self.interrupted = false;
     }
 
     /// The zero-based turn counter (how many stages have been produced so far).
@@ -411,5 +437,96 @@ mod tests {
         // No more pending — the next call returns Done.
         let stage = def.next_stage().await.unwrap();
         assert!(matches!(stage, ExecutorStage::Done));
+    }
+
+    /// `mark_interrupted` + `set_pending` prepends the interrupt notice
+    /// exactly once and clears the flag.
+    #[tokio::test]
+    async fn mark_interrupted_prepends_notice_once() {
+        let mut def = ChatDefinition::new(
+            "chat".into(),
+            PathBuf::from("."),
+            model("openai/gpt-4"),
+            "sys".into(),
+        );
+        def.mark_interrupted();
+        def.set_pending("hello", &model("openai/gpt-4"), "sys");
+
+        let stage = def.next_stage().await.unwrap();
+        match stage {
+            ExecutorStage::Agent { stage: agent, .. } => {
+                let prompt = agent.prompts.join("\n");
+                assert!(
+                    prompt.starts_with("Your previous response was interrupted."),
+                    "expected interrupt notice prefix, got: {prompt:?}"
+                );
+                assert!(
+                    prompt.ends_with("hello"),
+                    "expected original prompt suffix, got: {prompt:?}"
+                );
+            }
+            other => panic!(
+                "expected Agent stage (with notice), got: {}",
+                other.stage_type()
+            ),
+        }
+
+        // The flag is cleared; a second set_pending must not inject the notice.
+        def.set_pending("world", &model("openai/gpt-4"), "sys");
+        let stage = def.next_stage().await.unwrap();
+        match stage {
+            ExecutorStage::Agent { stage: agent, .. } => {
+                assert_eq!(
+                    agent.prompts.join("\n"),
+                    "world",
+                    "second set_pending must not repeat interrupt notice"
+                );
+            }
+            other => panic!(
+                "expected Agent stage (second turn), got: {}",
+                other.stage_type()
+            ),
+        }
+    }
+
+    /// `set_pending` without `mark_interrupted` must leave the prompt unchanged.
+    #[test]
+    fn set_pending_without_interrupt_leaves_prompt_unchanged() {
+        let mut def = ChatDefinition::new(
+            "chat".into(),
+            PathBuf::from("."),
+            model("openai/gpt-4"),
+            "sys".into(),
+        );
+        def.set_pending("hello", &model("openai/gpt-4"), "sys");
+
+        let (text, _, _) = def.pending.expect("pending must be set");
+        assert_eq!(text, "hello");
+        assert!(
+            !text.contains("interrupted"),
+            "prompt must not contain interrupt notice when not marked"
+        );
+    }
+
+    /// `clear_interrupted` resets the flag so the next `set_pending`
+    /// does *not* inject the interrupt notice.
+    #[test]
+    fn clear_interrupted_resets_flag() {
+        let mut def = ChatDefinition::new(
+            "chat".into(),
+            PathBuf::from("."),
+            model("openai/gpt-4"),
+            "sys".into(),
+        );
+        def.mark_interrupted();
+        def.clear_interrupted();
+        def.set_pending("hello", &model("openai/gpt-4"), "sys");
+
+        let (text, _, _) = def.pending.expect("pending must be set");
+        assert_eq!(text, "hello");
+        assert!(
+            !text.contains("interrupted"),
+            "prompt must not contain interrupt notice after clear_interrupted"
+        );
     }
 }
