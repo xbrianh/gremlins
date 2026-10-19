@@ -5,8 +5,8 @@
 //! ```
 
 pub use crate::builders::*;
-pub use crate::clients::client::ModelURI;
 pub use crate::definition::{GremlinDefinition, StaticDefinition};
+pub use crate::model_uri::ModelURI;
 pub use crate::schemas::bootstrap::Bootstrap;
 pub use crate::schemas::error::SchemaError;
 pub use crate::stage_spec::parallel::ErrorPolicy;
