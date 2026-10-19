@@ -118,7 +118,8 @@ impl LandscapeExplorer {
     /// `root` itself, 1 also scans one subdirectory level, and so on. Symlinks
     /// are not followed. Hidden and vendor directories, unrecognized files, and
     /// oversized files are skipped. Files with no recognizable items are
-    /// omitted.
+    /// returned with an empty `items` vector so spine detection can still see
+    /// that their parent directory contains files.
     ///
     /// When `cache_path` is `Some`, unchanged files (matching `mtime` and
     /// `size`) are served from the cache file at that path and the refreshed
@@ -153,12 +154,10 @@ impl LandscapeExplorer {
                 let fingerprint = file_fingerprint(path);
                 if let Some((mtime_ns, size)) = fingerprint {
                     if let Some(items) = cache.get(path, mtime_ns, size) {
-                        if !items.is_empty() {
-                            results.push(FileOutline {
-                                path: path.clone(),
-                                items,
-                            });
-                        }
+                        results.push(FileOutline {
+                            path: path.clone(),
+                            items,
+                        });
                         continue;
                     }
                 }
@@ -194,9 +193,7 @@ impl LandscapeExplorer {
                             cache.insert(&path, mtime_ns, size, items.clone());
                         }
                     }
-                    if !items.is_empty() {
-                        results.push(FileOutline { path, items });
-                    }
+                    results.push(FileOutline { path, items });
                 }
                 Err(_) => {
                     if let Some(ref mut cache) = cache {
@@ -537,7 +534,7 @@ fn render_key_parts(
     let parent = rel.parent().unwrap_or(Path::new(""));
     for component in parent.components() {
         let name = component.as_os_str().to_string_lossy().to_string();
-        current = current.join(&name);
+        current = current.join(component);
         if spine_map.is_skeletal(&current) {
             // Spine directories accumulated between the last skeletal
             // ancestor and this one are folded into this directory's
@@ -573,6 +570,27 @@ fn render_key_parts(
     Some(parts)
 }
 
+/// A formatted landscape block plus the number of files and items actually
+/// retained inside it.
+///
+/// Depth-limiting can drop whole files, so callers must use these counts
+/// rather than recomputing them from the unfiltered outline set.
+pub(crate) struct LandscapeBlock {
+    pub(crate) block: String,
+    pub(crate) file_count: usize,
+    pub(crate) item_count: usize,
+}
+
+impl LandscapeBlock {
+    pub(crate) fn empty() -> Self {
+        Self {
+            block: String::new(),
+            file_count: 0,
+            item_count: 0,
+        }
+    }
+}
+
 /// Format the landscape block with a given compressed-depth limit.
 ///
 /// Only files whose compressed depth ≤ `max_depth` are included. Spine
@@ -590,7 +608,7 @@ fn format_at_depth(
     has_outline_tool: bool,
     notice: Option<&str>,
     name_cap: Option<usize>,
-) -> String {
+) -> LandscapeBlock {
     let mut block = String::new();
     block.push_str("<!-- BEGIN LANDSCAPE BLOCK -->\n");
     block.push_str(
@@ -625,10 +643,16 @@ fn format_at_depth(
     // Sort by render key parts for tree-order output.
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
+    let mut file_count = 0usize;
+    let mut item_count = 0usize;
+
     // Render with tree grouping: track the current directory path.
     let mut dir_stack: Vec<&str> = Vec::new();
     for (parts, idx) in &entries {
         let outline = renderable[*idx];
+        file_count += 1;
+        item_count += outline.items.len();
+
         // Determine common prefix length with current dir_stack.
         let n_dirs = parts.len() - 1; // last element is filename
         let common = dir_stack
@@ -675,7 +699,11 @@ fn format_at_depth(
     }
 
     block.push_str("<!-- END LANDSCAPE BLOCK -->\n");
-    block
+    LandscapeBlock {
+        block,
+        file_count,
+        item_count,
+    }
 }
 
 /// Format the captured outlines as the structural landscape block injected
@@ -694,21 +722,21 @@ fn format_at_depth(
 /// achieved, the function returns [`LandscapeError::BudgetExceeded`].
 ///
 /// An empty landscape (no recognized files, no outlineable items, or no
-/// file with at least three items) formats to an empty string so callers can
-/// skip the block entirely.
+/// file with at least three items) formats to an empty block with zero counts
+/// so callers can skip the block entirely.
 pub(crate) fn format_landscape_block(
     outlines: &[FileOutline],
     root: &Path,
     max_bytes: usize,
     has_outline_tool: bool,
-) -> Result<String, LandscapeError> {
+) -> Result<LandscapeBlock, LandscapeError> {
     // Build spine map from ALL outlines (including those with <3 items).
     let spine_map = build_spine_map(outlines, root);
 
     // Filter to files with ≥3 items for rendering.
     let renderable: Vec<&FileOutline> = outlines.iter().filter(|o| o.items.len() >= 3).collect();
     if renderable.is_empty() {
-        return Ok(String::new());
+        return Ok(LandscapeBlock::empty());
     }
 
     // Compute compressed depth for each renderable file.
@@ -728,7 +756,7 @@ pub(crate) fn format_landscape_block(
         None,
         None,
     );
-    if full_block.len() <= max_bytes {
+    if full_block.block.len() <= max_bytes {
         return Ok(full_block);
     }
 
@@ -751,7 +779,7 @@ pub(crate) fn format_landscape_block(
         None,
     );
 
-    if best.len() > max_bytes {
+    if best.block.len() > max_bytes {
         // Even depth 0 with skeletonization doesn't fit.
         // Fall back to depth 0 with name truncation, water-filling
         // the largest per-name cap that fits the budget.
@@ -791,13 +819,13 @@ pub(crate) fn format_landscape_block(
         let mut cap_lo = floor;
         let mut cap_hi = max_name_len.max(floor);
         let mut cap_best = format_for_cap(cap_lo);
-        if cap_best.len() > max_bytes {
+        if cap_best.block.len() > max_bytes {
             return Err(LandscapeError::BudgetExceeded);
         }
         while cap_lo < cap_hi {
             let mid = cap_lo + (cap_hi - cap_lo).div_ceil(2);
             let candidate = format_for_cap(mid);
-            if candidate.len() <= max_bytes {
+            if candidate.block.len() <= max_bytes {
                 cap_lo = mid;
                 cap_best = candidate;
             } else {
@@ -818,7 +846,7 @@ pub(crate) fn format_landscape_block(
             Some(depth_notice),
             None,
         );
-        if candidate.len() <= max_bytes {
+        if candidate.block.len() <= max_bytes {
             lo = mid;
             best = candidate;
         } else {
@@ -857,7 +885,9 @@ mod tests {
     #[test]
     fn format_landscape_block_is_empty_without_outlines() {
         assert_eq!(
-            format_landscape_block(&[], Path::new("/repo"), usize::MAX, true).unwrap(),
+            format_landscape_block(&[], Path::new("/repo"), usize::MAX, true)
+                .unwrap()
+                .block,
             ""
         );
     }
@@ -875,7 +905,8 @@ mod tests {
                 usize::MAX,
                 true,
             )
-            .unwrap(),
+            .unwrap()
+            .block,
             ""
         );
     }
@@ -895,7 +926,9 @@ mod tests {
                 OutlineItem::new(IMPL, "Big", 3),
             ],
         };
-        let block = format_landscape_block(&[small, big], root, usize::MAX, true).unwrap();
+        let block = format_landscape_block(&[small, big], root, usize::MAX, true)
+            .unwrap()
+            .block;
         assert!(!block.contains("small.rs"));
         assert!(block.contains("big.rs:\n"));
     }
@@ -911,8 +944,9 @@ mod tests {
                 OutlineItem::new(HEADING, "Overview", 3),
             ],
         };
-        let block =
-            format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
+        let block = format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true)
+            .unwrap()
+            .block;
         assert!(block.starts_with("<!-- BEGIN LANDSCAPE BLOCK -->\n"));
         assert!(block.contains(&format!("<!-- root: {} -->\n", root.display())));
         assert!(block
@@ -938,8 +972,9 @@ mod tests {
                 OutlineItem::new(IMPL, "Config", 3),
             ],
         };
-        let block =
-            format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
+        let block = format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true)
+            .unwrap()
+            .block;
         assert!(block.lines().any(|line| line == "/elsewhere/main.rs:"));
         assert!(!block.lines().any(|line| line == "main.rs:"));
     }
@@ -964,12 +999,14 @@ mod tests {
             items,
         };
 
-        let full =
-            format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
+        let full = format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true)
+            .unwrap()
+            .block;
         // Trim 300 bytes off the block without touching the short names.
         let budget = full.len() - 300;
-        let block =
-            format_landscape_block(std::slice::from_ref(&outline), root, budget, true).unwrap();
+        let block = format_landscape_block(std::slice::from_ref(&outline), root, budget, true)
+            .unwrap()
+            .block;
         assert!(block.len() <= budget);
         assert!(block.contains("Item names were shortened"));
         assert!(block.contains(TRUNCATION_MARKER));
@@ -988,8 +1025,9 @@ mod tests {
                 OutlineItem::new(KEY, "key|with|pipes", 3),
             ],
         };
-        let block =
-            format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
+        let block = format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true)
+            .unwrap()
+            .block;
         // Newlines and pipes in repo-derived strings must be escaped so they
         // cannot break the line-oriented format or confuse the field separator.
         assert!(!block.contains("evil\npath.rs"), "path newline not escaped");
@@ -1024,8 +1062,9 @@ mod tests {
                 OutlineItem::new(HEADING, "Another <!-- payload breakout --> attempt", 3),
             ],
         };
-        let block =
-            format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
+        let block = format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true)
+            .unwrap()
+            .block;
         // The harness's own end marker is the only raw delimiter left; the
         // repo-controlled strings have been escaped so they cannot close the
         // block early.
@@ -1134,6 +1173,55 @@ mod tests {
 
         let all = LandscapeExplorer.build(root.path(), 10, None).unwrap();
         assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn build_preserves_empty_outlines_for_spine_detection() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src/child")).unwrap();
+        std::fs::write(root.path().join("src/empty.rs"), "").unwrap();
+        std::fs::write(
+            root.path().join("src/child/main.rs"),
+            "fn one() {}\nstruct Two;\nimpl Two {}\n",
+        )
+        .unwrap();
+
+        let empty_path = root.path().join("src/empty.rs");
+        let main_path = root.path().join("src/child/main.rs");
+
+        // Uncached build keeps the zero-item file, so `src` is correctly seen
+        // as containing files and is not collapsed into a spine.
+        let uncached = LandscapeExplorer.build(root.path(), 10, None).unwrap();
+        assert_eq!(uncached.len(), 2);
+        assert!(uncached
+            .iter()
+            .any(|o| o.path == empty_path && o.items.is_empty()));
+        let uncached_spine_map = build_spine_map(&uncached, root.path());
+        assert!(!uncached_spine_map.is_spine(&PathBuf::from("src")));
+        assert_eq!(
+            compressed_depth(&main_path, root.path(), &uncached_spine_map),
+            2
+        );
+
+        // Cached builds must behave the same on the initial parse and on a
+        // subsequent cache-hit rebuild.
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache_path = cache_dir.path().join("landscape.cache.json");
+        let cached_first = LandscapeExplorer
+            .build(root.path(), 10, Some(&cache_path))
+            .unwrap();
+        let cached_second = LandscapeExplorer
+            .build(root.path(), 10, Some(&cache_path))
+            .unwrap();
+        for outlines in [&cached_first, &cached_second] {
+            assert_eq!(outlines.len(), 2);
+            assert!(outlines
+                .iter()
+                .any(|o| o.path == empty_path && o.items.is_empty()));
+            let spine_map = build_spine_map(outlines, root.path());
+            assert!(!spine_map.is_spine(&PathBuf::from("src")));
+            assert_eq!(compressed_depth(&main_path, root.path(), &spine_map), 2);
+        }
     }
 
     #[test]
@@ -1538,6 +1626,42 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn render_key_parts_uses_original_component_for_spine_lookup() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // A non-UTF-8 directory component must still be joined with its raw
+        // bytes for spine-map lookups. The lossy display string (U+FFFD) does
+        // not match the map keys and would make every ancestor look skeletal.
+        let root = Path::new("/repo");
+        let mut path = root.to_path_buf();
+        path.push(OsStr::from_bytes(b"bad\xff"));
+        path.push("leaf");
+        path.push("file.rs");
+
+        let outline = FileOutline {
+            path: path.clone(),
+            items: vec![
+                OutlineItem::new(FN, "one", 1),
+                OutlineItem::new(STRUCT, "Two", 2),
+                OutlineItem::new(IMPL, "Two", 3),
+            ],
+        };
+        let spine_map = build_spine_map(std::slice::from_ref(&outline), root);
+
+        assert_eq!(compressed_depth(&path, root, &spine_map), 1);
+        let parts = render_key_parts(&path, root, &spine_map, 1).expect("file should be included");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[1], "file.rs");
+
+        let block =
+            format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
+        assert_eq!(block.file_count, 1);
+        assert!(block.block.contains("file.rs:"));
+    }
+
     // ── formatting budget tests ──
 
     #[test]
@@ -1569,8 +1693,9 @@ mod tests {
             "\n",
             "<!-- END LANDSCAPE BLOCK -->\n",
         );
-        let block =
-            format_landscape_block(std::slice::from_ref(&outline), root, 4096, true).unwrap();
+        let block = format_landscape_block(std::slice::from_ref(&outline), root, 4096, true)
+            .unwrap()
+            .block;
         assert_eq!(block, expected);
         assert!(!block.contains("shortened to fit"));
     }
@@ -1601,7 +1726,8 @@ mod tests {
             usize::MAX,
             true,
         )
-        .unwrap();
+        .unwrap()
+        .block;
         assert!(full.contains("top.rs"));
         assert!(full.contains("a.rs"));
         assert!(full.contains("b.rs"));
@@ -1616,13 +1742,61 @@ mod tests {
             Some(DEPTH_NOTICE_WITH_TOOL),
             None,
         );
-        let budget = depth1_block.len();
-        let block = format_landscape_block(&[d0, d1, d2], root, budget, true).unwrap();
+        let budget = depth1_block.block.len();
+        let block = format_landscape_block(&[d0, d1, d2], root, budget, true)
+            .unwrap()
+            .block;
         assert!(block.len() <= budget);
         assert!(block.contains("top.rs"));
         assert!(block.contains("a.rs"));
         assert!(!block.contains("b.rs"));
         assert!(block.contains("Some files were omitted"));
+    }
+
+    #[test]
+    fn format_landscape_block_reports_retained_counts() {
+        // The counts returned with the block must reflect the files and items
+        // actually rendered after depth-limiting, not the unfiltered inputs.
+        let root = Path::new("/repo");
+        let mk_file = |path: PathBuf, prefix: &str| -> FileOutline {
+            FileOutline {
+                path,
+                items: (1..=20)
+                    .map(|i| OutlineItem::new(FN, format!("{prefix}_{i:02}"), i))
+                    .collect(),
+            }
+        };
+        let d0 = mk_file(root.join("top.rs"), "top");
+        let d1 = mk_file(root.join("src/a.rs"), "a");
+        let d2 = mk_file(root.join("src/sub/b.rs"), "b");
+
+        let full = format_landscape_block(
+            &[d0.clone(), d1.clone(), d2.clone()],
+            root,
+            usize::MAX,
+            true,
+        )
+        .unwrap();
+        assert_eq!(full.file_count, 3);
+        assert_eq!(full.item_count, 60);
+
+        let spine_map = build_spine_map(&[d0.clone(), d1.clone(), d2.clone()], root);
+        let depth1 = format_at_depth(
+            &[&d0, &d1, &d2],
+            &spine_map,
+            root,
+            1,
+            true,
+            Some(DEPTH_NOTICE_WITH_TOOL),
+            None,
+        );
+        let limited =
+            format_landscape_block(&[d0, d1, d2], root, depth1.block.len(), true).unwrap();
+        assert_eq!(limited.file_count, 2);
+        assert_eq!(limited.item_count, 40);
+        assert!(limited.block.contains("top.rs"));
+        assert!(limited.block.contains("a.rs"));
+        assert!(!limited.block.contains("b.rs"));
     }
 
     #[test]
@@ -1646,11 +1820,13 @@ mod tests {
                 OutlineItem::new(IMPL, "AnotherExtremelyLongStructNameForTestingPurposes", 3),
             ],
         };
-        let full =
-            format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
+        let full = format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true)
+            .unwrap()
+            .block;
         let budget = full.len() - 40;
-        let block =
-            format_landscape_block(std::slice::from_ref(&outline), root, budget, true).unwrap();
+        let block = format_landscape_block(std::slice::from_ref(&outline), root, budget, true)
+            .unwrap()
+            .block;
         assert!(block.starts_with("<!-- BEGIN LANDSCAPE BLOCK -->\n"));
         assert!(block.ends_with("<!-- END LANDSCAPE BLOCK -->\n"));
         assert!(block.contains("Item names were shortened"));
@@ -1671,8 +1847,9 @@ mod tests {
                 OutlineItem::new(IMPL, long, 4),
             ],
         };
-        let block =
-            format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
+        let block = format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true)
+            .unwrap()
+            .block;
         assert!(!block.contains("shortened"));
         assert!(block.contains("  1|fn|new\n"));
         assert!(block.contains("  2|fn|fmt\n"));
@@ -1717,7 +1894,8 @@ mod tests {
             usize::MAX,
             true,
         )
-        .unwrap();
+        .unwrap()
+        .block;
         assert!(full.contains("root_file.rs"));
         assert!(full.contains("file1.rs"));
         assert!(full.contains("file2.rs"));
@@ -1734,8 +1912,10 @@ mod tests {
             Some(DEPTH_NOTICE_WITH_TOOL),
             None,
         );
-        let budget = depth1_block.len();
-        let block = format_landscape_block(&[depth0, depth1, depth2], root, budget, true).unwrap();
+        let budget = depth1_block.block.len();
+        let block = format_landscape_block(&[depth0, depth1, depth2], root, budget, true)
+            .unwrap()
+            .block;
         assert!(block.len() <= budget);
         assert!(block.contains("root_file.rs"));
         assert!(block.contains("file1.rs"));
@@ -1762,14 +1942,16 @@ mod tests {
                 OutlineItem::new(IMPL, long, 4),
             ],
         };
-        let full =
-            format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
+        let full = format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true)
+            .unwrap()
+            .block;
         // Trim enough to force truncation but not so much that even the floor
         // block can't fit. The two short names ("n", "f") can't shrink further;
         // the two long names must absorb all the reduction.
         let budget = full.len() - 20;
-        let block =
-            format_landscape_block(std::slice::from_ref(&outline), root, budget, true).unwrap();
+        let block = format_landscape_block(std::slice::from_ref(&outline), root, budget, true)
+            .unwrap()
+            .block;
         assert!(block.len() <= budget);
         assert!(
             block.contains("  1|fn|n\n"),
@@ -1812,8 +1994,9 @@ mod tests {
             ],
         };
 
-        let full =
-            format_landscape_block(&[d0.clone(), d1.clone()], root, usize::MAX, true).unwrap();
+        let full = format_landscape_block(&[d0.clone(), d1.clone()], root, usize::MAX, true)
+            .unwrap()
+            .block;
         assert!(full.contains("top.rs"));
         assert!(full.contains("deep.rs"));
 
@@ -1828,8 +2011,10 @@ mod tests {
             None,
         );
         // Use a budget a little below the depth-0 full-name block.
-        let budget = depth0_full.len() - 60;
-        let block = format_landscape_block(&[d0, d1], root, budget, true).unwrap();
+        let budget = depth0_full.block.len() - 60;
+        let block = format_landscape_block(&[d0, d1], root, budget, true)
+            .unwrap()
+            .block;
         assert!(block.len() <= budget);
         assert!(block.contains("top.rs"));
         assert!(!block.contains("deep.rs"), "deep file must be omitted");
