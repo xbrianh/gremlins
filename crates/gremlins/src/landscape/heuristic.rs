@@ -13,7 +13,6 @@ use super::{OutlineItem, CLASS, ENUM, FN, HEADING, IMPL, KEY, METHOD, MOD, STRUC
 pub(crate) fn scan(extension: &str, content: &str, collapse_tests: bool) -> Vec<OutlineItem> {
     match extension {
         "rs" => scan_rust(content, collapse_tests),
-        "md" | "markdown" => scan_markdown(content),
         "json" => scan_json_keys(content),
         "toml" | "ini" | "cfg" | "conf" => scan_config_sections(content),
         "py" | "pyi" => scan_python(content),
@@ -25,9 +24,7 @@ pub(crate) fn scan(extension: &str, content: &str, collapse_tests: bool) -> Vec<
 pub(crate) fn recognizes(extension: &str) -> bool {
     matches!(
         extension,
-        "rs" | "md"
-            | "markdown"
-            | "json"
+        "rs" | "json"
             | "toml"
             | "ini"
             | "cfg"
@@ -254,53 +251,6 @@ fn leading_identifier(rest: &str) -> Option<&str> {
         }
     }
     Some(&rest[..len])
-}
-
-fn scan_markdown(content: &str) -> Vec<OutlineItem> {
-    static HEADING_RE: OnceLock<Regex> = OnceLock::new();
-    let pattern = HEADING_RE.get_or_init(|| {
-        Regex::new(r"^(?P<hash>#{1,6})\s+(?P<name>.+?)\s*$").expect("valid markdown regex")
-    });
-
-    let mut items = Vec::new();
-    let mut in_fence = false;
-    let mut fence_char: Option<char> = None;
-    for (idx, line) in content.lines().enumerate() {
-        let trimmed = line.trim_start();
-        if in_fence {
-            if let Some(ch) = fence_char {
-                if fence_run_len(trimmed, ch) >= 3 {
-                    in_fence = false;
-                    fence_char = None;
-                }
-            }
-            // Headings (and the closing fence itself) inside fenced code are
-            // code, not document structure.
-            continue;
-        }
-        if let Some(ch) = fence_opening_char(trimmed) {
-            in_fence = true;
-            fence_char = Some(ch);
-            continue;
-        }
-        if let Some(caps) = pattern.captures(line) {
-            items.push(item(HEADING, &caps["name"], idx + 1));
-        }
-    }
-    items
-}
-
-/// Detect a CommonMark fenced-code opener: a run of three or more ``` or ~~~.
-fn fence_opening_char(trimmed: &str) -> Option<char> {
-    let ch = trimmed.chars().next()?;
-    if ch != '`' && ch != '~' {
-        return None;
-    }
-    (fence_run_len(trimmed, ch) >= 3).then_some(ch)
-}
-
-fn fence_run_len(trimmed: &str, ch: char) -> usize {
-    trimmed.chars().take_while(|c| *c == ch).count()
 }
 
 fn scan_json_keys(content: &str) -> Vec<OutlineItem> {
@@ -564,35 +514,6 @@ impl<F: Fn() -> u8> StateBlob for T {}
         let items = scan("rs", src, false);
         let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(names, vec!["real"]);
-    }
-
-    #[test]
-    fn markdown_scanner_finds_headings() {
-        let items = scan("md", "# Title\nsome text\n## Subtitle\n", false);
-        assert_eq!(items.len(), 2);
-        assert!(items.iter().all(|i| i.kind == HEADING));
-        assert_eq!(items[0].name, "Title");
-        assert_eq!(items[0].line, 1);
-        assert_eq!(items[1].name, "Subtitle");
-        assert_eq!(items[1].line, 3);
-    }
-
-    #[test]
-    fn markdown_scanner_skips_fenced_code_block_headings() {
-        let src = "\
-# A
-```rust
-# inside code
-```
-## B
-~~~python
-# also inside code
-~~~
-### C
-";
-        let items = scan("md", src, false);
-        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
-        assert_eq!(names, vec!["A", "B", "C"]);
     }
 
     #[test]

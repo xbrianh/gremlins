@@ -66,10 +66,15 @@ impl OutlineItem {
 }
 
 /// A file path together with the outline items found inside it.
+///
+/// When `skipped` is true the file has an unrecognized extension — it was
+/// intentionally not parsed, but its existence is still surfaced so agents
+/// can see it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileOutline {
     pub path: PathBuf,
     pub items: Vec<OutlineItem>,
+    pub skipped: bool,
 }
 
 /// Concrete outliner used by agent tooling.
@@ -98,12 +103,13 @@ impl LandscapeExplorer {
     }
 
     /// Walk a directory tree and collect outlines for every recognized file.
+    /// Files with unrecognized extensions are included as skipped entries
+    /// (path but no items) so agents can see they exist.
     ///
     /// `depth_limit` counts nested directory levels: 0 only scans files in
     /// `root` itself, 1 also scans one subdirectory level, and so on. Symlinks
-    /// are not followed. Hidden and vendor directories, unrecognized files, and
-    /// oversized files are skipped. Files with no recognizable items are
-    /// omitted.
+    /// are not followed. Hidden and vendor directories and oversized files are
+    /// skipped. Files with no recognizable items are omitted.
     ///
     /// When `cache_path` is `Some`, unchanged files (matching `mtime` and
     /// `size`) are served from the cache file at that path and the refreshed
@@ -136,12 +142,15 @@ impl LandscapeExplorer {
             if let Some(ref mut cache) = cache {
                 cache.mark_visited(path);
                 let fingerprint = file_fingerprint(path);
+                let ext = path_extension(path);
+                let recognized = heuristic::recognizes(&ext);
                 if let Some((mtime_ns, size)) = fingerprint {
                     if let Some(items) = cache.get(path, mtime_ns, size) {
-                        if !items.is_empty() {
+                        if !items.is_empty() || !recognized {
                             results.push(FileOutline {
                                 path: path.clone(),
                                 items,
+                                skipped: !recognized,
                             });
                         }
                         continue;
@@ -169,18 +178,25 @@ impl LandscapeExplorer {
 
         // ── Phase 4: process results and update cache ──
         for (path, fingerprint, result) in fresh {
+            let extension = path_extension(&path);
+            let recognized = heuristic::recognizes(&extension);
             match result {
                 Ok(items) => {
                     // Cache every successful parse, even one with no items,
                     // so an unchanged empty file is not re-parsed on the
-                    // next build.
+                    // next build. Skipped files (unrecognized extension)
+                    // are also cached with empty items.
                     if let Some(ref mut cache) = cache {
                         if let Some((mtime_ns, size)) = fingerprint {
                             cache.insert(&path, mtime_ns, size, items.clone());
                         }
                     }
-                    if !items.is_empty() {
-                        results.push(FileOutline { path, items });
+                    if !items.is_empty() || !recognized {
+                        results.push(FileOutline {
+                            path,
+                            items,
+                            skipped: !recognized,
+                        });
                     }
                 }
                 Err(_) => {
@@ -268,12 +284,16 @@ fn collect_paths_recursive(
             }
             collect_paths_recursive(&path, depth + 1, depth_limit, canonical_cache, paths)?;
         } else if metadata.is_file() {
-            if !is_outlineable_file(&path) || metadata.len() > MAX_OUTLINE_BYTES {
+            if metadata.len() > MAX_OUTLINE_BYTES {
                 continue;
             }
             if canonical_cache.is_some_and(|canonical| same_file(canonical, &path)) {
                 continue;
             }
+            // Collect any regular file under the size limit — recognized or
+            // not. Recognized files are parsed for structure; unrecognized
+            // ones are surfaced as skipped entries so agents can see they
+            // exist.
             paths.push(path);
         }
     }
@@ -285,10 +305,6 @@ fn path_extension(path: &Path) -> String {
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase())
         .unwrap_or_default()
-}
-
-fn is_outlineable_file(path: &Path) -> bool {
-    heuristic::recognizes(&path_extension(path))
 }
 
 fn should_skip_dir(path: &Path) -> bool {
@@ -419,15 +435,17 @@ enum LandscapeBlockKind {
 /// Paths under `root` are emitted relative to it (with `root` itself named in
 /// a preamble comment); anything outside `root` keeps its absolute path.
 /// Files with fewer than three outline items are skipped: they carry too
-/// little structural signal for the per-file overhead.
+/// little structural signal for the per-file overhead. Skipped files (files
+/// with unrecognized extensions) always get a path header regardless of item
+/// count.
 ///
 /// When the formatted block exceeds `max_bytes`, per-item name truncation is
 /// applied uniformly. If the budget cannot be achieved even after truncating
 /// every name to its floor, the function returns
 /// [`LandscapeError::BudgetExceeded`].
 ///
-/// An empty landscape (no recognized files, no outlineable items, or no
-/// file with at least three items) formats to an empty string so callers can
+/// An empty landscape (no recognized files, no outlineable items, and no
+/// skipped files) formats to an empty string so callers can
 /// skip the block entirely.
 pub(crate) fn format_landscape_block(
     outlines: &[FileOutline],
@@ -465,7 +483,7 @@ fn format_landscape_block_with_kind(
 ) -> Result<String, LandscapeError> {
     let outlines: Vec<&FileOutline> = outlines
         .iter()
-        .filter(|outline| outline.items.len() >= 3)
+        .filter(|outline| outline.skipped || outline.items.len() >= 3)
         .collect();
     if outlines.is_empty() {
         return Ok(String::new());
@@ -639,6 +657,7 @@ mod tests {
         let outline = FileOutline {
             path: PathBuf::from("src/main.rs"),
             items: Vec::new(),
+            skipped: false,
         };
         assert_eq!(
             format_landscape_block(
@@ -658,6 +677,7 @@ mod tests {
         let small = FileOutline {
             path: root.join("small.rs"),
             items: vec![OutlineItem::new(FN, "small", 1)],
+            skipped: false,
         };
         let big = FileOutline {
             path: root.join("big.rs"),
@@ -666,6 +686,7 @@ mod tests {
                 OutlineItem::new(STRUCT, "Big", 2),
                 OutlineItem::new(IMPL, "Big", 3),
             ],
+            skipped: false,
         };
         let block = format_landscape_block(&[small, big], root, usize::MAX, true).unwrap();
         assert!(!block.contains("small.rs"));
@@ -682,6 +703,7 @@ mod tests {
                 OutlineItem::new(STRUCT, "Config", 45),
                 OutlineItem::new(HEADING, "Overview", 3),
             ],
+            skipped: false,
         };
         let block =
             format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
@@ -707,6 +729,7 @@ mod tests {
                 OutlineItem::new(STRUCT, "Config", 2),
                 OutlineItem::new(IMPL, "Config", 3),
             ],
+            skipped: false,
         };
         let block =
             format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
@@ -732,6 +755,7 @@ mod tests {
         let outline = FileOutline {
             path: root.join("lib.rs"),
             items,
+            skipped: false,
         };
 
         let full =
@@ -757,6 +781,7 @@ mod tests {
                 OutlineItem::new(HEADING, "line1\nline2", 2),
                 OutlineItem::new(KEY, "key|with|pipes", 3),
             ],
+            skipped: false,
         };
         let block =
             format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
@@ -793,6 +818,7 @@ mod tests {
                 OutlineItem::new(HEADING, "Ordinary heading", 2),
                 OutlineItem::new(HEADING, "Another <!-- payload breakout --> attempt", 3),
             ],
+            skipped: false,
         };
         let block =
             format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
@@ -818,6 +844,7 @@ mod tests {
                 OutlineItem::new(STRUCT, "Config", 2),
                 OutlineItem::new(IMPL, "Config", 3),
             ],
+            skipped: false,
         };
         let block =
             format_landscape_tool_block(std::slice::from_ref(&outline), root, usize::MAX).unwrap();
@@ -874,13 +901,12 @@ mod tests {
     }
 
     #[test]
-    fn outline_markdown_returns_heading_items() {
+    fn outline_markdown_is_unknown_extension() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
         std::fs::write(&path, "# One\n## Two\n").unwrap();
         let items = outline_items(&LandscapeExplorer, &path, false);
-        assert_eq!(items.len(), 2);
-        assert!(items.iter().all(|i| i.kind == HEADING));
+        assert!(items.is_empty());
     }
 
     #[test]
@@ -915,6 +941,7 @@ mod tests {
         std::fs::create_dir_all(root.path().join("a/b")).unwrap();
         std::fs::write(root.path().join("top.rs"), "fn top() {}\n").unwrap();
         std::fs::write(root.path().join("a/mid.rs"), "fn mid() {}\n").unwrap();
+        // .md is no longer recognized; deep.md appears as a skipped entry.
         std::fs::write(root.path().join("a/b/deep.md"), "# Deep\n").unwrap();
 
         let depth0 = LandscapeExplorer.build(root.path(), 0, None).unwrap();
@@ -927,8 +954,15 @@ mod tests {
         assert!(paths.contains(&root.path().join("a/mid.rs").as_path()));
         assert!(!paths.contains(&root.path().join("a/b/deep.md").as_path()));
 
+        // deep.md is now a skipped entry (unrecognized extension) with empty items.
         let all = LandscapeExplorer.build(root.path(), 10, None).unwrap();
         assert_eq!(all.len(), 3);
+        let deep = all
+            .iter()
+            .find(|f| f.path == root.path().join("a/b/deep.md"))
+            .unwrap();
+        assert!(deep.skipped);
+        assert!(deep.items.is_empty());
     }
 
     #[test]
@@ -939,11 +973,16 @@ mod tests {
         std::fs::write(root.path().join("keep.rs"), "fn keep() {}\n").unwrap();
         std::fs::write(root.path().join("vendor/skip.rs"), "fn skip() {}\n").unwrap();
         std::fs::write(root.path().join(".git/config.rs"), "fn skip() {}\n").unwrap();
+        // notes.txt is now collected as a skipped entry (unrecognized extension).
         std::fs::write(root.path().join("notes.txt"), "fn skip() {}\n").unwrap();
 
         let all = LandscapeExplorer.build(root.path(), 10, None).unwrap();
-        assert_eq!(all.len(), 1);
+        // keep.rs + notes.txt (skipped)
+        assert_eq!(all.len(), 2);
         assert_eq!(all[0].path, root.path().join("keep.rs"));
+        assert!(!all[0].skipped);
+        assert_eq!(all[1].path, root.path().join("notes.txt"));
+        assert!(all[1].skipped);
     }
 
     #[test]
@@ -957,6 +996,7 @@ mod tests {
     fn build_with_and_without_cache_produce_identical_results() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("a.rs"), "fn a() {}\n").unwrap();
+        // .md is no longer recognized — b.md appears as a skipped entry.
         std::fs::write(root.path().join("b.md"), "# B\n").unwrap();
 
         let uncached = LandscapeExplorer.build(root.path(), 10, None).unwrap();
@@ -1146,6 +1186,7 @@ mod tests {
                 OutlineItem::new(STRUCT, "Config", 2),
                 OutlineItem::new(IMPL, "Config", 3),
             ],
+            skipped: false,
         };
         let expected = concat!(
             "<!-- BEGIN LANDSCAPE BLOCK -->\n",
@@ -1188,6 +1229,7 @@ mod tests {
                 ),
                 OutlineItem::new(IMPL, "AnotherExtremelyLongStructNameForTestingPurposes", 3),
             ],
+            skipped: false,
         };
         let full =
             format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
@@ -1218,6 +1260,7 @@ mod tests {
                 OutlineItem::new(STRUCT, long, 3),
                 OutlineItem::new(IMPL, long, 4),
             ],
+            skipped: false,
         };
         // Budget well above the full block: no truncation needed,
         // short names survive byte-identical.
@@ -1244,6 +1287,7 @@ mod tests {
                 OutlineItem::new(STRUCT, long, 3),
                 OutlineItem::new(IMPL, long, 4),
             ],
+            skipped: false,
         };
         let full =
             format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
@@ -1278,6 +1322,7 @@ mod tests {
                 OutlineItem::new(STRUCT, "long_name_two", 2),
                 OutlineItem::new(IMPL, "long_name_three", 3),
             ],
+            skipped: false,
         };
         // The fixed overhead is > 200 bytes, so a 50-byte budget is impossible.
         let result = format_landscape_block(std::slice::from_ref(&outline), root, 50, true);
