@@ -100,9 +100,9 @@ pub(crate) async fn landscape_block(gremlin: &Gremlin, has_landscape_tool: bool)
 /// other failure is logged (daemon + `log_tx`) and also degrades to an empty
 /// snapshot.
 ///
-/// `file_count`/`item_count` are computed from all files that enter
-/// the formatted block, matching what the agent actually sees.
-/// A file with zero items counts as one file with zero items.
+/// `file_count`/`item_count` are computed from the outlines that enter
+/// the formatted block, excluding items that the formatter suppresses
+/// (e.g., markdown headings). The log line matches what the agent sees.
 async fn build_landscape_snapshot(
     cwd: PathBuf,
     cache_path: Option<PathBuf>,
@@ -141,7 +141,7 @@ async fn build_landscape_snapshot(
     ) {
         Ok(block) if !block.is_empty() => {
             let file_count = outlines.len();
-            let item_count = outlines.iter().map(|o| o.items.len()).sum();
+            let item_count = crate::landscape::rendered_item_count(&outlines);
             (block, file_count, item_count)
         }
         Ok(_) => (String::new(), 0, 0),
@@ -277,6 +277,43 @@ mod tests {
         assert!(snapshot.block.contains("thin.rs:"));
         assert_eq!(snapshot.file_count, 1);
         assert_eq!(snapshot.item_count, 1);
+    }
+
+    #[tokio::test]
+    async fn markdown_items_are_excluded_from_item_count() {
+        // A mixture of a heading-heavy README and a code file.
+        // The block must contain the README filename but no heading lines;
+        // item_count must exclude markdown headings that the formatter
+        // suppresses, counting only code-file items.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("README.md"),
+            "# Overview\n# Install\n# Usage\n# License\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "fn main() {}\nstruct Config {}\n",
+        )
+        .unwrap();
+
+        let snapshot = build_landscape_snapshot(dir.path().to_path_buf(), None, None, true).await;
+        assert!(!snapshot.block.is_empty());
+        assert!(
+            snapshot.block.contains("README.md:\n"),
+            "READMe.md must appear in block"
+        );
+        assert!(
+            !snapshot.block.lines().any(|line| line.contains("|h|")),
+            "markdown headings must be suppressed"
+        );
+        assert!(
+            snapshot.block.contains("lib.rs:\n"),
+            "lib.rs must appear in block"
+        );
+        assert_eq!(snapshot.file_count, 2);
+        // Only the two .rs items count; the four markdown headings are excluded.
+        assert_eq!(snapshot.item_count, 2);
     }
 
     #[tokio::test]

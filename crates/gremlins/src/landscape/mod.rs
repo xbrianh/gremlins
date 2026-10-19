@@ -40,7 +40,7 @@ const TRUNCATION_NOTICE_NO_TOOL: &str =
 /// Extensions whose items are never emitted in landscape blocks.
 /// These files always render as filename-only entries so heading text
 /// never consumes the size budget.
-const NO_SUMMARIZE_EXTS: &[&str] = &["md"];
+const NO_SUMMARIZE_EXTS: &[&str] = &["md", "markdown"];
 
 const MAX_OUTLINE_BYTES: u64 = 1024 * 1024;
 const SKIP_DIR_NAMES: &[&str] = &[
@@ -107,8 +107,8 @@ impl LandscapeExplorer {
     /// `depth_limit` counts nested directory levels: 0 only scans files in
     /// `root` itself, 1 also scans one subdirectory level, and so on. Symlinks
     /// are not followed. Hidden and vendor directories, unrecognized files, and
-    /// oversized files are skipped. Files with no recognizable items are
-    /// omitted.
+    /// oversized files are skipped. Every recognized file is included, even
+    /// those with no outline items; they render as filename-only entries.
     ///
     /// When `cache_path` is `Some`, unchanged files (matching `mtime` and
     /// `size`) are served from the cache file at that path and the refreshed
@@ -421,17 +421,17 @@ enum LandscapeBlockKind {
 ///
 /// Paths under `root` are emitted relative to it (with `root` itself named in
 /// a preamble comment); anything outside `root` keeps its absolute path.
-/// Files with fewer than three outline items are skipped: they carry too
-/// little structural signal for the per-file overhead.
+/// Every recognized file appears — thin files with 1–2 items render their
+/// items, empty files render as filename-only, and markdown headings are
+/// always suppressed.
 ///
 /// When the formatted block exceeds `max_bytes`, per-item name truncation is
 /// applied uniformly. If the budget cannot be achieved even after truncating
 /// every name to its floor, the function returns
 /// [`LandscapeError::BudgetExceeded`].
 ///
-/// An empty landscape (no recognized files, no outlineable items, or no
-/// file with at least three items) formats to an empty string so callers can
-/// skip the block entirely.
+/// An empty landscape (no recognized files) formats to an empty string so
+/// callers can skip the block entirely.
 pub(crate) fn format_landscape_block(
     outlines: &[FileOutline],
     root: &Path,
@@ -446,7 +446,16 @@ pub(crate) fn format_landscape_block(
     )
 }
 
-/// Format a landscape block returned by the `Landscape` tool.
+/// Count the outline items that would actually be rendered in a landscape
+/// block: excludes items from files whose extension is in
+/// [`NO_SUMMARIZE_EXTS`] (markdown headings are suppressed at format time).
+pub(crate) fn rendered_item_count(outlines: &[FileOutline]) -> usize {
+    outlines
+        .iter()
+        .filter(|o| !NO_SUMMARIZE_EXTS.contains(&path_extension(&o.path).as_str()))
+        .map(|o| o.items.len())
+        .sum()
+}
 ///
 /// This is the same format as [`format_landscape_block`] except the preamble
 /// reflects an on-demand capture instead of the stage-start snapshot. The
@@ -466,7 +475,6 @@ fn format_landscape_block_with_kind(
     max_bytes: usize,
     kind: LandscapeBlockKind,
 ) -> Result<String, LandscapeError> {
-    let outlines: Vec<&FileOutline> = outlines.iter().collect();
     if outlines.is_empty() {
         return Ok(String::new());
     }
@@ -527,7 +535,7 @@ fn format_landscape_block_with_kind(
             block.push_str(notice);
         }
         block.push('\n');
-        for outline in &outlines {
+        for outline in outlines {
             let raw_path = match outline.path.strip_prefix(root) {
                 Ok(relative) if !relative.as_os_str().is_empty() => relative.display().to_string(),
                 _ => outline.path.display().to_string(),
@@ -535,8 +543,7 @@ fn format_landscape_block_with_kind(
             let path = escape_landscape_delimiters(&raw_path);
             block.push_str(&format!("{path}:\n"));
             let ext = path_extension(&outline.path);
-            let suppress_items =
-                NO_SUMMARIZE_EXTS.contains(&ext.as_str()) || outline.items.is_empty();
+            let suppress_items = NO_SUMMARIZE_EXTS.contains(&ext.as_str());
             if !suppress_items {
                 for item in &outline.items {
                     let name = escape_landscape_delimiters(&name_fn(&item.name));
@@ -1350,5 +1357,48 @@ mod tests {
         assert!(block.contains("thin.rs:\n"));
         assert!(block.contains("1|fn|only_one_fn\n"));
         assert!(block.contains("3|struct|OnlyOneStruct\n"));
+    }
+
+    #[test]
+    fn format_landscape_block_suppresses_markdown_extension_items() {
+        // A .markdown file must be treated the same as .md.
+        let root = Path::new("/repo");
+        let doc = FileOutline {
+            path: root.join("README.markdown"),
+            items: vec![
+                OutlineItem::new(HEADING, "Overview", 1),
+                OutlineItem::new(HEADING, "Details", 3),
+            ],
+        };
+        let block =
+            format_landscape_block(std::slice::from_ref(&doc), root, usize::MAX, true).unwrap();
+        assert!(
+            !block.lines().any(|line| line.contains('|')),
+            ".markdown items must be suppressed"
+        );
+    }
+
+    #[test]
+    fn rendered_item_count_excludes_suppressed_extensions() {
+        let root = Path::new("/repo");
+        let outlines = vec![
+            FileOutline {
+                path: root.join("lib.rs"),
+                items: vec![OutlineItem::new(FN, "main", 1)],
+            },
+            FileOutline {
+                path: root.join("README.md"),
+                items: vec![
+                    OutlineItem::new(HEADING, "H1", 1),
+                    OutlineItem::new(HEADING, "H2", 2),
+                ],
+            },
+        ];
+        assert_eq!(rendered_item_count(&outlines), 1);
+    }
+
+    #[test]
+    fn rendered_item_count_empty_list_is_zero() {
+        assert_eq!(rendered_item_count(&[]), 0);
     }
 }
