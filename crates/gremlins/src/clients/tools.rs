@@ -1316,7 +1316,7 @@ fn outline_file_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &
             return err;
         }
     }
-    match LandscapeExplorer.outline_file(&path) {
+    match LandscapeExplorer.outline_file(&path, false) {
         Ok(items) => render_outline(&items),
         Err(LandscapeError::Utf8(e)) => format!("Error: file is not valid UTF-8: {e}"),
         Err(LandscapeError::Read(e)) => format!("Error: {e}"),
@@ -2635,7 +2635,7 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
         },
         ToolDefinition {
             name: "OutlineFile".into(),
-            description: "Show the structural outline of a single file without reading the body. Returns one item per line with its 1-based line number, kind, and name. Kinds include fn, struct, impl, trait, enum, mod, class, method, heading, and key. Unknown file extensions yield an empty outline. Paths outside the sandbox are rejected.".into(),
+            description: "Show the structural outline of a single file without reading the body. Returns one item per line with its 1-based line number, kind, and name. Kinds include fn, struct, impl, trait, enum, mod, class, method, heading, and key. Test functions inside `#[cfg(test)]` modules are shown individually. Unknown file extensions yield an empty outline. Paths outside the sandbox are rejected.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

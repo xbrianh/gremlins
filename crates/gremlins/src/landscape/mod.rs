@@ -82,7 +82,11 @@ pub struct LandscapeExplorer;
 impl LandscapeExplorer {
     /// Outline a single file. Unknown extensions yield an empty outline, not an
     /// error. Non-UTF-8 files yield [`LandscapeError::Utf8`].
-    pub fn outline_file(&self, path: &Path) -> Result<Vec<OutlineItem>, LandscapeError> {
+    pub fn outline_file(
+        &self,
+        path: &Path,
+        collapse_tests: bool,
+    ) -> Result<Vec<OutlineItem>, LandscapeError> {
         let extension = path_extension(path);
         if !heuristic::recognizes(&extension) {
             return Ok(Vec::new());
@@ -90,7 +94,7 @@ impl LandscapeExplorer {
 
         let bytes = std::fs::read(path)?;
         let content = std::str::from_utf8(&bytes)?;
-        Ok(heuristic::scan(&extension, content))
+        Ok(heuristic::scan(&extension, content, collapse_tests))
     }
 
     /// Walk a directory tree and collect outlines for every recognized file.
@@ -158,7 +162,7 @@ impl LandscapeExplorer {
         let fresh: Vec<FreshEntry> = misses
             .into_par_iter()
             .map(|(path, fingerprint)| {
-                let result = self.outline_file(&path);
+                let result = self.outline_file(&path, true);
                 (path, fingerprint, result)
             })
             .collect();
@@ -553,8 +557,12 @@ fn kind_abbrev(kind: &str) -> &str {
 mod tests {
     use super::*;
 
-    fn outline_items(explorer: &LandscapeExplorer, path: &Path) -> Vec<OutlineItem> {
-        explorer.outline_file(path).unwrap()
+    fn outline_items(
+        explorer: &LandscapeExplorer,
+        path: &Path,
+        collapse_tests: bool,
+    ) -> Vec<OutlineItem> {
+        explorer.outline_file(path, collapse_tests).unwrap()
     }
 
     #[test]
@@ -774,7 +782,7 @@ mod tests {
             "fn main() {}\nstruct Foo;\nimpl Foo {}\ntrait Shape {}\nmod inner;\npub enum Color {}\n",
         )
         .unwrap();
-        let items = outline_items(&LandscapeExplorer, &path);
+        let items = outline_items(&LandscapeExplorer, &path, false);
         let kinds: Vec<&str> = items.iter().map(|i| i.kind).collect();
         assert_eq!(kinds, vec![FN, STRUCT, IMPL, TRAIT, MOD, ENUM]);
     }
@@ -784,7 +792,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
         std::fs::write(&path, "# One\n## Two\n").unwrap();
-        let items = outline_items(&LandscapeExplorer, &path);
+        let items = outline_items(&LandscapeExplorer, &path, false);
         assert_eq!(items.len(), 2);
         assert!(items.iter().all(|i| i.kind == HEADING));
     }
@@ -795,14 +803,14 @@ mod tests {
         let path = dir.path().join("missing.txt");
         // The file does not exist, but the unknown extension is rejected before
         // the read is attempted, so the call succeeds with an empty outline.
-        let items = outline_items(&LandscapeExplorer, &path);
+        let items = outline_items(&LandscapeExplorer, &path, false);
         assert!(items.is_empty());
     }
 
     #[test]
     fn outline_missing_file_is_read_error() {
         let path = PathBuf::from("/definitely/not/present/outline-test.rs");
-        let result = LandscapeExplorer.outline_file(&path);
+        let result = LandscapeExplorer.outline_file(&path, false);
         assert!(matches!(result, Err(LandscapeError::Read(_))));
     }
 
@@ -811,7 +819,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("binary.rs");
         std::fs::write(&path, [0xff, 0xfe, 0x00, 0x01]).unwrap();
-        let result = LandscapeExplorer.outline_file(&path);
+        let result = LandscapeExplorer.outline_file(&path, false);
         assert!(matches!(result, Err(LandscapeError::Utf8(_))));
     }
 
@@ -1188,5 +1196,22 @@ mod tests {
         // The fixed overhead is > 200 bytes, so a 50-byte budget is impossible.
         let result = format_landscape_block(std::slice::from_ref(&outline), root, 50, true);
         assert!(matches!(result, Err(LandscapeError::BudgetExceeded)));
+    }
+
+    #[test]
+    fn build_collapses_test_modules_in_landscape_path() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("lib.rs"),
+            "#[cfg(test)]\nmod tests {\n    fn test_a() {}\n    fn test_b() {}\n}\nfn real() {}\n",
+        )
+        .unwrap();
+        let outlines = LandscapeExplorer.build(root.path(), 10, None).unwrap();
+        assert_eq!(outlines.len(), 1);
+        let items = &outlines[0].items;
+        let kinds: Vec<&str> = items.iter().map(|i| i.kind).collect();
+        assert_eq!(kinds, vec![MOD, FN]);
+        assert_eq!(items[0].name, "tests");
+        assert_eq!(items[1].name, "real");
     }
 }
