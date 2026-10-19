@@ -2143,7 +2143,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // All tools participate uniformly in the transcript.
                         live_area.commit_tool_result(&id, &call);
                     }
-                    ChatEvent::TurnComplete { text, tool_calls, stats, turn, .. } => {
+                    ChatEvent::TurnComplete { text, tool_calls, stats, loop_turn, .. } => {
                         log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);
                         live_area.clear_tool_output();
                         // `text` is the model's full response for the just-completed
@@ -2162,7 +2162,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // compact per-turn token/cache summary prefixed with the
                         // agent-loop turn number so the operator can see which
                         // iteration the stats belong to.
-                        let turn_num = turn.and_then(|t| t.parse::<usize>().ok()).unwrap_or(0);
+                        let turn_num = loop_turn.unwrap_or(0);
                         live_area.set_reasoning_title(&stats_title(turn_num, stats.as_ref()));
                     }
                     ChatEvent::Done { text, summary, .. } => {

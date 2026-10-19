@@ -43,7 +43,13 @@ pub enum ChatEvent {
         /// the TUI stats title, which reports only the per-turn delta.
         #[allow(dead_code)]
         total: Option<Value>,
+        /// Chat request ID for stale-event filtering. Not the agent-loop
+        /// iteration — use [`loop_turn`] for the loop counter.
         turn: Option<String>,
+        /// Agent-loop iteration counter (1-based within the current
+        /// prompt). Used to render the turn-number prefix in the
+        /// reasoning-stream stats title.
+        loop_turn: Option<usize>,
     },
     Done {
         text: String,
@@ -151,6 +157,10 @@ pub(crate) fn parse_chat_event(value: &Value) -> Option<ChatEvent> {
             stats: value.get("stats").filter(|v| !v.is_null()).cloned(),
             total: value.get("total").filter(|v| !v.is_null()).cloned(),
             turn,
+            loop_turn: value
+                .get("loop_turn")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize),
         }),
         Some("done") => Some(ChatEvent::Done {
             text: value
@@ -285,6 +295,52 @@ mod tests {
                 assert_eq!(turn.as_deref(), Some("8"));
             }
             other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_turn_complete_distinguishes_request_id_from_loop_turn() {
+        // The `turn` field is the chat request ID (for stale-event
+        // filtering). It stays constant across iterations of a single
+        // prompt. The `loop_turn` field is the agent-loop iteration
+        // counter and increments on every agent iteration.
+        let value = serde_json::json!({
+            "type": "turn_complete",
+            "turn": "5",
+            "loop_turn": 3,
+            "text": "iteration three",
+            "tool_calls": [],
+        });
+        match parse_chat_event(&value) {
+            Some(ChatEvent::TurnComplete {
+                turn,
+                loop_turn,
+                text,
+                ..
+            }) => {
+                assert_eq!(turn.as_deref(), Some("5"), "request ID");
+                assert_eq!(loop_turn, Some(3), "loop iteration");
+                assert_eq!(text, "iteration three");
+            }
+            other => panic!("expected TurnComplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_turn_complete_missing_loop_turn_is_none() {
+        // When `loop_turn` is absent (e.g. from an older daemon), the
+        // field is `None` and the consumer falls back to 0.
+        let value = serde_json::json!({
+            "type": "turn_complete",
+            "turn": "1",
+            "text": "ok",
+            "tool_calls": [],
+        });
+        match parse_chat_event(&value) {
+            Some(ChatEvent::TurnComplete { loop_turn, .. }) => {
+                assert_eq!(loop_turn, None);
+            }
+            other => panic!("expected TurnComplete, got {other:?}"),
         }
     }
 }

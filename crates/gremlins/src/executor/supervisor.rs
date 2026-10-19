@@ -3383,7 +3383,7 @@ async fn run_chat_turn(
                     }
                     Some(InteractiveEvent::TurnComplete { turn: tc_turn, text, tool_calls, stats, totals }) => {
                         let total = totals.as_ref().map(|totals| add_usage_stats(&baseline_usage, totals));
-                        let payload = chat_payload(&turn, serde_json::json!({"type": "turn_complete", "turn": tc_turn, "text": text, "tool_calls": tool_calls, "stats": stats, "total": total}));
+                        let payload = chat_payload(&turn, serde_json::json!({"type": "turn_complete", "loop_turn": tc_turn, "text": text, "tool_calls": tool_calls, "stats": stats, "total": total}));
                         if writer.write_json_line(&payload).await.is_err() {
                             break;
                         }
