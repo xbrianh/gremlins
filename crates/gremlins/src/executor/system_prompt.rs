@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state::FileSystemStateStore;
-use crate::landscape::{LandscapeBlock, LandscapeError, LandscapeExplorer};
+use crate::landscape::{LandscapeError, LandscapeExplorer};
 
 const LANDSCAPE_CACHE_FILE: &str = "landscape.cache.json";
 
@@ -62,7 +62,7 @@ impl SystemPrompt {
 /// failure is logged (to both the daemon log and the gremlin's `log_tx` so the
 /// operator sees it in `gremlins log`) before degrading the same way.
 ///
-/// `has_outline_tool` controls whether the block advertises the `OutlineFile`
+/// `has_outline_tool` controls whether the block advertises the `Landscape`
 /// tool; stages/backends without that tool must not be told to use it.
 ///
 /// The synchronous directory walk runs on a blocking thread pool so the tokio
@@ -134,13 +134,22 @@ async fn build_landscape_snapshot(
 
     let budget: u64 = crate::config::max_landscape_bytes();
     let max_bytes: usize = usize::try_from(budget).unwrap_or(usize::MAX);
-    let landscape = match crate::landscape::format_landscape_block(
+    let (block, file_count, item_count) = match crate::landscape::format_landscape_block(
         &outlines,
         &root,
         max_bytes,
         has_outline_tool,
     ) {
-        Ok(block) => block,
+        Ok(block) if !block.is_empty() => {
+            let file_count = outlines.iter().filter(|o| o.items.len() >= 3).count();
+            let item_count = outlines
+                .iter()
+                .filter(|o| o.items.len() >= 3)
+                .map(|o| o.items.len())
+                .sum();
+            (block, file_count, item_count)
+        }
+        Ok(_) => (String::new(), 0, 0),
         Err(LandscapeError::BudgetExceeded) => {
             let msg = format!(
                 "[landscape] block for {} could not be trimmed to fit the {} byte budget; omitting",
@@ -148,21 +157,21 @@ async fn build_landscape_snapshot(
                 budget,
             );
             send_log(&log_tx, &msg);
-            LandscapeBlock::empty()
+            (String::new(), 0, 0)
         }
         Err(other) => {
             send_log(
                 &log_tx,
                 &format!("landscape block formatting failed: {other}"),
             );
-            LandscapeBlock::empty()
+            (String::new(), 0, 0)
         }
     };
 
     LandscapeSnapshot {
-        block: landscape.block,
-        file_count: landscape.file_count,
-        item_count: landscape.item_count,
+        block,
+        file_count,
+        item_count,
     }
 }
 

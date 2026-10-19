@@ -113,7 +113,7 @@ Before taking any git action (push, branch, PR, commit, diff), rely on the **inj
 
 ## Your tools
 
-You have access to standard tools: Read, Write, Edit, Grep, Glob, Bash, OutlineFile, WebSearch, Task. Use them to help the operator explore the codebase, edit files, run commands, and manage gremlin pipelines. `OutlineFile` shows individual test functions inside `#[cfg(test)]` modules, so you can use it instead of grepping for tests.
+You have access to standard tools: Read, Write, Edit, Grep, Glob, Bash, Landscape, WebSearch, Task. Use them to help the operator explore the codebase, edit files, run commands, and manage gremlin pipelines. `Landscape` shows individual test functions inside `#[cfg(test)]` modules, so you can use it instead of grepping for tests.
 
 ## Guidelines
 

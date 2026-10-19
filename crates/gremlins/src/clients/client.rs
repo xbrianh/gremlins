@@ -36,7 +36,7 @@ pub fn default_native_block() -> HashMap<String, Vec<String>> {
             "Write".to_string(),
             "Grep".to_string(),
             "Glob".to_string(),
-            "OutlineFile".to_string(),
+            "Landscape".to_string(),
         ],
     )])
 }
@@ -859,7 +859,7 @@ mod tests {
             "Write",
             "Grep",
             "Glob",
-            "OutlineFile",
+            "Landscape",
         ] {
             assert!(tools.contains(&name.to_string()), "missing {name}");
         }

@@ -689,7 +689,7 @@ and its item names/paths have comment delimiters escaped.
 - When the block exceeds the budget, item names are shortened to fit; if even
   floor-length names don't fit, the block is dropped rather than failing the
   stage, and the `[landscape]` log line reports the drop.
-- Native agents also have the `OutlineFile` tool for current line numbers after
+- Native agents also have the `Landscape` tool for current line numbers after
   edits; the block only advertises it when the stage's effective tool list
   actually includes that tool.
 - A `landscape.cache.json` lives in filesystem-backed state directories and
@@ -795,7 +795,7 @@ These are set by the launcher or executor and should not be set manually:
 ## What can a gremlin do to my machine?
 
 Gremlins are restricted to an allowlist of tools (Read, Edit, Write, Bash,
-Grep, Glob, OutlineFile) and their Bash commands are path-scoped to the gremlin's git
+Grep, Glob, Landscape) and their Bash commands are path-scoped to the gremlin's git
 worktree. They can read and modify files inside that worktree and block direct
 path references outside it. This is a best-effort token check, not a full
 sandbox — indirect references (heredocs, computed paths) may not be caught.
