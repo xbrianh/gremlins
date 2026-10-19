@@ -47,6 +47,9 @@ pub struct ChatDefinition {
     /// Operator input queued by the supervisor, consumed by the next
     /// `next_stage` call: `(prompt_text, model, system_prompt)`.
     pending: Option<(String, ModelURI, String)>,
+    /// Set when a soft interrupt ends the current turn. Cleared when the
+    /// next `set_pending` call prepends the interrupt notice.
+    interrupted: bool,
 }
 
 impl ChatDefinition {
@@ -64,6 +67,7 @@ impl ChatDefinition {
             _system_prompt: system_prompt,
             turn: 0,
             pending: None,
+            interrupted: false,
         }
     }
 
@@ -72,8 +76,23 @@ impl ChatDefinition {
     /// The `model` and `system_prompt` are consumed by the next
     /// [`next_stage`](GremlinDefinition::next_stage) call to build the agent
     /// stage. The stored `default_model` on the definition is left unchanged.
+    ///
+    /// When the `interrupted` flag is set (from a preceding soft interrupt),
+    /// an interrupt notice is prepended to the prompt and the flag is cleared.
     pub fn set_pending(&mut self, prompt: &str, model: &ModelURI, system_prompt: &str) {
-        self.pending = Some((prompt.to_string(), model.clone(), system_prompt.to_string()));
+        let text = if self.interrupted {
+            self.interrupted = false;
+            format!("Your previous response was interrupted.\n\n{prompt}")
+        } else {
+            prompt.to_string()
+        };
+        self.pending = Some((text, model.clone(), system_prompt.to_string()));
+    }
+
+    /// Mark the definition as interrupted so the next [`set_pending`] call
+    /// prepends an interrupt notice to the operator's prompt.
+    pub fn mark_interrupted(&mut self) {
+        self.interrupted = true;
     }
 
     /// The zero-based turn counter (how many stages have been produced so far).
