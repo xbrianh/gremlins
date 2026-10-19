@@ -1304,7 +1304,6 @@ pub(crate) async fn clear_chat_turn_artifact(gremlin: &Gremlin, turn: usize) {
 /// Pass `None` to walk all available artifacts. After rollback via `goto`,
 /// pass the turn number of the stage about to run minus one so abandoned
 /// future artifacts are excluded from the baseline.
-#[allow(dead_code)]
 pub(crate) async fn read_chat_conversation(
     gremlin: &Gremlin,
     max_turn: Option<usize>,

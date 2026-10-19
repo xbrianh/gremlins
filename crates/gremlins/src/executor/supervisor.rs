@@ -28,6 +28,7 @@ use crate::definition::ChatDefinition;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin, GremlinConfig};
 use crate::executor::socket::{self, GremlinsDaemonLock};
 use crate::executor::state::{self, FileSystemStateStore};
+use rig_core::completion::Message;
 
 // ---------------------------------------------------------------------------
 // SharedWriter — Arc<Mutex<WriteHalf>> for concurrent socket writes
@@ -3255,6 +3256,24 @@ async fn run_chat_turn(
     // treated as zero.
     let baseline_usage = usage_stats_from_state(gremlin.state.read_field("token_usage").as_ref());
 
+    // Snapshot the pre-turn conversation length so the soft-cancel path
+    // can split off only messages added during this turn, avoiding
+    // duplication of prior-turn history in the per-turn artifact.
+    let pre_turn_len = crate::executor::run::read_chat_conversation(
+        &gremlin,
+        chat_turn_num.map(|n| n.saturating_sub(1)),
+    )
+    .await
+    .len();
+
+    // Capture the user prompt before moving `stage` into the run task, so
+    // the soft-cancel path can fall back to it when the model produced no
+    // output before cancellation.
+    let user_prompt = match &stage {
+        crate::definition::ExecutorStage::Agent { stage: agent, .. } => agent.prompts.join("\n"),
+        _ => String::new(),
+    };
+
     // Spawn the stage runner so we can select on it alongside stream events.
     let mut run_task = tokio::spawn(async move {
         let result = crate::executor::run::run_stage(&stage, &mut gremlin).await;
@@ -3428,9 +3447,19 @@ async fn run_chat_turn(
 
                             // Persist partial messages to the current
                             // turn's per-turn artifact so the conversation
-                            // history is preserved.
+                            // history is preserved. Split off only messages
+                            // added during this turn to avoid duplicating
+                            // prior-turn history.
                             let mut partial = messages.unwrap_or_default();
+                            if partial.len() >= pre_turn_len {
+                                partial = partial.split_off(pre_turn_len);
+                            } else {
+                                partial = Vec::new();
+                            }
                             crate::executor::run::strip_unpaired_tool_messages(&mut partial);
+                            if partial.is_empty() {
+                                partial.push(Message::user(user_prompt.clone()));
+                            }
                             if let Some(turn_num) = chat_turn_num {
                                 crate::executor::run::append_chat_conversation_turn(
                                     &recovered,

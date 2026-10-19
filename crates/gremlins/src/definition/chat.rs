@@ -431,4 +431,73 @@ mod tests {
         let stage = def.next_stage().await.unwrap();
         assert!(matches!(stage, ExecutorStage::Done));
     }
+
+    /// `mark_interrupted` + `set_pending` prepends the interrupt notice
+    /// exactly once and clears the flag.
+    #[tokio::test]
+    async fn mark_interrupted_prepends_notice_once() {
+        let mut def = ChatDefinition::new(
+            "chat".into(),
+            PathBuf::from("."),
+            model("openai/gpt-4"),
+            "sys".into(),
+        );
+        def.mark_interrupted();
+        def.set_pending("hello", &model("openai/gpt-4"), "sys");
+
+        let stage = def.next_stage().await.unwrap();
+        match stage {
+            ExecutorStage::Agent { stage: agent, .. } => {
+                let prompt = agent.prompts.join("\n");
+                assert!(
+                    prompt.starts_with("Your previous response was interrupted."),
+                    "expected interrupt notice prefix, got: {prompt:?}"
+                );
+                assert!(
+                    prompt.ends_with("hello"),
+                    "expected original prompt suffix, got: {prompt:?}"
+                );
+            }
+            other => panic!(
+                "expected Agent stage (with notice), got: {}",
+                other.stage_type()
+            ),
+        }
+
+        // The flag is cleared; a second set_pending must not inject the notice.
+        def.set_pending("world", &model("openai/gpt-4"), "sys");
+        let stage = def.next_stage().await.unwrap();
+        match stage {
+            ExecutorStage::Agent { stage: agent, .. } => {
+                assert_eq!(
+                    agent.prompts.join("\n"),
+                    "world",
+                    "second set_pending must not repeat interrupt notice"
+                );
+            }
+            other => panic!(
+                "expected Agent stage (second turn), got: {}",
+                other.stage_type()
+            ),
+        }
+    }
+
+    /// `set_pending` without `mark_interrupted` must leave the prompt unchanged.
+    #[test]
+    fn set_pending_without_interrupt_leaves_prompt_unchanged() {
+        let mut def = ChatDefinition::new(
+            "chat".into(),
+            PathBuf::from("."),
+            model("openai/gpt-4"),
+            "sys".into(),
+        );
+        def.set_pending("hello", &model("openai/gpt-4"), "sys");
+
+        let (text, _, _) = def.pending.expect("pending must be set");
+        assert_eq!(text, "hello");
+        assert!(
+            !text.contains("interrupted"),
+            "prompt must not contain interrupt notice when not marked"
+        );
+    }
 }
