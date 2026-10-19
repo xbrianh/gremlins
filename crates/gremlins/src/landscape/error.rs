@@ -7,7 +7,7 @@ pub enum LandscapeError {
     Utf8(#[from] std::str::Utf8Error),
 
     #[error(
-        "landscape block cannot fit within the size budget even after truncating every item name"
+        "landscape block cannot fit within the size budget even at minimum depth with name truncation"
     )]
     BudgetExceeded,
 }
