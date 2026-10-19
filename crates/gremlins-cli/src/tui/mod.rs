@@ -712,18 +712,30 @@ pub(crate) const REASONING_PLACEHOLDER_TITLE: &str = "clanking";
 pub(crate) const REASONING_COMPLETED_TITLE: &str = "clawnked";
 
 /// Format a token count compactly for the live stats title: raw integers
-/// below 1000, one-decimal `k` for thousands, and one-decimal `M` for
-/// millions. The unit is chosen from the rounded value so that e.g. 999_950
-/// rounds up to 1.0M rather than rendering as 1000.0k. Missing values render
-/// as a dash.
+/// below 1000, one-decimal `k` for thousands, and two-decimal `M` for
+/// millions (with the second decimal trimmed when zero, so 1.00M renders as
+/// 1.0M). Promotion to millions happens at 999_950, when the thousands
+/// display would reach 1000.0k. Missing values render as a dash.
 fn compact_tokens(value: Option<u64>) -> String {
     match value {
         None => "-".to_string(),
         Some(v) if v < 1_000 => v.to_string(),
-        Some(v) if (v as f64 / 1_000.0).round() < 1_000.0 => {
+        Some(v) if v < 999_950 => {
             format!("{:.1}k", v as f64 / 1_000.0)
         }
-        Some(v) => format!("{:.1}M", v as f64 / 1_000_000.0),
+        Some(v) => {
+            let s = format!("{:.2}M", v as f64 / 1_000_000.0);
+            // Trim the trailing zero in the hundredths place when it is zero
+            // (e.g. "1.00M" → "1.0M", "1.20M" → "1.2M") but leave "1.23M" alone.
+            if s.ends_with("0M") && s.as_bytes()[s.len() - 4] == b'.' {
+                // "X.X0M" → strip the zero → "X.XM"
+                let mut trimmed = s.into_bytes();
+                trimmed.remove(trimmed.len() - 2); // remove the trailing zero before 'M'
+                String::from_utf8(trimmed).unwrap()
+            } else {
+                s
+            }
+        }
     }
 }
 
@@ -2575,8 +2587,12 @@ mod tests {
         assert_eq!(compact_tokens(Some(1_000)), "1.0k");
         assert_eq!(compact_tokens(Some(46_884)), "46.9k");
         assert_eq!(compact_tokens(Some(999_499)), "999.5k");
-        assert_eq!(compact_tokens(Some(999_500)), "1.0M");
+        assert_eq!(compact_tokens(Some(999_500)), "999.5k");
+        assert_eq!(compact_tokens(Some(999_949)), "999.9k");
+        assert_eq!(compact_tokens(Some(999_950)), "1.0M");
         assert_eq!(compact_tokens(Some(1_000_000)), "1.0M");
+        assert_eq!(compact_tokens(Some(1_200_000)), "1.2M");
+        assert_eq!(compact_tokens(Some(1_234_567)), "1.23M");
         assert_eq!(compact_tokens(None), "-");
     }
 
