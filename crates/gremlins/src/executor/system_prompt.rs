@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state::FileSystemStateStore;
-use crate::landscape::{LandscapeError, LandscapeExplorer};
+use crate::landscape::{LandscapeBlock, LandscapeError, LandscapeExplorer};
 
 const LANDSCAPE_CACHE_FILE: &str = "landscape.cache.json";
 
@@ -134,22 +134,13 @@ async fn build_landscape_snapshot(
 
     let budget: u64 = crate::config::max_landscape_bytes();
     let max_bytes: usize = usize::try_from(budget).unwrap_or(usize::MAX);
-    let (block, file_count, item_count) = match crate::landscape::format_landscape_block(
+    let landscape = match crate::landscape::format_landscape_block(
         &outlines,
         &root,
         max_bytes,
         has_outline_tool,
     ) {
-        Ok(block) if !block.is_empty() => {
-            let file_count = outlines.iter().filter(|o| o.items.len() >= 3).count();
-            let item_count = outlines
-                .iter()
-                .filter(|o| o.items.len() >= 3)
-                .map(|o| o.items.len())
-                .sum();
-            (block, file_count, item_count)
-        }
-        Ok(_) => (String::new(), 0, 0),
+        Ok(block) => block,
         Err(LandscapeError::BudgetExceeded) => {
             let msg = format!(
                 "[landscape] block for {} could not be trimmed to fit the {} byte budget; omitting",
@@ -157,21 +148,21 @@ async fn build_landscape_snapshot(
                 budget,
             );
             send_log(&log_tx, &msg);
-            (String::new(), 0, 0)
+            LandscapeBlock::empty()
         }
         Err(other) => {
             send_log(
                 &log_tx,
                 &format!("landscape block formatting failed: {other}"),
             );
-            (String::new(), 0, 0)
+            LandscapeBlock::empty()
         }
     };
 
     LandscapeSnapshot {
-        block,
-        file_count,
-        item_count,
+        block: landscape.block,
+        file_count: landscape.file_count,
+        item_count: landscape.item_count,
     }
 }
 
