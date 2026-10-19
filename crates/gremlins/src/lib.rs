@@ -8,6 +8,7 @@ pub mod core;
 pub mod definition;
 pub mod executor;
 pub mod landscape;
+pub mod model_uri;
 pub mod prelude;
 pub mod schemas;
 pub mod stage_spec;
