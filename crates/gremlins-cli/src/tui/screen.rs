@@ -536,18 +536,15 @@ impl<B: Backend> LiveArea<B> {
 
     /// Relabel the current reasoning title's leading word from the active
     /// `clanking` placeholder to the finished `clawnked` label without
-    /// disturbing the trailing token/cache stats.
+    /// disturbing the turn-number prefix or trailing token/cache stats.
     pub fn relabel_reasoning_title(&mut self) {
-        let suffix = self
+        let new_title = self
             .scene
             .reasoning
             .title()
-            .and_then(|t| t.strip_prefix(REASONING_PLACEHOLDER_TITLE))
-            .map(|rest| rest.to_string());
-        if let Some(suffix) = suffix {
-            self.scene
-                .reasoning
-                .set_title(&(REASONING_COMPLETED_TITLE.to_string() + &suffix));
+            .map(|t| t.replacen(REASONING_PLACEHOLDER_TITLE, REASONING_COMPLETED_TITLE, 1));
+        if let Some(new_title) = new_title {
+            self.scene.reasoning.set_title(&new_title);
         }
     }
 
@@ -1796,7 +1793,7 @@ mod tests {
         live_area.submit_prompt("hi".to_string());
         live_area.push_reasoning_text("thinking\n");
         live_area.flush_reasoning();
-        live_area.set_reasoning_title("clanking · ↑100 · ↓50 · ∴30 · cache 40%");
+        live_area.set_reasoning_title("turn 2 · clanking · ↑100 · ↓50 · ∴30 · cache 40%");
         live_area.replace_response("answer");
 
         live_area.relabel_reasoning_title();
@@ -1805,11 +1802,11 @@ mod tests {
 
         let visible = dump_buffer(live_area.backend().buffer());
         assert!(
-            visible.contains("◈ clawnked · ↑100 · ↓50 · ∴30 · cache 40%"),
-            "Done should commit the clawnked header with its stats intact.\nBuffer:\n{visible}"
+            visible.contains("◈ turn 2 · clawnked · ↑100 · ↓50 · ∴30 · cache 40%"),
+            "Done should commit the clawnked header with its stats and turn number intact.\nBuffer:\n{visible}"
         );
         assert!(
-            !visible.contains("◈ clanking"),
+            !visible.contains("◈ turn 2 · clanking"),
             "active clanking label must be replaced on the finished header.\nBuffer:\n{visible}"
         );
         assert_eq!(
@@ -1848,12 +1845,12 @@ mod tests {
             "the placeholder header should render the reasoning glyph exactly once.\nBuffer:\n{visible}"
         );
 
-        live_area.set_reasoning_title("clanking · ↑100 · ↓50 · ∴30 · cache 40%");
+        live_area.set_reasoning_title("turn 1 · clanking · ↑100 · ↓50 · ∴30 · cache 40%");
         live_area.compose(&app).unwrap();
         let visible = dump_buffer(live_area.backend().buffer());
         assert!(
-            visible.contains("◈ clanking · ↑100"),
-            "TurnComplete stats should replace the placeholder without losing the clanking prefix.\nBuffer:\n{visible}"
+            visible.contains("◈ turn 1 · clanking · ↑100"),
+            "TurnComplete stats should replace the placeholder without losing the turn-number or clanking prefix.\nBuffer:\n{visible}"
         );
         assert_eq!(
             visible.matches('◈').count(),
@@ -1874,11 +1871,11 @@ mod tests {
         live_area.submit_prompt("hi".to_string());
         live_area.push_reasoning_text("first turn thinking\n");
         live_area.flush_reasoning();
-        live_area.set_reasoning_title("clanking · ↑100 · ↓50 · ∴30 · cache 40%");
+        live_area.set_reasoning_title("turn 1 · clanking · ↑100 · ↓50 · ∴30 · cache 40%");
         live_area.compose(&app).unwrap();
         let visible = dump_buffer(live_area.backend().buffer());
         assert!(
-            visible.contains("clanking · ↑100"),
+            visible.contains("turn 1 · clanking · ↑100"),
             "TurnComplete stats should carry the turn-1 header.\nBuffer:\n{visible}"
         );
 
@@ -1891,7 +1888,7 @@ mod tests {
         live_area.compose(&app).unwrap();
         let visible = dump_buffer(live_area.backend().buffer());
         assert!(
-            visible.contains("clanking · ↑100"),
+            visible.contains("turn 1 · clanking · ↑100"),
             "the latest completed turn's stats title must persist over the next turn's reasoning.\nBuffer:\n{visible}"
         );
         assert!(
@@ -1957,19 +1954,19 @@ mod tests {
         app.project_name = "gremlins".to_string();
 
         live_area.submit_prompt("hi".to_string());
-        live_area.set_reasoning_title("clanking · ↑10 · ↓5 · ∴3 · cache 40%");
+        live_area.set_reasoning_title("turn 1 · clanking · ↑10 · ↓5 · ∴3 · cache 40%");
         live_area.replace_response("answer");
         live_area.finish_turn();
 
         live_area.compose(&app).unwrap();
         let visible = dump_buffer(live_area.backend().buffer());
         let lines: Vec<&str> = visible.lines().collect();
-        let header = lines.iter().position(|l| l.contains("◈ clanking"));
+        let header = lines.iter().position(|l| l.contains("◈ turn 1 · clanking"));
         let response = lines.iter().position(|l| l.contains("answer"));
         assert_eq!(
-            visible.matches("◈ clanking").count(),
+            visible.matches("◈ turn 1 · clanking").count(),
             1,
-            "no-body turns should commit exactly one clanking stats header.\nBuffer:\n{visible}"
+            "no-body turns should commit exactly one clanking stats header with turn number.\nBuffer:\n{visible}"
         );
         let (Some(header), Some(response)) = (header, response) else {
             panic!(

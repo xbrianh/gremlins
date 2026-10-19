@@ -766,11 +766,11 @@ fn usage_title_part(usage: Option<&serde_json::Value>) -> String {
 }
 
 /// Build the reasoning-stream stats title shown on each `TurnComplete`:
-/// the `clanking` header label followed by the compact per-turn token/cache
-/// summary.
-fn stats_title(stats: Option<&serde_json::Value>) -> String {
+/// the turn number prefix followed by the `clanking` header label and the
+/// compact per-turn token/cache summary.
+fn stats_title(turn: usize, stats: Option<&serde_json::Value>) -> String {
     format!(
-        "{REASONING_PLACEHOLDER_TITLE} · {}",
+        "turn {turn} · {REASONING_PLACEHOLDER_TITLE} · {}",
         usage_title_part(stats)
     )
 }
@@ -2143,7 +2143,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // All tools participate uniformly in the transcript.
                         live_area.commit_tool_result(&id, &call);
                     }
-                    ChatEvent::TurnComplete { text, tool_calls, stats, .. } => {
+                    ChatEvent::TurnComplete { text, tool_calls, stats, turn, .. } => {
                         log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);
                         live_area.clear_tool_output();
                         // `text` is the model's full response for the just-completed
@@ -2159,8 +2159,11 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // finishes. All tools participate uniformly.
                         live_area.reconcile_tool_calls(&tool_calls);
                         // The reasoning stream's title row is the live stats line:
-                        // compact per-turn token/cache summary.
-                        live_area.set_reasoning_title(&stats_title(stats.as_ref()));
+                        // compact per-turn token/cache summary prefixed with the
+                        // agent-loop turn number so the operator can see which
+                        // iteration the stats belong to.
+                        let turn_num = turn.and_then(|t| t.parse::<usize>().ok()).unwrap_or(0);
+                        live_area.set_reasoning_title(&stats_title(turn_num, stats.as_ref()));
                     }
                     ChatEvent::Done { text, summary, .. } => {
                         log::debug!("Done text_len={} summary_len={} has_current_turn={}",
@@ -2523,9 +2526,12 @@ mod tests {
             "reasoning_tokens": 30
         });
 
-        let title = stats_title(Some(&stats));
+        let title = stats_title(2, Some(&stats));
 
-        assert_eq!(title, "clanking · ↑100 · ↓50 · ∴30 · cache 40%", "{title}");
+        assert_eq!(
+            title, "turn 2 · clanking · ↑100 · ↓50 · ∴30 · cache 40%",
+            "{title}"
+        );
     }
 
     #[test]
@@ -2539,17 +2545,20 @@ mod tests {
             "reasoning_tokens": 4
         });
 
-        let title = stats_title(Some(&stats));
+        let title = stats_title(2, Some(&stats));
 
         // The `↑` figure is the per-turn prompt size (77).
-        assert_eq!(title, "clanking · ↑77 · ↓9 · ∴4 · cache 0%", "{title}");
+        assert_eq!(
+            title, "turn 2 · clanking · ↑77 · ↓9 · ∴4 · cache 0%",
+            "{title}"
+        );
     }
 
     #[test]
     fn stats_title_renders_dashes_when_usage_is_absent() {
-        let title = stats_title(None);
+        let title = stats_title(0, None);
 
-        assert_eq!(title, "clanking · ↑- · ↓- · ∴- · cache -");
+        assert_eq!(title, "turn 0 · clanking · ↑- · ↓- · ∴- · cache -");
     }
 
     #[test]
@@ -2563,9 +2572,9 @@ mod tests {
             "reasoning_tokens": 1
         });
 
-        let title = stats_title(Some(&stats));
+        let title = stats_title(1, Some(&stats));
 
-        assert_eq!(title, "clanking · ↑0 · ↓7 · ∴1 · cache -");
+        assert_eq!(title, "turn 1 · clanking · ↑0 · ↓7 · ∴1 · cache -");
     }
 
     #[test]
