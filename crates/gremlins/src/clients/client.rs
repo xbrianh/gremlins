@@ -852,15 +852,7 @@ mod tests {
         let block = default_native_block();
         let tools = block.get("allowed_tools").unwrap();
         assert_eq!(tools.len(), 7);
-        for name in [
-            "Bash",
-            "Edit",
-            "Read",
-            "Write",
-            "Grep",
-            "Glob",
-            "Landscape",
-        ] {
+        for name in ["Bash", "Edit", "Read", "Write", "Grep", "Glob", "Landscape"] {
             assert!(tools.contains(&name.to_string()), "missing {name}");
         }
     }

@@ -2871,10 +2871,7 @@ mod tests {
     #[test]
     fn format_tool_call_parts_landscape_and_done() {
         assert_eq!(
-            format_tool_call_parts(
-                "Landscape",
-                &serde_json::json!({"file_path": "Cargo.toml"})
-            ),
+            format_tool_call_parts("Landscape", &serde_json::json!({"file_path": "Cargo.toml"})),
             "Landscape(file_path=\"Cargo.toml\")"
         );
         assert_eq!(

@@ -1329,9 +1329,7 @@ fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str
                 }
             }
             Err(LandscapeError::Read(e)) => format!("Error: {e}"),
-            Err(LandscapeError::BudgetExceeded) => {
-                String::from("Error: landscape budget exceeded")
-            }
+            Err(LandscapeError::BudgetExceeded) => String::from("Error: landscape budget exceeded"),
             Err(LandscapeError::Utf8(e)) => format!("Error: file is not valid UTF-8: {e}"),
         }
     } else {
