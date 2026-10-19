@@ -196,21 +196,25 @@ impl LandscapeExplorer {
 
         for path in &paths {
             if !is_outlineable_file(path) {
-                // Unrecognized extension: emit a skipped entry (no items).
-                // Cache it so unchanged skipped files are not re-stat-ed.
+                // Unrecognized extension: emit a skipped entry (no items) so
+                // the file still shows up in the landscape block.
                 if let Some(ref mut cache) = cache {
                     cache.mark_visited(path);
                     let fingerprint = file_fingerprint(path);
                     if let Some((mtime_ns, size)) = fingerprint {
-                        if let Some(items) = cache.get(path, mtime_ns, size) {
-                            results.push(FileOutline {
-                                path: path.clone(),
-                                items,
-                                skipped: true,
-                            });
-                            continue;
+                        // A stale entry may still hold items from when this
+                        // extension was outlineable (e.g. `.md` headings
+                        // scanned before markdown support was dropped). The
+                        // hit is presence-only: record an empty items list so
+                        // those stale items never round-trip. Avoid marking an
+                        // already-empty entry dirty so unchanged skipped files
+                        // don't force a cache write on every build.
+                        if cache
+                            .get(path, mtime_ns, size)
+                            .is_none_or(|items| !items.is_empty())
+                        {
+                            cache.insert(path, mtime_ns, size, Vec::new());
                         }
-                        cache.insert(path, mtime_ns, size, Vec::new());
                     }
                 }
                 results.push(FileOutline {
@@ -942,6 +946,23 @@ mod tests {
     }
 
     #[test]
+    fn format_landscape_block_emits_skipped_file_header_only() {
+        let root = Path::new("/repo");
+        let skipped = FileOutline {
+            skipped: true,
+            path: root.join("notes.txt"),
+            items: Vec::new(),
+        };
+        let block = format_landscape_block(std::slice::from_ref(&skipped), root, usize::MAX, true)
+            .unwrap()
+            .block;
+        // The file header is emitted (bypassing the ≥3-item threshold), but
+        // with no item lines underneath.
+        assert!(block.lines().any(|line| line == "notes.txt:"));
+        assert!(!block.contains('|'));
+    }
+
+    #[test]
     fn format_landscape_block_formats_files_and_items() {
         let root = Path::new("/repo");
         let outline = FileOutline {
@@ -1258,6 +1279,42 @@ mod tests {
             .build(root.path(), 10, Some(&cache_path))
             .unwrap();
         assert_eq!(uncached, recached);
+    }
+
+    #[test]
+    fn build_heals_stale_md_cache_entry_to_skipped_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let md_path = root.path().join("doc.md");
+        std::fs::write(&md_path, "# A\n## B\n### C\n").unwrap();
+        let cache_path = cache_dir.path().join("landscape.cache.json");
+
+        // Seed a stale entry as if `.md` had been scanned before markdown
+        // support was removed: its fingerprint matches the file, so a naive
+        // cache hit would replay the stored headings.
+        let (mtime_ns, size) = file_fingerprint(&md_path).unwrap();
+        let mut cache = cache::LandscapeCache::load(&cache_path);
+        cache.insert(
+            &md_path,
+            mtime_ns,
+            size,
+            vec![
+                OutlineItem::new(HEADING, "A", 1),
+                OutlineItem::new(HEADING, "B", 2),
+                OutlineItem::new(HEADING, "C", 3),
+            ],
+        );
+        cache.save(&cache_path).unwrap();
+
+        let built = LandscapeExplorer
+            .build(root.path(), 10, Some(&cache_path))
+            .unwrap();
+        let md = built
+            .iter()
+            .find(|o| o.path == md_path)
+            .expect("skipped md file present");
+        assert!(md.skipped);
+        assert!(md.items.is_empty());
     }
 
     #[test]
