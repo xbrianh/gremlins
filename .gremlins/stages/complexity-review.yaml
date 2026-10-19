@@ -11,10 +11,13 @@ stages:
             base_sha: content("artifact://base_sha")
           outputs:
             report: "artifact://complexity-report.md"
+            tree: "artifact://complexity-report.md.tree"
+            dot: "artifact://complexity-report.md.dot"
+            adjacency: "artifact://complexity-report.md.adjacency"
         options:
           timeout: 300
           cmds:
-            - 'cargo_modules_report "{base_sha}" "{report}"'
+            - 'cargo_modules_report "{base_sha}" "artifact://complexity-report.md" "{report}" "{tree}" "{dot}" "{adjacency}"'
 
       - name: review
         type: agent

@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
 # Generate a cargo-modules structural report for review.
-# Usage: cargo_modules_report <base_sha> <report_file>
+# Usage: cargo_modules_report <base_sha> <report_uri> <report_path> <tree_path> <dot_path> <adjacency_path>
 # Produces:
-#   <report_file>             — consolidated review report (markdown)
-#   <report_file>.tree        — raw module trees (forensics)
-#   <report_file>.dot         — raw DOT output (forensics)
-#   <report_file>.adjacency   — collapsed module-level adjacency list
+#   <report_path>             — consolidated review report (markdown)
+#   <tree_path>               — raw module trees (forensics)
+#   <dot_path>                — raw DOT output (forensics)
+#   <adjacency_path>          — collapsed module-level adjacency list
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/logging.sh"
 
 BASE_SHA="${1:-}"
-REPORT_FILE="${2:-}"
+REPORT_URI="${2:-}"
+REPORT_FILE="${3:-}"
+TREE_OUT="${4:-}"
+DOT_OUT="${5:-}"
+ADJACENCY_OUT="${6:-}"
 
-if [ -z "$BASE_SHA" ] || [ -z "$REPORT_FILE" ]; then
-    die "Usage: cargo_modules_report <base_sha> <report_file>"
+if [ -z "$BASE_SHA" ] || [ -z "$REPORT_URI" ] || [ -z "$REPORT_FILE" ] || [ -z "$TREE_OUT" ] || [ -z "$DOT_OUT" ] || [ -z "$ADJACENCY_OUT" ]; then
+    die "Usage: cargo_modules_report <base_sha> <report_uri> <report_path> <tree_path> <dot_path> <adjacency_path>"
 fi
 
 # ---------- prerequisites ----------
@@ -45,7 +49,6 @@ strip_ansi() {
 PACKAGES=("gremlins" "gremlins-cli")
 
 # ---------- run structure (once per package) ----------
-TREE_OUT="${REPORT_FILE}.tree"
 info "collecting module trees"
 {
     for pkg in "${PACKAGES[@]}"; do
@@ -57,7 +60,6 @@ info "collecting module trees"
 } > "$TREE_OUT"
 
 # ---------- run dependencies (once per package) — raw DOT ----------
-DOT_OUT="${REPORT_FILE}.dot"
 info "collecting dependency graphs"
 {
     for pkg in "${PACKAGES[@]}"; do
@@ -76,7 +78,6 @@ info "collecting dependency graphs"
 #     "gremlins::builders::agent" -> "gremlins::builders::artifacts" [label="uses", ...];
 # With --no-fns --no-types --no-traits every node is already a module —
 # no segment stripping needed.
-ADJACENCY_OUT="${REPORT_FILE}.adjacency"
 info "building adjacency list"
 {
     echo "# Module adjacency (cargo modules dependencies)"
@@ -87,9 +88,15 @@ info "building adjacency list"
         echo
 
         # Extract edges from the raw DOT: "src" -> "dst"
-        # Sort unique src->dst pairs, then collapse by src
-        sed -nE 's/^[[:space:]]*"([^"]+)" -> "([^"]+)".*/\1 -> \2/p' "$DOT_OUT" \
-            | grep -v "^$" \
+        # Sort unique src->dst pairs, then collapse by src.
+        # Filter to the current package's DOT section so each heading
+        # only shows its own dependencies (both crates use the same
+        # target name internally).
+        awk -v pkg="$pkg" '
+            /^## / { in_section = ($0 == "## " pkg) ? 1 : 0; next }
+            in_section
+        ' "$DOT_OUT" \
+            | sed -nE 's/^[[:space:]]*"([^"]+)" -> "([^"]+)".*/\1 -> \2/p' \
             | sort -u \
             | awk -F' -> ' '
             {
@@ -107,6 +114,24 @@ info "building adjacency list"
     done
 } > "$ADJACENCY_OUT"
 
+# ---------- helper: resolve a crate directory to its Rust target name ----------
+# Reads Cargo.toml to find the [lib] or [[bin]] name, falling back to the
+# directory name. This is necessary because e.g. crates/gremlins-cli/ has a
+# [[bin]] target named "gremlins", not "gremlins-cli".
+target_name_for() {
+    local dir="$1"
+    local toml="$PROJECT_ROOT/crates/$dir/Cargo.toml"
+    if [ ! -f "$toml" ]; then
+        echo "$dir"
+        return
+    fi
+    # Extract name from [lib] or [[bin]] section (whichever comes first).
+    sed -nE '
+        /^\[lib\]$/,/^\[/ { s/^name[[:space:]]*=[[:space:]]*"(.+)"/\1/p; }
+        /^\[\[bin\]\]$/,/^\[/ { s/^name[[:space:]]*=[[:space:]]*"(.+)"/\1/p; }
+    ' "$toml" | head -1
+}
+
 # ---------- helper: map a changed file path to a module path ----------
 module_path_for() {
     local file="$1"
@@ -117,11 +142,18 @@ module_path_for() {
     fi
 
     # Strip leading crates/<name>/src/
-    local crate
-    crate="$(echo "$file" | sed -nE 's|^crates/([^/]+)/src/.*|\1|p')"
-    if [ -z "$crate" ]; then
+    local pkg_dir
+    pkg_dir="$(echo "$file" | sed -nE 's|^crates/([^/]+)/src/.*|\1|p')"
+    if [ -z "$pkg_dir" ]; then
         echo ""
         return
+    fi
+
+    # Resolve the Rust target name from the package directory.
+    local crate
+    crate="$(target_name_for "$pkg_dir")"
+    if [ -z "$crate" ]; then
+        crate="$pkg_dir"
     fi
 
     # Remove crates/<name>/src/ prefix and .rs suffix
@@ -186,10 +218,10 @@ info "assembling report: $REPORT_FILE"
 
     echo "## Raw artifacts"
     echo
-    echo "- Full tree output: \`${REPORT_FILE}.tree\`"
-    echo "- Raw DOT graph: \`${REPORT_FILE}.dot\`"
-    echo "- Adjacency list: \`${REPORT_FILE}.adjacency\`"
+    echo "- Full tree output: \`${REPORT_URI}.tree\`"
+    echo "- Raw DOT graph: \`${REPORT_URI}.dot\`"
+    echo "- Adjacency list: \`${REPORT_URI}.adjacency\`"
 
 } > "$REPORT_FILE"
 
-info "report written to $REPORT_FILE"
+info "report written to ${REPORT_URI}"
