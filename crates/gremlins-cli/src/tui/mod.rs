@@ -702,87 +702,77 @@ fn usage_field(usage: Option<&serde_json::Value>, field: &str) -> Option<u64> {
 
 /// Placeholder reasoning title shown as soon as the first reasoning chunk of
 /// a turn arrives, and the fixed label prefix of the live stats title. Shared
-/// by [`stats_title`] here and the reasoning band in `screen.rs` so the
+/// by [`stats_title`] and the reasoning band in `screen.rs` so the
 /// placeholder→stats handoff can never drift between two hard-coded strings.
 pub(crate) const REASONING_PLACEHOLDER_TITLE: &str = "clanking";
 
-/// Format one usage object as the compact token/cache portion of the live
-/// stats title. Missing values render as dashes. The cache-hit rate is
-/// grouped inside the `in` field as a percentage of prompt tokens. When
-/// `cache_creation_input_tokens` is absent the `+… new` portion is omitted;
-/// when `cached_input_tokens` is also absent the entire `(cache …)` group
-/// is omitted.
-fn usage_title_part(usage: Option<&serde_json::Value>) -> String {
-    let field = |name: &str| usage_field(usage, name);
-    let num = |name: &str| match field(name) {
-        Some(v) => v.to_string(),
-        None => "-".to_string(),
-    };
+/// Finished reasoning title used when the agent calls `Done`. Used by
+/// `LiveArea::relabel_reasoning_title` (in `screen.rs`) so the active→finished
+/// handoff can never drift between two hard-coded strings.
+pub(crate) const REASONING_COMPLETED_TITLE: &str = "clawnked";
 
-    let prompt = field("prompt_tokens");
-    let in_part = match prompt {
-        Some(p) if p > 0 => {
-            let cached = field("cached_input_tokens");
-            match cached {
-                Some(c) => {
-                    let pct = format!("{:.0}%", (c as f64 / p as f64) * 100.0);
-                    match field("cache_creation_input_tokens") {
-                        Some(new) => format!("in {p} (cache {pct}, +{new} new)"),
-                        None => format!("in {p} (cache {pct})"),
-                    }
-                }
-                None => format!("in {p}"),
+/// Format a token count compactly for the live stats title: raw integers
+/// below 1000, one-decimal `k` for thousands, and two-decimal `M` for
+/// millions (with the second decimal trimmed when zero, so 1.00M renders as
+/// 1.0M). Promotion to millions happens at 999_950, when the thousands
+/// display would reach 1000.0k. Missing values render as a dash.
+fn compact_tokens(value: Option<u64>) -> String {
+    match value {
+        None => "-".to_string(),
+        Some(v) if v < 1_000 => v.to_string(),
+        Some(v) if v < 999_950 => {
+            format!("{:.1}k", v as f64 / 1_000.0)
+        }
+        Some(v) => {
+            let s = format!("{:.2}M", v as f64 / 1_000_000.0);
+            // Trim the trailing zero in the hundredths place when it is zero
+            // (e.g. "1.00M" → "1.0M", "1.20M" → "1.2M") but leave "1.23M" alone.
+            if s.ends_with("0M") && s.as_bytes()[s.len() - 4] == b'.' {
+                // "X.X0M" → strip the zero → "X.XM"
+                let mut trimmed = s.into_bytes();
+                trimmed.remove(trimmed.len() - 2); // remove the trailing zero before 'M'
+                String::from_utf8(trimmed).unwrap()
+            } else {
+                s
             }
         }
-        Some(_) => match field("cached_input_tokens") {
-            Some(_) => match field("cache_creation_input_tokens") {
-                Some(new) => format!("in 0 (cache -, +{new} new)"),
-                None => "in 0 (cache -)".to_string(),
-            },
-            None => "in 0".to_string(),
-        },
-        None => "in -".to_string(),
-    };
-
-    format!(
-        "{in_part} · out {} · reason {}",
-        num("completion_tokens"),
-        num("reasoning_tokens")
-    )
+    }
 }
 
-/// Format the conversation-wide Σ (total) portion of the stats title.
-/// Only completion and reasoning tokens are summed. Prompt-token totals are
-/// not monotonic across conversation compaction, so they are not summed; the
-/// per-turn prompt size is already shown in the `in` field.
-fn totals_title_part(total: Option<&serde_json::Value>) -> String {
-    let num = |name: &str| match usage_field(total, name) {
-        Some(v) => v.to_string(),
-        None => "-".to_string(),
+/// Format one usage object as the compact token/cache portion of the live
+/// stats title: prompt (`↑`), completion (`↓`), and reasoning (`∴`) token
+/// counts separated by ` · `, plus a single `cache <pct>%` group derived
+/// from `cached_input_tokens / prompt_tokens`. Missing values render as
+/// dashes. A zero or absent prompt denominator renders `cache -` and never
+/// divides by zero.
+fn usage_title_part(usage: Option<&serde_json::Value>) -> String {
+    let prompt = usage_field(usage, "prompt_tokens");
+    let cache = match prompt {
+        Some(p) if p > 0 => match usage_field(usage, "cached_input_tokens") {
+            Some(cached) => {
+                format!("cache {:.0}%", (cached as f64 / p as f64) * 100.0)
+            }
+            None => "cache -".to_string(),
+        },
+        Some(_) | None => "cache -".to_string(),
     };
 
     format!(
-        "out {} · reason {}",
-        num("completion_tokens"),
-        num("reasoning_tokens")
+        "↑{} · ↓{} · ∴{} · {cache}",
+        compact_tokens(prompt),
+        compact_tokens(usage_field(usage, "completion_tokens")),
+        compact_tokens(usage_field(usage, "reasoning_tokens"))
     )
 }
 
 /// Build the reasoning-stream stats title shown on each `TurnComplete`:
-/// the `clanking` header label, the just-completed turn's delta, and the
-/// conversation-wide completion/reasoning total.
-fn stats_title(stats: Option<&serde_json::Value>, total: Option<&serde_json::Value>) -> String {
-    let turn = stats
-        .and_then(|v| v.get("turn"))
-        .and_then(|v| v.as_u64())
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "-".to_string());
-    let parts = [
-        format!("{REASONING_PLACEHOLDER_TITLE} · turn {turn}"),
-        usage_title_part(stats),
-        format!("Σ {}", totals_title_part(total)),
-    ];
-    parts.join(" · ")
+/// the `clanking` header label followed by the compact per-turn token/cache
+/// summary.
+fn stats_title(stats: Option<&serde_json::Value>) -> String {
+    format!(
+        "{REASONING_PLACEHOLDER_TITLE} · {}",
+        usage_title_part(stats)
+    )
 }
 
 /// Daemon broadcast events (run lifecycle, log lines, etc.) are forwarded
@@ -2117,7 +2107,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // All tools participate uniformly in the transcript.
                         live_area.commit_tool_result(&id, &call);
                     }
-                    ChatEvent::TurnComplete { text, tool_calls, stats, total, .. } => {
+                    ChatEvent::TurnComplete { text, tool_calls, stats, .. } => {
                         log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);
                         live_area.clear_tool_output();
                         // `text` is the model's full response for the just-completed
@@ -2133,11 +2123,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // finishes. All tools participate uniformly.
                         live_area.reconcile_tool_calls(&tool_calls);
                         // The reasoning stream's title row is the live stats line:
-                        // per-turn delta plus the conversation-wide total.
-                        live_area.set_reasoning_title(&stats_title(
-                            stats.as_ref(),
-                            total.as_ref(),
-                        ));
+                        // compact per-turn token/cache summary.
+                        live_area.set_reasoning_title(&stats_title(stats.as_ref()));
                     }
                     ChatEvent::Done { text, summary, .. } => {
                         log::debug!("Done text_len={} summary_len={} has_current_turn={}",
@@ -2154,6 +2141,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // (unless empty or already equal to the text on
                         // screen) so it is displayed as part of the turn.
                         live_area.finish_response(&text, &summary);
+
+                        // Relabel the live stats header from the in-progress
+                        // `clanking` label to the finished `clawnked` label
+                        // before `finish_turn` commits its title to the
+                        // transcript. `Done` carries no per-turn token
+                        // figures, so only the already-rendered title changes.
+                        live_area.relabel_reasoning_title();
 
                         // Unpin the turn and clear its draft state so the
                         // finished response is committed to the transcript.
@@ -2463,14 +2457,14 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_chat_request, ctrl_c_should_quit, format_socket_response, interrupt_press,
-        stats_title, usage_field, usage_title_part, InterruptAction,
+        build_chat_request, compact_tokens, ctrl_c_should_quit, format_socket_response,
+        interrupt_press, stats_title, usage_field, usage_title_part, InterruptAction,
     };
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
     #[test]
-    fn stats_title_formats_turn_delta_and_conversation_total() {
+    fn stats_title_formats_compact_token_cache_summary() {
         let stats = serde_json::json!({
             "turn": 3,
             "prompt_tokens": 100,
@@ -2479,26 +2473,14 @@ mod tests {
             "cache_creation_input_tokens": 5,
             "reasoning_tokens": 30
         });
-        let total = serde_json::json!({
-            "turn": 4,
-            "prompt_tokens": 400,
-            "completion_tokens": 200,
-            "cached_input_tokens": 150,
-            "cache_creation_input_tokens": 15,
-            "reasoning_tokens": 120
-        });
 
-        let title = stats_title(Some(&stats), Some(&total));
+        let title = stats_title(Some(&stats));
 
-        assert_eq!(
-            title,
-            "clanking · turn 3 · in 100 (cache 40%, +5 new) · out 50 · reason 30 · Σ out 200 · reason 120",
-            "{title}"
-        );
+        assert_eq!(title, "clanking · ↑100 · ↓50 · ∴30 · cache 40%", "{title}");
     }
 
     #[test]
-    fn stats_title_reports_per_turn_prompt_not_conversation_total() {
+    fn stats_title_reports_compact_per_turn_prompt_tokens() {
         let stats = serde_json::json!({
             "turn": 2,
             "prompt_tokens": 77,
@@ -2507,35 +2489,18 @@ mod tests {
             "cache_creation_input_tokens": 3,
             "reasoning_tokens": 4
         });
-        let total = serde_json::json!({
-            "turn": 2,
-            "prompt_tokens": 999,
-            "completion_tokens": 21,
-            "cached_input_tokens": 500,
-            "cache_creation_input_tokens": 16,
-            "reasoning_tokens": 8
-        });
 
-        let title = stats_title(Some(&stats), Some(&total));
+        let title = stats_title(Some(&stats));
 
-        // The `in` figure is the per-turn prompt size (77), not the
-        // conversation-wide prompt total (999), which may drop across
-        // compaction and is therefore never summed.
-        assert_eq!(
-            title,
-            "clanking · turn 2 · in 77 (cache 0%, +3 new) · out 9 · reason 4 · Σ out 21 · reason 8",
-            "{title}"
-        );
+        // The `↑` figure is the per-turn prompt size (77).
+        assert_eq!(title, "clanking · ↑77 · ↓9 · ∴4 · cache 0%", "{title}");
     }
 
     #[test]
     fn stats_title_renders_dashes_when_usage_is_absent() {
-        let title = stats_title(None, None);
+        let title = stats_title(None);
 
-        assert_eq!(
-            title,
-            "clanking · turn - · in - · out - · reason - · Σ out - · reason -"
-        );
+        assert_eq!(title, "clanking · ↑- · ↓- · ∴- · cache -");
     }
 
     #[test]
@@ -2549,16 +2514,13 @@ mod tests {
             "reasoning_tokens": 1
         });
 
-        let title = stats_title(Some(&stats), None);
+        let title = stats_title(Some(&stats));
 
-        assert_eq!(
-            title,
-            "clanking · turn 1 · in 0 (cache -, +2 new) · out 7 · reason 1 · Σ out - · reason -"
-        );
+        assert_eq!(title, "clanking · ↑0 · ↓7 · ∴1 · cache -");
     }
 
     #[test]
-    fn usage_title_part_omits_new_when_cache_creation_absent() {
+    fn usage_title_part_compacts_thousands_and_reports_cache_rate() {
         let usage = serde_json::json!({
             "prompt_tokens": 46884,
             "cached_input_tokens": 46415,
@@ -2568,12 +2530,12 @@ mod tests {
 
         assert_eq!(
             usage_title_part(Some(&usage)),
-            "in 46884 (cache 99%) · out 500 · reason 200"
+            "↑46.9k · ↓500 · ∴200 · cache 99%"
         );
     }
 
     #[test]
-    fn usage_title_part_omits_cache_group_when_cached_absent() {
+    fn usage_title_part_renders_cache_dash_when_cached_absent() {
         let usage = serde_json::json!({
             "prompt_tokens": 46884,
             "cache_creation_input_tokens": 80,
@@ -2583,7 +2545,7 @@ mod tests {
 
         assert_eq!(
             usage_title_part(Some(&usage)),
-            "in 46884 · out 500 · reason 200"
+            "↑46.9k · ↓500 · ∴200 · cache -"
         );
     }
 
@@ -2591,10 +2553,7 @@ mod tests {
     fn usage_title_part_prompt_only_renders_dashes_for_missing_stats() {
         let usage = serde_json::json!({"prompt_tokens": 46884});
 
-        assert_eq!(
-            usage_title_part(Some(&usage)),
-            "in 46884 · out - · reason -"
-        );
+        assert_eq!(usage_title_part(Some(&usage)), "↑46.9k · ↓- · ∴- · cache -");
     }
 
     #[test]
@@ -2606,10 +2565,7 @@ mod tests {
             "reasoning_tokens": 1
         });
 
-        assert_eq!(
-            usage_title_part(Some(&usage)),
-            "in 0 (cache -) · out 7 · reason 1"
-        );
+        assert_eq!(usage_title_part(Some(&usage)), "↑0 · ↓7 · ∴1 · cache -");
     }
 
     #[test]
@@ -2621,7 +2577,23 @@ mod tests {
             "reasoning_tokens": 1
         });
 
-        assert_eq!(usage_title_part(Some(&usage)), "in 0 · out 7 · reason 1");
+        assert_eq!(usage_title_part(Some(&usage)), "↑0 · ↓7 · ∴1 · cache -");
+    }
+
+    #[test]
+    fn compact_tokens_renders_raw_thousands_and_millions() {
+        assert_eq!(compact_tokens(Some(512)), "512");
+        assert_eq!(compact_tokens(Some(999)), "999");
+        assert_eq!(compact_tokens(Some(1_000)), "1.0k");
+        assert_eq!(compact_tokens(Some(46_884)), "46.9k");
+        assert_eq!(compact_tokens(Some(999_499)), "999.5k");
+        assert_eq!(compact_tokens(Some(999_500)), "999.5k");
+        assert_eq!(compact_tokens(Some(999_949)), "999.9k");
+        assert_eq!(compact_tokens(Some(999_950)), "1.0M");
+        assert_eq!(compact_tokens(Some(1_000_000)), "1.0M");
+        assert_eq!(compact_tokens(Some(1_200_000)), "1.2M");
+        assert_eq!(compact_tokens(Some(1_234_567)), "1.23M");
+        assert_eq!(compact_tokens(None), "-");
     }
 
     #[test]

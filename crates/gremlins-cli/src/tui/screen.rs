@@ -39,7 +39,7 @@ use crate::tui::widgets::{
     layout_widgets, render_wrapped_tail, DebugWidget, InfoBarWidget, InputBarWidget,
     LiveAreaWidget, RenderContext, StreamingWidget, TranscriptWidget,
 };
-use crate::tui::REASONING_PLACEHOLDER_TITLE;
+use crate::tui::{REASONING_COMPLETED_TITLE, REASONING_PLACEHOLDER_TITLE};
 
 /// Approximate number of rows reserved at the bottom of the screen for the
 /// input and info bars before the first layout pass runs. The real value is
@@ -532,6 +532,23 @@ impl<B: Backend> LiveArea<B> {
     /// token/cache stats string.
     pub fn set_reasoning_title(&mut self, title: &str) {
         self.reasoning_mut().set_title(title);
+    }
+
+    /// Relabel the current reasoning title's leading word from the active
+    /// `clanking` placeholder to the finished `clawnked` label without
+    /// disturbing the trailing token/cache stats.
+    pub fn relabel_reasoning_title(&mut self) {
+        let suffix = self
+            .scene
+            .reasoning
+            .title()
+            .and_then(|t| t.strip_prefix(REASONING_PLACEHOLDER_TITLE))
+            .map(|rest| rest.to_string());
+        if let Some(suffix) = suffix {
+            self.scene
+                .reasoning
+                .set_title(&(REASONING_COMPLETED_TITLE.to_string() + &suffix));
+        }
     }
 
     /// Append a live tool-output chunk to the transcript's tool stream keyed
@@ -1768,6 +1785,41 @@ mod tests {
     }
 
     #[test]
+    fn done_relabels_finished_reasoning_title_to_clawnked() {
+        let cols: u16 = 80;
+        let rows: u16 = 12;
+        let mut live_area = new_live(cols, rows);
+
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        live_area.submit_prompt("hi".to_string());
+        live_area.push_reasoning_text("thinking\n");
+        live_area.flush_reasoning();
+        live_area.set_reasoning_title("clanking · ↑100 · ↓50 · ∴30 · cache 40%");
+        live_area.replace_response("answer");
+
+        live_area.relabel_reasoning_title();
+        live_area.finish_turn();
+        live_area.compose(&app).unwrap();
+
+        let visible = dump_buffer(live_area.backend().buffer());
+        assert!(
+            visible.contains("◈ clawnked · ↑100 · ↓50 · ∴30 · cache 40%"),
+            "Done should commit the clawnked header with its stats intact.\nBuffer:\n{visible}"
+        );
+        assert!(
+            !visible.contains("◈ clanking"),
+            "active clanking label must be replaced on the finished header.\nBuffer:\n{visible}"
+        );
+        assert_eq!(
+            visible.matches('◈').count(),
+            1,
+            "the clawnked header should render the reasoning glyph exactly once.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
     fn reasoning_placeholder_title_gives_way_to_turn_complete_stats() {
         let cols: u16 = 80;
         let rows: u16 = 12;
@@ -1796,13 +1848,11 @@ mod tests {
             "the placeholder header should render the reasoning glyph exactly once.\nBuffer:\n{visible}"
         );
 
-        live_area.set_reasoning_title(
-            "clanking · turn 3 · in 100 (cache 40%, +5 new) · out 50 · reason 30 · Σ out 200 · reason 120",
-        );
+        live_area.set_reasoning_title("clanking · ↑100 · ↓50 · ∴30 · cache 40%");
         live_area.compose(&app).unwrap();
         let visible = dump_buffer(live_area.backend().buffer());
         assert!(
-            visible.contains("◈ clanking · turn 3"),
+            visible.contains("◈ clanking · ↑100"),
             "TurnComplete stats should replace the placeholder without losing the clanking prefix.\nBuffer:\n{visible}"
         );
         assert_eq!(
@@ -1824,13 +1874,11 @@ mod tests {
         live_area.submit_prompt("hi".to_string());
         live_area.push_reasoning_text("first turn thinking\n");
         live_area.flush_reasoning();
-        live_area.set_reasoning_title(
-            "clanking · turn 1 · in 100 (cache 40%, +5 new) · out 50 · reason 30 · Σ out 200 · reason 120",
-        );
+        live_area.set_reasoning_title("clanking · ↑100 · ↓50 · ∴30 · cache 40%");
         live_area.compose(&app).unwrap();
         let visible = dump_buffer(live_area.backend().buffer());
         assert!(
-            visible.contains("clanking · turn 1"),
+            visible.contains("clanking · ↑100"),
             "TurnComplete stats should carry the turn-1 header.\nBuffer:\n{visible}"
         );
 
@@ -1843,7 +1891,7 @@ mod tests {
         live_area.compose(&app).unwrap();
         let visible = dump_buffer(live_area.backend().buffer());
         assert!(
-            visible.contains("clanking · turn 1"),
+            visible.contains("clanking · ↑100"),
             "the latest completed turn's stats title must persist over the next turn's reasoning.\nBuffer:\n{visible}"
         );
         assert!(
@@ -1909,9 +1957,7 @@ mod tests {
         app.project_name = "gremlins".to_string();
 
         live_area.submit_prompt("hi".to_string());
-        live_area.set_reasoning_title(
-            "clanking · turn 2 · in 10 (cache 40%, +1 new) · out 5 · reason 3 · Σ out 10 · reason 6",
-        );
+        live_area.set_reasoning_title("clanking · ↑10 · ↓5 · ∴3 · cache 40%");
         live_area.replace_response("answer");
         live_area.finish_turn();
 

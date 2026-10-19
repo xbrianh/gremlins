@@ -1602,6 +1602,11 @@ impl StreamingWidget {
         self.title.as_deref().is_none_or(str::is_empty)
     }
 
+    /// The currently configured title text, if any.
+    pub(crate) fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
     /// The configured reasoning stream: four-cell body gutter, `◈ `-prefixed
     /// chrome title, nickel italic text. The title renders and commits even
     /// when the stream has no reasoning body, so the chat TUI's live token
