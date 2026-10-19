@@ -61,11 +61,18 @@ impl OutlineItem {
     }
 }
 
-/// A file path together with the outline items found inside it.
+/// A file path together with the outline items found inside it, plus a
+/// [`skipped`] marker for files whose extension is not recognized by the
+/// outliner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileOutline {
     pub path: PathBuf,
     pub items: Vec<OutlineItem>,
+    /// True for files intentionally skipped because their extension is
+    /// unrecognized — they carry no items but still appear in the landscape
+    /// block. Files with a known extension that happen to produce zero
+    /// items have `skipped == false`.
+    pub skipped: bool,
 }
 
 /// Concrete outliner used by agent tooling.
@@ -188,6 +195,32 @@ impl LandscapeExplorer {
         let mut misses: Vec<(PathBuf, Option<(u64, u64)>)> = Vec::new();
 
         for path in &paths {
+            if !is_outlineable_file(path) {
+                // Unrecognized extension: emit a skipped entry (no items).
+                // Cache it so unchanged skipped files are not re-stat-ed.
+                if let Some(ref mut cache) = cache {
+                    cache.mark_visited(path);
+                    let fingerprint = file_fingerprint(path);
+                    if let Some((mtime_ns, size)) = fingerprint {
+                        if let Some(items) = cache.get(path, mtime_ns, size) {
+                            results.push(FileOutline {
+                                path: path.clone(),
+                                items,
+                                skipped: true,
+                            });
+                            continue;
+                        }
+                        cache.insert(path, mtime_ns, size, Vec::new());
+                    }
+                }
+                results.push(FileOutline {
+                    path: path.clone(),
+                    items: Vec::new(),
+                    skipped: true,
+                });
+                continue;
+            }
+
             if let Some(ref mut cache) = cache {
                 cache.mark_visited(path);
                 let fingerprint = file_fingerprint(path);
@@ -196,6 +229,7 @@ impl LandscapeExplorer {
                         results.push(FileOutline {
                             path: path.clone(),
                             items,
+                            skipped: false,
                         });
                         continue;
                     }
@@ -232,7 +266,11 @@ impl LandscapeExplorer {
                             cache.insert(&path, mtime_ns, size, items.clone());
                         }
                     }
-                    results.push(FileOutline { path, items });
+                    results.push(FileOutline {
+                        path,
+                        items,
+                        skipped: false,
+                    });
                 }
                 Err(_) => {
                     if let Some(ref mut cache) = cache {
@@ -342,9 +380,7 @@ fn collect_paths_recursive(
         depth,
         depth_limit,
         &|path, len| {
-            len <= MAX_OUTLINE_BYTES
-                && is_outlineable_file(path)
-                && !canonical_cache.is_some_and(|cc| same_file(cc, path))
+            len <= MAX_OUTLINE_BYTES && !canonical_cache.is_some_and(|cc| same_file(cc, path))
         },
         paths,
     )
@@ -728,8 +764,9 @@ fn format_at_depth(
 ///
 /// Paths under `root` are emitted relative to it (with `root` itself named in
 /// a preamble comment); anything outside `root` keeps its absolute path.
-/// Files with fewer than three outline items are skipped: they carry too
-/// little structural signal for the per-file overhead.
+/// Files with fewer than three outline items are skipped unless they carry the
+/// [`skipped`](FileOutline::skipped) marker (unrecognized extension), in which
+/// case the file header is always emitted so agents can see it exists.
 ///
 /// When the formatted block exceeds `max_tokens`, skeletonization is applied:
 /// spine directories (exactly one subdirectory, zero files) are compressed
@@ -751,8 +788,12 @@ pub(crate) fn format_landscape_block(
     // Build spine map from ALL outlines (including those with <3 items).
     let spine_map = build_spine_map(outlines, root);
 
-    // Filter to files with ≥3 items for rendering.
-    let renderable: Vec<&FileOutline> = outlines.iter().filter(|o| o.items.len() >= 3).collect();
+    // Filter to files with ≥3 items for rendering, but always include
+    // skipped files (unrecognized extensions) so agents can still see them.
+    let renderable: Vec<&FileOutline> = outlines
+        .iter()
+        .filter(|o| o.skipped || o.items.len() >= 3)
+        .collect();
     if renderable.is_empty() {
         return Ok(LandscapeBlock::empty());
     }
@@ -859,6 +900,7 @@ mod tests {
     #[test]
     fn format_landscape_block_skips_empty_outlines() {
         let outline = FileOutline {
+            skipped: false,
             path: PathBuf::from("src/main.rs"),
             items: Vec::new(),
         };
@@ -879,10 +921,12 @@ mod tests {
     fn format_landscape_block_skips_files_with_fewer_than_three_items() {
         let root = Path::new("/repo");
         let small = FileOutline {
+            skipped: false,
             path: root.join("small.rs"),
             items: vec![OutlineItem::new(FN, "small", 1)],
         };
         let big = FileOutline {
+            skipped: false,
             path: root.join("big.rs"),
             items: vec![
                 OutlineItem::new(FN, "first", 1),
@@ -901,6 +945,7 @@ mod tests {
     fn format_landscape_block_formats_files_and_items() {
         let root = Path::new("/repo");
         let outline = FileOutline {
+            skipped: false,
             path: root.join("src/main.rs"),
             items: vec![
                 OutlineItem::new(FN, "main", 12),
@@ -939,6 +984,7 @@ mod tests {
     fn format_landscape_block_keeps_absolute_path_outside_root() {
         let root = Path::new("/repo");
         let outline = FileOutline {
+            skipped: false,
             path: PathBuf::from("/elsewhere/main.rs"),
             items: vec![
                 OutlineItem::new(FN, "main", 1),
@@ -957,6 +1003,7 @@ mod tests {
     fn format_landscape_block_escapes_newlines_and_pipes_in_names_and_paths() {
         let root = Path::new("/repo");
         let outline = FileOutline {
+            skipped: false,
             path: root.join("src/evil\npath.rs"),
             items: vec![
                 OutlineItem::new(FN, "normal", 1),
@@ -990,6 +1037,7 @@ mod tests {
     fn format_landscape_block_escapes_comment_delimiters_in_names() {
         let root = Path::new("/repo");
         let outline = FileOutline {
+            skipped: false,
             path: root.join("doc.md"),
             items: vec![
                 OutlineItem::new(
@@ -1061,9 +1109,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
         std::fs::write(&path, "# One\n## Two\n").unwrap();
+        // .md is no longer a recognized extension: outline_file yields empty.
         let items = outline_items(&LandscapeExplorer, &path, false);
-        assert_eq!(items.len(), 2);
-        assert!(items.iter().all(|i| i.kind == HEADING));
+        assert_eq!(items.len(), 0);
     }
 
     #[test]
@@ -1174,8 +1222,12 @@ mod tests {
         std::fs::write(root.path().join("notes.txt"), "fn skip() {}\n").unwrap();
 
         let all = LandscapeExplorer.build(root.path(), 10, None).unwrap();
-        assert_eq!(all.len(), 1);
+        // keep.rs (outlineable) + notes.txt (unrecognized extension, skipped)
+        assert_eq!(all.len(), 2);
         assert_eq!(all[0].path, root.path().join("keep.rs"));
+        assert!(!all[0].skipped);
+        assert_eq!(all[1].path, root.path().join("notes.txt"));
+        assert!(all[1].skipped);
     }
 
     #[test]
@@ -1330,6 +1382,7 @@ mod tests {
         let outlines = vec![
             // File in a dir that has both subdirs and files → skeletal
             FileOutline {
+                skipped: false,
                 path: root.join("src/backends/anthropic.rs"),
                 items: vec![
                     OutlineItem::new(FN, "f1", 1),
@@ -1339,6 +1392,7 @@ mod tests {
             },
             // Another file in same dir → backends is skeletal (has files)
             FileOutline {
+                skipped: false,
                 path: root.join("src/backends/openai.rs"),
                 items: vec![
                     OutlineItem::new(FN, "g1", 1),
@@ -1349,6 +1403,7 @@ mod tests {
             // This file creates a spine chain: a/b/c/d/file.rs
             // Each of a,b,c,d has exactly one subdir and no files.
             FileOutline {
+                skipped: false,
                 path: root.join("a/b/c/d/deep.rs"),
                 items: vec![
                     OutlineItem::new(FN, "h1", 1),
@@ -1358,6 +1413,7 @@ mod tests {
             },
             // 2-item file — still counts for spine detection (directory has files)
             FileOutline {
+                skipped: false,
                 path: root.join("src/has_two.rs"),
                 items: vec![
                     OutlineItem::new(FN, "only", 1),
@@ -1387,6 +1443,7 @@ mod tests {
     fn spine_map_2item_file_prevents_spine() {
         let root = Path::new("/repo");
         let outlines = vec![FileOutline {
+            skipped: false,
             path: root.join("only_dir/only_file.rs"),
             items: vec![OutlineItem::new(FN, "a", 1), OutlineItem::new(FN, "b", 2)],
         }];
@@ -1402,6 +1459,7 @@ mod tests {
         // src/backends is skeletal (has the file). So compressed depth = 1.
         let outlines = vec![
             FileOutline {
+                skipped: false,
                 path: root.join("a/b/c/d/deep.rs"),
                 items: vec![
                     OutlineItem::new(FN, "x", 1),
@@ -1410,6 +1468,7 @@ mod tests {
                 ],
             },
             FileOutline {
+                skipped: false,
                 path: root.join("src/backends/anthropic.rs"),
                 items: vec![
                     OutlineItem::new(FN, "x", 1),
@@ -1444,6 +1503,7 @@ mod tests {
         // So the spine prefix is "src/clients" before the skeletal "backends".
         let outlines = vec![
             FileOutline {
+                skipped: false,
                 path: root.join("src/clients/backends/anthropic.rs"),
                 items: vec![
                     OutlineItem::new(FN, "x", 1),
@@ -1452,6 +1512,7 @@ mod tests {
                 ],
             },
             FileOutline {
+                skipped: false,
                 path: root.join("a/b/c/d/deep.rs"),
                 items: vec![
                     OutlineItem::new(FN, "x", 1),
@@ -1483,6 +1544,7 @@ mod tests {
         let root = Path::new("/repo");
         let outlines = vec![
             FileOutline {
+                skipped: false,
                 path: root.join("src/a.rs"),
                 items: vec![
                     OutlineItem::new(FN, "x", 1),
@@ -1491,6 +1553,7 @@ mod tests {
                 ],
             },
             FileOutline {
+                skipped: false,
                 path: root.join("src/sub/b.rs"),
                 items: vec![
                     OutlineItem::new(FN, "x", 1),
@@ -1510,6 +1573,7 @@ mod tests {
         // Spine chain x/y/z/spine_file.rs: x,y are spines, z is skeletal (has the file).
         // Compressed depth = 1 (z only). At depth limit 0: excluded.
         let spine_chain = vec![FileOutline {
+            skipped: false,
             path: root.join("x/y/z/spine_file.rs"),
             items: vec![
                 OutlineItem::new(FN, "x", 1),
@@ -1543,6 +1607,7 @@ mod tests {
         path.push("file.rs");
 
         let outline = FileOutline {
+            skipped: false,
             path: path.clone(),
             items: vec![
                 OutlineItem::new(FN, "one", 1),
@@ -1570,6 +1635,7 @@ mod tests {
         // A root-level file: compressed depth 0, no directory headers.
         let root = Path::new("/repo");
         let outline = FileOutline {
+            skipped: false,
             path: root.join("main.rs"),
             items: vec![
                 OutlineItem::new(FN, "main", 1),
@@ -1610,6 +1676,7 @@ mod tests {
         let root = Path::new("/repo");
         let mk_file = |path: PathBuf, prefix: &str| -> FileOutline {
             FileOutline {
+                skipped: false,
                 path,
                 items: (1..=20)
                     .map(|i| OutlineItem::new(FN, format!("{prefix}_{i:02}"), i))
@@ -1660,6 +1727,7 @@ mod tests {
         let root = Path::new("/repo");
         let mk_file = |path: PathBuf, prefix: &str| -> FileOutline {
             FileOutline {
+                skipped: false,
                 path,
                 items: (1..=20)
                     .map(|i| OutlineItem::new(FN, format!("{prefix}_{i:02}"), i))
@@ -1708,6 +1776,7 @@ mod tests {
         let root = Path::new("/repo");
         let long = "a_very_very_very_long_name_specifically_designed_to_overflow_the_budget";
         let outline = FileOutline {
+            skipped: false,
             path: root.join("lib.rs"),
             items: vec![
                 OutlineItem::new(FN, "new", 1),
@@ -1728,6 +1797,7 @@ mod tests {
     fn format_landscape_block_impossible_budget_returns_err() {
         let root = Path::new("/repo");
         let outline = FileOutline {
+            skipped: false,
             path: root.join("lib.rs"),
             items: vec![
                 OutlineItem::new(FN, "long_name_one", 1),
@@ -1752,6 +1822,7 @@ mod tests {
         let root = Path::new("/repo");
         let mk_file = |path: PathBuf, prefix: &str| -> FileOutline {
             FileOutline {
+                skipped: false,
                 path,
                 items: (1..=30)
                     .map(|i| OutlineItem::new(FN, format!("{prefix}_{i:02}"), i))

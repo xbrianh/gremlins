@@ -1358,7 +1358,7 @@ fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str
         }
     } else {
         match LandscapeExplorer.outline_file(&path, false) {
-            Ok(items) => render_landscape(&items),
+            Ok(items) => render_landscape(&items, &path),
             Err(LandscapeError::Utf8(e)) => format!("Error: file is not valid UTF-8: {e}"),
             Err(LandscapeError::Read(e)) => format!("Error: {e}"),
             // `outline_file` never returns BudgetExceeded or Tokenizer either;
@@ -1369,9 +1369,17 @@ fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str
     }
 }
 
-fn render_landscape(items: &[crate::landscape::OutlineItem]) -> String {
+fn render_landscape(items: &[crate::landscape::OutlineItem], path: &Path) -> String {
     if items.is_empty() {
-        return "(no outline items)".to_string();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        if crate::landscape::heuristic::recognizes(&ext) {
+            return "(no outline items)".to_string();
+        }
+        return path.display().to_string();
     }
     items
         .iter()
@@ -3038,11 +3046,10 @@ mod tests {
         std::fs::write(dir.join("README.md"), "# Title\n\n## Subtitle\n").unwrap();
         let args = serde_json::json!({"file_path": "README.md"}).to_string();
         let out = landscape_invoke(&c, &args).await;
-        assert!(out.contains("heading"), "got: {out:?}");
-        assert!(
-            out.contains("Title") && out.contains("Subtitle"),
-            "got: {out:?}"
-        );
+        // .md is no longer a recognized extension; the tool shows the
+        // filename instead of "(no outline items)".
+        assert!(out.contains("README.md"), "got: {out:?}");
+        assert!(!out.contains("heading"), "got: {out:?}");
     }
 
     #[tokio::test]
