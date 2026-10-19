@@ -106,6 +106,10 @@ struct CurrentTurn {
     /// gremlin (or dropped it). A follow-up `chat` for the same id waits on
     /// this so it never sees the gremlin as "unknown" mid-turn.
     done: Arc<tokio::sync::Notify>,
+    /// True when a soft-interrupt has already emitted `ended` for this
+    /// turn. The turn stays alive so a hard cancel within the double-press
+    /// window can still clean up the partial artifact and interrupt flag.
+    interrupted: bool,
 }
 
 /// Daemon-side assets for one interactive front-end session.
@@ -3091,6 +3095,7 @@ async fn handle_chat(
             cancel: turn_cancel.clone(),
             soft_cancel: Arc::clone(&soft_cancel),
             done: Arc::clone(&done),
+            interrupted: false,
         });
     }
 
@@ -3469,6 +3474,35 @@ async fn run_chat_turn(
                                 .await;
                             }
 
+                            // A hard cancel may have arrived during
+                            // `append_chat_conversation_turn`. Serialize
+                            // the final soft/hard decision under the
+                            // session lock: if hard cancellation won,
+                            // clear the artifact and skip
+                            // `mark_interrupted()`.
+                            if !soft_cancel.load(Ordering::Relaxed) {
+                                if let Some(turn_num) = chat_turn_num {
+                                    crate::executor::run::clear_chat_turn_artifact(
+                                        &recovered, turn_num,
+                                    )
+                                    .await;
+                                }
+                                reinsert_and_clear(
+                                    &id,
+                                    Some(recovered),
+                                    &turn_cancel,
+                                    &session,
+                                    &done,
+                                )
+                                .await;
+                                let payload = chat_payload(
+                                    &turn,
+                                    serde_json::json!({"type": "ended", "id": id, "reason": "cancelled"}),
+                                );
+                                let _ = writer.write_json_line(&payload).await;
+                                return;
+                            }
+
                             // Mark the definition as interrupted so the
                             // next turn injects the interrupt notice.
                             if let Some(chat) = recovered
@@ -3479,14 +3513,20 @@ async fn run_chat_turn(
                                 chat.mark_interrupted();
                             }
 
-                            reinsert_and_clear(
-                                &id,
-                                Some(recovered),
-                                &turn_cancel,
-                                &session,
-                                &done,
-                            )
-                            .await;
+                            // Re-insert the gremlin but keep
+                            // `current_turn` alive (marked interrupted)
+                            // so a hard cancel within the double-press
+                            // window can still clean up the artifact.
+                            reinsert_chat_gremlin(&id, recovered, &session).await;
+                            {
+                                let mut s = session.lock().await;
+                                if let Some(cur) = &mut s.current_turn {
+                                    if Arc::ptr_eq(&cur.cancel, &turn_cancel) {
+                                        cur.interrupted = true;
+                                    }
+                                }
+                            }
+                            done.notify_one();
                             let payload = chat_payload(
                                 &turn,
                                 serde_json::json!({"type": "ended", "id": id, "reason": "interrupted"}),
@@ -3623,8 +3663,11 @@ async fn run_chat_turn(
 
 /// Cancel the in-flight chat turn for this connection, if one is active.
 ///
-/// The terminal `ended` event is emitted by the turn task (which owns the
-/// gremlin re-insertion), so this handler only cancels the token and acks.
+/// The terminal `ended` event is normally emitted by the turn task (which
+/// owns the gremlin re-insertion). For an already-interrupted turn the turn
+/// task has returned; this handler performs the cleanup and emits `ended`
+/// directly.
+///
 /// When the request names a `turn`, only a matching in-flight turn is
 /// cancelled, so a late `cancel_chat` cannot hit a subsequent turn. A no-op
 /// when no matching turn is in flight.
@@ -3646,12 +3689,82 @@ async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &Se
         None => false,
     };
     if matches {
-        // Cancel the token but leave `current_turn` installed — its `done`
-        // `Notify` is what `handle_chat` waits on when the gremlin is
-        // temporarily out of `chat_gremlins`. `run_chat_turn::finish`
-        // clears `current_turn` once the turn has completed and re-inserted
-        // (or dropped) the gremlin.
+        // If the turn has already been interrupted (soft-cancel finished),
+        // only a hard cancel is meaningful: clean up the artifact and the
+        // `interrupted` flag, then emit `ended` so the TUI can retire the
+        // turn. A soft cancel on an already-interrupted turn is a no-op.
         if let Some(cur) = &s.current_turn {
+            if cur.interrupted {
+                if soft {
+                    // Already interrupted — soft cancel is a no-op.
+                    drop(s);
+                    let _ = writer
+                        .write_json_line(&ok_response(serde_json::json!({})))
+                        .await;
+                    return;
+                }
+
+                // Hard cancel on an interrupted turn: take the gremlin
+                // from the session, clear the partial artifact and the
+                // interrupt flag, then re-insert.  Emit `ended` directly
+                // since the turn task has already returned.
+                let id = cur.id.clone();
+                let turn = cur.turn.clone();
+                let done = Arc::clone(&cur.done);
+                drop(s);
+
+                let gremlin_opt = {
+                    let mut s = session.lock().await;
+                    s.chat_gremlins.remove(&id)
+                };
+
+                if let Some(mut gremlin) = gremlin_opt {
+                    let turn_num = gremlin
+                        .definition
+                        .as_any_mut()
+                        .and_then(|a| a.downcast_ref::<ChatDefinition>())
+                        .map(|c| c.turn_count());
+
+                    if let Some(turn_num) = turn_num {
+                        crate::executor::run::clear_chat_turn_artifact(&gremlin, turn_num).await;
+                    }
+
+                    if let Some(chat) = gremlin
+                        .definition
+                        .as_any_mut()
+                        .and_then(|a| a.downcast_mut::<ChatDefinition>())
+                    {
+                        chat.clear_interrupted();
+                    }
+
+                    let mut s = session.lock().await;
+                    s.chat_gremlins.insert(id.clone(), gremlin);
+                    s.current_turn = None;
+                    drop(s);
+                } else {
+                    let mut s = session.lock().await;
+                    s.current_turn = None;
+                    drop(s);
+                }
+
+                done.notify_one();
+                let payload = chat_payload(
+                    &turn,
+                    serde_json::json!({"type": "ended", "id": id, "reason": "cancelled"}),
+                );
+                let _ = writer.write_json_line(&payload).await;
+                let _ = writer
+                    .write_json_line(&ok_response(serde_json::json!({})))
+                    .await;
+                return;
+            }
+
+            // Normal (non-interrupted) path: cancel the token but leave
+            // `current_turn` installed — its `done` `Notify` is what
+            // `handle_chat` waits on when the gremlin is temporarily out
+            // of `chat_gremlins`. `run_chat_turn::finish` clears
+            // `current_turn` once the turn has completed and re-inserted
+            // (or dropped) the gremlin.
             let already_cancelled = cur.cancel.is_cancelled();
             if soft {
                 // Only honour a soft request when the token has not yet
@@ -5343,6 +5456,7 @@ model-profiles:
                 cancel: super::CancelToken::new(),
                 soft_cancel: Arc::new(AtomicBool::new(false)),
                 done: Arc::new(tokio::sync::Notify::new()),
+                interrupted: false,
             });
         }
 
@@ -5561,6 +5675,7 @@ model-profiles:
                 cancel: cancel.clone(),
                 soft_cancel: Arc::new(AtomicBool::new(false)),
                 done: Arc::new(tokio::sync::Notify::new()),
+                interrupted: false,
             });
         }
 

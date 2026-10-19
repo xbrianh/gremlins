@@ -95,6 +95,13 @@ impl ChatDefinition {
         self.interrupted = true;
     }
 
+    /// Clear the interrupted flag without injecting a notice.
+    /// Used when a hard cancel escalates after a soft interrupt to discard
+    /// the partial turn entirely.
+    pub fn clear_interrupted(&mut self) {
+        self.interrupted = false;
+    }
+
     /// The zero-based turn counter (how many stages have been produced so far).
     pub fn turn_count(&self) -> usize {
         self.turn
@@ -498,6 +505,28 @@ mod tests {
         assert!(
             !text.contains("interrupted"),
             "prompt must not contain interrupt notice when not marked"
+        );
+    }
+
+    /// `clear_interrupted` resets the flag so the next `set_pending`
+    /// does *not* inject the interrupt notice.
+    #[test]
+    fn clear_interrupted_resets_flag() {
+        let mut def = ChatDefinition::new(
+            "chat".into(),
+            PathBuf::from("."),
+            model("openai/gpt-4"),
+            "sys".into(),
+        );
+        def.mark_interrupted();
+        def.clear_interrupted();
+        def.set_pending("hello", &model("openai/gpt-4"), "sys");
+
+        let (text, _, _) = def.pending.expect("pending must be set");
+        assert_eq!(text, "hello");
+        assert!(
+            !text.contains("interrupted"),
+            "prompt must not contain interrupt notice after clear_interrupted"
         );
     }
 }
