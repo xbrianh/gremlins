@@ -12,11 +12,19 @@ use tokio::process::Command;
 use super::agent_loop::format_tool_call_parts;
 use super::interactive::StreamEventSender;
 use super::task_kind::TaskKind;
-use crate::landscape::{format_landscape_block, LandscapeError, LandscapeExplorer};
+use crate::landscape::{format_landscape_tool_block, LandscapeError, LandscapeExplorer};
 
 const GREP_MAX_LINES: usize = 2000;
 const BASH_TIMEOUT_SECS: u64 = 120;
 const WEBSEARCH_TIMEOUT_SECS: u64 = 30;
+/// Directory depth used by the `Landscape` tool when the caller does not pass
+/// an explicit `depth`. A modest default keeps an on-demand directory scan
+/// bounded instead of walking the entire tree on every call.
+const LANDSCAPE_TOOL_DEFAULT_DEPTH: u64 = 4;
+/// Hard upper bound for an explicit `depth` argument to the `Landscape` tool.
+/// Deeper than this is almost never useful once the block is capped to
+/// `max_landscape_bytes`, and it prevents an accidental runaway walk.
+const LANDSCAPE_TOOL_MAX_DEPTH: u64 = 16;
 /// Cap on Task calls spawned from a single model message. Without this, one
 /// response could fan out unbounded child loops and overflow the context.
 pub(crate) const TASK_MAX_PER_TURN: usize = 8;
@@ -29,6 +37,17 @@ const ALWAYS_AVAILABLE: &[&str] = &["Task", "Done"];
 
 fn always_available(name: &str) -> bool {
     ALWAYS_AVAILABLE.contains(&name)
+}
+
+/// Normalize a tool name before dispatch.
+///
+/// `OutlineFile` is the historical name of the `Landscape` tool and is still
+/// accepted so old prompts or transcripts keep working after the rename.
+fn normalize_tool_name(name: &str) -> &str {
+    match name {
+        "OutlineFile" => "Landscape",
+        other => other,
+    }
 }
 
 /// First `max_chars` characters of a string, with \n escaped to `\\n`.
@@ -1317,19 +1336,31 @@ fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str
         }
     }
     if path.is_dir() {
-        match LandscapeExplorer.build(&path, usize::MAX, None) {
+        let depth = args
+            .get("depth")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(LANDSCAPE_TOOL_DEFAULT_DEPTH)
+            .clamp(0, LANDSCAPE_TOOL_MAX_DEPTH) as usize;
+        match LandscapeExplorer.build(&path, depth, None) {
             Ok(outlines) => {
                 let max_bytes = crate::config::max_landscape_bytes() as usize;
-                match format_landscape_block(&outlines, &path, max_bytes, false) {
-                    Ok(block) => block,
-                    Err(LandscapeError::BudgetExceeded) => {
-                        String::from("Error: landscape budget exceeded")
-                    }
+                match format_landscape_tool_block(&outlines, &path, max_bytes) {
+                    Ok(block) if !block.is_empty() => block,
+                    Ok(_) => String::from(
+                        "(no files with enough structure for a landscape; try a specific file)",
+                    ),
+                    Err(LandscapeError::BudgetExceeded) => format!(
+                        "Error: landscape for {} exceeds the {max_bytes} byte budget; target a narrower subdirectory or a single file",
+                        path.display()
+                    ),
                     Err(e) => format!("Error: {e}"),
                 }
             }
             Err(LandscapeError::Read(e)) => format!("Error: {e}"),
-            Err(LandscapeError::BudgetExceeded) => String::from("Error: landscape budget exceeded"),
+            Err(LandscapeError::BudgetExceeded) => format!(
+                "Error: landscape for {} exceeds the byte budget; target a narrower subdirectory or a single file",
+                path.display()
+            ),
             Err(LandscapeError::Utf8(e)) => format!("Error: file is not valid UTF-8: {e}"),
         }
     } else {
@@ -1339,7 +1370,7 @@ fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str
             Err(LandscapeError::Read(e)) => format!("Error: {e}"),
             Err(LandscapeError::BudgetExceeded) => {
                 // `outline_file` never returns BudgetExceeded (that variant only
-                // comes from `format_landscape_block`), but the match must be
+                // comes from `format_landscape_tool_block`), but the match must be
                 // exhaustive. Returning an error string is just as short and keeps
                 // a future refactor from turning this into a panic in a blocking
                 // task.
@@ -2356,7 +2387,10 @@ fn glob_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
 fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool)>> {
     match name {
         "Read" => Some(vec![("file_path", "string", true)]),
-        "Landscape" => Some(vec![("file_path", "string", true)]),
+        "Landscape" => Some(vec![
+            ("file_path", "string", true),
+            ("depth", "integer", false),
+        ]),
         "Edit" => Some(vec![
             ("file_path", "string", true),
             ("edits", "array", true),
@@ -2501,6 +2535,10 @@ pub(crate) async fn invoke(
     ctx: &AgentLoopRuntime,
     args_json: &str,
 ) -> String {
+    // `OutlineFile` was the tool's pre-rename name. Accept it as a deprecated
+    // alias so stale model call-sites keep working instead of failing with
+    // "unknown tool".
+    let name = normalize_tool_name(name);
     if let Some(allowed) = &ctx.allowed_tools {
         if !always_available(name) && !allowed.iter().any(|n| n == name) {
             return format!("Error: unknown tool {name}");
@@ -2653,13 +2691,17 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
         },
         ToolDefinition {
             name: "Landscape".into(),
-            description: "Show the structural outline of a file or directory. For a file, returns one item per line with its 1-based line number, kind, and name. Kinds include fn, struct, impl, trait, enum, mod, class, method, heading, and key. Test functions inside `#[cfg(test)]` modules are shown individually. Unknown file extensions yield an empty outline. For a directory, returns a full landscape block with outlines for all recognized files. Paths outside the sandbox are rejected.".into(),
+            description: "Show the structural outline of a file or directory. For a file, returns one item per line with its 1-based line number, kind, and name. Kinds include fn, struct, impl, trait, enum, mod, class, method, heading, and key. Test functions inside `#[cfg(test)]` modules are shown individually. Unknown file extensions yield an empty outline. For a directory, returns a landscape block with outlines for recognized files up to `depth` levels deep (default 4, max 16). Paths outside the sandbox are rejected.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
                         "description": "Path to the file or directory to outline (relative or absolute)"
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "description": "For directories, how many nested directory levels to scan (default 4, max 16)"
                     }
                 },
                 "required": ["file_path"],
@@ -3002,6 +3044,10 @@ mod tests {
             out.contains("     1  fn       main"),
             "line numbers must be aligned: {out:?}"
         );
+        assert!(
+            !out.contains("captured by the harness at stage start"),
+            "file outlines must not carry the stage-start preamble: {out:?}"
+        );
     }
 
     #[tokio::test]
@@ -3037,6 +3083,84 @@ mod tests {
             .to_string();
         let out = landscape_invoke(&c, &args).await;
         assert!(out.contains("outside sandbox"), "got: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn landscape_directory_renders_tool_block() {
+        let _env = crate::test_support::EnvGuard::lock();
+        let dir = tmp();
+        let c = ctx(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            "fn main() {}\nstruct Foo;\nimpl Foo {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("README.md"),
+            "# Title\n\n## Subtitle\n\n### Details\n",
+        )
+        .unwrap();
+        let args = serde_json::json!({"file_path": "."}).to_string();
+        let out = landscape_invoke(&c, &args).await;
+        assert!(
+            out.starts_with("<!-- BEGIN LANDSCAPE BLOCK -->\n"),
+            "got: {out:?}"
+        );
+        assert!(
+            out.contains("captured on demand by the Landscape tool"),
+            "got: {out:?}"
+        );
+        assert!(
+            !out.contains("captured by the harness at stage start"),
+            "got: {out:?}"
+        );
+        assert!(out.contains("src/lib.rs:"), "got: {out:?}");
+        assert!(out.contains("README.md:"), "got: {out:?}");
+        assert!(out.contains("1|fn|main\n"), "got: {out:?}");
+        assert!(
+            out.ends_with("<!-- END LANDSCAPE BLOCK -->\n"),
+            "got: {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn landscape_directory_outside_sandbox_is_denied() {
+        let dir = tmp();
+        let outside = tmp();
+        let c = ctx(&dir);
+        std::fs::write(outside.join("outside.rs"), "fn outside() {}\n").unwrap();
+        let args = serde_json::json!({"file_path": outside.to_str().unwrap()}).to_string();
+        let out = landscape_invoke(&c, &args).await;
+        assert!(out.contains("outside sandbox"), "got: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn landscape_directory_budget_exceeded_is_actionable() {
+        let mut env = crate::test_support::EnvGuard::lock();
+        let dir = tmp();
+        let c = ctx(&dir);
+        std::fs::write(dir.join("big.rs"), "fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
+        env.set("GREMLINS_MAX_LANDSCAPE_BYTES", "50");
+        let args = serde_json::json!({"file_path": "."}).to_string();
+        let out = landscape_invoke(&c, &args).await;
+        assert!(out.starts_with("Error:"), "got: {out:?}");
+        assert!(out.contains("byte budget"), "got: {out:?}");
+        assert!(out.contains("narrower subdirectory"), "got: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn outline_file_alias_lands_on_landscape() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        std::fs::write(
+            dir.join("lib.rs"),
+            "fn main() {}\nstruct Foo;\nimpl Foo {}\n",
+        )
+        .unwrap();
+        let args = serde_json::json!({"file_path": "lib.rs"}).to_string();
+        let out = invoke("tool-test-id", "OutlineFile", &c, &args).await;
+        assert!(out.contains("fn") && out.contains("main"), "got: {out:?}");
     }
 
     #[tokio::test]

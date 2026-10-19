@@ -62,17 +62,17 @@ impl SystemPrompt {
 /// failure is logged (to both the daemon log and the gremlin's `log_tx` so the
 /// operator sees it in `gremlins log`) before degrading the same way.
 ///
-/// `has_outline_tool` controls whether the block advertises the `Landscape`
+/// `has_landscape_tool` controls whether the block advertises the `Landscape`
 /// tool; stages/backends without that tool must not be told to use it.
 ///
 /// The synchronous directory walk runs on a blocking thread pool so the tokio
 /// runtime is never stalled on filesystem I/O.
-pub(crate) async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -> String {
+pub(crate) async fn landscape_block(gremlin: &Gremlin, has_landscape_tool: bool) -> String {
     let snapshot = build_landscape_snapshot(
         gremlin.cwd(),
         landscape_cache_path(gremlin),
         gremlin.runtime_config.log_tx.clone(),
-        has_outline_tool,
+        has_landscape_tool,
     )
     .await;
 
@@ -108,7 +108,7 @@ async fn build_landscape_snapshot(
     cwd: PathBuf,
     cache_path: Option<PathBuf>,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    has_outline_tool: bool,
+    has_landscape_tool: bool,
 ) -> LandscapeSnapshot {
     let root = cwd.clone();
     let walk_log_tx = log_tx.clone();
@@ -138,7 +138,7 @@ async fn build_landscape_snapshot(
         &outlines,
         &root,
         max_bytes,
-        has_outline_tool,
+        has_landscape_tool,
     ) {
         Ok(block) if !block.is_empty() => {
             let file_count = outlines.iter().filter(|o| o.items.len() >= 3).count();

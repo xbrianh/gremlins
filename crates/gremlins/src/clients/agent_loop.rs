@@ -2092,7 +2092,7 @@ pub(crate) fn format_tool_call_parts(name: &str, args: &serde_json::Value) -> St
             .get("url")
             .and_then(|v| v.as_str())
             .map(|s| format!("url={s:?}")),
-        "Landscape" => args
+        "OutlineFile" | "Landscape" => args
             .get("file_path")
             .and_then(|v| v.as_str())
             .map(|s| format!("file_path={s:?}")),
