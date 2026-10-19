@@ -7,7 +7,7 @@
 //!
 //! [`ModelURI`] is a pure data type — it parses a model specifier string and
 //! stores the result. It has no runtime behavior, no network, no credentials,
-//! and no dependency on any other crate module.
+//! and no code dependency on any other crate module.
 
 use indexmap::IndexMap;
 use std::fmt;
@@ -225,11 +225,12 @@ impl ModelURI {
     /// Validate raw parts and build a normalized reference.
     ///
     /// This is the shape-only invariant chokepoint shared by the parsers and
-    /// [`Client::new`]: the raw `(provider, model, params)` triple is checked
+    /// `Client::new`: the raw `(provider, model, params)` triple is checked
     /// against the same grammar rules as a parsed spec, without going through
     /// a string round-trip.
     ///
-    /// [`Client::new`]: crate::clients::client::Client::new
+    /// `pub(crate)` so that `Client::new` can call it; all other crate
+    /// modules should go through [`ModelURI::parse`].
     pub(crate) fn from_parts(
         provider: String,
         model: String,
@@ -544,8 +545,8 @@ mod tests {
         assert!(err.contains("expected 'provider/model'"), "{err:?}");
 
         // The parts-based constructor funnels through the same
-        // [`ModelURI::from_parts`] chokepoint, so it must reject `profile`
-        // before any provider allowlist check runs.
+        // `ModelURI::from_parts` chokepoint, so it must reject `profile`
+        // at the grammar level.
         let err =
             ModelURI::from_parts("profile".into(), "foo".into(), IndexMap::new()).unwrap_err();
         assert!(err.contains("reserved profile-reference prefix"), "{err:?}");

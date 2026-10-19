@@ -407,6 +407,11 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("invalid client params"), "{err:?}");
 
+        // `profile` is rejected by `ModelURI::from_parts` before
+        // `Client::new` ever runs the provider allowlist check.
+        let err = Client::new("profile".into(), "foo".into(), IndexMap::new()).unwrap_err();
+        assert!(err.contains("reserved profile-reference prefix"), "{err:?}");
+
         assert!(Client::new("cmd".into(), "echo hi?y=1".into(), IndexMap::new()).is_ok());
     }
 
