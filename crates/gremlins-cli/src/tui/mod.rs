@@ -702,24 +702,27 @@ fn usage_field(usage: Option<&serde_json::Value>, field: &str) -> Option<u64> {
 
 /// Placeholder reasoning title shown as soon as the first reasoning chunk of
 /// a turn arrives, and the fixed label prefix of the live stats title. Shared
-/// by [`stats_title`] here and the reasoning band in `screen.rs` so the
+/// by [`stats_title`] and the reasoning band in `screen.rs` so the
 /// placeholder→stats handoff can never drift between two hard-coded strings.
 pub(crate) const REASONING_PLACEHOLDER_TITLE: &str = "clanking";
 
-/// Finished reasoning title used when the agent calls `Done`. Shared by
-/// `LiveArea::relabel_reasoning_title` (mod.rs) and the reasoning band in
-/// `screen.rs` so the active→finished handoff can never drift between two
-/// hard-coded strings.
+/// Finished reasoning title used when the agent calls `Done`. Used by
+/// `LiveArea::relabel_reasoning_title` (in `screen.rs`) so the active→finished
+/// handoff can never drift between two hard-coded strings.
 pub(crate) const REASONING_COMPLETED_TITLE: &str = "clawnked";
 
 /// Format a token count compactly for the live stats title: raw integers
 /// below 1000, one-decimal `k` for thousands, and one-decimal `M` for
-/// millions. Missing values render as a dash.
+/// millions. The unit is chosen from the rounded value so that e.g. 999_950
+/// rounds up to 1.0M rather than rendering as 1000.0k. Missing values render
+/// as a dash.
 fn compact_tokens(value: Option<u64>) -> String {
     match value {
         None => "-".to_string(),
         Some(v) if v < 1_000 => v.to_string(),
-        Some(v) if v < 1_000_000 => format!("{:.1}k", v as f64 / 1_000.0),
+        Some(v) if (v as f64 / 1_000.0).round() < 1_000.0 => {
+            format!("{:.1}k", v as f64 / 1_000.0)
+        }
         Some(v) => format!("{:.1}M", v as f64 / 1_000_000.0),
     }
 }
@@ -2108,7 +2111,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // finishes. All tools participate uniformly.
                         live_area.reconcile_tool_calls(&tool_calls);
                         // The reasoning stream's title row is the live stats line:
-                        // per-turn delta plus the conversation-wide total.
+                        // compact per-turn token/cache summary.
                         live_area.set_reasoning_title(&stats_title(stats.as_ref()));
                     }
                     ChatEvent::Done { text, summary, .. } => {
@@ -2477,9 +2480,7 @@ mod tests {
 
         let title = stats_title(Some(&stats));
 
-        // The `↑` figure is the per-turn prompt size (77), not the
-        // conversation-wide prompt total (999), which may drop across
-        // compaction and is therefore never summed.
+        // The `↑` figure is the per-turn prompt size (77).
         assert_eq!(title, "clanking · ↑77 · ↓9 · ∴4 · cache 0%", "{title}");
     }
 
@@ -2573,6 +2574,8 @@ mod tests {
         assert_eq!(compact_tokens(Some(999)), "999");
         assert_eq!(compact_tokens(Some(1_000)), "1.0k");
         assert_eq!(compact_tokens(Some(46_884)), "46.9k");
+        assert_eq!(compact_tokens(Some(999_499)), "999.5k");
+        assert_eq!(compact_tokens(Some(999_500)), "1.0M");
         assert_eq!(compact_tokens(Some(1_000_000)), "1.0M");
         assert_eq!(compact_tokens(None), "-");
     }

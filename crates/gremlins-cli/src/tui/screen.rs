@@ -538,14 +538,16 @@ impl<B: Backend> LiveArea<B> {
     /// `clanking` placeholder to the finished `clawnked` label without
     /// disturbing the trailing token/cache stats.
     pub fn relabel_reasoning_title(&mut self) {
-        let title = self.scene.reasoning.title();
-        let Some(title) = title else {
-            return;
-        };
-        if let Some(rest) = title.strip_prefix(REASONING_PLACEHOLDER_TITLE) {
+        let suffix = self
+            .scene
+            .reasoning
+            .title()
+            .and_then(|t| t.strip_prefix(REASONING_PLACEHOLDER_TITLE))
+            .map(|rest| rest.to_string());
+        if let Some(suffix) = suffix {
             self.scene
                 .reasoning
-                .set_title(&(REASONING_COMPLETED_TITLE.to_string() + rest));
+                .set_title(&(REASONING_COMPLETED_TITLE.to_string() + &suffix));
         }
     }
 
