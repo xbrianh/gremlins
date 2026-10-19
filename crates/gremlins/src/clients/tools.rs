@@ -1359,8 +1359,14 @@ fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str
             Err(LandscapeError::Utf8(e)) => format!("Error: file is not valid UTF-8: {e}"),
         }
     } else {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        let recognized = crate::landscape::heuristic::recognizes(&ext);
         match LandscapeExplorer.outline_file(&path, false) {
-            Ok(items) => render_outline(&path, &items),
+            Ok(items) => render_outline(&path, &items, recognized),
             Err(LandscapeError::Utf8(e)) => format!("Error: file is not valid UTF-8: {e}"),
             Err(LandscapeError::Read(e)) => format!("Error: {e}"),
             Err(LandscapeError::BudgetExceeded) => {
@@ -1375,8 +1381,15 @@ fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str
     }
 }
 
-fn render_outline(path: &Path, items: &[crate::landscape::OutlineItem]) -> String {
+fn render_outline(
+    path: &Path,
+    items: &[crate::landscape::OutlineItem],
+    recognized: bool,
+) -> String {
     if items.is_empty() {
+        if recognized {
+            return "(no outline items)".to_string();
+        }
         return format!("{}", path.display());
     }
     items
@@ -2686,7 +2699,7 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
         },
         ToolDefinition {
             name: "Landscape".into(),
-            description: "Show the structural outline of a file or directory. For a file, returns one item per line with its 1-based line number, kind, and name. Kinds include fn, struct, impl, trait, enum, mod, class, method, and key. Test functions inside `#[cfg(test)]` modules are shown individually. Unknown file extensions show the filename. For a directory, returns a landscape block with outlines for recognized files. Paths outside the sandbox are rejected.".into(),
+            description: "Show the structural outline of a file or directory. For a file, returns one item per line with its 1-based line number, kind, and name. Kinds include fn, struct, impl, trait, enum, mod, class, method, and key. Test functions inside `#[cfg(test)]` modules are shown individually. Unknown file extensions show the filename. For a directory, returns a landscape block with outlines for recognized files and filenames for other files. Paths outside the sandbox are rejected.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -3054,6 +3067,9 @@ mod tests {
         let out = landscape_invoke(&c, &args).await;
         // .md is no longer a recognized extension — the tool shows the filename.
         assert!(out.contains("README.md"), "got: {out:?}");
+        assert!(!out.contains("heading"), "got: {out:?}");
+        assert!(!out.contains("Title"), "got: {out:?}");
+        assert!(!out.contains("Subtitle"), "got: {out:?}");
     }
 
     #[tokio::test]

@@ -141,10 +141,13 @@ async fn build_landscape_snapshot(
         has_landscape_tool,
     ) {
         Ok(block) if !block.is_empty() => {
-            let file_count = outlines.iter().filter(|o| o.items.len() >= 3).count();
+            let file_count = outlines
+                .iter()
+                .filter(|o| o.skipped || o.items.len() >= 3)
+                .count();
             let item_count = outlines
                 .iter()
-                .filter(|o| o.items.len() >= 3)
+                .filter(|o| o.skipped || o.items.len() >= 3)
                 .map(|o| o.items.len())
                 .sum();
             (block, file_count, item_count)

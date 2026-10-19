@@ -146,11 +146,23 @@ impl LandscapeExplorer {
                 let recognized = heuristic::recognizes(&ext);
                 if let Some((mtime_ns, size)) = fingerprint {
                     if let Some(items) = cache.get(path, mtime_ns, size) {
-                        if !items.is_empty() || !recognized {
+                        if recognized {
+                            if !items.is_empty() {
+                                results.push(FileOutline {
+                                    path: path.clone(),
+                                    items,
+                                    skipped: false,
+                                });
+                            }
+                        } else {
+                            // Extension is no longer recognized (e.g. a
+                            // pre-upgrade cache has stale .md headings).
+                            // Discard cached items and overwrite the entry.
+                            cache.insert(path, mtime_ns, size, Vec::new());
                             results.push(FileOutline {
                                 path: path.clone(),
-                                items,
-                                skipped: !recognized,
+                                items: Vec::new(),
+                                skipped: true,
                             });
                         }
                         continue;
@@ -691,6 +703,20 @@ mod tests {
         let block = format_landscape_block(&[small, big], root, usize::MAX, true).unwrap();
         assert!(!block.contains("small.rs"));
         assert!(block.contains("big.rs:\n"));
+    }
+
+    #[test]
+    fn format_landscape_block_includes_skipped_files_regardless_of_item_count() {
+        let root = Path::new("/repo");
+        // A skipped file with zero items still gets a header line.
+        let skipped = FileOutline {
+            path: root.join("notes.txt"),
+            items: Vec::new(),
+            skipped: true,
+        };
+        let block =
+            format_landscape_block(std::slice::from_ref(&skipped), root, usize::MAX, true).unwrap();
+        assert!(block.contains("notes.txt:\n"), "got: {block:?}");
     }
 
     #[test]
