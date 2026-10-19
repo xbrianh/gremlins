@@ -692,8 +692,7 @@ and its item names/paths have comment delimiters escaped.
 - Native agents also have the `Landscape` tool for current line numbers after
   edits; the block only advertises it when the stage's effective tool list
   actually includes that tool. `Landscape` accepts either a file path or a
-  directory path. Directory calls scan up to `depth` levels (default 4, max
-  16) and return an on-demand landscape block. The pre-rename spelling
+  directory path. Directory calls scan the full tree and return an on-demand
   `OutlineFile` is still accepted as a deprecated alias.
 - A `landscape.cache.json` lives in filesystem-backed state directories and
   makes per-stage rebuilds incremental; it is an optimization and corrupt or

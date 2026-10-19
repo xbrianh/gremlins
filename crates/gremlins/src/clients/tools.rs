@@ -18,13 +18,9 @@ const GREP_MAX_LINES: usize = 2000;
 const BASH_TIMEOUT_SECS: u64 = 120;
 const WEBSEARCH_TIMEOUT_SECS: u64 = 30;
 /// Directory depth used by the `Landscape` tool when the caller does not pass
-/// an explicit `depth`. A modest default keeps an on-demand directory scan
-/// bounded instead of walking the entire tree on every call.
-const LANDSCAPE_TOOL_DEFAULT_DEPTH: u64 = 4;
-/// Hard upper bound for an explicit `depth` argument to the `Landscape` tool.
-/// Deeper than this is almost never useful once the block is capped to
-/// `max_landscape_bytes`, and it prevents an accidental runaway walk.
-const LANDSCAPE_TOOL_MAX_DEPTH: u64 = 16;
+/// an explicit `depth`.  Uses `usize::MAX` for unrestricted traversal;
+/// the `max_landscape_bytes` budget already bounds the output.
+const LANDSCAPE_TOOL_DEFAULT_DEPTH: u64 = u64::MAX;
 /// Cap on Task calls spawned from a single model message. Without this, one
 /// response could fan out unbounded child loops and overflow the context.
 pub(crate) const TASK_MAX_PER_TURN: usize = 8;
@@ -1339,8 +1335,7 @@ fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str
         let depth = args
             .get("depth")
             .and_then(|v| v.as_u64())
-            .unwrap_or(LANDSCAPE_TOOL_DEFAULT_DEPTH)
-            .clamp(0, LANDSCAPE_TOOL_MAX_DEPTH) as usize;
+            .unwrap_or(LANDSCAPE_TOOL_DEFAULT_DEPTH) as usize;
         match LandscapeExplorer.build(&path, depth, None) {
             Ok(outlines) => {
                 let max_bytes = crate::config::max_landscape_bytes() as usize;
@@ -2691,7 +2686,7 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
         },
         ToolDefinition {
             name: "Landscape".into(),
-            description: "Show the structural outline of a file or directory. For a file, returns one item per line with its 1-based line number, kind, and name. Kinds include fn, struct, impl, trait, enum, mod, class, method, heading, and key. Test functions inside `#[cfg(test)]` modules are shown individually. Unknown file extensions yield an empty outline. For a directory, returns a landscape block with outlines for recognized files up to `depth` levels deep (default 4, max 16). Paths outside the sandbox are rejected.".into(),
+            description: "Show the structural outline of a file or directory. For a file, returns one item per line with its 1-based line number, kind, and name. Kinds include fn, struct, impl, trait, enum, mod, class, method, heading, and key. Test functions inside `#[cfg(test)]` modules are shown individually. Unknown file extensions yield an empty outline. For a directory, returns a landscape block with outlines for recognized files. Paths outside the sandbox are rejected.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2701,7 +2696,7 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
                     },
                     "depth": {
                         "type": "integer",
-                        "description": "For directories, how many nested directory levels to scan (default 4, max 16)"
+                        "description": "For directories, how many nested directory levels to scan (default: all levels)"
                     }
                 },
                 "required": ["file_path"],
