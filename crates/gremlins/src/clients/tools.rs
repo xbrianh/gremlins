@@ -1365,6 +1365,15 @@ fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str
             .unwrap_or_default()
             .to_lowercase();
         let recognized = crate::landscape::heuristic::recognizes(&ext);
+        if !recognized {
+            // outline_file returns an empty vec for unrecognized extensions
+            // without checking existence. Check metadata here so deleted or
+            // mistyped paths return a read error rather than a successful
+            // path-only result.
+            if let Err(e) = path.metadata() {
+                return format!("Error: {e}");
+            }
+        }
         match LandscapeExplorer.outline_file(&path, false) {
             Ok(items) => render_outline(&path, &items, recognized),
             Err(LandscapeError::Utf8(e)) => format!("Error: file is not valid UTF-8: {e}"),

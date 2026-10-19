@@ -157,8 +157,14 @@ impl LandscapeExplorer {
                         } else {
                             // Extension is no longer recognized (e.g. a
                             // pre-upgrade cache has stale .md headings).
-                            // Discard cached items and overwrite the entry.
-                            cache.insert(path, mtime_ns, size, Vec::new());
+                            // Discard cached items and overwrite the entry
+                            // only when the cached items are nonempty;
+                            // otherwise the entry is already up-to-date and
+                            // an unconditional insert would dirty the cache
+                            // on every build.
+                            if !items.is_empty() {
+                                cache.insert(path, mtime_ns, size, Vec::new());
+                            }
                             results.push(FileOutline {
                                 path: path.clone(),
                                 items: Vec::new(),
