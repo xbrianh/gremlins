@@ -3422,12 +3422,12 @@ async fn run_chat_turn(
                 // before cancellation, then end the turn immediately.
                 // The next turn will prepend an interrupt notice via
                 // the ChatDefinition's `interrupted` flag.
-                if soft_cancel.load(Ordering::Relaxed) {
+                if soft_cancel.load(Ordering::Acquire) {
                     match run_task.await {
                         Ok((Err(crate::executor::RunError::Cancelled { messages, .. }), mut recovered)) => {
                             // A hard cancel may have raced the soft path
                             // while we were awaiting the run task.
-                            if !soft_cancel.load(Ordering::Relaxed) {
+                            if !soft_cancel.load(Ordering::Acquire) {
                                 if let Some(turn_num) = chat_turn_num {
                                     crate::executor::run::clear_chat_turn_artifact(
                                         &recovered, turn_num,
@@ -3480,7 +3480,7 @@ async fn run_chat_turn(
                             // session lock: if hard cancellation won,
                             // clear the artifact and skip
                             // `mark_interrupted()`.
-                            if !soft_cancel.load(Ordering::Relaxed) {
+                            if !soft_cancel.load(Ordering::Acquire) {
                                 if let Some(turn_num) = chat_turn_num {
                                     crate::executor::run::clear_chat_turn_artifact(
                                         &recovered, turn_num,
@@ -3771,10 +3771,10 @@ async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &Se
                 // been cancelled — a hard cancel that arrived first
                 // must not be overwritten by a late soft request.
                 if !already_cancelled {
-                    cur.soft_cancel.store(true, Ordering::Relaxed);
+                    cur.soft_cancel.store(true, Ordering::Release);
                 }
             } else {
-                cur.soft_cancel.store(false, Ordering::Relaxed);
+                cur.soft_cancel.store(false, Ordering::Release);
             }
             if !already_cancelled {
                 cur.cancel.cancel();
