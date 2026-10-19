@@ -421,7 +421,7 @@ async fn run_agent(
     // shifts line numbers, so a per-session memo would go stale quickly), but
     // the cache keeps the rebuild to touched files only.
     let system_prompt = SystemPrompt::new(prepared.system_prompt())
-        .with_landscape(landscape_block(gremlin, client.has_tool("OutlineFile")).await)
+        .with_landscape(landscape_block(gremlin, client.has_tool("Landscape")).await)
         .assemble();
 
     let stage_env = gremlin.env.clone();

@@ -2092,10 +2092,21 @@ pub(crate) fn format_tool_call_parts(name: &str, args: &serde_json::Value) -> St
             .get("url")
             .and_then(|v| v.as_str())
             .map(|s| format!("url={s:?}")),
-        "OutlineFile" => args
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("file_path={s:?}")),
+        "Landscape" => {
+            let depth = args
+                .get("depth")
+                .and_then(|v| v.as_u64())
+                .map(|d| format!("depth={d}"));
+            let path = args
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .map(|s| format!("file_path={s:?}"));
+            match (path, depth) {
+                (Some(p), Some(d)) => Some(format!("{p}, {d}")),
+                (Some(p), None) => Some(p),
+                _ => None,
+            }
+        }
         "Done" => args
             .get("summary")
             .and_then(|v| v.as_str())
@@ -2869,13 +2880,18 @@ mod tests {
     }
 
     #[test]
-    fn format_tool_call_parts_outline_and_done() {
+    fn format_tool_call_parts_landscape_and_done() {
+        assert_eq!(
+            format_tool_call_parts("Landscape", &serde_json::json!({"file_path": "Cargo.toml"})),
+            "Landscape(file_path=\"Cargo.toml\")"
+        );
+        // Landscape with depth.
         assert_eq!(
             format_tool_call_parts(
-                "OutlineFile",
-                &serde_json::json!({"file_path": "Cargo.toml"})
+                "Landscape",
+                &serde_json::json!({"file_path": "src", "depth": 2})
             ),
-            "OutlineFile(file_path=\"Cargo.toml\")"
+            "Landscape(file_path=\"src\", depth=2)"
         );
         assert_eq!(
             format_tool_call_parts("Done", &serde_json::json!({"summary": "Fixed it"})),

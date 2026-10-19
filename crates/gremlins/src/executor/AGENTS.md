@@ -22,7 +22,7 @@ semantics. Keep those seams intact.
 | `run.rs` | The sequential stage loop. `Gremlin::run` walks `next_stage()` in declaration order, drives each through `run_stage_scoped`, and owns attempt/`loop_iter`/bail bookkeeping. `run_stage` dispatches by `ExecutorStage` variant. |
 | `parallel.rs` | Parallel fan-out/fan-in. Forks one child gremlin per child stage, launches via supervisor, awaits `RunState` channels, applies `ErrorPolicy`, merges artifacts, and cleans up children. |
 | `supervisor.rs` | Single-instance daemon. Owns the global `RUN_MAP` (`HashMap<String, RunHandle>`), the socket accept loop and op dispatch (`launch`/`stop`/`resume`/`ls`/`status`/`info`/`log`/`debug`/`chat`), `DaemonEvent` broadcast, and `launch_child`/`stop_child`. |
-| `system_prompt.rs` | The single place that composes a stage's base prompt with the structural landscape block. Runs the landscape build on a blocking thread, formats it under the byte budget, and reports `[landscape] …` plus failure warnings to the gremlin's `log_tx`. |
+| `system_prompt.rs` | The single place that composes a stage's base prompt with the structural landscape block. Runs the landscape build on a blocking thread, formats it under the token budget, and reports `[landscape] …` plus failure warnings to the gremlin's `log_tx`. |
 | `socket.rs` | Unix-domain socket + daemon lock helpers (`GremlinsDaemonLock`, `bind_socket`, `connect_socket`, JSON-line read/write). The socket lives at `$state_root/executor.sock`. |
 | `agent_runner.rs` | Agent leaf execution: `prepare_agent` (resolve everything without touching the client) and `commit_agent` (verify outputs were produced). |
 | `exec_runner.rs` | Exec leaf execution: `prepare_exec`, `run_shell`, and `commit_exec`. Owns `ExecPrepared` and `ExecError`. |
@@ -77,7 +77,7 @@ root (only when the concrete store is a `FileSystemStateStore`). It is an
 optimization: a corrupt or unwritable cache degrades to a fresh rebuild and is
 never a failure. The walker (`landscape/mod.rs`) builds the outline, and
 `system_prompt.rs` decides how to inject it; run-loop code in `run.rs` only
-passes the `client.has_tool("OutlineFile")` flag through.
+passes the `client.has_tool("Landscape")` flag through.
 
 ### Supervisor
 

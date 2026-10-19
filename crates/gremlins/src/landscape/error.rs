@@ -6,8 +6,9 @@ pub enum LandscapeError {
     #[error("file is not valid UTF-8: {0}")]
     Utf8(#[from] std::str::Utf8Error),
 
-    #[error(
-        "landscape block cannot fit within the size budget even after truncating every item name"
-    )]
+    #[error("landscape block cannot fit within the token budget even at minimum depth")]
     BudgetExceeded,
+
+    #[error("tokenizer initialization failed: {0}")]
+    Tokenizer(String),
 }

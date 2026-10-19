@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state::FileSystemStateStore;
-use crate::landscape::{LandscapeError, LandscapeExplorer};
+use crate::landscape::{LandscapeBlock, LandscapeError, LandscapeExplorer};
 
 const LANDSCAPE_CACHE_FILE: &str = "landscape.cache.json";
 
@@ -62,7 +62,7 @@ impl SystemPrompt {
 /// failure is logged (to both the daemon log and the gremlin's `log_tx` so the
 /// operator sees it in `gremlins log`) before degrading the same way.
 ///
-/// `has_outline_tool` controls whether the block advertises the `OutlineFile`
+/// `has_outline_tool` controls whether the block advertises the `Landscape`
 /// tool; stages/backends without that tool must not be told to use it.
 ///
 /// The synchronous directory walk runs on a blocking thread pool so the tokio
@@ -81,11 +81,11 @@ pub(crate) async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -
     // `build_landscape_snapshot`, so an operator sees the failure rather than
     // a line that looks identical to a disabled landscape.
     if snapshot.file_count > 0 {
-        let kb = snapshot.block.len() as f64 / 1024.0;
+        let tokens = crate::landscape::count_tokens(&snapshot.block).unwrap_or(0);
         if let Some(tx) = &gremlin.runtime_config.log_tx {
             let _ = tx.send(format!(
-                "[landscape] {} files, {} items, {:.1} KB",
-                snapshot.file_count, snapshot.item_count, kb
+                "[landscape] {} files, {} items, {} tokens",
+                snapshot.file_count, snapshot.item_count, tokens
             ));
         }
     }
@@ -132,46 +132,37 @@ async fn build_landscape_snapshot(
         Vec::new()
     });
 
-    let budget: u64 = crate::config::max_landscape_bytes();
-    let max_bytes: usize = usize::try_from(budget).unwrap_or(usize::MAX);
-    let (block, file_count, item_count) = match crate::landscape::format_landscape_block(
+    let budget: u64 = crate::config::max_landscape_tokens();
+    let max_tokens: usize = usize::try_from(budget).unwrap_or(usize::MAX);
+    let landscape = match crate::landscape::format_landscape_block(
         &outlines,
         &root,
-        max_bytes,
+        max_tokens,
         has_outline_tool,
     ) {
-        Ok(block) if !block.is_empty() => {
-            let file_count = outlines.iter().filter(|o| o.items.len() >= 3).count();
-            let item_count = outlines
-                .iter()
-                .filter(|o| o.items.len() >= 3)
-                .map(|o| o.items.len())
-                .sum();
-            (block, file_count, item_count)
-        }
-        Ok(_) => (String::new(), 0, 0),
+        Ok(block) => block,
         Err(LandscapeError::BudgetExceeded) => {
             let msg = format!(
-                "[landscape] block for {} could not be trimmed to fit the {} byte budget; omitting",
+                "[landscape] block for {} could not be trimmed to fit the {} token budget; omitting",
                 root.display(),
                 budget,
             );
             send_log(&log_tx, &msg);
-            (String::new(), 0, 0)
+            LandscapeBlock::empty()
         }
         Err(other) => {
             send_log(
                 &log_tx,
                 &format!("landscape block formatting failed: {other}"),
             );
-            (String::new(), 0, 0)
+            LandscapeBlock::empty()
         }
     };
 
     LandscapeSnapshot {
-        block,
-        file_count,
-        item_count,
+        block: landscape.block,
+        file_count: landscape.file_count,
+        item_count: landscape.item_count,
     }
 }
 
@@ -274,7 +265,7 @@ mod tests {
     async fn dropped_block_reports_zero_stats() {
         // A file with only one outline item is below the three-item threshold:
         // the formatted block is empty, and the stats must report 0 rather
-        // than a `[landscape] 1 files, 1 items, 0.0 KB`-style line that hides
+        // than a `[landscape] 1 files, 1 items, 0 tokens`-style line that hides
         // the fact that nothing was injected.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("thin.rs"), "fn only() {}\n").unwrap();
