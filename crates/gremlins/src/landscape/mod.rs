@@ -115,8 +115,9 @@ impl LandscapeExplorer {
         root: &Path,
         depth_limit: usize,
     ) -> Result<String, LandscapeError> {
-        let mut paths: Vec<PathBuf> = Vec::new();
-        collect_all_paths_recursive(root, 0, depth_limit, &mut paths)?;
+        let mut paths_with_fp: Vec<(PathBuf, Option<Fingerprint>)> = Vec::new();
+        collect_all_paths_recursive(root, 0, depth_limit, &mut paths_with_fp)?;
+        let mut paths: Vec<PathBuf> = paths_with_fp.into_iter().map(|(p, _)| p).collect();
         paths.sort();
 
         if paths.is_empty() {
@@ -189,18 +190,18 @@ impl LandscapeExplorer {
 
         // ── Phase 2: partition into cache hits and misses ──
         let mut results: Vec<FileOutline> = Vec::new();
-        // Each miss carries the fingerprint taken *before* parsing so a
+        // Each miss carries the fingerprint harvested during the walk
+        // (from `symlink_metadata`), taken *before* parsing so a
         // concurrent write during the parse window cannot stick stale items
         // under the new fingerprint.
-        let mut misses: Vec<(PathBuf, Option<(u64, u64)>)> = Vec::new();
+        let mut misses: Vec<(PathBuf, Option<Fingerprint>)> = Vec::new();
 
-        for path in &paths {
+        for (path, fingerprint) in &paths {
             if !is_outlineable_file(path) {
                 // Unrecognized extension: emit a skipped entry (no items) so
                 // the file still shows up in the landscape block.
                 if let Some(ref mut cache) = cache {
                     cache.mark_visited(path);
-                    let fingerprint = file_fingerprint(path);
                     if let Some((mtime_ns, size)) = fingerprint {
                         // A stale entry may still hold items from when this
                         // extension was outlineable (e.g. `.md` headings
@@ -210,10 +211,10 @@ impl LandscapeExplorer {
                         // already-empty entry dirty so unchanged skipped files
                         // don't force a cache write on every build.
                         if cache
-                            .get(path, mtime_ns, size)
+                            .get(path, *mtime_ns, *size)
                             .is_none_or(|items| !items.is_empty())
                         {
-                            cache.insert(path, mtime_ns, size, Vec::new());
+                            cache.insert(path, *mtime_ns, *size, Vec::new());
                         }
                     }
                 }
@@ -227,9 +228,8 @@ impl LandscapeExplorer {
 
             if let Some(ref mut cache) = cache {
                 cache.mark_visited(path);
-                let fingerprint = file_fingerprint(path);
                 if let Some((mtime_ns, size)) = fingerprint {
-                    if let Some(items) = cache.get(path, mtime_ns, size) {
+                    if let Some(items) = cache.get(path, *mtime_ns, *size) {
                         results.push(FileOutline {
                             path: path.clone(),
                             items,
@@ -238,16 +238,16 @@ impl LandscapeExplorer {
                         continue;
                     }
                 }
-                misses.push((path.clone(), fingerprint));
+                misses.push((path.clone(), *fingerprint));
             } else {
-                misses.push((path.clone(), None));
+                misses.push((path.clone(), *fingerprint));
             }
         }
 
         // ── Phase 3: parallel parse ──
         type FreshEntry = (
             PathBuf,
-            Option<(u64, u64)>,
+            Option<Fingerprint>,
             Result<Vec<OutlineItem>, LandscapeError>,
         );
         let fresh: Vec<FreshEntry> = misses
@@ -300,33 +300,50 @@ impl LandscapeExplorer {
     }
 }
 
+/// File fingerprint: `(mtime_ns, size)` harvested from the walker's
+/// `symlink_metadata` so `build` never re-stats a file.
+type Fingerprint = (u64, u64);
+
 /// Walk the directory tree, collecting every outlineable file path.
 ///
 /// Applies the same filters as `build`: depth limit, hidden/skip dirs,
 /// file extension, file size, and cache-blob exclusion. Returns paths in
-/// alphabetical order.
+/// alphabetical order, each paired with a fingerprint harvested from the
+/// walker's `symlink_metadata` call so `build` does not re-stat every file.
 fn collect_paths(
     root: &Path,
     depth_limit: usize,
     canonical_cache: Option<&Path>,
-) -> Result<Vec<PathBuf>, LandscapeError> {
+) -> Result<Vec<(PathBuf, Option<Fingerprint>)>, LandscapeError> {
     let mut paths = Vec::new();
     collect_paths_recursive(root, 0, depth_limit, canonical_cache, &mut paths)?;
-    paths.sort();
+    paths.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(paths)
+}
+
+/// Compute a cache fingerprint from metadata already obtained by the walker.
+///
+/// Stat errors on `modified()` (possible even when `symlink_metadata`
+/// succeeded) become `None`, which the caller treats as a cache miss.
+fn fingerprint_from_metadata(metadata: &std::fs::Metadata) -> Option<Fingerprint> {
+    let mtime = metadata.modified().ok()?;
+    let mtime_ns = mtime.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos() as u64;
+    Some((mtime_ns, metadata.len()))
 }
 
 /// Shared directory walker parameterized by a file-inclusion predicate.
 ///
 /// `include_file` receives the path and file length (from `symlink_metadata`)
-/// and returns `true` when the file should be collected. Symlinks are never
-/// followed. Hidden and vendor directories are always skipped.
+/// and returns `true` when the file should be collected. When a file passes
+/// the predicate, its cache fingerprint is computed from the same metadata
+/// to avoid a redundant `stat` downstream. Symlinks are never followed.
+/// Hidden and vendor directories are always skipped.
 fn walk_dir(
     dir: &Path,
     depth: usize,
     depth_limit: usize,
     include_file: &dyn Fn(&Path, u64) -> bool,
-    paths: &mut Vec<PathBuf>,
+    paths: &mut Vec<(PathBuf, Option<Fingerprint>)>,
 ) -> Result<(), LandscapeError> {
     if depth > depth_limit {
         return Ok(());
@@ -366,7 +383,8 @@ fn walk_dir(
             }
             walk_dir(&path, depth + 1, depth_limit, include_file, paths)?;
         } else if metadata.is_file() && include_file(&path, metadata.len()) {
-            paths.push(path);
+            let fingerprint = fingerprint_from_metadata(&metadata);
+            paths.push((path, fingerprint));
         }
     }
     Ok(())
@@ -377,7 +395,7 @@ fn collect_paths_recursive(
     depth: usize,
     depth_limit: usize,
     canonical_cache: Option<&Path>,
-    paths: &mut Vec<PathBuf>,
+    paths: &mut Vec<(PathBuf, Option<Fingerprint>)>,
 ) -> Result<(), LandscapeError> {
     walk_dir(
         dir,
@@ -397,7 +415,7 @@ fn collect_all_paths_recursive(
     dir: &Path,
     depth: usize,
     depth_limit: usize,
-    paths: &mut Vec<PathBuf>,
+    paths: &mut Vec<(PathBuf, Option<Fingerprint>)>,
 ) -> Result<(), LandscapeError> {
     walk_dir(
         dir,
@@ -436,7 +454,8 @@ fn should_skip_dir(path: &Path) -> bool {
 /// tick can produce a stale cache hit; the tradeoff is accepted because the
 /// cache is an optimization and the worst case is re-presenting one stale
 /// snapshot until the file changes size or crosses a tick.
-fn file_fingerprint(path: &Path) -> Option<(u64, u64)> {
+#[allow(dead_code)]
+fn file_fingerprint(path: &Path) -> Option<Fingerprint> {
     let metadata = std::fs::metadata(path).ok()?;
     let mtime = metadata.modified().ok()?;
     let mtime_ns = mtime.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos() as u64;
