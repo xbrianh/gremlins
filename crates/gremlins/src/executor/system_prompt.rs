@@ -100,10 +100,9 @@ pub(crate) async fn landscape_block(gremlin: &Gremlin, has_landscape_tool: bool)
 /// other failure is logged (daemon + `log_tx`) and also degrades to an empty
 /// snapshot.
 ///
-/// `file_count`/`item_count` are computed from the files that actually enter
-/// the formatted block (files need at least three outline items), so the log
-/// line never reports a `[landscape] 538 files, …` summary for a block that was
-/// trimmed to nothing.
+/// `file_count`/`item_count` are computed from all files that enter
+/// the formatted block, matching what the agent actually sees.
+/// A file with zero items counts as one file with zero items.
 async fn build_landscape_snapshot(
     cwd: PathBuf,
     cache_path: Option<PathBuf>,
@@ -141,12 +140,8 @@ async fn build_landscape_snapshot(
         has_landscape_tool,
     ) {
         Ok(block) if !block.is_empty() => {
-            let file_count = outlines.iter().filter(|o| o.items.len() >= 3).count();
-            let item_count = outlines
-                .iter()
-                .filter(|o| o.items.len() >= 3)
-                .map(|o| o.items.len())
-                .sum();
+            let file_count = outlines.len();
+            let item_count = outlines.iter().map(|o| o.items.len()).sum();
             (block, file_count, item_count)
         }
         Ok(_) => (String::new(), 0, 0),
@@ -271,18 +266,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropped_block_reports_zero_stats() {
-        // A file with only one outline item is below the three-item threshold:
-        // the formatted block is empty, and the stats must report 0 rather
-        // than a `[landscape] 1 files, 1 items, 0.0 KB`-style line that hides
-        // the fact that nothing was injected.
+    async fn few_item_files_appear_in_block_and_stats() {
+        // A file with only one outline item now appears in the block and
+        // counts toward the stats, unlike the old >= 3 threshold.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("thin.rs"), "fn only() {}\n").unwrap();
 
         let snapshot = build_landscape_snapshot(dir.path().to_path_buf(), None, None, true).await;
-        assert_eq!(snapshot.block, "");
-        assert_eq!(snapshot.file_count, 0);
-        assert_eq!(snapshot.item_count, 0);
+        assert!(!snapshot.block.is_empty());
+        assert!(snapshot.block.contains("thin.rs:"));
+        assert_eq!(snapshot.file_count, 1);
+        assert_eq!(snapshot.item_count, 1);
     }
 
     #[tokio::test]
