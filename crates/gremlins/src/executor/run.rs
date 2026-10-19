@@ -431,24 +431,68 @@ async fn run_agent(
         &task_models_by_kind,
     );
 
-    // Chat gremlins pre-populate the agent loop's history from the previous
-    // stage's conversation artifact so full model context flows between turns.
-    // A missing artifact (first turn) yields no prefix. An artifact that
-    // exists but fails to parse is fatal: running with an empty prefix would
-    // then overwrite the unreadable artifact with the new turn's messages,
-    // destroying recoverable history.
+    // Chat gremlins pre-populate the agent loop's history from previous
+    // per-turn conversation artifacts so full model context flows between
+    // turns. For stage "chat-NNNN", we walk all artifacts from
+    // `conversation/0001.json` onward until one is missing, concatenating
+    // their message arrays. On a re-run (soft-interrupt recovery) the
+    // current turn's artifact may already exist with partial messages.
+    // A missing artifact at turn 1 yields no prefix. An artifact that
+    // exists but fails to parse is fatal: running without it would
+    // destroy recoverable history.
     let is_chat = gremlin.state.read_str("kind") == "chat";
+    let chat_turn: Option<usize> = chat_turn_from_stage_name(&agent.name);
+    // Messages from turns *before* the current one — the canonical baseline
+    // used for diff computation. Stored as a Vec (not just a length) so the
+    // rollback-baseline check can compare the loaded prefix against
+    // completed.messages rather than comparing a slice with itself.
+    let mut canonical_prefix: Vec<Message> = Vec::new();
     let verbatim_history = if is_chat {
-        match gremlin
-            .state
-            .content("artifact://conversation.json", None)
-            .await
-        {
-            Ok(json) => match messages_from_conversation(&json) {
-                Ok(msgs) => Some(msgs),
+        let Some(current_turn) = chat_turn else {
+            return Err(RunError::Message(format!(
+                "chat stage name '{}' does not contain a valid turn number",
+                agent.name
+            )));
+        };
+
+        // Load baseline: turns 1..current_turn-1. Each must exist and parse.
+        // A missing or unparseable prior-turn artifact is fatal — running
+        // without it would silently drop history context.
+        for t in 1..current_turn {
+            let uri = format!("artifact://conversation/{:04}.json", t);
+            match gremlin.state.content(&uri, None).await {
+                Ok(json) => match messages_from_conversation(&json) {
+                    Ok(msgs) => canonical_prefix.extend(msgs),
+                    Err(e) => {
+                        return Err(RunError::Message(format!(
+                            "conversation artifact {} unparseable: {}",
+                            uri, e
+                        )));
+                    }
+                },
                 Err(e) => {
                     return Err(RunError::Message(format!(
-                        "conversation artifact unparseable; refusing to overwrite with empty history: {e}"
+                        "failed to read conversation artifact {}: {}",
+                        uri, e
+                    )));
+                }
+            }
+        }
+
+        let mut all_msgs = canonical_prefix.clone();
+
+        // Soft-interrupt recovery: the current turn's artifact may already
+        // contain partial messages from a prior attempt. Load it if present.
+        let cur_uri = format!("artifact://conversation/{:04}.json", current_turn);
+        match gremlin.state.content(&cur_uri, None).await {
+            Ok(json) => match messages_from_conversation(&json) {
+                Ok(msgs) => {
+                    all_msgs.extend(msgs);
+                }
+                Err(e) => {
+                    return Err(RunError::Message(format!(
+                        "current-turn conversation artifact {} unparseable: {}",
+                        cur_uri, e
                     )));
                 }
             },
@@ -456,13 +500,20 @@ async fn run_agent(
                 if e.downcast_ref::<crate::executor::state::MissingArtifact>()
                     .is_some()
                 {
-                    None // First turn — no artifact yet
+                    // First attempt at this turn — no artifact yet.
                 } else {
                     return Err(RunError::Message(format!(
-                        "failed to read conversation artifact: {e}"
+                        "failed to read current-turn conversation artifact {}: {}",
+                        cur_uri, e
                     )));
                 }
             }
+        }
+
+        if all_msgs.is_empty() {
+            None
+        } else {
+            Some(all_msgs)
         }
     } else {
         None
@@ -622,16 +673,37 @@ async fn run_agent(
         gremlin.state.accumulate_token_usage(&delta);
     }
 
-    // Chat gremlins persist the agent loop's accumulated message history as a
-    // structured artifact so the next stage can pre-populate its own history
-    // with full model context. The loop keeps `history` verbatim and never
-    // rewrites it, so `completed.messages` is the full transcript: the prior
-    // archive plus every message from this turn. On serialize failure, log and
-    // leave any prior artifact untouched rather than erasing it with an empty
-    // array.
+    // Chat gremlins persist only the *new* messages from this turn as a
+    // per-turn diff artifact (`conversation/{turn}.json`). The agent loop
+    // keeps `history` verbatim and never rewrites it, so `completed.messages`
+    // is the full transcript: the prior archive plus every message from this
+    // turn. We strip the canonical prefix (messages from turns before this
+    // one) to compute the diff. When the prefix doesn't match (rollback where
+    // the artifact baseline changed), treat the entire `completed.messages`
+    // as the diff and overwrite the turn artifact.
     if is_chat {
-        if let Some(messages) = &completed.messages {
-            persist_chat_conversation(gremlin, messages).await;
+        if let (Some(messages), Some(turn_num)) = (&completed.messages, chat_turn) {
+            let diff: Vec<Message> = if canonical_prefix.is_empty() {
+                messages.clone()
+            } else if messages.len() >= canonical_prefix.len() {
+                let completed_prefix = &messages[..canonical_prefix.len()];
+                // Compare the artifact-loaded canonical prefix against the
+                // actual prefix of completed.messages (not against itself).
+                let completed_prefix_json =
+                    serde_json::to_string(completed_prefix).unwrap_or_default();
+                let canonical_prefix_json =
+                    serde_json::to_string(&canonical_prefix).unwrap_or_default();
+                if canonical_prefix_json == completed_prefix_json {
+                    messages[canonical_prefix.len()..].to_vec()
+                } else {
+                    messages.clone()
+                }
+            } else {
+                messages.clone()
+            };
+            // Always write — an empty diff `[]` overwrites a stale artifact
+            // from an abandoned rollback branch.
+            persist_chat_conversation_turn(gremlin, turn_num, &diff).await;
         }
     }
 
@@ -1176,82 +1248,151 @@ pub(crate) fn messages_from_conversation(
         .map_err(|e| format!("chat: failed to parse conversation artifact: {e}"))
 }
 
-/// Persist the verbatim chat transcript as `artifact://conversation.json`.
+/// Persist messages to a per-turn artifact
+/// (`artifact://conversation/{turn:04}.json`).
 ///
-/// The agent loop keeps `history` verbatim and never rewrites it, so callers
-/// pass `completed.messages` directly. On serialize failure, log and leave any
-/// prior artifact untouched rather than erasing it with an empty array.
-pub(crate) async fn persist_chat_conversation(
+/// On serialize failure, log and leave any prior artifact untouched.
+pub(crate) async fn persist_chat_conversation_turn(
     gremlin: &Gremlin,
+    turn: usize,
     messages: &[rig_core::completion::Message],
 ) {
+    let uri_str = format!("artifact://conversation/{:04}.json", turn);
     match serde_json::to_string(messages) {
         Ok(json) => {
-            if let Ok(uri) = Uri::parse("artifact://conversation.json") {
+            if let Ok(uri) = Uri::parse(&uri_str) {
                 let _ = gremlin.state.write_into_registry(&uri, &json).await;
             }
         }
         Err(e) => {
-            log::warn!("chat: failed to serialize conversation artifact: {e}");
+            log::warn!(
+                "chat: failed to serialize conversation artifact for turn {}: {}",
+                turn,
+                e
+            );
         }
     }
 }
 
-/// Read the chat gremlin's persisted conversation artifact, if present.
+/// Derive a turn number from a chat stage name like `chat-0001`.
+pub(crate) fn chat_turn_from_stage_name(name: &str) -> Option<usize> {
+    name.strip_prefix("chat-").and_then(|s| s.parse().ok())
+}
+
+/// Clear a per-turn conversation artifact by writing an empty message array.
 ///
-/// Missing or unreadable artifacts yield an empty history. Callers only use
-/// this after a successful turn or cancellation, so an unreadable artifact
-/// has already been reported by [`run_agent`] rather than silently dropped.
-pub(crate) async fn read_chat_conversation(gremlin: &Gremlin) -> Vec<Message> {
-    match gremlin
-        .state
-        .content("artifact://conversation.json", None)
-        .await
-    {
-        Ok(json) => messages_from_conversation(&json).unwrap_or_default(),
-        Err(_) => Vec::new(),
+/// Used by the soft-interrupt recovery path's hard-cancel branch to restore
+/// the pre-turn baseline: the current turn's artifact is overwritten with
+/// `[]` so the next turn's concatenated history won't include partial
+/// messages from the cancelled turn.
+pub(crate) async fn clear_chat_turn_artifact(gremlin: &Gremlin, turn: usize) {
+    let uri_str = format!("artifact://conversation/{:04}.json", turn);
+    if let Ok(uri) = Uri::parse(&uri_str) {
+        let _ = gremlin.state.write_into_registry(&uri, "[]").await;
     }
 }
 
-/// Append messages to the chat gremlin's persisted conversation artifact.
+/// Read the chat gremlin's persisted conversation from per-turn artifacts.
 ///
-/// Thin composition of [`read_chat_conversation`] and
-/// [`persist_chat_conversation`]: the existing archive is preserved verbatim
-/// and the new messages follow it, so a re-run's `prepopulated_messages` sees
-/// the partial turn before the synthetic interruption prompt is submitted.
+/// Walks `artifact://conversation/0001.json`, `0002.json`, ... until a
+/// missing artifact is encountered or `max_turn` is reached, concatenating
+/// their message arrays. Missing or unparseable artifacts after the first
+/// missing one are treated as end-of-list; gaps are tolerated but shouldn't
+/// occur.
 ///
-/// When the artifact exists but cannot be parsed, the append is skipped to
-/// avoid replacing a valid history with partial data. A missing artifact
-/// (first turn) is fine and the new messages become the initial archive.
-pub(crate) async fn append_chat_conversation(gremlin: &Gremlin, messages: &[Message]) {
-    let mut history = read_chat_conversation(gremlin).await;
-    // Guard: if read returned empty but the artifact file actually exists
-    // (unparseable JSON), don't overwrite it with just the suffix.
-    if history.is_empty() && !messages.is_empty() {
-        // Check whether the artifact exists on disk by attempting a read
-        // with a dedicated check — `read_chat_conversation` conflates
-        // "not found" and "parse error" into `Vec::new()`.
-        match gremlin
-            .state
-            .content("artifact://conversation.json", None)
-            .await
-        {
-            Ok(json) if messages_from_conversation(&json).is_err() => {
-                // Artifact exists with content but failed to parse as
-                // Message array.  Don't destroy the original.
+/// `max_turn` caps the walk at the given 1-based turn number (inclusive).
+/// Pass `None` to walk all available artifacts. After rollback via `goto`,
+/// pass the turn number of the stage about to run minus one so abandoned
+/// future artifacts are excluded from the baseline.
+pub(crate) async fn read_chat_conversation(
+    gremlin: &Gremlin,
+    max_turn: Option<usize>,
+) -> Vec<Message> {
+    let mut all_msgs = Vec::new();
+    for t in 1.. {
+        if let Some(max) = max_turn {
+            if t > max {
+                break;
+            }
+        }
+        let uri = format!("artifact://conversation/{:04}.json", t);
+        match gremlin.state.content(&uri, None).await {
+            Ok(json) => {
+                match messages_from_conversation(&json) {
+                    Ok(msgs) => all_msgs.extend(msgs),
+                    Err(_e) => {
+                        // Unparseable — log and stop; with per-turn
+                        // artifacts there should be no gaps.
+                        log::warn!(
+                            "chat: conversation artifact {} unparseable; stopping walk",
+                            uri
+                        );
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                if e.downcast_ref::<crate::executor::state::MissingArtifact>()
+                    .is_some()
+                {
+                    // No more turn artifacts.
+                    break;
+                }
+                // Other error — skip and keep walking.
+                continue;
+            }
+        }
+    }
+    all_msgs
+}
+
+/// Append messages to a specific turn's conversation artifact.
+///
+/// Reads only the current turn's artifact (`conversation/{turn:04}.json`),
+/// appends the given messages, and writes the result back. This is used by
+/// the soft-interrupt recovery path to make partial turn messages available
+/// to the re-run agent without duplicating earlier-turn history into this
+/// turn's file.
+pub(crate) async fn append_chat_conversation_turn(
+    gremlin: &Gremlin,
+    turn: usize,
+    messages: &[Message],
+) {
+    if messages.is_empty() {
+        return;
+    }
+    let uri_str = format!("artifact://conversation/{:04}.json", turn);
+    let mut existing = match gremlin.state.content(&uri_str, None).await {
+        Ok(json) => match messages_from_conversation(&json) {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                // Unparseable current-turn artifact — do not overwrite it
+                // with a partial suffix; the prior artifact may still hold
+                // recoverable messages.
                 log::warn!(
-                    "chat: conversation artifact exists but could not be parsed; \
-                     refusing to append"
+                    "chat: current-turn artifact {} unparseable; refusing to append: {}",
+                    uri_str,
+                    e
                 );
                 return;
             }
-            _ => {
-                // Artifact truly missing, empty, or a valid empty `[]` — first turn.
+        },
+        Err(e) => {
+            if e.downcast_ref::<crate::executor::state::MissingArtifact>()
+                .is_some()
+            {
+                Vec::new()
+            } else {
+                log::warn!(
+                    "chat: failed to read current-turn artifact for append: {}",
+                    e
+                );
+                return;
             }
         }
-    }
-    history.extend_from_slice(messages);
-    persist_chat_conversation(gremlin, &history).await;
+    };
+    existing.extend_from_slice(messages);
+    persist_chat_conversation_turn(gremlin, turn, &existing).await;
 }
 
 /// Strip trailing messages left dangling by a mid-tool-call cancellation.
@@ -1516,7 +1657,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_conversation_persists_verbatim_messages() {
+    async fn chat_conversation_persists_per_turn_artifact() {
         use rig_core::completion::Message;
 
         let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
@@ -1525,18 +1666,128 @@ mod tests {
             Message::user("world".to_string()),
         ];
 
-        persist_chat_conversation(&gremlin, &messages).await;
+        persist_chat_conversation_turn(&gremlin, 1, &messages).await;
 
         let json = gremlin
             .state
-            .content("artifact://conversation.json", None)
+            .content("artifact://conversation/0001.json", None)
             .await
             .expect("conversation artifact must be readable");
         let round_tripped = messages_from_conversation(&json).expect("artifact must parse");
         assert_eq!(
             round_tripped, messages,
-            "the persisted artifact must be verbatim"
+            "the persisted per-turn artifact must be verbatim"
         );
+    }
+
+    #[tokio::test]
+    async fn read_chat_conversation_walks_per_turn_artifacts() {
+        use rig_core::completion::Message;
+
+        let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
+
+        let turn1 = vec![Message::user("hello".to_string())];
+        let turn2 = vec![Message::user("world".to_string())];
+
+        persist_chat_conversation_turn(&gremlin, 1, &turn1).await;
+        persist_chat_conversation_turn(&gremlin, 2, &turn2).await;
+
+        let history = read_chat_conversation(&gremlin, None).await;
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0], turn1[0]);
+        assert_eq!(history[1], turn2[0]);
+    }
+
+    #[tokio::test]
+    async fn persist_chat_conversation_turn_writes_empty_array() {
+        use rig_core::completion::Message;
+
+        let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
+
+        // Write an empty diff — this must produce a valid [] artifact so
+        // a rollback's stale artifact is overwritten rather than preserved.
+        let empty: Vec<Message> = vec![];
+        persist_chat_conversation_turn(&gremlin, 1, &empty).await;
+
+        let json = gremlin
+            .state
+            .content("artifact://conversation/0001.json", None)
+            .await
+            .expect("empty per-turn artifact must be readable");
+        let round_tripped: Vec<Message> =
+            serde_json::from_str(&json).expect("empty artifact must parse");
+        assert!(
+            round_tripped.is_empty(),
+            "empty diff must produce an empty artifact array"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_chat_conversation_turn_only_writes_to_current_turn() {
+        use rig_core::completion::Message;
+
+        let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
+
+        // Write turn 1 with one message.
+        let turn1 = vec![Message::user("hello".to_string())];
+        persist_chat_conversation_turn(&gremlin, 1, &turn1).await;
+
+        // Append a partial message to turn 2 only.
+        let partial = vec![Message::user("partial".to_string())];
+        append_chat_conversation_turn(&gremlin, 2, &partial).await;
+
+        // Turn 1 must be unchanged.
+        let json1 = gremlin
+            .state
+            .content("artifact://conversation/0001.json", None)
+            .await
+            .expect("turn 1 must be readable");
+        let msgs1: Vec<Message> = serde_json::from_str(&json1).unwrap();
+        assert_eq!(msgs1.len(), 1, "turn 1 must not have duplicated messages");
+        assert_eq!(msgs1[0], turn1[0]);
+
+        // Turn 2 must have only the partial message (no turn 1 messages).
+        let json2 = gremlin
+            .state
+            .content("artifact://conversation/0002.json", None)
+            .await
+            .expect("turn 2 must be readable");
+        let msgs2: Vec<Message> = serde_json::from_str(&json2).unwrap();
+        assert_eq!(msgs2.len(), 1, "turn 2 must have only its own messages");
+        assert_eq!(msgs2[0], partial[0]);
+    }
+
+    #[tokio::test]
+    async fn clear_chat_turn_artifact_writes_empty_array() {
+        use rig_core::completion::Message;
+
+        let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
+
+        let t1 = vec![Message::user("ghost".to_string())];
+        persist_chat_conversation_turn(&gremlin, 1, &t1).await;
+
+        // Clear must overwrite the ghost.
+        clear_chat_turn_artifact(&gremlin, 1).await;
+
+        let json = gremlin
+            .state
+            .content("artifact://conversation/0001.json", None)
+            .await
+            .expect("cleared artifact must be readable");
+        let msgs: Vec<Message> = serde_json::from_str(&json).unwrap();
+        assert!(
+            msgs.is_empty(),
+            "cleared turn artifact must be an empty array"
+        );
+    }
+
+    #[test]
+    fn chat_turn_from_stage_name_parses_turn() {
+        assert_eq!(chat_turn_from_stage_name("chat-0001"), Some(1));
+        assert_eq!(chat_turn_from_stage_name("chat-0042"), Some(42));
+        assert_eq!(chat_turn_from_stage_name("not-chat-3"), None);
+        assert_eq!(chat_turn_from_stage_name("chat-"), None);
+        assert_eq!(chat_turn_from_stage_name(""), None);
     }
 
     // --- agent ---

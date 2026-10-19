@@ -22,6 +22,8 @@ pub use crate::stage_spec::exec::Exec;
 pub use crate::stage_spec::node::StageSpec;
 pub use crate::stage_spec::parallel::{ErrorPolicy, ForkSpec, JoinSpec};
 
+pub(crate) mod chat;
+pub use chat::ChatDefinition;
 pub(crate) mod r#static;
 pub use r#static::StaticDefinition;
 
@@ -212,6 +214,14 @@ pub trait GremlinDefinition: Send + Sync {
     /// Returns `Ok(ExecutorStage::Done)` when the definition has no more stages.
     async fn next_stage(&mut self) -> Result<ExecutorStage, DefinitionError>;
 
+    /// Escape hatch for downcasting to concrete definition types.
+    ///
+    /// Defaults to `None`. Override in definition types that need
+    /// concrete access from callers that know the type at compile time.
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
+
     /// Serialize this definition to bytes.
     ///
     /// Stub — returns `Err(DefinitionError::Message("not implemented"))`.
@@ -286,6 +296,10 @@ impl GremlinDefinition for Box<dyn GremlinDefinition> {
 
     async fn next_stage(&mut self) -> Result<ExecutorStage, DefinitionError> {
         self.as_mut().next_stage().await
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        self.as_mut().as_any_mut()
     }
 
     fn serialize(&self) -> Result<Vec<u8>, DefinitionError> {
