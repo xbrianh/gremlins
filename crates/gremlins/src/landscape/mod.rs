@@ -827,9 +827,8 @@ fn format_at_depth_inner(
 ///
 /// Paths under `root` are emitted relative to it (with `root` itself named in
 /// a preamble comment); anything outside `root` keeps its absolute path.
-/// Files with fewer than three outline items are skipped unless they carry the
-/// [`skipped`](FileOutline::skipped) marker (unrecognized extension), in which
-/// case the file header is always emitted so agents can see it exists.
+/// Files with fewer than three outline items are skipped, as are files with
+/// unrecognized extensions (the [`skipped`](FileOutline::skipped) marker).
 ///
 /// When the formatted block exceeds `max_tokens`, skeletonization is applied:
 /// spine directories (exactly one subdirectory, zero files) are compressed
@@ -870,9 +869,10 @@ pub(crate) fn format_landscape_block(
 /// the repository-metadata boilerplate.
 ///
 /// When `max_tokens` is `None`, the block is rendered at full depth
-/// without any token counting. Unrecognized files (skipped entries) and
-/// parse failures are included so the agent sees a complete directory
-/// view.
+/// without any token counting. Every discovered file — recognized files
+/// with any number of outline items plus unrecognized (skipped) entries —
+/// and every parse failure is included so the agent sees a complete
+/// directory view.
 pub(crate) fn format_landscape_block_tool(
     build: &DirectoryBuild,
     root: &Path,
@@ -894,20 +894,20 @@ fn format_landscape_block_with_mode(
     root: &Path,
     max_tokens: Option<usize>,
     bare: bool,
-    include_skipped: bool,
+    include_all: bool,
     failures: &[(PathBuf, LandscapeError)],
     has_outline_tool: bool,
 ) -> Result<LandscapeBlock, LandscapeError> {
     // Build spine map from ALL outlines (including those with <3 items).
     let spine_map = build_spine_map(outlines, root);
 
-    // Filter to files with ≥3 items for rendering. Skipped files (unrecognized
-    // extensions with no structural items) are dropped — they carry no information
-    // and agents can discover them via Glob or Landscape.
+    // Tool mode keeps every discovered file so small files and skipped
+    // entries stay visible. System-prompt blocks retain the three-item
+    // cutoff so they only carry structural content.
     let renderable: Vec<&FileOutline> = outlines
         .iter()
         .filter(|o| {
-            if include_skipped && o.skipped {
+            if include_all {
                 true
             } else {
                 !o.skipped && o.items.len() >= 3
@@ -915,8 +915,7 @@ fn format_landscape_block_with_mode(
         })
         .collect();
 
-    let failure_count = failures.len();
-    if renderable.is_empty() && failure_count == 0 {
+    if renderable.is_empty() && failures.is_empty() {
         return Ok(LandscapeBlock::empty());
     }
 
@@ -941,14 +940,14 @@ fn format_landscape_block_with_mode(
                 None,
                 bare,
             );
-            append_failures(&mut block.block, failures, root);
-            block.file_count += failure_count;
+            append_failures_to_block(&mut block, failures, root);
             return Ok(block);
         }
     };
 
-    // Try full depth first.
-    let full_block = format_at_depth_inner(
+    // Try full depth first, including failure annotations so the token
+    // check covers every byte the agent will actually receive.
+    let mut full_block = format_at_depth_inner(
         &renderable,
         &spine_map,
         root,
@@ -957,11 +956,9 @@ fn format_landscape_block_with_mode(
         None,
         bare,
     );
+    append_failures_to_block(&mut full_block, failures, root);
     if count_tokens(&full_block.block)? <= max_tokens {
-        let mut block = full_block;
-        append_failures(&mut block.block, failures, root);
-        block.file_count += failure_count;
-        return Ok(block);
+        return Ok(full_block);
     }
 
     // Depth binary search: find the largest D for which the block fits.
@@ -982,6 +979,7 @@ fn format_landscape_block_with_mode(
         Some(depth_notice),
         bare,
     );
+    append_failures_to_block(&mut best, failures, root);
 
     if count_tokens(&best.block)? > max_tokens {
         // Even depth 0 with skeletonization doesn't fit the token budget.
@@ -990,7 +988,7 @@ fn format_landscape_block_with_mode(
 
     while lo < hi {
         let mid = lo + (hi - lo).div_ceil(2);
-        let candidate = format_at_depth_inner(
+        let mut candidate = format_at_depth_inner(
             &renderable,
             &spine_map,
             root,
@@ -999,6 +997,7 @@ fn format_landscape_block_with_mode(
             Some(depth_notice),
             bare,
         );
+        append_failures_to_block(&mut candidate, failures, root);
         if count_tokens(&candidate.block)? <= max_tokens {
             lo = mid;
             best = candidate;
@@ -1006,8 +1005,6 @@ fn format_landscape_block_with_mode(
             hi = mid - 1;
         }
     }
-    append_failures(&mut best.block, failures, root);
-    best.file_count += failure_count;
     Ok(best)
 }
 
@@ -1028,6 +1025,17 @@ fn append_failures(block: &mut String, failures: &[(PathBuf, LandscapeError)], r
             escape_landscape_delimiters(&display)
         ));
     }
+}
+
+/// Append failure annotations to a formatted block and adjust its retained
+/// file count so callers see the annotations as discovered files.
+fn append_failures_to_block(
+    block: &mut LandscapeBlock,
+    failures: &[(PathBuf, LandscapeError)],
+    root: &Path,
+) {
+    append_failures(&mut block.block, failures, root);
+    block.file_count += failures.len();
 }
 
 /// Estimate the number of tokens in a rendered landscape block.
@@ -2158,6 +2166,23 @@ mod tests {
         };
         assert!(matches!(error, LandscapeError::BudgetExceeded));
         assert!(error.to_string().contains("token budget"));
+    }
+
+    #[test]
+    fn format_landscape_block_tool_counts_failure_annotations_against_budget() {
+        let root = Path::new("/repo");
+        let build = DirectoryBuild {
+            outlines: Vec::new(),
+            failures: vec![(
+                root.join("broken.rs"),
+                LandscapeError::Read(std::io::Error::other("unreadable")),
+            )],
+        };
+
+        // A budget of zero can never fit the annotation; the result must be
+        // an error rather than a block that overruns the requested budget.
+        let result = format_landscape_block_tool(&build, root, Some(0));
+        assert!(matches!(result, Err(LandscapeError::BudgetExceeded)));
     }
 
     #[test]

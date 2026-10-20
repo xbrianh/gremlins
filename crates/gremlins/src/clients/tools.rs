@@ -3187,19 +3187,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn landscape_directory_with_only_small_files_shows_no_items() {
+    async fn landscape_directory_with_only_small_files_lists_them() {
         let dir = tmp();
         let c = ctx(&dir);
         let sub = dir.join("shallow");
         std::fs::create_dir(&sub).unwrap();
-        // Two files, each with fewer than 3 outline items —
-        // they get filtered out, so the directory is not empty
-        // but nothing is outlineable.
+        // Two recognized files, each with fewer than 3 outline items.
+        // Tool mode must still list them (and their items) rather than
+        // applying the injected-block three-item cutoff.
         std::fs::write(sub.join("a.rs"), "fn a() {}\nstruct A;\n").unwrap();
         std::fs::write(sub.join("b.rs"), "fn b() {}\n").unwrap();
         let args = serde_json::json!({"file_path": "shallow"}).to_string();
         let out = landscape_invoke(&c, &args).await;
-        assert_eq!(out, "(no outline items)");
+        assert!(
+            out.contains("a.rs:") && out.contains("1|fn|a") && out.contains("2|struct|A"),
+            "small recognized file with two items must be listed: {out:?}"
+        );
+        assert!(
+            out.contains("b.rs:") && out.contains("1|fn|b"),
+            "small recognized file with one item must be listed: {out:?}"
+        );
     }
 
     #[tokio::test]
