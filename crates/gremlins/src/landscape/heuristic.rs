@@ -567,6 +567,7 @@ impl<F: Fn() -> u8> StateBlob for T {}
 
     #[test]
     fn recognized_extensions_are_exhaustive_against_scan() {
+        // Every recognized extension must have a scan match arm.
         for &extension in RECOGNIZED_EXTENSIONS {
             let content = match extension {
                 "rs" => "fn foo() {}\n",
@@ -584,6 +585,20 @@ impl<F: Fn() -> u8> StateBlob for T {}
                 scan(extension, content, false).len(),
                 1,
                 "RECOGNIZED_EXTENSIONS entry {extension} must have a scan match arm"
+            );
+        }
+
+        // Every scan match arm must also appear in RECOGNIZED_EXTENSIONS.
+        // Collect the concrete extension strings that `scan` dispatches on
+        // (excluding the wildcard `_` arm).
+        let scan_arms: &[&str] = &[
+            "rs", "json", "toml", "ini", "cfg", "conf", "py", "pyi", "js", "jsx", "ts", "tsx",
+            "mjs", "cjs",
+        ];
+        for &extension in scan_arms {
+            assert!(
+                RECOGNIZED_EXTENSIONS.contains(&extension),
+                "scan arm {extension} is missing from RECOGNIZED_EXTENSIONS"
             );
         }
     }
