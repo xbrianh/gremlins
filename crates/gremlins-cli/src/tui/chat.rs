@@ -39,9 +39,7 @@ pub enum ChatEvent {
         /// Per-turn token/cache delta from the completed agent-loop turn.
         stats: Option<Value>,
         /// Conversation-wide token/cache total (the current prompt's running
-        /// total plus the persisted chat-gremlin baseline). Not rendered by
-        /// the TUI stats title, which reports only the per-turn delta.
-        #[allow(dead_code)]
+        /// total plus the persisted chat-gremlin baseline).
         total: Option<Value>,
         /// Chat request ID for stale-event filtering. Not the agent-loop
         /// iteration — use [`loop_turn`] for the loop counter.
