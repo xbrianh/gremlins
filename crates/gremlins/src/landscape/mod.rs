@@ -358,6 +358,15 @@ fn walk_dir(
     include_file: &dyn Fn(&Path, u64) -> bool,
     paths: &mut Vec<(PathBuf, Option<Fingerprint>)>,
 ) -> Result<(), LandscapeError> {
+    // Verify the root can be enumerated before building the walker. The
+    // ignore crate's walker can yield a successful directory entry for an
+    // existing but unreadable root before reporting the error opening its
+    // contents, which would silently produce an empty traversal instead of
+    // the expected read error.
+    if let Err(err) = std::fs::read_dir(dir) {
+        return Err(LandscapeError::Read(err));
+    }
+
     let mut builder = ignore::WalkBuilder::new(dir);
     builder
         .standard_filters(false) // don't use blanket hidden-file filter
@@ -385,25 +394,17 @@ fn walk_dir(
 
     let walker = builder.build();
 
-    let mut first = true;
     for result in walker {
         let entry = match result {
             Ok(entry) => entry,
             Err(err) => {
-                if first {
-                    // A failure on the very first entry means the root itself
-                    // is unreadable (e.g. EACCES); propagate as fatal.
-                    let msg = err.to_string();
-                    let io_err = err
-                        .into_io_error()
-                        .unwrap_or_else(|| std::io::Error::other(msg));
-                    return Err(LandscapeError::Read(io_err));
-                }
+                // Errors in nested directories are non-fatal (e.g.
+                // permission denied on a subdirectory). The root
+                // readability is already checked above.
                 log::debug!("landscape: walk error: {err}");
                 continue;
             }
         };
-        first = false;
 
         let path = entry.path().to_path_buf();
 
@@ -1349,14 +1350,33 @@ mod tests {
             "key: value\nkey2: value2\nkey3: value3\n",
         )
         .unwrap();
-        // Create a .gitignored target/ — must be excluded.
+        // Create a .gitignored target/ — must be excluded by the
+        // hardcoded SKIP_DIR_NAMES fallback.
         std::fs::create_dir_all(sandbox.repo_path().join("target")).unwrap();
         std::fs::write(
             sandbox.repo_path().join("target/build.rs"),
             "fn build() {}\n",
         )
         .unwrap();
-        std::fs::write(sandbox.repo_path().join(".gitignore"), "/target\n").unwrap();
+        // Create a gitignored file at the root level whose name is NOT in
+        // SKIP_DIR_NAMES, so exclusion can only come from .gitignore.
+        std::fs::write(
+            sandbox.repo_path().join("generated-code.rs"),
+            "fn generated() {}\n",
+        )
+        .unwrap();
+        // Create a non-gitignored file alongside it to prove the walker
+        // can see files in the same directory.
+        std::fs::write(
+            sandbox.repo_path().join("checked-in.rs"),
+            "fn checked_in() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sandbox.repo_path().join(".gitignore"),
+            "/target\n/generated-code.rs\n",
+        )
+        .unwrap();
         crate::test_support::git(sandbox.repo_path(), &["add", "."]);
         crate::test_support::git(sandbox.repo_path(), &["commit", "-q", "-m", "extra"]);
 
@@ -1379,6 +1399,17 @@ mod tests {
         assert!(
             !paths.contains(&sandbox.repo_path().join(".git/config").as_path()),
             ".git/ must be excluded even inside a git repo"
+        );
+        // Gitignore filtering: generated-code.rs is in .gitignore but its
+        // name is not in SKIP_DIR_NAMES, so exclusion proves gitignore works.
+        assert!(
+            !paths.contains(&sandbox.repo_path().join("generated-code.rs").as_path()),
+            "generated-code.rs must be excluded by .gitignore"
+        );
+        // Sanity check: a non-gitignored sibling file must be visible.
+        assert!(
+            paths.contains(&sandbox.repo_path().join("checked-in.rs").as_path()),
+            "checked-in.rs must be visible"
         );
     }
 
