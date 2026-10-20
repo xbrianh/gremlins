@@ -28,6 +28,7 @@ bootstrap:
         source "$THE_ENV"
     fi
     export PREFIX="${GREMLINS_SCRATCH_DIR}/install"
+    export PATH="${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}"
 
 land:
   interpolation:
@@ -67,6 +68,7 @@ stage-definitions:
           cmds:
             - git add -A
             - git diff --cached --quiet || git commit -m "fix checks"
+  complexity-review: complexity-review
 
 stages:
   - { name: plan, type: plan, prompt: [style_guide.md, plan.md] }
@@ -105,6 +107,9 @@ stages:
           outputs:
             filepath: "artifact://review-two.md"
         prompt: [review.md]
+      - name: complexity-review
+        type: complexity-review
+        prompt: [complexity_review.md]
   - name: address
     type: agent
     prompt: [style_guide.md, dev-env-howto.md, address.md]
@@ -114,6 +119,7 @@ stages:
         diff: content("artifact://diff.txt")
         review_one: content("artifact://review-one.md")
         review_two: content("artifact://review-two.md")
+        complexity_review: content("artifact://complexity-review.md")
       outputs:
         address_summary: "artifact://address-summary.md"
   - { name: verify-address-fixes, type: check-and-fix }

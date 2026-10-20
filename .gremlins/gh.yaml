@@ -49,6 +49,7 @@ stage-definitions:
   github-wait-copilot: github-wait-copilot
   github-wait-ci: github-wait-ci
   github-push-to-pr-branch: github-push-to-pr-branch
+  complexity-review: complexity-review
   check-and-fix:
     type: sequence
     body:
@@ -114,6 +115,9 @@ stages:
           outputs:
             filepath: "artifact://review-two.md"
         prompt: [review.md]
+      - name: complexity-review
+        type: complexity-review
+        prompt: [complexity_review.md]
 
   - name: address
     type: agent
@@ -124,6 +128,7 @@ stages:
         diff: content("artifact://diff.txt")
         review_one: content("artifact://review-one.md")
         review_two: content("artifact://review-two.md")
+        complexity_review: content("artifact://complexity-review.md")
       outputs:
         address_summary: "artifact://address-summary.md"
 

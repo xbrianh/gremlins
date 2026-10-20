@@ -30,6 +30,12 @@ The diff under review:
 {review_two}
 </review>
 
+## Structural complexity review
+
+<review>
+{complexity_review}
+</review>
+
 ## Summary
 
 After addressing the findings, write a concise summary of every fix made to `{address_summary}`. Include the file, line, issue category, and what was changed for each fix.
