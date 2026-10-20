@@ -585,6 +585,15 @@ mod tests {
     }
 
     #[test]
+    fn require_one_of_flat_list_not_list_of_lists() {
+        // The common typo: a single flat list instead of a list of lists.
+        let yaml = "require_one_of: [instructions, plan]\nkey:\n  type: string\n";
+        let raw: serde_yaml::Mapping = serde_yaml::from_str(yaml).unwrap();
+        let err = InputSources::from_yaml(&raw).unwrap_err();
+        assert!(err.to_string().contains("must be a list of source names"));
+    }
+
+    #[test]
     fn require_one_of_not_list_of_strings() {
         let yaml = "require_one_of: [[42]]\nkey:\n  type: string\n";
         let raw: serde_yaml::Mapping = serde_yaml::from_str(yaml).unwrap();

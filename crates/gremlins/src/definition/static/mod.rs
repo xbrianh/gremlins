@@ -540,6 +540,7 @@ fn bootstrap_to_yaml(bootstrap: &Bootstrap) -> Value {
 mod tests {
     use super::*;
     use crate::clients::client::ModelURI;
+    use crate::schemas::bootstrap::{InputSource, InputSources};
     use crate::stage_spec::agent::Agent;
     use crate::stage_spec::composite::StageAttrs;
     use crate::stage_spec::exec::Exec;
@@ -1119,6 +1120,44 @@ mod tests {
     }
 
     // ---- DefinitionError tests ----
+
+    #[test]
+    fn bootstrap_to_yaml_preserves_require_one_of_group() {
+        let mut sources = std::collections::HashMap::new();
+        sources.insert(
+            "instructions".to_string(),
+            InputSource::new("instructions".to_string(), vec!["string".to_string()], true).unwrap(),
+        );
+        sources.insert(
+            "plan".to_string(),
+            InputSource::new("plan".to_string(), vec!["filepath".to_string()], true).unwrap(),
+        );
+        let mut input_sources = InputSources::new(sources);
+        input_sources.require_one_of = vec![vec!["instructions".to_string(), "plan".to_string()]];
+
+        let bootstrap = Bootstrap {
+            source: Some(input_sources),
+            ..Bootstrap::default()
+        };
+
+        let yaml = bootstrap_to_yaml(&bootstrap);
+        let mapping = yaml
+            .as_mapping()
+            .expect("bootstrap_to_yaml returns a mapping");
+        let source = mapping
+            .get(serde_yaml::Value::String("source".to_string()))
+            .expect("source key present");
+        let src_mapping = source.as_mapping().expect("source is a mapping");
+        let roo = src_mapping
+            .get(serde_yaml::Value::String("require_one_of".to_string()))
+            .expect("require_one_of key present in serialized source");
+        let roo_seq = roo.as_sequence().expect("require_one_of is a sequence");
+        assert_eq!(roo_seq.len(), 1);
+        let group = roo_seq[0].as_sequence().expect("group is a sequence");
+        assert_eq!(group.len(), 2);
+        assert_eq!(group[0].as_str().unwrap(), "instructions");
+        assert_eq!(group[1].as_str().unwrap(), "plan");
+    }
 
     #[test]
     fn definition_error_registry_variant() {
