@@ -1,6 +1,6 @@
-The Task tool delegates self-contained pieces of work to a worker. Each
-Task runs in a clean context — it sees only the prompt you provide and
-returns a distilled result. This keeps findings precise and grounded.
+The Task tool delegates self-contained pieces of work to a worker.
+Non-Fork kinds start with a clean conversation context; the Fork kind
+inherits the parent conversation history.
 
 Multiple Task calls issued in the same message execute concurrently
 (up to 8). Use this to fan out independent subtasks and collect
