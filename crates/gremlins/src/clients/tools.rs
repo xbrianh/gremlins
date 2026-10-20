@@ -1327,17 +1327,17 @@ fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str
         None
     };
 
-    let token_budget: Option<usize> = if args.get("token_budget").is_some() {
-        let n = match args.get("token_budget").and_then(|v| v.as_u64()) {
-            Some(n) => n as usize,
-            None => {
-                return "Error: 'token_budget' must be a non-negative integer".to_string();
+    let token_budget: Option<usize> =
+        if let Some(v) = args.get("token_budget").filter(|v| !v.is_null()) {
+            match v.as_u64() {
+                Some(n) => Some(n as usize),
+                None => {
+                    return "Error: 'token_budget' must be a non-negative integer".to_string();
+                }
             }
+        } else {
+            None
         };
-        Some(n)
-    } else {
-        None
-    };
 
     // Reject a symlink root so the directory walk does not follow it.
     let meta = match path.symlink_metadata() {
@@ -1353,29 +1353,36 @@ fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str
 
     if meta.is_dir() {
         let depth_limit = depth.unwrap_or(usize::MAX);
-        let outlines = match LandscapeExplorer.build(&path, depth_limit, None) {
-            Ok(outlines) => outlines,
+        let build = match LandscapeExplorer.build_with_failures(&path, depth_limit) {
+            Ok(b) => b,
             Err(LandscapeError::Read(e)) => return format!("Error: {e}"),
-            // `build` does not return Utf8, BudgetExceeded, or Tokenizer;
-            // these arms exist only for exhaustive matching.
+            // `build_with_failures` does not return Utf8, BudgetExceeded,
+            // or Tokenizer; these arms exist only for exhaustive matching.
             Err(LandscapeError::Utf8(e)) => return format!("Error: file is not valid UTF-8: {e}"),
-            Err(LandscapeError::BudgetExceeded) => return String::from("Error: budget exceeded"),
+            Err(LandscapeError::BudgetExceeded) => {
+                return String::from("Error: budget exceeded");
+            }
             Err(LandscapeError::Tokenizer(e)) => {
-                return format!("Error: tokenizer init failed: {e}");
+                return format!("Error: tokenizer error: {e}");
             }
         };
 
-        let max_tokens = token_budget.unwrap_or(usize::MAX);
-        match crate::landscape::format_landscape_block_tool(&outlines, &path, max_tokens) {
+        match crate::landscape::format_landscape_block_tool(&build, &path, token_budget) {
             Ok(block) => {
                 if block.block.is_empty() {
-                    "(empty directory)".to_string()
+                    if build.outlines.is_empty() && build.failures.is_empty() {
+                        "(empty directory)".to_string()
+                    } else {
+                        "(no outline items)".to_string()
+                    }
                 } else {
                     block.block
                 }
             }
             Err(LandscapeError::BudgetExceeded) => String::from("Error: budget exceeded"),
-            Err(LandscapeError::Tokenizer(e)) => format!("Error: tokenizer init failed: {e}"),
+            Err(LandscapeError::Tokenizer(e)) => {
+                format!("Error: tokenizer error: {e}")
+            }
             Err(LandscapeError::Read(e)) => format!("Error: {e}"),
             Err(LandscapeError::Utf8(e)) => format!("Error: file is not valid UTF-8: {e}"),
         }
@@ -1404,18 +1411,7 @@ fn render_landscape(items: &[crate::landscape::OutlineItem], path: &Path) -> Str
         }
         return path.display().to_string();
     }
-    items
-        .iter()
-        .map(|item| {
-            format!(
-                "{}|{}|{}",
-                item.line,
-                item.kind,
-                crate::landscape::escape_landscape_delimiters(&item.name)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    crate::landscape::format_outline_items(items)
 }
 
 pub(crate) async fn edit_invoke(ctx: &AgentLoopRuntime, args_json: &str) -> String {
@@ -3126,8 +3122,8 @@ mod tests {
             "dir listing missing lib.rs tree entry: {out:?}"
         );
         assert!(
-            !out.contains("sub/lib.rs") && !out.contains("notes.txt"),
-            "directory output must use block tree headers: {out:?}"
+            !out.contains("sub/lib.rs") && out.contains("notes.txt:"),
+            "directory output must use block tree headers and list unrecognized files: {out:?}"
         );
         assert!(
             out.contains("1|fn|a") && out.contains("2|struct|B"),
@@ -3191,6 +3187,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn landscape_directory_with_only_small_files_shows_no_items() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let sub = dir.join("shallow");
+        std::fs::create_dir(&sub).unwrap();
+        // Two files, each with fewer than 3 outline items —
+        // they get filtered out, so the directory is not empty
+        // but nothing is outlineable.
+        std::fs::write(sub.join("a.rs"), "fn a() {}\nstruct A;\n").unwrap();
+        std::fs::write(sub.join("b.rs"), "fn b() {}\n").unwrap();
+        let args = serde_json::json!({"file_path": "shallow"}).to_string();
+        let out = landscape_invoke(&c, &args).await;
+        assert_eq!(out, "(no outline items)");
+    }
+
+    #[tokio::test]
     async fn landscape_refuses_symlink_root() {
         let dir = tmp();
         let c = ctx(&dir);
@@ -3236,10 +3248,13 @@ mod tests {
         std::fs::create_dir(dir.join("sub")).unwrap();
         std::fs::write(dir.join("sub/lib.rs"), "fn a() {}\nstruct B;\nimpl B {}\n").unwrap();
 
-        let outlines = LandscapeExplorer.build(&dir, usize::MAX, None).unwrap();
-        let expected = crate::landscape::format_landscape_block_tool(&outlines, &dir, usize::MAX)
-            .unwrap()
-            .block;
+        let build = LandscapeExplorer
+            .build_with_failures(&dir, usize::MAX)
+            .unwrap();
+        let expected =
+            crate::landscape::format_landscape_block_tool(&build, &dir, Some(usize::MAX))
+                .unwrap()
+                .block;
         assert!(!expected.contains("<!-- BEGIN LANDSCAPE BLOCK -->"));
         assert!(!expected.contains("repository metadata"));
 
@@ -3269,8 +3284,10 @@ mod tests {
         std::fs::write(dir.join("src/mid.rs"), mid).unwrap();
         std::fs::write(dir.join("src/nested/deep.rs"), deep).unwrap();
 
-        let outlines = LandscapeExplorer.build(&dir, usize::MAX, None).unwrap();
-        let full = crate::landscape::format_landscape_block_tool(&outlines, &dir, usize::MAX)
+        let build = LandscapeExplorer
+            .build_with_failures(&dir, usize::MAX)
+            .unwrap();
+        let full = crate::landscape::format_landscape_block_tool(&build, &dir, Some(usize::MAX))
             .unwrap()
             .block;
         let full_tokens = crate::landscape::count_tokens(&full).unwrap();
@@ -3292,10 +3309,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn landscape_unreadable_file_is_omitted() {
+    async fn landscape_unreadable_file_is_annotated() {
         // Create a real file inside a subdirectory with outlineable extension
         // but revoke read permission so the block pipeline cannot parse it.
-        // `build` drops unparseable files rather than surfacing inline errors.
+        // `build_with_failures` surfaces the path as an inline annotation.
         let dir = tmp();
         let c = ctx(&dir);
         std::fs::create_dir(dir.join("sub")).unwrap();
@@ -3309,8 +3326,8 @@ mod tests {
         let args = serde_json::json!({"file_path": ".", "depth": 2}).to_string();
         let out = landscape_invoke(&c, &args).await;
         assert!(
-            !out.contains("broken.rs") && !out.contains("Error:"),
-            "unreadable file must be omitted by the block pipeline: {out:?}"
+            out.contains("broken.rs") && out.contains("(unreadable)"),
+            "unreadable file must be annotated: {out:?}"
         );
     }
 

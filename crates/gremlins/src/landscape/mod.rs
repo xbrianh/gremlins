@@ -81,6 +81,18 @@ pub struct FileOutline {
     pub skipped: bool,
 }
 
+/// Result of a directory build, including per-file parse failures.
+///
+/// [`LandscapeExplorer::build`] discards unreadable files silently so the
+/// system-prompt block never carries I/O noise. The `Landscape` tool uses
+/// [`LandscapeExplorer::build_with_failures`] instead so agents can see that a
+/// file was discovered but could not be outlined.
+#[derive(Debug)]
+pub(crate) struct DirectoryBuild {
+    pub(crate) outlines: Vec<FileOutline>,
+    pub(crate) failures: Vec<(PathBuf, LandscapeError)>,
+}
+
 /// Concrete outliner used by agent tooling.
 ///
 /// Construction is deliberately trivial: the explorer carries no state, so a
@@ -106,67 +118,6 @@ impl LandscapeExplorer {
         Ok(heuristic::scan(&extension, content, collapse_tests))
     }
 
-    /// Outline a directory tree, returning a rendered string with path headers.
-    ///
-    /// Each file is emitted with a path header. Recognized files also list their
-    /// structural items; unrecognized files appear as just the path. Symlinks are
-    /// not followed. Build-artifact directories (target, node_modules, etc.) are
-    /// skipped. Dot-directories that are tracked in git (`.gremlins/`) are visible.
-    /// Files larger than
-    /// `MAX_OUTLINE_BYTES` are skipped.
-    ///
-    /// `depth_limit` controls how many nested directory levels to descend: 0 scans
-    /// only the root directory itself, 1 includes one level of subdirectories, and
-    /// so on.
-    pub fn outline_directory(
-        &self,
-        root: &Path,
-        depth_limit: usize,
-    ) -> Result<String, LandscapeError> {
-        let mut paths_with_fp: Vec<(PathBuf, Option<Fingerprint>)> = Vec::new();
-        collect_all_paths_recursive(root, depth_limit, &mut paths_with_fp)?;
-        let mut paths: Vec<PathBuf> = paths_with_fp.into_iter().map(|(p, _)| p).collect();
-        paths.sort();
-
-        if paths.is_empty() {
-            return Ok(String::new());
-        }
-
-        let mut out = String::new();
-        // Emit each file with its relative path and (when recognized) its items.
-        for path in &paths {
-            let relative = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
-            out.push_str(&relative);
-
-            if heuristic::recognizes(&path_extension(path)) {
-                match self.outline_file(path, false) {
-                    Ok(items) if !items.is_empty() => {
-                        out.push(':');
-                        out.push('\n');
-                        for item in &items {
-                            out.push_str(&format!(
-                                "{:>6}  {:<8} {}\n",
-                                item.line, item.kind, item.name
-                            ));
-                        }
-                    }
-                    Ok(_) => {
-                        out.push('\n');
-                    }
-                    Err(e) => {
-                        // Surface per-file errors inline so the caller can
-                        // distinguish a genuinely empty file from a failed
-                        // read / encoding issue.
-                        out.push_str(&format!(" (Error: {e})\n"));
-                    }
-                }
-            } else {
-                out.push('\n');
-            }
-        }
-        Ok(out)
-    }
-
     /// Walk a directory tree and collect outlines for every recognized file.
     ///
     /// `depth_limit` counts nested directory levels: 0 only scans files in
@@ -190,6 +141,28 @@ impl LandscapeExplorer {
         depth_limit: usize,
         cache_path: Option<&Path>,
     ) -> Result<Vec<FileOutline>, LandscapeError> {
+        self.build_impl(root, depth_limit, cache_path, false)
+            .map(|result| result.outlines)
+    }
+
+    /// Like [`LandscapeExplorer::build`], but retains per-file parse failures
+    /// instead of dropping them. Intended for the `Landscape` tool so it can
+    /// surface unreadable files that would otherwise vanish from the outline.
+    pub(crate) fn build_with_failures(
+        &self,
+        root: &Path,
+        depth_limit: usize,
+    ) -> Result<DirectoryBuild, LandscapeError> {
+        self.build_impl(root, depth_limit, None, true)
+    }
+
+    fn build_impl(
+        &self,
+        root: &Path,
+        depth_limit: usize,
+        cache_path: Option<&Path>,
+        collect_failures: bool,
+    ) -> Result<DirectoryBuild, LandscapeError> {
         let mut cache = cache_path.map(cache::LandscapeCache::load);
         let canonical_cache = cache_path.and_then(|path| std::fs::canonicalize(path).ok());
 
@@ -198,6 +171,7 @@ impl LandscapeExplorer {
 
         // ── Phase 2: partition into cache hits and misses ──
         let mut results: Vec<FileOutline> = Vec::new();
+        let mut failures: Vec<(PathBuf, LandscapeError)> = Vec::new();
         // Each miss carries the fingerprint harvested during the walk
         // (from `symlink_metadata`), taken *before* parsing so a
         // concurrent write during the parse window cannot stick stale items
@@ -284,9 +258,12 @@ impl LandscapeExplorer {
                         skipped: false,
                     });
                 }
-                Err(_) => {
+                Err(err) => {
                     if let Some(ref mut cache) = cache {
                         cache.remove(&path);
+                    }
+                    if collect_failures {
+                        failures.push((path, err));
                     }
                 }
             }
@@ -294,6 +271,7 @@ impl LandscapeExplorer {
 
         // ── Phase 5: sort, save, return ──
         results.sort_by(|a, b| a.path.cmp(&b.path));
+        failures.sort_by(|a, b| a.0.cmp(&b.0));
         if let (Some(cache), Some(path)) = (cache, cache_path) {
             // Caching is an optimization: a failed write never fails the
             // build. Skip the write entirely when nothing changed (a pure
@@ -304,7 +282,10 @@ impl LandscapeExplorer {
                 let _ = cache.save(path);
             }
         }
-        Ok(results)
+        Ok(DirectoryBuild {
+            outlines: results,
+            failures,
+        })
     }
 }
 
@@ -441,17 +422,6 @@ fn collect_paths_recursive(
     )
 }
 
-/// Walk a directory tree collecting *all* file paths (including unrecognized
-/// files) so unrecognized files appear as path-only entries in
-/// `outline_directory`. Uses the shared `walk_dir` with no extension filtering.
-fn collect_all_paths_recursive(
-    dir: &Path,
-    depth_limit: usize,
-    paths: &mut Vec<(PathBuf, Option<Fingerprint>)>,
-) -> Result<(), LandscapeError> {
-    walk_dir(dir, depth_limit, &|_, len| len <= MAX_OUTLINE_BYTES, paths)
-}
-
 fn path_extension(path: &Path) -> String {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -514,6 +484,27 @@ pub(crate) fn escape_landscape_delimiters(text: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('|', "\u{00A6}")
+}
+
+/// Render a slice of outline items in the unified `line|kind|name` format,
+/// separated by single spaces.
+///
+/// This is the single source of truth for the item format used by both the
+/// system-prompt landscape block and the `Landscape` tool. Keeping it here
+/// means the two rendering paths cannot drift out of sync.
+pub(crate) fn format_outline_items(items: &[OutlineItem]) -> String {
+    items
+        .iter()
+        .map(|item| {
+            format!(
+                "{}|{}|{}",
+                item.line,
+                item.kind,
+                escape_landscape_delimiters(&item.name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ── Skeletonization ──────────────────────────────────────────────────────
@@ -813,9 +804,10 @@ fn format_at_depth_inner(
             "{file_indent}{}:",
             escape_landscape_delimiters(filename)
         ));
-        for item in &outline.items {
-            let name = escape_landscape_delimiters(&item.name);
-            block.push_str(&format!(" {}|{}|{}", item.line, item.kind, name));
+        let rendered_items = format_outline_items(&outline.items);
+        if !rendered_items.is_empty() {
+            block.push(' ');
+            block.push_str(&rendered_items);
         }
         block.push('\n');
     }
@@ -856,31 +848,54 @@ pub(crate) fn format_landscape_block(
     max_tokens: usize,
     has_outline_tool: bool,
 ) -> Result<LandscapeBlock, LandscapeError> {
-    format_landscape_block_with_mode(outlines, root, max_tokens, false, has_outline_tool)
+    format_landscape_block_with_mode(
+        outlines,
+        root,
+        Some(max_tokens),
+        false,
+        false,
+        &[],
+        has_outline_tool,
+    )
 }
 
 /// Format the captured outlines as a headerless landscape tree for the
 /// `Landscape` tool.
 ///
 /// This is the same rendering pipeline as [`format_landscape_block`] —
-/// including skeletonization and depth back-off under `max_tokens` — but it
-/// omits the HTML comment wrappers, preamble, and root comment that belong in
-/// the system prompt block. The caller (`Landscape` tool) already knows which
-/// directory it asked about and does not need the repository-metadata
-/// boilerplate.
+/// including skeletonization and depth back-off when `max_tokens` is
+/// `Some` — but it omits the HTML comment wrappers, preamble, and root
+/// comment that belong in the system prompt block. The caller (`Landscape`
+/// tool) already knows which directory it asked about and does not need
+/// the repository-metadata boilerplate.
+///
+/// When `max_tokens` is `None`, the block is rendered at full depth
+/// without any token counting. Unrecognized files (skipped entries) and
+/// parse failures are included so the agent sees a complete directory
+/// view.
 pub(crate) fn format_landscape_block_tool(
-    outlines: &[FileOutline],
+    build: &DirectoryBuild,
     root: &Path,
-    max_tokens: usize,
+    max_tokens: Option<usize>,
 ) -> Result<LandscapeBlock, LandscapeError> {
-    format_landscape_block_with_mode(outlines, root, max_tokens, true, true)
+    format_landscape_block_with_mode(
+        &build.outlines,
+        root,
+        max_tokens,
+        true,
+        true,
+        &build.failures,
+        true,
+    )
 }
 
 fn format_landscape_block_with_mode(
     outlines: &[FileOutline],
     root: &Path,
-    max_tokens: usize,
+    max_tokens: Option<usize>,
     bare: bool,
+    include_skipped: bool,
+    failures: &[(PathBuf, LandscapeError)],
     has_outline_tool: bool,
 ) -> Result<LandscapeBlock, LandscapeError> {
     // Build spine map from ALL outlines (including those with <3 items).
@@ -891,9 +906,17 @@ fn format_landscape_block_with_mode(
     // and agents can discover them via Glob or Landscape.
     let renderable: Vec<&FileOutline> = outlines
         .iter()
-        .filter(|o| !o.skipped && o.items.len() >= 3)
+        .filter(|o| {
+            if include_skipped && o.skipped {
+                true
+            } else {
+                !o.skipped && o.items.len() >= 3
+            }
+        })
         .collect();
-    if renderable.is_empty() {
+
+    let failure_count = failures.len();
+    if renderable.is_empty() && failure_count == 0 {
         return Ok(LandscapeBlock::empty());
     }
 
@@ -903,6 +926,26 @@ fn format_landscape_block_with_mode(
         .map(|o| compressed_depth(&o.path, root, &spine_map))
         .max()
         .unwrap_or(0);
+
+    // When no token budget was requested, render at full depth without any
+    // token counting.
+    let max_tokens = match max_tokens {
+        Some(n) => n,
+        None => {
+            let mut block = format_at_depth_inner(
+                &renderable,
+                &spine_map,
+                root,
+                max_cdepth,
+                has_outline_tool,
+                None,
+                bare,
+            );
+            append_failures(&mut block.block, failures, root);
+            block.file_count += failure_count;
+            return Ok(block);
+        }
+    };
 
     // Try full depth first.
     let full_block = format_at_depth_inner(
@@ -915,7 +958,10 @@ fn format_landscape_block_with_mode(
         bare,
     );
     if count_tokens(&full_block.block)? <= max_tokens {
-        return Ok(full_block);
+        let mut block = full_block;
+        append_failures(&mut block.block, failures, root);
+        block.file_count += failure_count;
+        return Ok(block);
     }
 
     // Depth binary search: find the largest D for which the block fits.
@@ -960,7 +1006,28 @@ fn format_landscape_block_with_mode(
             hi = mid - 1;
         }
     }
+    append_failures(&mut best.block, failures, root);
+    best.file_count += failure_count;
     Ok(best)
+}
+
+/// Append parse-failure entries to a formatted landscape block.
+///
+/// Each failure becomes a line like `sub/broken.rs (unreadable)` (relative
+/// to `root`, falling back to the absolute path when outside it) so the
+/// agent knows which files were discovered but couldn't be outlined.
+fn append_failures(block: &mut String, failures: &[(PathBuf, LandscapeError)], root: &Path) {
+    for (path, _err) in failures {
+        let display = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .display()
+            .to_string();
+        block.push_str(&format!(
+            "{} (unreadable)\n",
+            escape_landscape_delimiters(&display)
+        ));
+    }
 }
 
 /// Estimate the number of tokens in a rendered landscape block.
