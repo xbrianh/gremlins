@@ -444,24 +444,6 @@ fn should_skip_dir(path: &Path) -> bool {
     name.starts_with('.') || SKIP_DIR_NAMES.contains(&name)
 }
 
-/// Resolve a file's cache fingerprint: `(mtime_ns, size)`.
-///
-/// Stat errors (including a vanished file) are cache misses, not build errors:
-/// the caller simply falls back to a fresh parse and stores nothing.
-///
-/// This fingerprint is deliberately cheap, not cryptographic. On filesystems
-/// with coarse timestamp resolution, a same-size edit in the same timestamp
-/// tick can produce a stale cache hit; the tradeoff is accepted because the
-/// cache is an optimization and the worst case is re-presenting one stale
-/// snapshot until the file changes size or crosses a tick.
-#[allow(dead_code)]
-fn file_fingerprint(path: &Path) -> Option<Fingerprint> {
-    let metadata = std::fs::metadata(path).ok()?;
-    let mtime = metadata.modified().ok()?;
-    let mtime_ns = mtime.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos() as u64;
-    Some((mtime_ns, metadata.len()))
-}
-
 /// Whether `path` names the same on-disk file as the already-canonicalized
 /// cache blob `canonical_cache`.
 ///
@@ -1311,7 +1293,8 @@ mod tests {
         // Seed a stale entry as if `.md` had been scanned before markdown
         // support was removed: its fingerprint matches the file, so a naive
         // cache hit would replay the stored headings.
-        let (mtime_ns, size) = file_fingerprint(&md_path).unwrap();
+        let metadata = std::fs::metadata(&md_path).unwrap();
+        let (mtime_ns, size) = fingerprint_from_metadata(&metadata).unwrap();
         let mut cache = cache::LandscapeCache::load(&cache_path);
         cache.insert(
             &md_path,

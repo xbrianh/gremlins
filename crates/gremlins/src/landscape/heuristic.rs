@@ -8,7 +8,13 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use super::{OutlineItem, CLASS, ENUM, FN, HEADING, IMPL, KEY, METHOD, MOD, STRUCT, TRAIT};
+use super::{OutlineItem, CLASS, ENUM, FN, IMPL, KEY, METHOD, MOD, STRUCT, TRAIT};
+
+/// Extensions the heuristic scanner can outline. `scan` dispatches on these
+/// same values; the exhaustive test below keeps the two lists in sync.
+const RECOGNIZED_EXTENSIONS: &[&str] = &[
+    "rs", "json", "toml", "ini", "cfg", "conf", "py", "pyi", "js", "jsx", "ts", "tsx", "mjs", "cjs",
+];
 
 pub(crate) fn scan(extension: &str, content: &str, collapse_tests: bool) -> Vec<OutlineItem> {
     match extension {
@@ -22,22 +28,7 @@ pub(crate) fn scan(extension: &str, content: &str, collapse_tests: bool) -> Vec<
 }
 
 pub(crate) fn recognizes(extension: &str) -> bool {
-    matches!(
-        extension,
-        "rs" | "json"
-            | "toml"
-            | "ini"
-            | "cfg"
-            | "conf"
-            | "py"
-            | "pyi"
-            | "js"
-            | "jsx"
-            | "ts"
-            | "tsx"
-            | "mjs"
-            | "cjs"
-    )
+    RECOGNIZED_EXTENSIONS.contains(&extension)
 }
 
 fn item(kind: &'static str, name: &str, line: usize) -> OutlineItem {
@@ -57,9 +48,8 @@ fn kind_for(kind: &str) -> Option<&'static str> {
         "enum" => Some(ENUM),
         "mod" => Some(MOD),
         "class" => Some(CLASS),
-        "method" | "def" => Some(METHOD),
-        "heading" => Some(HEADING),
-        "key" | "section" => Some(KEY),
+        "method" => Some(METHOD),
+        "key" => Some(KEY),
         _ => None,
     }
 }
@@ -147,22 +137,73 @@ fn scan_rust(content: &str, collapse_tests: bool) -> Vec<OutlineItem> {
     items
 }
 
-/// Count `"` characters not preceded by a backslash escape.
+/// Count unescaped `"` characters, ignoring those inside character literals.
+///
+/// Rust string literals are single-line (except for backslash-continued ones,
+/// which the caller handles across lines), so the scanner only needs to know
+/// whether a line contains an odd number of real string delimiters. A `"`
+/// inside `'"'` must not count.
 fn count_unescaped_quotes(line: &str) -> usize {
+    enum Region {
+        None,
+        Char,
+        String,
+    }
+
     let bytes = line.as_bytes();
     let mut count = 0usize;
     let mut idx = 0usize;
+    let mut region = Region::None;
+
     while idx < bytes.len() {
-        match bytes[idx] {
-            b'\\' => idx += 2,
-            b'"' => {
-                count += 1;
-                idx += 1;
-            }
-            _ => idx += 1,
+        match region {
+            Region::None => match bytes[idx] {
+                b'\\' => idx += 2,
+                b'"' => {
+                    count += 1;
+                    region = Region::String;
+                    idx += 1;
+                }
+                b'\'' if char_literal_opens_at(bytes, idx) => {
+                    region = Region::Char;
+                    idx += 1;
+                }
+                _ => idx += 1,
+            },
+            Region::String => match bytes[idx] {
+                b'\\' => idx += 2,
+                b'"' => {
+                    count += 1;
+                    region = Region::None;
+                    idx += 1;
+                }
+                _ => idx += 1,
+            },
+            Region::Char => match bytes[idx] {
+                b'\\' => idx += 2,
+                b'\'' => {
+                    region = Region::None;
+                    idx += 1;
+                }
+                _ => idx += 1,
+            },
         }
     }
     count
+}
+
+/// Whether the `'` at `idx` opens a character literal on this line, rather
+/// than being a lifetime apostrophe such as the one in `<'a>`.
+fn char_literal_opens_at(bytes: &[u8], idx: usize) -> bool {
+    debug_assert_eq!(bytes[idx], b'\'');
+    match bytes.get(idx + 1) {
+        // `'\n'`, `'\''`, and other escaped character literals close after
+        // the escaped byte: opening quote, backslash, escaped byte, quote.
+        Some(b'\\') => bytes.get(idx + 3) == Some(&b'\''),
+        // An ordinary ASCII character literal: quote, byte, quote.
+        Some(_) => bytes.get(idx + 2) == Some(&b'\''),
+        None => false,
+    }
 }
 
 /// Update a brace-depth counter from one line, returning 0 once the body
@@ -514,6 +555,37 @@ impl<F: Fn() -> u8> StateBlob for T {}
         let items = scan("rs", src, false);
         let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(names, vec!["real"]);
+    }
+
+    #[test]
+    fn rust_scanner_ignores_quotes_inside_character_literals() {
+        let src = "let c = '\\'';\nlet d = '\"';\nfn real() {}\nstruct Foo;\n";
+        let items = scan("rs", src, false);
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["real", "Foo"]);
+    }
+
+    #[test]
+    fn recognized_extensions_are_exhaustive_against_scan() {
+        for &extension in RECOGNIZED_EXTENSIONS {
+            let content = match extension {
+                "rs" => "fn foo() {}\n",
+                "json" => "{\n\"a\": 1\n}\n",
+                "toml" | "ini" | "cfg" | "conf" => "[a]\n",
+                "py" | "pyi" => "def a():\n    pass\n",
+                "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => "function a() {}\n",
+                _ => unreachable!(),
+            };
+            assert!(
+                recognizes(extension),
+                "RECOGNIZED_EXTENSIONS entry {extension} must be recognized"
+            );
+            assert_eq!(
+                scan(extension, content, false).len(),
+                1,
+                "RECOGNIZED_EXTENSIONS entry {extension} must have a scan match arm"
+            );
+        }
     }
 
     #[test]
