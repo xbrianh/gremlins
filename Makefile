@@ -59,3 +59,4 @@ PREFIX ?= /usr/local
 
 install:
 	cargo install --path crates/gremlins-cli --root $(DESTDIR)$(PREFIX)
+	cargo install --path crates/drag --root $(DESTDIR)$(PREFIX)
