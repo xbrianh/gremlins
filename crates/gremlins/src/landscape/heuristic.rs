@@ -10,21 +10,53 @@ use regex::Regex;
 
 use super::{OutlineItem, CLASS, ENUM, FN, IMPL, KEY, METHOD, MOD, STRUCT, TRAIT};
 
-/// Extensions the heuristic scanner can outline. `scan` dispatches on these
-/// same values; the exhaustive test below keeps the two lists in sync.
+/// Extensions the heuristic scanner can outline. Every entry must appear in
+/// `SCANNERS`; the exhaustive test below keeps the two lists in sync.
 const RECOGNIZED_EXTENSIONS: &[&str] = &[
     "rs", "json", "toml", "ini", "cfg", "conf", "py", "pyi", "js", "jsx", "ts", "tsx", "mjs", "cjs",
 ];
 
+type ScanFn = fn(&str, bool) -> Vec<OutlineItem>;
+
+struct Scanner {
+    extensions: &'static [&'static str],
+    scan: ScanFn,
+}
+
+/// Single source of truth for extension → scanner dispatch. Every extension
+/// in `RECOGNIZED_EXTENSIONS` must be covered by at least one entry, and every
+/// extension listed here must appear in `RECOGNIZED_EXTENSIONS`. The
+/// exhaustive test below enforces both directions.
+const SCANNERS: &[Scanner] = &[
+    Scanner {
+        extensions: &["rs"],
+        scan: scan_rust,
+    },
+    Scanner {
+        extensions: &["json"],
+        scan: scan_json_keys,
+    },
+    Scanner {
+        extensions: &["toml", "ini", "cfg", "conf"],
+        scan: scan_config_sections,
+    },
+    Scanner {
+        extensions: &["py", "pyi"],
+        scan: scan_python,
+    },
+    Scanner {
+        extensions: &["js", "jsx", "ts", "tsx", "mjs", "cjs"],
+        scan: scan_javascript,
+    },
+];
+
 pub(crate) fn scan(extension: &str, content: &str, collapse_tests: bool) -> Vec<OutlineItem> {
-    match extension {
-        "rs" => scan_rust(content, collapse_tests),
-        "json" => scan_json_keys(content),
-        "toml" | "ini" | "cfg" | "conf" => scan_config_sections(content),
-        "py" | "pyi" => scan_python(content),
-        "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => scan_javascript(content),
-        _ => Vec::new(),
+    for scanner in SCANNERS {
+        if scanner.extensions.contains(&extension) {
+            return (scanner.scan)(content, collapse_tests);
+        }
     }
+    Vec::new()
 }
 
 pub(crate) fn recognizes(extension: &str) -> bool {
@@ -79,6 +111,10 @@ fn scan_rust(content: &str, collapse_tests: bool) -> Vec<OutlineItem> {
     // A backslash-continued (or otherwise multi-line) string literal. Structure
     // found on its interior lines is test-fixture text, not real items.
     let mut in_multiline_string = false;
+    // When `Some(n)`, we are inside a raw string whose closing delimiter is
+    // `"` followed by exactly `n` hash characters. Lines are skipped until the
+    // delimiter is found.
+    let mut raw_hash: Option<usize> = None;
     // The immediately preceding line was `#[cfg(test)]`, so a following
     // `mod NAME {` is a test module even when it isn't named `tests`.
     let mut prev_cfg_test = false;
@@ -89,9 +125,11 @@ fn scan_rust(content: &str, collapse_tests: bool) -> Vec<OutlineItem> {
             continue;
         }
 
-        if in_multiline_string {
-            // A line with an odd number of unescaped quotes closes the string.
-            if count_unescaped_quotes(line) % 2 == 1 {
+        // Lines inside a multi-line string or raw string are skipped.
+        if in_multiline_string || raw_hash.is_some() {
+            let qc = count_unescaped_quotes(line, raw_hash);
+            raw_hash = qc.in_raw;
+            if raw_hash.is_none() && qc.count % 2 == 1 {
                 in_multiline_string = false;
             }
             continue;
@@ -113,9 +151,16 @@ fn scan_rust(content: &str, collapse_tests: bool) -> Vec<OutlineItem> {
 
         // A line with an odd number of unescaped quotes opens a multi-line
         // string (Rust only continues normal strings across lines when the
-        // newline is escaped, so this is rare outside test fixtures). Lines
-        // inside that string are deliberately not scanned for items.
-        if count_unescaped_quotes(line) % 2 == 1 {
+        // newline is escaped, so this is rare outside test fixtures). An
+        // unclosed raw string opening also causes subsequent lines to be
+        // skipped. Lines inside either are deliberately not scanned for items.
+        let qc = count_unescaped_quotes(line, None);
+        if qc.in_raw.is_some() {
+            raw_hash = qc.in_raw;
+            prev_cfg_test = line.trim() == "#[cfg(test)]";
+            continue;
+        }
+        if qc.count % 2 == 1 {
             in_multiline_string = true;
             prev_cfg_test = line.trim() == "#[cfg(test)]";
             continue;
@@ -137,23 +182,45 @@ fn scan_rust(content: &str, collapse_tests: bool) -> Vec<OutlineItem> {
     items
 }
 
-/// Count unescaped `"` characters, ignoring those inside character literals.
+/// Holds the result of scanning a line for unescaped double-quote characters.
+#[derive(Debug, Clone, Copy)]
+struct QuoteCount {
+    /// Number of unescaped `"` characters outside raw strings. Used to
+    /// detect multi-line backslash-continued regular strings.
+    count: usize,
+    /// When the line ends inside a raw string, the number of `#` in its
+    /// delimiter (e.g. `r#"...` → `Some(1)`). `None` when no raw string is
+    /// open at end of line.
+    in_raw: Option<usize>,
+}
+
+/// Count unescaped `"` characters, ignoring:
+///
+/// * quotes inside character literals (`'"'`),
+/// * quotes inside raw string bodies (`r#"..."#`).
 ///
 /// Rust string literals are single-line (except for backslash-continued ones,
 /// which the caller handles across lines), so the scanner only needs to know
 /// whether a line contains an odd number of real string delimiters. A `"`
-/// inside `'"'` must not count.
-fn count_unescaped_quotes(line: &str) -> usize {
+/// inside `'"'` or a raw string must not count.
+///
+/// When `in_raw` is `Some(n)`, scanning begins *inside* a raw string whose
+/// closing delimiter is `"` followed by exactly `n` hash characters.
+fn count_unescaped_quotes(line: &str, in_raw: Option<usize>) -> QuoteCount {
     enum Region {
         None,
         Char,
         String,
+        RawString(usize),
     }
 
     let bytes = line.as_bytes();
     let mut count = 0usize;
     let mut idx = 0usize;
-    let mut region = Region::None;
+    let mut region = match in_raw {
+        Some(n) => Region::RawString(n),
+        None => Region::None,
+    };
 
     while idx < bytes.len() {
         match region {
@@ -167,6 +234,18 @@ fn count_unescaped_quotes(line: &str) -> usize {
                 b'\'' if char_literal_opens_at(bytes, idx) => {
                     region = Region::Char;
                     idx += 1;
+                }
+                b'r' if raw_string_opens_at(bytes, idx) => {
+                    let hashes = raw_hash_count(bytes, idx);
+                    // Skip `r`, the hashes, and the opening `"`.
+                    idx += 1 + hashes + 1;
+                    count += 1;
+                    if hashes > 0 {
+                        region = Region::RawString(hashes);
+                    }
+                    // A hashless raw string `r"..."` is handled by
+                    // Region::String: the opening `"` was counted above
+                    // and the closing `"` will be found naturally.
                 }
                 _ => idx += 1,
             },
@@ -187,22 +266,132 @@ fn count_unescaped_quotes(line: &str) -> usize {
                 }
                 _ => idx += 1,
             },
+            Region::RawString(hashes) => {
+                if bytes[idx] == b'"' {
+                    // Check if followed by exactly `hashes` hash characters.
+                    let mut j = idx + 1;
+                    let mut seen = 0usize;
+                    while j < bytes.len() && bytes[j] == b'#' && seen < hashes {
+                        seen += 1;
+                        j += 1;
+                    }
+                    if seen == hashes {
+                        count += 1;
+                        region = Region::None;
+                        idx = j;
+                        continue;
+                    }
+                }
+                idx += 1;
+            }
         }
+    }
+
+    let in_raw = match region {
+        Region::RawString(n) => Some(n),
+        _ => None,
+    };
+    QuoteCount { count, in_raw }
+}
+
+/// Whether the byte at `idx` (which must be `b'r'`) begins a Rust raw string
+/// literal (`r"..."`, `r#"..."#`, `r##"..."##`, etc.).
+///
+/// Returns `true` only when `r` is at the start of a token: position 0 or
+/// preceded by a byte that cannot be part of an identifier.
+fn raw_string_opens_at(bytes: &[u8], idx: usize) -> bool {
+    debug_assert_eq!(bytes[idx], b'r');
+    // `r` must be at token start, not e.g. part of `outer`.
+    if idx > 0 {
+        let prev = bytes[idx - 1];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return false;
+        }
+    }
+    // After `r`, expect zero or more `#` then `"`.
+    let mut j = idx + 1;
+    while j < bytes.len() && bytes[j] == b'#' {
+        j += 1;
+    }
+    j < bytes.len() && bytes[j] == b'"'
+}
+
+/// Count the number of `#` characters between the `r` at `idx` and the
+/// opening `"` of a raw string. Caller must have already verified that
+/// [`raw_string_opens_at`] returned `true`.
+fn raw_hash_count(bytes: &[u8], idx: usize) -> usize {
+    let mut j = idx + 1;
+    let mut count = 0usize;
+    while j < bytes.len() && bytes[j] == b'#' {
+        count += 1;
+        j += 1;
     }
     count
 }
 
 /// Whether the `'` at `idx` opens a character literal on this line, rather
 /// than being a lifetime apostrophe such as the one in `<'a>`.
+///
+/// Handles ordinary characters (including multi-byte UTF-8), single-char
+/// escapes (`\n`, `\\'`, etc.), `\xNN`, and `\u{...}`.
 fn char_literal_opens_at(bytes: &[u8], idx: usize) -> bool {
     debug_assert_eq!(bytes[idx], b'\'');
-    match bytes.get(idx + 1) {
-        // `'\n'`, `'\''`, and other escaped character literals close after
-        // the escaped byte: opening quote, backslash, escaped byte, quote.
-        Some(b'\\') => bytes.get(idx + 3) == Some(&b'\''),
-        // An ordinary ASCII character literal: quote, byte, quote.
-        Some(_) => bytes.get(idx + 2) == Some(&b'\''),
-        None => false,
+    let rest = &bytes[idx + 1..];
+    if rest.is_empty() {
+        return false;
+    }
+    match rest[0] {
+        b'\\' => {
+            let after = &rest[1..];
+            if after.is_empty() {
+                return false;
+            }
+            match after[0] {
+                b'x' => {
+                    // `\xNN` — exactly two hex digits then closing quote.
+                    after.len() >= 3
+                        && after[1].is_ascii_hexdigit()
+                        && after[2].is_ascii_hexdigit()
+                        && after[3] == b'\''
+                }
+                b'u' => {
+                    // `\u{...}` — find closing `}` then check for `'`.
+                    let mut pos = 1;
+                    while pos < after.len() && after[pos] != b'}' {
+                        pos += 1;
+                    }
+                    pos + 1 < after.len() && after[pos + 1] == b'\''
+                }
+                _ => {
+                    // Single-char escape: `\n`, `\t`, `\\`, `\'`, `\"`, `\0`, `\r`.
+                    after.len() >= 2 && after[1] == b'\''
+                }
+            }
+        }
+        b'\'' => {
+            // `'''` is never a valid char literal — the empty character is
+            // illegal in Rust.
+            false
+        }
+        _ => {
+            // Non-escaped character: skip the full UTF-8 character and check
+            // for a closing quote immediately after.
+            let char_len = utf8_byte_len(rest[0]);
+            rest.len() > char_len && rest[char_len] == b'\''
+        }
+    }
+}
+
+/// Number of bytes in the UTF-8 encoded character whose first byte is `first`.
+fn utf8_byte_len(first: u8) -> usize {
+    if first & 0x80 == 0 {
+        1
+    } else if first & 0xE0 == 0xC0 {
+        2
+    } else if first & 0xF0 == 0xE0 {
+        3
+    } else {
+        4
     }
 }
 
@@ -294,7 +483,7 @@ fn leading_identifier(rest: &str) -> Option<&str> {
     Some(&rest[..len])
 }
 
-fn scan_json_keys(content: &str) -> Vec<OutlineItem> {
+fn scan_json_keys(content: &str, _collapse_tests: bool) -> Vec<OutlineItem> {
     // Track brace/bracket depth and emit keys only at depth 1, i.e. direct
     // children of the root object/array. Indentation is intentionally ignored
     // so minified, tab-indented, and 4-space JSON all produce the same outline.
@@ -365,7 +554,7 @@ fn json_key_colon_follows(content: &str, start: usize) -> bool {
     false
 }
 
-fn scan_config_sections(content: &str) -> Vec<OutlineItem> {
+fn scan_config_sections(content: &str, _collapse_tests: bool) -> Vec<OutlineItem> {
     static SECTION_RE: OnceLock<Regex> = OnceLock::new();
     let pattern = SECTION_RE.get_or_init(|| {
         Regex::new(r"^\s*\[{1,2}(?P<name>[^\]\[]+)\]{1,2}\s*(?:#.*)?$")
@@ -381,7 +570,7 @@ fn scan_config_sections(content: &str) -> Vec<OutlineItem> {
     items
 }
 
-fn scan_python(content: &str) -> Vec<OutlineItem> {
+fn scan_python(content: &str, _collapse_tests: bool) -> Vec<OutlineItem> {
     static CLASS_RE: OnceLock<Regex> = OnceLock::new();
     static DEF_RE: OnceLock<Regex> = OnceLock::new();
     let class = CLASS_RE.get_or_init(|| {
@@ -414,7 +603,7 @@ fn scan_python(content: &str) -> Vec<OutlineItem> {
     items
 }
 
-fn scan_javascript(content: &str) -> Vec<OutlineItem> {
+fn scan_javascript(content: &str, _collapse_tests: bool) -> Vec<OutlineItem> {
     static FUNCTION_RE: OnceLock<Regex> = OnceLock::new();
     static CLASS_RE: OnceLock<Regex> = OnceLock::new();
     let function = FUNCTION_RE.get_or_init(|| {
@@ -566,39 +755,81 @@ impl<F: Fn() -> u8> StateBlob for T {}
     }
 
     #[test]
+    fn rust_scanner_ignores_quotes_inside_raw_strings() {
+        // A single-line raw string containing `"` characters must not toggle
+        // `in_multiline_string`; `fn real()` on the next line must be found.
+        let src = "let example = r#\"\" and '\"'\"#;\nfn real() {}\n";
+        let items = scan("rs", src, false);
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["real"]);
+
+        // A multi-line raw string must skip all interior lines.
+        let src = "let s = r#\"\nfn ghost() {}\nstruct Ghost;\n\"#;\nfn real() {}\n";
+        let items = scan("rs", src, false);
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["real"]);
+
+        // Hashless raw string `r"..."` on one line.
+        let src = "let s = r\"...\";\nfn real() {}\n";
+        let items = scan("rs", src, false);
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["real"]);
+    }
+
+    #[test]
+    fn rust_scanner_handles_non_ascii_and_extended_escapes_in_char_literals() {
+        // Non-ASCII UTF-8 character inside a char literal.
+        let src = "let chars = ['\"','\u{00e9}','\"'];\nfn real() {}\n";
+        let items = scan("rs", src, false);
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["real"]);
+
+        // `\xNN` escape.
+        let src = "let c = '\\x41';\nfn real() {}\n";
+        let items = scan("rs", src, false);
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["real"]);
+
+        // `\u{...}` escape.
+        let src = "let c = '\\u{1F600}';\nfn real() {}\n";
+        let items = scan("rs", src, false);
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["real"]);
+    }
+
+    #[test]
     fn recognized_extensions_are_exhaustive_against_scan() {
-        // Every recognized extension must have a scan match arm.
-        for &extension in RECOGNIZED_EXTENSIONS {
-            let content = match extension {
-                "rs" => "fn foo() {}\n",
-                "json" => "{\n\"a\": 1\n}\n",
-                "toml" | "ini" | "cfg" | "conf" => "[a]\n",
-                "py" | "pyi" => "def a():\n    pass\n",
-                "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => "function a() {}\n",
-                _ => unreachable!(),
-            };
-            assert!(
-                recognizes(extension),
-                "RECOGNIZED_EXTENSIONS entry {extension} must be recognized"
-            );
-            assert_eq!(
-                scan(extension, content, false).len(),
-                1,
-                "RECOGNIZED_EXTENSIONS entry {extension} must have a scan match arm"
-            );
+        // Forward: every extension listed in SCANNERS must be recognized and
+        // produce a non-empty outline for a trivial input.
+        for scanner in SCANNERS {
+            for &extension in scanner.extensions {
+                let content = match extension {
+                    "rs" => "fn foo() {}\n",
+                    "json" => "{\n\"a\": 1\n}\n",
+                    "toml" | "ini" | "cfg" | "conf" => "[a]\n",
+                    "py" | "pyi" => "def a():\n    pass\n",
+                    "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => "function a() {}\n",
+                    _ => unreachable!(),
+                };
+                assert!(
+                    recognizes(extension),
+                    "SCANNER extension {extension} must be recognized"
+                );
+                assert_eq!(
+                    scan(extension, content, false).len(),
+                    1,
+                    "SCANNER extension {extension} must have a scan arm"
+                );
+            }
         }
 
-        // Every scan match arm must also appear in RECOGNIZED_EXTENSIONS.
-        // Collect the concrete extension strings that `scan` dispatches on
-        // (excluding the wildcard `_` arm).
-        let scan_arms: &[&str] = &[
-            "rs", "json", "toml", "ini", "cfg", "conf", "py", "pyi", "js", "jsx", "ts", "tsx",
-            "mjs", "cjs",
-        ];
-        for &extension in scan_arms {
+        // Reverse: every extension in RECOGNIZED_EXTENSIONS must be covered
+        // by at least one SCANNERS entry.
+        for &extension in RECOGNIZED_EXTENSIONS {
+            let found = SCANNERS.iter().any(|s| s.extensions.contains(&extension));
             assert!(
-                RECOGNIZED_EXTENSIONS.contains(&extension),
-                "scan arm {extension} is missing from RECOGNIZED_EXTENSIONS"
+                found,
+                "RECOGNIZED_EXTENSIONS entry {extension} is not covered by any SCANNERS entry"
             );
         }
     }
