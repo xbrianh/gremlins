@@ -997,7 +997,9 @@ mod tests {
         // Tree format: src is a skeletal directory, main.rs beneath it.
         assert!(block.lines().any(|line| line == "src/"));
         // Items are inlined on the file line: "  main.rs: 12|fn|main 45|struct|Config ..."
-        assert!(block.lines().any(|line| line.starts_with("  main.rs:") && line.contains("12|fn|main")));
+        assert!(block
+            .lines()
+            .any(|line| line.starts_with("  main.rs:") && line.contains("12|fn|main")));
         assert!(!block.lines().any(|line| line == "/repo/src/main.rs:"));
         assert!(block.contains("12|fn|main"));
         assert!(block.contains("45|struct|Config"));
@@ -1031,7 +1033,9 @@ mod tests {
         let block = format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true)
             .unwrap()
             .block;
-        assert!(block.lines().any(|line| line.starts_with("/elsewhere/main.rs:")));
+        assert!(block
+            .lines()
+            .any(|line| line.starts_with("/elsewhere/main.rs:")));
         assert!(!block.lines().any(|line| line == "main.rs:"));
     }
 

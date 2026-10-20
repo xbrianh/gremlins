@@ -290,7 +290,10 @@ mod tests {
         assert!(snapshot
             .block
             .contains(&format!("<!-- root: {} -->\n", dir.path().display())));
-        assert!(snapshot.block.lines().any(|line| line.starts_with("main.rs:")));
+        assert!(snapshot
+            .block
+            .lines()
+            .any(|line| line.starts_with("main.rs:")));
         assert!(!snapshot
             .block
             .contains(&format!("{}:", dir.path().join("main.rs").display())));
