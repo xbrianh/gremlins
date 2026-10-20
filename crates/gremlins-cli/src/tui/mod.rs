@@ -742,10 +742,18 @@ fn compact_tokens(value: Option<u64>) -> String {
 /// Format one usage object as the compact token/cache portion of the live
 /// stats title: prompt (`↑`), completion (`↓`), and reasoning (`∴`) token
 /// counts separated by ` · `, plus a single `cache <pct>%` group derived
-/// from `cached_input_tokens / prompt_tokens`. Missing values render as
-/// dashes. A zero or absent prompt denominator renders `cache -` and never
-/// divides by zero.
-fn usage_title_part(usage: Option<&serde_json::Value>) -> String {
+/// from `cached_input_tokens / prompt_tokens`.
+///
+/// `usage` is the per-turn delta; `total` is the cumulative conversation-wide
+/// total. Completion (`↓`) and reasoning (`∴`) values are drawn from `total`
+/// when available and fall back to `usage` so the title never regresses. Prompt
+/// (`↑`) and cache are always sourced from the per-turn `usage`.
+/// Missing values render as dashes. A zero or absent prompt denominator
+/// renders `cache -` and never divides by zero.
+fn usage_title_part(
+    usage: Option<&serde_json::Value>,
+    total: Option<&serde_json::Value>,
+) -> String {
     let prompt = usage_field(usage, "prompt_tokens");
     let cache = match prompt {
         Some(p) if p > 0 => match usage_field(usage, "cached_input_tokens") {
@@ -757,21 +765,31 @@ fn usage_title_part(usage: Option<&serde_json::Value>) -> String {
         Some(_) | None => "cache -".to_string(),
     };
 
+    // Cumulative figures for completion and reasoning; fall back to per-turn.
+    let completion =
+        usage_field(total, "completion_tokens").or_else(|| usage_field(usage, "completion_tokens"));
+    let reasoning =
+        usage_field(total, "reasoning_tokens").or_else(|| usage_field(usage, "reasoning_tokens"));
+
     format!(
         "↑{} · ↓{} · ∴{} · {cache}",
         compact_tokens(prompt),
-        compact_tokens(usage_field(usage, "completion_tokens")),
-        compact_tokens(usage_field(usage, "reasoning_tokens"))
+        compact_tokens(completion),
+        compact_tokens(reasoning)
     )
 }
 
 /// Build the reasoning-stream stats title shown on each `TurnComplete`:
-/// the turn number prefix followed by the `clanking` header label and the
-/// compact per-turn token/cache summary.
-fn stats_title(turn: usize, stats: Option<&serde_json::Value>) -> String {
+/// the `clanking` header label followed by the turn number and the compact
+/// per-turn and cumulative token/cache summary.
+fn stats_title(
+    turn: usize,
+    stats: Option<&serde_json::Value>,
+    total: Option<&serde_json::Value>,
+) -> String {
     format!(
-        "turn {turn} · {REASONING_PLACEHOLDER_TITLE} · {}",
-        usage_title_part(stats)
+        "{REASONING_PLACEHOLDER_TITLE} · turn {turn} · {}",
+        usage_title_part(stats, total)
     )
 }
 
@@ -2143,7 +2161,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // All tools participate uniformly in the transcript.
                         live_area.commit_tool_result(&id, &call);
                     }
-                    ChatEvent::TurnComplete { text, tool_calls, stats, loop_turn, .. } => {
+                    ChatEvent::TurnComplete { text, tool_calls, stats, total, loop_turn, .. } => {
                         log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);
                         live_area.clear_tool_output();
                         // `text` is the model's full response for the just-completed
@@ -2163,7 +2181,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // agent-loop turn number so the operator can see which
                         // iteration the stats belong to.
                         let turn_num = loop_turn.unwrap_or(0);
-                        live_area.set_reasoning_title(&stats_title(turn_num, stats.as_ref()));
+                        live_area.set_reasoning_title(&stats_title(turn_num, stats.as_ref(), total.as_ref()));
                     }
                     ChatEvent::Done { text, summary, .. } => {
                         log::debug!("Done text_len={} summary_len={} has_current_turn={}",
@@ -2526,10 +2544,10 @@ mod tests {
             "reasoning_tokens": 30
         });
 
-        let title = stats_title(2, Some(&stats));
+        let title = stats_title(2, Some(&stats), None);
 
         assert_eq!(
-            title, "turn 2 · clanking · ↑100 · ↓50 · ∴30 · cache 40%",
+            title, "clanking · turn 2 · ↑100 · ↓50 · ∴30 · cache 40%",
             "{title}"
         );
     }
@@ -2545,20 +2563,20 @@ mod tests {
             "reasoning_tokens": 4
         });
 
-        let title = stats_title(2, Some(&stats));
+        let title = stats_title(2, Some(&stats), None);
 
         // The `↑` figure is the per-turn prompt size (77).
         assert_eq!(
-            title, "turn 2 · clanking · ↑77 · ↓9 · ∴4 · cache 0%",
+            title, "clanking · turn 2 · ↑77 · ↓9 · ∴4 · cache 0%",
             "{title}"
         );
     }
 
     #[test]
     fn stats_title_renders_dashes_when_usage_is_absent() {
-        let title = stats_title(0, None);
+        let title = stats_title(0, None, None);
 
-        assert_eq!(title, "turn 0 · clanking · ↑- · ↓- · ∴- · cache -");
+        assert_eq!(title, "clanking · turn 0 · ↑- · ↓- · ∴- · cache -");
     }
 
     #[test]
@@ -2572,9 +2590,9 @@ mod tests {
             "reasoning_tokens": 1
         });
 
-        let title = stats_title(1, Some(&stats));
+        let title = stats_title(1, Some(&stats), None);
 
-        assert_eq!(title, "turn 1 · clanking · ↑0 · ↓7 · ∴1 · cache -");
+        assert_eq!(title, "clanking · turn 1 · ↑0 · ↓7 · ∴1 · cache -");
     }
 
     #[test]
@@ -2586,8 +2604,9 @@ mod tests {
             "reasoning_tokens": 200
         });
 
+        // No cumulative total: per-turn figures are used throughout.
         assert_eq!(
-            usage_title_part(Some(&usage)),
+            usage_title_part(Some(&usage), None),
             "↑46.9k · ↓500 · ∴200 · cache 99%"
         );
     }
@@ -2602,7 +2621,7 @@ mod tests {
         });
 
         assert_eq!(
-            usage_title_part(Some(&usage)),
+            usage_title_part(Some(&usage), None),
             "↑46.9k · ↓500 · ∴200 · cache -"
         );
     }
@@ -2611,7 +2630,10 @@ mod tests {
     fn usage_title_part_prompt_only_renders_dashes_for_missing_stats() {
         let usage = serde_json::json!({"prompt_tokens": 46884});
 
-        assert_eq!(usage_title_part(Some(&usage)), "↑46.9k · ↓- · ∴- · cache -");
+        assert_eq!(
+            usage_title_part(Some(&usage), None),
+            "↑46.9k · ↓- · ∴- · cache -"
+        );
     }
 
     #[test]
@@ -2623,7 +2645,10 @@ mod tests {
             "reasoning_tokens": 1
         });
 
-        assert_eq!(usage_title_part(Some(&usage)), "↑0 · ↓7 · ∴1 · cache -");
+        assert_eq!(
+            usage_title_part(Some(&usage), None),
+            "↑0 · ↓7 · ∴1 · cache -"
+        );
     }
 
     #[test]
@@ -2635,7 +2660,86 @@ mod tests {
             "reasoning_tokens": 1
         });
 
-        assert_eq!(usage_title_part(Some(&usage)), "↑0 · ↓7 · ∴1 · cache -");
+        assert_eq!(
+            usage_title_part(Some(&usage), None),
+            "↑0 · ↓7 · ∴1 · cache -"
+        );
+    }
+
+    #[test]
+    fn usage_title_part_prefers_cumulative_completion_and_reasoning() {
+        // Per-turn stats show completion=50, reasoning=30.
+        // Cumulative total shows completion=150, reasoning=90.
+        // The title should report the larger cumulative figures for ↓/∴.
+        let stats = serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "cached_input_tokens": 40,
+            "reasoning_tokens": 30
+        });
+        let total = serde_json::json!({
+            "completion_tokens": 150,
+            "reasoning_tokens": 90
+        });
+
+        assert_eq!(
+            usage_title_part(Some(&stats), Some(&total)),
+            "↑100 · ↓150 · ∴90 · cache 40%"
+        );
+    }
+
+    #[test]
+    fn usage_title_part_falls_back_to_per_turn_when_total_missing_fields() {
+        // Total is present but only carries `completion_tokens`;
+        // reasoning should fall back to the per-turn value.
+        let stats = serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "cached_input_tokens": 40,
+            "reasoning_tokens": 30
+        });
+        let total = serde_json::json!({
+            "completion_tokens": 150
+        });
+
+        assert_eq!(
+            usage_title_part(Some(&stats), Some(&total)),
+            "↑100 · ↓150 · ∴30 · cache 40%"
+        );
+    }
+
+    #[test]
+    fn usage_title_part_nil_total_uses_per_turn_figures() {
+        // No cumulative total at all — should behave identically to the
+        // pre-cumulative path (no regression).
+        let stats = serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "cached_input_tokens": 40,
+            "reasoning_tokens": 30
+        });
+
+        assert_eq!(
+            usage_title_part(Some(&stats), None),
+            "↑100 · ↓50 · ∴30 · cache 40%"
+        );
+    }
+
+    #[test]
+    fn stats_title_with_cumulative_total_puts_label_first() {
+        let stats = serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "cached_input_tokens": 40,
+            "reasoning_tokens": 30
+        });
+        let total = serde_json::json!({
+            "completion_tokens": 150,
+            "reasoning_tokens": 90
+        });
+
+        let title = stats_title(3, Some(&stats), Some(&total));
+        assert_eq!(title, "clanking · turn 3 · ↑100 · ↓150 · ∴90 · cache 40%");
     }
 
     #[test]
