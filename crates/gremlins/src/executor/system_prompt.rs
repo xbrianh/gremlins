@@ -290,13 +290,16 @@ mod tests {
         assert!(snapshot
             .block
             .contains(&format!("<!-- root: {} -->\n", dir.path().display())));
-        assert!(snapshot.block.lines().any(|line| line == "main.rs:"));
+        assert!(snapshot
+            .block
+            .lines()
+            .any(|line| line.starts_with("main.rs:")));
         assert!(!snapshot
             .block
             .contains(&format!("{}:", dir.path().join("main.rs").display())));
-        assert!(snapshot.block.contains("1|fn|main\n"));
-        assert!(snapshot.block.contains("2|struct|Config\n"));
-        assert!(snapshot.block.contains("3|impl|Config\n"));
+        assert!(snapshot.block.contains("1|fn|main"));
+        assert!(snapshot.block.contains("2|struct|Config"));
+        assert!(snapshot.block.contains("3|impl|Config"));
         assert_eq!(snapshot.file_count, 1);
         assert_eq!(snapshot.item_count, 3);
 

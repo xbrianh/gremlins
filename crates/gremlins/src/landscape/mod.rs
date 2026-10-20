@@ -754,22 +754,16 @@ fn format_at_depth(
             dir_stack.push(part);
         }
 
-        // Emit file header.
+        // Emit file header with inlined items.
         let file_indent = "  ".repeat(dir_stack.len());
         let filename = &parts[n_dirs];
         block.push_str(&format!(
-            "{file_indent}{}:\n",
+            "{file_indent}{}:",
             escape_landscape_delimiters(filename)
         ));
-
-        // Emit items.
-        let item_indent = "  ".repeat(dir_stack.len() + 1);
         for item in &outline.items {
             let name = escape_landscape_delimiters(&item.name);
-            block.push_str(&format!(
-                "{item_indent}{}|{}|{}\n",
-                item.line, item.kind, name,
-            ));
+            block.push_str(&format!(" {}|{}|{}", item.line, item.kind, name));
         }
         block.push('\n');
     }
@@ -811,11 +805,12 @@ pub(crate) fn format_landscape_block(
     // Build spine map from ALL outlines (including those with <3 items).
     let spine_map = build_spine_map(outlines, root);
 
-    // Filter to files with ≥3 items for rendering, but always include
-    // skipped files (unrecognized extensions) so agents can still see them.
+    // Filter to files with ≥3 items for rendering. Skipped files (unrecognized
+    // extensions with no structural items) are dropped — they carry no information
+    // and agents can discover them via Glob or Landscape.
     let renderable: Vec<&FileOutline> = outlines
         .iter()
-        .filter(|o| o.skipped || o.items.len() >= 3)
+        .filter(|o| !o.skipped && o.items.len() >= 3)
         .collect();
     if renderable.is_empty() {
         return Ok(LandscapeBlock::empty());
@@ -961,24 +956,22 @@ mod tests {
             .unwrap()
             .block;
         assert!(!block.contains("small.rs"));
-        assert!(block.contains("big.rs:\n"));
+        assert!(block.contains("big.rs:"));
     }
 
     #[test]
-    fn format_landscape_block_emits_skipped_file_header_only() {
+    fn format_landscape_block_drops_skipped_files() {
         let root = Path::new("/repo");
         let skipped = FileOutline {
             skipped: true,
             path: root.join("notes.txt"),
             items: Vec::new(),
         };
+        // Skipped files are dropped entirely — they carry no structural info.
         let block = format_landscape_block(std::slice::from_ref(&skipped), root, usize::MAX, true)
             .unwrap()
             .block;
-        // The file header is emitted (bypassing the ≥3-item threshold), but
-        // with no item lines underneath.
-        assert!(block.lines().any(|line| line == "notes.txt:"));
-        assert!(!block.contains('|'));
+        assert!(block.is_empty());
     }
 
     #[test]
@@ -1003,14 +996,19 @@ mod tests {
         assert!(block.contains(&format!("<!-- root: {} -->\n", root.display())));
         // Tree format: src is a skeletal directory, main.rs beneath it.
         assert!(block.lines().any(|line| line == "src/"));
-        assert!(block.lines().any(|line| line == "  main.rs:"));
+        // Items are inlined on the file line: "  main.rs: 12|fn|main 45|struct|Config ..."
+        assert!(block
+            .lines()
+            .any(|line| line.starts_with("  main.rs:") && line.contains("12|fn|main")));
         assert!(!block.lines().any(|line| line == "/repo/src/main.rs:"));
-        assert!(block.contains("    12|fn|main\n"));
-        assert!(block.contains("    45|struct|Config\n"));
-        assert!(block.contains("    3|heading|Overview\n"));
-        assert!(block.contains("    10|class|MyClass\n"));
-        assert!(block.contains("    15|method|do_thing\n"));
-        assert!(block.contains("    1|key|package\n"));
+        assert!(block.contains("12|fn|main"));
+        assert!(block.contains("45|struct|Config"));
+        assert!(block.contains("3|heading|Overview"));
+        assert!(block.contains("10|class|MyClass"));
+        assert!(block.contains("15|method|do_thing"));
+        assert!(block.contains("1|key|package"));
+        // Items are separated by spaces, not newlines.
+        assert!(!block.contains("|main\n    45"));
         // Kinds are full words, never abbreviations, and no legend is emitted.
         assert!(!block.contains("|h|"));
         assert!(!block.contains("|c|"));
@@ -1035,7 +1033,9 @@ mod tests {
         let block = format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true)
             .unwrap()
             .block;
-        assert!(block.lines().any(|line| line == "/elsewhere/main.rs:"));
+        assert!(block
+            .lines()
+            .any(|line| line.starts_with("/elsewhere/main.rs:")));
         assert!(!block.lines().any(|line| line == "main.rs:"));
     }
 
@@ -1728,11 +1728,7 @@ mod tests {
             "\n",
             "<!-- root: /repo -->\n",
             "\n",
-            "main.rs:\n",
-            "  1|fn|main\n",
-            "  2|struct|Config\n",
-            "  3|impl|Config\n",
-            "\n",
+            "main.rs: 1|fn|main 2|struct|Config 3|impl|Config\n",
             "<!-- END LANDSCAPE BLOCK -->\n",
         );
         let block = format_landscape_block(std::slice::from_ref(&outline), root, 4096, true)
@@ -1865,8 +1861,8 @@ mod tests {
             .unwrap()
             .block;
         assert!(!block.contains("shortened"));
-        assert!(block.contains("  1|fn|new\n"));
-        assert!(block.contains("  2|fn|fmt\n"));
+        assert!(block.contains("1|fn|new"));
+        assert!(block.contains("2|fn|fmt"));
     }
 
     #[test]
