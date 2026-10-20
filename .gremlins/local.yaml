@@ -2,6 +2,7 @@ prompt_dir: prompts
 
 bootstrap:
   source:
+    require_one_of: [[instructions, plan]]
     instructions:
       type: string
       optional: true
@@ -12,7 +13,6 @@ bootstrap:
       type: string
       optional: true
   launch_cmds:
-    - '[ -n "{instructions}" ] || [ -n "{plan}" ] || { echo "ERROR: at least one of --instructions or --plan is required" >&2; exit 1; }'
     - gremlins:bind_artifact("artifact://plan.md", plan)
     - gremlins:bind_artifact("artifact://instructions.md", instructions)
     - gremlins:bind_artifact("artifact://base_ref", base_ref)

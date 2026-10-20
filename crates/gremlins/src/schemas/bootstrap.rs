@@ -41,19 +41,46 @@ impl InputSource {
 #[derive(Debug, Clone)]
 pub struct InputSources {
     pub sources: HashMap<String, InputSource>,
+    /// Each inner list names bootstrap source keys; at least one member of
+    /// every group must be present and non-empty for validation to pass.
+    pub require_one_of: Vec<Vec<String>>,
 }
 
 impl InputSources {
     pub fn new(sources: HashMap<String, InputSource>) -> Self {
-        InputSources { sources }
+        InputSources {
+            sources,
+            require_one_of: Vec::new(),
+        }
     }
 
     pub fn from_yaml(raw: &serde_yaml::Mapping) -> Result<Self, SchemaError> {
+        // Parse the reserved require_one_of key before per-source entries so
+        // the reserved name cannot be mistaken for a source definition.
+        let raw_require_one_of: Vec<serde_yaml::Value> =
+            match raw.get(serde_yaml::Value::String("require_one_of".to_string())) {
+                Some(v) => v
+                    .as_sequence()
+                    .ok_or_else(|| {
+                        SchemaError::Generic(
+                            "bootstrap.source.require_one_of must be a list of lists".to_string(),
+                        )
+                    })?
+                    .clone(),
+                None => Vec::new(),
+            };
+
         let mut sources: HashMap<String, InputSource> = HashMap::new();
         for (key_val, entry_val) in raw {
             let key = key_val
                 .as_str()
                 .ok_or_else(|| SchemaError::Generic("source keys must be strings".to_string()))?;
+
+            // Skip the reserved key — it is not a source definition.
+            if key == "require_one_of" {
+                continue;
+            }
+
             let entry_map = entry_val
                 .as_mapping()
                 .ok_or_else(|| SchemaError::InputSource {
@@ -107,7 +134,45 @@ impl InputSources {
                 InputSource::new(key.to_string(), types, optional)?,
             );
         }
-        Ok(InputSources { sources })
+
+        // Validate require_one_of groups against the parsed sources.
+        let mut require_one_of: Vec<Vec<String>> = Vec::with_capacity(raw_require_one_of.len());
+        for (group_idx, group_val) in raw_require_one_of.iter().enumerate() {
+            let group_seq = group_val.as_sequence().ok_or_else(|| {
+                SchemaError::Generic(format!(
+                    "bootstrap.source.require_one_of[{}] must be a list of source names",
+                    group_idx
+                ))
+            })?;
+            if group_seq.is_empty() {
+                return Err(SchemaError::Generic(format!(
+                    "bootstrap.source.require_one_of[{}] must not be empty",
+                    group_idx
+                )));
+            }
+            let mut group: Vec<String> = Vec::with_capacity(group_seq.len());
+            for name_val in group_seq {
+                let name = name_val.as_str().ok_or_else(|| {
+                    SchemaError::Generic(format!(
+                        "bootstrap.source.require_one_of[{}] entries must be strings",
+                        group_idx
+                    ))
+                })?;
+                if !sources.contains_key(name) {
+                    return Err(SchemaError::Generic(format!(
+                        "bootstrap.source.require_one_of[{}] names undeclared source {name:?}",
+                        group_idx
+                    )));
+                }
+                group.push(name.to_string());
+            }
+            require_one_of.push(group);
+        }
+
+        Ok(InputSources {
+            sources,
+            require_one_of,
+        })
     }
 
     pub fn get(&self, key: &str) -> Option<&InputSource> {
@@ -315,6 +380,22 @@ fn validate_source_values_in(
             }
         }
     }
+
+    // Enforce require_one_of groups: at least one member must be present
+    // and non-empty in the supplied values.
+    for group in &source.require_one_of {
+        let satisfied = group
+            .iter()
+            .any(|key| values.get(key).is_some_and(|v| !v.is_empty()));
+        if !satisfied {
+            let alternatives: Vec<String> = group.iter().map(|k| format!("{k:?}")).collect();
+            return Err(SchemaError::Generic(format!(
+                "bootstrap.source: at least one of {} is required",
+                alternatives.join(", ")
+            )));
+        }
+    }
+
     Ok(())
 }
 
@@ -468,5 +549,166 @@ mod tests {
         let values = HashMap::from([("x".to_string(), "'; rm -rf /; echo 'pwned".to_string())]);
         let result = substitute_bootstrap_vars("echo {x}", Path::new("/tmp"), &values);
         assert_eq!(result, "echo ''\\''; rm -rf /; echo '\\''pwned'");
+    }
+
+    // ---- require_one_of tests ----
+
+    #[test]
+    fn require_one_of_groups_are_empty_by_default() {
+        let src = InputSources::new(HashMap::new());
+        assert!(src.require_one_of.is_empty());
+    }
+
+    #[test]
+    fn require_one_of_empty_group_rejected_at_parse_time() {
+        let yaml = "require_one_of: [[]]\nkey:\n  type: string\n";
+        let raw: serde_yaml::Mapping = serde_yaml::from_str(yaml).unwrap();
+        let err = InputSources::from_yaml(&raw).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn require_one_of_undeclared_source_rejected_at_parse_time() {
+        let yaml = "require_one_of: [[nope]]\nkey:\n  type: string\n";
+        let raw: serde_yaml::Mapping = serde_yaml::from_str(yaml).unwrap();
+        let err = InputSources::from_yaml(&raw).unwrap_err();
+        assert!(err.to_string().contains("undeclared source"));
+        assert!(err.to_string().contains("nope"));
+    }
+
+    #[test]
+    fn require_one_of_malformed_not_list_of_lists() {
+        let yaml = "require_one_of: not-a-list\nkey:\n  type: string\n";
+        let raw: serde_yaml::Mapping = serde_yaml::from_str(yaml).unwrap();
+        let err = InputSources::from_yaml(&raw).unwrap_err();
+        assert!(err.to_string().contains("must be a list of lists"));
+    }
+
+    #[test]
+    fn require_one_of_flat_list_not_list_of_lists() {
+        // The common typo: a single flat list instead of a list of lists.
+        let yaml = "require_one_of: [instructions, plan]\nkey:\n  type: string\n";
+        let raw: serde_yaml::Mapping = serde_yaml::from_str(yaml).unwrap();
+        let err = InputSources::from_yaml(&raw).unwrap_err();
+        assert!(err.to_string().contains("must be a list of source names"));
+    }
+
+    #[test]
+    fn require_one_of_not_list_of_strings() {
+        let yaml = "require_one_of: [[42]]\nkey:\n  type: string\n";
+        let raw: serde_yaml::Mapping = serde_yaml::from_str(yaml).unwrap();
+        let err = InputSources::from_yaml(&raw).unwrap_err();
+        assert!(err.to_string().contains("must be strings"));
+    }
+
+    #[test]
+    fn require_one_of_no_values_supplied_fails_validation() {
+        let mut src = InputSources::new(
+            [
+                (
+                    "instructions".to_string(),
+                    InputSource::new("instructions".to_string(), vec!["string".to_string()], true)
+                        .unwrap(),
+                ),
+                (
+                    "plan".to_string(),
+                    InputSource::new("plan".to_string(), vec!["filepath".to_string()], true)
+                        .unwrap(),
+                ),
+            ]
+            .into(),
+        );
+        src.require_one_of = vec![vec!["instructions".to_string(), "plan".to_string()]];
+        let values = HashMap::new();
+        let err = validate_source_values(&src, &values).unwrap_err();
+        assert!(err.to_string().contains("at least one of"));
+        assert!(err.to_string().contains("\"instructions\""));
+        assert!(err.to_string().contains("\"plan\""));
+    }
+
+    #[test]
+    fn require_one_of_empty_values_fail_validation() {
+        let mut src = InputSources::new(
+            [
+                (
+                    "instructions".to_string(),
+                    InputSource::new("instructions".to_string(), vec!["string".to_string()], true)
+                        .unwrap(),
+                ),
+                (
+                    "plan".to_string(),
+                    InputSource::new("plan".to_string(), vec!["filepath".to_string()], true)
+                        .unwrap(),
+                ),
+            ]
+            .into(),
+        );
+        src.require_one_of = vec![vec!["instructions".to_string(), "plan".to_string()]];
+        let values = HashMap::from([
+            ("instructions".to_string(), String::new()),
+            ("plan".to_string(), String::new()),
+        ]);
+        let err = validate_source_values(&src, &values).unwrap_err();
+        assert!(err.to_string().contains("at least one of"));
+    }
+
+    #[test]
+    fn require_one_of_single_member_present_passes_validation() {
+        let mut src = InputSources::new(
+            [
+                (
+                    "instructions".to_string(),
+                    InputSource::new("instructions".to_string(), vec!["string".to_string()], true)
+                        .unwrap(),
+                ),
+                (
+                    "plan".to_string(),
+                    InputSource::new("plan".to_string(), vec!["filepath".to_string()], true)
+                        .unwrap(),
+                ),
+            ]
+            .into(),
+        );
+        src.require_one_of = vec![vec!["instructions".to_string(), "plan".to_string()]];
+        let values = HashMap::from([("instructions".to_string(), "do it".to_string())]);
+        validate_source_values(&src, &values).unwrap();
+    }
+
+    #[test]
+    fn require_one_of_both_members_present_passes_validation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let plan_path = tmp.path().join("plan.md");
+        std::fs::write(&plan_path, "plan content").unwrap();
+
+        let mut src = InputSources::new(
+            [
+                (
+                    "instructions".to_string(),
+                    InputSource::new("instructions".to_string(), vec!["string".to_string()], true)
+                        .unwrap(),
+                ),
+                (
+                    "plan".to_string(),
+                    InputSource::new("plan".to_string(), vec!["filepath".to_string()], true)
+                        .unwrap(),
+                ),
+            ]
+            .into(),
+        );
+        src.require_one_of = vec![vec!["instructions".to_string(), "plan".to_string()]];
+        let values = HashMap::from([
+            ("instructions".to_string(), "do it".to_string()),
+            ("plan".to_string(), plan_path.to_string_lossy().into_owned()),
+        ]);
+        validate_source_values(&src, &values).unwrap();
+    }
+
+    #[test]
+    fn require_one_of_reserved_key_not_treated_as_source() {
+        let yaml = "require_one_of: [[a]]\na:\n  type: string\n  optional: true\n";
+        let raw: serde_yaml::Mapping = serde_yaml::from_str(yaml).unwrap();
+        let result = InputSources::from_yaml(&raw).unwrap();
+        assert_eq!(result.all_sources(), vec!["a"]);
+        assert_eq!(result.require_one_of, vec![vec!["a".to_string()]]);
     }
 }
