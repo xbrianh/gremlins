@@ -1327,7 +1327,19 @@ fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str
         None
     };
 
-    // Reject a symlink root so `outline_directory` does not follow it.
+    let token_budget: Option<usize> = if args.get("token_budget").is_some() {
+        let n = match args.get("token_budget").and_then(|v| v.as_u64()) {
+            Some(n) => n as usize,
+            None => {
+                return "Error: 'token_budget' must be a non-negative integer".to_string();
+            }
+        };
+        Some(n)
+    } else {
+        None
+    };
+
+    // Reject a symlink root so the directory walk does not follow it.
     let meta = match path.symlink_metadata() {
         Ok(m) => m,
         Err(e) => return format!("Error: {e}"),
@@ -1341,20 +1353,31 @@ fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str
 
     if meta.is_dir() {
         let depth_limit = depth.unwrap_or(usize::MAX);
-        match LandscapeExplorer.outline_directory(&path, depth_limit) {
-            Ok(out) => {
-                if out.is_empty() {
+        let outlines = match LandscapeExplorer.build(&path, depth_limit, None) {
+            Ok(outlines) => outlines,
+            Err(LandscapeError::Read(e)) => return format!("Error: {e}"),
+            // `build` does not return Utf8, BudgetExceeded, or Tokenizer;
+            // these arms exist only for exhaustive matching.
+            Err(LandscapeError::Utf8(e)) => return format!("Error: file is not valid UTF-8: {e}"),
+            Err(LandscapeError::BudgetExceeded) => return String::from("Error: budget exceeded"),
+            Err(LandscapeError::Tokenizer(e)) => {
+                return format!("Error: tokenizer init failed: {e}");
+            }
+        };
+
+        let max_tokens = token_budget.unwrap_or(usize::MAX);
+        match crate::landscape::format_landscape_block_tool(&outlines, &path, max_tokens) {
+            Ok(block) => {
+                if block.block.is_empty() {
                     "(empty directory)".to_string()
                 } else {
-                    out
+                    block.block
                 }
             }
-            Err(LandscapeError::Read(e)) => format!("Error: {e}"),
-            // `outline_directory` does not return Utf8, BudgetExceeded, or
-            // Tokenizer; these arms exist only for exhaustive matching.
-            Err(LandscapeError::Utf8(e)) => format!("Error: file is not valid UTF-8: {e}"),
             Err(LandscapeError::BudgetExceeded) => String::from("Error: budget exceeded"),
             Err(LandscapeError::Tokenizer(e)) => format!("Error: tokenizer init failed: {e}"),
+            Err(LandscapeError::Read(e)) => format!("Error: {e}"),
+            Err(LandscapeError::Utf8(e)) => format!("Error: file is not valid UTF-8: {e}"),
         }
     } else {
         match LandscapeExplorer.outline_file(&path, false) {
@@ -1383,9 +1406,16 @@ fn render_landscape(items: &[crate::landscape::OutlineItem], path: &Path) -> Str
     }
     items
         .iter()
-        .map(|item| format!("{:>6}  {:<8} {}", item.line, item.kind, item.name))
+        .map(|item| {
+            format!(
+                "{}|{}|{}",
+                item.line,
+                item.kind,
+                crate::landscape::escape_landscape_delimiters(&item.name)
+            )
+        })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join(" ")
 }
 
 pub(crate) async fn edit_invoke(ctx: &AgentLoopRuntime, args_json: &str) -> String {
@@ -2387,6 +2417,7 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool
         "Landscape" => Some(vec![
             ("file_path", "string", true),
             ("depth", "integer", false),
+            ("token_budget", "integer", false),
         ]),
         "Edit" => Some(vec![
             ("file_path", "string", true),
@@ -2684,7 +2715,7 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
         },
         ToolDefinition {
             name: "Landscape".into(),
-            description: "Show the structural outline of a file or directory. For a file, returns one item per line with its 1-based line number, kind, and name. Kinds include fn, struct, impl, trait, enum, mod, class, method, heading, and key. Test functions inside `#[cfg(test)]` modules are shown individually. Unknown file extensions yield an empty outline. For a directory, returns a block listing recognized files with their items and unrecognized files by path, honoring the depth argument to limit nesting. Paths outside the sandbox are rejected.".into(),
+            description: "Show the structural outline of a file or directory. For a file, returns space-separated `line|kind|name` items on a single line. Kinds include fn, struct, impl, trait, enum, mod, class, method, heading, and key. Test functions inside `#[cfg(test)]` modules are shown individually. Unknown file extensions yield the file path. For a directory, returns a tree-formatted outline using the same `line|kind|name` item format as the landscape block: directory headers end with `/` and file headers end with `:` followed by space-separated items. The `depth` argument limits how many nested directory levels to descend (default: all levels). The optional `token_budget` argument applies skeletonization and depth back-off when the tree is too large, just like the system prompt landscape block. Paths outside the sandbox are rejected.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2695,6 +2726,10 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
                     "depth": {
                         "type": "integer",
                         "description": "For directories, how many nested directory levels to descend (default: all levels)"
+                    },
+                    "token_budget": {
+                        "type": "integer",
+                        "description": "Optional token budget for directory outlines. When set, the tree is trimmed with skeletonization and depth back-off to fit the budget."
                     }
                 },
                 "required": ["file_path"],
@@ -3034,8 +3069,12 @@ mod tests {
         );
         assert!(out.contains("impl"), "got: {out:?}");
         assert!(
-            out.contains("     1  fn       main"),
-            "line numbers must be aligned: {out:?}"
+            out.contains("1|fn|main"),
+            "items must use line|kind|name format: {out:?}"
+        );
+        assert!(
+            out.contains("2|struct|Foo") && out.contains("3|impl|Foo"),
+            "items must be space-separated on one line: {out:?}"
         );
     }
 
@@ -3078,21 +3117,21 @@ mod tests {
         let dir = tmp();
         let c = ctx(&dir);
         std::fs::create_dir(dir.join("sub")).unwrap();
-        std::fs::write(dir.join("sub/lib.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.join("sub/lib.rs"), "fn a() {}\nstruct B;\nimpl B {}\n").unwrap();
         std::fs::write(dir.join("sub/notes.txt"), "hello").unwrap();
         let args = serde_json::json!({"file_path": ".", "depth": 2}).to_string();
         let out = landscape_invoke(&c, &args).await;
         assert!(
-            out.contains("sub/lib.rs"),
-            "dir listing missing sub/lib.rs: {out:?}"
+            out.contains("sub/") && out.contains("lib.rs:"),
+            "dir listing missing lib.rs tree entry: {out:?}"
         );
         assert!(
-            out.contains("sub/notes.txt"),
-            "dir listing missing unrecognized file: {out:?}"
+            !out.contains("sub/lib.rs") && !out.contains("notes.txt"),
+            "directory output must use block tree headers: {out:?}"
         );
         assert!(
-            out.contains("fn") && out.contains("a"),
-            "items not rendered for lib.rs: {out:?}"
+            out.contains("1|fn|a") && out.contains("2|struct|B"),
+            "items not rendered in line|kind|name format: {out:?}"
         );
     }
 
@@ -3105,14 +3144,14 @@ mod tests {
         std::fs::create_dir(dir.join("src")).unwrap();
         std::fs::write(dir.join(".git/config"), "x").unwrap();
         std::fs::write(dir.join("target/out"), "x").unwrap();
-        std::fs::write(dir.join("src/lib.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "fn a() {}\nstruct B;\nimpl B {}\n").unwrap();
         let args = serde_json::json!({"file_path": ".", "depth": 2}).to_string();
         let out = landscape_invoke(&c, &args).await;
         assert!(!out.contains(".git"), "must skip .git: {out:?}");
         assert!(!out.contains("target"), "must skip target: {out:?}");
         assert!(
-            out.contains("src/lib.rs"),
-            "should include src/lib.rs: {out:?}"
+            out.contains("src/") && out.contains("lib.rs:"),
+            "should include src/lib.rs tree entry: {out:?}"
         );
     }
 
@@ -3121,13 +3160,17 @@ mod tests {
         let dir = tmp();
         let c = ctx(&dir);
         std::fs::create_dir_all(dir.join("a/b/c")).unwrap();
-        std::fs::write(dir.join("a/b/c/deep.rs"), "fn deep() {}\n").unwrap();
-        std::fs::write(dir.join("a/top.rs"), "fn top() {}\n").unwrap();
+        std::fs::write(
+            dir.join("a/b/c/deep.rs"),
+            "fn deep() {}\nstruct D;\nimpl D {}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("a/top.rs"), "fn top() {}\nstruct T;\nimpl T {}\n").unwrap();
         // depth=1: only a/ itself plus one level → a/top.rs visible, a/b/ skipped
         let args = serde_json::json!({"file_path": ".", "depth": 1}).to_string();
         let out = landscape_invoke(&c, &args).await;
         assert!(
-            out.contains("a/top.rs"),
+            out.contains("a/") && out.contains("top.rs:"),
             "depth 1 should include a/top.rs: {out:?}"
         );
         assert!(
@@ -3175,14 +3218,89 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn landscape_unreadable_file_shows_error_inline() {
+    async fn landscape_bad_token_budget_is_rejected() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let args = serde_json::json!({"file_path": ".", "token_budget": "two"}).to_string();
+        let out = landscape_invoke(&c, &args).await;
+        assert!(
+            out.starts_with("Error:") && out.contains("token_budget"),
+            "bad token_budget must be rejected: {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn landscape_directory_matches_block_format() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/lib.rs"), "fn a() {}\nstruct B;\nimpl B {}\n").unwrap();
+
+        let outlines = LandscapeExplorer.build(&dir, usize::MAX, None).unwrap();
+        let expected = crate::landscape::format_landscape_block_tool(&outlines, &dir, usize::MAX)
+            .unwrap()
+            .block;
+        assert!(!expected.contains("<!-- BEGIN LANDSCAPE BLOCK -->"));
+        assert!(!expected.contains("repository metadata"));
+
+        let args = serde_json::json!({"file_path": ".", "depth": 2}).to_string();
+        let out = landscape_invoke(&c, &args).await;
+        assert_eq!(
+            out, expected,
+            "tool directory output must match the block format"
+        );
+    }
+
+    #[tokio::test]
+    async fn landscape_token_budget_limits_directory_output() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        std::fs::create_dir_all(dir.join("src/nested")).unwrap();
+
+        let mut top = String::new();
+        let mut mid = String::new();
+        let mut deep = String::new();
+        for i in 0..20 {
+            top.push_str(&format!("fn top_{i:02}() {{}}\n"));
+            mid.push_str(&format!("fn mid_{i:02}() {{}}\n"));
+            deep.push_str(&format!("fn deep_{i:02}() {{}}\n"));
+        }
+        std::fs::write(dir.join("top.rs"), top).unwrap();
+        std::fs::write(dir.join("src/mid.rs"), mid).unwrap();
+        std::fs::write(dir.join("src/nested/deep.rs"), deep).unwrap();
+
+        let outlines = LandscapeExplorer.build(&dir, usize::MAX, None).unwrap();
+        let full = crate::landscape::format_landscape_block_tool(&outlines, &dir, usize::MAX)
+            .unwrap()
+            .block;
+        let full_tokens = crate::landscape::count_tokens(&full).unwrap();
+        assert!(full_tokens > 1);
+        let budget = full_tokens - 1;
+
+        let args = serde_json::json!({"file_path": ".", "token_budget": budget}).to_string();
+        let out = landscape_invoke(&c, &args).await;
+        assert!(
+            crate::landscape::count_tokens(&out).unwrap() <= budget,
+            "tool output must respect token_budget: {out:?}"
+        );
+        assert!(out.contains("top.rs:"), "shallow file kept: {out:?}");
+        assert!(out.contains("mid.rs:"), "depth-limited file kept: {out:?}");
+        assert!(
+            !out.contains("deep.rs:"),
+            "deepest file must be trimmed by token_budget: {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn landscape_unreadable_file_is_omitted() {
         // Create a real file inside a subdirectory with outlineable extension
-        // but revoke read permission so `outline_file` fails with a read error.
+        // but revoke read permission so the block pipeline cannot parse it.
+        // `build` drops unparseable files rather than surfacing inline errors.
         let dir = tmp();
         let c = ctx(&dir);
         std::fs::create_dir(dir.join("sub")).unwrap();
         let broken = dir.join("sub/broken.rs");
-        std::fs::write(&broken, "fn x() {}\n").unwrap();
+        std::fs::write(&broken, "fn x() {}\nstruct X;\nimpl X {}\n").unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o000);
@@ -3191,8 +3309,8 @@ mod tests {
         let args = serde_json::json!({"file_path": ".", "depth": 2}).to_string();
         let out = landscape_invoke(&c, &args).await;
         assert!(
-            out.contains("sub/broken.rs") && out.contains("Error:"),
-            "unreadable file must carry an error annotation: {out:?}"
+            !out.contains("broken.rs") && !out.contains("Error:"),
+            "unreadable file must be omitted by the block pipeline: {out:?}"
         );
     }
 
