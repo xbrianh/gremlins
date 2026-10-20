@@ -689,10 +689,7 @@ mod tests {
         src.require_one_of = vec![vec!["instructions".to_string(), "plan".to_string()]];
         let values = HashMap::from([
             ("instructions".to_string(), "do it".to_string()),
-            (
-                "plan".to_string(),
-                plan_path.to_string_lossy().into_owned(),
-            ),
+            ("plan".to_string(), plan_path.to_string_lossy().into_owned()),
         ]);
         validate_source_values(&src, &values).unwrap();
     }
