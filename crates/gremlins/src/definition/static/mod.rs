@@ -456,7 +456,7 @@ fn bootstrap_to_yaml(bootstrap: &Bootstrap) -> Value {
     let mut m = Mapping::new();
 
     if let Some(ref source) = bootstrap.source {
-        let mut src_map = Mapping::with_capacity(source.sources.len());
+        let mut src_map = Mapping::with_capacity(source.sources.len() + 1);
         for (name, input_src) in &source.sources {
             let mut entry = Mapping::new();
             if input_src.types.len() == 1 {
@@ -476,6 +476,19 @@ fn bootstrap_to_yaml(bootstrap: &Bootstrap) -> Value {
                 entry.insert(Value::String("optional".to_string()), Value::Bool(true));
             }
             src_map.insert(Value::String(name.clone()), Value::Mapping(entry));
+        }
+        if !source.require_one_of.is_empty() {
+            let groups: Vec<Value> = source
+                .require_one_of
+                .iter()
+                .map(|group| {
+                    Value::Sequence(group.iter().map(|n| Value::String(n.clone())).collect())
+                })
+                .collect();
+            src_map.insert(
+                Value::String("require_one_of".to_string()),
+                Value::Sequence(groups),
+            );
         }
         m.insert(Value::String("source".to_string()), Value::Mapping(src_map));
     }
