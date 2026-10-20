@@ -32,6 +32,7 @@ dirs = "6"
 tempfile = "3"
 rayon = "1"
 tiktoken-rs = "0.12"
+ignore = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "test-util"] }
