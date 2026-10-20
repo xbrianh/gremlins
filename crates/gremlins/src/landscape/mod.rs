@@ -41,7 +41,13 @@ const SKIP_DIR_NAMES: &[&str] = &[
     "dist",
     "build",
     "__pycache__",
+    ".git",
 ];
+
+/// Dot-directories that are safe to walk even though they start with `.`.
+/// Every other dot-directory is skipped to avoid leaking secrets (`.ssh`,
+/// `.aws`, `.gnupg`) into model prompts.
+const ALLOWLIST_DOT_DIRS: &[&str] = &[".gremlins", ".github", ".cargo-gremlin-target"];
 
 /// One discovered structural item and its 1-based line number.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,7 +110,9 @@ impl LandscapeExplorer {
     ///
     /// Each file is emitted with a path header. Recognized files also list their
     /// structural items; unrecognized files appear as just the path. Symlinks are
-    /// not followed. Hidden and vendor directories are skipped. Files larger than
+    /// not followed. Build-artifact directories (target, node_modules, etc.) are
+    /// skipped. Dot-directories that are tracked in git (`.gremlins/`) are visible.
+    /// Files larger than
     /// `MAX_OUTLINE_BYTES` are skipped.
     ///
     /// `depth_limit` controls how many nested directory levels to descend: 0 scans
@@ -116,7 +124,7 @@ impl LandscapeExplorer {
         depth_limit: usize,
     ) -> Result<String, LandscapeError> {
         let mut paths_with_fp: Vec<(PathBuf, Option<Fingerprint>)> = Vec::new();
-        collect_all_paths_recursive(root, 0, depth_limit, &mut paths_with_fp)?;
+        collect_all_paths_recursive(root, depth_limit, &mut paths_with_fp)?;
         let mut paths: Vec<PathBuf> = paths_with_fp.into_iter().map(|(p, _)| p).collect();
         paths.sort();
 
@@ -163,7 +171,7 @@ impl LandscapeExplorer {
     ///
     /// `depth_limit` counts nested directory levels: 0 only scans files in
     /// `root` itself, 1 also scans one subdirectory level, and so on. Symlinks
-    /// are not followed. Hidden and vendor directories, unrecognized files, and
+    /// are not followed. Build-artifact directories, unrecognized files, and
     /// oversized files are skipped. Files with no recognizable items are
     /// returned with an empty `items` vector so spine detection can still see
     /// that their parent directory contains files.
@@ -306,7 +314,7 @@ type Fingerprint = (u64, u64);
 
 /// Walk the directory tree, collecting every outlineable file path.
 ///
-/// Applies the same filters as `build`: depth limit, hidden/skip dirs,
+/// Applies the same filters as `build`: depth limit, skip dirs,
 /// file extension, file size, and cache-blob exclusion. Returns paths in
 /// alphabetical order, each paired with a fingerprint harvested from the
 /// walker's `symlink_metadata` call so `build` does not re-stat every file.
@@ -316,7 +324,7 @@ fn collect_paths(
     canonical_cache: Option<&Path>,
 ) -> Result<Vec<(PathBuf, Option<Fingerprint>)>, LandscapeError> {
     let mut paths = Vec::new();
-    collect_paths_recursive(root, 0, depth_limit, canonical_cache, &mut paths)?;
+    collect_paths_recursive(root, depth_limit, canonical_cache, &mut paths)?;
     paths.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(paths)
 }
@@ -333,73 +341,98 @@ fn fingerprint_from_metadata(metadata: &std::fs::Metadata) -> Option<Fingerprint
 
 /// Shared directory walker parameterized by a file-inclusion predicate.
 ///
+/// Uses the `ignore` crate for gitignore-aware traversal: `.gitignore` rules
+/// are respected, so `target/` and other git-ignored directories are skipped
+/// automatically. Dot-directories that are tracked in git (like `.gremlins/`)
+/// are allowed through via [`ALLOWLIST_DOT_DIRS`] while other dot-directories
+/// (`.ssh/`, `.aws/`) are skipped. The hardcoded [`SKIP_DIR_NAMES`] list is
+/// applied as a belt-and-suspenders fallback.
+///
 /// `include_file` receives the path and file length (from `symlink_metadata`)
 /// and returns `true` when the file should be collected. When a file passes
 /// the predicate, its cache fingerprint is computed from the same metadata
 /// to avoid a redundant `stat` downstream. Symlinks are never followed.
-/// Hidden and vendor directories are always skipped.
 fn walk_dir(
     dir: &Path,
-    depth: usize,
     depth_limit: usize,
     include_file: &dyn Fn(&Path, u64) -> bool,
     paths: &mut Vec<(PathBuf, Option<Fingerprint>)>,
 ) -> Result<(), LandscapeError> {
-    if depth > depth_limit {
-        return Ok(());
+    // Verify the root can be enumerated before building the walker. The
+    // ignore crate's walker can yield a successful directory entry for an
+    // existing but unreadable root before reporting the error opening its
+    // contents, which would silently produce an empty traversal instead of
+    // the expected read error.
+    if let Err(err) = std::fs::read_dir(dir) {
+        return Err(LandscapeError::Read(err));
     }
 
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) => {
-            // Only a missing root is fatal: it means the workspace itself
-            // is gone. An unreadable nested directory (EACCES on a
-            // cache with odd permissions, a docker-owned dir, or one that
-            // is deleted mid-walk) is skipped so a single bad subdirectory
-            // cannot wipe out the whole landscape.
-            if depth == 0 {
-                return Err(LandscapeError::Read(error));
-            }
-            log::debug!(
-                "landscape: skipping unreadable directory {}: {error}",
-                dir.display()
-            );
-            return Ok(());
-        }
-    };
-    let mut dir_paths: Vec<PathBuf> = entries
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .collect();
-    dir_paths.sort();
+    let mut builder = ignore::WalkBuilder::new(dir);
+    builder
+        .standard_filters(false) // don't use blanket hidden-file filter
+        .git_ignore(true) // respect .gitignore
+        .git_global(false) // don't apply machine-global gitignore
+        .git_exclude(false) // don't apply .git/info/exclude
+        .ignore(false) // don't read .ignore files
+        .parents(true) // look for .gitignore in parent dirs within a repo
+        .require_git(true) // only apply .gitignore inside real git repos
+        .max_depth(depth_limit.checked_add(1))
+        .follow_links(false);
 
-    for path in dir_paths {
-        let Ok(metadata) = path.symlink_metadata() else {
-            continue;
+    // Belt-and-suspenders: skip hardcoded build-artifact directories even
+    // if they somehow escape the gitignore filter. Also reject entries with
+    // unknown file types (e.g. broken symlinks).
+    builder.filter_entry(|entry| {
+        let Some(ft) = entry.file_type() else {
+            return false;
         };
-        if metadata.is_dir() {
-            if should_skip_dir(&path) {
+        if ft.is_dir() {
+            return !should_skip_dir(entry.path());
+        }
+        true
+    });
+
+    let walker = builder.build();
+
+    for result in walker {
+        let entry = match result {
+            Ok(entry) => entry,
+            Err(err) => {
+                // Errors in nested directories are non-fatal (e.g.
+                // permission denied on a subdirectory). The root
+                // readability is already checked above.
+                log::debug!("landscape: walk error: {err}");
                 continue;
             }
-            walk_dir(&path, depth + 1, depth_limit, include_file, paths)?;
-        } else if metadata.is_file() && include_file(&path, metadata.len()) {
-            let fingerprint = fingerprint_from_metadata(&metadata);
-            paths.push((path, fingerprint));
+        };
+
+        let path = entry.path().to_path_buf();
+
+        if let Some(ft) = entry.file_type() {
+            if ft.is_file() {
+                let metadata = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if include_file(&path, metadata.len()) {
+                    let fingerprint = fingerprint_from_metadata(&metadata);
+                    paths.push((path, fingerprint));
+                }
+            }
         }
     }
+
     Ok(())
 }
 
 fn collect_paths_recursive(
     dir: &Path,
-    depth: usize,
     depth_limit: usize,
     canonical_cache: Option<&Path>,
     paths: &mut Vec<(PathBuf, Option<Fingerprint>)>,
 ) -> Result<(), LandscapeError> {
     walk_dir(
         dir,
-        depth,
         depth_limit,
         &|path, len| {
             len <= MAX_OUTLINE_BYTES && !canonical_cache.is_some_and(|cc| same_file(cc, path))
@@ -413,17 +446,10 @@ fn collect_paths_recursive(
 /// `outline_directory`. Uses the shared `walk_dir` with no extension filtering.
 fn collect_all_paths_recursive(
     dir: &Path,
-    depth: usize,
     depth_limit: usize,
     paths: &mut Vec<(PathBuf, Option<Fingerprint>)>,
 ) -> Result<(), LandscapeError> {
-    walk_dir(
-        dir,
-        depth,
-        depth_limit,
-        &|_, len| len <= MAX_OUTLINE_BYTES,
-        paths,
-    )
+    walk_dir(dir, depth_limit, &|_, len| len <= MAX_OUTLINE_BYTES, paths)
 }
 
 fn path_extension(path: &Path) -> String {
@@ -437,11 +463,24 @@ fn is_outlineable_file(path: &Path) -> bool {
     heuristic::recognizes(&path_extension(path))
 }
 
+/// Secondary filter for directories that should always be skipped regardless
+/// of gitignore status. The `ignore` crate's gitignore-aware walker handles
+/// most cases (like `target/` when it's in `.gitignore`), but some build-artifact
+/// directories like `node_modules` or `__pycache__` may not be gitignored.
+///
+/// Dot-directories are skipped unless they appear in [`ALLOWLIST_DOT_DIRS`],
+/// which keeps `.gremlins/`, `.github/`, and `.cargo-gremlin-target/` visible
+/// while preventing secret directories like `.ssh/` or `.aws/` from leaking
+/// into model prompts.
 fn should_skip_dir(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    name.starts_with('.') || SKIP_DIR_NAMES.contains(&name)
+    if SKIP_DIR_NAMES.contains(&name) {
+        return true;
+    }
+    // Skip dot-directories that aren't on the allowlist.
+    name.starts_with('.') && !ALLOWLIST_DOT_DIRS.contains(&name)
 }
 
 /// Whether `path` names the same on-disk file as the already-canonicalized
@@ -1236,20 +1275,142 @@ mod tests {
     #[test]
     fn build_skips_hidden_vendor_and_unrecognized_files() {
         let root = tempfile::tempdir().unwrap();
+        // Directories skipped by SKIP_DIR_NAMES (belt-and-suspenders).
         std::fs::create_dir_all(root.path().join("vendor")).unwrap();
+        std::fs::create_dir_all(root.path().join("target")).unwrap();
+        // .git/ is skipped by SKIP_DIR_NAMES.
         std::fs::create_dir_all(root.path().join(".git")).unwrap();
+        // Allowlisted dot-directories are visible.
+        std::fs::create_dir_all(root.path().join(".gremlins")).unwrap();
+        std::fs::create_dir_all(root.path().join(".github")).unwrap();
+        // Non-allowlisted dot-directories must be skipped.
+        std::fs::create_dir_all(root.path().join(".ssh")).unwrap();
+
         std::fs::write(root.path().join("keep.rs"), "fn keep() {}\n").unwrap();
         std::fs::write(root.path().join("vendor/skip.rs"), "fn skip() {}\n").unwrap();
+        std::fs::write(root.path().join("target/skip.rs"), "fn skip() {}\n").unwrap();
         std::fs::write(root.path().join(".git/config.rs"), "fn skip() {}\n").unwrap();
+        std::fs::write(root.path().join(".ssh/id_rsa"), "secret\n").unwrap();
         std::fs::write(root.path().join("notes.txt"), "fn skip() {}\n").unwrap();
+        // Allowlisted dot-directory files should appear.
+        std::fs::write(
+            root.path().join(".gremlins/config.yaml"),
+            "key: value\nkey2: value2\nkey3: value3\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join(".github/workflow.rs"), "fn wf() {}\n").unwrap();
 
         let all = LandscapeExplorer.build(root.path(), 10, None).unwrap();
-        // keep.rs (outlineable) + notes.txt (unrecognized extension, skipped)
-        assert_eq!(all.len(), 2);
-        assert_eq!(all[0].path, root.path().join("keep.rs"));
-        assert!(!all[0].skipped);
-        assert_eq!(all[1].path, root.path().join("notes.txt"));
-        assert!(all[1].skipped);
+        let paths: Vec<&Path> = all.iter().map(|f| f.path.as_path()).collect();
+        // Visible: root file + unrecognized extension + allowlisted dot-directory files
+        assert!(paths.contains(&root.path().join("keep.rs").as_path()));
+        assert!(paths.contains(&root.path().join("notes.txt").as_path()));
+        assert!(paths.contains(&root.path().join(".gremlins/config.yaml").as_path()));
+        assert!(paths.contains(&root.path().join(".github/workflow.rs").as_path()));
+        // Skipped: vendor, target, .git, .ssh
+        assert!(!paths.contains(&root.path().join("vendor/skip.rs").as_path()));
+        assert!(!paths.contains(&root.path().join("target/skip.rs").as_path()));
+        assert!(!paths.contains(&root.path().join(".git/config.rs").as_path()));
+        assert!(!paths.contains(&root.path().join(".ssh/id_rsa").as_path()));
+    }
+
+    #[test]
+    fn build_skips_target_without_gitignore() {
+        // Even without a .gitignore file, target/ and .git/ are skipped by
+        // the hardcoded SKIP_DIR_NAMES fallback (gitignore rules don't apply
+        // outside a repo because require_git is true).
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("target")).unwrap();
+        std::fs::create_dir_all(root.path().join(".git")).unwrap();
+        std::fs::write(root.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+        std::fs::write(root.path().join("target/skip.rs"), "fn skip() {}\n").unwrap();
+        std::fs::write(root.path().join(".git/config"), "[core]\n").unwrap();
+
+        let all = LandscapeExplorer.build(root.path(), 10, None).unwrap();
+        let paths: Vec<&Path> = all.iter().map(|f| f.path.as_path()).collect();
+        assert!(paths.contains(&root.path().join("keep.rs").as_path()));
+        assert!(!paths.contains(&root.path().join("target/skip.rs").as_path()));
+        assert!(!paths.contains(&root.path().join(".git/config").as_path()));
+    }
+
+    #[test]
+    fn build_includes_tracked_dot_dirs() {
+        // In a git-initialized repo, allowlisted dot-directories like
+        // .gremlins/ must appear in landscape results. Non-allowlisted
+        // dot-directories (.git/) and hardcoded skip dirs (target/) must
+        // still be excluded even when they are tracked in git.
+        let sandbox = crate::test_support::GitSandbox::new();
+        if sandbox.is_skipped() {
+            return;
+        }
+        // GitSandbox creates and tracks .gremlins/demo.yaml.
+        // Add another file inside .gremlins/ to verify it's also visible.
+        std::fs::write(
+            sandbox.repo_path().join(".gremlins/extra.yaml"),
+            "key: value\nkey2: value2\nkey3: value3\n",
+        )
+        .unwrap();
+        // Create a .gitignored target/ — must be excluded by the
+        // hardcoded SKIP_DIR_NAMES fallback.
+        std::fs::create_dir_all(sandbox.repo_path().join("target")).unwrap();
+        std::fs::write(
+            sandbox.repo_path().join("target/build.rs"),
+            "fn build() {}\n",
+        )
+        .unwrap();
+        // Create a gitignored file at the root level whose name is NOT in
+        // SKIP_DIR_NAMES, so exclusion can only come from .gitignore.
+        std::fs::write(
+            sandbox.repo_path().join("generated-code.rs"),
+            "fn generated() {}\n",
+        )
+        .unwrap();
+        // Create a non-gitignored file alongside it to prove the walker
+        // can see files in the same directory.
+        std::fs::write(
+            sandbox.repo_path().join("checked-in.rs"),
+            "fn checked_in() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sandbox.repo_path().join(".gitignore"),
+            "/target\n/generated-code.rs\n",
+        )
+        .unwrap();
+        crate::test_support::git(sandbox.repo_path(), &["add", "."]);
+        crate::test_support::git(sandbox.repo_path(), &["commit", "-q", "-m", "extra"]);
+
+        let all = LandscapeExplorer
+            .build(sandbox.repo_path(), 10, None)
+            .unwrap();
+        let paths: Vec<&Path> = all.iter().map(|f| f.path.as_path()).collect();
+        assert!(
+            paths.contains(&sandbox.repo_path().join(".gremlins/demo.yaml").as_path()),
+            ".gremlins/demo.yaml must be visible when tracked in git"
+        );
+        assert!(
+            paths.contains(&sandbox.repo_path().join(".gremlins/extra.yaml").as_path()),
+            ".gremlins/extra.yaml must be visible when tracked in git"
+        );
+        assert!(
+            !paths.contains(&sandbox.repo_path().join("target/build.rs").as_path()),
+            "target/ must be excluded even inside a git repo"
+        );
+        assert!(
+            !paths.contains(&sandbox.repo_path().join(".git/config").as_path()),
+            ".git/ must be excluded even inside a git repo"
+        );
+        // Gitignore filtering: generated-code.rs is in .gitignore but its
+        // name is not in SKIP_DIR_NAMES, so exclusion proves gitignore works.
+        assert!(
+            !paths.contains(&sandbox.repo_path().join("generated-code.rs").as_path()),
+            "generated-code.rs must be excluded by .gitignore"
+        );
+        // Sanity check: a non-gitignored sibling file must be visible.
+        assert!(
+            paths.contains(&sandbox.repo_path().join("checked-in.rs").as_path()),
+            "checked-in.rs must be visible"
+        );
     }
 
     #[test]
