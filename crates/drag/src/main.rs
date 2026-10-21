@@ -55,6 +55,12 @@ struct Cli {
     /// Print the resolved model spec and the full request body sent to the API.
     #[arg(short = 'v', long)]
     verbose: bool,
+
+    /// Number of independent LLM estimates per module for comprehensibility
+    /// scoring (median is used). Default 1. Only meaningful with
+    /// `--comprehensibility`.
+    #[arg(long, default_value_t = 1)]
+    comprehensibility_estimates: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -190,8 +196,18 @@ async fn run() -> Result<(), String> {
     // 7. Comprehensibility (optional). Failures skip individual modules
     //    rather than aborting the whole run.
     if cli.comprehensibility {
+        if cli.comprehensibility_estimates < 1 {
+            return Err("--comprehensibility-estimates must be >= 1".to_string());
+        }
         let model_spec = resolve_comprehensibility_model(cli.model.as_deref())?;
-        score_comprehensibility(&model_spec, cli.verbose, &target_modules, &mut scores).await?;
+        score_comprehensibility(
+            &model_spec,
+            cli.verbose,
+            cli.comprehensibility_estimates,
+            &target_modules,
+            &mut scores,
+        )
+        .await?;
     }
 
     // 8. Compute the final drag scores once, after any scoring.
@@ -447,6 +463,7 @@ type ComprehensionTask = tokio::task::JoinHandle<Result<(String, f64), String>>;
 async fn score_comprehensibility(
     model_spec: &str,
     verbose: bool,
+    estimates: usize,
     modules: &[(String, PathBuf, String)],
     scores: &mut [ModuleDrag],
 ) -> Result<(), String> {
@@ -502,162 +519,181 @@ async fn score_comprehensibility(
 
     eprintln!("Scoring comprehensibility for {} modules...", modules.len());
 
-    // Fan out: one task per module, running in parallel. Each task retries
-    // transient failures up to MAX_COMP_RETRIES with exponential backoff.
+    // Fan out: `estimates` tasks per module, running in parallel. Each task
+    // retries transient failures up to MAX_COMP_RETRIES with exponential backoff.
     // Non-retryable errors and exhausted retries abort the whole run.
     let mut handles: Vec<ComprehensionTask> = Vec::new();
     let additional = additional.clone();
     for (module, file, _pkg) in modules.iter() {
-        let module = module.clone();
-        let file = file.clone();
-        let model = model.clone();
-        let additional = additional.clone();
-        let fence = lang::code_fence(&file);
-        handles.push(tokio::spawn(async move {
-            // ── read source (file errors are never retried) ──
-            let source = match std::fs::read_to_string(&file) {
-                Ok(s) => s,
-                Err(e) => {
-                    return Err(format!("[{module}] failed to read source: {e}"));
-                }
-            };
-            if source.trim().is_empty() {
-                return Ok((module, 1.0));
-            }
-
-            let prompt = format!("SOURCE FILE ({module}):\n\n```{fence}\n{source}\n```");
-
-            for attempt in 0..MAX_COMP_RETRIES {
-                // ── call the model ──
-                let request = CompletionRequest::new(Message::user(prompt.clone()))
-                    .preamble(COMPREHENSIBILITY_SYSTEM_PROMPT.to_string())
-                    .max_tokens(500)
-                    .additional_params(serde_json::Value::Object(additional.clone()));
-
-                let response = match model.call(request).await {
-                    Ok(r) => r,
+        for _ in 0..estimates {
+            let module = module.clone();
+            let file = file.clone();
+            let model = model.clone();
+            let additional = additional.clone();
+            let fence = lang::code_fence(&file);
+            handles.push(tokio::spawn(async move {
+                // ── read source (file errors are never retried) ──
+                let source = match std::fs::read_to_string(&file) {
+                    Ok(s) => s,
                     Err(e) => {
-                        let msg = e.to_string();
-                        if is_retryable_comp_error(&e) && attempt + 1 < MAX_COMP_RETRIES {
-                            eprintln!(
-                                "  [{module}] attempt {}/{}: {msg} — retrying in {:.0}s",
-                                attempt + 1,
-                                MAX_COMP_RETRIES,
-                                COMP_BACKOFF[attempt as usize]
-                            );
-                            tokio::time::sleep(Duration::from_secs_f64(
-                                COMP_BACKOFF[attempt as usize],
-                            ))
-                            .await;
-                            continue;
-                        }
-                        return Err(format!(
-                            "[{module}] LLM call failed on attempt {}/{}: {msg}",
-                            attempt + 1,
-                            MAX_COMP_RETRIES
-                        ));
+                        return Err(format!("[{module}] failed to read source: {e}"));
                     }
                 };
-
-                let text = response.text();
-
-                // ── verbose: inspect response ──
-                if verbose {
-                    let reasoning = response.usage.reasoning_tokens.unwrap_or(0);
-                    eprintln!("  [{module}] reasoning_tokens: {reasoning}");
-                    let prompt_tokens = response.usage.input_tokens.unwrap_or(0);
-                    let output_tokens = response.usage.output_tokens.unwrap_or(0);
-                    eprintln!("  [{module}] tokens: {prompt_tokens} in, {output_tokens} out");
-                    if let Some(ref provider) =
-                        response.raw.get("provider").and_then(|v| v.as_str())
-                    {
-                        eprintln!("  [{module}] upstream provider: {provider}");
-                    }
-                    if let Some(model_name) = response.raw.get("model").and_then(|v| v.as_str()) {
-                        eprintln!("  [{module}] served by model: {model_name}");
-                    }
-                    let preview = if text.len() > 500 {
-                        format!(
-                            "{}…[truncated, {} bytes total]",
-                            truncate(&text, 500),
-                            text.len()
-                        )
-                    } else {
-                        text.to_string()
-                    };
-                    eprintln!("  [{module}] raw response:\n{preview}");
+                if source.trim().is_empty() {
+                    return Ok((module, 1.0));
                 }
 
-                // ── parse JSON ──
-                let json_str = extract_json(&text);
+                let prompt = format!("SOURCE FILE ({module}):\n\n```{fence}\n{source}\n```");
 
-                let parse_result = json_str
-                    .as_deref()
-                    .ok_or_else(|| {
-                        format!(
-                            "no JSON object found in response (first 200 bytes): {}",
-                            truncate(&text, 200)
-                        )
-                    })
-                    .and_then(|s| {
-                        serde_json::from_str::<ComprehensibilityScores>(s).map_err(|e| {
+                for attempt in 0..MAX_COMP_RETRIES {
+                    // ── call the model ──
+                    let request = CompletionRequest::new(Message::user(prompt.clone()))
+                        .preamble(COMPREHENSIBILITY_SYSTEM_PROMPT.to_string())
+                        .max_tokens(500)
+                        .additional_params(serde_json::Value::Object(additional.clone()));
+
+                    let response = match model.call(request).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let msg = e.to_string();
+                            if is_retryable_comp_error(&e) && attempt + 1 < MAX_COMP_RETRIES {
+                                eprintln!(
+                                    "  [{module}] attempt {}/{}: {msg} — retrying in {:.0}s",
+                                    attempt + 1,
+                                    MAX_COMP_RETRIES,
+                                    COMP_BACKOFF[attempt as usize]
+                                );
+                                tokio::time::sleep(Duration::from_secs_f64(
+                                    COMP_BACKOFF[attempt as usize],
+                                ))
+                                .await;
+                                continue;
+                            }
+                            return Err(format!(
+                                "[{module}] LLM call failed on attempt {}/{}: {msg}",
+                                attempt + 1,
+                                MAX_COMP_RETRIES
+                            ));
+                        }
+                    };
+
+                    let text = response.text();
+
+                    // ── verbose: inspect response ──
+                    if verbose {
+                        let reasoning = response.usage.reasoning_tokens.unwrap_or(0);
+                        eprintln!("  [{module}] reasoning_tokens: {reasoning}");
+                        let prompt_tokens = response.usage.input_tokens.unwrap_or(0);
+                        let output_tokens = response.usage.output_tokens.unwrap_or(0);
+                        eprintln!("  [{module}] tokens: {prompt_tokens} in, {output_tokens} out");
+                        if let Some(ref provider) =
+                            response.raw.get("provider").and_then(|v| v.as_str())
+                        {
+                            eprintln!("  [{module}] upstream provider: {provider}");
+                        }
+                        if let Some(model_name) = response.raw.get("model").and_then(|v| v.as_str())
+                        {
+                            eprintln!("  [{module}] served by model: {model_name}");
+                        }
+                        let preview = if text.len() > 500 {
                             format!(
-                                "failed to parse extracted JSON: {e}; extracted: {}",
-                                truncate(s, 200)
+                                "{}…[truncated, {} bytes total]",
+                                truncate(&text, 500),
+                                text.len()
+                            )
+                        } else {
+                            text.to_string()
+                        };
+                        eprintln!("  [{module}] raw response:\n{preview}");
+                    }
+
+                    // ── parse JSON ──
+                    let json_str = extract_json(&text);
+
+                    let parse_result = json_str
+                        .as_deref()
+                        .ok_or_else(|| {
+                            format!(
+                                "no JSON object found in response (first 200 bytes): {}",
+                                truncate(&text, 200)
                             )
                         })
-                    });
+                        .and_then(|s| {
+                            serde_json::from_str::<ComprehensibilityScores>(s).map_err(|e| {
+                                format!(
+                                    "failed to parse extracted JSON: {e}; extracted: {}",
+                                    truncate(s, 200)
+                                )
+                            })
+                        });
 
-                match parse_result {
-                    Ok(c) => {
-                        let raw: f64 = (c.naming as f64
-                            + c.control_flow as f64
-                            + c.data_flow as f64
-                            + c.abstractions as f64)
-                            / 16.0;
-                        let score = raw.clamp(0.0, 1.0);
-                        if score >= 1.0 {
-                            eprintln!(
+                    match parse_result {
+                        Ok(c) => {
+                            let raw: f64 = (c.naming as f64
+                                + c.control_flow as f64
+                                + c.data_flow as f64
+                                + c.abstractions as f64)
+                                / 16.0;
+                            let score = raw.clamp(0.0, 1.0);
+                            if score >= 1.0 {
+                                eprintln!(
                                 "  [{module}] WARNING: perfect score (all 4s) — raw response:\n{}",
                                 truncate(&text, 400)
                             );
+                            }
+                            return Ok((module, score));
                         }
-                        return Ok((module, score));
-                    }
-                    Err(e) => {
-                        if attempt + 1 < MAX_COMP_RETRIES {
-                            eprintln!(
-                                "  [{module}] attempt {}/{}: {e} — retrying in {:.0}s",
-                                attempt + 1,
-                                MAX_COMP_RETRIES,
-                                COMP_BACKOFF[attempt as usize]
-                            );
-                            tokio::time::sleep(Duration::from_secs_f64(
-                                COMP_BACKOFF[attempt as usize],
-                            ))
-                            .await;
-                            continue;
+                        Err(e) => {
+                            if attempt + 1 < MAX_COMP_RETRIES {
+                                eprintln!(
+                                    "  [{module}] attempt {}/{}: {e} — retrying in {:.0}s",
+                                    attempt + 1,
+                                    MAX_COMP_RETRIES,
+                                    COMP_BACKOFF[attempt as usize]
+                                );
+                                tokio::time::sleep(Duration::from_secs_f64(
+                                    COMP_BACKOFF[attempt as usize],
+                                ))
+                                .await;
+                                continue;
+                            }
+                            return Err(format!(
+                                "[{module}] JSON parse failed after {} attempts: {e}",
+                                MAX_COMP_RETRIES
+                            ));
                         }
-                        return Err(format!(
-                            "[{module}] JSON parse failed after {} attempts: {e}",
-                            MAX_COMP_RETRIES
-                        ));
                     }
                 }
-            }
 
-            unreachable!("retry loop always returns or continues; never falls through");
-        }));
+                unreachable!("retry loop always returns or continues; never falls through");
+            }));
+        }
     }
 
+    // Collect results: group by module, compute median across estimates.
+    let mut by_module: HashMap<String, Vec<f64>> = HashMap::new();
     for handle in handles {
         let (module, score) = handle.await.map_err(|e| format!("join error: {e}"))??;
-        eprintln!("  {module}: {:.3}", score);
+        by_module.entry(module).or_default().push(score);
+    }
+
+    for (module, _file, _pkg) in modules.iter() {
+        let estimates_vec = by_module
+            .get(module.as_str())
+            .ok_or_else(|| format!("[{module}] no estimates collected — all tasks failed"))?;
+        if estimates_vec.len() != estimates {
+            return Err(format!(
+                "[{module}] expected {estimates} estimates, got {}",
+                estimates_vec.len()
+            ));
+        }
+        let med = median(estimates_vec);
+        eprintln!("  {module}: {med:.3}");
         let s = scores
             .iter_mut()
-            .find(|s| s.module == module)
+            .find(|s| s.module == *module)
             .ok_or_else(|| format!("[{module}] score computed but no matching ModuleDrag found"))?;
-        s.comprehensibility = Some(score);
+        s.comprehensibility = Some(med);
     }
 
     Ok(())
@@ -836,7 +872,9 @@ fn remove_trailing_commas(json: &str) -> String {
         // skip this comma.
         if ch == ',' {
             let mut j = i + 1;
-            while j < len && (chars[j] == ' ' || chars[j] == '\t' || chars[j] == '\n' || chars[j] == '\r') {
+            while j < len
+                && (chars[j] == ' ' || chars[j] == '\t' || chars[j] == '\n' || chars[j] == '\r')
+            {
                 j += 1;
             }
             if j < len && (chars[j] == '}' || chars[j] == ']') {
@@ -918,6 +956,21 @@ fn truncate(s: &str, max_len: usize) -> &str {
     &s[..end]
 }
 
+/// Return the median of a non-empty slice of f64 values.
+/// Odd-length: middle element after sort. Even-length: average of the two
+/// middle elements.
+fn median(values: &[f64]) -> f64 {
+    debug_assert!(!values.is_empty(), "median of empty slice");
+    let mut sorted: Vec<f64> = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = sorted.len();
+    if n % 2 == 1 {
+        sorted[n / 2]
+    } else {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -977,7 +1030,8 @@ mod tests {
 
     #[test]
     fn extract_json_fenced_no_lang() {
-        let raw = "```\n{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3}\n```";
+        let raw =
+            "```\n{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3}\n```";
         let extracted = extract_json(raw).unwrap();
         let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
         assert_eq!(scores.naming, 3);
@@ -1026,7 +1080,8 @@ mod tests {
 
     #[test]
     fn extract_json_missing_closing_fence() {
-        let raw = "```json\n{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3}";
+        let raw =
+            "```json\n{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3}";
         let extracted = extract_json(raw).unwrap();
         let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
         assert_eq!(scores.naming, 3);
@@ -1048,17 +1103,37 @@ mod tests {
 
     #[test]
     fn remove_trailing_comma_before_brace() {
-        assert_eq!(
-            remove_trailing_commas("{\"a\": 1,}"),
-            "{\"a\": 1}"
-        );
+        assert_eq!(remove_trailing_commas("{\"a\": 1,}"), "{\"a\": 1}");
     }
 
     #[test]
     fn remove_trailing_comma_with_newline() {
-        assert_eq!(
-            remove_trailing_commas("{\"a\": 1,\n}"),
-            "{\"a\": 1\n}"
-        );
+        assert_eq!(remove_trailing_commas("{\"a\": 1,\n}"), "{\"a\": 1\n}");
+    }
+
+    // ── median tests ──
+
+    #[test]
+    fn median_odd_length() {
+        let vals = [3.0, 1.0, 2.0];
+        assert!((median(&vals) - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn median_even_length() {
+        let vals = [1.0, 4.0, 2.0, 3.0];
+        assert!((median(&vals) - 2.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn median_single_value() {
+        let vals = [7.0];
+        assert!((median(&vals) - 7.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn median_identical_values() {
+        let vals = [0.5, 0.5, 0.5];
+        assert!((median(&vals) - 0.5).abs() < 1e-12);
     }
 }
