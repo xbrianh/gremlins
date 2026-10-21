@@ -420,9 +420,13 @@ async fn run_agent(
     // JSON write entirely. Chat still rebuilds once per turn (every edit
     // shifts line numbers, so a per-session memo would go stale quickly), but
     // the cache keeps the rebuild to touched files only.
-    let system_prompt = SystemPrompt::new(prepared.system_prompt())
-        .with_landscape(landscape_block(gremlin, client.has_tool("Landscape")).await)
-        .assemble();
+    let system_prompt = if agent.landscape {
+        SystemPrompt::new(prepared.system_prompt())
+            .with_landscape(landscape_block(gremlin, client.has_tool("Landscape")).await)
+            .assemble()
+    } else {
+        SystemPrompt::new(prepared.system_prompt()).assemble()
+    };
 
     let stage_env = gremlin.env.clone();
 

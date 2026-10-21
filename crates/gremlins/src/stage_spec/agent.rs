@@ -11,6 +11,7 @@ pub struct Agent {
     pub options: HashMap<String, serde_json::Value>,
     pub interpolation_map: HashMap<String, String>,
     pub outputs_map: HashMap<String, String>,
+    pub landscape: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -32,11 +33,13 @@ mod tests {
             )]),
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::from([("bind-key".to_string(), "bind-val".to_string())]),
+            landscape: true,
         };
 
         assert_eq!(agent.name, "test-agent");
         assert_eq!(agent.prompts, vec!["hi".to_string()]);
         assert_eq!(agent.outputs_map.get("bind-key").unwrap(), "bind-val");
+        assert!(agent.landscape);
         assert_eq!(
             agent.options.get("key").unwrap(),
             &serde_json::Value::String("val".to_string())
