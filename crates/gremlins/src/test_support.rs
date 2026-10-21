@@ -172,10 +172,12 @@ pub(crate) fn with_sandbox<T>(config_json: Option<&str>, body: impl FnOnce(&Sand
 ///
 /// Install with [`LogCapture::install`]; the returned handle provides
 /// [`LogCapture::messages`] for inspection.
+#[allow(dead_code)]
 pub(crate) struct LogCapture {
     records: Arc<Mutex<Vec<String>>>,
 }
 
+#[allow(dead_code)]
 impl LogCapture {
     /// Install this logger as the global logger and return a handle.
     ///
@@ -199,6 +201,7 @@ impl LogCapture {
     }
 }
 
+#[allow(dead_code)]
 struct LogCaptureLogger {
     records: Arc<Mutex<Vec<String>>>,
 }
