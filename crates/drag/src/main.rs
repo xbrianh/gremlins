@@ -779,33 +779,34 @@ async fn score_comprehensibility(
 
     for (module, _file, _pkg) in modules.iter() {
         // Determine the scores: either from cache hits or fresh estimates.
-        let scores_for_module: Vec<f64> =
-            if let Some(estimates_vec) = estimates_map.get(module.as_str()) {
-                // ── cache miss: scores come from fresh estimates ──
-                if estimates_vec.len() != estimates {
-                    eprintln!(
+        let scores_for_module: Vec<f64> = if let Some(estimates_vec) =
+            estimates_map.get(module.as_str())
+        {
+            // ── cache miss: scores come from fresh estimates ──
+            if estimates_vec.len() != estimates {
+                eprintln!(
                         "  [{module}] WARNING: expected {estimates} estimates, got {} — skipping comprehensibility scoring",
                         estimates_vec.len()
                     );
-                    continue;
-                }
-                estimates_vec.iter().map(|e| e.score).collect()
-            } else if let Some(scores_vec) = by_module.get(module.as_str()) {
-                // ── cache hit: scores were pre-populated ──
-                if scores_vec.len() != estimates {
-                    eprintln!(
+                continue;
+            }
+            estimates_vec.iter().map(|e| e.score).collect()
+        } else if let Some(scores_vec) = by_module.get(module.as_str()) {
+            // ── cache hit: scores were pre-populated ──
+            if scores_vec.len() != estimates {
+                eprintln!(
                         "  [{module}] WARNING: cache-hit expected {estimates} scores, got {} — skipping comprehensibility scoring",
                         scores_vec.len()
                     );
-                    continue;
-                }
-                scores_vec.clone()
-            } else {
-                eprintln!(
+                continue;
+            }
+            scores_vec.clone()
+        } else {
+            eprintln!(
                     "  [{module}] WARNING: no estimates collected — all tasks failed — skipping comprehensibility scoring"
                 );
-                continue;
-            };
+            continue;
+        };
 
         let med = median(&scores_for_module);
         eprintln!("  {module}: {med:.3}");
@@ -934,8 +935,8 @@ async fn run_comp_agent(
         CompAgentError::Retryable(format!("no JSON in artifact: {}", truncate(&content, 200)))
     })?;
 
-    let scores: ComprehensibilityScores =
-        serde_json::from_str(&json_str).map_err(|e| CompAgentError::Retryable(format!("parse: {e}")))?;
+    let scores: ComprehensibilityScores = serde_json::from_str(&json_str)
+        .map_err(|e| CompAgentError::Retryable(format!("parse: {e}")))?;
 
     // Validate every dimension is in the requested 0–4 range.
     // Out-of-range values mean the model misbehaved — retryable.
