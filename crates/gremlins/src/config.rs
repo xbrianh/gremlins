@@ -211,6 +211,7 @@ struct BackoffSection {
 ///
 /// Forward-looking: future landscape settings will be added here.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LandscapeSection {
     /// Preferred key: `max-tokens` under `landscape:`.
     #[serde(rename = "max-tokens", default)]
