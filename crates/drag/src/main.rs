@@ -1,16 +1,20 @@
+mod lang;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-/// Compute drag scores for one or more Rust modules.
+use lang::PackageInfo;
+
+/// Compute drag scores for source modules.
 #[derive(Parser)]
 #[command(name = "gremlins-drag")]
 struct Cli {
-    /// File or directory to score. If a .rs file, scores that module.
-    /// If a directory, scores all Rust modules under it.
+    /// Source file or directory to score. Recognized extensions: .rs, .py.
+    /// If a file, scores that module. If a directory, scores all modules
+    /// under it.
     path: PathBuf,
 
     /// Output JSON instead of a human-readable table.
@@ -87,42 +91,6 @@ struct ModuleDrag {
 }
 
 // ---------------------------------------------------------------------------
-// Cargo metadata types (partial — only what we need)
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-struct CargoMetadata {
-    packages: Vec<CargoPackage>,
-}
-
-#[derive(Deserialize)]
-struct CargoPackage {
-    name: String,
-    manifest_path: String,
-    targets: Vec<CargoTarget>,
-}
-
-#[derive(Deserialize)]
-struct CargoTarget {
-    name: String,
-    kind: Vec<String>,
-}
-
-/// A workspace package we can analyze: its directory, Cargo.toml name, and the
-/// Rust crate name that `cargo modules` emits.
-#[derive(Clone, Debug)]
-struct PackageInfo {
-    /// Directory containing Cargo.toml.
-    dir: PathBuf,
-    /// The `[package].name` in Cargo.toml.
-    pkg_name: String,
-    /// The Rust crate name (with `-` normalized to `_`) that cargo-modules emits.
-    target_name: String,
-    /// Whether this is a bin target (affects root file: main.rs vs lib.rs).
-    is_bin: bool,
-}
-
-// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -137,50 +105,52 @@ async fn main() {
 async fn run() -> Result<(), String> {
     let cli = Cli::parse();
 
-    // 1. Discover packages
-    let packages = discover_packages()?;
-    if packages.is_empty() {
-        return Err("no Rust packages found in workspace".into());
-    }
+    // 1. Discover packages (Rust + Python, best-effort)
+    let packages = lang::discover_packages();
 
-    // 2. Resolve the input path to a list of source files
+    // 2. Resolve the input path to a list of recognized source files
     let target_files = resolve_path_files(&cli.path)?;
 
     // 3. Map files to module paths, tracking which package each belongs to.
-    let mut target_modules: Vec<(String, PathBuf, String)> = Vec::new(); // (module, file, pkg_name)
+    let mut target_modules: Vec<(String, PathBuf, String)> = Vec::new(); // (module, file, pkg_key)
     for file in &target_files {
-        if let Some((module, pkg_name)) = file_to_module(file, &packages) {
-            target_modules.push((module, file.clone(), pkg_name));
+        if let Some((module, pkg_key)) = lang::file_to_module(file, &packages) {
+            target_modules.push((module, file.clone(), pkg_key));
         } else {
             eprintln!("warning: could not map to module: {}", file.display());
         }
     }
     if target_modules.is_empty() {
-        return Err(format!("no Rust modules found at: {}", cli.path.display()));
+        let exts = lang::extensions()
+            .iter()
+            .map(|e| format!(".{e}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "no recognized modules ({exts}) found at: {}",
+            cli.path.display()
+        ));
     }
 
-    // 4. Build dependency graph from cargo-modules (for fan-in/fan-out context)
+    // 4. Build dependency graph (fan-out per package in parallel).
     let mut edges: Vec<(String, String)> = Vec::new();
 
-    // Only run cargo-modules for packages that contain our target modules.
     let relevant_packages: HashSet<String> = target_modules
         .iter()
-        .map(|(_, _, pkg_name)| pkg_name.clone())
+        .map(|(_, _, pkg_key)| pkg_key.clone())
         .collect();
 
     let scoring_packages: Vec<&PackageInfo> = packages
         .iter()
-        .filter(|p| relevant_packages.contains(&p.pkg_name))
+        .filter(|p| relevant_packages.contains(&p.key()))
         .collect();
 
-    // Run cargo-modules for each package in parallel — each invocation is
-    // ~5s and they're independent.
+    // Run dependency-graph extraction for each package in parallel.
     let mut handles = Vec::new();
     for pkg in &scoring_packages {
-        let pkg_name = pkg.pkg_name.clone();
+        let pkg = (*pkg).clone();
         handles.push(tokio::task::spawn_blocking(move || {
-            let dot = run_cargo_modules_dependencies(&pkg_name)?;
-            Ok::<_, String>(parse_dot(&dot))
+            lang::dependency_graph(&pkg)
         }));
     }
     for handle in handles {
@@ -197,7 +167,7 @@ async fn run() -> Result<(), String> {
         .map_err(|e| format!("failed to load tokenizer {}: {e}", cli.tokenizer))?;
 
     let mut scores: Vec<ModuleDrag> = Vec::new();
-    for (module, file, _pkg_name) in &target_modules {
+    for (module, file, _pkg_key) in &target_modules {
         let token_count = count_tokens(bpe, file)?;
         let fan_out = fan_out_map.get(module).copied().unwrap_or(0);
         let fan_in = fan_in_map.get(module).copied().unwrap_or(0);
@@ -217,7 +187,7 @@ async fn run() -> Result<(), String> {
     }
 
     // 7. Comprehensibility (optional). Failures skip individual modules
-    // rather than aborting the whole run.
+    //    rather than aborting the whole run.
     if cli.comprehensibility {
         let model_spec = resolve_comprehensibility_model(cli.model.as_deref())?;
         score_comprehensibility(&model_spec, cli.verbose, &target_modules, &mut scores).await?;
@@ -270,43 +240,46 @@ async fn run() -> Result<(), String> {
 // Path resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve a path to a list of .rs source files.
+/// Resolve a path to a list of recognized source files.
 fn resolve_path_files(path: &Path) -> Result<Vec<PathBuf>, String> {
     let canonical = path
         .canonicalize()
         .map_err(|e| format!("{}: {e}", path.display()))?;
 
     if canonical.is_file() {
-        if canonical.extension().is_some_and(|e| e == "rs") {
+        let ext = canonical.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if lang::extensions().contains(&ext) {
             return Ok(vec![canonical]);
         }
-        return Err(format!("not a .rs file: {}", canonical.display()));
+        let exts = lang::extensions()
+            .iter()
+            .map(|e| format!(".{e}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "not a recognized source file ({exts}): {}",
+            canonical.display()
+        ));
     }
 
     if canonical.is_dir() {
-        let mut files = Vec::new();
-        collect_rs_files(&canonical, &mut files)
+        let files = lang::collect_source_files(&canonical)
             .map_err(|e| format!("{}: {e}", canonical.display()))?;
         if files.is_empty() {
-            return Err(format!("no .rs files found in: {}", canonical.display()));
+            let exts = lang::extensions()
+                .iter()
+                .map(|e| format!(".{e}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "no source files ({exts}) found in: {}",
+                canonical.display()
+            ));
         }
         return Ok(files);
     }
 
     Err(format!("not found: {}", path.display()))
-}
-
-fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_rs_files(&path, out)?;
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -329,121 +302,8 @@ fn parse_tokenizer(name: &str) -> Result<tiktoken_rs::tokenizer::Tokenizer, Stri
 }
 
 // ---------------------------------------------------------------------------
-// Package discovery
+// Graph computations
 // ---------------------------------------------------------------------------
-
-fn discover_packages() -> Result<Vec<PackageInfo>, String> {
-    let output = Command::new("cargo")
-        .args(["metadata", "--format-version", "1", "--no-deps"])
-        .output()
-        .map_err(|e| format!("failed to run cargo metadata: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("cargo metadata failed: {stderr}"));
-    }
-
-    let meta: CargoMetadata =
-        serde_json::from_slice(&output.stdout).map_err(|e| format!("cargo metadata parse: {e}"))?;
-
-    let mut packages = Vec::new();
-    for pkg in &meta.packages {
-        let lib_target = pkg
-            .targets
-            .iter()
-            .find(|t| t.kind.iter().any(|k| k == "lib" || k == "rlib"));
-        let bin_target = pkg
-            .targets
-            .iter()
-            .find(|t| t.kind.iter().any(|k| k == "bin"));
-
-        let (target_name, is_bin) = if let Some(t) = lib_target {
-            (t.name.clone(), false)
-        } else if let Some(t) = bin_target {
-            (t.name.clone(), true)
-        } else {
-            continue;
-        };
-
-        let dir = Path::new(&pkg.manifest_path)
-            .parent()
-            .ok_or_else(|| format!("no parent for manifest: {}", pkg.manifest_path))?
-            .canonicalize()
-            .map_err(|e| format!("failed to canonicalize {}: {e}", pkg.manifest_path))?;
-
-        packages.push(PackageInfo {
-            dir,
-            pkg_name: pkg.name.clone(),
-            // cargo-modules emits Rust crate names, where `-` becomes `_`.
-            target_name: target_name.replace('-', "_"),
-            is_bin,
-        });
-    }
-
-    Ok(packages)
-}
-
-// ---------------------------------------------------------------------------
-// cargo-modules dependency graph
-// ---------------------------------------------------------------------------
-
-fn run_cargo_modules_dependencies(pkg_name: &str) -> Result<String, String> {
-    let output = Command::new("cargo")
-        .args([
-            "modules",
-            "dependencies",
-            "--no-externs",
-            "--no-sysroot",
-            "--no-owns",
-            "--no-fns",
-            "--no-traits",
-            "--no-types",
-            "-p",
-            pkg_name,
-        ])
-        .output()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "cargo-modules not found. Install with: cargo install cargo-modules".into()
-            } else {
-                format!("failed to run cargo modules: {e}")
-            }
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("cargo modules failed for {pkg_name}: {stderr}"));
-    }
-
-    String::from_utf8(output.stdout).map_err(|e| format!("invalid UTF-8 from cargo modules: {e}"))
-}
-
-/// Parse DOT output, returning the list of dependency edges.
-fn parse_dot(dot: &str) -> Vec<(String, String)> {
-    let mut edges = Vec::new();
-
-    for line in dot.lines() {
-        let line = line.trim();
-
-        // Edge: "src" -> "dst" [label="uses", ...];
-        if let Some(rest) = line.strip_prefix('"') {
-            if let Some(src_end) = rest.find('"') {
-                let src = &rest[..src_end];
-                let after_src = &rest[src_end + 1..];
-                if let Some(after_arrow) = after_src.trim_start().strip_prefix("->") {
-                    if let Some(dst_quoted) = after_arrow.trim_start().strip_prefix('"') {
-                        if let Some(dst_end) = dst_quoted.find('"') {
-                            let dst = &dst_quoted[..dst_end];
-                            edges.push((src.to_string(), dst.to_string()));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    edges
-}
 
 /// Compute fan-out and fan-in maps from edge list.
 fn compute_degrees(edges: &[(String, String)]) -> (HashMap<String, usize>, HashMap<String, usize>) {
@@ -456,53 +316,6 @@ fn compute_degrees(edges: &[(String, String)]) -> (HashMap<String, usize>, HashM
     }
 
     (fan_out, fan_in)
-}
-
-// ---------------------------------------------------------------------------
-// File → module mapping
-// ---------------------------------------------------------------------------
-
-/// Map a source file path back to its cargo-modules node name and the
-/// package it belongs to. Returns `(module_name, pkg_name)`.
-fn file_to_module(file: &Path, packages: &[PackageInfo]) -> Option<(String, String)> {
-    // Find the package whose src/ directory contains this file.
-    for pkg in packages {
-        let src_dir = pkg.dir.join("src");
-        if let Ok(rel) = file.strip_prefix(&src_dir) {
-            return Some((
-                file_rel_to_module(rel, &pkg.target_name, pkg.is_bin)?,
-                pkg.pkg_name.clone(),
-            ));
-        }
-    }
-    None
-}
-
-fn file_rel_to_module(rel: &Path, target_name: &str, is_bin: bool) -> Option<String> {
-    // cargo-modules emits Rust crate names, where `-` is replaced by `_`.
-    let crate_name = target_name.replace('-', "_");
-    let rel_str = rel.to_string_lossy();
-
-    // Handle crate root files.
-    if rel_str == "lib.rs" && !is_bin {
-        return Some(crate_name);
-    }
-    if rel_str == "main.rs" && is_bin {
-        return Some(crate_name);
-    }
-
-    // Strip .rs suffix.
-    let stripped = rel_str.strip_suffix(".rs")?;
-
-    // Handle mod.rs: <segments>/mod.rs → <segments>
-    if let Some(parent) = stripped.strip_suffix("/mod") {
-        let module_path = parent.replace('/', "::");
-        return Some(format!("{crate_name}::{module_path}"));
-    }
-
-    // Regular file: <segments>.rs → <segments>
-    let module_path = stripped.replace('/', "::");
-    Some(format!("{crate_name}::{module_path}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -625,9 +438,6 @@ async fn score_comprehensibility(
 
     use gremlins::rig::{CompletionRequest, Message};
 
-    // Build additional_params from the backend's resolved model-URI params.
-    // No drag-specific overrides — temperature, seed, reasoning, top_p etc.
-    // should be configured through the gremlins model URI.
     let additional = match backend.resolved_params().and_then(|r| r.additional_value()) {
         Some(serde_json::Value::Object(map)) => map,
         _ => serde_json::Map::new(),
@@ -675,6 +485,7 @@ async fn score_comprehensibility(
         let file = file.clone();
         let model = model.clone();
         let additional = additional.clone();
+        let fence = lang::code_fence(&file);
         handles.push(tokio::spawn(async move {
             let source = match std::fs::read_to_string(&file) {
                 Ok(source) => source,
@@ -687,7 +498,7 @@ async fn score_comprehensibility(
                 return Ok((module, Some(1.0)));
             }
 
-            let prompt = format!("SOURCE FILE ({module}):\n\n```rust\n{source}\n```");
+            let prompt = format!("SOURCE FILE ({module}):\n\n```{fence}\n{source}\n```");
 
             let request = CompletionRequest::new(Message::user(prompt))
                 .preamble(COMPREHENSIBILITY_SYSTEM_PROMPT.to_string())
@@ -859,25 +670,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_dependency_edges() {
-        let dot = "\"gremlins_drag\" [label=\"...\"];\n\"gremlins_drag::foo\" -> \"gremlins_drag::bar\" [label=\"uses\"];\n\"gremlins_drag::bar\" -> \"gremlins_drag::baz\" [label=\"uses\"];";
-        let edges = parse_dot(dot);
-        assert_eq!(
-            edges,
-            vec![
-                (
-                    "gremlins_drag::foo".to_string(),
-                    "gremlins_drag::bar".to_string()
-                ),
-                (
-                    "gremlins_drag::bar".to_string(),
-                    "gremlins_drag::baz".to_string()
-                ),
-            ]
-        );
-    }
-
-    #[test]
     fn computes_degrees() {
         let edges = vec![
             ("a".to_string(), "b".to_string()),
@@ -889,30 +681,6 @@ mod tests {
         assert_eq!(fan_out.get("b"), Some(&1));
         assert_eq!(fan_in.get("c"), Some(&2));
         assert_eq!(fan_in.get("b"), Some(&1));
-    }
-
-    #[test]
-    fn file_rel_to_module_normalizes_hyphens() {
-        assert_eq!(
-            file_rel_to_module(std::path::Path::new("main.rs"), "gremlins-drag", true),
-            Some("gremlins_drag".to_string())
-        );
-        assert_eq!(
-            file_rel_to_module(std::path::Path::new("foo/bar.rs"), "my-crate", false),
-            Some("my_crate::foo::bar".to_string())
-        );
-    }
-
-    #[test]
-    fn file_rel_to_module_handles_mod_rs_and_roots() {
-        assert_eq!(
-            file_rel_to_module(std::path::Path::new("foo/mod.rs"), "crate", false),
-            Some("crate::foo".to_string())
-        );
-        assert_eq!(
-            file_rel_to_module(std::path::Path::new("lib.rs"), "crate", false),
-            Some("crate".to_string())
-        );
     }
 
     #[test]
