@@ -121,6 +121,11 @@ async fn main() {
 async fn run() -> Result<(), String> {
     let cli = Cli::parse();
 
+    // ── guard ──
+    if cli.cache.is_some() && !cli.comprehensibility {
+        return Err("--cache requires --comprehensibility".to_string());
+    }
+
     // 1. Discover packages (Rust + Python, best-effort)
     let packages = lang::discover_packages();
 
@@ -146,6 +151,49 @@ async fn run() -> Result<(), String> {
             "no recognized modules ({exts}) found at: {}",
             cli.path.display()
         ));
+    }
+
+    // ── resolve model & load cache early (both needed for key computation) ──
+    let model_spec: Option<String> = if cli.comprehensibility {
+        Some(resolve_comprehensibility_model(cli.model.as_deref())?)
+    } else {
+        None
+    };
+
+    let cache_map: Option<HashMap<String, CacheEntry>> = match &cli.cache {
+        Some(cache_path) => {
+            let map = load_cache(cache_path)?;
+            eprintln!(
+                "Loaded {} cached entries from {}",
+                map.len(),
+                cache_path.display()
+            );
+            Some(map)
+        }
+        None => None,
+    };
+
+    // ── pre-compute cache keys and build module → CacheEntry lookup ──
+    let mut module_cache: HashMap<String, CacheEntry> = HashMap::new();
+    if let (Some(ref cache_map), Some(ref ms)) = (&cache_map, &model_spec) {
+        for (module, file, _pkg) in &target_modules {
+            let source = std::fs::read_to_string(file).unwrap_or_default();
+            if source.trim().is_empty() {
+                continue;
+            }
+            let abs_path = std::fs::canonicalize(file)
+                .unwrap_or_else(|_| file.clone())
+                .to_string_lossy()
+                .into_owned();
+            let key = compute_cache_key(&abs_path, &source, ms);
+            if let Some(entry) = cache_map.get(&key) {
+                module_cache.insert(module.clone(), entry.clone());
+            }
+        }
+    }
+    let cache_hit_count = module_cache.len();
+    if cache_hit_count > 0 {
+        eprintln!("  {cache_hit_count} modules have complete cache hits");
     }
 
     // 4. Build dependency graph (fan-out per package in parallel).
@@ -178,16 +226,27 @@ async fn run() -> Result<(), String> {
     let (fan_out_map, fan_in_map) = compute_degrees(&edges);
 
     // 6. Count tokens and assemble per-module metrics.
+    //    Use cached values when available; compute fresh otherwise.
     let tokenizer = parse_tokenizer(&cli.tokenizer)?;
     let bpe = tiktoken_rs::bpe_for_tokenizer(tokenizer)
         .map_err(|e| format!("failed to load tokenizer {}: {e}", cli.tokenizer))?;
 
     let mut scores: Vec<ModuleDrag> = Vec::new();
     for (module, file, _pkg_key) in &target_modules {
-        let token_count = count_tokens(bpe, file)?;
-        let fan_out = fan_out_map.get(module).copied().unwrap_or(0);
-        let fan_in = fan_in_map.get(module).copied().unwrap_or(0);
-        let graph_complexity = fan_in + fan_out;
+        let (token_count, fan_out, fan_in, graph_complexity) =
+            if let Some(entry) = module_cache.get(module.as_str()) {
+                (
+                    entry.token_count,
+                    entry.fan_out,
+                    entry.fan_in,
+                    entry.graph_complexity,
+                )
+            } else {
+                let tc = count_tokens(bpe, file)?;
+                let fo = fan_out_map.get(module).copied().unwrap_or(0);
+                let fi = fan_in_map.get(module).copied().unwrap_or(0);
+                (tc, fo, fi, fo + fi)
+            };
 
         scores.push(ModuleDrag {
             module: module.clone(),
@@ -208,29 +267,25 @@ async fn run() -> Result<(), String> {
         if cli.comprehensibility_estimates < 1 {
             return Err("--comprehensibility-estimates must be >= 1".to_string());
         }
-        let model_spec = resolve_comprehensibility_model(cli.model.as_deref())?;
+        let model_spec = model_spec.as_ref().unwrap();
 
-        // Load cache (if --cache was set).
+        // Use the already-loaded cache.
         let cache_state: Option<CacheState> = match &cli.cache {
             Some(cache_path) => {
-                let map = load_cache(cache_path)?;
-                eprintln!(
-                    "Loaded {} cached scores from {}",
-                    map.len(),
-                    cache_path.display()
-                );
+                let map = cache_map.as_ref().unwrap().clone();
                 Some((Arc::new(Mutex::new(map)), cache_path.clone()))
             }
             None => None,
         };
 
         score_comprehensibility(
-            &model_spec,
+            model_spec,
             cli.verbose,
             cli.comprehensibility_estimates,
             &target_modules,
             &mut scores,
             cache_state,
+            module_cache,
         )
         .await?;
     }
@@ -435,7 +490,7 @@ No trailing commas. No // or /* */ comments.
   "abstractions": 0
 }"#;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct ComprehensibilityScores {
     naming: u8,
     control_flow: u8,
@@ -444,7 +499,12 @@ struct ComprehensibilityScores {
 }
 
 /// One line in the JSONL cache file.
-#[derive(Serialize, Deserialize, Debug)]
+///
+/// The cache key is model-dependent: `blake3(abs_path || "\0" || content || "\0" || model_uri)`.
+/// Token counts and graph metrics are model-independent but ride along on the same key so
+/// the cache stays self-consistent — every entry is a full snapshot of all drag dimensions
+/// for a given (file, content, model) tuple.
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct CacheEntry {
     /// BLAKE3 hash of (abs_path || "\0" || content || "\0" || model_uri),
     /// hex-encoded, first 16 chars. This is the lookup key.
@@ -453,6 +513,14 @@ struct CacheEntry {
     file: String,
     /// Fully-resolved model URI used for scoring.
     model: String,
+    /// Token count from tiktoken BPE (model-independent; stored here for convenience).
+    token_count: usize,
+    /// Fan-in count from the dependency graph (model-independent).
+    fan_in: usize,
+    /// Fan-out count from the dependency graph (model-independent).
+    fan_out: usize,
+    /// Graph complexity = fan_in + fan_out.
+    graph_complexity: usize,
     /// Median comprehensibility score (0–1).
     comprehensibility: f64,
     /// The four dimension scores from the LLM response.
@@ -572,6 +640,7 @@ async fn score_comprehensibility(
     modules: &[(String, PathBuf, String)],
     scores: &mut [ModuleDrag],
     cache_state: Option<CacheState>,
+    module_cache: HashMap<String, CacheEntry>,
 ) -> Result<(), String> {
     // `model_spec` is already fully resolved by `resolve_comprehensibility_model`.
     use gremlins::clients::client::Client;
@@ -625,54 +694,78 @@ async fn score_comprehensibility(
 
     eprintln!("Scoring comprehensibility for {} modules...", modules.len());
 
-    // Fan out: `estimates` tasks per module, running in parallel. Each task
-    // retries transient failures up to MAX_COMP_RETRIES with exponential backoff.
-    // Non-retryable errors and exhausted retries abort the whole run.
+    // Single pass: for each module, check the pre-computed module_cache.
+    // Cache hits produce `estimates` copies of the cached score directly.
+    // Cache misses spawn `estimates` LLM tasks.
     let mut handles: Vec<ComprehensionTask> = Vec::new();
-    let additional = additional.clone();
+
+    // Scores collected so far (cache hits go straight here).
+    let mut by_module: HashMap<String, Vec<f64>> = HashMap::new();
+
+    // Build a module → metrics lookup from scores for cache-miss writeback.
+    let metrics: HashMap<String, (usize, usize, usize, usize)> = scores
+        .iter()
+        .map(|s| {
+            (
+                s.module.clone(),
+                (s.token_count, s.fan_in, s.fan_out, s.graph_complexity),
+            )
+        })
+        .collect();
+
     for (module, file, _pkg) in modules.iter() {
+        // ── cache hit (pre-computed in run()) ──
+        if let Some(entry) = module_cache.get(module.as_str()) {
+            eprintln!("  [{module}] cache hit ({})", entry.key);
+            by_module
+                .entry(module.clone())
+                .or_default()
+                .resize(estimates, entry.comprehensibility);
+            continue;
+        }
+
+        // ── cache miss or no cache: spawn LLM tasks ──
+        let source = match std::fs::read_to_string(file) {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(format!("[{module}] failed to read source: {e}"));
+            }
+        };
+        if source.trim().is_empty() {
+            by_module
+                .entry(module.clone())
+                .or_default()
+                .resize(estimates, 1.0);
+            continue;
+        }
+
+        let abs_path = std::fs::canonicalize(file)
+            .unwrap_or_else(|_| file.clone())
+            .to_string_lossy()
+            .into_owned();
+
+        let fence = lang::code_fence(&file);
+        let prompt =
+            format!("SOURCE FILE ({module}):\n\n```{fence}\n{source}\n```");
+
+        let cached_metrics = metrics.get(module.as_str()).copied();
+
         for _ in 0..estimates {
             let module = module.clone();
-            let file = file.clone();
+            let source = source.clone();
+            let abs_path = abs_path.clone();
+            let prompt = prompt.clone();
             let model = model.clone();
             let additional = additional.clone();
             let model_spec = model_spec.to_string();
-            let fence = lang::code_fence(&file);
-
-            // Clone cache components for this task.
             let cache_arc = cache_state.as_ref().map(|cs| Arc::clone(&cs.0));
             let cache_path = cache_state.as_ref().map(|cs| cs.1.clone());
+            let cached_metrics = cached_metrics;
 
             handles.push(tokio::spawn(async move {
-                // ── read source (file errors are never retried) ──
-                let source = match std::fs::read_to_string(&file) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return Err(format!("[{module}] failed to read source: {e}"));
-                    }
-                };
-                if source.trim().is_empty() {
-                    return Ok((module, 1.0));
-                }
-
-                let abs_path = match std::fs::canonicalize(&file) {
-                    Ok(p) => p.to_string_lossy().into_owned(),
-                    Err(_) => file.to_string_lossy().into_owned(),
-                };
-
-                // ── cache lookup ──
                 let cache_key = cache_arc
                     .as_ref()
                     .map(|_| compute_cache_key(&abs_path, &source, &model_spec));
-                if let (Some(ref arc), Some(ref key)) = (&cache_arc, &cache_key) {
-                    let map = arc.lock().unwrap();
-                    if let Some(entry) = map.get(key) {
-                        eprintln!("  [{module}] cache hit ({key})");
-                        return Ok((module, entry.comprehensibility));
-                    }
-                }
-
-                let prompt = format!("SOURCE FILE ({module}):\n\n```{fence}\n{source}\n```");
 
                 for attempt in 0..MAX_COMP_RETRIES {
                     // ── call the model ──
@@ -720,7 +813,8 @@ async fn score_comprehensibility(
                         {
                             eprintln!("  [{module}] upstream provider: {provider}");
                         }
-                        if let Some(model_name) = response.raw.get("model").and_then(|v| v.as_str())
+                        if let Some(model_name) =
+                            response.raw.get("model").and_then(|v| v.as_str())
                         {
                             eprintln!("  [{module}] served by model: {model_name}");
                         }
@@ -766,24 +860,27 @@ async fn score_comprehensibility(
                             let score = raw.clamp(0.0, 1.0);
                             if score >= 1.0 {
                                 eprintln!(
-                                "  [{module}] WARNING: perfect score (all 4s) — raw response:\n{}",
-                                truncate(&text, 400)
-                            );
+                                    "  [{module}] WARNING: perfect score (all 4s) — raw response:\n{}",
+                                    truncate(&text, 400)
+                                );
                             }
 
-                            // ── cache insert ──
+                            // ── cache insert (with full metrics) ──
                             if let (Some(ref arc), Some(ref cp), Some(ref key)) =
                                 (&cache_arc, &cache_path, &cache_key)
                             {
+                                let (tc, fi, fo, gc) = cached_metrics.unwrap_or((0, 0, 0, 0));
                                 let entry = CacheEntry {
                                     key: key.clone(),
                                     file: abs_path.clone(),
                                     model: model_spec.clone(),
+                                    token_count: tc,
+                                    fan_in: fi,
+                                    fan_out: fo,
+                                    graph_complexity: gc,
                                     comprehensibility: score,
                                     breakdown: c,
                                 };
-                                // Write outside the lock so other tasks can still
-                                // perform cache-hit lookups while this task does I/O.
                                 if let Err(e) = append_cache_entry(cp, &entry) {
                                     eprintln!(
                                         "  [{module}] WARNING: failed to append cache entry: {e}"
@@ -821,8 +918,7 @@ async fn score_comprehensibility(
         }
     }
 
-    // Collect results: group by module, compute median across estimates.
-    let mut by_module: HashMap<String, Vec<f64>> = HashMap::new();
+    // Collect task results into by_module.
     for handle in handles {
         let (module, score) = handle.await.map_err(|e| format!("join error: {e}"))??;
         by_module.entry(module).or_default().push(score);
@@ -1325,7 +1421,7 @@ mod tests {
         // Write a file where line 2 is blank.
         std::fs::write(
             &cache_path,
-            "{\"key\":\"abc\",\"file\":\"/f.rs\",\"model\":\"m\",\"comprehensibility\":0.5,\"breakdown\":{\"naming\":2,\"control_flow\":2,\"data_flow\":2,\"abstractions\":2}}\n\n",
+            "{\"key\":\"abc\",\"file\":\"/f.rs\",\"model\":\"m\",\"token_count\":10,\"fan_in\":0,\"fan_out\":0,\"graph_complexity\":0,\"comprehensibility\":0.5,\"breakdown\":{\"naming\":2,\"control_flow\":2,\"data_flow\":2,\"abstractions\":2}}\n\n",
         )
         .unwrap();
         let err = load_cache(&cache_path).unwrap_err();
@@ -1363,7 +1459,7 @@ mod tests {
         let dir = std::env::temp_dir().join("drag-test-valid");
         let _ = std::fs::create_dir_all(&dir);
         let cache_path = dir.join("cache.jsonl");
-        let line = "{\"key\":\"deadbeef12345678\",\"file\":\"/src/main.rs\",\"model\":\"openai/gpt-4o\",\"comprehensibility\":0.75,\"breakdown\":{\"naming\":3,\"control_flow\":3,\"data_flow\":3,\"abstractions\":3}}\n";
+        let line = "{\"key\":\"deadbeef12345678\",\"file\":\"/src/main.rs\",\"model\":\"openai/gpt-4o\",\"token_count\":42,\"fan_in\":1,\"fan_out\":2,\"graph_complexity\":3,\"comprehensibility\":0.75,\"breakdown\":{\"naming\":3,\"control_flow\":3,\"data_flow\":3,\"abstractions\":3}}\n";
         std::fs::write(&cache_path, line).unwrap();
         let map = load_cache(&cache_path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -1382,6 +1478,10 @@ mod tests {
             key: "abcd1234abcd1234".to_string(),
             file: "/abs/path/module.rs".to_string(),
             model: "openai/gpt-4o".to_string(),
+            token_count: 100,
+            fan_in: 2,
+            fan_out: 3,
+            graph_complexity: 5,
             comprehensibility: 0.5,
             breakdown: ComprehensibilityScores {
                 naming: 2,
