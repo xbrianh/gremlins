@@ -113,14 +113,31 @@ join:
 
 ## Stage definition references
 
-A stage can reference a named definition instead of inlining its config:
+A stage can reference a named definition instead of inlining its config.
+
+The **call site** provides a definition name via `type` and supplies concrete
+`prompt` and `options` values:
 
 ```yaml
-- type: <definition-name>
-  prompt:
-    - "{{prompt}}"                     # injects caller's prompt text
-  options:
-    some_key: "{{options.some_key | default('fallback')}}"
+# In a definition file (e.g. .gremlins/gh.yaml):
+stages:
+  - name: plan
+    type: plan                        # references stages/plan.yaml
+    prompt: [style_guide.md, plan.md] # concrete prompts
+```
+
+The **definition body** (e.g. `.gremlins/stages/plan.yaml`) uses templates to
+inject the caller's values:
+
+```yaml
+# In .gremlins/stages/plan.yaml:
+required-prompt: true
+stages:
+  - type: agent
+    prompt:
+      - "{{prompt}}"                  # expands to caller's prompt list
+    options:
+      timeout: "{{options.timeout | default(600)}}"
 ```
 
 - `required-prompt: true` in a definition file marks that the caller must supply `prompt`.
