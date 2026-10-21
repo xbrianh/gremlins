@@ -43,12 +43,12 @@ struct CargoTarget {
 // Package discovery
 // ---------------------------------------------------------------------------
 
-pub(super) fn discover_rust_packages() -> Result<Vec<RustPackage>, String> {
+pub(super) fn discover_rust_packages(base: &Path) -> Result<Vec<RustPackage>, String> {
     // If there is no `Cargo.toml` anywhere up the tree, this isn't a Rust
     // project. Running `cargo metadata` would fail with a scary "could not
     // find Cargo.toml" message, so short-circuit to an empty package list
     // instead. This keeps pure-Python (and other non-Rust) projects quiet.
-    if find_cargo_toml().is_none() {
+    if find_cargo_toml(base).is_none() {
         return Ok(Vec::new());
     }
 
@@ -102,10 +102,14 @@ pub(super) fn discover_rust_packages() -> Result<Vec<RustPackage>, String> {
     Ok(packages)
 }
 
-/// Locate the nearest `Cargo.toml`, walking up from the current directory.
+/// Locate the nearest `Cargo.toml`, walking up from `from`.
 /// Mirrors `cargo metadata`'s default manifest discovery.
-fn find_cargo_toml() -> Option<PathBuf> {
-    let mut dir = std::env::current_dir().ok()?;
+fn find_cargo_toml(from: &Path) -> Option<PathBuf> {
+    let mut dir = if from.is_dir() {
+        from.to_path_buf()
+    } else {
+        from.parent()?.to_path_buf()
+    };
     loop {
         let candidate = dir.join("Cargo.toml");
         if candidate.is_file() {

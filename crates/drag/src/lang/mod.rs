@@ -96,17 +96,17 @@ fn collect_source_files_impl(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Res
     Ok(())
 }
 
-/// Discover all packages (Rust + Python) under the current directory.
+/// Discover all packages (Rust + Python) anchored at `base`.
 /// Best-effort: failures for one language are non-fatal.
-pub fn discover_packages() -> Vec<PackageInfo> {
+pub fn discover_packages(base: &Path) -> Vec<PackageInfo> {
     let mut packages = Vec::new();
 
-    match rust::discover_rust_packages() {
+    match rust::discover_rust_packages(base) {
         Ok(rust_pkgs) => packages.extend(rust_pkgs.into_iter().map(PackageInfo::Rust)),
         Err(e) => eprintln!("gremlins-drag: Rust package discovery skipped: {e}"),
     }
 
-    match python::discover_python_packages() {
+    match python::discover_python_packages(base) {
         Ok(py_pkgs) => packages.extend(py_pkgs.into_iter().map(PackageInfo::Python)),
         Err(e) => eprintln!("gremlins-drag: Python package discovery skipped: {e}"),
     }

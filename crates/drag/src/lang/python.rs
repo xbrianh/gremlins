@@ -18,20 +18,45 @@ pub struct PythonPackage {
 // Package discovery
 // ---------------------------------------------------------------------------
 
-/// Walk the current directory for Python packages.
+/// Walk from `base` for Python packages.
 ///
-/// A package is any directory containing `__init__.py`. The root is the
-/// topmost ancestor that itself is *not* a package (i.e. lacks `__init__.py`).
-pub(super) fn discover_python_packages() -> Result<Vec<PythonPackage>, String> {
-    let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
-    let cwd = cwd
+/// A package is any directory containing `__init__.py`. Discovery starts from
+/// the nearest ancestor of `base` that itself is *not* a Python package
+/// (i.e. lacks `__init__.py`). This ensures the root used for module-path
+/// computation agrees with the embedded extractor's root.
+pub(super) fn discover_python_packages(base: &Path) -> Result<Vec<PythonPackage>, String> {
+    let start = if base.is_dir() {
+        base.to_path_buf()
+    } else {
+        base.parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| base.to_path_buf())
+    };
+    let start = start
         .canonicalize()
-        .map_err(|e| format!("canonicalize cwd: {e}"))?;
+        .map_err(|e| format!("canonicalize base: {e}"))?;
+
+    // Walk up from the start to find the nearest non-package ancestor.
+    let discovery_root = find_nearest_non_package_ancestor(&start);
+
     let mut packages = Vec::new();
-    find_python_packages(&cwd, &cwd, &mut packages);
+    find_python_packages(&discovery_root, &discovery_root, &mut packages);
     // Deduplicate by root_dir + name (a package may be found via multiple paths).
     dedup_packages(&mut packages);
     Ok(packages)
+}
+
+/// Walk up from `dir` until a directory without `__init__.py` is found.
+fn find_nearest_non_package_ancestor(dir: &Path) -> PathBuf {
+    let mut current = dir.to_path_buf();
+    loop {
+        if !current.join("__init__.py").is_file() {
+            return current;
+        }
+        if !current.pop() {
+            return dir.to_path_buf();
+        }
+    }
 }
 
 /// Recursively find Python packages. `root` is the nearest ancestor that

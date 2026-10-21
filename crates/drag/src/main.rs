@@ -117,8 +117,9 @@ async fn main() {
 async fn run() -> Result<(), String> {
     let cli = Cli::parse();
 
-    // 1. Discover packages (Rust + Python, best-effort)
-    let packages = lang::discover_packages();
+    // 1. Discover packages (Rust + Python, best-effort) anchored at the
+    //    user-supplied path so that packages are found regardless of cwd.
+    let packages = lang::discover_packages(&cli.path);
 
     // 2. Resolve the input path to a list of recognized source files
     let target_files = resolve_path_files(&cli.path)?;
@@ -170,9 +171,12 @@ async fn run() -> Result<(), String> {
         if source.trim().is_empty() {
             continue;
         }
-        let key = compute_cache_key(&source, &model_spec);
+        let key = compute_cache_key(&source, &model_spec, cli.comprehensibility_estimates);
         if let Some(entry) = cache_map.get(&key) {
-            module_cache.insert(module.clone(), entry.clone());
+            // Only accept cached entries whose estimate count matches.
+            if entry.estimates == cli.comprehensibility_estimates {
+                module_cache.insert(module.clone(), entry.clone());
+            }
         }
     }
     let cache_hit_count = module_cache.len();
@@ -225,14 +229,10 @@ async fn run() -> Result<(), String> {
 
     let mut scores: Vec<ModuleDrag> = Vec::new();
     for (module, file, _pkg_key) in &target_modules {
-        // Token count is content-derived and safe to reuse from cache;
-        // graph metrics are module-position-specific and always
-        // computed fresh from the dependency graph.
-        let token_count = if let Some(entry) = module_cache.get(module.as_str()) {
-            entry.token_count
-        } else {
-            count_tokens(bpe, file)?
-        };
+        // Token count is tokenizer-dependent and always recomputed fresh.
+        // Cached token counts are not reused because the cache key does not
+        // include the tokenizer selection.
+        let token_count = count_tokens(bpe, file)?;
         let fan_out = fan_out_map.get(module).copied().unwrap_or(0);
         let fan_in = fan_in_map.get(module).copied().unwrap_or(0);
         let graph_complexity = fan_in + fan_out;
@@ -382,11 +382,16 @@ fn parse_tokenizer(name: &str) -> Result<tiktoken_rs::tokenizer::Tokenizer, Stri
 // ---------------------------------------------------------------------------
 
 /// Compute fan-out and fan-in maps from edge list.
+/// Self-edges (src == dst) are excluded — they do not represent
+/// inter-module dependencies and inflate complexity.
 fn compute_degrees(edges: &[(String, String)]) -> (HashMap<String, usize>, HashMap<String, usize>) {
     let mut fan_out: HashMap<String, usize> = HashMap::new();
     let mut fan_in: HashMap<String, usize> = HashMap::new();
 
     for (src, dst) in edges {
+        if src == dst {
+            continue;
+        }
         *fan_out.entry(src.clone()).or_insert(0) += 1;
         *fan_in.entry(dst.clone()).or_insert(0) += 1;
     }
@@ -486,23 +491,32 @@ struct CacheEntry {
     fan_out: usize,
     /// Graph complexity = fan_in + fan_out.
     graph_complexity: usize,
+    /// Number of estimates used to produce the median.
+    #[serde(default = "default_estimates")]
+    estimates: usize,
     /// Median comprehensibility score (0–1).
     comprehensibility: f64,
     /// The four dimension scores from the LLM response.
     breakdown: ComprehensibilityScores,
 }
 
-/// Compute a BLAKE3-based cache key from the file's full source text
-/// and the resolved model URI.
+fn default_estimates() -> usize {
+    1
+}
+
+/// Compute a BLAKE3-based cache key from the file's full source text,
+/// the resolved model URI, and the estimate count.
 ///
-/// Key = first 16 hex chars of `blake3(content || "\0" || model_uri)`.
+/// Key = first 16 hex chars of `blake3(content || "\0" || model_uri || "\0" || estimates)`.
 /// The 64-bit truncation is fine at realistic cache sizes but collision
 /// risk grows past ~10⁵–10⁶ entries for strict uniqueness guarantees.
-fn compute_cache_key(content: &str, model_uri: &str) -> String {
+fn compute_cache_key(content: &str, model_uri: &str, estimates: usize) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(content.as_bytes());
     hasher.update(b"\0");
     hasher.update(model_uri.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(&estimates.to_le_bytes());
     hasher.finalize().to_hex()[..16].to_string()
 }
 
@@ -599,31 +613,27 @@ async fn score_comprehensibility(
     module_cache: HashMap<String, CacheEntry>,
 ) -> Result<(), String> {
     // `model_spec` is already fully resolved by `resolve_comprehensibility_model`.
-    use gremlins::clients::client::Client;
-    let client =
-        Client::parse(model_spec).map_err(|e| format!("invalid model spec {model_spec:?}: {e}"))?;
-    let backend = client
-        .get_or_build_backend()
-        .map_err(|e| format!("failed to build backend for {model_spec}: {e}"))?;
-
-    let model = backend
-        .make_model(model_spec)
-        .ok_or_else(|| format!("backend cannot build model for {model_spec}"))?;
-
-    // ── verbose: dump model info ──
+    // Diagnostics are best-effort — model construction may fail for cmd/… backends.
     if verbose {
-        eprintln!("╔══ model diagnostics ══╗");
-        eprintln!("║ model spec:      {model_spec}");
-        eprintln!("║ client:          {client}");
-        eprintln!("║ model name:      {}", model.name());
-        if let Some(id) = model.id() {
-            eprintln!("║ model id:        {id}");
+        use gremlins::clients::client::Client;
+        if let Ok(client) = Client::parse(model_spec) {
+            eprintln!("╔══ model diagnostics ══╗");
+            eprintln!("║ model spec:      {model_spec}");
+            eprintln!("║ client:          {client}");
+            if let Ok(backend) = client.get_or_build_backend() {
+                if let Some(model) = backend.make_model(model_spec) {
+                    eprintln!("║ model name:      {}", model.name());
+                    if let Some(id) = model.id() {
+                        eprintln!("║ model id:        {id}");
+                    }
+                }
+                if let Some(ref rp) = backend.resolved_params() {
+                    eprintln!("║ backend temp:    {:?}", rp.temperature);
+                    eprintln!("║ backend max_tok: {:?}", rp.max_tokens);
+                }
+            }
+            eprintln!("╚═══════════════════╝");
         }
-        if let Some(ref rp) = backend.resolved_params() {
-            eprintln!("║ backend temp:    {:?}", rp.temperature);
-            eprintln!("║ backend max_tok: {:?}", rp.max_tokens);
-        }
-        eprintln!("╚═══════════════════╝");
     }
 
     eprintln!("Scoring comprehensibility for {} modules...", modules.len());
@@ -691,7 +701,7 @@ async fn score_comprehensibility(
             let model_spec = model_spec.to_string();
 
             handles.push(tokio::spawn(async move {
-                let cache_key = compute_cache_key(&source, &model_spec);
+                let cache_key = compute_cache_key(&source, &model_spec, estimates);
 
                 for attempt in 0..MAX_COMP_RETRIES {
                     match run_comp_agent(&module, &source, &prompt, &model_spec, verbose).await {
@@ -773,33 +783,41 @@ async fn score_comprehensibility(
             if let Some(estimates_vec) = estimates_map.get(module.as_str()) {
                 // ── cache miss: scores come from fresh estimates ──
                 if estimates_vec.len() != estimates {
-                    return Err(format!(
-                        "[{module}] expected {estimates} estimates, got {}",
+                    eprintln!(
+                        "  [{module}] WARNING: expected {estimates} estimates, got {} — skipping comprehensibility scoring",
                         estimates_vec.len()
-                    ));
+                    );
+                    continue;
                 }
                 estimates_vec.iter().map(|e| e.score).collect()
             } else if let Some(scores_vec) = by_module.get(module.as_str()) {
                 // ── cache hit: scores were pre-populated ──
                 if scores_vec.len() != estimates {
-                    return Err(format!(
-                        "[{module}] cache-hit expected {estimates} scores, got {}",
+                    eprintln!(
+                        "  [{module}] WARNING: cache-hit expected {estimates} scores, got {} — skipping comprehensibility scoring",
                         scores_vec.len()
-                    ));
+                    );
+                    continue;
                 }
                 scores_vec.clone()
             } else {
-                return Err(format!(
-                    "[{module}] no estimates collected — all tasks failed"
-                ));
+                eprintln!(
+                    "  [{module}] WARNING: no estimates collected — all tasks failed — skipping comprehensibility scoring"
+                );
+                continue;
             };
 
         let med = median(&scores_for_module);
         eprintln!("  {module}: {med:.3}");
-        let s = scores
-            .iter_mut()
-            .find(|s| s.module == *module)
-            .ok_or_else(|| format!("[{module}] score computed but no matching ModuleDrag found"))?;
+        let s = match scores.iter_mut().find(|s| s.module == *module) {
+            Some(s) => s,
+            None => {
+                eprintln!(
+                    "  [{module}] WARNING: score computed but no matching ModuleDrag found — skipping"
+                );
+                continue;
+            }
+        };
         s.comprehensibility = Some(med);
 
         // ── Write a single cache entry with the median score (cache-miss only) ──
@@ -816,6 +834,7 @@ async fn score_comprehensibility(
                         fan_in: fi,
                         fan_out: fo,
                         graph_complexity: gc,
+                        estimates,
                         comprehensibility: med,
                         breakdown: first.breakdown.clone(),
                     };
@@ -838,7 +857,7 @@ async fn score_comprehensibility(
 /// artifact causes a bail, and our outer retry loop re-runs the whole gremlin.
 async fn run_comp_agent(
     module: &str,
-    _source: &str,
+    source: &str,
     prompt: &str,
     model_spec: &str,
     verbose: bool,
@@ -847,6 +866,7 @@ async fn run_comp_agent(
         .map_err(|e| CompAgentError::Fatal(format!("invalid model: {e}")))?;
 
     let stage = AgentBuilder::new("score")
+        .option("src", source)
         .prompt(format!(
             "{prompt}\n\n\
              Score the above source file on comprehensibility.\n\n\
@@ -914,7 +934,25 @@ async fn run_comp_agent(
         CompAgentError::Retryable(format!("no JSON in artifact: {}", truncate(&content, 200)))
     })?;
 
-    serde_json::from_str(&json_str).map_err(|e| CompAgentError::Retryable(format!("parse: {e}")))
+    let scores: ComprehensibilityScores =
+        serde_json::from_str(&json_str).map_err(|e| CompAgentError::Retryable(format!("parse: {e}")))?;
+
+    // Validate every dimension is in the requested 0–4 range.
+    // Out-of-range values mean the model misbehaved — retryable.
+    for (name, val) in [
+        ("naming", scores.naming),
+        ("control_flow", scores.control_flow),
+        ("data_flow", scores.data_flow),
+        ("abstractions", scores.abstractions),
+    ] {
+        if val > 4 {
+            return Err(CompAgentError::Retryable(format!(
+                "{name}={val} out of 0–4 range"
+            )));
+        }
+    }
+
+    Ok(scores)
 }
 
 // ---------------------------------------------------------------------------
@@ -1214,6 +1252,22 @@ mod tests {
     }
 
     #[test]
+    fn self_edges_filtered() {
+        let edges = vec![
+            ("a".to_string(), "a".to_string()),
+            ("a".to_string(), "b".to_string()),
+            ("b".to_string(), "b".to_string()),
+        ];
+        let (fan_out, fan_in) = compute_degrees(&edges);
+        // Self-edges are excluded; only a→b is counted.
+        assert_eq!(fan_out.get("a"), Some(&1));
+        assert_eq!(fan_in.get("b"), Some(&1));
+        // a→a and b→b are not present in either map.
+        assert_eq!(fan_in.get("a"), None);
+        assert_eq!(fan_out.get("b"), None);
+    }
+
+    #[test]
     fn truncate_is_char_boundary_safe() {
         // "é" is two bytes; cutting at byte 1 would be a non-boundary.
         assert_eq!(truncate("éx", 1), "");
@@ -1359,16 +1413,19 @@ mod tests {
 
     #[test]
     fn cache_key_is_deterministic() {
-        let k1 = compute_cache_key("fn main() {}", "openai/gpt-4o");
-        let k2 = compute_cache_key("fn main() {}", "openai/gpt-4o");
+        let k1 = compute_cache_key("fn main() {}", "openai/gpt-4o", 1);
+        let k2 = compute_cache_key("fn main() {}", "openai/gpt-4o", 1);
         assert_eq!(k1, k2);
         assert_eq!(k1.len(), 16);
         // Different content → different key.
-        let k3 = compute_cache_key("fn main() { /* changed */ }", "openai/gpt-4o");
+        let k3 = compute_cache_key("fn main() { /* changed */ }", "openai/gpt-4o", 1);
         assert_ne!(k1, k3);
         // Different model → different key.
-        let k4 = compute_cache_key("fn main() {}", "anthropic/claude");
+        let k4 = compute_cache_key("fn main() {}", "anthropic/claude", 1);
         assert_ne!(k1, k4);
+        // Different estimates → different key.
+        let k5 = compute_cache_key("fn main() {}", "openai/gpt-4o", 5);
+        assert_ne!(k1, k5);
     }
 
     #[test]
@@ -1446,6 +1503,7 @@ mod tests {
             fan_in: 2,
             fan_out: 3,
             graph_complexity: 5,
+            estimates: 1,
             comprehensibility: 0.5,
             breakdown: ComprehensibilityScores {
                 naming: 2,
