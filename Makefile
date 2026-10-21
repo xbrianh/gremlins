@@ -1,11 +1,14 @@
 MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
 
-# sccache writes root-owned files that break subsequent builds; clear it.
+# sccache writes root-owned files that break subsequent builds; clear it
+# by default, but let callers opt back in via the environment.
 # /../cargo-target is not writable by the current user.
 # /usr/local/cargo/registry/cache has root-owned .crate files.
-RUSTC_WRAPPER :=
-CARGO_TARGET_DIR := $(shell pwd)/target
-CARGO_HOME := $(shell pwd)/.cargo-home
+# Use ?= so callers' exported Cargo settings (registry config, credentials,
+# cached crates) are never hidden.
+RUSTC_WRAPPER ?=
+CARGO_TARGET_DIR ?= $(shell pwd)/target
+CARGO_HOME ?= $(shell pwd)/.cargo-home
 
 .PHONY: test test-cli check fmt fmt-check clippy build release autoformat test-overlay-tools
 
