@@ -62,9 +62,9 @@ struct Cli {
     comprehensibility_estimates: usize,
 
     /// Path to a JSONL cache file for comprehensibility scores.
-    /// When set, scores are stored keyed by BLAKE3 hash of
-    /// (file path, file content, model URI). On re-runs, cached
-    /// scores are reused, eliminating redundant LLM calls.
+    /// When set, this path overrides the default cache location.
+    /// The default cache lives under the gremlins shared state directory
+    /// (e.g. `drag/comprehensibility-cache.jsonl`).
     #[arg(long)]
     cache: Option<PathBuf>,
 }
@@ -145,35 +145,34 @@ async fn run() -> Result<(), String> {
         ));
     }
 
-    // ── resolve model & load cache early (both needed for key computation) ──
+    // ── resolve model & cache path early (both needed for key computation) ──
     let model_spec = Some(resolve_comprehensibility_model(cli.model.as_deref())?);
 
-    let cache_map: Option<HashMap<String, CacheEntry>> = match &cli.cache {
-        Some(cache_path) => {
-            let map = load_cache(cache_path)?;
-            eprintln!(
-                "Loaded {} cached entries from {}",
-                map.len(),
-                cache_path.display()
-            );
-            Some(map)
+    // Resolve the effective cache path: --cache overrides the default.
+    let cache_path: PathBuf = match &cli.cache {
+        Some(p) => p.clone(),
+        None => {
+            let state = gremlins::config::state_root();
+            state.join("drag").join("comprehensibility-cache.jsonl")
         }
-        None => None,
     };
+
+    let cache_map = load_cache(&cache_path)?;
+    eprintln!(
+        "Loaded {} cached entries from {}",
+        cache_map.len(),
+        cache_path.display()
+    );
 
     // ── pre-compute cache keys and build module → CacheEntry lookup ──
     let mut module_cache: HashMap<String, CacheEntry> = HashMap::new();
-    if let (Some(ref cache_map), Some(ref ms)) = (&cache_map, &model_spec) {
+    if let Some(ref ms) = &model_spec {
         for (module, file, _pkg) in &target_modules {
             let source = std::fs::read_to_string(file).unwrap_or_default();
             if source.trim().is_empty() {
                 continue;
             }
-            let abs_path = std::fs::canonicalize(file)
-                .unwrap_or_else(|_| file.clone())
-                .to_string_lossy()
-                .into_owned();
-            let key = compute_cache_key(&abs_path, &source, ms);
+            let key = compute_cache_key(&source, ms);
             if let Some(entry) = cache_map.get(&key) {
                 module_cache.insert(module.clone(), entry.clone());
             }
@@ -221,20 +220,17 @@ async fn run() -> Result<(), String> {
 
     let mut scores: Vec<ModuleDrag> = Vec::new();
     for (module, file, _pkg_key) in &target_modules {
-        let (token_count, fan_out, fan_in, graph_complexity) =
-            if let Some(entry) = module_cache.get(module.as_str()) {
-                (
-                    entry.token_count,
-                    entry.fan_out,
-                    entry.fan_in,
-                    entry.graph_complexity,
-                )
-            } else {
-                let tc = count_tokens(bpe, file)?;
-                let fo = fan_out_map.get(module).copied().unwrap_or(0);
-                let fi = fan_in_map.get(module).copied().unwrap_or(0);
-                (tc, fo, fi, fo + fi)
-            };
+        // Token count is content-derived and safe to reuse from cache;
+        // graph metrics are module-position-specific and always
+        // computed fresh from the dependency graph.
+        let token_count = if let Some(entry) = module_cache.get(module.as_str()) {
+            entry.token_count
+        } else {
+            count_tokens(bpe, file)?
+        };
+        let fan_out = fan_out_map.get(module).copied().unwrap_or(0);
+        let fan_in = fan_in_map.get(module).copied().unwrap_or(0);
+        let graph_complexity = fan_in + fan_out;
 
         scores.push(ModuleDrag {
             module: module.clone(),
@@ -256,13 +252,7 @@ async fn run() -> Result<(), String> {
     }
     let model_spec = model_spec.as_ref().unwrap();
 
-    let cache_state: Option<CacheState> = match &cli.cache {
-        Some(cache_path) => {
-            let map = cache_map.as_ref().unwrap().clone();
-            Some((Arc::new(Mutex::new(map)), cache_path.clone()))
-        }
-        None => None,
-    };
+    let cache_state: CacheState = (Arc::new(Mutex::new(cache_map)), cache_path.clone());
 
     score_comprehensibility(
         model_spec,
@@ -450,13 +440,13 @@ struct ComprehensibilityScores {
 
 /// One line in the JSONL cache file.
 ///
-/// The cache key is model-dependent: `blake3(abs_path || "\0" || content || "\0" || model_uri)`.
+/// The cache key is model-dependent: `blake3(content || "\0" || model_uri)`.
 /// Token counts and graph metrics are model-independent but ride along on the same key so
 /// the cache stays self-consistent — every entry is a full snapshot of all drag dimensions
-/// for a given (file, content, model) tuple.
+/// for a given (content, model) tuple.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct CacheEntry {
-    /// BLAKE3 hash of (abs_path || "\0" || content || "\0" || model_uri),
+    /// BLAKE3 hash of (content || "\0" || model_uri),
     /// hex-encoded, first 16 chars. This is the lookup key.
     key: String,
     /// Absolute path of the source file at scoring time.
@@ -477,14 +467,12 @@ struct CacheEntry {
     breakdown: ComprehensibilityScores,
 }
 
-/// Compute a BLAKE3-based cache key from an absolute file path, the file's
-/// full source text, and the resolved model URI.
+/// Compute a BLAKE3-based cache key from the file's full source text
+/// and the resolved model URI.
 ///
-/// Key = first 16 hex chars of `blake3(abs_path || "\0" || content || "\0" || model_uri)`.
-fn compute_cache_key(abs_path: &str, content: &str, model_uri: &str) -> String {
+/// Key = first 16 hex chars of `blake3(content || "\0" || model_uri)`.
+fn compute_cache_key(content: &str, model_uri: &str) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(abs_path.as_bytes());
-    hasher.update(b"\0");
     hasher.update(content.as_bytes());
     hasher.update(b"\0");
     hasher.update(model_uri.as_bytes());
@@ -544,9 +532,7 @@ fn append_cache_entry(path: &Path, entry: &CacheEntry) -> Result<(), String> {
 /// bails).  Run errors wrap underlying network/provider failures that
 /// the agent loop exhausted its own retries on.
 fn is_retryable_comp_error_str(msg: &str) -> bool {
-    msg.contains("bail")
-        || msg.contains("missing artifact")
-        || msg.contains("gremlin run")
+    msg.contains("bail") || msg.contains("missing artifact") || msg.contains("gremlin run")
 }
 
 /// Resolve the model to use for comprehensibility scoring.
@@ -582,7 +568,7 @@ struct CompEstimate {
     /// Fields for deferred cache writing (after median is computed).
     abs_path: String,
     model_spec: String,
-    cache_key: Option<String>,
+    cache_key: String,
     cached_metrics: Option<(usize, usize, usize, usize)>,
     breakdown: ComprehensibilityScores,
 }
@@ -593,7 +579,7 @@ async fn score_comprehensibility(
     estimates: usize,
     modules: &[(String, PathBuf, String)],
     scores: &mut [ModuleDrag],
-    cache_state: Option<CacheState>,
+    cache_state: CacheState,
     module_cache: HashMap<String, CacheEntry>,
 ) -> Result<(), String> {
     // `model_spec` is already fully resolved by `resolve_comprehensibility_model`.
@@ -676,9 +662,8 @@ async fn score_comprehensibility(
             .to_string_lossy()
             .into_owned();
 
-        let fence = lang::code_fence(&file);
-        let prompt =
-            format!("SOURCE FILE ({module}):\n\n```{fence}\n{source}\n```");
+        let fence = lang::code_fence(file);
+        let prompt = format!("SOURCE FILE ({module}):\n\n```{fence}\n{source}\n```");
 
         let cached_metrics = metrics.get(module.as_str()).copied();
 
@@ -688,15 +673,9 @@ async fn score_comprehensibility(
             let abs_path = abs_path.clone();
             let prompt = prompt.clone();
             let model_spec = model_spec.to_string();
-            let cache_enabled = cache_state.is_some();
-            let cached_metrics = cached_metrics;
 
             handles.push(tokio::spawn(async move {
-                let cache_key = if cache_enabled {
-                    Some(compute_cache_key(&abs_path, &source, &model_spec))
-                } else {
-                    None
-                };
+                let cache_key = compute_cache_key(&source, &model_spec);
 
                 for attempt in 0..MAX_COMP_RETRIES {
                     match run_comp_agent(&module, &source, &prompt, &model_spec, verbose).await {
@@ -708,9 +687,7 @@ async fn score_comprehensibility(
                                 / 16.0;
                             let score = raw.clamp(0.0, 1.0);
                             if score >= 1.0 {
-                                eprintln!(
-                                    "  [{module}] WARNING: perfect score (all 4s)"
-                                );
+                                eprintln!("  [{module}] WARNING: perfect score (all 4s)");
                             }
 
                             return Ok(CompEstimate {
@@ -745,10 +722,7 @@ async fn score_comprehensibility(
                     }
                 }
 
-                Err(format!(
-                    "[{module}] exhausted {} retries",
-                    MAX_COMP_RETRIES
-                ))
+                Err(format!("[{module}] exhausted {} retries", MAX_COMP_RETRIES))
             }));
         }
     }
@@ -757,7 +731,10 @@ async fn score_comprehensibility(
     let mut estimates_map: HashMap<String, Vec<CompEstimate>> = HashMap::new();
     for handle in handles {
         let est = handle.await.map_err(|e| format!("join error: {e}"))??;
-        estimates_map.entry(est.module.clone()).or_default().push(est);
+        estimates_map
+            .entry(est.module.clone())
+            .or_default()
+            .push(est);
     }
 
     for (module, _file, _pkg) in modules.iter() {
@@ -798,27 +775,24 @@ async fn score_comprehensibility(
         // ── Write a single cache entry with the median score (cache-miss only) ──
         if let Some(estimates_vec) = estimates_map.get(module.as_str()) {
             if let Some(first) = estimates_vec.first() {
-                if let (Some(key), Some(metrics)) = (&first.cache_key, first.cached_metrics) {
-                    if let Some((ref arc, ref cp)) = cache_state {
-                        let (tc, fi, fo, gc) = metrics;
-                        let entry = CacheEntry {
-                            key: key.clone(),
-                            file: first.abs_path.clone(),
-                            model: first.model_spec.clone(),
-                            token_count: tc,
-                            fan_in: fi,
-                            fan_out: fo,
-                            graph_complexity: gc,
-                            comprehensibility: med,
-                            breakdown: first.breakdown.clone(),
-                        };
-                        if let Err(e) = append_cache_entry(cp, &entry) {
-                            eprintln!(
-                                "  [{module}] WARNING: failed to append cache entry: {e}"
-                            );
-                        }
-                        arc.lock().unwrap().insert(key.clone(), entry);
+                if let Some(metrics) = first.cached_metrics {
+                    let (ref arc, ref cp) = &cache_state;
+                    let (tc, fi, fo, gc) = metrics;
+                    let entry = CacheEntry {
+                        key: first.cache_key.clone(),
+                        file: first.abs_path.clone(),
+                        model: first.model_spec.clone(),
+                        token_count: tc,
+                        fan_in: fi,
+                        fan_out: fo,
+                        graph_complexity: gc,
+                        comprehensibility: med,
+                        breakdown: first.breakdown.clone(),
+                    };
+                    if let Err(e) = append_cache_entry(cp, &entry) {
+                        eprintln!("  [{module}] WARNING: failed to append cache entry: {e}");
                     }
+                    arc.lock().unwrap().insert(first.cache_key.clone(), entry);
                 }
             }
         }
@@ -840,8 +814,7 @@ async fn run_comp_agent(
     model_spec: &str,
     verbose: bool,
 ) -> Result<ComprehensibilityScores, String> {
-    let model_uri =
-        ModelURI::parse(model_spec).map_err(|e| format!("invalid model: {e}"))?;
+    let model_uri = ModelURI::parse(model_spec).map_err(|e| format!("invalid model: {e}"))?;
 
     let stage = AgentBuilder::new("score")
         .prompt(format!(
@@ -913,7 +886,6 @@ async fn run_comp_agent(
     serde_json::from_str(&json_str).map_err(|e| format!("parse: {e}"))
 }
 
-/// Whether a string error from [`run_comp_agent`] is worth retrying.
 // ---------------------------------------------------------------------------
 // JSON extraction
 // ---------------------------------------------------------------------------
@@ -1356,23 +1328,16 @@ mod tests {
 
     #[test]
     fn cache_key_is_deterministic() {
-        let k1 = compute_cache_key("/abs/path/foo.rs", "fn main() {}", "openai/gpt-4o");
-        let k2 = compute_cache_key("/abs/path/foo.rs", "fn main() {}", "openai/gpt-4o");
+        let k1 = compute_cache_key("fn main() {}", "openai/gpt-4o");
+        let k2 = compute_cache_key("fn main() {}", "openai/gpt-4o");
         assert_eq!(k1, k2);
         assert_eq!(k1.len(), 16);
         // Different content → different key.
-        let k3 = compute_cache_key(
-            "/abs/path/foo.rs",
-            "fn main() { /* changed */ }",
-            "openai/gpt-4o",
-        );
+        let k3 = compute_cache_key("fn main() { /* changed */ }", "openai/gpt-4o");
         assert_ne!(k1, k3);
         // Different model → different key.
-        let k4 = compute_cache_key("/abs/path/foo.rs", "fn main() {}", "anthropic/claude");
+        let k4 = compute_cache_key("fn main() {}", "anthropic/claude");
         assert_ne!(k1, k4);
-        // Different path → different key.
-        let k5 = compute_cache_key("/abs/path/bar.rs", "fn main() {}", "openai/gpt-4o");
-        assert_ne!(k1, k5);
     }
 
     #[test]
