@@ -25,7 +25,7 @@ const SKIP_DIRS: &[&str] = &["__pycache__", "node_modules", "target"];
 /// Tools that stay available even when a tool filter is set. `task_fn`
 /// re-applies both the tool filter and the sandbox mode to every nested agent,
 /// so bypassing the filter here cannot escape containment.
-const ALWAYS_AVAILABLE: &[&str] = &["Task", "Done"];
+const ALWAYS_AVAILABLE: &[&str] = &["Task", "Done", "Mischief"];
 
 fn always_available(name: &str) -> bool {
     ALWAYS_AVAILABLE.contains(&name)
@@ -2433,6 +2433,7 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool
         "Task" => Some(vec![("kind", "string", true), ("prompt", "string", true)]),
         "Done" => Some(vec![("summary", "string", true)]),
         "WebSearch" => Some(vec![("url", "string", true), ("timeout", "integer", false)]),
+        "Mischief" => Some(vec![]),
         _ => None,
     }
 }
@@ -2651,6 +2652,7 @@ pub(crate) async fn invoke(
             let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
             format!("Done. {summary}")
         }
+        "Mischief" => include_str!("mischief_dsl.md").to_string(),
         other => format!("Error: unknown tool {other}"),
     };
     audit(
@@ -2874,6 +2876,16 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition>
                     }
                 },
                 "required": ["url"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: "Mischief".into(),
+            description: "Return the gremlins YAML DSL reference. Call with no arguments to get a complete reference for definition files, stage types, artifact URIs, interpolation, bootstrap, land, and stage definitions.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
                 "additionalProperties": false
             }),
         },
@@ -3962,14 +3974,14 @@ mod tests {
     #[test]
     fn tool_definitions_filter() {
         let all = tool_definitions(None);
-        assert_eq!(all.len(), 10);
+        assert_eq!(all.len(), 11);
         let all_names: Vec<_> = all.iter().map(|t| t.name.as_str()).collect();
         assert!(all_names.contains(&"Landscape"), "got: {all_names:?}");
         assert!(all_names.contains(&"WebSearch"), "got: {all_names:?}");
         let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]));
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
-        // Task and Done are always available regardless of the filter.
-        assert_eq!(names, ["Read", "Bash", "Done", "Task"]);
+        // Task, Done, and Mischief are always available regardless of the filter.
+        assert_eq!(names, ["Read", "Bash", "Mischief", "Done", "Task"]);
         assert!(!names.contains(&"WebSearch"), "got: {names:?}");
     }
 
@@ -3979,6 +3991,7 @@ mod tests {
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"Task"), "got: {names:?}");
         assert!(names.contains(&"Done"), "got: {names:?}");
+        assert!(names.contains(&"Mischief"), "got: {names:?}");
         assert!(names.contains(&"Read"), "got: {names:?}");
     }
 
