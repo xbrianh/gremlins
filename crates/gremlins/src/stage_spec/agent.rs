@@ -11,6 +11,10 @@ pub struct Agent {
     pub options: HashMap<String, serde_json::Value>,
     pub interpolation_map: HashMap<String, String>,
     pub outputs_map: HashMap<String, String>,
+    /// Whether the executor recomputes a landscape block before this stage.
+    /// Defaults to `true`. When `false`, the system prompt is assembled
+    /// without a landscape block — useful for conversation turns where the
+    /// block is already present in the context from the first turn.
     pub landscape: bool,
 }
 

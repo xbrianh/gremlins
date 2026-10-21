@@ -1,17 +1,5 @@
 MAKEFLAGS += -j$(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
 
-# The sandboxed runner ships a pre-populated registry in `.cargo-home` while
-# leaving `CARGO_HOME`/`CARGO_TARGET_DIR` pointed at host paths this user
-# cannot open. Prefer the repo-local copies when present so plain `cargo`
-# invocations work without touching the shared cache.
-ifneq ($(wildcard .cargo-home),)
-CARGO_HOME := $(abspath .cargo-home)
-CARGO_TARGET_DIR := $(abspath target)
-endif
-
-export CARGO_HOME
-export CARGO_TARGET_DIR
-
 .PHONY: test test-cli check fmt fmt-check clippy build release autoformat test-overlay-tools
 
 # --- Test ---

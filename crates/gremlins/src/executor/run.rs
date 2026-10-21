@@ -2042,6 +2042,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn agent_landscape_flag_controls_system_prompt_assembly() {
+        // Mirror the conditional in run_agent (lines 423-429):
+        //   - landscape: true  → SystemPrompt::new(…).with_landscape(…).assemble()
+        //   - landscape: false → SystemPrompt::new(…).assemble()
+        let base = "base prompt".to_string();
+        let landscape = "<!-- LANDSCAPE BLOCK -->".to_string();
+
+        // When landscape is true, the block appears in the assembled prompt.
+        let with_landscape = SystemPrompt::new(base.clone())
+            .with_landscape(landscape.clone())
+            .assemble();
+        assert!(
+            with_landscape.contains(&landscape),
+            "landscape block must be present when landscape flag is true"
+        );
+
+        // When landscape is false, the block is absent.
+        let without_landscape = SystemPrompt::new(base.clone()).assemble();
+        assert!(
+            !without_landscape.contains(&landscape),
+            "landscape block must be absent when landscape flag is false"
+        );
+        assert_eq!(without_landscape, base);
+    }
+
     // --- exec ---
 
     #[tokio::test]
