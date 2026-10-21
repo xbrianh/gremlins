@@ -15,7 +15,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 
 use crate::config;
 
@@ -162,60 +162,6 @@ impl Sandbox {
 pub(crate) fn with_sandbox<T>(config_json: Option<&str>, body: impl FnOnce(&Sandbox) -> T) -> T {
     let sandbox = Sandbox::with_config(config_json);
     body(&sandbox)
-}
-
-// ---------------------------------------------------------------------------
-// LogCapture — in-process log assertion helper for deprecation-warning tests
-// ---------------------------------------------------------------------------
-
-/// A `log::Log` implementation that records every message it receives.
-///
-/// Install with [`LogCapture::install`]; the returned handle provides
-/// [`LogCapture::messages`] for inspection.
-pub(crate) struct LogCapture {
-    records: Arc<Mutex<Vec<String>>>,
-}
-
-impl LogCapture {
-    /// Install this logger as the global logger and return a handle.
-    ///
-    /// Panics if a logger is already set.
-    pub(crate) fn install() -> Self {
-        let records = Arc::new(Mutex::new(Vec::new()));
-        let cap = LogCapture {
-            records: Arc::clone(&records),
-        };
-        // Leak a Box so we can hand `log::set_logger` a &'static reference.
-        let logger: &'static LogCaptureLogger = Box::leak(Box::new(LogCaptureLogger { records }));
-        log::set_logger(logger)
-            .expect("logger already set; only one LogCapture per test is supported");
-        log::set_max_level(log::LevelFilter::Warn);
-        cap
-    }
-
-    /// All captured messages, oldest first.
-    pub(crate) fn messages(&self) -> Vec<String> {
-        self.records.lock().unwrap().clone()
-    }
-}
-
-struct LogCaptureLogger {
-    records: Arc<Mutex<Vec<String>>>,
-}
-
-impl log::Log for LogCaptureLogger {
-    fn enabled(&self, _metadata: &log::Metadata) -> bool {
-        true
-    }
-
-    fn log(&self, record: &log::Record) {
-        self.records
-            .lock()
-            .unwrap()
-            .push(format!("{} {}", record.level(), record.args()));
-    }
-
-    fn flush(&self) {}
 }
 
 /// A throwaway git repository inside a throwaway sandbox root, wired together
