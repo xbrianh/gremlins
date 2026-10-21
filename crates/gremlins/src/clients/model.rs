@@ -22,7 +22,7 @@ pub struct GremlinsModel {
 impl GremlinsModel {
     /// Wrap an erased rig completion model with `max_prompt_bytes` as its
     /// hard prompt-size limit.
-    pub fn new(inner: DynModel<Completion>, max_prompt_bytes: u64) -> Self {
+    pub(crate) fn new(inner: DynModel<Completion>, max_prompt_bytes: u64) -> Self {
         Self {
             inner,
             max_prompt_bytes,
@@ -34,7 +34,7 @@ impl GremlinsModel {
     /// An oversized request returns [`GremlinsModelError::TooLarge`] without
     /// calling the inner model. Provider failures from the inner model are
     /// preserved in [`GremlinsModelError::Provider`].
-    pub fn stream(
+    pub(crate) fn stream(
         &self,
         request: CompletionRequest,
     ) -> Result<Streamed<Completion>, GremlinsModelError> {
@@ -55,7 +55,7 @@ impl GremlinsModel {
     /// This mirrors `stream` for the unary path so both model surfaces stay
     /// governed by the same size check.
     #[allow(dead_code)]
-    pub async fn call(
+    pub(crate) async fn call(
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse, GremlinsModelError> {
@@ -81,7 +81,7 @@ impl GremlinsModel {
     }
 
     #[allow(dead_code)]
-    pub fn capabilities(&self) -> Capabilities {
+    pub(crate) fn capabilities(&self) -> Capabilities {
         self.inner.capabilities()
     }
 
@@ -125,7 +125,7 @@ impl std::fmt::Debug for GremlinsModel {
 
 /// Errors produced by [`GremlinsModel`].
 #[derive(Debug)]
-pub enum GremlinsModelError {
+pub(crate) enum GremlinsModelError {
     /// The serialized request exceeded the configured prompt-size ceiling.
     TooLarge { limit: u64, actual: u64 },
     /// The inner model rejected the request with a provider error.

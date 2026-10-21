@@ -18,7 +18,6 @@ pub enum PackageInfo {
 
 impl PackageInfo {
     /// Package name suitable for display.
-    #[allow(dead_code)]
     pub fn name(&self) -> &str {
         match self {
             PackageInfo::Rust(r) => &r.pkg_name,

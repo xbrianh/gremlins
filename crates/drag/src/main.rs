@@ -2,7 +2,6 @@ mod lang;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::Parser;
@@ -52,7 +51,7 @@ struct Cli {
     #[arg(long, default_value_t = 0.01)]
     epsilon: f64,
 
-    /// Print the resolved model spec and the full request body sent to the API.
+    /// Print the resolved model spec and diagnostic information.
     #[arg(short = 'v', long)]
     verbose: bool,
 
@@ -146,7 +145,7 @@ async fn run() -> Result<(), String> {
     }
 
     // ── resolve model & cache path early (both needed for key computation) ──
-    let model_spec = Some(resolve_comprehensibility_model(cli.model.as_deref())?);
+    let model_spec = resolve_comprehensibility_model(cli.model.as_deref())?;
 
     // Resolve the effective cache path: --cache overrides the default.
     let cache_path: PathBuf = match &cli.cache {
@@ -166,16 +165,14 @@ async fn run() -> Result<(), String> {
 
     // ── pre-compute cache keys and build module → CacheEntry lookup ──
     let mut module_cache: HashMap<String, CacheEntry> = HashMap::new();
-    if let Some(ref ms) = &model_spec {
-        for (module, file, _pkg) in &target_modules {
-            let source = std::fs::read_to_string(file).unwrap_or_default();
-            if source.trim().is_empty() {
-                continue;
-            }
-            let key = compute_cache_key(&source, ms);
-            if let Some(entry) = cache_map.get(&key) {
-                module_cache.insert(module.clone(), entry.clone());
-            }
+    for (module, file, _pkg) in &target_modules {
+        let source = std::fs::read_to_string(file).unwrap_or_default();
+        if source.trim().is_empty() {
+            continue;
+        }
+        let key = compute_cache_key(&source, &model_spec);
+        if let Some(entry) = cache_map.get(&key) {
+            module_cache.insert(module.clone(), entry.clone());
         }
     }
     let cache_hit_count = module_cache.len();
@@ -204,9 +201,17 @@ async fn run() -> Result<(), String> {
             lang::dependency_graph(&pkg)
         }));
     }
-    for handle in handles {
-        let pkg_edges = handle.await.map_err(|e| format!("join error: {e}"))??;
-        edges.extend(pkg_edges);
+    for (i, handle) in handles.into_iter().enumerate() {
+        match handle.await {
+            Ok(Ok(pkg_edges)) => edges.extend(pkg_edges),
+            Ok(Err(e)) => {
+                let pkg_name = scoring_packages[i].name();
+                eprintln!("gremlins-drag: dependency graph skipped for {pkg_name}: {e}");
+            }
+            Err(e) => {
+                eprintln!("gremlins-drag: dependency graph join error: {e}");
+            }
+        }
     }
 
     // 5. Compute fan-in / fan-out
@@ -250,12 +255,11 @@ async fn run() -> Result<(), String> {
     if cli.comprehensibility_estimates < 1 {
         return Err("--comprehensibility-estimates must be >= 1".to_string());
     }
-    let model_spec = model_spec.as_ref().unwrap();
 
-    let cache_state: CacheState = (Arc::new(Mutex::new(cache_map)), cache_path.clone());
+    let cache_state: CacheState = cache_path.clone();
 
     score_comprehensibility(
-        model_spec,
+        &model_spec,
         cli.verbose,
         cli.comprehensibility_estimates,
         &target_modules,
@@ -405,8 +409,9 @@ fn count_tokens(tokenizer: &tiktoken_rs::CoreBPE, file: &Path) -> Result<usize, 
 
 /// Compute the log-drag score for a module.
 ///
-/// When comprehensibility has not been scored, the comprehensibility term is
-/// omitted entirely rather than assuming a perfect score.
+/// Comprehensibility is always scored now (the `--comprehensibility` flag
+/// was removed). The `Option` remains for backward compatibility with
+/// minimal refactoring but the `None` branch is effectively unreachable.
 fn compute_ln_drag(
     w1: f64,
     w2: f64,
@@ -430,6 +435,23 @@ fn compute_ln_drag(
 const MAX_COMP_RETRIES: u32 = 3;
 const COMP_BACKOFF: [f64; 2] = [1.0, 2.0];
 
+/// Classification of an error from [`run_comp_agent`].
+#[derive(Debug)]
+enum CompAgentError {
+    /// A transient failure worth retrying (model produced no/malformed JSON).
+    Retryable(String),
+    /// A non-retryable failure (bail, missing artifact after agent loop exhausted retries).
+    Fatal(String),
+}
+
+impl std::fmt::Display for CompAgentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompAgentError::Retryable(s) | CompAgentError::Fatal(s) => write!(f, "{s}"),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct ComprehensibilityScores {
     naming: u8,
@@ -441,9 +463,12 @@ struct ComprehensibilityScores {
 /// One line in the JSONL cache file.
 ///
 /// The cache key is model-dependent: `blake3(content || "\0" || model_uri)`.
-/// Token counts and graph metrics are model-independent but ride along on the same key so
-/// the cache stays self-consistent — every entry is a full snapshot of all drag dimensions
-/// for a given (content, model) tuple.
+///
+/// **What the cache actually fast-paths:** only `token_count` and
+/// `comprehensibility` are restored on a cache hit. The remaining fields
+/// (`file`, `model`, `fan_in`, `fan_out`, `graph_complexity`, `breakdown`)
+/// are stored for inspection/debugging but are never read back — graph
+/// metrics are position/context-dependent and always recomputed fresh.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct CacheEntry {
     /// BLAKE3 hash of (content || "\0" || model_uri),
@@ -471,6 +496,8 @@ struct CacheEntry {
 /// and the resolved model URI.
 ///
 /// Key = first 16 hex chars of `blake3(content || "\0" || model_uri)`.
+/// The 64-bit truncation is fine at realistic cache sizes but collision
+/// risk grows past ~10⁵–10⁶ entries for strict uniqueness guarantees.
 fn compute_cache_key(content: &str, model_uri: &str) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(content.as_bytes());
@@ -525,16 +552,6 @@ fn append_cache_entry(path: &Path, entry: &CacheEntry) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether a string error from [`run_comp_agent`] is worth retrying.
-///
-/// Bail / missing-artifact errors happen when the model returned empty
-/// (the agent loop breaks, the artifact is never written, and the stage
-/// bails).  Run errors wrap underlying network/provider failures that
-/// the agent loop exhausted its own retries on.
-fn is_retryable_comp_error_str(msg: &str) -> bool {
-    msg.contains("bail") || msg.contains("missing artifact") || msg.contains("gremlin run")
-}
-
 /// Resolve the model to use for comprehensibility scoring.
 /// If `--model` was given, resolve it through profiles.
 /// Otherwise, use the gremlins default model.
@@ -552,9 +569,8 @@ fn resolve_comprehensibility_model(cli_model: Option<&str>) -> Result<String, St
     gremlins::config::resolve_model_with_global(&spec)
 }
 
-/// Shared comprehensibility cache: a lock-protected map plus the JSONL file it
-/// is persisted to.
-type CacheState = (Arc<Mutex<HashMap<String, CacheEntry>>>, PathBuf);
+/// Shared comprehensibility cache: the JSONL file path it is persisted to.
+type CacheState = PathBuf;
 
 /// Handle for a single comprehensibility scoring task.
 /// On success returns all the info needed to compute the median and write the cache.
@@ -701,7 +717,9 @@ async fn score_comprehensibility(
                             });
                         }
                         Err(e) => {
-                            if is_retryable_comp_error_str(&e) && attempt + 1 < MAX_COMP_RETRIES {
+                            if matches!(&e, CompAgentError::Retryable(_))
+                                && attempt + 1 < MAX_COMP_RETRIES
+                            {
                                 eprintln!(
                                     "  [{module}] attempt {}/{}: {e} — retrying in {:.0}s",
                                     attempt + 1,
@@ -715,8 +733,12 @@ async fn score_comprehensibility(
                                 continue;
                             }
                             return Err(format!(
-                                "[{module}] failed after {} attempts: {e}",
-                                attempt + 1
+                                "[{module}] failed after {} attempts: {}",
+                                attempt + 1,
+                                match &e {
+                                    CompAgentError::Retryable(s) | CompAgentError::Fatal(s) =>
+                                        s.as_str(),
+                                }
                             ));
                         }
                     }
@@ -730,11 +752,19 @@ async fn score_comprehensibility(
     // Collect task results into estimates_map (cache-miss modules only).
     let mut estimates_map: HashMap<String, Vec<CompEstimate>> = HashMap::new();
     for handle in handles {
-        let est = handle.await.map_err(|e| format!("join error: {e}"))??;
-        estimates_map
-            .entry(est.module.clone())
-            .or_default()
-            .push(est);
+        let est = handle.await.map_err(|e| format!("join error: {e}"))?;
+        match est {
+            Ok(est) => {
+                estimates_map
+                    .entry(est.module.clone())
+                    .or_default()
+                    .push(est);
+            }
+            Err(e) => {
+                eprintln!("  WARNING: {e}");
+                continue;
+            }
+        }
     }
 
     for (module, _file, _pkg) in modules.iter() {
@@ -776,7 +806,7 @@ async fn score_comprehensibility(
         if let Some(estimates_vec) = estimates_map.get(module.as_str()) {
             if let Some(first) = estimates_vec.first() {
                 if let Some(metrics) = first.cached_metrics {
-                    let (ref arc, ref cp) = &cache_state;
+                    let cp = &cache_state;
                     let (tc, fi, fo, gc) = metrics;
                     let entry = CacheEntry {
                         key: first.cache_key.clone(),
@@ -792,7 +822,6 @@ async fn score_comprehensibility(
                     if let Err(e) = append_cache_entry(cp, &entry) {
                         eprintln!("  [{module}] WARNING: failed to append cache entry: {e}");
                     }
-                    arc.lock().unwrap().insert(first.cache_key.clone(), entry);
                 }
             }
         }
@@ -813,8 +842,9 @@ async fn run_comp_agent(
     prompt: &str,
     model_spec: &str,
     verbose: bool,
-) -> Result<ComprehensibilityScores, String> {
-    let model_uri = ModelURI::parse(model_spec).map_err(|e| format!("invalid model: {e}"))?;
+) -> Result<ComprehensibilityScores, CompAgentError> {
+    let model_uri = ModelURI::parse(model_spec)
+        .map_err(|e| CompAgentError::Fatal(format!("invalid model: {e}")))?;
 
     let stage = AgentBuilder::new("score")
         .prompt(format!(
@@ -836,17 +866,17 @@ async fn run_comp_agent(
         .landscape(false)
         .model(model_uri.clone())
         .build()
-        .map_err(|e| format!("agent build: {e}"))?;
+        .map_err(|e| CompAgentError::Fatal(format!("agent build: {e}")))?;
 
     let def = DefinitionBuilder::new("drag-comp", model_uri)
         .stage(stage)
         .build()
-        .map_err(|e| format!("def build: {e}"))?;
+        .map_err(|e| CompAgentError::Fatal(format!("def build: {e}")))?;
 
     // Gremlin::init canonicalizes definition_path to derive the project root.
     // For ephemeral runs the worktree is a temp dir so the project root is
     // irrelevant — we just need an extant path.
-    let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
+    let cwd = std::env::current_dir().map_err(|e| CompAgentError::Fatal(format!("cwd: {e}")))?;
 
     let config = GremlinConfig { ephemeral: true };
     let mut gremlin = Gremlin::init(
@@ -857,7 +887,7 @@ async fn run_comp_agent(
         Some(model_spec),
         &config,
     )
-    .map_err(|e| format!("gremlin init: {e}"))?;
+    .map_err(|e| CompAgentError::Fatal(format!("gremlin init: {e}")))?;
 
     if verbose {
         eprintln!("  [{module}] running agent stage (model={model_spec})...");
@@ -866,24 +896,25 @@ async fn run_comp_agent(
     let exit_code = gremlin
         .run(None)
         .await
-        .map_err(|e| format!("gremlin run: {e}"))?;
+        .map_err(|e| CompAgentError::Fatal(format!("gremlin run: {e}")))?;
 
     if exit_code != 0 {
-        return Err(format!(
+        return Err(CompAgentError::Fatal(format!(
             "agent stage exited {exit_code} (bail/missing artifact)"
-        ));
+        )));
     }
 
     let content = gremlin
         .state
         .content("artifact://comprehensibility", None)
         .await
-        .map_err(|e| format!("artifact read: {e}"))?;
+        .map_err(|e| CompAgentError::Fatal(format!("artifact read: {e}")))?;
 
-    let json_str = extract_json(&content)
-        .ok_or_else(|| format!("no JSON in artifact: {}", truncate(&content, 200)))?;
+    let json_str = extract_json(&content).ok_or_else(|| {
+        CompAgentError::Retryable(format!("no JSON in artifact: {}", truncate(&content, 200)))
+    })?;
 
-    serde_json::from_str(&json_str).map_err(|e| format!("parse: {e}"))
+    serde_json::from_str(&json_str).map_err(|e| CompAgentError::Retryable(format!("parse: {e}")))
 }
 
 // ---------------------------------------------------------------------------

@@ -13,12 +13,5 @@ pub mod prelude;
 pub mod schemas;
 pub mod stage_spec;
 
-/// Re-exports of the `rig-core` completion types used by downstream binaries
-/// (e.g. `gremlins-drag`). Depending on these through `gremlins` avoids a
-/// second, independently-versioned `rig-core` in those crates.
-pub mod rig {
-    pub use rig_core::completion::{CompletionRequest, CompletionResponse, Message};
-}
-
 #[cfg(test)]
 mod test_support;

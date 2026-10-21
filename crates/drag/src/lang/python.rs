@@ -262,6 +262,13 @@ def extract_edges(pkg_root, pkg_dir):
                     # The imported dotted path is the dependency if we know it.
                     if name in known_mods:
                         edges.add((src_mod, name))
+                    # Also add parent packages (e.g. `a.b` for `import a.b.c`)
+                    # to be symmetric with `from x import y` which adds the
+                    # base module via `add_edge`.
+                    while '.' in name:
+                        name = name.rsplit('.', 1)[0]
+                        if name in known_mods:
+                            edges.add((src_mod, name))
             elif isinstance(node, ast.ImportFrom):
                 names = [
                     alias.name
