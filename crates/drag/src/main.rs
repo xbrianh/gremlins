@@ -2,6 +2,7 @@ mod lang;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::Parser;
@@ -61,6 +62,14 @@ struct Cli {
     /// `--comprehensibility`.
     #[arg(long, default_value_t = 1)]
     comprehensibility_estimates: usize,
+
+    /// Path to a JSONL cache file for comprehensibility scores.
+    /// When set, scores are stored keyed by BLAKE3 hash of
+    /// (file path, file content, model URI). On re-runs, cached
+    /// scores are reused, eliminating redundant LLM calls.
+    /// Without `--comprehensibility` this flag is ignored.
+    #[arg(long)]
+    cache: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -200,12 +209,28 @@ async fn run() -> Result<(), String> {
             return Err("--comprehensibility-estimates must be >= 1".to_string());
         }
         let model_spec = resolve_comprehensibility_model(cli.model.as_deref())?;
+
+        // Load cache (if --cache was set).
+        let cache_state: Option<CacheState> = match &cli.cache {
+            Some(cache_path) => {
+                let map = load_cache(cache_path)?;
+                eprintln!(
+                    "Loaded {} cached scores from {}",
+                    map.len(),
+                    cache_path.display()
+                );
+                Some((Arc::new(Mutex::new(map)), cache_path.clone()))
+            }
+            None => None,
+        };
+
         score_comprehensibility(
             &model_spec,
             cli.verbose,
             cli.comprehensibility_estimates,
             &target_modules,
             &mut scores,
+            cache_state,
         )
         .await?;
     }
@@ -410,12 +435,88 @@ No trailing commas. No // or /* */ comments.
   "abstractions": 0
 }"#;
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 struct ComprehensibilityScores {
     naming: u8,
     control_flow: u8,
     data_flow: u8,
     abstractions: u8,
+}
+
+/// One line in the JSONL cache file.
+#[derive(Serialize, Deserialize, Debug)]
+struct CacheEntry {
+    /// BLAKE3 hash of (abs_path || "\0" || content || "\0" || model_uri),
+    /// hex-encoded, first 16 chars. This is the lookup key.
+    key: String,
+    /// Absolute path of the source file at scoring time.
+    file: String,
+    /// Fully-resolved model URI used for scoring.
+    model: String,
+    /// Median comprehensibility score (0–1).
+    comprehensibility: f64,
+    /// The four dimension scores from the LLM response.
+    breakdown: ComprehensibilityScores,
+}
+
+/// Compute a BLAKE3-based cache key from an absolute file path, the file's
+/// full source text, and the resolved model URI.
+///
+/// Key = first 16 hex chars of `blake3(abs_path || "\0" || content || "\0" || model_uri)`.
+fn compute_cache_key(abs_path: &str, content: &str, model_uri: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(abs_path.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(content.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(model_uri.as_bytes());
+    hasher.finalize().to_hex()[..16].to_string()
+}
+
+/// Load a JSONL cache file, returning a map keyed by `CacheEntry::key`.
+///
+/// An empty or missing file is treated as a cold cache (empty map).
+/// Any line that is not valid JSON or fails to deserialize as a [`CacheEntry`]
+/// produces an error that includes the file path and 1-based line number.
+fn load_cache(path: &Path) -> Result<HashMap<String, CacheEntry>, String> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read cache file {}: {e}", path.display()))?;
+    let mut map = HashMap::new();
+    for (line_no, line) in content.lines().enumerate() {
+        let line = line.trim();
+        let entry: CacheEntry = serde_json::from_str(line).map_err(|e| {
+            format!(
+                "{}:{}: invalid cache entry: {e}",
+                path.display(),
+                line_no + 1
+            )
+        })?;
+        map.insert(entry.key.clone(), entry);
+    }
+    Ok(map)
+}
+
+/// Append one [`CacheEntry`] as a JSON line to the cache file.
+///
+/// Creates the file (and parent directories) if they do not exist.
+fn append_cache_entry(path: &Path, entry: &CacheEntry) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create cache dir {}: {e}", parent.display()))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("failed to open cache file {}: {e}", path.display()))?;
+    let mut line = serde_json::to_string(entry).map_err(|e| format!("serialization error: {e}"))?;
+    line.push('\n');
+    std::io::Write::write_all(&mut file, line.as_bytes())
+        .map_err(|e| format!("failed to write cache entry: {e}"))?;
+    Ok(())
 }
 
 /// Classify a [`GremlinsModelError`] as retryable for comprehensibility scoring.
@@ -455,6 +556,10 @@ fn resolve_comprehensibility_model(cli_model: Option<&str>) -> Result<String, St
     gremlins::config::resolve_model_with_global(&spec)
 }
 
+/// Shared comprehensibility cache: a lock-protected map plus the JSONL file it
+/// is persisted to.
+type CacheState = (Arc<Mutex<HashMap<String, CacheEntry>>>, PathBuf);
+
 /// Handle for a single comprehensibility scoring task.
 /// On success returns the module name and its score (guaranteed `Some`).
 /// On failure returns the module name and a human-readable reason.
@@ -466,6 +571,7 @@ async fn score_comprehensibility(
     estimates: usize,
     modules: &[(String, PathBuf, String)],
     scores: &mut [ModuleDrag],
+    cache_state: Option<CacheState>,
 ) -> Result<(), String> {
     // `model_spec` is already fully resolved by `resolve_comprehensibility_model`.
     use gremlins::clients::client::Client;
@@ -530,7 +636,13 @@ async fn score_comprehensibility(
             let file = file.clone();
             let model = model.clone();
             let additional = additional.clone();
+            let model_spec = model_spec.to_string();
             let fence = lang::code_fence(&file);
+
+            // Clone cache components for this task.
+            let cache_arc = cache_state.as_ref().map(|cs| Arc::clone(&cs.0));
+            let cache_path = cache_state.as_ref().map(|cs| cs.1.clone());
+
             handles.push(tokio::spawn(async move {
                 // ── read source (file errors are never retried) ──
                 let source = match std::fs::read_to_string(&file) {
@@ -541,6 +653,23 @@ async fn score_comprehensibility(
                 };
                 if source.trim().is_empty() {
                     return Ok((module, 1.0));
+                }
+
+                let abs_path = match std::fs::canonicalize(&file) {
+                    Ok(p) => p.to_string_lossy().into_owned(),
+                    Err(_) => file.to_string_lossy().into_owned(),
+                };
+
+                // ── cache lookup ──
+                let cache_key = cache_arc
+                    .as_ref()
+                    .map(|_| compute_cache_key(&abs_path, &source, &model_spec));
+                if let (Some(ref arc), Some(ref key)) = (&cache_arc, &cache_key) {
+                    let map = arc.lock().unwrap();
+                    if let Some(entry) = map.get(key) {
+                        eprintln!("  [{module}] cache hit ({key})");
+                        return Ok((module, entry.comprehensibility));
+                    }
                 }
 
                 let prompt = format!("SOURCE FILE ({module}):\n\n```{fence}\n{source}\n```");
@@ -641,6 +770,28 @@ async fn score_comprehensibility(
                                 truncate(&text, 400)
                             );
                             }
+
+                            // ── cache insert ──
+                            if let (Some(ref arc), Some(ref cp), Some(ref key)) =
+                                (&cache_arc, &cache_path, &cache_key)
+                            {
+                                let entry = CacheEntry {
+                                    key: key.clone(),
+                                    file: abs_path.clone(),
+                                    model: model_spec.clone(),
+                                    comprehensibility: score,
+                                    breakdown: c,
+                                };
+                                // Write outside the lock so other tasks can still
+                                // perform cache-hit lookups while this task does I/O.
+                                if let Err(e) = append_cache_entry(cp, &entry) {
+                                    eprintln!(
+                                        "  [{module}] WARNING: failed to append cache entry: {e}"
+                                    );
+                                }
+                                arc.lock().unwrap().insert(key.clone(), entry);
+                            }
+
                             return Ok((module, score));
                         }
                         Err(e) => {
@@ -1135,5 +1286,117 @@ mod tests {
     fn median_identical_values() {
         let vals = [0.5, 0.5, 0.5];
         assert!((median(&vals) - 0.5).abs() < 1e-12);
+    }
+
+    // ── cache tests ──
+
+    #[test]
+    fn cache_key_is_deterministic() {
+        let k1 = compute_cache_key("/abs/path/foo.rs", "fn main() {}", "openai/gpt-4o");
+        let k2 = compute_cache_key("/abs/path/foo.rs", "fn main() {}", "openai/gpt-4o");
+        assert_eq!(k1, k2);
+        assert_eq!(k1.len(), 16);
+        // Different content → different key.
+        let k3 = compute_cache_key(
+            "/abs/path/foo.rs",
+            "fn main() { /* changed */ }",
+            "openai/gpt-4o",
+        );
+        assert_ne!(k1, k3);
+        // Different model → different key.
+        let k4 = compute_cache_key("/abs/path/foo.rs", "fn main() {}", "anthropic/claude");
+        assert_ne!(k1, k4);
+        // Different path → different key.
+        let k5 = compute_cache_key("/abs/path/bar.rs", "fn main() {}", "openai/gpt-4o");
+        assert_ne!(k1, k5);
+    }
+
+    #[test]
+    fn load_cache_missing_file_is_cold() {
+        let map = load_cache(Path::new("/nonexistent/cache/file.jsonl")).unwrap();
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn load_cache_blank_line_errors() {
+        let dir = std::env::temp_dir().join("drag-test-blank-line");
+        let _ = std::fs::create_dir_all(&dir);
+        let cache_path = dir.join("cache.jsonl");
+        // Write a file where line 2 is blank.
+        std::fs::write(
+            &cache_path,
+            "{\"key\":\"abc\",\"file\":\"/f.rs\",\"model\":\"m\",\"comprehensibility\":0.5,\"breakdown\":{\"naming\":2,\"control_flow\":2,\"data_flow\":2,\"abstractions\":2}}\n\n",
+        )
+        .unwrap();
+        let err = load_cache(&cache_path).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            err.contains(&cache_path.display().to_string()),
+            "error should contain cache file path, got: {err}"
+        );
+        assert!(
+            err.contains(":2:"),
+            "error should mention line 2, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_cache_malformed_line_errors_with_line_number() {
+        let dir = std::env::temp_dir().join("drag-test-malformed");
+        let _ = std::fs::create_dir_all(&dir);
+        let cache_path = dir.join("cache.jsonl");
+        std::fs::write(&cache_path, "not valid json\n").unwrap();
+        let err = load_cache(&cache_path).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            err.contains(&cache_path.display().to_string()),
+            "error should contain cache file path, got: {err}"
+        );
+        assert!(
+            err.contains(":1:"),
+            "error should mention line 1, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_cache_valid_entries() {
+        let dir = std::env::temp_dir().join("drag-test-valid");
+        let _ = std::fs::create_dir_all(&dir);
+        let cache_path = dir.join("cache.jsonl");
+        let line = "{\"key\":\"deadbeef12345678\",\"file\":\"/src/main.rs\",\"model\":\"openai/gpt-4o\",\"comprehensibility\":0.75,\"breakdown\":{\"naming\":3,\"control_flow\":3,\"data_flow\":3,\"abstractions\":3}}\n";
+        std::fs::write(&cache_path, line).unwrap();
+        let map = load_cache(&cache_path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(map.len(), 1);
+        let entry = map.get("deadbeef12345678").unwrap();
+        assert_eq!(entry.comprehensibility, 0.75);
+        assert_eq!(entry.breakdown.naming, 3);
+    }
+
+    #[test]
+    fn append_and_load_roundtrip() {
+        let dir = std::env::temp_dir().join("drag-test-roundtrip");
+        let _ = std::fs::create_dir_all(&dir);
+        let cache_path = dir.join("cache.jsonl");
+        let entry = CacheEntry {
+            key: "abcd1234abcd1234".to_string(),
+            file: "/abs/path/module.rs".to_string(),
+            model: "openai/gpt-4o".to_string(),
+            comprehensibility: 0.5,
+            breakdown: ComprehensibilityScores {
+                naming: 2,
+                control_flow: 2,
+                data_flow: 2,
+                abstractions: 2,
+            },
+        };
+        append_cache_entry(&cache_path, &entry).unwrap();
+        let map = load_cache(&cache_path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(map.len(), 1);
+        let loaded = map.get("abcd1234abcd1234").unwrap();
+        assert_eq!(loaded.comprehensibility, 0.5);
+        assert_eq!(loaded.file, "/abs/path/module.rs");
+        assert_eq!(loaded.model, "openai/gpt-4o");
     }
 }
