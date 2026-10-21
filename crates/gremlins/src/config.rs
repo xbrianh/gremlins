@@ -211,7 +211,6 @@ struct BackoffSection {
 ///
 /// Forward-looking: future landscape settings will be added here.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct LandscapeSection {
     /// Preferred key: `max-tokens` under `landscape:`.
     #[serde(rename = "max-tokens", default)]
@@ -1380,7 +1379,7 @@ mod tests {
     use std::fs;
 
     use crate::clients::client::Client;
-    use crate::test_support::{EnvGuard, Sandbox};
+    use crate::test_support::{EnvGuard, LogCapture, Sandbox};
 
     // -----------------------------------------------------------------------
     // Config parsing tests
@@ -2408,9 +2407,20 @@ model-profiles:
     fn test_max_landscape_tokens_top_level_deprecated_still_works() {
         // When only the top-level key is present and `landscape.max-tokens` is
         // absent, the top-level value is used (with a deprecation warning).
+        let _cap = LogCapture::install();
         let _sandbox = Sandbox::with_config(Some(r#"{"max-landscape-tokens": 33333}"#));
         let cfg = Config::load().unwrap();
         assert_eq!(cfg.max_landscape_tokens(), 33333);
+
+        let msgs = _cap.messages();
+        let deprecation = msgs
+            .iter()
+            .find(|m| m.contains("max-landscape-tokens") && m.contains("deprecated"));
+        assert!(
+            deprecation.is_some(),
+            "expected deprecation warning for top-level max-landscape-tokens, got: {:?}",
+            msgs
+        );
     }
 
     #[test]
