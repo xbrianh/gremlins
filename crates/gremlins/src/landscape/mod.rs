@@ -212,10 +212,13 @@ impl LandscapeExplorer {
     }
 }
 
-/// Walk the directory tree, collecting every outlinable file path.
+/// Walk the directory tree, collecting every file whose size is within
+/// `MAX_OUTLINE_BYTES`. Extension filtering happens later in
+/// `is_outlineable_file`, so the returned paths may include files with
+/// extensions that are not outlineable (they become skipped entries).
 ///
-/// Applies the same filters as `build`: depth limit, skip dirs,
-/// file extension, and file size. Returns paths in alphabetical order.
+/// Applies the same filters as `build`: depth limit and skip dirs.
+/// Returns paths in alphabetical order.
 fn collect_paths(root: &Path, depth_limit: usize) -> Result<Vec<PathBuf>, LandscapeError> {
     let mut paths = Vec::new();
     collect_paths_recursive(root, depth_limit, &mut paths)?;
@@ -1257,19 +1260,16 @@ mod tests {
         let empty_path = root.path().join("src/empty.rs");
         let main_path = root.path().join("src/child/main.rs");
 
-        // Uncached build keeps the zero-item file, so `src` is correctly seen
+        // Build keeps the zero-item file, so `src` is correctly seen
         // as containing files and is not collapsed into a spine.
-        let uncached = LandscapeExplorer.build(root.path(), 10).unwrap();
-        assert_eq!(uncached.len(), 2);
-        assert!(uncached
+        let outlines = LandscapeExplorer.build(root.path(), 10).unwrap();
+        assert_eq!(outlines.len(), 2);
+        assert!(outlines
             .iter()
             .any(|o| o.path == empty_path && o.items.is_empty()));
-        let uncached_spine_map = build_spine_map(&uncached, root.path());
-        assert!(!uncached_spine_map.is_spine(&PathBuf::from("src")));
-        assert_eq!(
-            compressed_depth(&main_path, root.path(), &uncached_spine_map),
-            2
-        );
+        let spine_map = build_spine_map(&outlines, root.path());
+        assert!(!spine_map.is_spine(&PathBuf::from("src")));
+        assert_eq!(compressed_depth(&main_path, root.path(), &spine_map), 2);
     }
 
     #[test]
