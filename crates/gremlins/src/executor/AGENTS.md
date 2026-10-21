@@ -72,12 +72,9 @@ The registry is URI-based (`artifact://scope/key`). `is_registered_uri`
 accepts both a bare key and its `artifact://` form because pipelines
 spell guards/stop conditions either way.
 
-Landscape caching writes `landscape.cache.json` into the filesystem state
-root (only when the concrete store is a `FileSystemStateStore`). It is an
-optimization: a corrupt or unwritable cache degrades to a fresh rebuild and is
-never a failure. The walker (`landscape/mod.rs`) builds the outline, and
-`system_prompt.rs` decides how to inject it; run-loop code in `run.rs` only
-passes the `client.has_tool("Landscape")` flag through.
+The walker (`landscape/mod.rs`) builds the outline, and `system_prompt.rs`
+decides how to inject it; run-loop code in `run.rs` only passes the
+`client.has_tool("Landscape")` flag through.
 
 ### Supervisor
 

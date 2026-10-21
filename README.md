@@ -694,9 +694,8 @@ and its item names/paths have comment delimiters escaped.
 - Native agents also have the `Landscape` tool for current line numbers after
   edits and to explore the directory tree; the block only advertises it when
   the stage's effective tool list actually includes that tool.
-- A `landscape.cache.json` lives in filesystem-backed state directories and
-  makes per-stage rebuilds incremental; it is an optimization and corrupt or
-  unwritable caches degrade silently to fresh builds.
+- Each build reparses every eligible recognized file from scratch; the
+  computation is fast enough that caching is unnecessary.
 
 ### Model specifier syntax
 
