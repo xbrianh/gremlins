@@ -45,10 +45,10 @@ interpolation:
     out_name: "artifact://path"            # bind artifact path (required)
     out_opt?: "artifact://path"            # ? suffix = optional artifact
 options:
-  idle_timeout: 600          # seconds (optional)
-  capture_events: true       # capture stream events (optional)
-  max_turns: 100             # override max agent turns (optional)
   …                          # arbitrary key/value pairs passed through
+# Turn limits, idle timeout, and event capture are controlled via
+# environment variables (GREMLINS_AGENT_MAX_TURNS, GREMLINS_STREAM_IDLE_TIMEOUT)
+# and are not stage options.
 ```
 
 ### `exec`
@@ -102,12 +102,12 @@ body:                        # list of child stage mappings
 max_concurrent: 4            # max concurrent children (optional)
 cancel_on_error: true        # stop all on first failure (default false)
 error_policy: any            # "any" (default): fail if any child fails; "all": fail only if all fail
-skip_if_exists: "artifact://path"
 fork:
-  cmds:                      # commands run once before children
+  cmds:                      # per-child: run before each child is launched
     - git worktree add --detach "$GREMLIN_FORK_WORKDIR" HEAD
 join:
-  cmds:                      # commands run once after all children finish
+  cmds:                      # per-child: run after each child finishes
+    # Substitution map is empty for join commands.
     - echo "all done"
 ```
 
@@ -172,7 +172,7 @@ inputs:
   my_content: content("artifact://plan.md")      # reads file content → {my_content}
   my_path: "artifact://plan.md"                   # bare URI → file path → {my_path}
   my_optional: "artifact://plan.md?"              # optional bare URI
-  my_opt_content: content("artifact://plan.md?")  # optional content
+  my_opt_content: content("artifact://plan.md")?  # optional content
 ```
 
 - `content()` wraps an artifact URI to inline the artifact's contents rather than its path.
@@ -192,9 +192,15 @@ outputs:
 
 ### Interpolation in command strings
 
-In `exec` stages and `fork`/`join`/`bootstrap` commands, interpolation vars
-appear as `{var_name}` tokens. Runtime normalises hyphens ↔ underscores:
-`{my-var}` and `{my_var}` are equivalent.
+In `exec` stages and `bootstrap.launch_cmds`, interpolation vars from
+`inputs` appear as `{var_name}` tokens. Runtime normalises hyphens ↔
+underscores: `{my-var}` and `{my_var}` are equivalent.
+
+Fork commands receive only fixed child-metadata placeholders (`{child_key}`,
+`{child_name}`, `{child_id}`, `{parent_id}`, `{group_name}`) plus
+environment variables `GREMLIN_WORKDIR` and `GREMLIN_FORK_WORKDIR`.
+Join commands receive an empty substitution map — artifact and input
+placeholders are not available in join hooks.
 
 ## Bootstrap
 
@@ -214,10 +220,11 @@ bootstrap:
   launch_cmds:                                  # shell commands run at bootstrap (file setup)
     - gremlins:bind_artifact("artifact://plan.md", plan)
     - gremlins:bind_artifact("artifact://instructions.md", instructions)
-    - 'git worktree add --detach "$GREMLIN_WORKDIR" "$SHA"'
+    - gremlins:bind_artifact("artifact://base_ref", base_ref)
+    - 'BASE_REF={base_ref} && SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "${BASE_REF:-HEAD}") && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && echo "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"'
   env: |                                        # shell script sourced into environment
     export CARGO_INCREMENTAL=0
-  cli_out:                                       # artifact bindings emitted back to CLI
+  cli_out:                                       # artifact registrations at bootstrap time
     base_sha: "artifact://base_sha"
 ```
 
@@ -226,7 +233,9 @@ bootstrap:
 - `launch_cmds` run after source values are available. `gremlins:bind_artifact(uri, key)` binds
   a source value to an artifact for downstream stages.
 - `env` is a shell script sourced before every stage.
-- `cli_out` maps artifact URIs to names — these are emitted when the gremlin finishes.
+- `cli_out` registers artifacts into the store during bootstrap by binding files that were
+  written by `launch_cmds`. It does not emit output on its own — it is a mechanical
+  registration step that happens before any pipeline stage runs.
 
 ## Land
 
@@ -234,8 +243,9 @@ bootstrap:
 land:
   interpolation:
     inputs:
-      message: content("artifact://commit_message.txt")
+      message: artifact://commit_message.txt
   land_cmds:                                     # commands to execute (e.g. merge worktree, push)
+    - WORKTREE_HEAD=$(git -C "$GREMLIN_WORKDIR" rev-parse HEAD)
     - git merge --squash "$WORKTREE_HEAD"
     - 'git diff --cached --quiet || git commit -F "{message}"'
   clean_cmds:                                    # cleanup commands (run on both success and failure)
@@ -243,13 +253,18 @@ land:
     - git worktree prune
 ```
 
-- `land` is a special final exec stage that runs after all other stages.
-- `land_cmds` run when land is invoked. `clean_cmds` always run afterward.
-- Interpolation under `land.interpolation.inputs` uses the same `content()` / bare URI rules.
+- `land` is a final exec stage that runs **explicitly** via `gremlins land <id>`, not
+  automatically after pipeline execution.
+- `land.inputs` uses bare artifact URIs (not `content()`): `git commit -F` expects
+  a file path, not inline text. See `.gremlins/local.yaml` for a working example.
+- `clean_cmds` run separately during `Gremlin::clean` (triggered by `gremlins rm`
+  or `gremlins clean`), not automatically after `land_cmds`.
 
 ## `skip_if_exists`
 
-Available on `sequence`, `parallel`, and (via stage definitions) any stage:
+Available on `sequence` stages only (and definition references that expand to
+sequences). Agent and exec stages do not read it, and `run_parallel` discards
+it. Wrap non-sequence stages in a guarded sequence when a skip guard is needed.
 
 ```yaml
 skip_if_exists: "artifact://plan.md"
