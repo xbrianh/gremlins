@@ -415,11 +415,8 @@ async fn run_agent(
 
     // The landscape is recomputed before every agent stage. After an `exec`
     // stage mutates files, the next agent stage therefore sees a fresh
-    // snapshot; the (mtime, size) cache keeps this incrementally cheap and,
-    // after the changes in `landscape/cache.rs`, an unchanged tree skips the
-    // JSON write entirely. Chat still rebuilds once per turn (every edit
-    // shifts line numbers, so a per-session memo would go stale quickly), but
-    // the cache keeps the rebuild to touched files only.
+    // snapshot. Chat rebuilds once per turn (every edit shifts line numbers,
+    // so a per-session memo would go stale quickly).
     let system_prompt = agent_system_prompt(
         prepared.system_prompt(),
         if agent.landscape {
