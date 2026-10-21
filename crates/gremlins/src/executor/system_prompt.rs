@@ -55,6 +55,18 @@ impl SystemPrompt {
     }
 }
 
+/// Build the assembled system prompt for an agent stage, conditionally
+/// including the landscape block.
+///
+/// This is a thin wrapper around [`SystemPrompt`] that keeps the flag-driven
+/// branch out of `run_agent` so both arms can be tested directly.
+pub(crate) fn agent_system_prompt(base: String, landscape_block: Option<String>) -> String {
+    match landscape_block {
+        Some(block) => SystemPrompt::new(base).with_landscape(block).assemble(),
+        None => SystemPrompt::new(base).assemble(),
+    }
+}
+
 /// Compute the gremlin's stage-start landscape block.
 ///
 /// The block is a one-shot snapshot of `gremlin.cwd()` at call time. A missing
@@ -246,6 +258,37 @@ mod tests {
             .assemble();
         assert_eq!(prompt, "base prompt");
     }
+
+    // --- agent_system_prompt (the flag-driven helper used by run_agent) ---
+
+    #[test]
+    fn agent_system_prompt_includes_block_when_provided() {
+        let base = "base prompt".to_string();
+        let block = "<!-- LANDSCAPE BLOCK -->".to_string();
+
+        let assembled = agent_system_prompt(base.clone(), Some(block.clone()));
+        assert!(
+            assembled.contains(&block),
+            "landscape block must be present when Some(block) is passed"
+        );
+        assert!(
+            assembled.starts_with(&base),
+            "base prompt must come before the landscape block"
+        );
+    }
+
+    #[test]
+    fn agent_system_prompt_omits_block_when_none() {
+        let base = "base prompt".to_string();
+
+        let assembled = agent_system_prompt(base.clone(), None);
+        assert_eq!(
+            assembled, base,
+            "assembled prompt must equal base when no landscape block is passed"
+        );
+    }
+
+    // --- landscape_block (integration) ---
 
     #[tokio::test]
     async fn missing_cwd_produces_empty_block() {

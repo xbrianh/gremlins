@@ -2937,7 +2937,28 @@ mod tests {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// Returns true if a process with the given pid exists on this host.
+    ///
+    /// `kill -0` reports success for zombies too, because a zombie still
+    /// occupies a process-table entry until its parent (or init) reaps it.
+    /// A killed descendant is precisely what the process-group timeout test
+    /// asserts, so on Linux treat zombies as dead by reading `/proc`.
     fn process_alive(pid: u32) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                // `/proc/<pid>/stat` is `pid (comm) state ...`. `comm` may
+                // itself contain spaces and parentheses, so split after the
+                // last `)` and read the next field.
+                if let Some(state) = stat
+                    .rsplit_once(')')
+                    .and_then(|(_, rest)| rest.split_whitespace().next())
+                {
+                    if matches!(state, "Z" | "X" | "x") {
+                        return false;
+                    }
+                }
+            }
+        }
         std::process::Command::new("kill")
             .arg("-0")
             .arg(pid.to_string())

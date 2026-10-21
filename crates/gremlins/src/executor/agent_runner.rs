@@ -298,6 +298,7 @@ mod tests {
                 r#"content("artifact://world")"#.to_string(),
             )]),
             outputs_map: HashMap::new(),
+            landscape: true,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -321,6 +322,7 @@ mod tests {
                 r#"content("artifact://interp-src")"#.to_string(),
             )]),
             outputs_map: HashMap::new(),
+            landscape: true,
         };
         let fw = HashMap::from([("name".to_string(), "from-fw".to_string())]);
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -345,6 +347,7 @@ mod tests {
                 r#"content("artifact://interp-val")"#.to_string(),
             )]),
             outputs_map: HashMap::from([("key".to_string(), "artifact://out.md".to_string())]),
+            landscape: true,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -370,6 +373,7 @@ mod tests {
             options: HashMap::new(),
             interpolation_map: HashMap::from([("missing".to_string(), "nonexistent".to_string())]),
             outputs_map: HashMap::new(),
+            landscape: true,
         };
         let fw = HashMap::new();
         let err = prepare_agent(&agent, &store, &store, "", &fw)
@@ -392,6 +396,7 @@ mod tests {
                 "out".to_string(),
                 "artifact://{loop_iter}/out.txt".to_string(),
             )]),
+            landscape: true,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "my-agent~3", &fw)
@@ -421,6 +426,7 @@ mod tests {
                 r#"content("artifact://{loop_iter}/plan.md")"#.to_string(),
             )]),
             outputs_map: HashMap::new(),
+            landscape: true,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "my-agent~2", &fw)
@@ -440,6 +446,7 @@ mod tests {
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::from([("result?".to_string(), "artifact://out.md".to_string())]),
+            landscape: true,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -467,6 +474,7 @@ mod tests {
                 r#"content("artifact://openai")"#.to_string(),
             )]),
             outputs_map: HashMap::new(),
+            landscape: true,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -486,6 +494,7 @@ mod tests {
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
+            landscape: true,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -505,6 +514,7 @@ mod tests {
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
+            landscape: true,
         };
         let fw = HashMap::new();
         let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -528,6 +538,7 @@ mod tests {
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
+            landscape: true,
         };
         let fw = HashMap::new();
         let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -554,6 +565,7 @@ mod tests {
                 "{name}".to_string(),
                 "artifact://{name}.md".to_string(),
             )]),
+            landscape: true,
         };
         let fw = HashMap::from([("name".to_string(), "my-agent".to_string())]);
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -578,6 +590,7 @@ mod tests {
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
+            landscape: true,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -601,6 +614,7 @@ mod tests {
                 "artifact://value".to_string(),
             )]),
             outputs_map: HashMap::new(),
+            landscape: true,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -626,6 +640,7 @@ mod tests {
             options: opts,
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
+            landscape: true,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -650,6 +665,7 @@ mod tests {
                 ("b".to_string(), "artifact://b.md".to_string()),
                 ("c".to_string(), "artifact://c.md".to_string()),
             ]),
+            landscape: true,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -670,6 +686,7 @@ mod tests {
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
+            landscape: true,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -696,6 +713,7 @@ mod tests {
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::from([(key.to_string(), uri.to_string())]),
+            landscape: true,
         }
     }
 
@@ -750,6 +768,7 @@ mod tests {
                 ("a".to_string(), "artifact://a.md".to_string()),
                 ("b".to_string(), "artifact://b.md".to_string()),
             ]),
+            landscape: true,
         };
         let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
@@ -777,6 +796,7 @@ mod tests {
                 ("a".to_string(), "artifact://a.md".to_string()),
                 ("b?".to_string(), "artifact://b.md".to_string()),
             ]),
+            landscape: true,
         };
         let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
@@ -814,6 +834,7 @@ mod tests {
             )]),
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
+            landscape: true,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -833,6 +854,7 @@ mod tests {
             options: HashMap::new(),
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
+            landscape: true,
         };
         let fw = HashMap::new();
         let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)

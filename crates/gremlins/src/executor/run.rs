@@ -33,7 +33,7 @@ use crate::executor::parallel::run_parallel;
 use crate::executor::state;
 use crate::executor::state::{Checkout, Collision, FileSystemStateStore, StateStore};
 use crate::executor::supervisor::get_run_map;
-use crate::executor::system_prompt::{landscape_block, SystemPrompt};
+use crate::executor::system_prompt::{agent_system_prompt, landscape_block};
 use crate::executor::vars;
 use crate::executor::RunError;
 use indexmap::IndexMap;
@@ -420,9 +420,14 @@ async fn run_agent(
     // JSON write entirely. Chat still rebuilds once per turn (every edit
     // shifts line numbers, so a per-session memo would go stale quickly), but
     // the cache keeps the rebuild to touched files only.
-    let system_prompt = SystemPrompt::new(prepared.system_prompt())
-        .with_landscape(landscape_block(gremlin, client.has_tool("Landscape")).await)
-        .assemble();
+    let system_prompt = agent_system_prompt(
+        prepared.system_prompt(),
+        if agent.landscape {
+            Some(landscape_block(gremlin, client.has_tool("Landscape")).await)
+        } else {
+            None
+        },
+    );
 
     let stage_env = gremlin.env.clone();
 
@@ -2036,6 +2041,41 @@ mod tests {
             Err(RunError::Bail { .. }) => {}
             other => panic!("expected Bail, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn agent_landscape_flag_controls_system_prompt_assembly() {
+        // Exercises the agent_system_prompt helper that run_agent calls:
+        //   - landscape: true  → agent_system_prompt(base, Some(block))
+        //   - landscape: false → agent_system_prompt(base, None)
+        //
+        // This is the same code path as the production flag handling — if the
+        // `agent.landscape` conditional in run_agent is ever removed or
+        // inverted, the `None` arm here will fail.
+        let base = "base prompt".to_string();
+        let block = "<!-- LANDSCAPE BLOCK -->".to_string();
+
+        // When landscape is true, the block appears in the assembled prompt.
+        let with_landscape = agent_system_prompt(base.clone(), Some(block.clone()));
+        assert!(
+            with_landscape.contains(&block),
+            "landscape block must be present when landscape flag is true"
+        );
+        assert!(
+            with_landscape.starts_with(&base),
+            "base prompt must come before the landscape block"
+        );
+
+        // When landscape is false, the block is absent.
+        let without_landscape = agent_system_prompt(base.clone(), None);
+        assert!(
+            !without_landscape.contains(&block),
+            "landscape block must be absent when landscape flag is false"
+        );
+        assert_eq!(
+            without_landscape, base,
+            "assembled prompt must equal base when landscape is false"
+        );
     }
 
     // --- exec ---

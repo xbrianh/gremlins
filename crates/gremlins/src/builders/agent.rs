@@ -37,6 +37,7 @@ pub struct AgentBuilder {
     outputs_map: HashMap<String, String>,
     model: Option<ModelURI>,
     task_models: Option<IndexMap<String, String>>,
+    landscape: bool,
 }
 
 impl AgentBuilder {
@@ -50,6 +51,7 @@ impl AgentBuilder {
             outputs_map: HashMap::new(),
             model: None,
             task_models: None,
+            landscape: true,
         }
     }
 
@@ -121,6 +123,15 @@ impl AgentBuilder {
     /// Set the stage's own task-model overrides.
     pub fn task_models(mut self, task_models: IndexMap<String, String>) -> Self {
         self.task_models = Some(task_models);
+        self
+    }
+
+    /// Control whether the executor recomputes a landscape block before this stage.
+    /// Defaults to `true`. When `false`, the system prompt is assembled without a
+    /// landscape block — useful for conversation turns where the block is already
+    /// present in the context from the first turn.
+    pub fn landscape(mut self, landscape: bool) -> Self {
+        self.landscape = landscape;
         self
     }
 
@@ -224,6 +235,7 @@ impl AgentBuilder {
             options: self.options,
             interpolation_map: self.interpolation_map,
             outputs_map: self.outputs_map,
+            landscape: self.landscape,
         };
         Ok(StageSpec::Agent {
             stage,
@@ -350,5 +362,31 @@ mod tests {
             )
             .build()
             .unwrap();
+    }
+
+    #[test]
+    fn landscape_flag_defaults_to_true() {
+        let stage = AgentBuilder::new("test").prompt("hi").build().unwrap();
+        match stage {
+            StageSpec::Agent { stage, .. } => {
+                assert!(stage.landscape, "landscape must default to true");
+            }
+            other => panic!("expected Agent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn landscape_setter() {
+        let stage = AgentBuilder::new("test")
+            .prompt("hi")
+            .landscape(false)
+            .build()
+            .unwrap();
+        match stage {
+            StageSpec::Agent { stage, .. } => {
+                assert!(!stage.landscape, "landscape setter must propagate false");
+            }
+            other => panic!("expected Agent, got {other:?}"),
+        }
     }
 }

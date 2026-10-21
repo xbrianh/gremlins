@@ -1246,6 +1246,41 @@ stages:
     }
 
     #[test]
+    fn agent_landscape_not_in_yaml_and_defaults_true_on_reparse() {
+        // Build with landscape: false, verify the field does NOT appear in
+        // serialized YAML, and that a re-parsed stage always gets landscape: true.
+        let stage = AgentBuilder::new("plan")
+            .prompt("hi")
+            .landscape(false)
+            .build()
+            .unwrap();
+
+        let yaml_val = stage.to_yaml();
+        let yaml_str = serde_yaml::to_string(&yaml_val).unwrap();
+        assert!(
+            !yaml_str.contains("landscape"),
+            "landscape field must not appear in YAML: {yaml_str}"
+        );
+
+        // Re-parse through stage_from_yaml — landscape must default to true.
+        let mapping = yaml_val
+            .as_mapping()
+            .expect("to_yaml must produce a mapping");
+        let settings = config::Config::default();
+        let round_tripped = stage_from_yaml(mapping, Some(&settings), None)
+            .expect("stage_from_yaml must accept to_yaml output");
+        match round_tripped {
+            StageSpec::Agent { stage, .. } => {
+                assert!(
+                    stage.landscape,
+                    "landscape must default to true when parsed from YAML"
+                );
+            }
+            other => panic!("expected Agent, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn exec_to_yaml_round_trip() {
         let stage = ExecBuilder::new("run")
             .cmd("echo {input} > {out}")
