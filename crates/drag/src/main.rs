@@ -27,10 +27,6 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
-    /// Also score comprehensibility via LLM (requires a configured model).
-    #[arg(long)]
-    comprehensibility: bool,
-
     /// Model spec for comprehensibility scoring (e.g. "openai/gpt-4o").
     /// Defaults to the gremlins default model.
     #[arg(long)]
@@ -49,7 +45,6 @@ struct Cli {
     w2: f64,
 
     /// Weight for comprehensibility in the ln_drag formula (subtracted).
-    /// Only applied when `--comprehensibility` is set.
     #[arg(long, default_value_t = 0.4)]
     w3: f64,
 
@@ -62,8 +57,7 @@ struct Cli {
     verbose: bool,
 
     /// Number of independent LLM estimates per module for comprehensibility
-    /// scoring (median is used). Default 1. Only meaningful with
-    /// `--comprehensibility`.
+    /// scoring (median is used). Default 1.
     #[arg(long, default_value_t = 1)]
     comprehensibility_estimates: usize,
 
@@ -71,7 +65,6 @@ struct Cli {
     /// When set, scores are stored keyed by BLAKE3 hash of
     /// (file path, file content, model URI). On re-runs, cached
     /// scores are reused, eliminating redundant LLM calls.
-    /// Without `--comprehensibility` this flag is ignored.
     #[arg(long)]
     cache: Option<PathBuf>,
 }
@@ -125,11 +118,6 @@ async fn main() {
 async fn run() -> Result<(), String> {
     let cli = Cli::parse();
 
-    // ── guard ──
-    if cli.cache.is_some() && !cli.comprehensibility {
-        return Err("--cache requires --comprehensibility".to_string());
-    }
-
     // 1. Discover packages (Rust + Python, best-effort)
     let packages = lang::discover_packages();
 
@@ -158,11 +146,7 @@ async fn run() -> Result<(), String> {
     }
 
     // ── resolve model & load cache early (both needed for key computation) ──
-    let model_spec: Option<String> = if cli.comprehensibility {
-        Some(resolve_comprehensibility_model(cli.model.as_deref())?)
-    } else {
-        None
-    };
+    let model_spec = Some(resolve_comprehensibility_model(cli.model.as_deref())?);
 
     let cache_map: Option<HashMap<String, CacheEntry>> = match &cli.cache {
         Some(cache_path) => {
@@ -265,34 +249,31 @@ async fn run() -> Result<(), String> {
         });
     }
 
-    // 7. Comprehensibility (optional). Failures skip individual modules
-    //    rather than aborting the whole run.
-    if cli.comprehensibility {
-        if cli.comprehensibility_estimates < 1 {
-            return Err("--comprehensibility-estimates must be >= 1".to_string());
-        }
-        let model_spec = model_spec.as_ref().unwrap();
-
-        // Use the already-loaded cache.
-        let cache_state: Option<CacheState> = match &cli.cache {
-            Some(cache_path) => {
-                let map = cache_map.as_ref().unwrap().clone();
-                Some((Arc::new(Mutex::new(map)), cache_path.clone()))
-            }
-            None => None,
-        };
-
-        score_comprehensibility(
-            model_spec,
-            cli.verbose,
-            cli.comprehensibility_estimates,
-            &target_modules,
-            &mut scores,
-            cache_state,
-            module_cache,
-        )
-        .await?;
+    // 7. Comprehensibility. Failures skip individual modules rather than
+    //    aborting the whole run.
+    if cli.comprehensibility_estimates < 1 {
+        return Err("--comprehensibility-estimates must be >= 1".to_string());
     }
+    let model_spec = model_spec.as_ref().unwrap();
+
+    let cache_state: Option<CacheState> = match &cli.cache {
+        Some(cache_path) => {
+            let map = cache_map.as_ref().unwrap().clone();
+            Some((Arc::new(Mutex::new(map)), cache_path.clone()))
+        }
+        None => None,
+    };
+
+    score_comprehensibility(
+        model_spec,
+        cli.verbose,
+        cli.comprehensibility_estimates,
+        &target_modules,
+        &mut scores,
+        cache_state,
+        module_cache,
+    )
+    .await?;
 
     // 8. Compute the final drag scores once, after any scoring.
     for s in &mut scores {
