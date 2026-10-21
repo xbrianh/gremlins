@@ -2,6 +2,7 @@ mod lang;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -355,6 +356,9 @@ fn compute_ln_drag(
 // Comprehensibility scoring
 // ---------------------------------------------------------------------------
 
+const MAX_COMP_RETRIES: u32 = 3;
+const COMP_BACKOFF: [f64; 2] = [1.0, 2.0];
+
 const COMPREHENSIBILITY_SYSTEM_PROMPT: &str = r#"Score the comprehensibility of this source file.
 
 Target reader: a competent developer familiar with the language
@@ -398,6 +402,26 @@ struct ComprehensibilityScores {
     abstractions: u8,
 }
 
+/// Classify a [`GremlinsModelError`] as retryable for comprehensibility scoring.
+///
+/// Retryable: HTTP 429, 5xx, and provider errors without an HTTP status
+/// (mid-stream drops). Everything else — auth failures, `TooLarge`, bad
+/// requests — is fatal.
+fn is_retryable_comp_error(err: &gremlins::clients::model::GremlinsModelError) -> bool {
+    match err {
+        gremlins::clients::model::GremlinsModelError::TooLarge { .. } => false,
+        gremlins::clients::model::GremlinsModelError::Provider(box_err) => {
+            if let Some(status) = box_err.provider_response_status() {
+                let code = status.as_u16();
+                (500..600).contains(&code) || code == 429
+            } else {
+                // No HTTP status — mid-stream drop; retryable.
+                true
+            }
+        }
+    }
+}
+
 /// Resolve the model to use for comprehensibility scoring.
 /// If `--model` was given, resolve it through profiles.
 /// Otherwise, use the gremlins default model.
@@ -416,7 +440,9 @@ fn resolve_comprehensibility_model(cli_model: Option<&str>) -> Result<String, St
 }
 
 /// Handle for a single comprehensibility scoring task.
-type ComprehensionTask = tokio::task::JoinHandle<Result<(String, Option<f64>), String>>;
+/// On success returns the module name and its score (guaranteed `Some`).
+/// On failure returns the module name and a human-readable reason.
+type ComprehensionTask = tokio::task::JoinHandle<Result<(String, f64), String>>;
 
 async fn score_comprehensibility(
     model_spec: &str,
@@ -476,8 +502,9 @@ async fn score_comprehensibility(
 
     eprintln!("Scoring comprehensibility for {} modules...", modules.len());
 
-    // Fan out: one task per module, running in parallel. Individual failures
-    // are reported and skipped instead of aborting the whole run.
+    // Fan out: one task per module, running in parallel. Each task retries
+    // transient failures up to MAX_COMP_RETRIES with exponential backoff.
+    // Non-retryable errors and exhausted retries abort the whole run.
     let mut handles: Vec<ComprehensionTask> = Vec::new();
     let additional = additional.clone();
     for (module, file, _pkg) in modules.iter() {
@@ -487,111 +514,150 @@ async fn score_comprehensibility(
         let additional = additional.clone();
         let fence = lang::code_fence(&file);
         handles.push(tokio::spawn(async move {
+            // ── read source (file errors are never retried) ──
             let source = match std::fs::read_to_string(&file) {
-                Ok(source) => source,
+                Ok(s) => s,
                 Err(e) => {
-                    eprintln!("  [{module}] WARNING: failed to read source: {e}; skipping");
-                    return Ok::<_, String>((module, None));
+                    return Err(format!("[{module}] failed to read source: {e}"));
                 }
             };
             if source.trim().is_empty() {
-                return Ok((module, Some(1.0)));
+                return Ok((module, 1.0));
             }
 
             let prompt = format!("SOURCE FILE ({module}):\n\n```{fence}\n{source}\n```");
 
-            let request = CompletionRequest::new(Message::user(prompt))
-                .preamble(COMPREHENSIBILITY_SYSTEM_PROMPT.to_string())
-                .max_tokens(500)
-                .additional_params(serde_json::Value::Object(additional));
+            for attempt in 0..MAX_COMP_RETRIES {
+                // ── call the model ──
+                let request = CompletionRequest::new(Message::user(prompt.clone()))
+                    .preamble(COMPREHENSIBILITY_SYSTEM_PROMPT.to_string())
+                    .max_tokens(500)
+                    .additional_params(serde_json::Value::Object(additional.clone()));
 
-            let response = match model.call(request).await {
-                Ok(response) => response,
-                Err(e) => {
-                    eprintln!("  [{module}] WARNING: LLM call failed: {e}; skipping");
-                    return Ok::<_, String>((module, None));
-                }
-            };
-
-            let text = response.text();
-
-            // ── verbose: inspect response for reasoning activity ──
-            if verbose {
-                let reasoning = response.usage.reasoning_tokens.unwrap_or(0);
-                eprintln!("  [{module}] reasoning_tokens: {reasoning}");
-                let prompt_tokens = response.usage.input_tokens.unwrap_or(0);
-                let output_tokens = response.usage.output_tokens.unwrap_or(0);
-                eprintln!("  [{module}] tokens: {prompt_tokens} in, {output_tokens} out");
-                if let Some(ref provider) = response.raw.get("provider").and_then(|v| v.as_str()) {
-                    eprintln!("  [{module}] upstream provider: {provider}");
-                }
-                if let Some(model_name) = response.raw.get("model").and_then(|v| v.as_str()) {
-                    eprintln!("  [{module}] served by model: {model_name}");
-                }
-                let preview = if text.len() > 500 {
-                    format!("{}…[truncated, {} bytes total]", truncate(&text, 500), text.len())
-                } else {
-                    text.to_string()
-                };
-                eprintln!("  [{module}] raw response:\n{preview}");
-            }
-
-            let trimmed = text.trim();
-
-            let json_str = if let Some(inner) = trimmed
-                .strip_prefix("```json")
-                .and_then(|s| s.strip_suffix("```"))
-            {
-                inner.trim()
-            } else if let Some(inner) =
-                trimmed.strip_prefix("```").and_then(|s| s.strip_suffix("```"))
-            {
-                inner.trim()
-            } else {
-                trimmed
-            };
-
-            match serde_json::from_str::<ComprehensibilityScores>(json_str) {
-                Ok(c) => {
-                    let raw: f64 = (c.naming as f64
-                        + c.control_flow as f64
-                        + c.data_flow as f64
-                        + c.abstractions as f64)
-                        / 16.0;
-                    let score = raw.clamp(0.0, 1.0);
-                    if score >= 1.0 {
-                        eprintln!(
-                            "  [{module}] WARNING: perfect score (all 4s) — raw response:\n{}",
-                            truncate(&text, 400)
-                        );
+                let response = match model.call(request).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if is_retryable_comp_error(&e) && attempt + 1 < MAX_COMP_RETRIES {
+                            eprintln!(
+                                "  [{module}] attempt {}/{}: {msg} — retrying in {:.0}s",
+                                attempt + 1,
+                                MAX_COMP_RETRIES,
+                                COMP_BACKOFF[attempt as usize]
+                            );
+                            tokio::time::sleep(Duration::from_secs_f64(
+                                COMP_BACKOFF[attempt as usize],
+                            ))
+                            .await;
+                            continue;
+                        }
+                        return Err(format!(
+                            "[{module}] LLM call failed on attempt {}/{}: {msg}",
+                            attempt + 1,
+                            MAX_COMP_RETRIES
+                        ));
                     }
-                    Ok((module, Some(score)))
+                };
+
+                let text = response.text();
+
+                // ── verbose: inspect response ──
+                if verbose {
+                    let reasoning = response.usage.reasoning_tokens.unwrap_or(0);
+                    eprintln!("  [{module}] reasoning_tokens: {reasoning}");
+                    let prompt_tokens = response.usage.input_tokens.unwrap_or(0);
+                    let output_tokens = response.usage.output_tokens.unwrap_or(0);
+                    eprintln!("  [{module}] tokens: {prompt_tokens} in, {output_tokens} out");
+                    if let Some(ref provider) =
+                        response.raw.get("provider").and_then(|v| v.as_str())
+                    {
+                        eprintln!("  [{module}] upstream provider: {provider}");
+                    }
+                    if let Some(model_name) = response.raw.get("model").and_then(|v| v.as_str()) {
+                        eprintln!("  [{module}] served by model: {model_name}");
+                    }
+                    let preview = if text.len() > 500 {
+                        format!(
+                            "{}…[truncated, {} bytes total]",
+                            truncate(&text, 500),
+                            text.len()
+                        )
+                    } else {
+                        text.to_string()
+                    };
+                    eprintln!("  [{module}] raw response:\n{preview}");
                 }
-                Err(e) => {
-                    eprintln!(
-                        "  [{module}] WARNING: failed to parse response: {e}; raw (first 200 bytes): {}",
-                        truncate(&text, 200)
-                    );
-                    Ok((module, None))
+
+                // ── parse JSON ──
+                let trimmed = text.trim();
+                let json_str = if let Some(inner) = trimmed
+                    .strip_prefix("```json")
+                    .and_then(|s| s.strip_suffix("```"))
+                {
+                    inner.trim()
+                } else if let Some(inner) = trimmed
+                    .strip_prefix("```")
+                    .and_then(|s| s.strip_suffix("```"))
+                {
+                    inner.trim()
+                } else {
+                    trimmed
+                };
+
+                match serde_json::from_str::<ComprehensibilityScores>(json_str) {
+                    Ok(c) => {
+                        let raw: f64 = (c.naming as f64
+                            + c.control_flow as f64
+                            + c.data_flow as f64
+                            + c.abstractions as f64)
+                            / 16.0;
+                        let score = raw.clamp(0.0, 1.0);
+                        if score >= 1.0 {
+                            eprintln!(
+                                "  [{module}] WARNING: perfect score (all 4s) — raw response:\n{}",
+                                truncate(&text, 400)
+                            );
+                        }
+                        return Ok((module, score));
+                    }
+                    Err(e) => {
+                        let msg = format!(
+                            "failed to parse response: {e}; raw (first 200 bytes): {}",
+                            truncate(&text, 200)
+                        );
+                        if attempt + 1 < MAX_COMP_RETRIES {
+                            eprintln!(
+                                "  [{module}] attempt {}/{}: {msg} — retrying in {:.0}s",
+                                attempt + 1,
+                                MAX_COMP_RETRIES,
+                                COMP_BACKOFF[attempt as usize]
+                            );
+                            tokio::time::sleep(Duration::from_secs_f64(
+                                COMP_BACKOFF[attempt as usize],
+                            ))
+                            .await;
+                            continue;
+                        }
+                        return Err(format!(
+                            "[{module}] JSON parse failed after {} attempts: {msg}",
+                            MAX_COMP_RETRIES
+                        ));
+                    }
                 }
             }
+
+            unreachable!("retry loop always returns or continues; never falls through");
         }));
     }
 
     for handle in handles {
         let (module, score) = handle.await.map_err(|e| format!("join error: {e}"))??;
-        match score {
-            Some(score) => {
-                eprintln!("  {module}: {:.3}", score);
-                // Write the score back into the matching ModuleDrag.
-                if let Some(s) = scores.iter_mut().find(|s| s.module == module) {
-                    s.comprehensibility = Some(score);
-                }
-            }
-            None => {
-                eprintln!("  {module}: skipped (see warnings above)");
-            }
-        }
+        eprintln!("  {module}: {:.3}", score);
+        let s = scores
+            .iter_mut()
+            .find(|s| s.module == module)
+            .ok_or_else(|| format!("[{module}] score computed but no matching ModuleDrag found"))?;
+        s.comprehensibility = Some(score);
     }
 
     Ok(())
@@ -602,8 +668,9 @@ async fn score_comprehensibility(
 // ---------------------------------------------------------------------------
 
 fn print_human_table(scores: &[ModuleDrag]) {
-    // Show a "comp" column only when at least one module was scored.
-    let has_comp = scores.iter().any(|s| s.comprehensibility.is_some());
+    // Show a "comp" column only when every module was scored (i.e. after a
+    // successful comprehensibility run). When unscored, all are None.
+    let has_comp = scores.iter().all(|s| s.comprehensibility.is_some());
 
     if has_comp {
         println!(
@@ -620,18 +687,16 @@ fn print_human_table(scores: &[ModuleDrag]) {
     }
 
     for s in scores {
-        let comp_str = s
-            .comprehensibility
-            .map_or_else(|| "-".to_string(), |c| format!("{:.2}", c));
         if has_comp {
+            let c = s.comprehensibility.expect("has_comp guarantees Some");
             println!(
-                "{:<55} {:>8} {:>8} {:>8} {:>12} {:>6} {:>10.2}",
+                "{:<55} {:>8} {:>8} {:>8} {:>12} {:>6.2} {:>10.2}",
                 truncate(&s.module, 54),
                 s.token_count,
                 s.fan_in,
                 s.fan_out,
                 s.graph_complexity,
-                comp_str,
+                c,
                 s.ln_drag,
             );
         } else {
