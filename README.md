@@ -693,16 +693,18 @@ landscape:
 Every agent stage's system prompt carries a **structural landscape block**: a
 captured outline of the workspace's recognized files (Rust/Markdown/JSON/…
 items with 1-based line numbers) so the agent can navigate without reading
-whole files first. Each item is rendered in the compact `line|kind|name` format
-(e.g. `53|fn|scan`, `125|struct|Visitor`). The block is wrapped in
+whole files first. Each item is rendered in the compact
+`line\|kind\|name` format (e.g. `53|fn|scan`, `125|struct|Visitor`). The block is wrapped in
 `<!-- BEGIN LANDSCAPE BLOCK -->` /
 `<!-- END LANDSCAPE BLOCK -->`, labelled as untrusted repository metadata,
 and its item names/paths have comment delimiters escaped.
 
 - Directory traversal respects `.gitignore` via the `ignore` crate.
   `target/`, `.git/`, `node_modules/`, and `__pycache__/` are always
-  skipped regardless of `.gitignore` status. Tracked dot-directories such
-  as `.gremlins/` appear in the block.
+  skipped regardless of `.gitignore` status. Dot-directories are skipped
+  unless they appear on an explicit allowlist (`.gremlins/`, `.github/`,
+  and `.cargo-gremlin-target/`); other dot-directories — even tracked ones
+  such as `.devcontainer/` — are never shown.
 - The budget is an estimated **token** count (using the `o200k_base`
   tiktoken encoding), not a byte count.
 - Cap it with `settings.yaml` `landscape.max-tokens` (preferred),
@@ -715,13 +717,15 @@ and its item names/paths have comment delimiters escaped.
   edits and to explore the directory tree. The `Landscape` tool accepts an
   optional `token_budget` parameter that applies the same skeletonization and
   depth back-off as the system-prompt block. The tool returns the same
-  `line|kind|name` item format, with directory headers ending in `/` and
+  `line\|kind\|name` item format, with directory headers ending in `/` and
   file headers ending in `:`. The block only advertises the tool when
   the stage's effective tool list actually includes it.
-- Agent stages carry a programmatic `landscape` flag (default `true`). When `false`, the
-  system prompt is assembled without a landscape block — the TUI chat loop
-  uses this to avoid recomputing the block on every conversation turn after
-  the first.
+- Agent stages carry a programmatic `landscape` flag (default `true`).
+  When `false`, the system prompt is assembled without a landscape block.
+  This is an escape hatch for callers that want to skip landscape
+  computation — the TUI currently recomputes the block on every turn
+  because line numbers shift after each edit, so a stale snapshot would
+  mislead the model.
 - Each build reparses every eligible recognized file from scratch; the
   computation is fast enough that caching is unnecessary.
 
@@ -835,7 +839,7 @@ worktree.
 | `Bash` | Execute a shell command via `bash -c`. Scoped to the gremlin's worktree; direct path references outside it are blocked. |
 | `Grep` | Search file contents using a Rust regex pattern. Returns `path:line:content` matches. Skips `target/`, `.git/`, and common build dirs. |
 | `Glob` | Find files matching a glob pattern. Supports `**` for recursive matching. |
-| `Landscape` | Show the structural outline of a file or directory. Returns newline-separated `line|kind|name` items, with directory headers ending in `/` and file headers ending in `:`. Accepts optional `depth` and `token_budget` parameters. |
+| `Landscape` | Show the structural outline of a file or directory. For a file, returns space-separated `line\|kind\|name` items on a single line. For a directory, returns a tree-formatted outline where directory headers end in `/` and file headers end in `:` followed by space-separated items. Accepts optional `depth` (directories only) and `token_budget` (directories only) parameters. |
 
 Gremlins can read and modify files inside that worktree and block direct
 path references outside it. This is a best-effort token check, not a full
