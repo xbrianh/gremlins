@@ -681,7 +681,7 @@ landscape-related configuration:
 
 ```yaml
 landscape:
-  max-tokens: 32000   # preferred key; overrides GREMLINS_MAX_LANDSCAPE_TOKENS
+  max-tokens: 64000   # preferred key; overrides GREMLINS_MAX_LANDSCAPE_TOKENS
 ```
 
 | Key | Default | Description |
@@ -718,7 +718,7 @@ and its item names/paths have comment delimiters escaped.
   `line|kind|name` item format, with directory headers ending in `/` and
   file headers ending in `:`. The block only advertises the tool when
   the stage's effective tool list actually includes it.
-- Agent stages carry a `landscape` flag (default `true`). When `false`, the
+- Agent stages carry a programmatic `landscape` flag (default `true`). When `false`, the
   system prompt is assembled without a landscape block — the TUI chat loop
   uses this to avoid recomputing the block on every conversation turn after
   the first.
@@ -835,9 +835,9 @@ worktree.
 | `Bash` | Execute a shell command via `bash -c`. Scoped to the gremlin's worktree; direct path references outside it are blocked. |
 | `Grep` | Search file contents using a Rust regex pattern. Returns `path:line:content` matches. Skips `target/`, `.git/`, and common build dirs. |
 | `Glob` | Find files matching a glob pattern. Supports `**` for recursive matching. |
-| `Landscape` | Show the structural outline of a file or directory. Returns space-separated `line\|kind\|name` items. Accepts optional `depth` and `token_budget` parameters. Directories render as a tree with the same item format. |
+| `Landscape` | Show the structural outline of a file or directory. Returns newline-separated `line|kind|name` items, with directory headers ending in `/` and file headers ending in `:`. Accepts optional `depth` and `token_budget` parameters. |
 
-They can read and modify files inside that worktree and block direct
+Gremlins can read and modify files inside that worktree and block direct
 path references outside it. This is a best-effort token check, not a full
 sandbox — indirect references (heredocs, computed paths) may not be caught.
 
