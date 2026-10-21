@@ -8,10 +8,7 @@
 use std::path::PathBuf;
 
 use crate::executor::gremlin::Gremlin;
-use crate::executor::state::FileSystemStateStore;
 use crate::landscape::{LandscapeBlock, LandscapeError, LandscapeExplorer};
-
-const LANDSCAPE_CACHE_FILE: &str = "landscape.cache.json";
 
 /// The result of a landscape build: the formatted block ready for injection
 /// together with summary stats for logging.
@@ -82,7 +79,6 @@ pub(crate) fn agent_system_prompt(base: String, landscape_block: Option<String>)
 pub(crate) async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -> String {
     let snapshot = build_landscape_snapshot(
         gremlin.cwd(),
-        landscape_cache_path(gremlin),
         gremlin.runtime_config.log_tx.clone(),
         has_outline_tool,
     )
@@ -107,10 +103,9 @@ pub(crate) async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -
 
 /// Build and format a landscape block for one workspace root.
 ///
-/// `cwd` and `cache_path` are owned up front so the blocking closure needs no
-/// borrow of the gremlin. A missing workspace produces an empty snapshot; any
-/// other failure is logged (daemon + `log_tx`) and also degrades to an empty
-/// snapshot.
+/// `cwd` is owned up front so the blocking closure needs no borrow of the
+/// gremlin. A missing workspace produces an empty snapshot; any other failure
+/// is logged (daemon + `log_tx`) and also degrades to an empty snapshot.
 ///
 /// `file_count`/`item_count` are computed from the files that actually enter
 /// the formatted block (files need at least three outline items), so the log
@@ -118,14 +113,13 @@ pub(crate) async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -
 /// trimmed to nothing.
 async fn build_landscape_snapshot(
     cwd: PathBuf,
-    cache_path: Option<PathBuf>,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     has_outline_tool: bool,
 ) -> LandscapeSnapshot {
     let root = cwd.clone();
     let walk_log_tx = log_tx.clone();
-    let outlines = tokio::task::spawn_blocking(move || {
-        match LandscapeExplorer.build(&cwd, usize::MAX, cache_path.as_deref()) {
+    let outlines =
+        tokio::task::spawn_blocking(move || match LandscapeExplorer.build(&cwd, usize::MAX) {
             Ok(outlines) => outlines,
             Err(LandscapeError::Read(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 Vec::new()
@@ -135,14 +129,13 @@ async fn build_landscape_snapshot(
                 send_log(&walk_log_tx, &msg);
                 Vec::new()
             }
-        }
-    })
-    .await
-    .unwrap_or_else(|error| {
-        let msg = format!("landscape build task failed: {error}");
-        send_log(&log_tx, &msg);
-        Vec::new()
-    });
+        })
+        .await
+        .unwrap_or_else(|error| {
+            let msg = format!("landscape build task failed: {error}");
+            send_log(&log_tx, &msg);
+            Vec::new()
+        });
 
     let budget: u64 = crate::config::max_landscape_tokens();
     let max_tokens: usize = usize::try_from(budget).unwrap_or(usize::MAX);
@@ -185,57 +178,9 @@ fn send_log(log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: &s
     log::warn!("{msg}");
 }
 
-/// Resolve the on-disk cache blob path for landscape builds.
-///
-/// Cache I/O is only valid for a concrete filesystem state store. Other store
-/// backends (and the fallback `state_uri_display()` value, which may be a URI
-/// rather than a filesystem path) simply don't get a persistent cache, so
-/// returning `None` on a failed downcast is safer than treating a URI as a
-/// `PathBuf`.
-fn landscape_cache_path(gremlin: &Gremlin) -> Option<PathBuf> {
-    let store = gremlin.state.store_ref();
-    store
-        .as_any()
-        .and_then(|any| any.downcast_ref::<FileSystemStateStore>())
-        .map(|fs| fs.root_dir().join(LANDSCAPE_CACHE_FILE))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use crate::clients::client::Client;
-    use crate::definition::StaticDefinition;
-    use crate::executor::gremlin::{validate_gremlin_id, ScratchDir};
-    use crate::executor::state::StateData;
-
-    /// A Gremlin whose state store is a plain filesystem directory, so cache
-    /// path resolution can be exercised without launching a run.
-    fn fs_gremlin(state_dir: PathBuf) -> Gremlin {
-        Gremlin {
-            id: validate_gremlin_id("gr-test").unwrap(),
-            definition_path: None,
-            model_override: None,
-            definition: Box::new(StaticDefinition::stub()),
-            workdir: None,
-            project_root: PathBuf::new(),
-            state: StateData::from_store(
-                Some("gr-test".to_string()),
-                Box::new(FileSystemStateStore::from_path(state_dir)),
-            ),
-            env: std::collections::HashMap::new(),
-            client: Client::parse("cmd/true").unwrap(),
-            loop_iter: "1".to_string(),
-            stage_inputs: std::collections::HashMap::new(),
-            runtime_config: crate::executor::gremlin::RuntimeConfig::default(),
-            cancel_token: None,
-            interactive_session: None,
-            scratch_dir: ScratchDir::Persistent(PathBuf::from("/tmp/scratch")),
-            clean_cmds: Vec::new(),
-            enclosing_task_models: None,
-            enclosing_model: None,
-        }
-    }
 
     #[test]
     fn assembles_base_alone_without_landscape() {
@@ -295,7 +240,6 @@ mod tests {
         let snapshot = build_landscape_snapshot(
             PathBuf::from("/definitely/not/present/landscape-cwd"),
             None,
-            None,
             true,
         )
         .await;
@@ -313,7 +257,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("thin.rs"), "fn only() {}\n").unwrap();
 
-        let snapshot = build_landscape_snapshot(dir.path().to_path_buf(), None, None, true).await;
+        let snapshot = build_landscape_snapshot(dir.path().to_path_buf(), None, true).await;
         assert_eq!(snapshot.block, "");
         assert_eq!(snapshot.file_count, 0);
         assert_eq!(snapshot.item_count, 0);
@@ -328,7 +272,7 @@ mod tests {
         )
         .unwrap();
 
-        let snapshot = build_landscape_snapshot(dir.path().to_path_buf(), None, None, true).await;
+        let snapshot = build_landscape_snapshot(dir.path().to_path_buf(), None, true).await;
         assert!(snapshot.block.contains("<!-- BEGIN LANDSCAPE BLOCK -->"));
         assert!(snapshot
             .block
@@ -350,18 +294,5 @@ mod tests {
             .with_landscape(snapshot.block.clone())
             .assemble();
         assert_eq!(prompt, format!("base prompt\n\n{}", snapshot.block));
-    }
-
-    #[test]
-    fn filesystem_store_cache_path_lands_under_state_root() {
-        let dir = tempfile::tempdir().unwrap();
-        let state_dir = dir.path().join("state");
-        std::fs::create_dir_all(&state_dir).unwrap();
-
-        let gremlin = fs_gremlin(state_dir.clone());
-        assert_eq!(
-            landscape_cache_path(&gremlin),
-            Some(state_dir.join(LANDSCAPE_CACHE_FILE))
-        );
     }
 }
