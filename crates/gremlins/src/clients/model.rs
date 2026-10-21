@@ -72,11 +72,11 @@ impl GremlinsModel {
             .map_err(|e| GremlinsModelError::Provider(Box::new(e)))
     }
 
-    pub(crate) fn name(&self) -> &str {
+    pub fn name(&self) -> &str {
         self.inner.name()
     }
 
-    pub(crate) fn id(&self) -> Option<&str> {
+    pub fn id(&self) -> Option<&str> {
         self.inner.id()
     }
 

@@ -16,3 +16,6 @@ rig-core-extracted/
 ratatui-src/
 
 /.gremlins/env
+
+# drag cache files
+*.jsonl
