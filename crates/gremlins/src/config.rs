@@ -194,6 +194,7 @@ struct ConfigFile {
     #[serde(rename = "max-landscape-tokens", default)]
     max_landscape_tokens: Option<u64>,
     backoff: Option<BackoffSection>,
+    landscape: Option<LandscapeSection>,
 }
 
 /// The `backoff` section of settings.yaml.
@@ -204,6 +205,17 @@ struct BackoffSection {
     turn_retry: Option<Vec<f64>>,
     #[serde(rename = "timeout-retry", default)]
     timeout_retry: Option<Vec<f64>>,
+}
+
+/// The `landscape` section of settings.yaml.
+///
+/// Forward-looking: future landscape settings will be added here.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LandscapeSection {
+    /// Preferred key: `max-tokens` under `landscape:`.
+    #[serde(rename = "max-tokens", default)]
+    max_tokens: Option<u64>,
 }
 
 /// A single `model-profiles` entry as it appears in `settings.yaml`.
@@ -432,7 +444,17 @@ impl Config {
             .unwrap_or(DEFAULT_MAX_PROMPT_BYTES);
 
         let max_landscape_tokens = cfg_file
-            .max_landscape_tokens
+            .landscape
+            .and_then(|l| l.max_tokens)
+            .or_else(|| {
+                if cfg_file.max_landscape_tokens.is_some() {
+                    warn!(
+                        "settings.yaml top-level `max-landscape-tokens` is deprecated; \
+                         move it to `landscape.max-tokens`"
+                    );
+                }
+                cfg_file.max_landscape_tokens
+            })
             .or_else(|| {
                 std::env::var("GREMLINS_MAX_LANDSCAPE_TOKENS")
                     .ok()
@@ -1358,7 +1380,7 @@ mod tests {
     use std::fs;
 
     use crate::clients::client::Client;
-    use crate::test_support::{EnvGuard, Sandbox};
+    use crate::test_support::{EnvGuard, LogCapture, Sandbox};
 
     // -----------------------------------------------------------------------
     // Config parsing tests
@@ -2364,6 +2386,59 @@ model-profiles:
         // No settings.yaml, no env var — should get the 64000 default.
         let cfg = Config::load().unwrap();
         assert_eq!(cfg.max_landscape_tokens(), DEFAULT_MAX_LANDSCAPE_TOKENS);
+    }
+
+    #[test]
+    fn test_max_landscape_tokens_from_landscape_section() {
+        let _sandbox = Sandbox::with_config(Some(r#"{"landscape": {"max-tokens": 98765}}"#));
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_landscape_tokens(), 98765);
+    }
+
+    #[test]
+    fn test_max_landscape_tokens_landscape_section_wins_over_top_level() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"{"landscape": {"max-tokens": 11111}, "max-landscape-tokens": 22222}"#,
+        ));
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_landscape_tokens(), 11111);
+    }
+
+    #[test]
+    fn test_max_landscape_tokens_top_level_deprecated_still_works() {
+        // When only the top-level key is present and `landscape.max-tokens` is
+        // absent, the top-level value is used (with a deprecation warning).
+        let _cap = LogCapture::install();
+        let _sandbox = Sandbox::with_config(Some(r#"{"max-landscape-tokens": 33333}"#));
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_landscape_tokens(), 33333);
+
+        let msgs = _cap.messages();
+        let deprecation = msgs
+            .iter()
+            .find(|m| m.contains("max-landscape-tokens") && m.contains("deprecated"));
+        assert!(
+            deprecation.is_some(),
+            "expected deprecation warning for top-level max-landscape-tokens, got: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
+    fn test_max_landscape_tokens_landscape_section_overrides_env() {
+        let mut env = EnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("settings.yaml"),
+            r#"{"landscape": {"max-tokens": 55555}}"#,
+        )
+        .unwrap();
+        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
+        env.set("GREMLINS_MAX_LANDSCAPE_TOKENS", "999");
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.max_landscape_tokens(), 55555);
     }
 
     #[test]

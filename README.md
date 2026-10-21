@@ -653,7 +653,7 @@ The boss resumes from its child-spawn stage and proceeds with the next iteration
 | `GREMLINS_TELEMETRY` | *(unset)* | Set to `1` or `true` to enable per-turn telemetry (TTFT, token counts, cache hit ratio) in the gremlin log. Equivalent to the `--telemetry` / `-v` CLI flag. |
 | `GREMLINS_ARTIFACT_REMINDER_BUDGET` | `3` | How many times the agent loop will nudge the model when expected output artifacts have not been bound yet. |
 | `GREMLINS_COMPLETION_NUDGE_BUDGET` | `11` | How many empty-turn nudges to inject before giving up on a stuck agent loop. |
-| `GREMLINS_MAX_LANDSCAPE_TOKENS` | `64000` | Cap the structural landscape block injected into agent system prompts at this many estimated tokens. `settings.yaml` `max-landscape-tokens` takes precedence. |
+| `GREMLINS_MAX_LANDSCAPE_TOKENS` | `64000` | Cap the structural landscape block injected into agent system prompts at this many estimated tokens. `settings.yaml` `landscape.max-tokens` takes precedence over the env var; the deprecated top-level `max-landscape-tokens` also works. |
 
 ### settings.yaml backoff schedules
 
@@ -685,7 +685,8 @@ and its item names/paths have comment delimiters escaped.
 
 - The budget is an estimated **token** count (using the `o200k_base`
   tiktoken encoding), not a byte count.
-- Cap it with `settings.yaml` `max-landscape-tokens` or
+- Cap it with `settings.yaml` `landscape.max-tokens` (preferred),
+  the deprecated top-level `max-landscape-tokens`, or
   `GREMLINS_MAX_LANDSCAPE_TOKENS` (default `64000`).
 - When the block exceeds the budget, the rendered depth is reduced until it
   fits; if even the minimum depth doesn't fit, the block is dropped rather
