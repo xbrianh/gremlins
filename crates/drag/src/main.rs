@@ -375,6 +375,7 @@ Score on:
 - data_flow
 - abstractions
 
+
 Use this scale:
 4: Clear on a first careful reading.
 3: Clear with minor rereading or navigation.
@@ -382,11 +383,10 @@ Use this scale:
 1: Important behavior is obscured.
 0: Cannot reliably understand from supplied context.
 
-For each dimension, give a short reason tied to a specific
-identifier or construct. Do not invent problems to justify
-different scores. Equal scores are allowed.
+Respond with exactly one JSON object and nothing else.
+No markdown code fences. No surrounding text.
+No trailing commas. No // or /* */ comments.
 
-Return only JSON:
 {
   "naming": 0,
   "control_flow": 0,
@@ -589,22 +589,26 @@ async fn score_comprehensibility(
                 }
 
                 // ── parse JSON ──
-                let trimmed = text.trim();
-                let json_str = if let Some(inner) = trimmed
-                    .strip_prefix("```json")
-                    .and_then(|s| s.strip_suffix("```"))
-                {
-                    inner.trim()
-                } else if let Some(inner) = trimmed
-                    .strip_prefix("```")
-                    .and_then(|s| s.strip_suffix("```"))
-                {
-                    inner.trim()
-                } else {
-                    trimmed
-                };
+                let json_str = extract_json(&text);
 
-                match serde_json::from_str::<ComprehensibilityScores>(json_str) {
+                let parse_result = json_str
+                    .as_deref()
+                    .ok_or_else(|| {
+                        format!(
+                            "no JSON object found in response (first 200 bytes): {}",
+                            truncate(&text, 200)
+                        )
+                    })
+                    .and_then(|s| {
+                        serde_json::from_str::<ComprehensibilityScores>(s).map_err(|e| {
+                            format!(
+                                "failed to parse extracted JSON: {e}; extracted: {}",
+                                truncate(s, 200)
+                            )
+                        })
+                    });
+
+                match parse_result {
                     Ok(c) => {
                         let raw: f64 = (c.naming as f64
                             + c.control_flow as f64
@@ -621,13 +625,9 @@ async fn score_comprehensibility(
                         return Ok((module, score));
                     }
                     Err(e) => {
-                        let msg = format!(
-                            "failed to parse response: {e}; raw (first 200 bytes): {}",
-                            truncate(&text, 200)
-                        );
                         if attempt + 1 < MAX_COMP_RETRIES {
                             eprintln!(
-                                "  [{module}] attempt {}/{}: {msg} — retrying in {:.0}s",
+                                "  [{module}] attempt {}/{}: {e} — retrying in {:.0}s",
                                 attempt + 1,
                                 MAX_COMP_RETRIES,
                                 COMP_BACKOFF[attempt as usize]
@@ -639,7 +639,7 @@ async fn score_comprehensibility(
                             continue;
                         }
                         return Err(format!(
-                            "[{module}] JSON parse failed after {} attempts: {msg}",
+                            "[{module}] JSON parse failed after {} attempts: {e}",
                             MAX_COMP_RETRIES
                         ));
                     }
@@ -661,6 +661,200 @@ async fn score_comprehensibility(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// JSON extraction
+// ---------------------------------------------------------------------------
+
+/// Extract a JSON object from an LLM response, handling common failure modes.
+///
+/// Tries these strategies in order:
+/// 1. Strip markdown code fences (` ```json ` / ` ``` `).
+/// 2. Find the outermost `{...}` pair (handles text before/after JSON).
+/// 3. Clean common JSON formatting errors (trailing commas, comments).
+fn extract_json(text: &str) -> Option<String> {
+    let text = text.trim();
+
+    // ── 1. Strip markdown code fences ──
+    let mut inner = text;
+
+    // Strip opening fence: ```json or ``` (possibly with no newline after).
+    inner = inner
+        .strip_prefix("```json")
+        .or_else(|| inner.strip_prefix("```"))
+        .unwrap_or(inner)
+        .trim();
+
+    // Strip closing fence: last ``` in the text.
+    if let Some(pos) = inner.rfind("```") {
+        // Only strip if it appears to be a closing fence (at end or on its own line).
+        let tail = inner[pos..].trim();
+        if tail == "```" || tail.starts_with("```\n") || tail.starts_with("```\r") {
+            inner = inner[..pos].trim();
+        }
+    }
+
+    // ── 2. Find outermost JSON object ──
+    let json_str = find_json_object(inner)?;
+
+    // ── 3. Clean and return ──
+    Some(clean_json(&json_str))
+}
+
+/// Find the outermost `{...}` pair in text, respecting string boundaries.
+fn find_json_object(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut start = None;
+    let mut depth = 0u32;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for (i, &ch) in chars.iter().enumerate() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' && in_string {
+            escape = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        if ch == '{' {
+            if depth == 0 {
+                start = Some(i);
+            }
+            depth += 1;
+        } else if ch == '}' && depth > 0 {
+            depth -= 1;
+            if depth == 0 {
+                let s = start?;
+                return Some(chars[s..=i].iter().collect());
+            }
+        }
+    }
+    None
+}
+
+/// Clean common JSON formatting errors in LLM output:
+/// - `//` line comments
+/// - `/* */` block comments
+/// - Trailing commas before `}` or `]`
+fn clean_json(json: &str) -> String {
+    let mut result = String::with_capacity(json.len());
+    let chars: Vec<char> = json.chars().collect();
+    let mut in_string = false;
+    let mut escape = false;
+    let mut in_block_comment = false;
+    let mut i = 0;
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        // ── block comment ──
+        if in_block_comment {
+            if ch == '*' && i + 1 < chars.len() && chars[i + 1] == '/' {
+                in_block_comment = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        // ── string escape ──
+        if escape {
+            escape = false;
+            result.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == '\\' && in_string {
+            escape = true;
+            result.push(ch);
+            i += 1;
+            continue;
+        }
+
+        // ── string boundary ──
+        if ch == '"' {
+            in_string = !in_string;
+            result.push(ch);
+            i += 1;
+            continue;
+        }
+
+        // Inside a string: copy verbatim.
+        if in_string {
+            result.push(ch);
+            i += 1;
+            continue;
+        }
+
+        // ── line comment ──
+        if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+            // Skip to end of line.
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        // ── block comment start ──
+        if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+
+        result.push(ch);
+        i += 1;
+    }
+
+    // ── trailing commas ──
+    // Replace `,}` and `,]` with `}` / `]`, handling whitespace between.
+    remove_trailing_commas(&result)
+}
+
+/// Remove commas immediately before `}` or `]`, ignoring whitespace.
+fn remove_trailing_commas(json: &str) -> String {
+    let chars: Vec<char> = json.chars().collect();
+    let mut out = String::with_capacity(json.len());
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        let ch = chars[i];
+
+        // Look ahead from a comma: if the next non-whitespace char is } or ],
+        // skip this comma.
+        if ch == ',' {
+            let mut j = i + 1;
+            while j < len && (chars[j] == ' ' || chars[j] == '\t' || chars[j] == '\n' || chars[j] == '\r') {
+                j += 1;
+            }
+            if j < len && (chars[j] == '}' || chars[j] == ']') {
+                // Skip the comma, then copy the whitespace between comma and closer.
+                i += 1; // skip the comma itself
+                while i < j {
+                    out.push(chars[i]);
+                    i += 1;
+                }
+                continue;
+            }
+        }
+
+        out.push(ch);
+        i += 1;
+    }
+
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -760,5 +954,111 @@ mod tests {
         let no_comp = compute_ln_drag(1.0, 0.4, 0.4, 0.01, 100, 2, None);
         let with_comp = compute_ln_drag(1.0, 0.4, 0.4, 0.01, 100, 2, Some(1.0));
         assert!((no_comp - with_comp - 0.4 * 1.01f64.ln()).abs() < 1e-12);
+    }
+
+    // ── JSON extraction tests ──
+
+    #[test]
+    fn extract_plain_json() {
+        let raw = r#"{"naming": 3, "control_flow": 2, "data_flow": 2, "abstractions": 3}"#;
+        let extracted = extract_json(raw).unwrap();
+        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores.naming, 3);
+        assert_eq!(scores.control_flow, 2);
+    }
+
+    #[test]
+    fn extract_json_fenced() {
+        let raw = "```json\n{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3}\n```";
+        let extracted = extract_json(raw).unwrap();
+        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores.naming, 3);
+    }
+
+    #[test]
+    fn extract_json_fenced_no_lang() {
+        let raw = "```\n{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3}\n```";
+        let extracted = extract_json(raw).unwrap();
+        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores.naming, 3);
+    }
+
+    #[test]
+    fn extract_json_with_text_before() {
+        let raw = "Here is my assessment of the file:\n\n{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3}\n\nHope that helps.";
+        let extracted = extract_json(raw).unwrap();
+        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores.naming, 3);
+    }
+
+    #[test]
+    fn extract_json_with_trailing_comma() {
+        let raw = "{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3,}";
+        let extracted = extract_json(raw).unwrap();
+        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores.naming, 3);
+    }
+
+    #[test]
+    fn extract_json_with_line_comment() {
+        let raw = "{\n// scoring notes\n\"naming\": 3,\n\"control_flow\": 2,\n\"data_flow\": 2,\n\"abstractions\": 3\n}";
+        let extracted = extract_json(raw).unwrap();
+        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores.naming, 3);
+    }
+
+    #[test]
+    fn extract_json_with_block_comment() {
+        let raw = "{\n/* scoring notes */\n\"naming\": 3,\n\"control_flow\": 2,\n\"data_flow\": 2,\n\"abstractions\": 3\n}";
+        let extracted = extract_json(raw).unwrap();
+        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores.naming, 3);
+    }
+
+    #[test]
+    fn extract_json_fenced_with_text_and_trailing_comma() {
+        // The most common failure mode: markdown fence, trailing comma, extra text.
+        let raw = "Here's the score:\n\n```json\n{\n  \"naming\": 3,\n  \"control_flow\": 2,\n  \"data_flow\": 2,\n  \"abstractions\": 3,\n}\n```\n\nLet me know if you need anything else.";
+        let extracted = extract_json(raw).unwrap();
+        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores.naming, 3);
+    }
+
+    #[test]
+    fn extract_json_missing_closing_fence() {
+        let raw = "```json\n{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3}";
+        let extracted = extract_json(raw).unwrap();
+        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores.naming, 3);
+    }
+
+    #[test]
+    fn extract_json_nested_braces_in_string() {
+        // Braces inside a JSON string should not confuse the matcher.
+        let raw = r#"{"naming": 3, "note": "use {braces} here", "control_flow": 2, "data_flow": 2, "abstractions": 3}"#;
+        let extracted = extract_json(raw).unwrap();
+        // This test just needs valid JSON out — extra field is fine for serde.
+        let _: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+    }
+
+    #[test]
+    fn extract_json_no_braces_returns_none() {
+        assert!(extract_json("just some text, no json here").is_none());
+    }
+
+    #[test]
+    fn remove_trailing_comma_before_brace() {
+        assert_eq!(
+            remove_trailing_commas("{\"a\": 1,}"),
+            "{\"a\": 1}"
+        );
+    }
+
+    #[test]
+    fn remove_trailing_comma_with_newline() {
+        assert_eq!(
+            remove_trailing_commas("{\"a\": 1,\n}"),
+            "{\"a\": 1\n}"
+        );
     }
 }
