@@ -674,15 +674,35 @@ backoff:
 | `turn-retry` | `[2.0, 5.0, 10.0, 60.0, 120.0]` | Per-attempt backoff, in seconds, for retryable stream errors (429 / 5xx / no-HTTP-status) retried against the same turn. |
 | `timeout-retry` | `[5.0, 15.0, 30.0]` | Per-attempt backoff, in seconds, for stream idle-timeout retries. |
 
+### settings.yaml landscape settings
+
+The `landscape:` block in `~/.config/gremlins/settings.yaml` groups
+landscape-related configuration:
+
+```yaml
+landscape:
+  max-tokens: 32000   # preferred key; overrides GREMLINS_MAX_LANDSCAPE_TOKENS
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `max-tokens` | `64000` | Cap the structural landscape block at this many estimated tokens (using the `o200k_base` tiktoken encoding). Takes precedence over the deprecated top-level `max-landscape-tokens` and the `GREMLINS_MAX_LANDSCAPE_TOKENS` env var. |
+
 ### Structural landscape and token budgets
 
 Every agent stage's system prompt carries a **structural landscape block**: a
 captured outline of the workspace's recognized files (Rust/Markdown/JSON/…
 items with 1-based line numbers) so the agent can navigate without reading
-whole files first. The block is wrapped in `<!-- BEGIN LANDSCAPE BLOCK -->` /
+whole files first. Each item is rendered in the compact `line|kind|name` format
+(e.g. `53|fn|scan`, `125|struct|Visitor`). The block is wrapped in
+`<!-- BEGIN LANDSCAPE BLOCK -->` /
 `<!-- END LANDSCAPE BLOCK -->`, labelled as untrusted repository metadata,
 and its item names/paths have comment delimiters escaped.
 
+- Directory traversal respects `.gitignore` via the `ignore` crate.
+  `target/`, `.git/`, `node_modules/`, and `__pycache__/` are always
+  skipped regardless of `.gitignore` status. Tracked dot-directories such
+  as `.gremlins/` appear in the block.
 - The budget is an estimated **token** count (using the `o200k_base`
   tiktoken encoding), not a byte count.
 - Cap it with `settings.yaml` `landscape.max-tokens` (preferred),
@@ -692,8 +712,16 @@ and its item names/paths have comment delimiters escaped.
   fits; if even the minimum depth doesn't fit, the block is dropped rather
   than failing the stage, and the `[landscape]` log line reports the drop.
 - Native agents also have the `Landscape` tool for current line numbers after
-  edits and to explore the directory tree; the block only advertises it when
-  the stage's effective tool list actually includes that tool.
+  edits and to explore the directory tree. The `Landscape` tool accepts an
+  optional `token_budget` parameter that applies the same skeletonization and
+  depth back-off as the system-prompt block. The tool returns the same
+  `line|kind|name` item format, with directory headers ending in `/` and
+  file headers ending in `:`. The block only advertises the tool when
+  the stage's effective tool list actually includes it.
+- Agent stages carry a `landscape` flag (default `true`). When `false`, the
+  system prompt is assembled without a landscape block — the TUI chat loop
+  uses this to avoid recomputing the block on every conversation turn after
+  the first.
 - Each build reparses every eligible recognized file from scratch; the
   computation is fast enough that caching is unnecessary.
 
@@ -797,7 +825,19 @@ These are set by the launcher or executor and should not be set manually:
 
 Gremlins are restricted to an allowlist of tools (Read, Edit, Write, Bash,
 Grep, Glob, Landscape) and their Bash commands are path-scoped to the gremlin's git
-worktree. They can read and modify files inside that worktree and block direct
+worktree.
+
+| Tool | Description |
+|---|---|
+| `Read` | Read file contents with offset/limit pagination. Each returned line is prefixed with its 1-based line number. |
+| `Write` | Create or overwrite a file; parent directories are created as needed. |
+| `Edit` | Make one or more non-overlapping `old_string` → `new_string` replacements in a file. Each `old_string` must be unique. |
+| `Bash` | Execute a shell command via `bash -c`. Scoped to the gremlin's worktree; direct path references outside it are blocked. |
+| `Grep` | Search file contents using a Rust regex pattern. Returns `path:line:content` matches. Skips `target/`, `.git/`, and common build dirs. |
+| `Glob` | Find files matching a glob pattern. Supports `**` for recursive matching. |
+| `Landscape` | Show the structural outline of a file or directory. Returns space-separated `line\|kind\|name` items. Accepts optional `depth` and `token_budget` parameters. Directories render as a tree with the same item format. |
+
+They can read and modify files inside that worktree and block direct
 path references outside it. This is a best-effort token check, not a full
 sandbox — indirect references (heredocs, computed paths) may not be caught.
 
