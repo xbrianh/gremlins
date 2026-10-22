@@ -2332,7 +2332,30 @@ async fn handle_chat(
         }
     };
 
-    // 3. Update the session's active skill set and build the system prompt.
+    // 3. Wait for any in-flight turn to finish so that LoadSkill pushes
+    //    from the running turn are visible in the shared active set before
+    //    we snapshot it. This avoids a race where a queued turn's system
+    //    prompt is built from a stale snapshot.
+    //
+    //    The session owns at most one chat gremlin today, but
+    //    representations keep a map for multiple.
+    let mut id = reusable_chat_gremlin_id(session).await;
+    if let Some(existing) = &id {
+        // The gremlin may have been removed from the run map by a control-side
+        // `stop`. Treat it as gone and let the next message start fresh.
+        if !get_run_map()
+            .lock()
+            .unwrap()
+            .contains_key(existing.as_str())
+        {
+            let mut s = session.lock().await;
+            s.chat_ids.remove(existing);
+            s.chat_gremlins.remove(existing);
+            id = None;
+        }
+    }
+
+    // 4. Update the session's active skill set and build the system prompt.
     //    The supervisor queues the operator's prompt text onto the ChatDefinition
     //    before each turn; the definition constructs the Agent stage on demand
     //    via next_stage().
@@ -2367,23 +2390,8 @@ async fn handle_chat(
         crate::skills::build_system_prompt_section(&all_skills, &active_skills);
     let system_prompt = build_chat_system_prompt(context, &trusted_section);
 
-    // 4. Get or create the session's chat gremlin. The session owns at most
-    //    one chat gremlin today, but representations keep a map for multiple.
-    let mut id = reusable_chat_gremlin_id(session).await;
-    if let Some(existing) = &id {
-        // The gremlin may have been removed from the run map by a control-side
-        // `stop`. Treat it as gone and let the next message start fresh.
-        if !get_run_map()
-            .lock()
-            .unwrap()
-            .contains_key(existing.as_str())
-        {
-            let mut s = session.lock().await;
-            s.chat_ids.remove(existing);
-            s.chat_gremlins.remove(existing);
-            id = None;
-        }
-    }
+    // 5. Get or create the session's chat gremlin (id was resolved in step 3
+    //    after waiting for the in-flight turn).
 
     let id = match id {
         Some(id) => id,
@@ -2425,7 +2433,7 @@ async fn handle_chat(
         s.chat_ids.insert(id.clone());
     }
 
-    // 5. Take the gremlin out of the session, install this turn's definition,
+    // 6. Take the gremlin out of the session, install this turn's definition,
     //    stream channel, and a fresh per-turn cancel token, then drop the
     //    session lock before running so other ops are not serialized.
     let (stream_tx, stream_rx) = tokio::sync::mpsc::channel::<InteractiveEvent>(256);
@@ -2510,7 +2518,7 @@ async fn handle_chat(
         crate::executor::run::clear_chat_turn_artifact(&gremlin, turn_num).await;
     }
 
-    // 6. Run the stage in the background. Events are forwarded as
+    // 7. Run the stage in the background. Events are forwarded as
     //    unsolicited JSON lines to this connection while the dispatch
     //    loop stays live for cancel_chat and close_session.
     let done = Arc::new(tokio::sync::Notify::new());

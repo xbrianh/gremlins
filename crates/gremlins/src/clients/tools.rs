@@ -2582,7 +2582,10 @@ pub(crate) async fn invoke(
     args_json: &str,
 ) -> String {
     if let Some(allowed) = &ctx.allowed_tools {
-        if !always_available(name) && !allowed.iter().any(|n| n == name) {
+        // LoadSkill is chat-only; allow it through the gate even when the
+        // default allowlist doesn't include it. The handler will return an
+        // error when skills aren't configured.
+        if !always_available(name) && name != "LoadSkill" && !allowed.iter().any(|n| n == name) {
             return format!("Error: unknown tool {name}");
         }
     }
@@ -2726,6 +2729,15 @@ fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String
         None => return format!("Error: skill {name:?} not found"),
     };
 
+    // Reject skills that disable model invocation. Discovery retains them
+    // and `render_index` only hides them, so a model that learns the name
+    // from a file or user message could otherwise load and activate an
+    // operator-only skill. `user-invocable: false` is still allowed — the
+    // model self-selects skills.
+    if loaded.skill.disable_model_invocation {
+        return format!("Error: skill {name:?} is not available for model invocation");
+    }
+
     // Single critical section: check containment AND push so two
     // concurrent LoadSkill calls for the same name cannot both pass
     // the check and both push.
@@ -2739,18 +2751,18 @@ fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String
     active_guard.push(name.to_string());
     drop(active_guard);
 
-    // Return the skill body plus bundled files listing.
-    let mut result = String::new();
-    result.push_str(&format!("Loaded skill {name:?}.\n\n"));
-    result.push_str(&loaded.skill.body);
-    if !loaded.files.is_empty() {
-        result.push_str("\n\n**Bundled files:**\n");
-        for f in &loaded.files {
-            result.push_str(&format!("- `{}`\n", f.display()));
-        }
+    // Return a body-free acknowledgement. The skill body is injected as a
+    // trusted system-prompt amendment at the next turn boundary, not written
+    // into the transcript. Putting the body here would leak it into archived
+    // records and cross-turn history, where later turns would replay it
+    // alongside the trusted amendment (doubling the body in context).
+    let n_files = loaded.files.len();
+    let mut result = format!("Skill {name:?} loaded successfully.");
+    if n_files > 0 {
+        result.push_str(&format!(" {n_files} bundled file(s) available."));
     }
     result.push_str(&format!(
-        "\n**Skill directory:** `{}`\n",
+        "\n\n**Skill directory:** `{}`\n",
         loaded.skill.dir.display()
     ));
     result
@@ -3024,7 +3036,11 @@ message to finish. The summary parameter briefly describes what you accomplished
     match filter {
         Some(names) => all
             .into_iter()
-            .filter(|t| always_available(&t.name) || names.iter().any(|n| n == &t.name))
+            .filter(|t| {
+                always_available(&t.name)
+                    || (include_load_skill && t.name == "LoadSkill")
+                    || names.iter().any(|n| n == &t.name)
+            })
             .collect(),
         None => all,
     }
@@ -4160,6 +4176,18 @@ mod tests {
     }
 
     #[test]
+    fn load_skill_passes_filter_when_chat_mode() {
+        // With include_load_skill=true, LoadSkill must appear even when a
+        // restrictive filter is active — the default native_block filter
+        // does not include LoadSkill, and chat sessions must always expose it.
+        let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), true);
+        let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"LoadSkill"), "got: {names:?}");
+        assert!(names.contains(&"Read"), "got: {names:?}");
+        assert!(names.contains(&"Bash"), "got: {names:?}");
+    }
+
+    #[test]
     fn validate_tool_args_load_skill() {
         // Valid: has name.
         assert!(validate_tool_args("LoadSkill", &serde_json::json!({"name": "pdf"})).is_none());
@@ -4195,6 +4223,61 @@ mod tests {
         assert!(
             result.starts_with("Error: skill \"nonexistent\" not found"),
             "got: {result}"
+        );
+    }
+
+    #[test]
+    fn load_skill_rejects_disable_model_invocation() {
+        let mut c = ctx(&tmp());
+        c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
+        let skill = crate::skills::Skill {
+            name: "secret-ops".into(),
+            description: "operator-only skill".into(),
+            disable_model_invocation: true,
+            user_invocable: true,
+            body: "secret body".into(),
+            dir: PathBuf::from("/tmp"),
+            ..Default::default()
+        };
+        let loaded = crate::skills::LoadedSkill {
+            skill,
+            files: vec![],
+        };
+        c.discovered_skills = Some(Arc::new(vec![loaded]));
+        let result = load_skill_invoke(&c, &serde_json::json!({"name": "secret-ops"}));
+        assert!(
+            result.starts_with("Error: skill \"secret-ops\" is not available for model invocation"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn load_skill_success_body_free() {
+        // A successful LoadSkill must return a body-free acknowledgement.
+        // The skill body is injected as a trusted system-prompt amendment at
+        // the next turn boundary, not written into the transcript.
+        let mut c = ctx(&tmp());
+        c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
+        let skill = crate::skills::Skill {
+            name: "pdf".into(),
+            description: "PDF skill".into(),
+            body: "SECRET SKILL BODY".into(),
+            dir: PathBuf::from("/tmp/pdf-skill"),
+            ..Default::default()
+        };
+        let loaded = crate::skills::LoadedSkill {
+            skill,
+            files: vec![],
+        };
+        c.discovered_skills = Some(Arc::new(vec![loaded]));
+        let result = load_skill_invoke(&c, &serde_json::json!({"name": "pdf"}));
+        assert!(
+            result.starts_with("Skill \"pdf\" loaded successfully."),
+            "got: {result}"
+        );
+        assert!(
+            !result.contains("SECRET SKILL BODY"),
+            "skill body must not leak into tool result: {result}"
         );
     }
 
