@@ -658,6 +658,10 @@ fn tool_result_text(message: &Message) -> Option<String> {
 /// because they violate the required user/assistant alternation and the
 /// rule that every `tool_use` must be immediately followed by a matching
 /// `tool_result` block.
+///
+/// The [`UserContent::ToolResult`] comes first because Anthropic requires
+/// every `tool_result` block to precede any text blocks in the responding
+/// user message.
 pub(crate) fn done_user_message(
     ledger: &str,
     call_id: CallId,
@@ -666,10 +670,6 @@ pub(crate) fn done_user_message(
 ) -> Message {
     Message::User {
         content: vec![
-            UserContent::Text(Text {
-                text: ledger.to_string(),
-                additional_params: None,
-            }),
             UserContent::ToolResult(ToolResultMsg {
                 call: call_id,
                 name: tool_name,
@@ -677,6 +677,10 @@ pub(crate) fn done_user_message(
                     text: result_text.to_string(),
                     additional_params: None,
                 })],
+            }),
+            UserContent::Text(Text {
+                text: ledger.to_string(),
+                additional_params: None,
             }),
         ],
     }

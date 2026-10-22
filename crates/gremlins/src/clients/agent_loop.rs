@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use rig_core::completion::message::{
-    AssistantContent, CallId, Reasoning, Sealed, ToolCall, ToolName, UserContent,
+    AssistantContent, CallId, Reasoning, Sealed, Text, ToolCall, ToolName, UserContent,
 };
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
 use rig_core::error::ProviderError;
@@ -564,9 +564,39 @@ async fn interactive_loop(
                 "interactive_loop: Inject command (len={}, turn={turn})",
                 text.len()
             );
-            let msg = format!("[operator]: {text}");
-            history.push(Message::user(msg));
-            *next_prompt = Message::user(text);
+            // If next_prompt already carries pending ToolResult content
+            // (e.g. a tool_result from a Done rejection), merge the
+            // injected text into that message rather than overwriting it.
+            // This preserves the matching tool_result so the assistant
+            // Done call already in history stays paired with its result.
+            // Anthropic requires tool_result blocks to precede text
+            // blocks, so the injected text is appended after any
+            // existing content.
+            if let Message::User {
+                content: ref existing,
+            } = *next_prompt
+            {
+                if existing
+                    .iter()
+                    .any(|c| matches!(c, UserContent::ToolResult(_)))
+                {
+                    let mut merged = existing.clone();
+                    merged.push(UserContent::Text(Text {
+                        text: format!("[operator]: {text}"),
+                        additional_params: None,
+                    }));
+                    *next_prompt = Message::User { content: merged };
+                    // Don't push a separate user message to history — it
+                    // would separate the assistant Done call from its
+                    // tool_result in the merged next_prompt.
+                } else {
+                    history.push(Message::user(format!("[operator]: {text}")));
+                    *next_prompt = Message::user(text);
+                }
+            } else {
+                history.push(Message::user(format!("[operator]: {text}")));
+                *next_prompt = Message::user(text);
+            }
             Ok(InteractiveLoopResult::RunOneTurn)
         }
         InteractiveCommand::RunTurn => {
@@ -6796,8 +6826,9 @@ mod tests {
             "Done tool_use must appear in persisted history"
         );
 
-        // The action ledger text and Done tool_result must appear in the same
-        // user message (in that order).
+        // The Done tool_result and action ledger text must appear in the
+        // same user message (ToolResult first, then Text — Anthropic
+        // requires tool_result blocks to precede text blocks).
         let merged = messages.iter().find_map(|m| match m {
             Message::User { content } => {
                 let has_ledger = content.iter().any(|c| matches!(c, UserContent::Text(t) if t.text.starts_with("Actions taken this turn:")));
@@ -6822,8 +6853,8 @@ mod tests {
             .iter()
             .position(|c| matches!(c, UserContent::ToolResult(_)));
         assert!(
-            ledger_pos < result_pos,
-            "action ledger must precede Done tool_result in the merged message"
+            result_pos < ledger_pos,
+            "Done tool_result must precede action ledger in the merged message (Anthropic requires tool_result blocks before text blocks)"
         );
     }
 
