@@ -295,8 +295,11 @@ mod tests {
     fn find_cargo_toml_finds_workspace_manifest_from_subdir() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let workspace_manifest = tmp.path().join("Cargo.toml");
-        fs::write(&workspace_manifest, "[workspace]\nmembers = [\"crates/*\"]\n")
-            .expect("write workspace Cargo.toml");
+        fs::write(
+            &workspace_manifest,
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .expect("write workspace Cargo.toml");
 
         // Create a member crate with its own Cargo.toml
         let member_dir = tmp.path().join("crates/foo");
@@ -312,7 +315,10 @@ mod tests {
         fs::write(&file, "// test").expect("write lib.rs");
 
         let found = find_cargo_toml(&file);
-        assert_eq!(found.as_deref(), Some(member_dir.join("Cargo.toml").as_path()));
+        assert_eq!(
+            found.as_deref(),
+            Some(member_dir.join("Cargo.toml").as_path())
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -341,8 +347,7 @@ mod tests {
             "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         )
         .expect("write lib Cargo.toml");
-        fs::write(lib_dir.join("src/lib.rs"), "pub fn hello() {}\n")
-            .expect("write lib.rs");
+        fs::write(lib_dir.join("src/lib.rs"), "pub fn hello() {}\n").expect("write lib.rs");
 
         // Save current dir and move to a temp dir outside the fixture
         let prev_cwd = std::env::current_dir().expect("current_dir");
