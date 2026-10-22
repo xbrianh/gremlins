@@ -515,13 +515,29 @@ fn shell_tokenize(s: &str) -> Vec<ShellToken> {
     tokens
 }
 
+/// Separator between sub-commands: `;`, `&&`, or `||`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubCommandSep {
+    /// `;` — unconditional sequencing.
+    Semi,
+    /// `&&` — AND list: next command runs only if the previous succeeded.
+    AndAnd,
+    /// `||` — OR list: next command runs only if the previous failed.
+    OrOr,
+}
+
 /// Split a shell command string into sub-commands at `;`, `&&`, and `||`
 /// boundaries, respecting quotes and backslash escapes so that a quoted
 /// path containing those characters is not split.
-fn split_commands(s: &str) -> Vec<String> {
-    let mut parts: Vec<String> = Vec::new();
+///
+/// Returns `(separator, command)` pairs. The first sub-command always has
+/// `None` separator; every subsequent sub-command carries the separator
+/// that preceded it.
+fn split_commands(s: &str) -> Vec<(Option<SubCommandSep>, String)> {
+    let mut parts: Vec<(Option<SubCommandSep>, String)> = Vec::new();
     let mut current = String::new();
     let mut chars = s.chars();
+    let mut next_sep: Option<SubCommandSep> = None;
 
     while let Some(ch) = chars.next() {
         match ch {
@@ -566,24 +582,27 @@ fn split_commands(s: &str) -> Vec<String> {
             ';' => {
                 let trimmed = current.trim().to_string();
                 if !trimmed.is_empty() {
-                    parts.push(trimmed);
+                    parts.push((next_sep, trimmed));
                 }
+                next_sep = Some(SubCommandSep::Semi);
                 current.clear();
             }
             '&' if chars.clone().next() == Some('&') => {
                 chars.next();
                 let trimmed = current.trim().to_string();
                 if !trimmed.is_empty() {
-                    parts.push(trimmed);
+                    parts.push((next_sep, trimmed));
                 }
+                next_sep = Some(SubCommandSep::AndAnd);
                 current.clear();
             }
             '|' if chars.clone().next() == Some('|') => {
                 chars.next();
                 let trimmed = current.trim().to_string();
                 if !trimmed.is_empty() {
-                    parts.push(trimmed);
+                    parts.push((next_sep, trimmed));
                 }
+                next_sep = Some(SubCommandSep::OrOr);
                 current.clear();
             }
             c => current.push(c),
@@ -591,7 +610,7 @@ fn split_commands(s: &str) -> Vec<String> {
     }
     let trimmed = current.trim().to_string();
     if !trimmed.is_empty() {
-        parts.push(trimmed);
+        parts.push((next_sep, trimmed));
     }
     parts
 }
@@ -819,7 +838,7 @@ impl<'a> HeredocStripper<'a> {
             self.chars.next();
         }
         heredoc.delimiter = self.read_delimiter_word();
-        self.result.push('_');
+        self.result.push('\x01');
         self.pending.push(heredoc);
         self.word_start = false;
     }
@@ -937,7 +956,7 @@ impl<'a> HeredocStripper<'a> {
 ///
 /// A heredoc body is file *content*, not a path argument the agent is passing
 /// to the shell, so `bash_check` must never tokenize it. Each `<<`/`<<-`
-/// redirection plus its body is replaced with the same inert `_` placeholder
+/// redirection plus its body is replaced with the same inert `\x01` sentinel
 /// used by [`strip_subshells`], while the rest of the redirection's first line
 /// (such as `> /tmp/out` in `cat <<EOF > /tmp/out`) passes through unchanged.
 fn strip_heredocs(s: &str) -> String {
@@ -984,7 +1003,7 @@ fn strip_subshells(s: &str) -> String {
                             _ => {}
                         }
                     }
-                    result.push('_'); // placeholder — never path-like
+                    result.push('\x01'); // sentinel — never a valid path component
                     continue;
                 }
                 result.push(ch);
@@ -1002,7 +1021,7 @@ fn strip_subshells(s: &str) -> String {
                         _ => {}
                     }
                 }
-                result.push('_');
+                result.push('\x01');
             }
             _ => result.push(ch),
         }
@@ -1020,8 +1039,9 @@ fn strip_subshells(s: &str) -> String {
 /// shell would actually be in; `cd` only affects *later* sub-commands, so
 /// the operand of the `cd` itself still resolves from the pre-`cd` directory.
 ///
-/// This is a heuristic, not shell emulation. `cd -`, bare `cd`, and `cd`
-/// with a variable/substitution target are not tracked. The real containment
+/// This is a heuristic, not shell emulation. `cd -`, bare `cd`, `cd` with
+/// options (`-L`, `-P`, `--`), `cd` after `||`, and `cd` with a
+/// variable/substitution target are not tracked. The real containment
 /// boundary is `io_enforce`; this check provides early, clear denials for
 /// obviously stray path arguments.
 pub(crate) fn bash_check(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Option<String> {
@@ -1056,7 +1076,7 @@ pub(crate) fn bash_check(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Op
     };
 
     let sub_commands = split_commands(&cleaned);
-    for sub_cmd in &sub_commands {
+    for (sep, sub_cmd) in &sub_commands {
         let tokens = shell_tokenize(sub_cmd);
         if tokens.is_empty() {
             continue;
@@ -1098,14 +1118,30 @@ pub(crate) fn bash_check(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Op
         }
 
         // Check for a `cd` command — update sim_cwd for subsequent sub-commands.
+        //
+        // When the sub-command follows `||` (OR list), we cannot know
+        // statically whether it executes, so conservatively skip tracking.
+        // When it follows `&&` or `;` (or is the first sub-command), we
+        // optimistically track: most compound commands succeed, and
+        // over-tracking produces safe false denials rather than dangerous
+        // false approvals.
+        if *sep == Some(SubCommandSep::OrOr) {
+            continue;
+        }
         let first = &tokens[0];
         if (first.value == "cd" || first.value.ends_with("/cd")) && tokens.len() >= 2 {
             let arg = &tokens[1];
-            // cd with no arg (goes HOME), cd - (previous dir), or a
-            // variable/substitution target ($DIR, `...`, $(...)) — can't
-            // statically resolve, skip without touching sim_cwd.
-            let unresolvable =
-                arg.value == "-" || arg.value.contains('$') || arg.value.contains('`');
+            // Unresolvable cd targets — skip without touching sim_cwd:
+            //   - `cd` with no arg (goes HOME)
+            //   - `cd -` (previous dir)
+            //   - `cd` with a variable/substitution target ($DIR, `...`, $(...))
+            //   - `cd` with options (`cd -- dir`, `cd -P dir`, `cd -L dir`)
+            //   - `cd` target replaced by a subshell placeholder (\x01)
+            let unresolvable = arg.value == "-"
+                || arg.value.contains('$')
+                || arg.value.contains('`')
+                || arg.value.starts_with('-')
+                || arg.value.contains('\x01');
             if !unresolvable {
                 let expanded = expand_user(&arg.value);
                 let p = resolve(&expanded, Some(&sim_cwd));
@@ -5107,6 +5143,144 @@ mod tests {
         )
         .unwrap();
         assert!(err.contains("outside sandbox"), "got: {err}");
+    }
+
+    // ── Regression: cd after || must not be tracked ──────────────
+
+    #[test]
+    fn bash_check_cd_after_oror_not_tracked_true_or_cd_dotdot() {
+        let dir = tmp();
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(dir.join("file.txt"), "ok").unwrap();
+        // `true || cd ..` — cd .. is after || and won't execute because
+        // true succeeds. Without the || guard, sim_cwd would move to the
+        // parent and falsely deny the valid `cat ../file.txt`.
+        assert!(bash_check(
+            std::slice::from_ref(&dir),
+            "true || cd ..; cat ../file.txt",
+            Some(&sub),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn bash_check_cd_after_oror_not_tracked_cd_dot_or_cd_dotdot() {
+        let dir = tmp();
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(dir.join("file.txt"), "ok").unwrap();
+        // `cd . || cd ..` — the second cd is after || and won't execute.
+        // Without the || guard, sim_cwd would move to the parent.
+        assert!(bash_check(
+            std::slice::from_ref(&dir),
+            "cd . || cd ..; cat ../file.txt",
+            Some(&sub),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn bash_check_escape_after_oror_still_denied() {
+        let dir = tmp();
+        // `true || cd ..` is not tracked, so `cat ../secret` resolves from
+        // the original cwd (the sandbox root) and must be denied.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "true || cd ..; cat ../secret",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"), "got: {err}");
+    }
+
+    // ── Regression: cd options must not be tracked as directories ─
+
+    #[test]
+    fn bash_check_cd_dashdash_treated_as_option_not_dir() {
+        let dir = tmp();
+        // `cd -- .` — `--` is an option, not a directory operand.
+        // Without the guard, sim_cwd would become <root>/-- and
+        // `cat ../secret` would falsely pass.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "cd -- . && cat ../secret",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"), "got: {err}");
+    }
+
+    #[test]
+    fn bash_check_cd_dash_p_treated_as_option_not_dir() {
+        let dir = tmp();
+        // `cd -P .` — `-P` is an option, not a directory operand.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "cd -P . && cat ../secret",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"), "got: {err}");
+    }
+
+    #[test]
+    fn bash_check_cd_dash_l_treated_as_option_not_dir() {
+        let dir = tmp();
+        // `cd -L .` — `-L` is an option, not a directory operand.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "cd -L . && cat ../secret",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"), "got: {err}");
+    }
+
+    // ── Regression: subshell placeholders must not be tracked ────
+
+    #[test]
+    fn bash_check_cd_dollar_paren_subshell_not_tracked() {
+        let dir = tmp();
+        // `cd "$(pwd)"` — the subshell is replaced with a sentinel; cd
+        // tracking must leave sim_cwd untouched.  Without the guard the
+        // old `_` placeholder was treated as a valid directory name.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "cd \"$(pwd)\" && cat ../secret",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"), "got: {err}");
+    }
+
+    #[test]
+    fn bash_check_cd_backtick_subshell_not_tracked() {
+        let dir = tmp();
+        // `cd \`pwd\`` — backtick subshell replaced with sentinel.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "cd `pwd` && cat ../secret",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"), "got: {err}");
+    }
+
+    #[test]
+    fn bash_check_cd_literal_underscore_still_trackable() {
+        let dir = tmp();
+        let underscore_dir = dir.join("_");
+        std::fs::create_dir_all(&underscore_dir).unwrap();
+        std::fs::write(underscore_dir.join("file.txt"), "ok").unwrap();
+        // A literal directory named `_` must still be tracked (the
+        // subshell sentinel is `\x01`, not `_`, so there is no collision).
+        assert!(bash_check(
+            std::slice::from_ref(&dir),
+            "cd _ && cat file.txt",
+            Some(&dir),
+        )
+        .is_none());
     }
 
     #[test]
