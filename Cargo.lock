@@ -830,6 +830,7 @@ dependencies = [
  "gremlins",
  "serde",
  "serde_json",
+ "tempfile",
  "tiktoken-rs",
  "tokio",
 ]
