@@ -844,43 +844,104 @@ pub struct RunsView {
     stream_lines: VecDeque<String>,
 }
 
-/// Truncate a string to at most `max_width` Unicode scalar values.
+/// Truncate a string to at most `max_width` terminal columns.
+/// Appends `…` (single-width) when truncation occurs.
 fn truncate_str(s: &str, max_width: usize) -> String {
-    s.chars().take(max_width).collect()
-}
-
-/// Render a token count as a thousands-separated integer, or `-` when absent.
-fn format_token_count(value: Option<u64>) -> String {
-    match value {
-        Some(n) => {
-            let digits = n.to_string();
-            let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-            for (i, ch) in digits.chars().enumerate() {
-                if i > 0 && (digits.len() - i) % 3 == 0 {
-                    out.push(',');
-                }
-                out.push(ch);
-            }
-            out
+    if max_width == 0 {
+        return String::new();
+    }
+    let width = unicode_width::UnicodeWidthStr::width(s);
+    if width <= max_width {
+        return s.to_string();
+    }
+    // Walk characters until we exceed max_width columns, then stop one short
+    // to leave room for the `…` ellipsis.
+    let mut col = 0usize;
+    let mut end = 0usize;
+    let suffix_width = 1; // `…`
+    let limit = max_width.saturating_sub(suffix_width);
+    for (i, ch) in s.char_indices() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if col + cw > limit {
+            break;
         }
-        None => "-".to_string(),
+        col += cw;
+        end = i + ch.len_utf8();
+    }
+    if end == 0 {
+        // Even the first character doesn't fit; just show the ellipsis.
+        "…".to_string()
+    } else {
+        format!("{}…", &s[..end])
     }
 }
 
-/// Render the cache-hit rate as an integer percentage of prompt tokens,
-/// or `-` when either side is missing or the prompt count is zero.
-fn format_cache_pct(prompt: Option<u64>, cached: Option<u64>) -> String {
-    match (prompt, cached) {
-        (Some(p), Some(c)) if p > 0 => format!("{:.0}%", (c as f64 / p as f64) * 100.0),
-        _ => "-".to_string(),
-    }
+use super::format_cache_pct;
+use super::format_cost_usd;
+use super::format_token_count;
+
+/// Column widths computed from the visible runs for aligned rendering.
+struct ColumnWidths {
+    id: usize,
+    status: usize,
+    stage: usize,
+    definition: usize,
+    tokens_in: usize,
+    tokens_out: usize,
+    reasoning: usize,
+    cache: usize,
+    cost: usize,
 }
 
-/// Render a USD cost with four decimal places, or `-` when absent.
-fn format_cost_usd(cost: Option<f64>) -> String {
-    match cost {
-        Some(c) => format!("${c:.4}"),
-        None => "-".to_string(),
+impl ColumnWidths {
+    fn from_runs(runs: &[(&String, &crate::tui::app::ActiveRun)]) -> Self {
+        let mut w = ColumnWidths {
+            id: 2,         // "ID" header minimum
+            status: 6,     // "STATUS" minimum
+            stage: 5,      // "STAGE" minimum
+            definition: 4, // "DEF" minimum
+            tokens_in: 6,  // "IN" header minimum
+            tokens_out: 6, // "OUT" header minimum
+            reasoning: 6,  // "REAS" header minimum
+            cache: 5,      // "CACHE" header minimum
+            cost: 4,       // "COST" header minimum
+        };
+        for (id, run) in runs {
+            let glyph = match run.status.as_str() {
+                "running" => motif::glyph::RUNNING,
+                "done" => motif::glyph::DONE,
+                "failed" => motif::glyph::FAILED,
+                "stopped" => motif::glyph::STOPPED,
+                _ => motif::glyph::DONE,
+            };
+            let raw_id = id.as_str();
+            let raw_status = format!("{glyph} {}", run.status);
+            let raw_stage = run.stage.as_str();
+            let raw_def = run.definition.as_str();
+            let ti = format_token_count(run.prompt_tokens);
+            let to = format_token_count(run.completion_tokens);
+            let tr = format_token_count(run.reasoning_tokens);
+            let tc = format_cache_pct(run.prompt_tokens, run.cached_input_tokens);
+            let cd = format_cost_usd(run.cost_usd);
+
+            // For text columns we measure display width, not byte length.
+            w.id = w.id.max(unicode_width::UnicodeWidthStr::width(raw_id));
+            w.status = w
+                .status
+                .max(unicode_width::UnicodeWidthStr::width(raw_status.as_str()));
+            w.stage = w
+                .stage
+                .max(unicode_width::UnicodeWidthStr::width(raw_stage));
+            w.definition = w
+                .definition
+                .max(unicode_width::UnicodeWidthStr::width(raw_def));
+            w.tokens_in = w.tokens_in.max(ti.len());
+            w.tokens_out = w.tokens_out.max(to.len());
+            w.reasoning = w.reasoning.max(tr.len());
+            w.cache = w.cache.max(tc.len());
+            w.cost = w.cost.max(cd.len());
+        }
+        w
     }
 }
 
@@ -916,7 +977,12 @@ impl RunsView {
         runs
     }
 
-    fn run_row(id: &str, run: &crate::tui::app::ActiveRun, selected: bool) -> Line<'static> {
+    fn run_row(
+        id: &str,
+        run: &crate::tui::app::ActiveRun,
+        selected: bool,
+        w: &ColumnWidths,
+    ) -> Line<'static> {
         let style = if selected {
             Style::default()
                 .fg(DEFAULT_THEME.midnight)
@@ -935,19 +1001,24 @@ impl RunsView {
         };
 
         let sel = if selected { "▶" } else { " " };
-        let id_str = truncate_str(id, 7); // 7 + 1 space = 8 cols
-        let status_str = truncate_str(&format!("{glyph} {}", run.status), 11);
-        let stage_str = truncate_str(&run.stage, 11);
-        let def_str = truncate_str(&run.definition, 15);
+        let id_str = truncate_str(id, w.id);
+        let raw_status = format!("{glyph} {}", run.status);
+        let status_str = truncate_str(&raw_status, w.status);
+        let stage_str = truncate_str(&run.stage, w.stage);
+        let def_str = truncate_str(&run.definition, w.definition);
         let tokens_in = format_token_count(run.prompt_tokens);
         let tokens_out = format_token_count(run.completion_tokens);
         let reasoning = format_token_count(run.reasoning_tokens);
         let cache = format_cache_pct(run.prompt_tokens, run.cached_input_tokens);
         let cost = format_cost_usd(run.cost_usd);
 
-        // Build as a single styled span with fixed-width columns.
+        // Build as a single styled span with data-driven column widths.
+        // Text columns are left-aligned; token/cost columns are right-aligned
+        // and never truncated.
         let text = format!(
-            "{sel} {id_str:<7}  {status_str:<11}  {stage_str:<11}  {def_str:<15}  {tokens_in:>7}  {tokens_out:>7}  {reasoning:>7}  {cache:>5}  {cost:>9}",
+            "{sel} {id_str:<0$}  {status_str:<1$}  {stage_str:<2$}  {def_str:<3$}  {tokens_in:>4$}  {tokens_out:>5$}  {reasoning:>6$}  {cache:>7$}  {cost:>8$}",
+            w.id, w.status, w.stage, w.definition,
+            w.tokens_in, w.tokens_out, w.reasoning, w.cache, w.cost,
         );
         Line::from(Span::styled(text, style))
     }
@@ -972,6 +1043,7 @@ impl RunsView {
         let header_wrapped = wrapped_height(&header_lines, area.width) as u16;
 
         let runs = Self::listed_runs(ctx);
+        let widths = ColumnWidths::from_runs(&runs);
         let running = runs.iter().filter(|(_, r)| r.status == "running").count();
         let total = ctx.active_runs.len();
         let footer_line = Line::from(Span::styled(
@@ -1023,6 +1095,7 @@ impl RunsView {
                         (*id).as_str(),
                         run,
                         ctx.watch_selection == Some((*id).as_str()),
+                        &widths,
                     )
                 })
                 .collect();

@@ -1989,9 +1989,29 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
             // ── Run-snapshot refresh (after event_lagged) ─────
             Some(mut runs) = snapshot_rx.recv() => {
-                for run in runs.values_mut() {
+                // Merge snapshot data into existing runs, preserving
+                // token/cost values that the snapshot omits (the daemon
+                // omits absent keys rather than sending null/zero).
+                for (id, run) in runs.iter_mut() {
                     if run.project.is_empty() {
                         run.project = app.project_name.clone();
+                    }
+                    if let Some(prev) = app.active_runs.get(id) {
+                        if run.prompt_tokens.is_none() {
+                            run.prompt_tokens = prev.prompt_tokens;
+                        }
+                        if run.completion_tokens.is_none() {
+                            run.completion_tokens = prev.completion_tokens;
+                        }
+                        if run.reasoning_tokens.is_none() {
+                            run.reasoning_tokens = prev.reasoning_tokens;
+                        }
+                        if run.cached_input_tokens.is_none() {
+                            run.cached_input_tokens = prev.cached_input_tokens;
+                        }
+                        if run.cost_usd.is_none() {
+                            run.cost_usd = prev.cost_usd;
+                        }
                     }
                 }
                 app.active_runs = runs;
@@ -2455,7 +2475,7 @@ fn format_socket_response(op: &str, resp: &serde_json::Value) -> Vec<String> {
     }
 }
 
-fn format_token_count(v: Option<u64>) -> String {
+pub(crate) fn format_token_count(v: Option<u64>) -> String {
     match v {
         Some(n) => {
             let s = n.to_string();
@@ -2472,14 +2492,14 @@ fn format_token_count(v: Option<u64>) -> String {
     }
 }
 
-fn format_cache_pct(prompt: Option<u64>, cached: Option<u64>) -> String {
+pub(crate) fn format_cache_pct(prompt: Option<u64>, cached: Option<u64>) -> String {
     match (prompt, cached) {
         (Some(p), Some(c)) if p > 0 => format!("{:.0}%", (c as f64 / p as f64) * 100.0),
         _ => "-".to_string(),
     }
 }
 
-fn format_cost_usd(v: Option<f64>) -> String {
+pub(crate) fn format_cost_usd(v: Option<f64>) -> String {
     match v {
         Some(c) => format!("${c:.4}"),
         None => "-".to_string(),
@@ -2596,8 +2616,9 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_chat_request, compact_tokens, ctrl_c_should_quit, format_socket_response,
-        interrupt_press, stats_title, usage_field, usage_title_part, InterruptAction,
+        build_chat_request, compact_tokens, ctrl_c_should_quit, format_cache_pct, format_cost_usd,
+        format_ls_response, format_socket_response, format_token_count, interrupt_press,
+        stats_title, usage_field, usage_title_part, InterruptAction,
     };
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
@@ -2976,5 +2997,154 @@ mod tests {
         );
         assert_eq!(count, 1);
         assert!(window.is_some());
+    }
+
+    // ── format_token_count ──
+
+    #[test]
+    fn format_token_count_renders_int_with_thousands_separators() {
+        assert_eq!(format_token_count(Some(0)), "0");
+        assert_eq!(format_token_count(Some(999)), "999");
+        assert_eq!(format_token_count(Some(1_000)), "1,000");
+        assert_eq!(format_token_count(Some(46_884)), "46,884");
+        assert_eq!(format_token_count(Some(1_000_000)), "1,000,000");
+    }
+
+    #[test]
+    fn format_token_count_renders_dash_for_none() {
+        assert_eq!(format_token_count(None), "-");
+    }
+
+    // ── format_cache_pct ──
+
+    #[test]
+    fn format_cache_pct_renders_integer_percentage() {
+        assert_eq!(format_cache_pct(Some(100), Some(40)), "40%");
+        assert_eq!(format_cache_pct(Some(100), Some(100)), "100%");
+        assert_eq!(format_cache_pct(Some(100), Some(0)), "0%");
+    }
+
+    #[test]
+    fn format_cache_pct_dash_when_prompt_missing() {
+        assert_eq!(format_cache_pct(None, Some(40)), "-");
+    }
+
+    #[test]
+    fn format_cache_pct_dash_when_cached_missing() {
+        assert_eq!(format_cache_pct(Some(100), None), "-");
+    }
+
+    #[test]
+    fn format_cache_pct_dash_when_prompt_zero() {
+        assert_eq!(format_cache_pct(Some(0), Some(40)), "-");
+        assert_eq!(format_cache_pct(Some(0), Some(0)), "-");
+    }
+
+    // ── format_cost_usd ──
+
+    #[test]
+    fn format_cost_usd_renders_dollar_amount() {
+        assert_eq!(format_cost_usd(Some(0.0)), "$0.0000");
+        assert_eq!(format_cost_usd(Some(0.1234)), "$0.1234");
+        assert_eq!(format_cost_usd(Some(1.5)), "$1.5000");
+    }
+
+    #[test]
+    fn format_cost_usd_renders_dash_for_none() {
+        assert_eq!(format_cost_usd(None), "-");
+    }
+
+    // ── format_ls_response ──
+
+    #[test]
+    fn format_ls_response_shows_token_cost_columns() {
+        let resp = serde_json::json!({
+            "gremlins": [{
+                "id": "gr-1",
+                "status": "running",
+                "stage": "build",
+                "started_at": "2025-01-01T00:00:00Z",
+                "project": "/p",
+                "launch": "gremlins run",
+                "prompt_tokens": 1_000,
+                "completion_tokens": 500,
+                "reasoning_tokens": 200,
+                "cached_input_tokens": 400,
+                "cost_usd": 0.0123
+            }]
+        });
+        let lines = format_ls_response(&resp);
+        assert!(lines.len() >= 2, "expected at least header + one row");
+        let header = &lines[0];
+        assert!(
+            header.contains("TOKENS IN"),
+            "header missing TOKENS IN: {header}"
+        );
+        assert!(
+            header.contains("TOKENS OUT"),
+            "header missing TOKENS OUT: {header}"
+        );
+        assert!(
+            header.contains("REASONING"),
+            "header missing REASONING: {header}"
+        );
+        assert!(header.contains("CACHE"), "header missing CACHE: {header}");
+        assert!(header.contains("COST"), "header missing COST: {header}");
+        let row = &lines[1];
+        assert!(row.contains("1,000"), "row missing prompt tokens: {row}");
+        assert!(row.contains("500"), "row missing completion tokens: {row}");
+        assert!(row.contains("40%"), "row missing cache pct: {row}");
+        assert!(row.contains("$0.0123"), "row missing cost: {row}");
+    }
+
+    #[test]
+    fn format_ls_response_renders_dashes_for_missing_token_fields() {
+        let resp = serde_json::json!({
+            "gremlins": [{
+                "id": "gr-2",
+                "status": "done",
+                "stage": "",
+                "started_at": "2025-01-01T00:00:00Z",
+                "project": "/p",
+                "launch": ""
+            }]
+        });
+        let lines = format_ls_response(&resp);
+        assert!(lines.len() >= 2);
+        let row = &lines[1];
+        // All five token/cost columns should render as `-` when absent.
+        // We count five dashes appearing in positions after the LAUNCH column.
+        let dash_count = row.matches('-').count();
+        assert!(
+            dash_count >= 5,
+            "expected at least 5 dashes for absent token/cost fields, got {dash_count}: {row}"
+        );
+    }
+
+    #[test]
+    fn format_ls_response_handles_zero_prompt_tokens() {
+        let resp = serde_json::json!({
+            "gremlins": [{
+                "id": "gr-3",
+                "status": "running",
+                "stage": "chat",
+                "started_at": "2025-01-01T00:00:00Z",
+                "project": "/p",
+                "launch": "",
+                "prompt_tokens": 0,
+                "completion_tokens": 10,
+                "cached_input_tokens": 0
+            }]
+        });
+        let lines = format_ls_response(&resp);
+        assert!(lines.len() >= 2);
+        let row = &lines[1];
+        // Cache should be `-` when prompt is zero.
+        assert!(
+            row.contains("-"),
+            "cache should be dash when prompt is 0: {row}"
+        );
+        // prompt_tokens of 0 should render as "0"
+        assert!(row.contains('0'), "prompt 0 should render as 0: {row}");
     }
 }
