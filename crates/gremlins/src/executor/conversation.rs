@@ -11,7 +11,7 @@ use indexmap::{IndexMap, IndexSet};
 use rig_core::completion::message::{AssistantContent, ToolCall, ToolResultContent, UserContent};
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition};
 
-use crate::clients::tools;
+use crate::clients::display;
 
 /// Chat-only compaction tuning. `threshold_bytes` is the soft trigger; when a
 /// request view exceeds it the loop compacts toward `target_bytes` so one pass
@@ -115,7 +115,7 @@ impl Facts {
                     let key = format!("Bash: {command}");
                     self.upsert_result_fact(
                         key,
-                        tools::result_status(output).to_string(),
+                        display::result_status(output).to_string(),
                         bash_result_tail(output, RESULT_TAIL_BYTES),
                     );
                 }
@@ -124,7 +124,7 @@ impl Facts {
                 if let Some(key) = search_result_key(name, args) {
                     self.upsert_result_fact(
                         key,
-                        tools::result_status(output).to_string(),
+                        display::result_status(output).to_string(),
                         tail_bytes(output, RESULT_TAIL_BYTES),
                     );
                 }

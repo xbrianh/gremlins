@@ -1637,7 +1637,7 @@ mod tests {
                 content: "you are a chat assistant".to_string(),
             },
             Message::user("hello".to_string()),
-            crate::clients::agent_loop::assistant_tool_message("hi there", &[], &[]),
+            crate::clients::display::assistant_tool_message("hi there", &[], &[]),
             Message::tool_result(
                 CallId::from_wire("call_1".to_string()),
                 ToolName::new("Read".to_string()).unwrap(),
