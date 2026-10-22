@@ -1,8 +1,6 @@
 use std::io::Write;
 
-use rig_core::completion::message::{
-    AssistantContent, Reasoning, Sealed, ToolCall,
-};
+use rig_core::completion::message::{AssistantContent, Reasoning, Sealed, ToolCall};
 use rig_core::completion::Message;
 use rig_core::streaming::{Item, StreamEvent};
 

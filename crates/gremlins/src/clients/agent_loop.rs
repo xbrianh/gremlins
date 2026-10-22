@@ -15,10 +15,14 @@ use tokio::sync::{mpsc, Notify};
 use crate::executor::conversation;
 
 use super::backend::{ClientError, RunParams};
+use super::display::{
+    apply_chunk, assistant_text_event, assistant_tool_message, enrich_log_line, format_tool_call,
+    format_tool_call_parts, ledger_key_arg, ledger_line, ledger_message, tool_result_event,
+    tool_use_event, write_raw,
+};
 use super::interactive::{
     InteractiveCommand, InteractiveEvent, InteractiveSession, PauseToken, StreamEventSender,
 };
-use super::display::{apply_chunk, assistant_text_event, assistant_tool_message, enrich_log_line, format_tool_call, format_tool_call_parts, ledger_key_arg, ledger_line, ledger_message, tool_use_event, tool_result_event, write_raw};
 use super::log_util::trunc;
 use super::model::{GremlinsModel, GremlinsModelError};
 use super::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};

@@ -18,8 +18,9 @@
 # How it works:
 #   1. Baseline — run gremlins-drag once to capture the starting score.
 #   2. Loop (max 5 iterations):
-#      a. Refactor — an agent stage inspects the baseline drag report and
-#         edits the target to reduce drag.
+#      a. Refactor — an agent stage inspects the latest drag report (and,
+#         from iteration 2 on, the report from before the last attempt)
+#         and edits the target to reduce drag.
 #      b. Commit — git add + commit in the isolated worktree.
 #      c. Score + converge — run gremlins-drag on the refactored code.  If
 #         the max ln_drag did not improve, write a convergence marker
@@ -74,6 +75,7 @@ stages:
           MODEL_ARG=""
           [ -n "{drag_model}" ] && MODEL_ARG="--model {drag_model}"
         - gremlins-drag --json {target} $MODEL_ARG > {report}
+        - cp {report} "$GREMLINS_STATE_DIR/drag_current.json"
         - |
           cat {report} | python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(m["ln_drag"] for m in data["modules"]))' > .gremlins_drag_best
         - 'echo "baseline sum ln_drag = $(cat .gremlins_drag_best)"'
@@ -84,13 +86,37 @@ stages:
     max-iterations: 5
     skip_if_exists: "artifact://{loop_iter}/converged"
     body:
+      # --- prepare refactor context (latest report + previous, when available) ---
+      - name: prepare-refactor-context
+        type: exec
+        interpolation:
+          outputs:
+            context: "artifact://{loop_iter}/refactor_context.md"
+        options:
+          cmds:
+            - |
+              STATE_DIR="$GREMLINS_STATE_DIR"
+              {
+                if [ -f "$STATE_DIR/drag_previous.json" ]; then
+                  echo "## Drag report before the last refactor (previous state)"
+                  echo '```json'
+                  cat "$STATE_DIR/drag_previous.json"
+                  echo '```'
+                  echo ""
+                fi
+                echo "## Drag report after the last refactor (current state)"
+                echo '```json'
+                cat "$STATE_DIR/drag_current.json"
+                echo '```'
+              } > {context}
+
       # --- refactor ---
       - name: refactor
         type: agent
         interpolation:
           inputs:
             target: content("artifact://target.txt")
-            baseline_report: content("artifact://baseline/report.json")
+            drag_context: content("artifact://{loop_iter}/refactor_context.md")
             instructions: content("artifact://instructions.txt")
           outputs:
             summary: "artifact://{loop_iter}/summary.md"
@@ -98,10 +124,12 @@ stages:
           - |
             Refactor the target at {target} to reduce its drag score.
 
-            ## Initial (baseline) drag analysis (JSON)
-            ```json
-            {baseline_report}
-            ```
+            The reports below are the most recent drag analyses. The "current
+            state" report describes the code you are about to edit. When a
+            "previous state" report is present, it describes the code before the
+            last refactor, so you can compare what changed and how drag moved.
+
+            {drag_context}
 
             ## What drag means
             ln_drag = w1*ln(token_count) + w2*ln(graph_complexity) − w3*ln(comprehensibility + ε)
@@ -180,6 +208,12 @@ stages:
               MODEL_ARG=""
               [ -n "{drag_model}" ] && MODEL_ARG="--model {drag_model}"
             - gremlins-drag --json {target} $MODEL_ARG > {report}
+            - |
+              STATE_DIR="$GREMLINS_STATE_DIR"
+              if [ -f "$STATE_DIR/drag_current.json" ]; then
+                cp "$STATE_DIR/drag_current.json" "$STATE_DIR/drag_previous.json"
+              fi
+              cp {report} "$STATE_DIR/drag_current.json"
             - |
               BEST=$(cat .gremlins_drag_best 2>/dev/null || echo 0)
               CURR=$(cat {report} | python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(m["ln_drag"] for m in data["modules"]))')

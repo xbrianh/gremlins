@@ -620,4 +620,3 @@ pub(crate) fn strip_subshells(s: &str) -> String {
     }
     result
 }
-

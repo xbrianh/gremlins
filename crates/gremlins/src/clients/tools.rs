@@ -11,7 +11,9 @@ use tokio::process::Command;
 
 use super::display::{format_tool_call_parts, result_status};
 use super::interactive::StreamEventSender;
-use super::shell::{check_ln_symlink, shell_tokenize, split_commands, strip_heredocs, strip_subshells};
+use super::shell::{
+    check_ln_symlink, shell_tokenize, split_commands, strip_heredocs, strip_subshells,
+};
 use super::task_kind::TaskKind;
 use crate::landscape::{LandscapeError, LandscapeExplorer};
 
@@ -1790,13 +1792,21 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool
 }
 
 fn json_type_name(val: &serde_json::Value) -> &'static str {
-    if val.is_string() { "string" }
-    else if val.is_array() { "array" }
-    else if val.is_number() { "number" }
-    else if val.is_object() { "object" }
-    else if val.is_null() { "null" }
-    else if val.is_boolean() { "bool" }
-    else { "?" }
+    if val.is_string() {
+        "string"
+    } else if val.is_array() {
+        "array"
+    } else if val.is_number() {
+        "number"
+    } else if val.is_object() {
+        "object"
+    } else if val.is_null() {
+        "null"
+    } else if val.is_boolean() {
+        "bool"
+    } else {
+        "?"
+    }
 }
 
 /// Validate tool arguments against the expected schema before dispatching
