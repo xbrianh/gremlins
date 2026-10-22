@@ -1366,10 +1366,79 @@ impl RunsView {
             .stream_lines
             .iter()
             .map(|line| {
-                Line::from(Span::styled(
-                    line.clone(),
-                    Style::default().fg(DEFAULT_THEME.text),
-                ))
+                // Try to parse as a stage-stream JSON line
+                if let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) {
+                    match obj.get("kind").and_then(|v| v.as_str()) {
+                        Some("reasoning") => {
+                            let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            Line::from(Span::styled(
+                                text.to_string(),
+                                Style::default()
+                                    .fg(DEFAULT_THEME.accent_secondary)
+                                    .add_modifier(Modifier::ITALIC),
+                            ))
+                        }
+                        Some("text") => {
+                            let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            Line::from(Span::styled(
+                                text.to_string(),
+                                Style::default().fg(DEFAULT_THEME.text),
+                            ))
+                        }
+                        Some("tool_output") | Some("tool_result") => {
+                            let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let text = obj
+                                .get("text")
+                                .or(obj.get("output"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            Line::from(Span::styled(
+                                format!("◆ {} {}", name, text),
+                                Style::default().fg(DEFAULT_THEME.subtle),
+                            ))
+                        }
+                        Some("turn_complete") | Some("done") | Some("stream_reset") => {
+                            Line::from(Span::styled(
+                                format!(
+                                    "── {}",
+                                    obj.get("kind").and_then(|v| v.as_str()).unwrap_or("")
+                                ),
+                                Style::default()
+                                    .fg(DEFAULT_THEME.chrome)
+                                    .add_modifier(Modifier::BOLD),
+                            ))
+                        }
+                        Some("stdout") => {
+                            let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            Line::from(Span::styled(
+                                text.to_string(),
+                                Style::default().fg(DEFAULT_THEME.text),
+                            ))
+                        }
+                        Some("stderr") => {
+                            let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            Line::from(Span::styled(
+                                text.to_string(),
+                                Style::default()
+                                    .fg(DEFAULT_THEME.subtle)
+                                    .add_modifier(Modifier::DIM),
+                            ))
+                        }
+                        _ => {
+                            // Fallback: render the raw line as plain text
+                            Line::from(Span::styled(
+                                line.clone(),
+                                Style::default().fg(DEFAULT_THEME.text),
+                            ))
+                        }
+                    }
+                } else {
+                    // Not JSON — operational log fallback, render as plain text
+                    Line::from(Span::styled(
+                        line.clone(),
+                        Style::default().fg(DEFAULT_THEME.text),
+                    ))
+                }
             })
             .collect();
 

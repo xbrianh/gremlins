@@ -188,6 +188,10 @@ pub(crate) struct RuntimeConfig {
     pub base_process_env: HashMap<String, String>,
     /// Per-gremlin log channel. Every gremlin-scoped log event is sent here.
     pub log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Broadcast of live stage output lines — exec stdout/stderr — for the
+    /// watch pane. When Some, command output is mirrored here in addition to
+    /// the per-gremlin log.
+    pub stage_stream_tx: Option<tokio::sync::broadcast::Sender<String>>,
     /// Interactive handle (supervisor → agent loop).
     pub interactive: Option<InteractiveHandle>,
     /// Sender for stream events (reasoning chunks, stream chunks,
@@ -208,6 +212,7 @@ impl Clone for RuntimeConfig {
             default_task_models: self.default_task_models.clone(),
             base_process_env: self.base_process_env.clone(),
             log_tx: self.log_tx.clone(),
+            stage_stream_tx: self.stage_stream_tx.clone(),
             interactive: self.interactive.clone(),
             stream_events: self.stream_events.clone(),
         }
@@ -242,6 +247,7 @@ impl RuntimeConfig {
             default_task_models,
             base_process_env,
             log_tx: None,
+            stage_stream_tx: None,
             interactive: None,
             stream_events: None,
         }
@@ -1132,6 +1138,7 @@ impl Gremlin {
                     None,
                     log_writer,
                     &log_tx,
+                    None,
                 )
                 .await;
 
@@ -1298,6 +1305,7 @@ impl Gremlin {
             None,
             log_writer,
             &log_tx,
+            None,
         )
         .await;
 

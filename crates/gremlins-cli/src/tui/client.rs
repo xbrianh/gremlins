@@ -338,6 +338,32 @@ impl DaemonClient {
         Ok((rx, handle))
     }
 
+    /// Open a dedicated session connection for a stage-aware stream follow.
+    /// Yields JSON lines with a `kind` field: reasoning, text, tool_output,
+    /// tool_result, turn_complete, done, stream_reset, stdout, stderr.
+    pub async fn follow_stage_stream(
+        &self,
+        id: &str,
+    ) -> Result<(mpsc::UnboundedReceiver<Value>, tokio::task::JoinHandle<()>), String> {
+        let session_id = self.session_id().await;
+        let mut stream = self.open_aux_stream().await?;
+
+        let request = serde_json::json!({"op": "stage_stream", "id": id, "follow": true, "session_id": session_id});
+        socket::write_json_line(&mut stream, &request).await?;
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move {
+            let mut reader = BufReader::new(stream);
+            while let Some(line) = socket::read_json_line(&mut reader).await.ok().flatten() {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok((rx, handle))
+    }
+
     /// Close the current session and create a fresh one.
     ///
     /// Used by `/clear` (releases the old chat gremlin and starts a fresh

@@ -717,6 +717,7 @@ async fn run_exec(
         local_registry.as_ref(),
         &loop_iter,
         &framework_subs,
+        gremlin.runtime_config.stage_stream_tx.clone(),
     )
     .await
     .map_err(|e| exec_prepare_err(e, &exec.name))?;

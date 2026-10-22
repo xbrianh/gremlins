@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use thiserror::Error;
+use tokio::sync::broadcast;
 
 use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
@@ -71,6 +72,8 @@ pub struct ExecPrepared {
     pub substitution_env: HashMap<String, String>,
     /// Per-gremlin log channel for exec stage lifecycle events.
     pub log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Stage stream broadcast for live watch pane output.
+    pub stage_stream_tx: Option<broadcast::Sender<String>>,
 }
 
 /// Phase 1: resolve interpolation, compute bind paths, substitute commands.
@@ -84,6 +87,7 @@ pub async fn prepare_exec(
     local_state: &dyn StateStore,
     loop_iter: &str,
     framework_subs: &HashMap<String, String>,
+    stage_stream_tx: Option<broadcast::Sender<String>>,
 ) -> Result<ExecPrepared, ExecError> {
     let name = &exec.name;
     let str_opts = vars::string_options(&exec.options);
@@ -200,6 +204,7 @@ pub async fn prepare_exec(
         base_env: HashMap::new(),
         substitution_env,
         log_tx: None,
+        stage_stream_tx,
     })
 }
 
@@ -254,6 +259,7 @@ pub async fn run_shell(
         prepared.timeout,
         log_writer,
         &prepared.log_tx,
+        prepared.stage_stream_tx.clone(),
     )
     .await;
 
@@ -370,7 +376,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
         };
-        let prepared = prepare_exec(&optional_exec, &store, &store, "", &fw)
+        let prepared = prepare_exec(&optional_exec, &store, &store, "", &fw, None)
             .await
             .unwrap();
         assert_eq!(prepared.output_uris[0].0, "out");
@@ -383,7 +389,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
-        let err = prepare_exec(&non_optional_exec, &store, &store, "", &fw)
+        let err = prepare_exec(&non_optional_exec, &store, &store, "", &fw, None)
             .await
             .err()
             .expect("expected duplicate-producer error");
@@ -404,7 +410,9 @@ mod tests {
             outputs_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &store, &store, "", &fw).await.unwrap();
+        let prepared = prepare_exec(&exec, &store, &store, "", &fw, None)
+            .await
+            .unwrap();
         let err = commit_exec(&prepared, &store).await.unwrap_err();
         assert!(matches!(err, ExecError::MissingArtifact { .. }));
         assert!(!store.is_registered("artifact://out.txt").await);
@@ -424,7 +432,9 @@ mod tests {
             outputs_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &store, &store, "", &fw).await.unwrap();
+        let prepared = prepare_exec(&exec, &store, &store, "", &fw, None)
+            .await
+            .unwrap();
         commit_exec(&prepared, &store).await.unwrap();
         assert!(!store.is_registered("artifact://out.txt").await);
     }
@@ -443,7 +453,9 @@ mod tests {
             outputs_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &store, &store, "", &fw).await.unwrap();
+        let prepared = prepare_exec(&exec, &store, &store, "", &fw, None)
+            .await
+            .unwrap();
         fs::write(&prepared.output_paths["out"], "data").unwrap();
         commit_exec(&prepared, &store).await.unwrap();
         assert!(store.is_registered("artifact://out.txt").await);
@@ -478,6 +490,7 @@ mod tests {
             base_env: HashMap::new(),
             substitution_env,
             log_tx: None,
+            stage_stream_tx: None,
         };
 
         let state = StateData::with_state_dir(&state_dir);
@@ -507,6 +520,7 @@ mod tests {
             base_env: HashMap::new(),
             substitution_env: HashMap::new(),
             log_tx: None,
+            stage_stream_tx: None,
         }
     }
 
@@ -531,6 +545,7 @@ mod tests {
             cmds: vec!["echo \"${GREMLINS_INPUT}\"".to_string()],
             substitution_env,
             log_tx: None,
+            stage_stream_tx: None,
             ..make_prepared("resolved", vec!["echo ok"], &state_dir)
         };
         let state = StateData::with_state_dir(&state_dir);

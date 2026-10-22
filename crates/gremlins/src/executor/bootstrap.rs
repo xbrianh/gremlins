@@ -94,6 +94,7 @@ pub async fn run_bootstrap(
         None,
         log_writer,
         log_tx,
+        None,
     )
     .await;
 

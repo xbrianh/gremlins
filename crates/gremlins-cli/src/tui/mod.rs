@@ -162,40 +162,67 @@ fn start_watch_follow(
     let client = Arc::clone(client);
     let follow_id = id.clone();
     let follow_task = tokio::spawn(async move {
-        match client.follow_log(&follow_id).await {
+        // Try stage stream first for running gremlins; fall back to operational log.
+        let stage_result = client.follow_stage_stream(&follow_id).await;
+        match stage_result {
             Ok((mut rx, handle)) => {
                 let _guard = AbortOnDrop(handle);
                 while let Some(raw) = rx.recv().await {
-                    let Some(line) = raw.get("line").and_then(|v| v.as_str()) else {
-                        continue;
-                    };
+                    // Stage stream lines already have kind/text fields; forward as-is
+                    // but tagged with the view_log envelope so the log_rx handler
+                    // routes them to the watch pane.
                     let tagged = serde_json::json!({
                         "type": "view_log",
                         "id": follow_id,
                         "generation": generation,
-                        "line": line,
+                        "line": raw.to_string(),
                     });
                     if log_tx.send(tagged).is_err() {
                         break;
                     }
                 }
-                // The socket closed without an explicit run-terminal event.
-                // Surface that state instead of leaving the pane claiming it
-                // is actively following.
                 let _ = log_tx.send(serde_json::json!({
                     "type": "view_error",
                     "id": follow_id,
                     "generation": generation,
-                    "message": "log stream closed",
+                    "message": "stage stream closed",
                 }));
             }
-            Err(e) => {
-                let _ = log_tx.send(serde_json::json!({
-                    "type": "view_error",
-                    "id": follow_id,
-                    "generation": generation,
-                    "message": e,
-                }));
+            Err(_stage_err) => {
+                // Fall back to operational log
+                match client.follow_log(&follow_id).await {
+                    Ok((mut rx, handle)) => {
+                        let _guard = AbortOnDrop(handle);
+                        while let Some(raw) = rx.recv().await {
+                            let Some(line) = raw.get("line").and_then(|v| v.as_str()) else {
+                                continue;
+                            };
+                            let tagged = serde_json::json!({
+                                "type": "view_log",
+                                "id": follow_id,
+                                "generation": generation,
+                                "line": line,
+                            });
+                            if log_tx.send(tagged).is_err() {
+                                break;
+                            }
+                        }
+                        let _ = log_tx.send(serde_json::json!({
+                            "type": "view_error",
+                            "id": follow_id,
+                            "generation": generation,
+                            "message": "log stream closed",
+                        }));
+                    }
+                    Err(e) => {
+                        let _ = log_tx.send(serde_json::json!({
+                            "type": "view_error",
+                            "id": follow_id,
+                            "generation": generation,
+                            "message": e,
+                        }));
+                    }
+                }
             }
         }
     });

@@ -1401,7 +1401,7 @@ async fn land(id: &str) -> Result<(), String> {
     let workdir = raw.get("workdir").and_then(Value::as_str).unwrap_or("");
     let worktree = (!workdir.is_empty()).then(|| PathBuf::from(workdir));
 
-    let prepared = prepare_exec(&exec, &store, &store, "", &HashMap::new())
+    let prepared = prepare_exec(&exec, &store, &store, "", &HashMap::new(), None)
         .await
         .map_err(|e| format!("gremlin {id}: {e}"))?;
 
@@ -1425,9 +1425,16 @@ async fn land(id: &str) -> Result<(), String> {
         env.insert(k.clone(), v.clone());
     }
 
-    let result = run_shell_async(&joined, Some(&cwd), Some(&env), prepared.timeout, None)
-        .await
-        .map_err(|e| format!("gremlin {id}: land: {e}"))?;
+    let result = run_shell_async(
+        &joined,
+        Some(&cwd),
+        Some(&env),
+        prepared.timeout,
+        None,
+        None,
+    )
+    .await
+    .map_err(|e| format!("gremlin {id}: land: {e}"))?;
 
     {
         use std::io::Write;

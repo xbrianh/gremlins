@@ -14,6 +14,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::sync::broadcast;
 use tokio::sync::mpsc::UnboundedSender;
 
 use tokio::io::AsyncReadExt;
@@ -456,6 +457,7 @@ pub async fn run_shell_async(
     env: Option<&HashMap<String, String>>,
     timeout: Option<f64>,
     stream_writer: Option<Arc<std::sync::Mutex<Box<dyn io::Write + Send>>>>,
+    stage_stream_tx: Option<broadcast::Sender<String>>,
 ) -> Result<ProcResult, ProcError> {
     if shell_cmd.is_empty() {
         return Err(ProcError::EmptyCommand);
@@ -505,6 +507,9 @@ pub async fn run_shell_async(
     let sw_stdout = stream_writer.clone();
     let sw_stderr = stream_writer.clone();
 
+    let ss_stdout = stage_stream_tx.clone();
+    let ss_stderr = stage_stream_tx.clone();
+
     let stdout_handle = tokio::spawn(async move {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
@@ -517,6 +522,18 @@ pub async fn run_shell_async(
                         let mut g = w.lock().unwrap();
                         let _ = g.write_all(&chunk[..n]);
                         let _ = g.flush();
+                    }
+                    if let Some(ref ss) = ss_stdout {
+                        let text = String::from_utf8_lossy(&chunk[..n]).to_string();
+                        let ts = crate::executor::state::now_stamp_millis();
+                        for part in text.split('\n') {
+                            if !part.is_empty() {
+                                let line =
+                                    serde_json::json!({"kind": "stdout", "text": part, "ts": ts})
+                                        .to_string();
+                                let _ = ss.send(line);
+                            }
+                        }
                     }
                 }
                 Err(_) => break,
@@ -537,6 +554,18 @@ pub async fn run_shell_async(
                         let mut g = w.lock().unwrap();
                         let _ = g.write_all(&chunk[..n]);
                         let _ = g.flush();
+                    }
+                    if let Some(ref ss) = ss_stderr {
+                        let text = String::from_utf8_lossy(&chunk[..n]).to_string();
+                        let ts = crate::executor::state::now_stamp_millis();
+                        for part in text.split('\n') {
+                            if !part.is_empty() {
+                                let line =
+                                    serde_json::json!({"kind": "stderr", "text": part, "ts": ts})
+                                        .to_string();
+                                let _ = ss.send(line);
+                            }
+                        }
                     }
                 }
                 Err(_) => break,
@@ -688,6 +717,7 @@ pub async fn run_logged_commands(
     timeout: Option<f64>,
     log_writer: Option<Box<dyn io::Write + Send>>,
     log_tx: &Option<UnboundedSender<String>>,
+    stage_stream_tx: Option<broadcast::Sender<String>>,
 ) -> Result<ShellResult, ProcError> {
     if cmds.is_empty() {
         return Ok(ShellResult {
@@ -727,7 +757,15 @@ pub async fn run_logged_commands(
     let script = build_instrumented_script(cmds, substitution_env);
 
     // Run the script — streaming output goes through the same handle.
-    let result = run_shell_async(&script, Some(cwd), Some(env), timeout, shared.clone()).await;
+    let result = run_shell_async(
+        &script,
+        Some(cwd),
+        Some(env),
+        timeout,
+        shared.clone(),
+        stage_stream_tx,
+    )
+    .await;
 
     let elapsed = t0.elapsed().as_secs_f64();
 
@@ -2498,7 +2536,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_shell_async_success() {
-        let r = run_shell_async("true", None, None, None, None)
+        let r = run_shell_async("true", None, None, None, None, None)
             .await
             .unwrap();
         assert_eq!(r.returncode, 0);
@@ -2506,7 +2544,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_shell_async_captures_stdout() {
-        let r = run_shell_async("echo hello", None, None, None, None)
+        let r = run_shell_async("echo hello", None, None, None, None, None)
             .await
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "hello");
@@ -2514,7 +2552,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_shell_async_timeout() {
-        let err = run_shell_async("sleep 10", None, None, Some(0.05), None)
+        let err = run_shell_async("sleep 10", None, None, Some(0.05), None, None)
             .await
             .unwrap_err();
         match err {
@@ -2525,7 +2563,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_shell_async_timeout_kills_grandchildren() {
-        let err = run_shell_async("sleep 60 & sleep 60", None, None, Some(0.1), None)
+        let err = run_shell_async("sleep 60 & sleep 60", None, None, Some(0.1), None, None)
             .await
             .unwrap_err();
         match err {
@@ -2542,6 +2580,7 @@ mod tests {
             None,
             Some(0.2),
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -2556,7 +2595,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_shell_async_cancel() {
         let handle =
-            tokio::spawn(async { run_shell_async("sleep 10", None, None, None, None).await });
+            tokio::spawn(async { run_shell_async("sleep 10", None, None, None, None, None).await });
         tokio::time::sleep(Duration::from_millis(50)).await;
         handle.abort();
         let result = handle.await;
@@ -2571,6 +2610,7 @@ mod tests {
             Some(&HashMap::from([("FOO".to_string(), "bar".to_string())])),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2579,7 +2619,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_shell_async_empty_cmd() {
-        let err = run_shell_async("", None, None, None, None)
+        let err = run_shell_async("", None, None, None, None, None)
             .await
             .unwrap_err();
         match err {
@@ -2608,7 +2648,7 @@ mod tests {
             )))
         };
         let handle = tokio::spawn(async move {
-            run_shell_async(cmd, None, None, None, stream_writer)
+            run_shell_async(cmd, None, None, None, stream_writer, None)
                 .await
                 .unwrap()
         });
