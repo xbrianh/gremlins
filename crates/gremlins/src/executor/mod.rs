@@ -13,7 +13,6 @@ use rig_core::completion::Message;
 use crate::clients::backend::ClientError;
 use crate::executor::state::StateError;
 
-
 /// Why a gremlin run failed.
 ///
 /// The variants are deliberately coarse: the run loop (M2/M3) reports a
@@ -66,7 +65,6 @@ pub enum RunError {
     #[error(transparent)]
     State(#[from] StateError),
 }
-
 
 pub mod agent_runner;
 pub mod bootstrap;

@@ -1023,9 +1023,19 @@ async fn dispatch_op(
         DispatchOutcome::Continue
     }
     match op {
-        "launch" => reply(writer, handle_launch(request, state_root, shutdown_tx).await).await,
+        "launch" => {
+            reply(
+                writer,
+                handle_launch(request, state_root, shutdown_tx).await,
+            )
+            .await
+        }
         "create_session" => {
-            reply(writer, handle_create_session(request, state_root, shutdown_tx).await).await
+            reply(
+                writer,
+                handle_create_session(request, state_root, shutdown_tx).await,
+            )
+            .await
         }
         "stop" => {
             if let Some(id) = request.get("id").and_then(|v| v.as_str()) {
@@ -1033,7 +1043,13 @@ async fn dispatch_op(
             }
             reply(writer, handle_stop(request, shutdown_tx).await).await
         }
-        "resume" => reply(writer, handle_resume(request, state_root, shutdown_tx).await).await,
+        "resume" => {
+            reply(
+                writer,
+                handle_resume(request, state_root, shutdown_tx).await,
+            )
+            .await
+        }
         "ls" => reply(writer, handle_ls(request, state_root).await).await,
         "status" => reply(writer, handle_status(request, state_root).await).await,
         "info" => reply(writer, handle_info(request, state_root).await).await,
@@ -1196,8 +1212,7 @@ fn open_persisted_gremlin(id: &str) -> Result<(Gremlin, PathBuf), Value> {
     if !state_dir.is_dir() || !state_file.is_file() {
         return Err(error_response(&format!("unknown gremlin {id:?}")));
     }
-    let gremlin =
-        Gremlin::from(id).map_err(|e| error_response(&format!("gremlin {id}: {e}")))?;
+    let gremlin = Gremlin::from(id).map_err(|e| error_response(&format!("gremlin {id}: {e}")))?;
     Ok((gremlin, state_dir))
 }
 
@@ -1486,7 +1501,14 @@ async fn handle_resume(
 
     let definition_name = gremlin.state.read_str("kind");
 
-    spawn_gremlin_runner(gremlin, id, &resume_stage, Some(&resume_stage), &definition_name, shutdown_tx);
+    spawn_gremlin_runner(
+        gremlin,
+        id,
+        &resume_stage,
+        Some(&resume_stage),
+        &definition_name,
+        shutdown_tx,
+    );
 
     ok_response(serde_json::json!({"id": id, "resume_from": resume_stage_for_response}))
 }
@@ -3859,8 +3881,7 @@ fn spawn_gremlin_runner(
     let (go_tx, go_rx) = tokio::sync::oneshot::channel();
     let join_handle = tokio::spawn(async move {
         let _ = go_rx.await;
-        let (result, _gremlin) =
-            run_gremlin_task(gremlin, resume_from_owned.as_deref()).await;
+        let (result, _gremlin) = run_gremlin_task(gremlin, resume_from_owned.as_deref()).await;
         if !aborted_for_task.load(Ordering::Relaxed) {
             RunHandle::finish(&id_owned, result, &state_tx_clone, Some(&shutdown_tx_clone));
         }

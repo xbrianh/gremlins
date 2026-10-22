@@ -883,7 +883,10 @@ impl FileSystemStateStore {
                     if is_file_artifact(path) && path.starts_with(&parent_ad_str) {
                         let rel = path.strip_prefix(&parent_ad_str).unwrap_or(path);
                         let rel = rel.trim_start_matches('/');
-                        data.insert(key.clone(), child_ad.join(rel).to_string_lossy().to_string());
+                        data.insert(
+                            key.clone(),
+                            child_ad.join(rel).to_string_lossy().to_string(),
+                        );
                     } else {
                         data.insert(key.clone(), path.clone());
                     }
@@ -1172,8 +1175,11 @@ impl StateStore for FileSystemStateStore {
             if parent_ad.is_dir() {
                 copy_dir_sync(&parent_ad, &child_ad)?;
             }
-            let child_store = FileSystemStateStore { root: StateRoot::Temp(child_temp) };
-            self.seed_fork_registry(&child_store, &child_ad, &parent_ad, false).await?;
+            let child_store = FileSystemStateStore {
+                root: StateRoot::Temp(child_temp),
+            };
+            self.seed_fork_registry(&child_store, &child_ad, &parent_ad, false)
+                .await?;
             let mut initial = Map::new();
             initial.insert("id".into(), Value::String(child_gremlin_id.to_string()));
             child_store.write_state(&initial)?;
@@ -1187,7 +1193,8 @@ impl StateStore for FileSystemStateStore {
                 copy_dir_sync(&parent_ad, &child_ad)?;
             }
             let child_store = FileSystemStateStore::open(child_gremlin_id)?;
-            self.seed_fork_registry(&child_store, &child_ad, &parent_ad, true).await?;
+            self.seed_fork_registry(&child_store, &child_ad, &parent_ad, true)
+                .await?;
             let mut initial = Map::new();
             initial.insert("id".into(), Value::String(child_gremlin_id.to_string()));
             child_store.write_state(&initial)?;
@@ -1476,7 +1483,11 @@ impl StateData {
     delegate!(pub store, fn accumulate_token_usage(&self, usage: &HashMap<String, i64>));
     delegate!(pub store, fn state_tree(&self) -> Map<String, Value>);
     delegate!(pub store, fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError>);
-    pub(crate) fn open_blob(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError> {
+    pub(crate) fn open_blob(
+        &self,
+        name: &str,
+        mode: BlobMode,
+    ) -> Result<Box<dyn StateBlob>, StateError> {
         self.store.open(name, mode)
     }
     delegate!(pub(crate) store, fn exists(&self, name: &str) -> bool);
