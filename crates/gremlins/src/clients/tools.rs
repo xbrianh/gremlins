@@ -196,7 +196,7 @@ fn normalize_dots(p: &Path) -> PathBuf {
 /// Resolve the real path by canonicalizing the deepest ancestor that exists
 /// on disk, then re-appending the non-existent suffix. Falls back to the
 /// original path if even the filesystem root can't be canonicalized.
-fn canonicalize_or_ancestor(p: &Path) -> PathBuf {
+pub(crate) fn canonicalize_or_ancestor(p: &Path) -> PathBuf {
     match p.canonicalize() {
         Ok(c) => c,
         Err(_) => {
@@ -1707,6 +1707,8 @@ pub(crate) async fn bash_invoke(ctx: &AgentLoopRuntime, args_json: &str, id: &st
     }
     if let Some(cwd) = &ctx.cwd {
         cmd.current_dir(cwd);
+    } else {
+        cmd.current_dir(project_root());
     }
     if let Some(base) = &ctx.base_env {
         let mut env = base.clone();
@@ -3583,13 +3585,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bash_invoke_cwd_none_uses_process_cwd() {
-        // When cwd is None, the command inherits the process current directory.
+    async fn bash_invoke_cwd_none_uses_project_root() {
+        // When cwd is None, bash must use project_root() — the same
+        // fallback that bash_check uses for path resolution. This keeps
+        // validation and execution bases aligned.
+        let _env = EnvGuard::lock();
+        let dir = tmp();
+        std::env::set_var("GREMLINS_PROJECT_ROOT", dir.to_str().unwrap());
         let c = AgentLoopRuntime {
             cwd: None,
             extra_env: None,
             base_env: None,
-            sandbox: SandboxMode::Roots(vec![std::env::current_dir().unwrap()]),
+            sandbox: SandboxMode::Roots(vec![dir.clone()]),
             audit_log: None,
             allowed_tools: None,
             task_fn: None,
@@ -3601,13 +3608,51 @@ mod tests {
                 tool_output: None,
             },
         };
-        let expected = std::env::current_dir().unwrap();
+        let expected = canonicalize_or_ancestor(&dir);
         let args = serde_json::json!({"command": "pwd"}).to_string();
         let output = bash_invoke(&c, &args, "tool-test-id").await;
         assert!(
             output.trim().contains(expected.to_str().unwrap()),
-            "bash_invoke with cwd=None should use process cwd={}, got: {output}",
+            "bash_invoke with cwd=None should use project_root={}, got: {output}",
             expected.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_invoke_cwd_none_diverges_from_process_cwd() {
+        // Regression: when GREMLINS_PROJECT_ROOT differs from the daemon's
+        // working directory, bash execution must still use project_root so
+        // validation and execution agree on what `./file.txt` refers to.
+        let _env = EnvGuard::lock();
+        let project = tmp();
+        let daemon = tmp();
+        std::env::set_var("GREMLINS_PROJECT_ROOT", project.to_str().unwrap());
+        let c = AgentLoopRuntime {
+            cwd: None,
+            extra_env: None,
+            base_env: None,
+            sandbox: SandboxMode::Roots(vec![project.clone()]),
+            audit_log: None,
+            allowed_tools: None,
+            task_fn: None,
+            audit_lock: None,
+            parent_history: None,
+            id_prefix: String::new(),
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
+        };
+        let expected = canonicalize_or_ancestor(&project);
+        // Ensure the daemon cwd is genuinely different from project root.
+        assert_ne!(canonicalize_or_ancestor(&daemon), expected);
+        let args = serde_json::json!({"command": "pwd"}).to_string();
+        let output = bash_invoke(&c, &args, "tool-test-id").await;
+        assert!(
+            output.trim().contains(expected.to_str().unwrap()),
+            "bash_invoke with cwd=None must use project_root={}, not process cwd={}, got: {output}",
+            expected.display(),
+            canonicalize_or_ancestor(&daemon).display()
         );
     }
 
@@ -5462,6 +5507,38 @@ mod tests {
         let outside_file = outside.join("bad.txt");
         let err = enforce(&roots, outside_file.to_str().unwrap(), None).unwrap();
         assert!(err.contains("outside sandbox"));
+    }
+
+    #[test]
+    fn within_worktree_relative_root_with_different_agent_cwd() {
+        // Regression: when a sandbox root was assembled relative to the
+        // daemon's cwd but the agent has a different cwd, within_worktree
+        // must still correctly resolve the root. The fix canonicalizes
+        // roots at assembly time, so they arrive here as absolute paths.
+        // This test simulates that: the root is pre-canonicalized (as the
+        // assembly step now does), and the agent cwd is unrelated.
+        let daemon_like = tmp();
+        let scratch = daemon_like.join("scratch");
+        std::fs::create_dir(&scratch).unwrap();
+        let scratch_file = scratch.join("data.txt");
+        std::fs::write(&scratch_file, "ok").unwrap();
+
+        let agent_cwd = tmp();
+        // The root is pre-canonicalized (absolute), as the assembly step
+        // now guarantees.
+        let roots = [canonicalize_or_ancestor(&scratch)];
+
+        // within_worktree must allow the scratch file even when agent cwd
+        // is somewhere entirely different.
+        assert!(within_worktree(&scratch_file, &roots, Some(&agent_cwd)));
+        // io_enforce must agree.
+        assert!(io_enforce(&scratch_file, &roots).is_none());
+
+        // A file outside the root is still denied by both.
+        let outside = agent_cwd.join("outside.txt");
+        std::fs::write(&outside, "x").unwrap();
+        assert!(!within_worktree(&outside, &roots, Some(&agent_cwd)));
+        assert!(io_enforce(&outside, &roots).is_some());
     }
 
     // Independent of `normalize_path`: for existing dirs it must agree with

@@ -329,10 +329,10 @@ pub(crate) async fn run_agent_loop(
     } else {
         let mut allowed_roots = vec![worktree];
         if let Some(ref artifact_dir) = ctx.params.artifact_dir {
-            allowed_roots.push(artifact_dir.clone());
+            allowed_roots.push(tools::canonicalize_or_ancestor(artifact_dir));
         }
         if let Some(scratch) = tools::scratch_root() {
-            allowed_roots.push(scratch);
+            allowed_roots.push(tools::canonicalize_or_ancestor(&scratch));
         }
         tools::SandboxMode::Roots(allowed_roots)
     };
