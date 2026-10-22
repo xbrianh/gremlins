@@ -355,6 +355,7 @@ fn build_chat_request(
     project_root: &str,
     context: &str,
     env: &HashMap<String, String>,
+    skills: &[String],
 ) -> serde_json::Value {
     let mut request = serde_json::json!({
         "op": "chat",
@@ -365,6 +366,14 @@ fn build_chat_request(
     });
     if !context.is_empty() {
         request["context"] = serde_json::Value::String(context.to_string());
+    }
+    if !skills.is_empty() {
+        request["skills"] = serde_json::Value::Array(
+            skills
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect(),
+        );
     }
     request
 }
@@ -408,6 +417,8 @@ fn send_chat_input(
     let chat_tx = client_for_chat.chat_sender();
     // The operator's project root, resolved the same way the info bar does.
     let project_root = gremlins::config::project_root();
+    // Snapshot active skills before the spawn so the borrow of `app` is released.
+    let active_skills = app.active_skills.clone();
     tokio::spawn(async move {
         // Gather the repository-context snapshot off the runtime's worker
         // threads (git subprocesses are blocking) and under one overall
@@ -437,6 +448,7 @@ fn send_chat_input(
             &project_root.to_string_lossy(),
             &context,
             &env,
+            &active_skills,
         );
         match client_for_chat
             .send_session_request_for_generation(request, session_generation)
@@ -1644,10 +1656,39 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         app.input.clear();
                                         app.input_cursor = 0;
                                         app.clear_completion();
+                                        app.active_skills.clear();
                                         live_area.reset_input_scroll();
                                     }
                                     CommandResult::Quit => {
                                         break;
+                                    }
+                                    CommandResult::ActivateSkill(name) => {
+                                        // Discover skills to validate the name.
+                                        let project_root = gremlins::config::project_root();
+                                        let skills = gremlins::skills::discover(&project_root);
+                                        match gremlins::skills::find_skill(&skills, &name, false) {
+                                            Some(_) => {
+                                                if !app.active_skills.contains(&name) {
+                                                    app.active_skills.push(name.clone());
+                                                }
+                                                live_area.push_transcript_line(format!(
+                                                    "> /skill {name}\nskill {name:?} activated"
+                                                ));
+                                            }
+                                            None => {
+                                                live_area.push_transcript_line(format!(
+                                                    "> /skill {name}\nskill {name:?} not found or not user-invocable"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    CommandResult::ListSkills => {
+                                        let project_root = gremlins::config::project_root();
+                                        let skills = gremlins::skills::discover(&project_root);
+                                        let index = gremlins::skills::render_operator_index(&skills);
+                                        let mut lines: Vec<String> = vec!["> /skills".to_string()];
+                                        lines.extend(index.lines().map(String::from));
+                                        live_area.push_transcript_block(lines);
                                     }
                                     CommandResult::SocketOp { op, payload } => {
                                         if op == "log" {
@@ -2802,7 +2843,7 @@ mod tests {
     #[test]
     fn chat_request_carries_project_root() {
         let env = HashMap::from([("PATH".to_string(), "/usr/bin".to_string())]);
-        let req = build_chat_request("push this branch", "3", "/home/user/proj", "", &env);
+        let req = build_chat_request("push this branch", "3", "/home/user/proj", "", &env, &[]);
         assert_eq!(req["op"], "chat");
         assert_eq!(req["text"], "push this branch");
         assert_eq!(req["turn"], "3");
@@ -2814,7 +2855,7 @@ mod tests {
     #[test]
     fn chat_request_does_not_carry_a_gremlin_id() {
         let env = HashMap::new();
-        let req = build_chat_request("hi", "2", "/p", "", &env);
+        let req = build_chat_request("hi", "2", "/p", "", &env, &[]);
         assert!(req.get("id").is_none());
         assert_eq!(req["project_root"], "/p");
     }
@@ -2822,7 +2863,7 @@ mod tests {
     #[test]
     fn chat_request_keeps_context_separate_from_text() {
         let env = HashMap::new();
-        let req = build_chat_request("hello", "1", "/p", "Current branch: main", &env);
+        let req = build_chat_request("hello", "1", "/p", "Current branch: main", &env, &[]);
         assert_eq!(req["text"], "hello");
         assert_eq!(req["context"], "Current branch: main");
     }
@@ -2830,9 +2871,17 @@ mod tests {
     #[test]
     fn chat_request_omits_empty_context() {
         let env = HashMap::new();
-        let req = build_chat_request("hello", "1", "/p", "", &env);
+        let req = build_chat_request("hello", "1", "/p", "", &env, &[]);
         assert!(req.get("context").is_none());
         assert_eq!(req["text"], "hello");
+    }
+
+    #[test]
+    fn chat_request_includes_skills_when_present() {
+        let env = HashMap::new();
+        let req = build_chat_request("hello", "1", "/p", "", &env, &["pdf".to_string()]);
+        assert_eq!(req["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(req["skills"][0], "pdf");
     }
 
     #[test]

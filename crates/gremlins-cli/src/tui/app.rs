@@ -49,6 +49,9 @@ pub struct App {
     /// Active filepath-completion state for the main input bar. The state is
     /// inert (no filesystem access); the completion module owns all I/O.
     pub completion: Option<CompletionState>,
+    /// Active skill names for the current session. Populated by `/skill`;
+    /// cleared by `/clear`. Sent to the daemon on each chat request.
+    pub active_skills: Vec<String>,
 }
 
 /// One tracked gremlin run.
@@ -127,6 +130,7 @@ impl App {
             history_cursor: None,
             width: 80,
             completion: None,
+            active_skills: Vec::new(),
         }
     }
 
