@@ -409,50 +409,6 @@ fn check_ln_symlink(cmd: &str) -> Option<String> {
     None
 }
 
-/// Defense-in-depth `cd` containment check. Scans for `cd` commands
-/// (possibly after `;`, `&&`, `||`) and resolves the target directory
-/// through [`within_worktree`]. Catches the escape where a
-/// bare symlink name like `link -> /tmp/outside` is not flagged by the
-/// path-heuristic loop (no `/`, no `~`, no `..`).
-///
-/// Like [`check_ln_symlink`], this is heuristic — it doesn't handle
-/// `env cd`, `sh -c 'cd link'`, or `cd` buried in subshells. The real
-/// defense is the per-token path check and the later `io_enforce` at
-/// I/O time; this just provides an earlier, clearer denial for the
-/// common `cd`-through-symlink pattern.
-fn check_cd(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Option<String> {
-    let parts = split_commands(cmd);
-    for part in &parts {
-        let tokens = shell_tokenize(part);
-        if tokens.is_empty() {
-            continue;
-        }
-        let first = &tokens[0];
-        if first.value != "cd" && !first.value.ends_with("/cd") {
-            continue;
-        }
-        // cd with no arg (goes HOME) or cd - (previous dir) —
-        // can't statically resolve, skip.
-        if tokens.len() < 2 {
-            continue;
-        }
-        let arg = &tokens[1];
-        if arg.value == "-" {
-            continue;
-        }
-        let expanded = expand_user(&arg.value);
-        let p = resolve(&expanded, cwd);
-        if !within_worktree(&p, roots, cwd) {
-            return Some(format!(
-                "Error: cd target outside sandbox: {}{}",
-                arg.value,
-                roots_suffix(roots, cwd)
-            ));
-        }
-    }
-    None
-}
-
 /// A single token produced by [`shell_tokenize`].
 struct ShellToken {
     /// The raw verbatim text as it appeared in the command string,
@@ -1054,23 +1010,28 @@ fn strip_subshells(s: &str) -> String {
     result
 }
 
+/// Pre-flight static analysis for Bash commands. Rejects commands that
+/// reference paths outside the sandbox roots.
+///
+/// Splits compound commands on `;`, `&&`, and `||`, then processes each
+/// sub-command in order while tracking a simulated working directory
+/// (`sim_cwd`). When a sub-command is `cd <arg>`, `sim_cwd` is updated so
+/// that subsequent relative paths are resolved against the directory the
+/// shell would actually be in.
+///
+/// This is a heuristic, not shell emulation. `cd -`, bare `cd`, and `cd`
+/// wrapped in subshells are not tracked. The real containment boundary is
+/// `io_enforce`; this check provides early, clear denials for obviously
+/// stray path arguments.
 pub(crate) fn bash_check(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Option<String> {
-    let s = cmd.trim();
-    if s.is_empty() {
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
         return None;
     }
     // Guard against symlink creation via ln.
-    if let Some(err) = check_ln_symlink(s) {
+    if let Some(err) = check_ln_symlink(cmd) {
         return Some(err);
     }
-    // Guard against cd into symlinked directories outside sandbox.
-    if let Some(err) = check_cd(roots, s, cwd) {
-        return Some(err);
-    }
-    // Strip heredoc bodies and subshells before tokenizing. Neither contains
-    // literal path arguments from the agent: heredoc bodies are file content,
-    // and subshell paths are runtime-expanded by the shell.
-    let cleaned = strip_subshells(&strip_heredocs(s));
     // Canonicalize roots once — avoid re-resolving per token.
     let canonical_roots: Vec<PathBuf> = roots
         .iter()
@@ -1079,33 +1040,75 @@ pub(crate) fn bash_check(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Op
     if canonical_roots.is_empty() {
         return Some("Error: invalid sandbox root".into());
     }
-    for tok in shell_tokenize(&cleaned) {
-        if tok.value.is_empty() {
+    // Simulated working directory — updated when we see a resolvable cd.
+    let mut sim_cwd = match cwd {
+        Some(c) => canonicalize_or_ancestor(c),
+        None => canonicalize_or_ancestor(&project_root()),
+    };
+
+    let sub_commands = split_commands(cmd);
+    for sub_cmd in &sub_commands {
+        // Strip heredoc bodies and subshells before tokenizing. Neither
+        // contains literal path arguments from the agent.
+        let cleaned = strip_subshells(&strip_heredocs(sub_cmd));
+        let tokens = shell_tokenize(&cleaned);
+        if tokens.is_empty() {
             continue;
         }
-        let looks_like_path = tok.value.starts_with('/')
-            || tok.value.starts_with('~')
-            || tok.value.starts_with("..")
-            || tok.value.contains('/');
-        if !looks_like_path {
-            continue;
+
+        // Check for cd command — update sim_cwd if resolvable.
+        let first = &tokens[0];
+        if (first.value == "cd" || first.value.ends_with("/cd")) && tokens.len() >= 2 {
+            let arg = &tokens[1];
+            // cd with no arg (goes HOME) or cd - (previous dir) —
+            // can't statically resolve, skip.
+            if arg.value != "-" {
+                let expanded = expand_user(&arg.value);
+                let p = resolve(&expanded, Some(&sim_cwd));
+                // Validate cd target with canonical containment.
+                if !within_worktree(&p, roots, Some(&sim_cwd)) {
+                    return Some(format!(
+                        "Error: cd target outside sandbox: {}{}",
+                        arg.value,
+                        roots_suffix(roots, Some(&sim_cwd))
+                    ));
+                }
+                // Update sim_cwd to the fully-normalized target.
+                if let Some(normalized) = normalize_path(&p, None) {
+                    sim_cwd = normalized;
+                }
+            }
         }
-        let expanded = if tok.value.starts_with('~') {
-            expand_user(&tok.value)
-        } else {
-            tok.value.clone()
-        };
-        let p = resolve(&expanded, cwd);
-        // Lexical-leaf, not canonical: a final-component symlink whose node is
-        // in-worktree (e.g. `.venv/bin/python`) is allowed. See
-        // within_worktree_lexical for the rationale and the anti-regression note.
-        if !within_worktree_lexical(&p, &canonical_roots) {
-            return Some(format!(
-                "Error: path outside sandbox (from {}): {}{}",
-                tok.raw,
-                tok.value,
-                roots_suffix(roots, cwd)
-            ));
+
+        // Check all path tokens against the current sim_cwd.
+        for tok in &tokens {
+            if tok.value.is_empty() {
+                continue;
+            }
+            let looks_like_path = tok.value.starts_with('/')
+                || tok.value.starts_with('~')
+                || tok.value.starts_with("..")
+                || tok.value.contains('/');
+            if !looks_like_path {
+                continue;
+            }
+            let expanded = if tok.value.starts_with('~') {
+                expand_user(&tok.value)
+            } else {
+                tok.value.clone()
+            };
+            let p = resolve(&expanded, Some(&sim_cwd));
+            // Lexical-leaf, not canonical: a final-component symlink whose node is
+            // in-worktree (e.g. `.venv/bin/python`) is allowed. See
+            // within_worktree_lexical for the rationale and the anti-regression note.
+            if !within_worktree_lexical(&p, &canonical_roots) {
+                return Some(format!(
+                    "Error: path outside sandbox (from {}): {}{}",
+                    tok.raw,
+                    tok.value,
+                    roots_suffix(roots, Some(&sim_cwd))
+                ));
+            }
         }
     }
     None
@@ -4871,7 +4874,7 @@ mod tests {
         std::fs::create_dir(&outside).unwrap();
         let link = worktree.join("link");
         std::os::unix::fs::symlink(&outside, &link).unwrap();
-        // cd link — bare name, no /, caught by check_cd.
+        // cd link — bare name, no /, caught by cd check in bash_check.
         let err = bash_check(
             std::slice::from_ref(&worktree),
             "cd link; cat secret",
@@ -4969,6 +4972,79 @@ mod tests {
         let dir = tmp();
         std::fs::create_dir(dir.join("sub")).unwrap();
         assert!(bash_check(std::slice::from_ref(&dir), "cd sub; ls", Some(&dir)).is_none());
+    }
+
+    #[test]
+    fn bash_check_cd_tracks_cwd_for_relative_paths() {
+        let dir = tmp();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("file.txt"), "ok").unwrap();
+        // cd into subdir, then reference ../file.txt — resolves inside
+        // worktree only from the new cwd.
+        assert!(bash_check(
+            std::slice::from_ref(&dir),
+            "cd sub && cat ../file.txt",
+            Some(&dir),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn bash_check_cd_then_escape_still_denied() {
+        let dir = tmp();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        // cd sub && cat ../../../etc/passwd — escapes even from new cwd.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "cd sub && cat ../../../etc/passwd",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"), "got: {err}");
+    }
+
+    #[test]
+    fn bash_check_multiple_cd_chained() {
+        let dir = tmp();
+        std::fs::create_dir_all(dir.join("a").join("b")).unwrap();
+        std::fs::write(dir.join("file.txt"), "ok").unwrap();
+        // cd a && cd b && cat ../../file.txt — resolves inside worktree.
+        assert!(bash_check(
+            std::slice::from_ref(&dir),
+            "cd a && cd b && cat ../../file.txt",
+            Some(&dir),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn bash_check_cd_dash_does_not_update_cwd() {
+        let dir = tmp();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        // cd - doesn't update sim_cwd, so ../secret resolves from original
+        // cwd and should be denied.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "cd - && cat ../secret",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"), "got: {err}");
+    }
+
+    #[test]
+    fn bash_check_bare_cd_does_not_update_cwd() {
+        let dir = tmp();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        // bare cd doesn't update sim_cwd, so ../secret resolves from
+        // original cwd and should be denied.
+        let err = bash_check(
+            std::slice::from_ref(&dir),
+            "cd && cat ../secret",
+            Some(&dir),
+        )
+        .unwrap();
+        assert!(err.contains("outside sandbox"), "got: {err}");
     }
 
     #[test]
