@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use rig_core::completion::message::{
-    AssistantContent, CallId, Reasoning, Sealed, ToolCall, ToolName, UserContent,
+    AssistantContent, CallId, Reasoning, Sealed, Text, ToolCall, ToolName, UserContent,
 };
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
 use rig_core::error::ProviderError;
@@ -564,9 +564,39 @@ async fn interactive_loop(
                 "interactive_loop: Inject command (len={}, turn={turn})",
                 text.len()
             );
-            let msg = format!("[operator]: {text}");
-            history.push(Message::user(msg));
-            *next_prompt = Message::user(text);
+            // If next_prompt already carries pending ToolResult content
+            // (e.g. a tool_result from a Done rejection), merge the
+            // injected text into that message rather than overwriting it.
+            // This preserves the matching tool_result so the assistant
+            // Done call already in history stays paired with its result.
+            // Anthropic requires tool_result blocks to precede text
+            // blocks, so the injected text is appended after any
+            // existing content.
+            if let Message::User {
+                content: ref existing,
+            } = *next_prompt
+            {
+                if existing
+                    .iter()
+                    .any(|c| matches!(c, UserContent::ToolResult(_)))
+                {
+                    let mut merged = existing.clone();
+                    merged.push(UserContent::Text(Text {
+                        text: format!("[operator]: {text}"),
+                        additional_params: None,
+                    }));
+                    *next_prompt = Message::User { content: merged };
+                    // Don't push a separate user message to history — it
+                    // would separate the assistant Done call from its
+                    // tool_result in the merged next_prompt.
+                } else {
+                    history.push(Message::user(format!("[operator]: {text}")));
+                    *next_prompt = Message::user(text);
+                }
+            } else {
+                history.push(Message::user(format!("[operator]: {text}")));
+                *next_prompt = Message::user(text);
+            }
             Ok(InteractiveLoopResult::RunOneTurn)
         }
         InteractiveCommand::RunTurn => {
@@ -1468,40 +1498,41 @@ async fn run_agent_loop_core(
                 );
                 if !nested && !expected_artifact_paths.is_empty() {
                     let missing = missing_artifacts(expected_artifact_paths);
-                    if !missing.is_empty() {
-                        if reminder_budget > 0 {
-                            reminder_budget -= 1;
-                            let reminder = format!(
-                                "Done rejected: {}\nWrite each file using the Write \
-                                 tool, then call Done.",
-                                artifact_reminder(&missing),
-                            );
-                            history.push(next_prompt);
-                            history.push(assistant_tool_message(
-                                &text,
-                                &reasoning_items,
-                                std::slice::from_ref(done_tc),
-                            ));
-                            history.push(Message::tool_result(
-                                done_tc.id.clone(),
-                                done_tc.function.name.clone(),
-                                reminder.clone(),
-                            ));
-                            next_prompt = Message::user(format!(
-                                "Actions taken this turn:\n- Done {} (rejected)\n\n{}",
-                                done_summary, reminder
-                            ));
-                            continue;
-                        }
-                        // Budget exhausted — accept anyway. Python
-                        // verify_produced catches missing files.
-                        history.push(next_prompt.clone());
+                    if !missing.is_empty() && reminder_budget > 0 {
+                        reminder_budget -= 1;
+                        let reminder = format!(
+                            "Done rejected: {}\nWrite each file using the Write \
+                             tool, then call Done.",
+                            artifact_reminder(&missing),
+                        );
+                        history.push(next_prompt);
                         history.push(assistant_tool_message(
                             &text,
                             &reasoning_items,
                             std::slice::from_ref(done_tc),
                         ));
+                        // Build a single merged user message with both the
+                        // rejection ledger and the Done tool_result so the
+                        // persisted history never produces consecutive User
+                        // messages. Don't push to history here — the
+                        // acceptance path will append next_prompt once.
+                        let rejected_ledger = format!(
+                            "Actions taken this turn:\n- Done {} (rejected)\n\n{}",
+                            done_summary, reminder
+                        );
+                        next_prompt = conversation::done_user_message(
+                            &rejected_ledger,
+                            done_tc.id.clone(),
+                            done_tc.function.name.clone(),
+                            &reminder,
+                        );
+                        continue;
                     }
+                    // Budget exhausted (or no missing artifacts) — accept
+                    // anyway. Python verify_produced catches missing files.
+                    // Fall through to the normal Done acceptance path below;
+                    // do not push into history here to avoid duplicating
+                    // messages in the persisted artifact.
                 }
 
                 // Accept completion.
@@ -1564,10 +1595,15 @@ async fn run_agent_loop_core(
                     &reasoning_items,
                     std::slice::from_ref(done_tc),
                 ));
-                // Prepend the action ledger so Done is visible in persisted history.
+                // Prepend the action ledger and Done tool_result in a single
+                // User message so the persisted history never produces two
+                // consecutive User messages. Anthropic requires every assistant
+                // tool_use to be immediately followed by a matching tool_result
+                // block; merging the ledger text and the Done tool_result into
+                // one message satisfies that invariant.
                 let done_ledger = format!("Actions taken this turn:\n- Done {}\n", done_summary);
-                messages.push(Message::user(done_ledger));
-                messages.push(Message::tool_result(
+                messages.push(conversation::done_user_message(
+                    &done_ledger,
                     done_tc.id.clone(),
                     done_tc.function.name.clone(),
                     "Done accepted.",
@@ -6683,5 +6719,217 @@ mod tests {
             })
             .expect("Done ledger entry must be present in returned history");
         assert!(ledger.contains("- Done implemented the fix"), "{ledger}");
+    }
+
+    /// The Done completion path must never produce two consecutive `Message::User`
+    /// values in the persisted history. Anthropic and other providers reject
+    /// consecutive user messages because they violate the required
+    /// user/assistant alternation, and a `tool_use` must be immediately
+    /// followed by a matching `tool_result` block rather than a plain text
+    /// user message.
+    #[tokio::test]
+    async fn loop_done_persisted_history_has_no_consecutive_user_messages() {
+        let model = gm(
+            rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
+                rig_core::test_utils::MockStreamEvent::text("all finished"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "implemented the fix"}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ]])
+            .erase(),
+        );
+
+        let tool_ctx = test_tool_ctx();
+        let tool_defs = tools::tool_definitions(None, false);
+        let cancel = CancelToken::new();
+        let opts = loop_opts(None);
+
+        let result = run_agent_loop_core(
+            &model,
+            "do the thing",
+            None,
+            &tool_ctx,
+            &tool_defs,
+            &cancel,
+            &opts,
+            "[t] ",
+            10,
+            5.0,
+            &mut None,
+            &mut None,
+            false,
+            &[],
+            0,
+            0,
+            &None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let messages = result.messages.expect("Done run must return messages");
+
+        // Assert no consecutive user messages.
+        let mut prev_was_user = false;
+        for (i, m) in messages.iter().enumerate() {
+            let is_user = matches!(m, Message::User { .. });
+            if is_user {
+                assert!(
+                    !prev_was_user,
+                    "consecutive User messages at indices {} and {}: {messages:#?}",
+                    i - 1,
+                    i
+                );
+            }
+            prev_was_user = is_user;
+        }
+
+        // The Done tool_use (assistant) must be immediately followed by a user
+        // message containing a matching ToolResult.
+        let mut done_tool_use_seen = false;
+        for (i, m) in messages.iter().enumerate() {
+            if let Message::Assistant { content, .. } = m {
+                let has_done = content.iter().any(
+                    |c| matches!(c, AssistantContent::ToolCall(tc) if tc.function.name == "Done"),
+                );
+                if has_done {
+                    done_tool_use_seen = true;
+                    assert!(
+                        i + 1 < messages.len(),
+                        "Done tool_use at end of history with no following message"
+                    );
+                    let next = &messages[i + 1];
+                    assert!(
+                        matches!(next, Message::User { .. }),
+                        "Done tool_use at {i} must be followed by a User message, got: {next:?}"
+                    );
+                    if let Message::User { content } = next {
+                        let has_tool_result = content
+                            .iter()
+                            .any(|c| matches!(c, UserContent::ToolResult(_)));
+                        assert!(
+                            has_tool_result,
+                            "Done tool_use at {i} must be followed by a user message with a ToolResult, got: {content:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            done_tool_use_seen,
+            "Done tool_use must appear in persisted history"
+        );
+
+        // The Done tool_result and action ledger text must appear in the
+        // same user message (ToolResult first, then Text — Anthropic
+        // requires tool_result blocks to precede text blocks).
+        let merged = messages.iter().find_map(|m| match m {
+            Message::User { content } => {
+                let has_ledger = content.iter().any(|c| matches!(c, UserContent::Text(t) if t.text.starts_with("Actions taken this turn:")));
+                let has_tool_result = content.iter().any(|c| matches!(c, UserContent::ToolResult(_)));
+                if has_ledger && has_tool_result {
+                    Some(content.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        });
+        assert!(
+            merged.is_some(),
+            "ledger text and Done tool_result must be merged into one user message"
+        );
+        let content = merged.unwrap();
+        let ledger_pos = content
+            .iter()
+            .position(|c| matches!(c, UserContent::Text(_)));
+        let result_pos = content
+            .iter()
+            .position(|c| matches!(c, UserContent::ToolResult(_)));
+        assert!(
+            result_pos < ledger_pos,
+            "Done tool_result must precede action ledger in the merged message (Anthropic requires tool_result blocks before text blocks)"
+        );
+    }
+
+    /// When the artifact-reminder budget is exhausted (zero), Done is
+    /// accepted immediately even with missing artifacts. The persisted
+    /// history must also avoid consecutive User messages.
+    #[tokio::test]
+    async fn loop_done_artifact_reminder_exhausted_no_consecutive_user_messages() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-remind-exh-done-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("never-written.md");
+
+        // Single Done turn with reminder budget 0 — accepted immediately
+        // via the exhausted-acceptance path.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
+            rig_core::test_utils::MockStreamEvent::text("still no write"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done without artifact"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        ctx.expected_artifact_paths = vec![target.clone()];
+        ctx.reminder_budget = 0; // exhausted — Done accepted with missing artifacts
+        ctx.completion_nudge_budget = 0;
+        let cancel = CancelToken::new();
+        let result = run_agent_loop(
+            gm(model.clone().erase()),
+            "write",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let messages = result.messages.expect("Done run must return messages");
+
+        // No consecutive User messages.
+        let mut prev_was_user = false;
+        for (i, m) in messages.iter().enumerate() {
+            let is_user = matches!(m, Message::User { .. });
+            if is_user {
+                assert!(
+                    !prev_was_user,
+                    "consecutive User messages at indices {} and {} in artifact-exhausted path: {messages:#?}",
+                    i - 1,
+                    i
+                );
+            }
+            prev_was_user = is_user;
+        }
+
+        // The artifact-exhausted path must not duplicate the user prompt /
+        // assistant message pair in the persisted history.
+        // Count how many times the Done tool_use appears.
+        let done_count = messages.iter().filter(|m| {
+            matches!(m, Message::Assistant { content, .. }
+                if content.iter().any(|c| matches!(c, AssistantContent::ToolCall(tc) if tc.function.name == "Done")))
+        }).count();
+        assert_eq!(
+            done_count, 1,
+            "Done tool_use must appear exactly once in artifact-exhausted path, got {done_count}"
+        );
     }
 }

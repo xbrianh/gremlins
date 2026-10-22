@@ -8,8 +8,11 @@
 //! summaries) and an "already explored" manifest.
 
 use indexmap::{IndexMap, IndexSet};
-use rig_core::completion::message::{AssistantContent, ToolCall, ToolResultContent, UserContent};
+use rig_core::completion::message::{
+    AssistantContent, CallId, Text, ToolCall, ToolName, ToolResultContent, UserContent,
+};
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition};
+use rig_core::message::ToolResult as ToolResultMsg;
 
 use crate::clients::tools;
 
@@ -647,6 +650,40 @@ fn tool_result_text(message: &Message) -> Option<String> {
     }
 
     saw_result.then_some(text)
+}
+
+/// Build a single [`Message::User`] that merges a Done action ledger with
+/// the matching tool_result. This avoids consecutive `User` messages in
+/// the persisted history, which Anthropic (and other providers) reject
+/// because they violate the required user/assistant alternation and the
+/// rule that every `tool_use` must be immediately followed by a matching
+/// `tool_result` block.
+///
+/// The [`UserContent::ToolResult`] comes first because Anthropic requires
+/// every `tool_result` block to precede any text blocks in the responding
+/// user message.
+pub(crate) fn done_user_message(
+    ledger: &str,
+    call_id: CallId,
+    tool_name: ToolName,
+    result_text: &str,
+) -> Message {
+    Message::User {
+        content: vec![
+            UserContent::ToolResult(ToolResultMsg {
+                call: call_id,
+                name: tool_name,
+                content: vec![ToolResultContent::Text(Text {
+                    text: result_text.to_string(),
+                    additional_params: None,
+                })],
+            }),
+            UserContent::Text(Text {
+                text: ledger.to_string(),
+                additional_params: None,
+            }),
+        ],
+    }
 }
 
 fn user_text(message: &Message) -> String {
@@ -1769,6 +1806,22 @@ mod tests {
                 "Actions taken this turn:\n- Bash cargo check {batch}\n"
             )));
         }
+        // Append a Done turn with the merged text+tool_result user message
+        // pattern (uses the shared helper from the agent loop's Done completion path).
+        let done_call = tool_call(
+            "done_1",
+            "Done",
+            serde_json::json!({"summary": "completed the work"}),
+        );
+        history.push(assistant_with_tools(&[done_call]));
+        // Single user message with both text and tool_result, built by the
+        // same helper the agent loop uses.
+        history.push(done_user_message(
+            "Actions taken this turn:\n- Done completed the work\n",
+            CallId::from_wire("done_1".to_string()),
+            ToolName::new("Done".to_string()).unwrap(),
+            "Done accepted.",
+        ));
 
         let working = compact_round(&history, 0, 4096, 0);
         for (index, message) in working.iter().enumerate() {
@@ -1797,6 +1850,53 @@ mod tests {
             !assistant_has_tool_call(&history[compacted.cut - 1]),
             "a cut must never split a tool-use from its results"
         );
+
+        // Verify that the Done tool_use is not orphaned: after compaction,
+        // every assistant message containing a Done tool_use must be
+        // immediately followed by a user message with a matching ToolResult.
+        let mut done_seen = false;
+        for (index, message) in working.iter().enumerate() {
+            if assistant_has_done_call(message) {
+                done_seen = true;
+                assert!(
+                    index + 1 < working.len(),
+                    "Done tool_use at {index} has no following message"
+                );
+                let result_text = tool_result_text(&working[index + 1]);
+                assert!(
+                    result_text.is_some(),
+                    "Done tool_use at {index} is not followed by a tool_result"
+                );
+                // The tool_result must be for the correct Done call id.
+                assert!(
+                    result_text.is_some_and(|t| t.contains("Done accepted.")),
+                    "Done tool_use at {index} is not followed by the expected tool_result text"
+                );
+                // Verify the following user message has a ToolResult with call id "done_1".
+                let done_1_id = CallId::from_wire("done_1".to_string());
+                let has_done_1 = match &working[index + 1] {
+                    Message::User { content } => content
+                        .iter()
+                        .any(|c| matches!(c, UserContent::ToolResult(tr) if tr.call == done_1_id)),
+                    _ => false,
+                };
+                assert!(
+                    has_done_1,
+                    "Done tool_use at {index} must be followed by a ToolResult with call id done_1"
+                );
+            }
+        }
+        assert!(
+            done_seen,
+            "compacted window must still contain the Done assistant message"
+        );
+    }
+
+    fn assistant_has_done_call(message: &Message) -> bool {
+        matches!(message, Message::Assistant { content, .. }
+        if content.iter().any(|item| {
+            matches!(item, AssistantContent::ToolCall(tc) if tc.function.name == "Done")
+        }))
     }
 
     #[test]
