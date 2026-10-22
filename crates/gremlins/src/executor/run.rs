@@ -24,6 +24,7 @@ use crate::executor::gremlin::Gremlin;
 use crate::executor::gremlin::{GremlinConfig, ScratchDir, WorkDir};
 use crate::executor::parallel::run_parallel;
 use crate::executor::send_log;
+use crate::executor::stage_stream::send_stage_boundary;
 use crate::executor::state;
 use crate::executor::state::{Checkout, Collision, FileSystemStateStore, StateStore};
 use crate::executor::supervisor::get_run_map;
@@ -996,6 +997,11 @@ impl Gremlin {
                     stage.name(),
                     stage.stage_type()
                 ),
+            );
+            send_stage_boundary(
+                &self.runtime_config.stage_stream_tx,
+                stage.name(),
+                stage.stage_type(),
             );
 
             let stage_result = run_stage(&stage, self).await;

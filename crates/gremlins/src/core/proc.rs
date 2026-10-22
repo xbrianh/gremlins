@@ -14,8 +14,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::broadcast;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc;
 
 use tokio::io::AsyncReadExt;
 
@@ -28,6 +27,13 @@ pub struct ProcResult {
     pub returncode: i32,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+}
+
+/// A line of stdout or stderr from a running process, delivered to a
+/// line sink for live streaming.
+pub struct LineEvent {
+    pub text: String,
+    pub is_stderr: bool,
 }
 
 /// Error type for `run`.
@@ -457,7 +463,7 @@ pub async fn run_shell_async(
     env: Option<&HashMap<String, String>>,
     timeout: Option<f64>,
     stream_writer: Option<Arc<std::sync::Mutex<Box<dyn io::Write + Send>>>>,
-    stage_stream_tx: Option<broadcast::Sender<String>>,
+    line_tx: Option<mpsc::UnboundedSender<LineEvent>>,
 ) -> Result<ProcResult, ProcError> {
     if shell_cmd.is_empty() {
         return Err(ProcError::EmptyCommand);
@@ -507,15 +513,28 @@ pub async fn run_shell_async(
     let sw_stdout = stream_writer.clone();
     let sw_stderr = stream_writer.clone();
 
-    let ss_stdout = stage_stream_tx.clone();
-    let ss_stderr = stage_stream_tx.clone();
+    let lt_stdout = line_tx.clone();
+    let lt_stderr = line_tx.clone();
 
     let stdout_handle = tokio::spawn(async move {
         let mut buf = Vec::new();
+        let mut line_buf: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 4096];
         loop {
             match stdout.read(&mut chunk).await {
-                Ok(0) => break,
+                Ok(0) => {
+                    // Flush any remaining partial line.
+                    if !line_buf.is_empty() {
+                        let text = String::from_utf8_lossy(&line_buf).to_string();
+                        if let Some(ref tx) = lt_stdout {
+                            let _ = tx.send(LineEvent {
+                                text,
+                                is_stderr: false,
+                            });
+                        }
+                    }
+                    break;
+                }
                 Ok(n) => {
                     buf.extend_from_slice(&chunk[..n]);
                     if let Some(ref w) = sw_stdout {
@@ -523,15 +542,19 @@ pub async fn run_shell_async(
                         let _ = g.write_all(&chunk[..n]);
                         let _ = g.flush();
                     }
-                    if let Some(ref ss) = ss_stdout {
-                        let text = String::from_utf8_lossy(&chunk[..n]).to_string();
-                        let ts = crate::executor::state::now_stamp_millis();
-                        for part in text.split('\n') {
-                            if !part.is_empty() {
-                                let line =
-                                    serde_json::json!({"kind": "stdout", "text": part, "ts": ts})
-                                        .to_string();
-                                let _ = ss.send(line);
+                    if lt_stdout.is_some() {
+                        for &byte in &chunk[..n] {
+                            if byte == b'\n' {
+                                let text = String::from_utf8_lossy(&line_buf).to_string();
+                                if let Some(ref tx) = lt_stdout {
+                                    let _ = tx.send(LineEvent {
+                                        text,
+                                        is_stderr: false,
+                                    });
+                                }
+                                line_buf.clear();
+                            } else {
+                                line_buf.push(byte);
                             }
                         }
                     }
@@ -544,10 +567,22 @@ pub async fn run_shell_async(
 
     let stderr_handle = tokio::spawn(async move {
         let mut buf = Vec::new();
+        let mut line_buf: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 4096];
         loop {
             match stderr.read(&mut chunk).await {
-                Ok(0) => break,
+                Ok(0) => {
+                    if !line_buf.is_empty() {
+                        let text = String::from_utf8_lossy(&line_buf).to_string();
+                        if let Some(ref tx) = lt_stderr {
+                            let _ = tx.send(LineEvent {
+                                text,
+                                is_stderr: true,
+                            });
+                        }
+                    }
+                    break;
+                }
                 Ok(n) => {
                     buf.extend_from_slice(&chunk[..n]);
                     if let Some(ref w) = sw_stderr {
@@ -555,15 +590,19 @@ pub async fn run_shell_async(
                         let _ = g.write_all(&chunk[..n]);
                         let _ = g.flush();
                     }
-                    if let Some(ref ss) = ss_stderr {
-                        let text = String::from_utf8_lossy(&chunk[..n]).to_string();
-                        let ts = crate::executor::state::now_stamp_millis();
-                        for part in text.split('\n') {
-                            if !part.is_empty() {
-                                let line =
-                                    serde_json::json!({"kind": "stderr", "text": part, "ts": ts})
-                                        .to_string();
-                                let _ = ss.send(line);
+                    if lt_stderr.is_some() {
+                        for &byte in &chunk[..n] {
+                            if byte == b'\n' {
+                                let text = String::from_utf8_lossy(&line_buf).to_string();
+                                if let Some(ref tx) = lt_stderr {
+                                    let _ = tx.send(LineEvent {
+                                        text,
+                                        is_stderr: true,
+                                    });
+                                }
+                                line_buf.clear();
+                            } else {
+                                line_buf.push(byte);
                             }
                         }
                     }
@@ -716,8 +755,8 @@ pub async fn run_logged_commands(
     substitution_env: &HashMap<String, String>,
     timeout: Option<f64>,
     log_writer: Option<Box<dyn io::Write + Send>>,
-    log_tx: &Option<UnboundedSender<String>>,
-    stage_stream_tx: Option<broadcast::Sender<String>>,
+    log_tx: &Option<mpsc::UnboundedSender<String>>,
+    line_tx: Option<mpsc::UnboundedSender<LineEvent>>,
 ) -> Result<ShellResult, ProcError> {
     if cmds.is_empty() {
         return Ok(ShellResult {
@@ -763,7 +802,7 @@ pub async fn run_logged_commands(
         Some(env),
         timeout,
         shared.clone(),
-        stage_stream_tx,
+        line_tx,
     )
     .await;
 
@@ -805,7 +844,7 @@ fn write_log_header(
     env: &HashMap<String, String>,
     substitution_env: &HashMap<String, String>,
     timeout: Option<f64>,
-    log_tx: &Option<UnboundedSender<String>>,
+    log_tx: &Option<mpsc::UnboundedSender<String>>,
 ) {
     let _ = writeln!(writer, "=== {log_name} ===");
     let _ = writeln!(writer, "cwd: {}", cwd.display());
@@ -864,7 +903,7 @@ fn write_log_footer(
     writer: &mut dyn io::Write,
     rc: i32,
     elapsed: f64,
-    log_tx: &Option<UnboundedSender<String>>,
+    log_tx: &Option<mpsc::UnboundedSender<String>>,
 ) {
     let _ = writeln!(writer, "--- exit: {rc} (duration: {elapsed:.1}s) ---");
     let _ = writer.flush();

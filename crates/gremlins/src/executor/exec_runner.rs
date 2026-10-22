@@ -6,11 +6,12 @@ use tokio::sync::broadcast;
 
 use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
-use crate::core::proc::{run_logged_commands, ProcError, ProcResult, ShellResult};
+use crate::core::proc::{run_logged_commands, LineEvent, ProcError, ProcResult, ShellResult};
 use crate::definition::Exec;
-use crate::executor::state::StateStore;
+use crate::executor::state::{self, StateStore};
 use crate::executor::state::{BlobMode, StateData};
 use crate::executor::vars;
+use tokio::sync::mpsc;
 
 #[derive(Error, Debug)]
 pub enum ExecError {
@@ -73,7 +74,7 @@ pub struct ExecPrepared {
     /// Per-gremlin log channel for exec stage lifecycle events.
     pub log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// Stage stream broadcast for live watch pane output.
-    pub stage_stream_tx: Option<broadcast::Sender<String>>,
+    pub(crate) stage_stream_tx: Option<broadcast::Sender<String>>,
 }
 
 /// Phase 1: resolve interpolation, compute bind paths, substitute commands.
@@ -250,6 +251,30 @@ pub async fn run_shell(
         ));
     }
 
+    // Bridge the stage-stream broadcast: create an mpsc channel for raw
+    // line events from the process runner, then spawn a task that formats
+    // them as JSON with timestamps and forwards to the broadcast.
+    let line_tx: Option<mpsc::UnboundedSender<LineEvent>> =
+        prepared.stage_stream_tx.clone().map(|bcast| {
+            let (tx, mut rx) = mpsc::unbounded_channel::<LineEvent>();
+            tokio::spawn(async move {
+                while let Some(ev) = rx.recv().await {
+                    let kind = if ev.is_stderr { "stderr" } else { "stdout" };
+                    let ts = state::now_stamp_millis();
+                    let line = serde_json::json!({
+                        "kind": kind,
+                        "text": ev.text,
+                        "ts": ts,
+                    })
+                    .to_string();
+                    if bcast.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+            tx
+        });
+
     let result = run_logged_commands(
         &log_name,
         &prepared.cmds,
@@ -259,7 +284,7 @@ pub async fn run_shell(
         prepared.timeout,
         log_writer,
         &prepared.log_tx,
-        prepared.stage_stream_tx.clone(),
+        line_tx,
     )
     .await;
 

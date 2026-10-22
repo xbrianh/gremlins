@@ -1385,6 +1385,23 @@ impl RunsView {
                                 Style::default().fg(DEFAULT_THEME.text),
                             ))
                         }
+                        Some("log") => {
+                            // Operational-log fallback line — render the text field.
+                            let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            Line::from(Span::styled(
+                                text.to_string(),
+                                Style::default().fg(DEFAULT_THEME.text),
+                            ))
+                        }
+                        Some("lagged") => {
+                            let skipped = obj.get("skipped").and_then(|v| v.as_i64()).unwrap_or(0);
+                            Line::from(Span::styled(
+                                format!("[skipped {skipped} lines]"),
+                                Style::default()
+                                    .fg(DEFAULT_THEME.subtle)
+                                    .add_modifier(Modifier::DIM),
+                            ))
+                        }
                         Some("tool_output") | Some("tool_result") => {
                             let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
                             let text = obj
@@ -1392,8 +1409,11 @@ impl RunsView {
                                 .or(obj.get("output"))
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
+                            // Truncate to first line to avoid multi-line
+                            // output breaking the pane layout.
+                            let first_line = text.lines().next().unwrap_or("");
                             Line::from(Span::styled(
-                                format!("◆ {} {}", name, text),
+                                format!("◆ {} {}", name, first_line),
                                 Style::default().fg(DEFAULT_THEME.subtle),
                             ))
                         }
@@ -1425,9 +1445,11 @@ impl RunsView {
                             ))
                         }
                         _ => {
-                            // Fallback: render the raw line as plain text
+                            // Unknown kind: prefer the `text` field, fall back
+                            // to the raw JSON.
+                            let display = obj.get("text").and_then(|v| v.as_str()).unwrap_or(line);
                             Line::from(Span::styled(
-                                line.clone(),
+                                display.to_string(),
                                 Style::default().fg(DEFAULT_THEME.text),
                             ))
                         }
