@@ -148,7 +148,10 @@ pub(crate) fn project_root() -> PathBuf {
 }
 
 pub(crate) fn worktree_root(cwd: Option<&Path>) -> PathBuf {
-    cwd.map(Path::to_path_buf).unwrap_or_else(project_root)
+    match cwd {
+        Some(cwd) => canonicalize_or_ancestor(cwd),
+        None => canonicalize_or_ancestor(&project_root()),
+    }
 }
 
 pub(crate) fn scratch_root() -> Option<PathBuf> {
@@ -166,12 +169,14 @@ pub(crate) fn audit_log_path(raw_path: &Path) -> PathBuf {
 
 pub(crate) fn resolve(file_path: &str, cwd: Option<&Path>) -> PathBuf {
     let p = PathBuf::from(file_path);
-    if !p.is_absolute() {
-        if let Some(cwd) = cwd {
-            return cwd.join(p);
-        }
+    if p.is_absolute() {
+        return p;
     }
-    p
+    let base = match cwd {
+        Some(cwd) => canonicalize_or_ancestor(cwd),
+        None => canonicalize_or_ancestor(&project_root()),
+    };
+    base.join(p)
 }
 
 fn normalize_dots(p: &Path) -> PathBuf {
@@ -191,7 +196,7 @@ fn normalize_dots(p: &Path) -> PathBuf {
 /// Resolve the real path by canonicalizing the deepest ancestor that exists
 /// on disk, then re-appending the non-existent suffix. Falls back to the
 /// original path if even the filesystem root can't be canonicalized.
-fn canonicalize_or_ancestor(p: &Path) -> PathBuf {
+pub(crate) fn canonicalize_or_ancestor(p: &Path) -> PathBuf {
     match p.canonicalize() {
         Ok(c) => c,
         Err(_) => {
@@ -238,11 +243,15 @@ fn canonicalize_or_ancestor(p: &Path) -> PathBuf {
     }
 }
 
-fn normalize_path(p: &Path) -> Option<PathBuf> {
+fn normalize_path(p: &Path, cwd: Option<&Path>) -> Option<PathBuf> {
     let abs = if p.is_absolute() {
         p.to_path_buf()
     } else {
-        std::env::current_dir().ok()?.join(p)
+        let base = match cwd {
+            Some(cwd) => canonicalize_or_ancestor(cwd),
+            None => canonicalize_or_ancestor(&project_root()),
+        };
+        base.join(p)
     };
     let canonical = canonicalize_or_ancestor(&abs);
     // normalize_dots handles `.`/`..` in the non-existent suffix only —
@@ -251,24 +260,24 @@ fn normalize_path(p: &Path) -> Option<PathBuf> {
     Some(normalize_dots(&canonical))
 }
 
-pub(crate) fn within_worktree(p: &Path, roots: &[PathBuf]) -> bool {
-    let p_norm = match normalize_path(p) {
+pub(crate) fn within_worktree(p: &Path, roots: &[PathBuf], cwd: Option<&Path>) -> bool {
+    let p_norm = match normalize_path(p, cwd) {
         Some(n) => n,
         None => return false,
     };
-    roots.iter().any(|root| match normalize_path(root) {
+    roots.iter().any(|root| match normalize_path(root, cwd) {
         Some(r) => p_norm.starts_with(&r),
         None => false,
     })
 }
 
-fn roots_suffix(roots: &[PathBuf]) -> String {
+fn roots_suffix(roots: &[PathBuf], cwd: Option<&Path>) -> String {
     // Normalized, to match the paths the containment checks actually compare
     // against — raw roots read misleadingly under symlinked ancestors
     // (/var -> /private/var).
     let mut parts: Vec<String> = roots
         .iter()
-        .filter_map(|r| normalize_path(r))
+        .filter_map(|r| normalize_path(r, cwd))
         .map(|r| r.display().to_string())
         .collect();
     parts.sort();
@@ -328,10 +337,10 @@ fn expand_user(s: &str) -> String {
 
 pub(crate) fn enforce(roots: &[PathBuf], pth: &str, cwd: Option<&Path>) -> Option<String> {
     let p = resolve(pth, cwd);
-    if !within_worktree(&p, roots) {
+    if !within_worktree(&p, roots, cwd) {
         return Some(format!(
             "Error: path outside sandbox: {pth}{}",
-            roots_suffix(roots)
+            roots_suffix(roots, cwd)
         ));
     }
     None
@@ -342,19 +351,19 @@ pub(crate) fn enforce(roots: &[PathBuf], pth: &str, cwd: Option<&Path>) -> Optio
 /// symlinks that would otherwise escape containment. Returns Some(error) or
 /// None if the path is safe.
 ///
-/// Fail-closed by design: if a root fails to canonicalize it is skipped
-/// (via `continue`). If *every* root fails, `allowed` stays false and the
-/// path is denied. This is stricter and safer than the old single-root
-/// behavior, which returned `None` (allow) on canonicalization failure —
-/// a "paranoid, shouldn't happen" branch that was effectively fail-open.
+/// Fail-closed by design: a root that cannot be fully canonicalized is
+/// partially resolved via [`canonicalize_or_ancestor`] (existing prefix
+/// canonicalized, non-existent suffix kept lexical) rather than being
+/// dropped. If the path does not fall under any root `allowed` stays false
+/// and the path is denied. This is stricter and safer than the old
+/// single-root behavior, which returned `None` (allow) on canonicalization
+/// failure — a "paranoid, shouldn't happen" branch that was effectively
+/// fail-open.
 pub(crate) fn io_enforce(path: &Path, roots: &[PathBuf]) -> Option<String> {
-    let real = canonicalize_or_ancestor(path);
+    let real = normalize_dots(&canonicalize_or_ancestor(path));
     let mut allowed = false;
     for root in roots {
-        let real_root = match root.canonicalize() {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
+        let real_root = normalize_dots(&canonicalize_or_ancestor(root));
         if real.starts_with(&real_root) {
             allowed = true;
             break;
@@ -364,7 +373,7 @@ pub(crate) fn io_enforce(path: &Path, roots: &[PathBuf]) -> Option<String> {
         return Some(format!(
             "Error: path outside sandbox (resolved): {}{}",
             real.display(),
-            roots_suffix(roots)
+            roots_suffix(roots, None)
         ));
     }
     None
@@ -433,11 +442,11 @@ fn check_cd(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Option<String> 
         }
         let expanded = expand_user(&arg.value);
         let p = resolve(&expanded, cwd);
-        if !within_worktree(&p, roots) {
+        if !within_worktree(&p, roots, cwd) {
             return Some(format!(
                 "Error: cd target outside sandbox: {}{}",
                 arg.value,
-                roots_suffix(roots)
+                roots_suffix(roots, cwd)
             ));
         }
     }
@@ -1063,7 +1072,10 @@ pub(crate) fn bash_check(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Op
     // and subshell paths are runtime-expanded by the shell.
     let cleaned = strip_subshells(&strip_heredocs(s));
     // Canonicalize roots once — avoid re-resolving per token.
-    let canonical_roots: Vec<PathBuf> = roots.iter().filter_map(|r| normalize_path(r)).collect();
+    let canonical_roots: Vec<PathBuf> = roots
+        .iter()
+        .filter_map(|r| normalize_path(r, cwd))
+        .collect();
     if canonical_roots.is_empty() {
         return Some("Error: invalid sandbox root".into());
     }
@@ -1092,7 +1104,7 @@ pub(crate) fn bash_check(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Op
                 "Error: path outside sandbox (from {}): {}{}",
                 tok.raw,
                 tok.value,
-                roots_suffix(roots)
+                roots_suffix(roots, cwd)
             ));
         }
     }
@@ -1214,7 +1226,7 @@ fn check_tool(name: &str, ctx: &AgentLoopRuntime, args: &serde_json::Value) -> O
             let base = resolve(path, ctx.cwd.as_deref());
             let full_path = base.join(pattern);
             let full_str = full_path.to_string_lossy();
-            enforce(roots, &full_str, None)
+            enforce(roots, &full_str, ctx.cwd.as_deref())
         }
         "Bash" => bash_check(
             roots,
@@ -1695,6 +1707,8 @@ pub(crate) async fn bash_invoke(ctx: &AgentLoopRuntime, args_json: &str, id: &st
     }
     if let Some(cwd) = &ctx.cwd {
         cmd.current_dir(cwd);
+    } else {
+        cmd.current_dir(project_root());
     }
     if let Some(base) = &ctx.base_env {
         let mut env = base.clone();
@@ -2379,10 +2393,7 @@ fn glob_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
         Err(e) => return e,
     };
     let search_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-    let base = match cwd {
-        Some(cwd) => cwd.join(search_path),
-        None => PathBuf::from(search_path),
-    };
+    let base = resolve(search_path, cwd);
     let full = base.join(pattern);
     let pattern_str = full.to_string_lossy();
     let mut matches: Vec<String> = match glob::glob(&pattern_str) {
@@ -3574,13 +3585,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bash_invoke_cwd_none_uses_process_cwd() {
-        // When cwd is None, the command inherits the process current directory.
+    async fn bash_invoke_cwd_none_uses_project_root() {
+        // When cwd is None, bash must use project_root() — the same
+        // fallback that bash_check uses for path resolution. This keeps
+        // validation and execution bases aligned.
+        let _env = EnvGuard::lock();
+        let dir = tmp();
+        std::env::set_var("GREMLINS_PROJECT_ROOT", dir.to_str().unwrap());
         let c = AgentLoopRuntime {
             cwd: None,
             extra_env: None,
             base_env: None,
-            sandbox: SandboxMode::Roots(vec![std::env::current_dir().unwrap()]),
+            sandbox: SandboxMode::Roots(vec![dir.clone()]),
             audit_log: None,
             allowed_tools: None,
             task_fn: None,
@@ -3592,13 +3608,51 @@ mod tests {
                 tool_output: None,
             },
         };
-        let expected = std::env::current_dir().unwrap();
+        let expected = canonicalize_or_ancestor(&dir);
         let args = serde_json::json!({"command": "pwd"}).to_string();
         let output = bash_invoke(&c, &args, "tool-test-id").await;
         assert!(
             output.trim().contains(expected.to_str().unwrap()),
-            "bash_invoke with cwd=None should use process cwd={}, got: {output}",
+            "bash_invoke with cwd=None should use project_root={}, got: {output}",
             expected.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_invoke_cwd_none_diverges_from_process_cwd() {
+        // Regression: when GREMLINS_PROJECT_ROOT differs from the daemon's
+        // working directory, bash execution must still use project_root so
+        // validation and execution agree on what `./file.txt` refers to.
+        let _env = EnvGuard::lock();
+        let project = tmp();
+        let daemon = tmp();
+        std::env::set_var("GREMLINS_PROJECT_ROOT", project.to_str().unwrap());
+        let c = AgentLoopRuntime {
+            cwd: None,
+            extra_env: None,
+            base_env: None,
+            sandbox: SandboxMode::Roots(vec![project.clone()]),
+            audit_log: None,
+            allowed_tools: None,
+            task_fn: None,
+            audit_lock: None,
+            parent_history: None,
+            id_prefix: String::new(),
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
+        };
+        let expected = canonicalize_or_ancestor(&project);
+        // Ensure the daemon cwd is genuinely different from project root.
+        assert_ne!(canonicalize_or_ancestor(&daemon), expected);
+        let args = serde_json::json!({"command": "pwd"}).to_string();
+        let output = bash_invoke(&c, &args, "tool-test-id").await;
+        assert!(
+            output.trim().contains(expected.to_str().unwrap()),
+            "bash_invoke with cwd=None must use project_root={}, not process cwd={}, got: {output}",
+            expected.display(),
+            canonicalize_or_ancestor(&daemon).display()
         );
     }
 
@@ -3737,8 +3791,9 @@ mod tests {
         })
         .to_string();
         let out = grep_invoke(&c, &args).await;
-        let a = dir.join(".").join("a.txt");
-        let b = dir.join(".").join("b.txt");
+        let root = canonicalize_or_ancestor(&dir);
+        let a = root.join(".").join("a.txt");
+        let b = root.join(".").join("b.txt");
         assert_eq!(
             out,
             format!(
@@ -4125,18 +4180,84 @@ mod tests {
 
     #[test]
     fn resolve_relative_against_cwd() {
-        let cwd = PathBuf::from("/tmp/work");
+        let cwd = tmp();
         assert_eq!(
             resolve("a.txt", Some(&cwd)),
-            PathBuf::from("/tmp/work/a.txt")
+            canonicalize_or_ancestor(&cwd).join("a.txt")
         );
         assert_eq!(resolve("/abs", Some(&cwd)), PathBuf::from("/abs"));
     }
 
     #[test]
+    fn resolve_relative_with_cwd_is_absolute() {
+        let cwd = tmp();
+        let resolved = resolve("sub/file.txt", Some(&cwd));
+        assert!(resolved.is_absolute(), "got: {resolved:?}");
+        assert_eq!(
+            resolved,
+            canonicalize_or_ancestor(&cwd).join("sub/file.txt")
+        );
+    }
+
+    #[test]
+    fn resolve_relative_without_cwd_uses_project_root() {
+        let mut env = EnvGuard::lock();
+        let root = tmp();
+        env.set("GREMLINS_PROJECT_ROOT", root.to_str().unwrap());
+        let resolved = resolve("sub/file.txt", None);
+        assert!(resolved.is_absolute(), "got: {resolved:?}");
+        assert_eq!(
+            resolved,
+            canonicalize_or_ancestor(&root).join("sub/file.txt")
+        );
+    }
+
+    #[test]
+    fn within_worktree_relative_path_with_cwd() {
+        let dir = tmp();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        assert!(within_worktree(
+            Path::new("sub/file.txt"),
+            std::slice::from_ref(&dir),
+            Some(&dir)
+        ));
+    }
+
+    #[test]
+    fn within_worktree_relative_path_without_cwd_uses_project_root() {
+        let mut env = EnvGuard::lock();
+        let dir = tmp();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        env.set("GREMLINS_PROJECT_ROOT", dir.to_str().unwrap());
+        assert!(within_worktree(
+            Path::new("sub/file.txt"),
+            std::slice::from_ref(&dir),
+            None
+        ));
+    }
+
+    #[test]
+    fn glob_check_tool_resolves_relative_base_against_cwd() {
+        let dir = tmp();
+        std::fs::create_dir(dir.join("src")).unwrap();
+        let c = ctx(&dir);
+        let args = serde_json::json!({"path": "./src", "pattern": "**/*.rs"});
+        assert!(check_tool("Glob", &c, &args).is_none());
+    }
+
+    #[test]
+    fn glob_check_tool_rejects_relative_escape() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let args = serde_json::json!({"path": "../outside", "pattern": "*.txt"});
+        let err = check_tool("Glob", &c, &args).unwrap();
+        assert!(err.contains("outside sandbox"), "got: {err}");
+    }
+
+    #[test]
     fn within_worktree_same_dir() {
         let dir = tmp();
-        assert!(within_worktree(&dir, std::slice::from_ref(&dir)));
+        assert!(within_worktree(&dir, std::slice::from_ref(&dir), None));
     }
 
     #[test]
@@ -4144,28 +4265,29 @@ mod tests {
         let dir = tmp();
         assert!(within_worktree(
             &dir.join("sub").join("file.txt"),
-            std::slice::from_ref(&dir)
+            std::slice::from_ref(&dir),
+            None
         ));
     }
 
     #[test]
     fn within_worktree_outside() {
         let dir = tmp();
-        assert!(!within_worktree(&dir, &[dir.join("sub")]));
+        assert!(!within_worktree(&dir, &[dir.join("sub")], None));
     }
 
     #[test]
     fn within_worktree_second_root() {
         let dir1 = tmp();
         let dir2 = tmp();
-        assert!(within_worktree(&dir2.join("file.txt"), &[dir1, dir2]));
+        assert!(within_worktree(&dir2.join("file.txt"), &[dir1, dir2], None));
     }
 
     #[test]
     fn within_worktree_sibling() {
         let dir = tmp();
         let sibling = dir.parent().unwrap().join("other");
-        assert!(!within_worktree(&sibling, std::slice::from_ref(&dir)));
+        assert!(!within_worktree(&sibling, std::slice::from_ref(&dir), None));
     }
 
     #[test]
@@ -4179,7 +4301,11 @@ mod tests {
         let link = worktree.join("link");
         std::os::unix::fs::symlink(&outside, &link).unwrap();
         // Canonical containment: symlink resolves outside the worktree.
-        assert!(!within_worktree(&link, std::slice::from_ref(&worktree)));
+        assert!(!within_worktree(
+            &link,
+            std::slice::from_ref(&worktree),
+            None
+        ));
     }
 
     #[test]
@@ -4892,7 +5018,7 @@ mod tests {
         let child = dir.join("sub").join("file.txt");
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(&child, "x").unwrap();
-        assert!(within_worktree(&child, std::slice::from_ref(&dir)));
+        assert!(within_worktree(&child, std::slice::from_ref(&dir), None));
     }
 
     // --- Part 2: Edit diagnostics tests ---
@@ -5232,6 +5358,30 @@ mod tests {
     }
 
     #[test]
+    fn io_enforce_passes_for_non_existent_root() {
+        let dir = tmp();
+        let root = dir.join("does-not-exist-yet");
+        let target = root.join("new.txt");
+        // A root that doesn't exist yet (e.g. a not-yet-created scratch dir)
+        // must not be dropped from containment; its partial-canonical path is still used.
+        assert!(io_enforce(&target, std::slice::from_ref(&root)).is_none());
+        // A target that escapes the non-existent root via `..` must be rejected.
+        let escape = root.join("..").join("outside.txt");
+        let err = io_enforce(&escape, std::slice::from_ref(&root)).unwrap();
+        assert!(err.contains("outside sandbox"), "got: {err}");
+    }
+
+    #[test]
+    fn io_enforce_rejects_dotdot_escape_through_non_existent_root() {
+        let dir = tmp();
+        let root = dir.join("gap");
+        // Lexically under the (missing) root, but `..` resolves outside.
+        let escape = root.join("..").join("other").join("file.txt");
+        let err = io_enforce(&escape, std::slice::from_ref(&root)).unwrap();
+        assert!(err.contains("outside sandbox"), "got: {err}");
+    }
+
+    #[test]
     fn io_enforce_passes_for_lexical_sibling() {
         let dir = tmp();
         let sibling = dir.parent().unwrap().join(format!(
@@ -5359,6 +5509,38 @@ mod tests {
         assert!(err.contains("outside sandbox"));
     }
 
+    #[test]
+    fn within_worktree_relative_root_with_different_agent_cwd() {
+        // Regression: when a sandbox root was assembled relative to the
+        // daemon's cwd but the agent has a different cwd, within_worktree
+        // must still correctly resolve the root. The fix canonicalizes
+        // roots at assembly time, so they arrive here as absolute paths.
+        // This test simulates that: the root is pre-canonicalized (as the
+        // assembly step now does), and the agent cwd is unrelated.
+        let daemon_like = tmp();
+        let scratch = daemon_like.join("scratch");
+        std::fs::create_dir(&scratch).unwrap();
+        let scratch_file = scratch.join("data.txt");
+        std::fs::write(&scratch_file, "ok").unwrap();
+
+        let agent_cwd = tmp();
+        // The root is pre-canonicalized (absolute), as the assembly step
+        // now guarantees.
+        let roots = [canonicalize_or_ancestor(&scratch)];
+
+        // within_worktree must allow the scratch file even when agent cwd
+        // is somewhere entirely different.
+        assert!(within_worktree(&scratch_file, &roots, Some(&agent_cwd)));
+        // io_enforce must agree.
+        assert!(io_enforce(&scratch_file, &roots).is_none());
+
+        // A file outside the root is still denied by both.
+        let outside = agent_cwd.join("outside.txt");
+        std::fs::write(&outside, "x").unwrap();
+        assert!(!within_worktree(&outside, &roots, Some(&agent_cwd)));
+        assert!(io_enforce(&outside, &roots).is_some());
+    }
+
     // Independent of `normalize_path`: for existing dirs it must agree with
     // plain canonicalization, so tests comparing against it are not tautological.
     fn canon(p: &Path) -> String {
@@ -5380,10 +5562,10 @@ mod tests {
         std::fs::create_dir(&a).unwrap();
         std::fs::create_dir(&b).unwrap();
         assert_eq!(
-            roots_suffix(&[b.clone(), a.clone()]),
+            roots_suffix(&[b.clone(), a.clone()], None),
             format!("\n→ sandbox roots: {}, {}", canon(&a), canon(&b))
         );
-        assert_eq!(roots_suffix(&[]), "");
+        assert_eq!(roots_suffix(&[], None), "");
     }
 
     #[test]
@@ -5393,7 +5575,7 @@ mod tests {
         let link = tmp().join("alias");
         std::os::unix::fs::symlink(&dir, &link).unwrap();
         assert_eq!(
-            roots_suffix(&[dir.clone(), link]),
+            roots_suffix(&[dir.clone(), link], None),
             format!("\n→ sandbox roots: {}", canon(&dir))
         );
     }
