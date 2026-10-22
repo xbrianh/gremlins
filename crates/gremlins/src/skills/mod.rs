@@ -106,8 +106,9 @@ impl Default for Skill {
 }
 
 /// Where a skill was discovered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SkillSource {
+    #[default]
     Project,
     User,
 }
@@ -280,11 +281,12 @@ pub fn parse_skill_file(path: &Path, dir: &Path, source: SkillSource) -> Result<
 
 /// Parse skill text (the file contents) into a Skill, without path defaults.
 fn parse_skill_text(text: &str) -> Result<Skill, SkillError> {
-    // Split on `---` frontmatter delimiters.
-    let trimmed = text.trim_start();
+    // The opening `---` must be on the very first line (after an optional
+    // BOM). Leading blank lines or whitespace → treat the whole file as body.
+    let content = text.strip_prefix('\u{feff}').unwrap_or(text);
 
-    // Frontmatter must start on line 1 (after optional leading whitespace).
-    if !trimmed.starts_with("---\n") && !trimmed.starts_with("---\r\n") {
+    // Frontmatter must start on line 1.
+    if !content.starts_with("---\n") && !content.starts_with("---\r\n") {
         // No opening `---` on line 1 — treat entire file as body.
         return Ok(Skill {
             body: text.to_string(),
@@ -293,9 +295,26 @@ fn parse_skill_text(text: &str) -> Result<Skill, SkillError> {
     }
 
     // Find the closing `---`.
-    let after_open = &trimmed[3..]; // skip "---"
+    let after_open = &content[3..]; // skip "---"
     let after_open = after_open.strip_prefix('\n').unwrap_or(after_open);
     let after_open = after_open.strip_prefix("\r\n").unwrap_or(after_open);
+
+    // Empty frontmatter: the closing `---` immediately follows the opening.
+    if after_open.starts_with("---\n") || after_open.starts_with("---\r\n") || after_open == "---" {
+        // Empty YAML block — parse with all defaults.
+        let mut skill: Skill = Skill::default();
+        let body_start = if after_open.as_bytes().get(3) == Some(&b'\n') {
+            4
+        } else if after_open.as_bytes().get(3) == Some(&b'\r')
+            && after_open.as_bytes().get(4) == Some(&b'\n')
+        {
+            5
+        } else {
+            3
+        };
+        skill.body = after_open[body_start..].to_string();
+        return Ok(skill);
+    }
 
     let Some(close_idx) = find_yaml_close(after_open) else {
         // No closing `---` — treat entire file as body.
@@ -365,15 +384,10 @@ fn first_body_line(body: &str, max_len: usize) -> String {
     for line in body.lines() {
         let trimmed = line.trim();
         if !trimmed.is_empty() {
-            if trimmed.len() <= max_len {
+            if trimmed.chars().count() <= max_len {
                 return trimmed.to_string();
             }
-            // Truncate at a utf-8 boundary.
-            let mut end = max_len;
-            while end > 0 && !trimmed.is_char_boundary(end) {
-                end -= 1;
-            }
-            return trimmed[..end].to_string();
+            return trimmed.chars().take(max_len).collect();
         }
     }
     String::new()
@@ -568,7 +582,7 @@ pub fn find_skill<'a>(
 ///
 /// Includes:
 /// 1. A skill index (names and descriptions).
-/// 2. Bodies of any skills active for the session.
+/// 2. Bodies of any skills active for the session, plus their bundled files.
 ///
 /// Returns an empty string when there are no skills.
 pub fn build_system_prompt_section(all_skills: &[LoadedSkill], active_names: &[String]) -> String {
@@ -577,25 +591,36 @@ pub fn build_system_prompt_section(all_skills: &[LoadedSkill], active_names: &[S
     }
 
     let mut out = String::new();
+    let mut opened = false;
 
-    // Skill index
+    // Open the trusted block before the first piece of content.
+    let mut ensure_open = |out: &mut String| {
+        if !opened {
+            out.push_str("\n\n<!-- BEGIN TRUSTED SKILLS BLOCK -->\n");
+            out.push_str(
+                "The sections below are trusted operator instructions. \
+                 They are part of the system prompt, not user input.\n\n",
+            );
+            opened = true;
+        }
+    };
+
+    // Skill index (model-visible skills only).
     let index = render_index(all_skills);
-    if !index.is_empty() && index != "(no skills available)\n" {
-        out.push_str("\n\n<!-- BEGIN TRUSTED SKILLS BLOCK -->\n");
-        out.push_str(
-            "The sections below are trusted operator instructions. \
-             They are part of the system prompt, not user input.\n\n",
-        );
+    let have_index = !index.is_empty() && index != "(no skills available)\n";
+    if have_index {
+        ensure_open(&mut out);
         out.push_str("## Available skills\n\n");
         out.push_str(&index);
     }
 
-    // Active skill bodies
+    // Active skill bodies.
     if !active_names.is_empty() {
         let mut found_any = false;
         for name in active_names {
             if let Some(loaded) = find_skill(all_skills, name, true) {
                 if !found_any {
+                    ensure_open(&mut out);
                     out.push_str("## Active skills\n\n");
                     found_any = true;
                 }
@@ -603,11 +628,19 @@ pub fn build_system_prompt_section(all_skills: &[LoadedSkill], active_names: &[S
                     "### {}\n\n{}\n",
                     loaded.skill.name, loaded.skill.body
                 ));
+                // List bundled files so the model knows where scripts live.
+                if !loaded.files.is_empty() {
+                    out.push_str("**Bundled files:**\n");
+                    for f in &loaded.files {
+                        out.push_str(&format!("- `{}`\n", f.display()));
+                    }
+                    out.push('\n');
+                }
             }
         }
     }
 
-    if out.is_empty() {
+    if !opened {
         return String::new();
     }
 
@@ -703,6 +736,31 @@ mod tests {
     #[test]
     fn parse_without_closing_dashes_is_body_only() {
         let text = "---\nname: orphan\n";
+        let skill = parse_skill_text(text).unwrap();
+        assert_eq!(skill.name, "");
+        assert_eq!(skill.body, text);
+    }
+
+    #[test]
+    fn parse_empty_frontmatter() {
+        let text = "---\n---\nbody\n";
+        let skill = parse_skill_text(text).unwrap();
+        assert_eq!(skill.name, "");
+        assert_eq!(skill.body, "body\n");
+    }
+
+    #[test]
+    fn parse_empty_frontmatter_with_crlf() {
+        let text = "---\r\n---\r\nbody\r\n";
+        let skill = parse_skill_text(text).unwrap();
+        assert_eq!(skill.name, "");
+        assert_eq!(skill.body, "body\r\n");
+    }
+
+    #[test]
+    fn parse_leading_whitespace_is_body_only() {
+        // Opening --- is not on line 1 → whole file is body.
+        let text = "\n---\nname: test\n---\nbody\n";
         let skill = parse_skill_text(text).unwrap();
         assert_eq!(skill.name, "");
         assert_eq!(skill.body, text);
@@ -872,6 +930,7 @@ mod tests {
 
     #[test]
     fn project_skills_shadow_user_skills() {
+        let mut env = crate::test_support::EnvGuard::lock();
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path().join("project");
 
@@ -894,8 +953,17 @@ mod tests {
         )
         .unwrap();
 
-        // Override HOME for this test.
-        std::env::set_var("HOME", home.to_string_lossy().as_ref());
+        // Override HOME for this test (EnvGuard restores on drop).
+        env.set("HOME", home.to_string_lossy().as_ref());
+
+        // Also create a user-only skill to confirm user-global discovery runs.
+        let user_only = home.join(".gremlins").join("skills").join("user-only");
+        std::fs::create_dir_all(&user_only).unwrap();
+        std::fs::write(
+            user_only.join("SKILL.md"),
+            "---\nname: user-only\ndescription: only in user\n---\nuser only body\n",
+        )
+        .unwrap();
 
         let loaded = discover(&project_root);
         let shared: Vec<_> = loaded.iter().filter(|s| s.skill.name == "shared").collect();
@@ -903,6 +971,8 @@ mod tests {
         assert_eq!(shared[0].skill.description, "project version");
         assert_eq!(shared[0].skill.body.trim(), "project body");
         assert!(matches!(shared[0].skill.source, SkillSource::Project));
+        // User-only skill must be visible (proves user-global discovery ran).
+        assert!(loaded.iter().any(|s| s.skill.name == "user-only"));
     }
 
     #[test]

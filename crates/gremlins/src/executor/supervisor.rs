@@ -2236,9 +2236,10 @@ async fn handle_chat(
     // only on the in-memory `Gremlin.env` — never persisted to state or logs.
     let env = resolve_chat_env(request, base_process_env());
 
-    // Optional list of skill names to activate for this turn. Merged into the
-    // session's in-memory active skill set (never persisted). An empty list is
-    // a no-op. `/clear` resets the set.
+    // Optional list of skill names to activate for this turn. Replaces the
+    // session's in-memory active skill set (never persisted). The TUI always
+    // sends the full active set on each chat request, so `/clear` resets it
+    // by sending an empty array.
     let requested_skills: Vec<String> = request
         .get("skills")
         .and_then(|v| v.as_array())
@@ -2299,16 +2300,17 @@ async fn handle_chat(
     //    via next_stage().
     //
     //    Skills are discovered from the project root on each turn so newly
-    //    added skills take effect without a daemon restart.
+    //    added skills take effect without a daemon restart. Discovery runs in
+    //    spawn_blocking so filesystem I/O does not stall the async executor.
     {
         let mut s = session.lock().await;
-        for name in &requested_skills {
-            if !s.active_skills.contains(name) {
-                s.active_skills.push(name.clone());
-            }
-        }
+        s.active_skills = requested_skills.clone();
     }
-    let all_skills = crate::skills::discover(&project_root);
+    let project_root_for_skills = project_root.clone();
+    let all_skills =
+        tokio::task::spawn_blocking(move || crate::skills::discover(&project_root_for_skills))
+            .await
+            .unwrap_or_default();
     let active_skills = {
         let s = session.lock().await;
         s.active_skills.clone()

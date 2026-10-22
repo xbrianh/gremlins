@@ -367,14 +367,14 @@ fn build_chat_request(
     if !context.is_empty() {
         request["context"] = serde_json::Value::String(context.to_string());
     }
-    if !skills.is_empty() {
-        request["skills"] = serde_json::Value::Array(
-            skills
-                .iter()
-                .map(|s| serde_json::Value::String(s.clone()))
-                .collect(),
-        );
-    }
+    // Always send the skills array — even when empty — so the daemon knows
+    // the full active set and `/clear` resets it.
+    request["skills"] = serde_json::Value::Array(
+        skills
+            .iter()
+            .map(|s| serde_json::Value::String(s.clone()))
+            .collect(),
+    );
     request
 }
 
@@ -2877,11 +2877,15 @@ mod tests {
     }
 
     #[test]
-    fn chat_request_includes_skills_when_present() {
+    fn chat_request_always_includes_skills_array() {
         let env = HashMap::new();
+        // Skills present.
         let req = build_chat_request("hello", "1", "/p", "", &env, &["pdf".to_string()]);
         assert_eq!(req["skills"].as_array().unwrap().len(), 1);
         assert_eq!(req["skills"][0], "pdf");
+        // Skills empty (so /clear resets the daemon).
+        let req = build_chat_request("hello", "1", "/p", "", &env, &[]);
+        assert_eq!(req["skills"].as_array().unwrap().len(), 0);
     }
 
     #[test]
