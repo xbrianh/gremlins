@@ -1348,7 +1348,8 @@ fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str
                 }
             }
         } else {
-            None
+            // Model omitted token_budget — fall back to config / env var.
+            crate::config::max_landscape_tool_tokens().map(|n| n as usize)
         };
 
     // Reject a symlink root so the directory walk does not follow it.
@@ -3159,7 +3160,8 @@ mod tests {
         std::fs::create_dir(dir.join("sub")).unwrap();
         std::fs::write(dir.join("sub/lib.rs"), "fn a() {}\nstruct B;\nimpl B {}\n").unwrap();
         std::fs::write(dir.join("sub/notes.txt"), "hello").unwrap();
-        let args = serde_json::json!({"file_path": ".", "depth": 2}).to_string();
+        let args = serde_json::json!({"file_path": ".", "depth": 2, "token_budget": 1_000_000})
+            .to_string();
         let out = landscape_invoke(&c, &args).await;
         assert!(
             out.contains("sub/") && out.contains("lib.rs:"),
@@ -3185,7 +3187,8 @@ mod tests {
         std::fs::write(dir.join(".git/config"), "x").unwrap();
         std::fs::write(dir.join("target/out"), "x").unwrap();
         std::fs::write(dir.join("src/lib.rs"), "fn a() {}\nstruct B;\nimpl B {}\n").unwrap();
-        let args = serde_json::json!({"file_path": ".", "depth": 2}).to_string();
+        let args = serde_json::json!({"file_path": ".", "depth": 2, "token_budget": 1_000_000})
+            .to_string();
         let out = landscape_invoke(&c, &args).await;
         assert!(!out.contains(".git"), "must skip .git: {out:?}");
         assert!(!out.contains("target"), "must skip target: {out:?}");
@@ -3207,7 +3210,8 @@ mod tests {
         .unwrap();
         std::fs::write(dir.join("a/top.rs"), "fn top() {}\nstruct T;\nimpl T {}\n").unwrap();
         // depth=1: only a/ itself plus one level → a/top.rs visible, a/b/ skipped
-        let args = serde_json::json!({"file_path": ".", "depth": 1}).to_string();
+        let args = serde_json::json!({"file_path": ".", "depth": 1, "token_budget": 1_000_000})
+            .to_string();
         let out = landscape_invoke(&c, &args).await;
         assert!(
             out.contains("a/") && out.contains("top.rs:"),
@@ -3225,7 +3229,7 @@ mod tests {
         let sub = dir.join("empty");
         std::fs::create_dir(&sub).unwrap();
         let c = ctx(&dir);
-        let args = serde_json::json!({"file_path": "empty"}).to_string();
+        let args = serde_json::json!({"file_path": "empty", "token_budget": 1_000_000}).to_string();
         let out = landscape_invoke(&c, &args).await;
         assert_eq!(out, "(empty directory)");
     }
@@ -3241,7 +3245,8 @@ mod tests {
         // applying the injected-block three-item cutoff.
         std::fs::write(sub.join("a.rs"), "fn a() {}\nstruct A;\n").unwrap();
         std::fs::write(sub.join("b.rs"), "fn b() {}\n").unwrap();
-        let args = serde_json::json!({"file_path": "shallow"}).to_string();
+        let args =
+            serde_json::json!({"file_path": "shallow", "token_budget": 1_000_000}).to_string();
         let out = landscape_invoke(&c, &args).await;
         assert!(
             out.contains("a.rs:") && out.contains("1|fn|a") && out.contains("2|struct|A"),
@@ -3309,7 +3314,8 @@ mod tests {
         assert!(!expected.contains("<!-- BEGIN LANDSCAPE BLOCK -->"));
         assert!(!expected.contains("repository metadata"));
 
-        let args = serde_json::json!({"file_path": ".", "depth": 2}).to_string();
+        let args = serde_json::json!({"file_path": ".", "depth": 2, "token_budget": 1_000_000})
+            .to_string();
         let out = landscape_invoke(&c, &args).await;
         assert_eq!(
             out, expected,
@@ -3374,7 +3380,11 @@ mod tests {
             let perms = std::fs::Permissions::from_mode(0o000);
             std::fs::set_permissions(&broken, perms).unwrap();
         }
-        let args = serde_json::json!({"file_path": ".", "depth": 2}).to_string();
+        // Pass an explicit token_budget so the test never consults the
+        // global config (which can race with other tests that call
+        // init_global() in parallel).
+        let args =
+            serde_json::json!({"file_path": ".", "depth": 2, "token_budget": 100_000}).to_string();
         let out = landscape_invoke(&c, &args).await;
         assert!(
             out.contains("broken.rs") && out.contains("(unreadable)"),
@@ -5882,5 +5892,71 @@ mod tests {
         // never "allow all".
         let err = bash_check(&[], "cat /etc/passwd", Some(&dir)).unwrap();
         assert!(err.contains("invalid sandbox root"), "got: {err}");
+    }
+
+    // --- landscape_sync token_budget fallback ------------------------------
+
+    #[test]
+    fn landscape_sync_config_token_budget_fallback_caps_output() {
+        // Config has max-tool-tokens: 0 → landscape_sync without
+        // token_budget falls back to the config value and hits the cap.
+        let _sandbox = crate::test_support::Sandbox::with_config(Some(
+            r#"{"landscape": {"max-tool-tokens": 0}}"#,
+        ));
+        crate::config::clear_global();
+        crate::config::init_global().unwrap();
+
+        let dir = tmp();
+        std::fs::write(dir.join("a.rs"), "fn main() {}").unwrap();
+
+        let result = landscape_sync(Some(&dir), None, r#"{"file_path": "."}"#);
+        assert!(
+            result.contains("Error: budget exceeded"),
+            "expected budget-exceeded, got: {result}"
+        );
+        crate::config::clear_global();
+    }
+
+    #[test]
+    fn landscape_sync_no_config_no_token_budget_is_unlimited() {
+        // No config → no fallback cap → full-depth output with no error.
+        let _sandbox = crate::test_support::Sandbox::new();
+        crate::config::clear_global();
+        crate::config::init_global().unwrap();
+
+        let dir = tmp();
+        std::fs::write(dir.join("a.rs"), "fn main() {}").unwrap();
+
+        let result = landscape_sync(Some(&dir), None, r#"{"file_path": "."}"#);
+        assert!(
+            !result.contains("Error: budget exceeded"),
+            "should not be capped, got: {result}"
+        );
+        assert!(!result.is_empty(), "output should not be empty");
+    }
+
+    #[test]
+    fn landscape_sync_model_token_budget_overrides_config() {
+        // Config has max-tool-tokens: 0 (would cap), but the model passes
+        // an explicit token_budget → model's value wins, no cap error.
+        let _sandbox = crate::test_support::Sandbox::with_config(Some(
+            r#"{"landscape": {"max-tool-tokens": 0}}"#,
+        ));
+        crate::config::clear_global();
+        crate::config::init_global().unwrap();
+
+        let dir = tmp();
+        std::fs::write(dir.join("a.rs"), "fn main() {}").unwrap();
+
+        let result = landscape_sync(
+            Some(&dir),
+            None,
+            r#"{"file_path": ".", "token_budget": 999999}"#,
+        );
+        assert!(
+            !result.contains("Error: budget exceeded"),
+            "model budget should override config, got: {result}"
+        );
+        assert!(!result.is_empty(), "output should not be empty");
     }
 }
