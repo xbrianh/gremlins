@@ -29,9 +29,9 @@ use crate::artifacts::uri::Uri;
 use crate::core::proc::{run_logged_commands, ProcError};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run::truncate;
+use crate::executor::send_log;
 use crate::executor::state::BlobMode;
 use crate::executor::RunError;
-use crate::executor::send_log;
 use crate::schemas::bootstrap::substitute_bootstrap_vars;
 
 /// `gremlins:<name>(<args>)`, anchored at the start — the DSL marker is a

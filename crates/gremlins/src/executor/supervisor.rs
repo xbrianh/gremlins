@@ -3196,7 +3196,10 @@ fn create_chat_gremlin(
         "group_name": "",
         "child_key": "",
         "metadata": {},
-    }).as_object().unwrap().clone();
+    })
+    .as_object()
+    .unwrap()
+    .clone();
 
     let state = StateData::new(gremlin_id.as_str(), &initial, /* ephemeral */ true)
         .map_err(|e| format!("failed to write state: {e}"))?;
@@ -3325,7 +3328,10 @@ impl StateView {
             attempt: str_field(&tree, "attempt"),
             kind: str_field(&tree, "kind"),
             scratch_dir,
-            bail_info: store.stage_error().map(Value::Object).unwrap_or(Value::Null),
+            bail_info: store
+                .stage_error()
+                .map(Value::Object)
+                .unwrap_or(Value::Null),
         })
     }
 
@@ -3983,7 +3989,9 @@ mod tests {
     }
 
     /// Create a UnixStream pair, returning (writer, reader, server_read, session).
-    fn chat_pair(name: &str) -> (
+    fn chat_pair(
+        name: &str,
+    ) -> (
         super::SharedWriter,
         tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
         tokio::net::unix::OwnedReadHalf,
@@ -3994,10 +4002,9 @@ mod tests {
         let writer = super::SharedWriter::new(server_write);
         let (client_read, _client_write) = client.into_split();
         let reader = tokio::io::BufReader::new(client_read);
-        let session: super::SessionHandle =
-            Arc::new(tokio::sync::Mutex::new(super::ClientSession::new(
-                name.to_string(),
-            )));
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new(name.to_string()),
+        ));
         (writer, reader, server_read, session)
     }
 

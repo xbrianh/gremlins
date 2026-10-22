@@ -43,9 +43,9 @@ use crate::core::proc::{run_logged_commands, sanitize_log_filename};
 use crate::core::{discovery, env_file};
 use crate::definition::{GremlinDefinition, StaticDefinition};
 use crate::executor::state::{self, BlobMode, StateData, StateStore};
+use crate::executor::str_field;
 use crate::executor::vars;
 use crate::executor::RunError;
-use crate::executor::str_field;
 use crate::schemas::bootstrap::Bootstrap;
 
 /// Configuration knobs for [`Gremlin::init`].

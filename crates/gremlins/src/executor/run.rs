@@ -23,12 +23,12 @@ use crate::executor::gremlin::Gremlin;
 #[cfg(test)]
 use crate::executor::gremlin::{GremlinConfig, ScratchDir, WorkDir};
 use crate::executor::parallel::run_parallel;
+use crate::executor::send_log;
 use crate::executor::state;
 use crate::executor::state::{Checkout, Collision, FileSystemStateStore, StateStore};
 use crate::executor::supervisor::get_run_map;
 use crate::executor::vars;
 use crate::executor::RunError;
-use crate::executor::send_log;
 use crate::landscape::{LandscapeBlock, LandscapeError, LandscapeExplorer};
 use indexmap::IndexMap;
 use rig_core::completion::message::{AssistantContent, UserContent};
@@ -75,23 +75,24 @@ async fn build_landscape_snapshot(
     };
     let root = cwd.clone();
     let log_tx2 = log_tx.clone();
-    let outlines = tokio::task::spawn_blocking(move || match LandscapeExplorer.build(&cwd, usize::MAX) {
-        Ok(outlines) => outlines,
-        Err(LandscapeError::Read(e)) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => {
-            let msg = format!("landscape build failed for {}: {error}", cwd.display());
+    let outlines =
+        tokio::task::spawn_blocking(move || match LandscapeExplorer.build(&cwd, usize::MAX) {
+            Ok(outlines) => outlines,
+            Err(LandscapeError::Read(e)) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => {
+                let msg = format!("landscape build failed for {}: {error}", cwd.display());
+                log::warn!("{msg}");
+                send_log(&log_tx2, &msg);
+                Vec::new()
+            }
+        })
+        .await
+        .unwrap_or_else(|error| {
+            let msg = format!("landscape build task failed: {error}");
             log::warn!("{msg}");
-            send_log(&log_tx2, &msg);
+            send_log(&log_tx, &msg);
             Vec::new()
-        }
-    })
-    .await
-    .unwrap_or_else(|error| {
-        let msg = format!("landscape build task failed: {error}");
-        log::warn!("{msg}");
-        send_log(&log_tx, &msg);
-        Vec::new()
-    });
+        });
 
     let budget: u64 = crate::config::max_landscape_tokens();
     let landscape = match crate::landscape::format_landscape_block(
@@ -174,18 +175,20 @@ async fn run_stage_scoped(
     let enc_tm = enclosing_task_models.or(tm.as_ref());
     let m = gremlin.enclosing_model.clone();
     let enc_model = enclosing_model.or(m.as_ref());
-    send_log(&gremlin.runtime_config.log_tx,
-        format!("stage '{}': entering (type={})", stage.name(), stage.stage_type()));
+    send_log(
+        &gremlin.runtime_config.log_tx,
+        format!(
+            "stage '{}': entering (type={})",
+            stage.name(),
+            stage.stage_type()
+        ),
+    );
 
     match stage {
         ExecutorStage::Agent { .. } => run_agent(stage, gremlin, enc_model, enc_tm).await,
         ExecutorStage::Exec { .. } => run_exec(stage, gremlin, enc_model, enc_tm).await,
-        ExecutorStage::Sequence(_) => {
-            run_sequence(stage, gremlin, scope, enc_model, enc_tm).await
-        }
-        ExecutorStage::Parallel { .. } => {
-            run_parallel(stage, gremlin, enc_model, enc_tm).await
-        }
+        ExecutorStage::Sequence(_) => run_sequence(stage, gremlin, scope, enc_model, enc_tm).await,
+        ExecutorStage::Parallel { .. } => run_parallel(stage, gremlin, enc_model, enc_tm).await,
         ExecutorStage::Done => Ok(()),
     }
 }
@@ -209,26 +212,24 @@ fn resolve_model_spec(
     }
 
     let stage_name = stage.name();
-    let parse = |spec: &str| {
-        ModelURI::parse(spec).map_err(|m| stage_failed(stage_name, m))
-    };
+    let parse = |spec: &str| ModelURI::parse(spec).map_err(|m| stage_failed(stage_name, m));
 
     let cfg = &gremlin.runtime_config;
     for (exact, prefix) in [
-        (&cfg.profile_stage_models_exact, &cfg.profile_stage_models_prefix),
+        (
+            &cfg.profile_stage_models_exact,
+            &cfg.profile_stage_models_prefix,
+        ),
         (&cfg.stage_models_exact, &cfg.stage_models_prefix),
     ] {
         // Exact beats prefix; longest prefix wins.
-        if let Some(spec) = exact
-            .get(stage_name)
-            .or_else(|| {
-                prefix
-                    .iter()
-                    .filter(|(k, _)| stage_name.starts_with(k.as_str()))
-                    .max_by_key(|(k, _)| k.len())
-                    .map(|(_, v)| v)
-            })
-        {
+        if let Some(spec) = exact.get(stage_name).or_else(|| {
+            prefix
+                .iter()
+                .filter(|(k, _)| stage_name.starts_with(k.as_str()))
+                .max_by_key(|(k, _)| k.len())
+                .map(|(_, v)| v)
+        }) {
             return parse(spec);
         }
     }
@@ -278,11 +279,10 @@ async fn collect_checkout_keys(
     let str_opts = vars::string_options(options);
     let (content_map, filepath_map) =
         crate::artifacts::resolve::split_interpolation_map(interpolation_map);
-    let content_interpolated = crate::artifacts::resolve::resolve_interpolation_map(
-        store, &content_map, loop_iter,
-    )
-    .await
-    .map_err(|error| missing_artifact_bail_or_stage_fail(error, stage_name))?;
+    let content_interpolated =
+        crate::artifacts::resolve::resolve_interpolation_map(store, &content_map, loop_iter)
+            .await
+            .map_err(|error| missing_artifact_bail_or_stage_fail(error, stage_name))?;
 
     let mut uri_subs = content_interpolated;
     uri_subs.extend(framework_subs.clone());
@@ -314,34 +314,47 @@ fn missing_artifact_bail_or_stage_fail(error: ResolveError, stage_name: &str) ->
 }
 
 fn stage_failed(stage: &str, error: impl ToString) -> RunError {
-    RunError::StageFailed { stage: stage.to_string(), message: error.to_string() }
+    RunError::StageFailed {
+        stage: stage.to_string(),
+        message: error.to_string(),
+    }
 }
 
 fn agent_prepare_err(error: AgentError, name: &str) -> RunError {
     match error {
-        AgentError::Resolve { source: ResolveError::MissingArtifact(key), .. } => {
-            RunError::Bail { reason: format!("artifact not bound: {key:?}") }
-        }
+        AgentError::Resolve {
+            source: ResolveError::MissingArtifact(key),
+            ..
+        } => RunError::Bail {
+            reason: format!("artifact not bound: {key:?}"),
+        },
         other => stage_failed(name, other),
     }
 }
 fn agent_commit_err(error: AgentError, name: &str) -> RunError {
     match error {
-        AgentError::MissingArtifact { .. } => RunError::Bail { reason: error.to_string() },
+        AgentError::MissingArtifact { .. } => RunError::Bail {
+            reason: error.to_string(),
+        },
         other => stage_failed(name, other),
     }
 }
 fn exec_prepare_err(error: ExecError, name: &str) -> RunError {
     match error {
-        ExecError::Resolve { source: ResolveError::MissingArtifact(key), .. } => {
-            RunError::Bail { reason: format!("artifact not bound: {key:?}") }
-        }
+        ExecError::Resolve {
+            source: ResolveError::MissingArtifact(key),
+            ..
+        } => RunError::Bail {
+            reason: format!("artifact not bound: {key:?}"),
+        },
         other => stage_failed(name, other),
     }
 }
 fn exec_commit_err(error: ExecError, name: &str) -> RunError {
     match error {
-        ExecError::MissingArtifact { .. } => RunError::Bail { reason: error.to_string() },
+        ExecError::MissingArtifact { .. } => RunError::Bail {
+            reason: error.to_string(),
+        },
         other => stage_failed(name, other),
     }
 }
@@ -350,7 +363,10 @@ fn client_run_err(error: ClientError, name: &str) -> RunError {
     match error {
         ClientError::Bail { reason } => RunError::Bail { reason },
         ClientError::Cancelled { message, messages } => RunError::Cancelled { message, messages },
-        ClientError::Runtime { message } if message == "cancelled" => RunError::Cancelled { message, messages: None },
+        ClientError::Runtime { message } if message == "cancelled" => RunError::Cancelled {
+            message,
+            messages: None,
+        },
         other => stage_failed(name, other),
     }
 }
@@ -467,10 +483,18 @@ async fn run_agent(
         let cur_uri = conversation_uri(current_turn);
         match gremlin.state.content(&cur_uri, None).await {
             Ok(json) => all_msgs.extend(messages_from_conversation(&json).map_err(|e| {
-                RunError::Message(format!("current-turn conversation artifact {cur_uri} unparseable: {e}"))
+                RunError::Message(format!(
+                    "current-turn conversation artifact {cur_uri} unparseable: {e}"
+                ))
             })?),
-            Err(e) if e.downcast_ref::<crate::executor::state::MissingArtifact>().is_some() => {}
-            Err(e) => return Err(RunError::Message(format!("failed to read current-turn conversation artifact {cur_uri}: {e}"))),
+            Err(e)
+                if e.downcast_ref::<crate::executor::state::MissingArtifact>()
+                    .is_some() => {}
+            Err(e) => {
+                return Err(RunError::Message(format!(
+                    "failed to read current-turn conversation artifact {cur_uri}: {e}"
+                )))
+            }
         }
 
         (!all_msgs.is_empty()).then_some(all_msgs)
@@ -498,7 +522,10 @@ async fn run_agent(
             .model
             .clone()
             .or_else(|| Some(client.model().to_string())),
-        raw_path: Some(agent_raw_stream_path(gremlin, &prepared.name).map_err(|e| stage_failed(&prepared.name, e))?),
+        raw_path: Some(
+            agent_raw_stream_path(gremlin, &prepared.name)
+                .map_err(|e| stage_failed(&prepared.name, e))?,
+        ),
         capture_events: false,
         on_timeout_prompt: None,
         max_retries: 3,
@@ -523,7 +550,10 @@ async fn run_agent(
         compaction_opts,
     };
 
-    let effective_model = params.model.clone().unwrap_or_else(|| client.model().to_string());
+    let effective_model = params
+        .model
+        .clone()
+        .unwrap_or_else(|| client.model().to_string());
     let effective_model: &str = &effective_model;
     send_log(
         &gremlin.runtime_config.log_tx,
@@ -559,13 +589,10 @@ async fn run_agent(
         params.model.as_deref().unwrap_or("default")
     );
 
-    let completed = client
-        .run(params, interactive)
-        .await
-        .map_err(|error| {
-            let name = prepared.name.clone();
-            client_run_err(error, &name)
-        })?;
+    let completed = client.run(params, interactive).await.map_err(|error| {
+        let name = prepared.name.clone();
+        client_run_err(error, &name)
+    })?;
 
     send_log(
         &gremlin.runtime_config.log_tx,
@@ -585,7 +612,10 @@ async fn run_agent(
                 ("prompt_tokens", usage.prompt_tokens),
                 ("completion_tokens", usage.completion_tokens),
                 ("cached_input_tokens", usage.cached_input_tokens),
-                ("cache_creation_input_tokens", usage.cache_creation_input_tokens),
+                (
+                    "cache_creation_input_tokens",
+                    usage.cache_creation_input_tokens,
+                ),
                 ("reasoning_tokens", usage.reasoning_tokens),
             ]
             .into_iter()
@@ -596,14 +626,19 @@ async fn run_agent(
 
     if is_chat {
         if let (Some(messages), Some(turn_num)) = (&completed.messages, chat_turn) {
-            let diff: Vec<Message> = if canonical_prefix.is_empty() || messages.len() < canonical_prefix.len() {
-                messages.clone()
-            } else {
-                let cp = &messages[..canonical_prefix.len()];
-                let same = serde_json::to_string(cp).unwrap_or_default()
-                    == serde_json::to_string(&canonical_prefix).unwrap_or_default();
-                if same { messages[canonical_prefix.len()..].to_vec() } else { messages.clone() }
-            };
+            let diff: Vec<Message> =
+                if canonical_prefix.is_empty() || messages.len() < canonical_prefix.len() {
+                    messages.clone()
+                } else {
+                    let cp = &messages[..canonical_prefix.len()];
+                    let same = serde_json::to_string(cp).unwrap_or_default()
+                        == serde_json::to_string(&canonical_prefix).unwrap_or_default();
+                    if same {
+                        messages[canonical_prefix.len()..].to_vec()
+                    } else {
+                        messages.clone()
+                    }
+                };
             persist_chat_conversation_turn(gremlin, turn_num, &diff).await;
         }
     }
@@ -737,7 +772,8 @@ async fn run_sequence(
     };
 
     let enclosing_model = seq.model.as_ref().or(enclosing_model);
-    let merged = config::merge_task_models_runtime(None, enclosing_task_models, seq.task_models.as_ref());
+    let merged =
+        config::merge_task_models_runtime(None, enclosing_task_models, seq.task_models.as_ref());
     let enclosing_task_models = merged.as_ref();
 
     let key = stage_key(scope, &seq.name);
@@ -747,13 +783,27 @@ async fn run_sequence(
     // Non-repeating: run children once.
     if max_iterations == 1 {
         if !skip_guard.is_empty()
-            && is_registered_uri(gremlin.state.store_ref(), &skip_guard.replace("{loop_iter}", &gremlin.loop_iter)).await
+            && is_registered_uri(
+                gremlin.state.store_ref(),
+                &skip_guard.replace("{loop_iter}", &gremlin.loop_iter),
+            )
+            .await
         {
-            send_log(&gremlin.runtime_config.log_tx, format!("sequence '{}': skipped (artifact exists)", seq.name));
+            send_log(
+                &gremlin.runtime_config.log_tx,
+                format!("sequence '{}': skipped (artifact exists)", seq.name),
+            );
             return Ok(());
         }
         for child in &seq.stages {
-            Box::pin(run_stage_scoped(child, gremlin, &key, enclosing_model, enclosing_task_models)).await?;
+            Box::pin(run_stage_scoped(
+                child,
+                gremlin,
+                &key,
+                enclosing_model,
+                enclosing_task_models,
+            ))
+            .await?;
         }
         return Ok(());
     }
@@ -767,17 +817,34 @@ async fn run_sequence(
         let attempt = gremlin.state.read_str("attempt");
         gremlin.loop_iter = {
             let base = format!("{}~{}~{}", saved_loop_iter, seq.name, iteration);
-            if attempt.is_empty() { base } else { format!("{}~{}", base, attempt) }
+            if attempt.is_empty() {
+                base
+            } else {
+                format!("{}~{}", base, attempt)
+            }
         };
         let loop_iter = gremlin.loop_iter.clone();
 
         // Guard before body: skip/stops if artifact exists.
         if !skip_guard.is_empty()
-            && is_registered_uri(gremlin.state.store_ref(), &skip_guard.replace("{loop_iter}", &loop_iter)).await
+            && is_registered_uri(
+                gremlin.state.store_ref(),
+                &skip_guard.replace("{loop_iter}", &loop_iter),
+            )
+            .await
         {
-            send_log(&gremlin.runtime_config.log_tx,
-                format!("sequence '{}': {}", seq.name,
-                    if iteration == 1 { "skipped (artifact exists)" } else { "stopped (artifact exists)" }));
+            send_log(
+                &gremlin.runtime_config.log_tx,
+                format!(
+                    "sequence '{}': {}",
+                    seq.name,
+                    if iteration == 1 {
+                        "skipped (artifact exists)"
+                    } else {
+                        "stopped (artifact exists)"
+                    }
+                ),
+            );
             if iteration == 1 {
                 gremlin.loop_iter = saved_loop_iter;
                 return Ok(());
@@ -786,12 +853,24 @@ async fn run_sequence(
             break;
         }
 
-        send_log(&gremlin.runtime_config.log_tx, format!("sequence '{}': iteration {iteration}/{max_iterations} starting", seq.name));
+        send_log(
+            &gremlin.runtime_config.log_tx,
+            format!(
+                "sequence '{}': iteration {iteration}/{max_iterations} starting",
+                seq.name
+            ),
+        );
 
         for child in &seq.stages {
             if let Err(error) = Box::pin(run_stage_scoped(
-                child, gremlin, &loop_iter, enclosing_model, enclosing_task_models,
-            )).await {
+                child,
+                gremlin,
+                &loop_iter,
+                enclosing_model,
+                enclosing_task_models,
+            ))
+            .await
+            {
                 outcome = Err(error);
                 gremlin.loop_iter = saved_loop_iter;
                 return outcome;
@@ -800,9 +879,16 @@ async fn run_sequence(
 
         // Guard after body: produced artifact stops loop.
         if !skip_guard.is_empty()
-            && is_registered_uri(gremlin.state.store_ref(), &skip_guard.replace("{loop_iter}", &loop_iter)).await
+            && is_registered_uri(
+                gremlin.state.store_ref(),
+                &skip_guard.replace("{loop_iter}", &loop_iter),
+            )
+            .await
         {
-            send_log(&gremlin.runtime_config.log_tx, format!("sequence '{}': stopped (artifact produced)", seq.name));
+            send_log(
+                &gremlin.runtime_config.log_tx,
+                format!("sequence '{}': stopped (artifact produced)", seq.name),
+            );
             stopped = true;
             break;
         }
@@ -844,7 +930,10 @@ impl Gremlin {
         if self.workdir.is_some() && resume_from.is_none() && has_bootstrap {
             if let Err(error) = run_definition_bootstrap(self, is_fork).await {
                 send_log(&self.runtime_config.log_tx, "bootstrap failed");
-                self.state.record_stage_error("other", &truncate(&format!("bootstrap failed: {error}"), 200));
+                self.state.record_stage_error(
+                    "other",
+                    &truncate(&format!("bootstrap failed: {error}"), 200),
+                );
                 self.finish(1);
                 return Ok(1);
             }
@@ -856,7 +945,10 @@ impl Gremlin {
             let stage = match self.definition.next_stage().await {
                 Ok(stage) => stage,
                 Err(error) => {
-                    self.state.record_stage_error("other", &truncate(&format!("definition error: {error}"), 200));
+                    self.state.record_stage_error(
+                        "other",
+                        &truncate(&format!("definition error: {error}"), 200),
+                    );
                     exit_code = 1;
                     failure = Some(RunError::Message(error.to_string()));
                     break;
@@ -891,8 +983,14 @@ impl Gremlin {
             let saved_loop_iter = self.loop_iter.clone();
             self.loop_iter = format!("{}~{}", saved_loop_iter, attempt);
 
-            send_log(&self.runtime_config.log_tx,
-                format!("stage '{}': starting (type={})", stage.name(), stage.stage_type()));
+            send_log(
+                &self.runtime_config.log_tx,
+                format!(
+                    "stage '{}': starting (type={})",
+                    stage.name(),
+                    stage.stage_type()
+                ),
+            );
 
             let stage_result = run_stage(&stage, self).await;
             self.loop_iter = saved_loop_iter;
@@ -900,12 +998,16 @@ impl Gremlin {
             match stage_result {
                 Ok(()) => {}
                 Err(RunError::Bail { reason }) => {
-                    self.state.record_stage_error("other", &truncate(&reason, 200));
+                    self.state
+                        .record_stage_error("other", &truncate(&reason, 200));
                     exit_code = 1;
                     break;
                 }
                 Err(error) => {
-                    self.state.record_stage_error("other", &truncate(&format!("unexpected error: {error}"), 200));
+                    self.state.record_stage_error(
+                        "other",
+                        &truncate(&format!("unexpected error: {error}"), 200),
+                    );
                     exit_code = 1;
                     failure = Some(error);
                     break;
@@ -922,10 +1024,17 @@ impl Gremlin {
 
     /// Reap clients, fold subprocess cost into total, write terminal state.
     fn finish(&mut self, exit_code: i32) {
-        send_log(&self.runtime_config.log_tx, format!("finished (exit_code={exit_code})"));
+        send_log(
+            &self.runtime_config.log_tx,
+            format!("finished (exit_code={exit_code})"),
+        );
         self.client.reap_all(self.id.as_str());
         let mut total = self.client.total_cost_usd().unwrap_or(0.0);
-        let subprocess = self.state.read_str("subprocess_cost_usd").parse::<f64>().unwrap_or(0.0);
+        let subprocess = self
+            .state
+            .read_str("subprocess_cost_usd")
+            .parse::<f64>()
+            .unwrap_or(0.0);
         if subprocess.is_finite() && subprocess >= 0.0 {
             total += subprocess;
         }
@@ -939,9 +1048,7 @@ impl Gremlin {
 }
 
 /// Deserialize a conversation artifact (JSON array of rig `Message` values).
-fn messages_from_conversation(
-    json: &str,
-) -> Result<Vec<rig_core::completion::Message>, String> {
+fn messages_from_conversation(json: &str) -> Result<Vec<rig_core::completion::Message>, String> {
     serde_json::from_str::<Vec<rig_core::completion::Message>>(json)
         .map_err(|e| format!("chat: failed to parse conversation artifact: {e}"))
 }
@@ -958,7 +1065,9 @@ async fn persist_chat_conversation_turn(
                 let _ = gremlin.state.write_into_registry(&uri, &json).await;
             }
         }
-        Err(e) => log::warn!("chat: failed to serialize conversation artifact for turn {turn}: {e}"),
+        Err(e) => {
+            log::warn!("chat: failed to serialize conversation artifact for turn {turn}: {e}")
+        }
     }
 }
 
@@ -999,7 +1108,12 @@ pub(crate) async fn read_chat_conversation(
                     break;
                 }
             },
-            Err(e) if e.downcast_ref::<crate::executor::state::MissingArtifact>().is_some() => break,
+            Err(e)
+                if e.downcast_ref::<crate::executor::state::MissingArtifact>()
+                    .is_some() =>
+            {
+                break
+            }
             Err(_) => continue,
         }
     }
@@ -1017,14 +1131,21 @@ pub(crate) async fn append_chat_conversation_turn(
     }
     let uri_str = conversation_uri(turn);
     let mut existing = match gremlin.state.content(&uri_str, None).await {
-        Ok(json) => match messages_from_conversation(&json) {
-            Ok(msgs) => msgs,
-            Err(e) => {
-                log::warn!("chat: current-turn artifact {uri_str} unparseable; refusing to append: {e}");
-                return;
+        Ok(json) => {
+            match messages_from_conversation(&json) {
+                Ok(msgs) => msgs,
+                Err(e) => {
+                    log::warn!("chat: current-turn artifact {uri_str} unparseable; refusing to append: {e}");
+                    return;
+                }
             }
-        },
-        Err(e) if e.downcast_ref::<crate::executor::state::MissingArtifact>().is_some() => Vec::new(),
+        }
+        Err(e)
+            if e.downcast_ref::<crate::executor::state::MissingArtifact>()
+                .is_some() =>
+        {
+            Vec::new()
+        }
         Err(e) => {
             log::warn!("chat: failed to read current-turn artifact for append: {e}");
             return;
@@ -1038,7 +1159,10 @@ pub(crate) async fn append_chat_conversation_turn(
 pub(crate) fn strip_unpaired_tool_messages(messages: &mut Vec<Message>) {
     fn count_tool_calls(m: &Message) -> (bool, usize) {
         if let Message::Assistant { content, .. } = m {
-            let n = content.iter().filter(|i| matches!(i, AssistantContent::ToolCall(_))).count();
+            let n = content
+                .iter()
+                .filter(|i| matches!(i, AssistantContent::ToolCall(_)))
+                .count();
             (n > 0, n)
         } else {
             (false, 0)
@@ -1046,7 +1170,10 @@ pub(crate) fn strip_unpaired_tool_messages(messages: &mut Vec<Message>) {
     }
     fn count_tool_results(m: &Message) -> (bool, usize) {
         if let Message::User { content } = m {
-            let n = content.iter().filter(|i| matches!(i, UserContent::ToolResult(_))).count();
+            let n = content
+                .iter()
+                .filter(|i| matches!(i, UserContent::ToolResult(_)))
+                .count();
             (n > 0, n)
         } else {
             (false, 0)
@@ -1065,19 +1192,27 @@ pub(crate) fn strip_unpaired_tool_messages(messages: &mut Vec<Message>) {
             let mut result_count = 0;
             while idx > 0 {
                 let (is_result, n) = count_tool_results(&messages[idx - 1]);
-                if !is_result { break; }
+                if !is_result {
+                    break;
+                }
                 result_count += n;
                 idx -= 1;
             }
             if idx > 0 {
                 let (has_call, call_count) = count_tool_calls(&messages[idx - 1]);
-                if has_call && call_count == result_count { break; }
-                if has_call { idx -= 1; }
+                if has_call && call_count == result_count {
+                    break;
+                }
+                if has_call {
+                    idx -= 1;
+                }
             }
             messages.truncate(idx);
             continue;
         }
-        if messages.len() == before { break; }
+        if messages.len() == before {
+            break;
+        }
     }
 }
 
@@ -1144,8 +1279,15 @@ mod tests {
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),
             definition: Box::new(StaticDefinition::new(
-                "test".to_string(), PathBuf::from("test.yaml"), model(default_model),
-                bootstrap, stages, land, vec![], serde_yaml::Value::Null, None,
+                "test".to_string(),
+                PathBuf::from("test.yaml"),
+                model(default_model),
+                bootstrap,
+                stages,
+                land,
+                vec![],
+                serde_yaml::Value::Null,
+                None,
             )),
             definition_path: None,
             model_override: None,
@@ -1368,12 +1510,30 @@ mod tests {
     #[test]
     fn resolve_task_models_uses_task_maps_not_stage_maps() {
         let (_sandbox, mut gremlin) = test_gremlin(vec![], "cmd/true");
-        gremlin.runtime_config.stage_models_exact.insert("writer".into(), "cmd/stage-model".into());
-        gremlin.runtime_config.stage_models_prefix.insert("wri".into(), "cmd/stage-prefix".into());
-        gremlin.runtime_config.default_task_models = Some(IndexMap::from([("Scout".into(), "openai/mini".into())]));
-        let by_kind = resolve_task_models(gremlin.runtime_config.default_task_models.as_ref(), None, None).unwrap();
-        assert_eq!(by_kind.get(&TaskKind::Scout), Some(&"openai/mini".to_string()));
-        assert!(!by_kind.contains_key(&TaskKind::Implement), "stage-model entries must not leak");
+        gremlin
+            .runtime_config
+            .stage_models_exact
+            .insert("writer".into(), "cmd/stage-model".into());
+        gremlin
+            .runtime_config
+            .stage_models_prefix
+            .insert("wri".into(), "cmd/stage-prefix".into());
+        gremlin.runtime_config.default_task_models =
+            Some(IndexMap::from([("Scout".into(), "openai/mini".into())]));
+        let by_kind = resolve_task_models(
+            gremlin.runtime_config.default_task_models.as_ref(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            by_kind.get(&TaskKind::Scout),
+            Some(&"openai/mini".to_string())
+        );
+        assert!(
+            !by_kind.contains_key(&TaskKind::Implement),
+            "stage-model entries must not leak"
+        );
     }
 
     // --- model resolution ---
@@ -1387,7 +1547,9 @@ mod tests {
         expected: &str,
     ) {
         let mut b = AgentBuilder::new(stage_name).prompt("hi");
-        if let Some(m) = stage_model { b = b.model(model(m)); }
+        if let Some(m) = stage_model {
+            b = b.model(model(m));
+        }
         let (_sandbox, mut gremlin) = test_gremlin(vec![b.build().unwrap()], "cmd/default");
         setup(&mut gremlin);
         let stage = take_first_stage(&mut gremlin).await;
@@ -1397,48 +1559,108 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_model_spec_profile_map_wins_over_global_map() {
-        assert_resolved("plan", None, None, |g| {
-            g.runtime_config.profile_stage_models_exact.insert("plan".into(), "cmd/profile-plan".into());
-            g.runtime_config.stage_models_exact.insert("plan".into(), "cmd/global-plan".into());
-        }, "cmd/profile-plan").await;
+        assert_resolved(
+            "plan",
+            None,
+            None,
+            |g| {
+                g.runtime_config
+                    .profile_stage_models_exact
+                    .insert("plan".into(), "cmd/profile-plan".into());
+                g.runtime_config
+                    .stage_models_exact
+                    .insert("plan".into(), "cmd/global-plan".into());
+            },
+            "cmd/profile-plan",
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn resolve_model_spec_profile_exact_beats_profile_prefix() {
-        assert_resolved("plan-stage", None, None, |g| {
-            g.runtime_config.profile_stage_models_exact.insert("plan-stage".into(), "cmd/profile-exact".into());
-            g.runtime_config.profile_stage_models_prefix.insert("plan-".into(), "cmd/profile-prefix".into());
-        }, "cmd/profile-exact").await;
+        assert_resolved(
+            "plan-stage",
+            None,
+            None,
+            |g| {
+                g.runtime_config
+                    .profile_stage_models_exact
+                    .insert("plan-stage".into(), "cmd/profile-exact".into());
+                g.runtime_config
+                    .profile_stage_models_prefix
+                    .insert("plan-".into(), "cmd/profile-prefix".into());
+            },
+            "cmd/profile-exact",
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn resolve_model_spec_profile_prefix_wins_over_global_prefix() {
-        assert_resolved("plan-work", None, None, |g| {
-            g.runtime_config.profile_stage_models_prefix.insert("plan-".into(), "cmd/profile-prefix".into());
-            g.runtime_config.stage_models_prefix.insert("plan-".into(), "cmd/global-prefix".into());
-        }, "cmd/profile-prefix").await;
+        assert_resolved(
+            "plan-work",
+            None,
+            None,
+            |g| {
+                g.runtime_config
+                    .profile_stage_models_prefix
+                    .insert("plan-".into(), "cmd/profile-prefix".into());
+                g.runtime_config
+                    .stage_models_prefix
+                    .insert("plan-".into(), "cmd/global-prefix".into());
+            },
+            "cmd/profile-prefix",
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn resolve_model_spec_stage_model_beats_profile_map() {
-        assert_resolved("plan", Some("cmd/stage"), None, |g| {
-            g.runtime_config.profile_stage_models_exact.insert("plan".into(), "cmd/profile-plan".into());
-        }, "cmd/stage").await;
+        assert_resolved(
+            "plan",
+            Some("cmd/stage"),
+            None,
+            |g| {
+                g.runtime_config
+                    .profile_stage_models_exact
+                    .insert("plan".into(), "cmd/profile-plan".into());
+            },
+            "cmd/stage",
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn resolve_model_spec_enclosing_model_beats_profile_map() {
         let enc = model("cmd/enclosing");
-        assert_resolved("plan", None, Some(&enc), |g| {
-            g.runtime_config.profile_stage_models_exact.insert("plan".into(), "cmd/profile-plan".into());
-        }, "cmd/enclosing").await;
+        assert_resolved(
+            "plan",
+            None,
+            Some(&enc),
+            |g| {
+                g.runtime_config
+                    .profile_stage_models_exact
+                    .insert("plan".into(), "cmd/profile-plan".into());
+            },
+            "cmd/enclosing",
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn resolve_model_spec_falls_back_to_global_map() {
-        assert_resolved("review", None, None, |g| {
-            g.runtime_config.stage_models_exact.insert("review".into(), "cmd/global-review".into());
-        }, "cmd/global-review").await;
+        assert_resolved(
+            "review",
+            None,
+            None,
+            |g| {
+                g.runtime_config
+                    .stage_models_exact
+                    .insert("review".into(), "cmd/global-review".into());
+            },
+            "cmd/global-review",
+        )
+        .await;
     }
 
     #[tokio::test]

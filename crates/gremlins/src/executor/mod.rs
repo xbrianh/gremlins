@@ -15,7 +15,10 @@ use crate::clients::backend::ClientError;
 use crate::executor::state::StateError;
 
 /// Send a line through the per-gremlin log channel when one is configured.
-pub(crate) fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: impl AsRef<str>) {
+pub(crate) fn send_log(
+    tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    msg: impl AsRef<str>,
+) {
     if let Some(tx) = tx {
         let _ = tx.send(msg.as_ref().to_string());
     }
