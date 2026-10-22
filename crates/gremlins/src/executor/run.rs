@@ -33,17 +33,144 @@ use crate::executor::parallel::run_parallel;
 use crate::executor::state;
 use crate::executor::state::{Checkout, Collision, FileSystemStateStore, StateStore};
 use crate::executor::supervisor::get_run_map;
-use crate::executor::system_prompt::{agent_system_prompt, landscape_block};
 use crate::executor::vars;
 use crate::executor::RunError;
+use crate::executor::send_log;
+use crate::landscape::{LandscapeBlock, LandscapeError, LandscapeExplorer};
 use indexmap::IndexMap;
 use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::completion::Message;
 
-/// Send a log line through the per-gremlin channel if one is configured.
-fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: String) {
-    if let Some(tx) = tx {
-        let _ = tx.send(msg);
+// ---------------------------------------------------------------------------
+// System prompt assembly (inlined from system_prompt.rs)
+// ---------------------------------------------------------------------------
+
+/// The result of a landscape build: the formatted block ready for injection
+/// together with summary stats for logging.
+struct LandscapeSnapshot {
+    block: String,
+    file_count: usize,
+    item_count: usize,
+}
+
+/// Assembles the final system prompt for one agent stage.
+pub(crate) struct SystemPrompt {
+    base: String,
+    landscape: Option<String>,
+}
+
+impl SystemPrompt {
+    pub(crate) fn new(base: String) -> Self {
+        Self {
+            base,
+            landscape: None,
+        }
+    }
+
+    pub(crate) fn with_landscape(mut self, block: String) -> Self {
+        self.landscape = (!block.is_empty()).then_some(block);
+        self
+    }
+
+    pub(crate) fn assemble(self) -> String {
+        match self.landscape {
+            Some(landscape) => format!("{}\n\n{}", self.base, landscape),
+            None => self.base,
+        }
+    }
+}
+
+/// Build the assembled system prompt for an agent stage, conditionally
+/// including the landscape block.
+pub(crate) fn agent_system_prompt(base: String, landscape_block: Option<String>) -> String {
+    match landscape_block {
+        Some(block) => SystemPrompt::new(base).with_landscape(block).assemble(),
+        None => SystemPrompt::new(base).assemble(),
+    }
+}
+
+/// Compute the gremlin's stage-start landscape block.
+pub(crate) async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -> String {
+    let snapshot = build_landscape_snapshot(
+        gremlin.cwd(),
+        gremlin.runtime_config.log_tx.clone(),
+        has_outline_tool,
+    )
+    .await;
+
+    if snapshot.file_count > 0 {
+        let tokens = crate::landscape::count_tokens(&snapshot.block).unwrap_or(0);
+        if let Some(tx) = &gremlin.runtime_config.log_tx {
+            let _ = tx.send(format!(
+                "[landscape] {} files, {} items, {} tokens",
+                snapshot.file_count, snapshot.item_count, tokens
+            ));
+        }
+    }
+
+    snapshot.block
+}
+
+/// Build and format a landscape block for one workspace root.
+async fn build_landscape_snapshot(
+    cwd: PathBuf,
+    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    has_outline_tool: bool,
+) -> LandscapeSnapshot {
+    let root = cwd.clone();
+    let walk_log_tx = log_tx.clone();
+    let outlines =
+        tokio::task::spawn_blocking(move || match LandscapeExplorer.build(&cwd, usize::MAX) {
+            Ok(outlines) => outlines,
+            Err(LandscapeError::Read(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Vec::new()
+            }
+            Err(error) => {
+                let msg = format!("landscape build failed for {}: {error}", cwd.display());
+                log::warn!("{msg}");
+                send_log(&walk_log_tx, &msg);
+                Vec::new()
+            }
+        })
+        .await
+        .unwrap_or_else(|error| {
+            let msg = format!("landscape build task failed: {error}");
+            log::warn!("{msg}");
+            send_log(&log_tx, &msg);
+            Vec::new()
+        });
+
+    let budget: u64 = crate::config::max_landscape_tokens();
+    let max_tokens: usize = usize::try_from(budget).unwrap_or(usize::MAX);
+    let landscape = match crate::landscape::format_landscape_block(
+        &outlines,
+        &root,
+        max_tokens,
+        has_outline_tool,
+    ) {
+        Ok(block) => block,
+        Err(LandscapeError::BudgetExceeded) => {
+            let msg = format!(
+                "[landscape] block for {} could not be trimmed to fit the {} token budget; omitting",
+                root.display(),
+                budget,
+            );
+            log::warn!("{msg}");
+            send_log(&log_tx, &msg);
+            LandscapeBlock::empty()
+        }
+        Err(other) => {
+            let msg = format!("landscape block formatting failed: {other}");
+            log::warn!("{msg}");
+            send_log(&log_tx, &msg);
+            LandscapeBlock::empty()
+        }
+    };
+
+    LandscapeSnapshot {
+        block: landscape.block,
+        file_count: landscape.file_count,
+        item_count: landscape.item_count,
     }
 }
 
@@ -1097,7 +1224,7 @@ impl Gremlin {
         let first_start = self.workdir.is_some() && resume_from.is_none();
         if first_start && has_bootstrap {
             if let Err(error) = run_definition_bootstrap(self, is_fork).await {
-                send_log(&self.runtime_config.log_tx, "bootstrap failed".to_string());
+                send_log(&self.runtime_config.log_tx, "bootstrap failed");
                 self.state.record_stage_error(
                     "other",
                     &truncate(&format!("bootstrap failed: {error}"), 200),
@@ -1130,7 +1257,7 @@ impl Gremlin {
             // Check for cancellation before each stage.
             if let Some(ref cancel_token) = self.cancel_token {
                 if cancel_token.is_cancelled() {
-                    send_log(&self.runtime_config.log_tx, "cancelled".to_string());
+                    send_log(&self.runtime_config.log_tx, "cancelled");
                     self.finish(-1);
                     return Ok(-1);
                 }
@@ -2760,5 +2887,93 @@ mod tests {
         assert_eq!(messages.len(), 3);
         super::strip_unpaired_tool_messages(&mut messages);
         assert_eq!(messages.len(), 1);
+    }
+
+    // --- System prompt assembly (from system_prompt.rs) ---
+
+    #[test]
+    fn assembles_base_alone_without_landscape() {
+        let prompt = SystemPrompt::new("base prompt".to_string()).assemble();
+        assert_eq!(prompt, "base prompt");
+    }
+
+    #[test]
+    fn assembles_landscape_after_base() {
+        let prompt = SystemPrompt::new("base prompt".to_string())
+            .with_landscape("<!-- LANDSCAPE -->".to_string())
+            .assemble();
+        assert_eq!(prompt, "base prompt\n\n<!-- LANDSCAPE -->");
+    }
+
+    #[test]
+    fn empty_landscape_is_a_noop() {
+        let prompt = SystemPrompt::new("base prompt".to_string())
+            .with_landscape(String::new())
+            .assemble();
+        assert_eq!(prompt, "base prompt");
+    }
+
+    #[test]
+    fn agent_system_prompt_includes_block_when_provided() {
+        let base = "base prompt".to_string();
+        let block = "<!-- LANDSCAPE BLOCK -->".to_string();
+        let assembled = agent_system_prompt(base.clone(), Some(block.clone()));
+        assert!(assembled.contains(&block));
+        assert!(assembled.starts_with(&base));
+    }
+
+    #[test]
+    fn agent_system_prompt_omits_block_when_none() {
+        let base = "base prompt".to_string();
+        let assembled = agent_system_prompt(base.clone(), None);
+        assert_eq!(assembled, base);
+    }
+
+    #[tokio::test]
+    async fn missing_cwd_produces_empty_block() {
+        let snapshot = build_landscape_snapshot(
+            PathBuf::from("/definitely/not/present/landscape-cwd"),
+            None,
+            true,
+        )
+        .await;
+        assert_eq!(snapshot.block, "");
+        assert_eq!(snapshot.file_count, 0);
+        assert_eq!(snapshot.item_count, 0);
+    }
+
+    #[tokio::test]
+    async fn dropped_block_reports_zero_stats() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("thin.rs"), "fn only() {}\n").unwrap();
+        let snapshot = build_landscape_snapshot(dir.path().to_path_buf(), None, true).await;
+        assert_eq!(snapshot.block, "");
+        assert_eq!(snapshot.file_count, 0);
+        assert_eq!(snapshot.item_count, 0);
+    }
+
+    #[tokio::test]
+    async fn nonempty_outline_flows_through_assemble() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.rs"),
+            "fn main() {}\nstruct Config {}\nimpl Config {}\n",
+        )
+        .unwrap();
+        let snapshot = build_landscape_snapshot(dir.path().to_path_buf(), None, true).await;
+        assert!(snapshot.block.contains("<!-- BEGIN LANDSCAPE BLOCK -->"));
+        assert!(snapshot.block.contains(&format!("<!-- root: {} -->\n", dir.path().display())));
+        assert!(snapshot.block.lines().any(|line| line.starts_with("main.rs:")));
+        assert!(!snapshot.block.contains(&format!("{}:", dir.path().join("main.rs").display())));
+        assert!(snapshot.block.contains("1|fn|main"));
+        assert!(snapshot.block.contains("2|struct|Config"));
+        assert!(snapshot.block.contains("3|impl|Config"));
+        assert_eq!(snapshot.file_count, 1);
+        assert_eq!(snapshot.item_count, 3);
+
+        let prompt = SystemPrompt::new("base prompt".to_string())
+            .with_landscape(snapshot.block.clone())
+            .assemble();
+        assert_eq!(prompt, format!("base prompt\n\n{}", snapshot.block));
     }
 }

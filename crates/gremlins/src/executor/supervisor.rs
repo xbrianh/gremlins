@@ -28,6 +28,7 @@ use crate::definition::ChatDefinition;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin, GremlinConfig};
 use crate::executor::socket::{self, GremlinsDaemonLock};
 use crate::executor::state::{self, FileSystemStateStore};
+use crate::executor::{null_field, str_field};
 use rig_core::completion::Message;
 
 // ---------------------------------------------------------------------------
@@ -383,22 +384,6 @@ pub(crate) fn get_run_map() -> &'static Arc<Mutex<HashMap<String, RunHandle>>> {
     RUN_MAP.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
-// ---------------------------------------------------------------------------
-// Field extraction helpers — reduce repetition when reading from
-// serde_json::Map / Value trees that dominate the handle_* functions.
-// ---------------------------------------------------------------------------
-
-fn str_field(tree: &Map<String, Value>, key: &str) -> String {
-    tree.get(key)
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
-}
-
-fn null_field(tree: &Map<String, Value>, key: &str) -> Value {
-    tree.get(key).cloned().unwrap_or(Value::Null)
-}
-
 /// Extract and validate the `"id"` field from a JSON-RPC-style request.
 /// Returns `Ok(id)` when the field is present and passes `validate_gremlin_id`, or
 /// `Err(response)` with an error JSON object ready to send back to the caller.
@@ -546,7 +531,7 @@ async fn handle_connection(
             break;
         }
 
-        let _outcome = dispatch_op(&op, &request, &state_root, &shutdown_tx, &writer).await;
+        dispatch_op(&op, &request, &state_root, &shutdown_tx, &writer).await;
         // Unblock events *after* the response is written so one-shot
         // clients always read the response before any broadcast event.
         let _ = event_start_tx.send(true);
@@ -1005,58 +990,31 @@ async fn teardown_session_impl(session: &SessionHandle, state_root: &Path, abort
 // Op dispatch
 // ---------------------------------------------------------------------------
 
-enum DispatchOutcome {
-    /// Request-response: the handler wrote a reply; continue the request loop.
-    Continue,
-}
-
 async fn dispatch_op(
     op: &str,
     request: &Value,
     state_root: &Path,
     shutdown_tx: &watch::Sender<bool>,
     writer: &SharedWriter,
-) -> DispatchOutcome {
-    /// Write `resp` to `writer` and return Continue.
-    async fn reply(writer: &SharedWriter, resp: Value) -> DispatchOutcome {
-        let _ = writer.write_json_line(&resp).await;
-        DispatchOutcome::Continue
-    }
-    match op {
-        "launch" => {
-            reply(
-                writer,
-                handle_launch(request, state_root, shutdown_tx).await,
-            )
-            .await
-        }
-        "create_session" => {
-            reply(
-                writer,
-                handle_create_session(request, state_root, shutdown_tx).await,
-            )
-            .await
-        }
+) {
+    let resp = match op {
+        "launch" => handle_launch(request, state_root, shutdown_tx).await,
+        "create_session" => handle_create_session(request, state_root, shutdown_tx).await,
         "stop" => {
             if let Some(id) = request.get("id").and_then(|v| v.as_str()) {
                 stop_session_chat_gremlin(id).await;
             }
-            reply(writer, handle_stop(request, shutdown_tx).await).await
+            handle_stop(request, shutdown_tx).await
         }
-        "resume" => {
-            reply(
-                writer,
-                handle_resume(request, state_root, shutdown_tx).await,
-            )
-            .await
-        }
-        "ls" => reply(writer, handle_ls(request, state_root).await).await,
-        "status" => reply(writer, handle_status(request, state_root).await).await,
-        "info" => reply(writer, handle_info(request, state_root).await).await,
-        "artifact" => reply(writer, handle_artifact(request).await).await,
-        "model" => reply(writer, handle_model(request).await).await,
-        _ => reply(writer, error_response(&format!("unknown op: {op:?}"))).await,
-    }
+        "resume" => handle_resume(request, state_root, shutdown_tx).await,
+        "ls" => handle_ls(request, state_root).await,
+        "status" => handle_status(request, state_root).await,
+        "info" => handle_info(request, state_root).await,
+        "artifact" => handle_artifact(request).await,
+        "model" => handle_model(request).await,
+        _ => error_response(&format!("unknown op: {op:?}")),
+    };
+    let _ = writer.write_json_line(&resp).await;
 }
 
 fn ok_response(data: Value) -> Value {
@@ -1299,7 +1257,6 @@ async fn handle_launch(
         .get("ephemeral")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-
     let gremlin = match Gremlin::init(
         definition_name,
         &definition_path,
@@ -1329,11 +1286,6 @@ async fn handle_launch(
     }
 
     let id = gremlin.id.to_string();
-
-    let definition_name = definition_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("gremlin");
 
     spawn_gremlin_runner(gremlin, &id, "starting", None, definition_name, shutdown_tx);
 
@@ -3655,13 +3607,8 @@ fn create_chat_gremlin(
     project_root: &Path,
     env: &HashMap<String, String>,
 ) -> Result<Gremlin, String> {
-    use crate::clients::client::Client;
-    use crate::definition::ChatDefinition;
-    use crate::executor::gremlin::{validate_gremlin_id, Gremlin, RuntimeConfig, ScratchDir};
-    use crate::executor::state::{self, BlobMode, StateData};
-    use serde_json::{Map, Value};
-    use std::collections::HashMap;
-    use std::path::PathBuf;
+    use crate::executor::gremlin::{RuntimeConfig, ScratchDir};
+    use crate::executor::state::{BlobMode, StateData};
 
     let project_root = project_root.to_path_buf();
 
@@ -4297,6 +4244,7 @@ mod tests {
     };
     use crate::clients::client::{Client, ModelURI};
     use crate::clients::protocol::UsageStats;
+    use crate::executor::gremlin::Gremlin;
     use crate::executor::socket;
     use crate::schemas::bootstrap::{InputSource, InputSources};
     use crate::test_support::Sandbox;
@@ -4343,57 +4291,20 @@ mod tests {
     }
 
     /// Wait until the chat gremlin has been re-inserted after its turn, then
-    /// return a snapshot of its in-memory environment.
-    async fn wait_for_chat_gremlin_env(
+    /// extract a value through the provided closure.
+    async fn wait_for_chat_gremlin<T>(
         session: &super::SessionHandle,
         id: &str,
-    ) -> HashMap<String, String> {
+        extract: impl Fn(&Gremlin) -> T,
+    ) -> T {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let env = {
+                let val = {
                     let s = session.lock().await;
-                    s.chat_gremlins.get(id).map(|g| g.env.clone())
+                    s.chat_gremlins.get(id).map(&extract)
                 };
-                if let Some(env) = env {
-                    return env;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("timed out waiting for chat gremlin {id} to re-insert"))
-    }
-
-    /// Wait until the chat gremlin has been re-inserted after its turn, then
-    /// return its parsed client handle.
-    async fn wait_for_chat_gremlin_client(session: &super::SessionHandle, id: &str) -> Client {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let client = {
-                    let s = session.lock().await;
-                    s.chat_gremlins.get(id).map(|g| g.client.clone())
-                };
-                if let Some(client) = client {
-                    return client;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("timed out waiting for chat gremlin {id} to re-insert"))
-    }
-
-    /// Wait until the chat gremlin has been re-inserted after its turn, then
-    /// return the `model` value persisted in its state.json.
-    async fn wait_for_chat_gremlin_state_model(session: &super::SessionHandle, id: &str) -> String {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let model = {
-                    let s = session.lock().await;
-                    s.chat_gremlins.get(id).map(|g| g.state.read_str("model"))
-                };
-                if let Some(model) = model {
-                    return model;
+                if let Some(v) = val {
+                    return v;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -5011,7 +4922,7 @@ model-profiles:
         let ack = read_until_type(&mut reader, "ok").await;
         let id = ack["id"].as_str().unwrap().to_string();
         {
-            let env = wait_for_chat_gremlin_env(&session, &id).await;
+            let env = wait_for_chat_gremlin(&session, &id, |g| g.env.clone()).await;
             assert_eq!(
                 env.get("GREMLINS_CHAT_ENV_TEST").map(String::as_str),
                 Some("first")
@@ -5031,7 +4942,7 @@ model-profiles:
         .await;
         read_until_type(&mut reader, "ok").await;
         {
-            let env = wait_for_chat_gremlin_env(&session, &id).await;
+            let env = wait_for_chat_gremlin(&session, &id, |g| g.env.clone()).await;
             assert_eq!(
                 env.get("GREMLINS_CHAT_ENV_TEST").map(String::as_str),
                 Some("second")
@@ -5042,7 +4953,7 @@ model-profiles:
         super::handle_chat(&chat("3", None), &state_root, &writer, &session).await;
         read_until_type(&mut reader, "ok").await;
         {
-            let env = wait_for_chat_gremlin_env(&session, &id).await;
+            let env = wait_for_chat_gremlin(&session, &id, |g| g.env.clone()).await;
             assert_eq!(
                 env, base_env,
                 "absent env must fall back to the daemon base process snapshot"
@@ -5099,10 +5010,10 @@ model-profiles:
         super::handle_chat(&chat("1"), &state_root, &writer, &session).await;
         let ack = read_until_type(&mut reader, "ok").await;
         let id = ack["id"].as_str().unwrap().to_string();
-        let before = wait_for_chat_gremlin_client(&session, &id).await;
+        let before = wait_for_chat_gremlin(&session, &id, |g| g.client.clone()).await;
         assert_eq!(before, Client::parse("cmd/echo").unwrap());
         assert_eq!(
-            wait_for_chat_gremlin_state_model(&session, &id).await,
+            wait_for_chat_gremlin(&session, &id, |g| g.state.read_str("model")).await,
             "cmd/echo"
         );
 
@@ -5114,10 +5025,10 @@ model-profiles:
 
         super::handle_chat(&chat("2"), &state_root, &writer, &session).await;
         read_until_type(&mut reader, "ok").await;
-        let after = wait_for_chat_gremlin_client(&session, &id).await;
+        let after = wait_for_chat_gremlin(&session, &id, |g| g.client.clone()).await;
         assert_eq!(after, Client::parse("cmd/true").unwrap());
         assert_eq!(
-            wait_for_chat_gremlin_state_model(&session, &id).await,
+            wait_for_chat_gremlin(&session, &id, |g| g.state.read_str("model")).await,
             "cmd/true"
         );
 
@@ -5173,7 +5084,7 @@ model-profiles:
         let ack = read_until_type(&mut reader, "ok").await;
         let id = ack["id"].as_str().unwrap().to_string();
         assert_eq!(
-            wait_for_chat_gremlin_state_model(&session_a, &id).await,
+            wait_for_chat_gremlin(&session_a, &id, |g| g.state.read_str("model")).await,
             "cmd/echo"
         );
 
@@ -5223,7 +5134,7 @@ model-profiles:
         let ack = read_until_type(&mut reader, "ok").await;
         let id = ack["id"].as_str().unwrap().to_string();
         assert_eq!(
-            wait_for_chat_gremlin_state_model(&session, &id).await,
+            wait_for_chat_gremlin(&session, &id, |g| g.state.read_str("model")).await,
             "cmd/echo"
         );
 
@@ -5277,7 +5188,7 @@ model-profiles:
         let ack = read_until_type(&mut reader, "ok").await;
         let id = ack["id"].as_str().unwrap().to_string();
         assert_eq!(
-            wait_for_chat_gremlin_state_model(&session, &id).await,
+            wait_for_chat_gremlin(&session, &id, |g| g.state.read_str("model")).await,
             "cmd/echo"
         );
 

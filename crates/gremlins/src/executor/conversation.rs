@@ -372,17 +372,6 @@ impl RetainedPlan {
     }
 }
 
-#[cfg(test)]
-fn assemble_working(memory: String, window: &[Message]) -> Vec<Message> {
-    let mut working = Vec::with_capacity(2 + window.len());
-    working.push(Message::user(memory));
-    working.push(assistant_text(
-        "Prior context acknowledged. The retained verbatim conversation follows.",
-    ));
-    working.extend(window.iter().cloned());
-    working
-}
-
 // ---------------------------------------------------------------------------
 // Chat-turn boundaries
 // ---------------------------------------------------------------------------
@@ -899,16 +888,6 @@ fn prepend_window_chunk(chunk: WindowKeys, suffix: WindowKeys) -> WindowKeys {
 ///
 /// Evidence entries are emitted newest-first; older entries are trimmed when
 /// the budget is tight.
-#[cfg(test)]
-fn render_memory(older: &Facts, current: &WindowKeys, max_bytes: usize) -> Option<String> {
-    render_memory_with_label(
-        older,
-        current,
-        max_bytes,
-        "Conversation memory (compacted from earlier turns).\n",
-    )
-}
-
 fn render_memory_with_label(
     older: &Facts,
     current: &WindowKeys,
@@ -1110,17 +1089,6 @@ fn serialized_message_len(message: &Message) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-#[cfg(test)]
-fn range_serialized_len(start: usize, end: usize, message_lens: &[usize]) -> usize {
-    let count = end - start;
-    if count == 0 {
-        return 2;
-    }
-    let body: usize = message_lens[start..end].iter().sum();
-    // A compact JSON array: `[` + elements joined by `,` + `]`.
-    2 + body + count - 1
-}
-
 /// Keep the first `max` bytes of `text`, cutting on a UTF-8 char boundary.
 fn head_bytes(text: &str, max: usize) -> String {
     if text.len() <= max {
@@ -1177,6 +1145,35 @@ fn bash_result_tail(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use rig_core::completion::message::{CallId, ToolFunction, ToolName};
+
+    fn assemble_working(memory: String, window: &[Message]) -> Vec<Message> {
+        let mut working = Vec::with_capacity(2 + window.len());
+        working.push(Message::user(memory));
+        working.push(assistant_text(
+            "Prior context acknowledged. The retained verbatim conversation follows.",
+        ));
+        working.extend(window.iter().cloned());
+        working
+    }
+
+    fn render_memory(older: &Facts, current: &WindowKeys, max_bytes: usize) -> Option<String> {
+        render_memory_with_label(
+            older,
+            current,
+            max_bytes,
+            "Conversation memory (compacted from earlier turns).\n",
+        )
+    }
+
+    fn range_serialized_len(start: usize, end: usize, message_lens: &[usize]) -> usize {
+        let count = end - start;
+        if count == 0 {
+            return 2;
+        }
+        let body: usize = message_lens[start..end].iter().sum();
+        // A compact JSON array: `[` + elements joined by `,` + `]`.
+        2 + body + count - 1
+    }
 
     fn user_prompt(text: &str) -> Message {
         Message::user(text.to_string())

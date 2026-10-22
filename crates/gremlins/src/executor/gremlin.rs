@@ -45,6 +45,7 @@ use crate::definition::{GremlinDefinition, StaticDefinition};
 use crate::executor::state::{self, BlobMode, StateData, StateStore};
 use crate::executor::vars;
 use crate::executor::RunError;
+use crate::executor::str_field;
 use crate::schemas::bootstrap::Bootstrap;
 
 /// Configuration knobs for [`Gremlin::init`].
@@ -1449,14 +1450,6 @@ async fn register_stage_inputs(
 fn resolve_definition_in_project(kind: &str, project_root: &Path) -> Option<PathBuf> {
     let overlay = config::overlay_dir_without_env(project_root);
     discovery::resolve_definition_path_in(kind, Some(&overlay), project_root.to_path_buf()).ok()
-}
-
-/// Read a string field, treating anything else as `""`.
-fn str_field(map: &Map<String, Value>, field: &str) -> String {
-    map.get(field)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string()
 }
 
 /// A fork's identity field: the caller's value when non-empty, else the
