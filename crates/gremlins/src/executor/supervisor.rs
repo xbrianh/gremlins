@@ -1,5 +1,4 @@
 //! Single-instance executor supervisor.
-//!
 //! The supervisor owns the run map and the accept loop. It holds a
 //! `HashMap<String, RunHandle>` and dispatches socket requests to the
 //! appropriate handler.
@@ -965,6 +964,7 @@ async fn dispatch_op(
     writer: &SharedWriter,
 ) {
     let resp = match op {
+        "version" => ok_response(serde_json::json!({"version": crate::VERSION})),
         "launch" => handle_launch(request, state_root, shutdown_tx).await,
         "create_session" => handle_create_session(request, state_root, shutdown_tx).await,
         "stop" => {
