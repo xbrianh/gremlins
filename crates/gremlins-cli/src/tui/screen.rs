@@ -880,6 +880,23 @@ use super::format_cache_pct;
 use super::format_cost_usd;
 use super::format_token_count;
 
+/// Pad `s` with trailing spaces so its terminal display width equals
+/// `target`. When `s` is already wider than `target` it is returned
+/// unchanged — callers should truncate before padding when needed.
+fn pad_to_display_width(s: &str, target: usize) -> String {
+    let current = unicode_width::UnicodeWidthStr::width(s);
+    if current >= target {
+        return s.to_string();
+    }
+    let pad = target - current;
+    let mut out = String::with_capacity(s.len() + pad);
+    out.push_str(s);
+    for _ in 0..pad {
+        out.push(' ');
+    }
+    out
+}
+
 /// Column widths computed from the visible runs for aligned rendering.
 struct ColumnWidths {
     id: usize,
@@ -896,15 +913,15 @@ struct ColumnWidths {
 impl ColumnWidths {
     fn from_runs(runs: &[(&String, &crate::tui::app::ActiveRun)]) -> Self {
         let mut w = ColumnWidths {
-            id: 2,         // "ID" header minimum
-            status: 6,     // "STATUS" minimum
-            stage: 5,      // "STAGE" minimum
-            definition: 4, // "DEF" minimum
-            tokens_in: 6,  // "IN" header minimum
-            tokens_out: 6, // "OUT" header minimum
-            reasoning: 6,  // "REAS" header minimum
-            cache: 5,      // "CACHE" header minimum
-            cost: 4,       // "COST" header minimum
+            id: 2,          // "ID" header minimum
+            status: 6,      // "STATUS" minimum
+            stage: 5,       // "STAGE" minimum
+            definition: 4,  // "DEF" minimum
+            tokens_in: 9,   // "TOKENS IN" header
+            tokens_out: 10, // "TOKENS OUT" header
+            reasoning: 9,   // "REASONING" header
+            cache: 5,       // "CACHE" header
+            cost: 4,        // "COST" header
         };
         for (id, run) in runs {
             let glyph = match run.status.as_str() {
@@ -942,6 +959,49 @@ impl ColumnWidths {
             w.cost = w.cost.max(cd.len());
         }
         w
+    }
+
+    /// Clamp text columns so the total row fits within `max_width`.
+    /// Accounting columns (tokens/cost) are never shrunk; text columns
+    /// (id, status, stage, definition) give up space proportionally.
+    fn clamp(&mut self, max_width: usize) {
+        // Fixed overhead per row: "▶ " (2) + "  " separator between each of
+        // the 9 columns (8 gaps × 2 spaces = 16).
+        const OVERHEAD: usize = 2 + 8 * 2;
+        let fixed =
+            OVERHEAD + self.tokens_in + self.tokens_out + self.reasoning + self.cache + self.cost;
+        let text_budget = max_width.saturating_sub(fixed);
+        let text_desired = self.id + self.status + self.stage + self.definition;
+        if text_desired <= text_budget {
+            return;
+        }
+        let mins = [2usize, 6, 5, 4]; // id, status, stage, definition
+        let cols = [
+            &mut self.id,
+            &mut self.status,
+            &mut self.stage,
+            &mut self.definition,
+        ];
+        // Iteratively shrink the widest column until we fit.
+        loop {
+            let current: usize = cols.iter().map(|c| **c).sum();
+            if current <= text_budget {
+                break;
+            }
+            let mut best_idx = 0;
+            let mut best_excess = 0isize;
+            for (i, col) in cols.iter().enumerate() {
+                let excess = **col as isize - mins[i] as isize;
+                if excess > best_excess {
+                    best_excess = excess;
+                    best_idx = i;
+                }
+            }
+            if best_excess <= 0 {
+                break;
+            }
+            *cols[best_idx] -= 1;
+        }
     }
 }
 
@@ -1012,14 +1072,29 @@ impl RunsView {
         let cache = format_cache_pct(run.prompt_tokens, run.cached_input_tokens);
         let cost = format_cost_usd(run.cost_usd);
 
-        // Build as a single styled span with data-driven column widths.
-        // Text columns are left-aligned; token/cost columns are right-aligned
-        // and never truncated.
-        let text = format!(
-            "{sel} {id_str:<0$}  {status_str:<1$}  {stage_str:<2$}  {def_str:<3$}  {tokens_in:>4$}  {tokens_out:>5$}  {reasoning:>6$}  {cache:>7$}  {cost:>8$}",
-            w.id, w.status, w.stage, w.definition,
-            w.tokens_in, w.tokens_out, w.reasoning, w.cache, w.cost,
-        );
+        // Build with display-width padding so Unicode stage/definition
+        // names don't misalign subsequent columns.
+        let parts = vec![
+            format!("{sel} "),
+            pad_to_display_width(&id_str, w.id),
+            "  ".to_string(),
+            pad_to_display_width(&status_str, w.status),
+            "  ".to_string(),
+            pad_to_display_width(&stage_str, w.stage),
+            "  ".to_string(),
+            pad_to_display_width(&def_str, w.definition),
+            "  ".to_string(),
+            pad_to_display_width(&tokens_in, w.tokens_in),
+            "  ".to_string(),
+            pad_to_display_width(&tokens_out, w.tokens_out),
+            "  ".to_string(),
+            pad_to_display_width(&reasoning, w.reasoning),
+            "  ".to_string(),
+            pad_to_display_width(&cache, w.cache),
+            "  ".to_string(),
+            cost,
+        ];
+        let text = parts.concat();
         Line::from(Span::styled(text, style))
     }
 
@@ -1033,17 +1108,48 @@ impl RunsView {
             return;
         }
 
+        let runs = Self::listed_runs(ctx);
+        let mut widths = ColumnWidths::from_runs(&runs);
+        widths.clamp(area.width as usize);
+
         let header_style = Style::default()
             .fg(DEFAULT_THEME.heading_primary)
             .add_modifier(Modifier::BOLD);
+        let subhead_style = Style::default()
+            .fg(DEFAULT_THEME.accent_secondary)
+            .add_modifier(Modifier::BOLD);
+
+        // Column-header row using the same computed widths.
+        let col_header = {
+            let parts = vec![
+                "  ".to_string(),
+                pad_to_display_width("ID", widths.id),
+                "  ".to_string(),
+                pad_to_display_width("STATUS", widths.status),
+                "  ".to_string(),
+                pad_to_display_width("STAGE", widths.stage),
+                "  ".to_string(),
+                pad_to_display_width("DEF", widths.definition),
+                "  ".to_string(),
+                pad_to_display_width("TOKENS IN", widths.tokens_in),
+                "  ".to_string(),
+                pad_to_display_width("TOKENS OUT", widths.tokens_out),
+                "  ".to_string(),
+                pad_to_display_width("REASONING", widths.reasoning),
+                "  ".to_string(),
+                pad_to_display_width("CACHE", widths.cache),
+                "  ".to_string(),
+                "COST".to_string(),
+            ];
+            parts.concat()
+        };
+
         let header_lines = vec![
             Line::from(Span::styled("  g r e m l i n s", header_style)),
+            Line::from(Span::styled(col_header, subhead_style)),
             motif::streamline_rule_brass(area.width),
         ];
         let header_wrapped = wrapped_height(&header_lines, area.width) as u16;
-
-        let runs = Self::listed_runs(ctx);
-        let widths = ColumnWidths::from_runs(&runs);
         let running = runs.iter().filter(|(_, r)| r.status == "running").count();
         let total = ctx.active_runs.len();
         let footer_line = Line::from(Span::styled(

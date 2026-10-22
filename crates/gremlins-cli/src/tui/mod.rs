@@ -63,6 +63,75 @@ fn close_watch_follow(
     live_area.clear_watch_stream();
 }
 
+/// Spawn a one-shot `ls` request to refresh token/cost fields for every
+/// tracked run. Results are sent through `snapshot_tx` and merged by the
+/// event loop, preserving any local fields the daemon omits.
+fn fetch_run_snapshot(
+    client: &Arc<client::DaemonClient>,
+    snapshot_tx: &tokio::sync::mpsc::UnboundedSender<HashMap<String, ActiveRun>>,
+    fallback_project: String,
+) {
+    let c = Arc::clone(client);
+    let tx = snapshot_tx.clone();
+    tokio::spawn(async move {
+        if let Ok(resp) = c
+            .send_control_request(serde_json::json!({"op": "ls"}))
+            .await
+        {
+            let mut runs = HashMap::new();
+            if let Some(gremlins) = resp.get("gremlins").and_then(|v| v.as_array()) {
+                for entry in gremlins {
+                    if let Some(id) = entry.get("id").and_then(|v| v.as_str()) {
+                        let project = entry
+                            .get("project")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let project = if project.is_empty() {
+                            fallback_project.clone()
+                        } else {
+                            project
+                        };
+                        runs.insert(
+                            id.to_string(),
+                            ActiveRun {
+                                status: entry
+                                    .get("status")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                stage: entry
+                                    .get("stage")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                definition: entry
+                                    .get("definition")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                project,
+                                prompt_tokens: entry.get("prompt_tokens").and_then(|v| v.as_u64()),
+                                completion_tokens: entry
+                                    .get("completion_tokens")
+                                    .and_then(|v| v.as_u64()),
+                                reasoning_tokens: entry
+                                    .get("reasoning_tokens")
+                                    .and_then(|v| v.as_u64()),
+                                cached_input_tokens: entry
+                                    .get("cached_input_tokens")
+                                    .and_then(|v| v.as_u64()),
+                                cost_usd: entry.get("cost_usd").and_then(|v| v.as_f64()),
+                            },
+                        );
+                    }
+                }
+            }
+            let _ = tx.send(runs);
+        }
+    });
+}
+
 /// Open (or switch) the watch stream pane for `id`.
 ///
 /// At most one watch follow socket exists at a time: any prior follow is
@@ -1567,6 +1636,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
                                         app.show_runs();
                                         live_area.show_runs();
+                                        fetch_run_snapshot(&client, &snapshot_tx, app.project_name_str().to_string());
                                     }
                                     CommandResult::Debug(id) => {
                                         close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
@@ -1872,6 +1942,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             abort_watch_follow(&mut watch_follow_handle);
                         }
                         app.on_run_completed(id);
+                        fetch_run_snapshot(&client, &snapshot_tx, app.project_name_str().to_string());
                     }
                     gremlins::executor::DaemonEvent::RunFailed { id, exit_code, error } => {
                         let err_detail = error.as_deref().unwrap_or("");
@@ -1885,6 +1956,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             abort_watch_follow(&mut watch_follow_handle);
                         }
                         app.on_run_failed(id);
+                        fetch_run_snapshot(&client, &snapshot_tx, app.project_name_str().to_string());
                     }
                     gremlins::executor::DaemonEvent::RunStopped { id } => {
                         log::info!("[run stopped] {id}");
@@ -1893,10 +1965,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             abort_watch_follow(&mut watch_follow_handle);
                         }
                         app.on_run_stopped(id);
+                        fetch_run_snapshot(&client, &snapshot_tx, app.project_name_str().to_string());
                     }
                     gremlins::executor::DaemonEvent::StageTransition { id, stage } => {
                         log::info!("[{id}] stage → {stage}");
                         app.on_stage_transition(id, stage);
+                        fetch_run_snapshot(&client, &snapshot_tx, app.project_name_str().to_string());
                     }
                     gremlins::executor::DaemonEvent::LogLine { id, line } => {
                         if app.following_log.as_deref() == Some(&id) {
@@ -1912,71 +1986,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             // ── Raw lines (non-event JSON from the main socket) ─
             Some(raw) = raw_rx.recv() => {
                 if raw.get("type").and_then(|v| v.as_str()) == Some("event_lagged") {
-                    let c = Arc::clone(&client);
-                    let tx = snapshot_tx.clone();
-                    let fallback_project = app.project_name_str().to_string();
-                    tokio::spawn(async move {
-                        if let Ok(resp) = c.send_control_request(serde_json::json!({"op": "ls"})).await {
-                            let mut runs = HashMap::new();
-                            if let Some(gremlins) =
-                                resp.get("gremlins").and_then(|v| v.as_array())
-                            {
-                                for entry in gremlins {
-                                    if let Some(id) =
-                                        entry.get("id").and_then(|v| v.as_str())
-                                    {
-                                        let project = entry
-                                            .get("project")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .to_string();
-                                        let project = if project.is_empty() {
-                                            fallback_project.clone()
-                                        } else {
-                                            project
-                                        };
-                                        runs.insert(
-                                            id.to_string(),
-                                            ActiveRun {
-                                                status: entry
-                                                    .get("status")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("")
-                                                    .to_string(),
-                                                stage: entry
-                                                    .get("stage")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("")
-                                                    .to_string(),
-                                                definition: entry
-                                                    .get("definition")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("")
-                                                    .to_string(),
-                                                project,
-                                                prompt_tokens: entry
-                                                    .get("prompt_tokens")
-                                                    .and_then(|v| v.as_u64()),
-                                                completion_tokens: entry
-                                                    .get("completion_tokens")
-                                                    .and_then(|v| v.as_u64()),
-                                                reasoning_tokens: entry
-                                                    .get("reasoning_tokens")
-                                                    .and_then(|v| v.as_u64()),
-                                                cached_input_tokens: entry
-                                                    .get("cached_input_tokens")
-                                                    .and_then(|v| v.as_u64()),
-                                                cost_usd: entry
-                                                    .get("cost_usd")
-                                                    .and_then(|v| v.as_f64()),
-                                            },
-                                        );
-                                    }
-                                }
-                            }
-                            let _ = tx.send(runs);
-                        }
-                    });
+                    fetch_run_snapshot(&client, &snapshot_tx, app.project_name_str().to_string());
                 } else if raw.get("type").and_then(|v| v.as_str()) == Some("error") {
                     let msg = raw
                         .get("message")
