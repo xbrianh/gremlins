@@ -135,6 +135,10 @@ async fn main() {
 async fn run() -> Result<(), String> {
     let cli = Cli::parse();
 
+    // Initialize config early so cache path resolution (and --clear-cache)
+    // respect any configured state-root overrides.
+    gremlins::config::init_global().map_err(|e| e.to_string())?;
+
     // ── resolve cache path (needed by --curves? no, but --clear-cache needs it) ──
     let cache_path: PathBuf = match &cli.cache {
         Some(p) => p.clone(),
