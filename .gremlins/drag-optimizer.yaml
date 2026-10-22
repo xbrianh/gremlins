@@ -6,10 +6,11 @@
 #   gremlins launch drag-optimizer --target my_pkg/ --instructions "focus on cyclomatic complexity"
 #
 # Parameters (launch-time):
-#   target         (required)  module file or package directory to refactor
-#   drag-model     (optional)  model for comprehensibility scoring (gremlins-drag --model)
-#   instructions   (optional)  extra guidance injected into the per-iteration refactoring prompt
-#   base_ref       (optional)  git ref to check out for the isolated worktree (default: HEAD)
+#   target                    (required)  module file or package directory to refactor
+#   drag-model                (optional)  model for comprehensibility scoring (gremlins-drag --model)
+#   instructions              (optional)  extra guidance injected into the per-iteration refactoring prompt
+#   base_ref                  (optional)  git ref to check out for the isolated worktree (default: HEAD)
+#   comprehensibility-estimates (optional)  number of LLM estimates per module for comprehensibility scoring (default: 5)
 #
 # NOTE: the bootstrap source is named `drag-model` (not `model`) because `model`
 # collides with gremlins' own global --model flag.  Pass `--drag-model provider/model`
@@ -18,8 +19,9 @@
 # How it works:
 #   1. Baseline — run gremlins-drag once to capture the starting score.
 #   2. Loop (max 5 iterations):
-#      a. Refactor — an agent stage inspects the baseline drag report and
-#         edits the target to reduce drag.
+#      a. Refactor — an agent stage inspects the latest drag report (and,
+#         from iteration 2 on, the report from before the last attempt)
+#         and edits the target to reduce drag.
 #      b. Commit — git add + commit in the isolated worktree.
 #      c. Score + converge — run gremlins-drag on the refactored code.  If
 #         the max ln_drag did not improve, write a convergence marker
@@ -40,16 +42,22 @@ bootstrap:
     base_ref:
       type: string
       optional: true
+    comprehensibility-estimates:
+      type: string
+      optional: true
+      default: "5"
   launch_cmds:
     - 'printf "%s" {target} > "$GREMLINS_STATE_DIR/artifacts/target.txt"'
     - 'printf "%s" {drag-model} > "$GREMLINS_STATE_DIR/artifacts/drag_model.txt"'
     - 'printf "%s" {instructions} > "$GREMLINS_STATE_DIR/artifacts/instructions.txt"'
+    - 'printf "%s" {comprehensibility-estimates} > "$GREMLINS_STATE_DIR/artifacts/comp_estimates.txt"'
     - 'BASE_REF={base_ref} && SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "${BASE_REF:-HEAD}") && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && printf "%s" "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"'
   cli_out:
     target: "artifact://target.txt"
     drag_model: "artifact://drag_model.txt"
     instructions: "artifact://instructions.txt"
     base_sha: "artifact://base_sha"
+    comprehensibility_estimates: "artifact://comp_estimates.txt"
   env: |
     export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'
     THE_ENV="${GREMLINS_PROJECT_ROOT}/.gremlins/env"
@@ -66,17 +74,30 @@ stages:
       inputs:
         target: content("artifact://target.txt")
         drag_model: content("artifact://drag_model.txt")
+        comprehensibility_estimates: content("artifact://comp_estimates.txt")
       outputs:
         report: "artifact://baseline/report.json"
+        drag_best: "artifact://drag_best.txt"
     options:
       cmds:
         - |
           MODEL_ARG=""
           [ -n "{drag_model}" ] && MODEL_ARG="--model {drag_model}"
-        - gremlins-drag --json {target} $MODEL_ARG > {report}
+        - gremlins-drag --json --comprehensibility-estimates {comprehensibility_estimates} {target} $MODEL_ARG > {report}
+        - cp {report} "$GREMLINS_STATE_DIR/drag_current.json"
         - |
-          cat {report} | python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(m["ln_drag"] for m in data["modules"]))' > .gremlins_drag_best
-        - 'echo "baseline sum ln_drag = $(cat .gremlins_drag_best)"'
+          cat {report} | python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(m["ln_drag"] for m in data["modules"]))' > {drag_best}
+        - 'echo "baseline sum ln_drag = $(cat {drag_best})"'
+
+  # ── drag curves (generated from current weights) ─────────────────────
+  - name: curves
+    type: exec
+    interpolation:
+      outputs:
+        curves: "artifact://curves.txt"
+    options:
+      cmds:
+        - gremlins-drag --curves
 
   # ── optimize loop ─────────────────────────────────────────────────────
   - name: optimize
@@ -84,37 +105,85 @@ stages:
     max-iterations: 5
     skip_if_exists: "artifact://{loop_iter}/converged"
     body:
+      # --- prepare refactor context (latest report + previous, when available) ---
+      - name: prepare-refactor-context
+        type: exec
+        interpolation:
+          outputs:
+            context: "artifact://{loop_iter}/refactor_context.md"
+        options:
+          cmds:
+            - |
+              STATE_DIR="$GREMLINS_STATE_DIR"
+              {
+                if [ -f "$STATE_DIR/drag_previous.json" ]; then
+                  echo "## Drag report before the last refactor (previous state)"
+                  echo '```json'
+                  cat "$STATE_DIR/drag_previous.json"
+                  echo '```'
+                  echo ""
+                fi
+                echo "## Drag report after the last refactor (current state)"
+                echo '```json'
+                cat "$STATE_DIR/drag_current.json"
+                echo '```'
+              } > {context}
+
       # --- refactor ---
       - name: refactor
         type: agent
         interpolation:
           inputs:
             target: content("artifact://target.txt")
-            baseline_report: content("artifact://baseline/report.json")
+            drag_context: content("artifact://{loop_iter}/refactor_context.md")
             instructions: content("artifact://instructions.txt")
+            curves: content("artifact://curves.txt")
           outputs:
             summary: "artifact://{loop_iter}/summary.md"
         prompt:
           - |
             Refactor the target at {target} to reduce its drag score.
 
-            ## Initial (baseline) drag analysis (JSON)
-            ```json
-            {baseline_report}
-            ```
+            The reports below are the most recent drag analyses. The "current
+            state" report describes the code you are about to edit. When a
+            "previous state" report is present, it describes the code before the
+            last refactor, so you can compare what changed and how drag moved.
+
+            {drag_context}
 
             ## What drag means
             ln_drag = w1*ln(token_count) + w2*ln(graph_complexity) − w3*ln(comprehensibility + ε)
 
             Higher drag = the module is harder to maintain and change. The optimizer
             minimizes the **sum** of ln_drag across all scored modules — not any
-            single module in isolation. This means splitting a large module into
-            several smaller ones can still be a win if the total drag decreases.
-            1. **Reduce token_count** — extract helpers, deduplicate, trim boilerplate.
-            2. **Lower graph_complexity** — split large modules, flatten deep nesting,
-               decouple cross-cutting concerns.
+            single module in isolation.
+
+            ## Drag curves (how each term responds to change)
+
+            {curves}
+
+            ## Strategy
+            1. **Reduce token_count** — extract helpers, deduplicate, trim boilerplate,
+               remove dead code. This is the largest absolute contributor.
+            2. **Lower graph_complexity** — flatten deep nesting, decouple cross-cutting
+               concerns, reduce fan-in/fan-out.
             3. **Improve comprehensibility** — clearer names, simpler control flow,
-               better documentation where it aids understanding.
+               better documentation where it aids understanding. Highest leverage
+               per unit of change with w3=2.0.
+
+            ### Splitting trap (CRITICAL)
+            Splitting one module into two INCREASES total drag unless complexity or
+            comprehensibility improves enough to compensate:
+
+            One module (2000 tokens, complexity 50, comp 0.5):
+              ln_drag = 7.60 + 7.82 + 2.02 = 17.44
+
+            Two modules (1000 tokens each, same complexity and comp):
+              ln_drag = (6.91 + 7.82 + 2.02) + (6.91 + 7.82 + 2.02) = 33.50
+
+            → Splitting nearly DOUBLED drag! Only split if the resulting modules are
+              significantly simpler (lower complexity) or more comprehensible.
+              Prefer inlining, deduplication, and dead-code removal over splitting.
 
             ## Rules
             - Do NOT break correctness. After changes, verify the code still
@@ -171,23 +240,34 @@ stages:
           inputs:
             target: content("artifact://target.txt")
             drag_model: content("artifact://drag_model.txt")
+            comprehensibility_estimates: content("artifact://comp_estimates.txt")
+            drag_best_val: content("artifact://drag_best.txt")
           outputs:
             report: "artifact://{loop_iter}/report.json"
             converged?: "artifact://{loop_iter}/converged"
+            drag_best: "artifact://drag_best.txt"
         options:
           cmds:
             - |
               MODEL_ARG=""
               [ -n "{drag_model}" ] && MODEL_ARG="--model {drag_model}"
-            - gremlins-drag --json {target} $MODEL_ARG > {report}
+            - gremlins-drag --json --comprehensibility-estimates {comprehensibility_estimates} {target} $MODEL_ARG > {report}
             - |
-              BEST=$(cat .gremlins_drag_best 2>/dev/null || echo 0)
+              STATE_DIR="$GREMLINS_STATE_DIR"
+              if [ -f "$STATE_DIR/drag_current.json" ]; then
+                cp "$STATE_DIR/drag_current.json" "$STATE_DIR/drag_previous.json"
+              fi
+              cp {report} "$STATE_DIR/drag_current.json"
+            - |
+              BEST="{drag_best_val}"
+              [ -z "$BEST" ] && BEST=0
               CURR=$(cat {report} | python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(m["ln_drag"] for m in data["modules"]))')
               if awk "BEGIN{exit !($CURR >= $BEST)}"; then
                 touch {converged}
                 echo "converged — drag $CURR >= best $BEST"
+                printf "%s" "$BEST" > {drag_best}
               else
-                printf "%s" "$CURR" > .gremlins_drag_best
+                printf "%s" "$CURR" > {drag_best}
                 echo "improved — drag $CURR < $BEST (was $BEST)"
               fi
 
@@ -203,7 +283,7 @@ stages:
     options:
       cmds:
         - |
-          BEST=$(cat .gremlins_drag_best 2>/dev/null || echo "N/A")
+          BEST=$(cat "$GREMLINS_STATE_DIR/drag_best" 2>/dev/null || echo "N/A")
           BASE_SUM=$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(round(sum(m["ln_drag"] for m in data["modules"]), 2))' < {baseline_report})
           {
             echo "drag-optimizer: reduce drag for {target}"
