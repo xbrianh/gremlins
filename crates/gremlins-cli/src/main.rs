@@ -186,46 +186,8 @@ async fn main() {
 /// Checks CLI/daemon version match before dispatching the caller's request.
 async fn executor_request(request: serde_json::Value) -> Result<serde_json::Value, String> {
     let mut stream = spawn::ensure_executor().await?;
-    check_version(&mut stream).await?;
+    spawn::check_version(&mut stream).await?;
     spawn::send_request(&mut stream, request).await
-}
-
-/// Send a version-check request and compare the daemon's reported version
-/// to the CLI's own build version. Returns an error on mismatch or when the
-/// daemon is too old to understand the "version" op.
-async fn check_version(stream: &mut tokio::net::UnixStream) -> Result<(), String> {
-    let resp = spawn::send_request(stream, serde_json::json!({"op": "version"})).await?;
-
-    if resp.get("type").and_then(|v| v.as_str()) == Some("error") {
-        let msg = resp.get("message").and_then(|v| v.as_str()).unwrap_or("");
-        if msg.contains("unknown op") {
-            return Err(format!(
-                "version mismatch: CLI is {}, daemon is too old to report its version",
-                gremlins::VERSION,
-            ));
-        }
-        return Err(format!("version check failed: {msg}"));
-    }
-
-    let daemon_version = match resp.get("version").and_then(|v| v.as_str()) {
-        Some(v) => v,
-        None => {
-            return Err(
-                "version check failed: daemon returned an unrecognized response (no version field)"
-                    .to_string(),
-            );
-        }
-    };
-
-    if daemon_version != gremlins::VERSION {
-        return Err(format!(
-            "version mismatch: CLI is {}, daemon is {}",
-            gremlins::VERSION,
-            daemon_version,
-        ));
-    }
-
-    Ok(())
 }
 
 /// Print CLI and daemon build versions.
@@ -341,7 +303,7 @@ async fn ls(here: bool) -> Result<(), String> {
     // Try the executor first — but only connect, don't become one.
     let response = match spawn::connect().await {
         Ok(mut stream) => {
-            check_version(&mut stream).await?;
+            spawn::check_version(&mut stream).await?;
             match spawn::send_request(&mut stream, serde_json::json!({"op": "ls"})).await {
                 Ok(r) => r,
                 Err(_) => return ls_direct(here, &cwd),
@@ -543,7 +505,7 @@ async fn status(id: &str) -> Result<(), String> {
     // Try executor first — but only connect, don't become one.
     let response = match spawn::connect().await {
         Ok(mut stream) => {
-            check_version(&mut stream).await?;
+            spawn::check_version(&mut stream).await?;
             match spawn::send_request(&mut stream, serde_json::json!({"op": "status", "id": id}))
                 .await
             {
@@ -706,7 +668,7 @@ async fn info(id: &str) -> Result<(), String> {
     // Try executor first — but only connect, don't become one.
     let response = match spawn::connect().await {
         Ok(mut stream) => {
-            check_version(&mut stream).await?;
+            spawn::check_version(&mut stream).await?;
             match spawn::send_request(&mut stream, serde_json::json!({"op": "info", "id": id}))
                 .await
             {
@@ -845,7 +807,7 @@ async fn log_gremlin(id: &str) -> Result<(), String> {
         }
     };
 
-    check_version(&mut stream).await?;
+    spawn::check_version(&mut stream).await?;
 
     let request = serde_json::json!({"op": "log", "id": id, "follow": follow});
     socket::write_json_line(&mut stream, &request).await?;
@@ -886,7 +848,7 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
         }
     };
 
-    check_version(&mut stream).await?;
+    spawn::check_version(&mut stream).await?;
 
     let request = serde_json::json!({"op": "debug", "id": id});
     log::debug!("debug: sending request: {request}");

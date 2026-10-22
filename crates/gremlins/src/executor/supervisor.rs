@@ -514,7 +514,12 @@ async fn handle_connection(
         dispatch_op(&op, &request, &state_root, &shutdown_tx, &writer).await;
         // Unblock events *after* the response is written so one-shot
         // clients always read the response before any broadcast event.
-        let _ = event_start_tx.send(true);
+        // Skip for "version" — the version handshake is a one-shot
+        // probe before the caller's actual request; unblocking here
+        // would let a run event arrive before the real response.
+        if op != "version" {
+            let _ = event_start_tx.send(true);
+        }
     }
 
     // Abort the event-forwarding subtask so it doesn't leak the write
