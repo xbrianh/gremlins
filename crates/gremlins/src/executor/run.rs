@@ -63,6 +63,14 @@ async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -> String {
     block
 }
 
+/// Build a system prompt by optionally appending a landscape block.
+fn assemble_system_prompt(base: &str, landscape: Option<&str>) -> String {
+    match landscape.filter(|b| !b.is_empty()) {
+        Some(block) => format!("{base}\n\n{block}"),
+        None => base.to_string(),
+    }
+}
+
 /// Build and format a landscape block for one workspace root.
 async fn build_landscape_snapshot(
     cwd: PathBuf,
@@ -440,10 +448,10 @@ async fn run_agent(
     } else {
         None
     };
-    let system_prompt = match landscape.filter(|b| !b.is_empty()) {
-        Some(block) => format!("{}\n\n{block}", prepared.system_prompt()),
-        None => prepared.system_prompt(),
-    };
+    let system_prompt = assemble_system_prompt(
+        &prepared.system_prompt(),
+        landscape.as_deref(),
+    );
 
     let stage_env = gremlin.env.clone();
 
@@ -1757,15 +1765,13 @@ mod tests {
     #[test]
     fn agent_landscape_flag_controls_system_prompt_assembly() {
         let block = "<!-- LANDSCAPE BLOCK -->";
-        // Inlined version of the system prompt assembly:
-        let assemble = |base: &str, lb: Option<&str>| match lb.filter(|b| !b.is_empty()) {
-            Some(block) => format!("{base}\n\n{block}"),
-            None => base.to_string(),
-        };
-        let with = assemble("base", Some(block));
+        let with = assemble_system_prompt("base", Some(block));
         assert!(with.contains(block) && with.starts_with("base"));
-        let without = assemble("base", None);
+        let without = assemble_system_prompt("base", None);
         assert!(!without.contains(block) && without == "base");
+        // Empty string treated as absent.
+        let empty = assemble_system_prompt("base", Some(""));
+        assert_eq!(empty, "base");
     }
 
     // --- exec ---
@@ -2492,7 +2498,8 @@ mod tests {
         assert_eq!(file_count, 1);
         assert_eq!(item_count, 3);
 
-        let prompt = format!("base prompt\n\n{block}");
-        assert_eq!(prompt, format!("base prompt\n\n{block}"));
+        let prompt = assemble_system_prompt("base prompt", Some(&block));
+        assert!(prompt.starts_with("base prompt\n\n"));
+        assert!(prompt.contains(&block));
     }
 }

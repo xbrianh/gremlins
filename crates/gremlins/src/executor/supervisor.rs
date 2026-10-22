@@ -2693,7 +2693,8 @@ async fn run_chat_turn(
                     }
                     Some(InteractiveEvent::Ended { reason }) => {
                         finish(&id, &mut run_task, &turn_cancel, &session, &done).await;
-                        send!(serde_json::json!({"type": "ended", "id": id, "reason": reason}));
+                        let payload = chat_payload(&turn, serde_json::json!({"type": "ended", "id": id, "reason": reason}));
+                        let _ = writer.write_json_line(&payload).await;
                         return;
                     }
                     Some(InteractiveEvent::Ready { .. }) => {
@@ -2701,7 +2702,8 @@ async fn run_chat_turn(
                     }
                     None => {
                         finish(&id, &mut run_task, &turn_cancel, &session, &done).await;
-                        send!(serde_json::json!({"type": "error", "id": id, "message": "agent exited before completing"}));
+                        let payload = chat_payload(&turn, serde_json::json!({"type": "error", "id": id, "message": "agent exited before completing"}));
+                        let _ = writer.write_json_line(&payload).await;
                         return;
                     }
                 }
