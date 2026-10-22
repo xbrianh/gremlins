@@ -351,17 +351,19 @@ pub(crate) fn enforce(roots: &[PathBuf], pth: &str, cwd: Option<&Path>) -> Optio
 /// symlinks that would otherwise escape containment. Returns Some(error) or
 /// None if the path is safe.
 ///
-/// Fail-closed by design: a root that cannot be canonicalized falls back to
-/// its raw path rather than being dropped, and if the path does not fall
-/// under any root `allowed` stays false and the path is denied. This is
-/// stricter and safer than the old single-root behavior, which returned
-/// `None` (allow) on canonicalization failure — a "paranoid, shouldn't
-/// happen" branch that was effectively fail-open.
+/// Fail-closed by design: a root that cannot be fully canonicalized is
+/// partially resolved via [`canonicalize_or_ancestor`] (existing prefix
+/// canonicalized, non-existent suffix kept lexical) rather than being
+/// dropped. If the path does not fall under any root `allowed` stays false
+/// and the path is denied. This is stricter and safer than the old
+/// single-root behavior, which returned `None` (allow) on canonicalization
+/// failure — a "paranoid, shouldn't happen" branch that was effectively
+/// fail-open.
 pub(crate) fn io_enforce(path: &Path, roots: &[PathBuf]) -> Option<String> {
-    let real = canonicalize_or_ancestor(path);
+    let real = normalize_dots(&canonicalize_or_ancestor(path));
     let mut allowed = false;
     for root in roots {
-        let real_root = canonicalize_or_ancestor(root);
+        let real_root = normalize_dots(&canonicalize_or_ancestor(root));
         if real.starts_with(&real_root) {
             allowed = true;
             break;
@@ -5316,8 +5318,22 @@ mod tests {
         let root = dir.join("does-not-exist-yet");
         let target = root.join("new.txt");
         // A root that doesn't exist yet (e.g. a not-yet-created scratch dir)
-        // must not be dropped from containment; its raw path is still used.
+        // must not be dropped from containment; its partial-canonical path is still used.
         assert!(io_enforce(&target, std::slice::from_ref(&root)).is_none());
+        // A target that escapes the non-existent root via `..` must be rejected.
+        let escape = root.join("..").join("outside.txt");
+        let err = io_enforce(&escape, std::slice::from_ref(&root)).unwrap();
+        assert!(err.contains("outside sandbox"), "got: {err}");
+    }
+
+    #[test]
+    fn io_enforce_rejects_dotdot_escape_through_non_existent_root() {
+        let dir = tmp();
+        let root = dir.join("gap");
+        // Lexically under the (missing) root, but `..` resolves outside.
+        let escape = root.join("..").join("other").join("file.txt");
+        let err = io_enforce(&escape, std::slice::from_ref(&root)).unwrap();
+        assert!(err.contains("outside sandbox"), "got: {err}");
     }
 
     #[test]
