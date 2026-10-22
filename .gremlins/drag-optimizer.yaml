@@ -138,6 +138,14 @@ stages:
         options:
           idle_timeout: 600
 
+      - name: cleanup-build-artifacts
+        type: exec
+        options:
+          cmds:
+            - cargo clean 2>/dev/null || true
+            - find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+            - find . -type f -name '*.pyc' -delete 2>/dev/null || true
+
       - name: commit
         type: exec
         options:

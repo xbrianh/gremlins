@@ -6,7 +6,7 @@ plans/completed/
 .gremlins/secret_env
 
 # Rust
-/target/
+target/
 .cargo*
 *.so
 *.dylib
