@@ -3149,7 +3149,8 @@ mod tests {
         std::fs::create_dir(dir.join("sub")).unwrap();
         std::fs::write(dir.join("sub/lib.rs"), "fn a() {}\nstruct B;\nimpl B {}\n").unwrap();
         std::fs::write(dir.join("sub/notes.txt"), "hello").unwrap();
-        let args = serde_json::json!({"file_path": ".", "depth": 2}).to_string();
+        let args = serde_json::json!({"file_path": ".", "depth": 2, "token_budget": 1_000_000})
+            .to_string();
         let out = landscape_invoke(&c, &args).await;
         assert!(
             out.contains("sub/") && out.contains("lib.rs:"),
@@ -3175,7 +3176,8 @@ mod tests {
         std::fs::write(dir.join(".git/config"), "x").unwrap();
         std::fs::write(dir.join("target/out"), "x").unwrap();
         std::fs::write(dir.join("src/lib.rs"), "fn a() {}\nstruct B;\nimpl B {}\n").unwrap();
-        let args = serde_json::json!({"file_path": ".", "depth": 2}).to_string();
+        let args = serde_json::json!({"file_path": ".", "depth": 2, "token_budget": 1_000_000})
+            .to_string();
         let out = landscape_invoke(&c, &args).await;
         assert!(!out.contains(".git"), "must skip .git: {out:?}");
         assert!(!out.contains("target"), "must skip target: {out:?}");
@@ -3197,7 +3199,8 @@ mod tests {
         .unwrap();
         std::fs::write(dir.join("a/top.rs"), "fn top() {}\nstruct T;\nimpl T {}\n").unwrap();
         // depth=1: only a/ itself plus one level → a/top.rs visible, a/b/ skipped
-        let args = serde_json::json!({"file_path": ".", "depth": 1}).to_string();
+        let args = serde_json::json!({"file_path": ".", "depth": 1, "token_budget": 1_000_000})
+            .to_string();
         let out = landscape_invoke(&c, &args).await;
         assert!(
             out.contains("a/") && out.contains("top.rs:"),
@@ -3215,7 +3218,7 @@ mod tests {
         let sub = dir.join("empty");
         std::fs::create_dir(&sub).unwrap();
         let c = ctx(&dir);
-        let args = serde_json::json!({"file_path": "empty"}).to_string();
+        let args = serde_json::json!({"file_path": "empty", "token_budget": 1_000_000}).to_string();
         let out = landscape_invoke(&c, &args).await;
         assert_eq!(out, "(empty directory)");
     }
@@ -3231,7 +3234,8 @@ mod tests {
         // applying the injected-block three-item cutoff.
         std::fs::write(sub.join("a.rs"), "fn a() {}\nstruct A;\n").unwrap();
         std::fs::write(sub.join("b.rs"), "fn b() {}\n").unwrap();
-        let args = serde_json::json!({"file_path": "shallow"}).to_string();
+        let args =
+            serde_json::json!({"file_path": "shallow", "token_budget": 1_000_000}).to_string();
         let out = landscape_invoke(&c, &args).await;
         assert!(
             out.contains("a.rs:") && out.contains("1|fn|a") && out.contains("2|struct|A"),
@@ -3286,7 +3290,6 @@ mod tests {
     async fn landscape_directory_matches_block_format() {
         let dir = tmp();
         let c = ctx(&dir);
-        crate::config::clear_global();
         std::fs::create_dir(dir.join("sub")).unwrap();
         std::fs::write(dir.join("sub/lib.rs"), "fn a() {}\nstruct B;\nimpl B {}\n").unwrap();
 
@@ -3300,7 +3303,8 @@ mod tests {
         assert!(!expected.contains("<!-- BEGIN LANDSCAPE BLOCK -->"));
         assert!(!expected.contains("repository metadata"));
 
-        let args = serde_json::json!({"file_path": ".", "depth": 2}).to_string();
+        let args = serde_json::json!({"file_path": ".", "depth": 2, "token_budget": 1_000_000})
+            .to_string();
         let out = landscape_invoke(&c, &args).await;
         assert_eq!(
             out, expected,
@@ -3357,7 +3361,6 @@ mod tests {
         // `build_with_failures` surfaces the path as an inline annotation.
         let dir = tmp();
         let c = ctx(&dir);
-        crate::config::clear_global();
         std::fs::create_dir(dir.join("sub")).unwrap();
         let broken = dir.join("sub/broken.rs");
         std::fs::write(&broken, "fn x() {}\nstruct X;\nimpl X {}\n").unwrap();
