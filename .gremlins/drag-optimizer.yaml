@@ -183,9 +183,35 @@ stages:
                 echo "improved — drag $CURR < $BEST (was $BEST)"
               fi
 
+  # ── commit message ────────────────────────────────────────────────────
+  - name: commit-message
+    type: exec
+    interpolation:
+      inputs:
+        target: content("artifact://target.txt")
+        baseline_report: "artifact://baseline/report.json"
+      outputs:
+        commit_message: "artifact://commit_message.txt"
+    options:
+      cmds:
+        - |
+          BEST=$(cat .gremlins_drag_best 2>/dev/null || echo "N/A")
+          BASE_SUM=$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(round(sum(m["ln_drag"] for m in data["modules"]), 2))' < {baseline_report})
+          {
+            echo "drag-optimizer: reduce drag for {target}"
+            echo ""
+            echo "Baseline ln_drag sum: $BASE_SUM \u2192 Best: $BEST"
+            echo "Target: {target}"
+          } > {commit_message}
+
 land:
+  interpolation:
+    inputs:
+      message: artifact://commit_message.txt
   land_cmds:
-    - 'echo "drag optimization complete"'
+    - WORKTREE_HEAD=$(git -C "$GREMLIN_WORKDIR" rev-parse HEAD)
+    - git merge --squash "$WORKTREE_HEAD"
+    - 'git diff --cached --quiet || git commit -F "{message}"'
   clean_cmds:
     - git worktree remove --force "$GREMLIN_WORKDIR" || true
     - git worktree prune
