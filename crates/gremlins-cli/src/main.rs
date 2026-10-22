@@ -319,7 +319,21 @@ async fn ls(here: bool) -> Result<(), String> {
         .and_then(|v| v.as_array())
         .ok_or("invalid ls response")?;
 
-    let headers = ["ID", "STATUS", "STAGE", "DATE", "PROJECT", "LAUNCH"];
+    let headers = [
+        "ID",
+        "STATUS",
+        "STAGE",
+        "DATE",
+        "PROJECT",
+        "LAUNCH",
+        "TOKENS IN",
+        "TOKENS OUT",
+        "REASONING",
+        "CACHE",
+        "NEW",
+        "TURNS",
+        "COST",
+    ];
     let mut rows: Vec<Vec<String>> = Vec::new();
 
     for entry in gremlins {
@@ -345,6 +359,16 @@ async fn ls(here: bool) -> Result<(), String> {
             }
         }
 
+        let prompt_tokens = entry.get("prompt_tokens").and_then(|v| v.as_u64());
+        let completion_tokens = entry.get("completion_tokens").and_then(|v| v.as_u64());
+        let reasoning_tokens = entry.get("reasoning_tokens").and_then(|v| v.as_u64());
+        let cached_input_tokens = entry.get("cached_input_tokens").and_then(|v| v.as_u64());
+        let cache_creation_input_tokens = entry
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64());
+        let turns = entry.get("turns").and_then(|v| v.as_u64());
+        let total_cost_usd = entry.get("cost_usd").and_then(|v| v.as_f64());
+
         rows.push(vec![
             id.to_string(),
             status.to_string(),
@@ -352,6 +376,15 @@ async fn ls(here: bool) -> Result<(), String> {
             started_at.to_string(),
             project.to_string(),
             launch.to_string(),
+            crate::tui::format_token_count(prompt_tokens),
+            crate::tui::format_token_count(completion_tokens),
+            crate::tui::format_token_count(reasoning_tokens),
+            crate::tui::format_cache_pct(prompt_tokens, cached_input_tokens),
+            crate::tui::format_token_count(cache_creation_input_tokens),
+            turns
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            crate::tui::format_cost_usd(total_cost_usd),
         ]);
     }
 
@@ -362,7 +395,21 @@ async fn ls(here: bool) -> Result<(), String> {
 
 /// Fallback: scan state directories directly (no executor running).
 fn ls_direct(here: bool, cwd: &Path) -> Result<(), String> {
-    let headers = ["ID", "STATUS", "STAGE", "DATE", "PROJECT", "LAUNCH"];
+    let headers = [
+        "ID",
+        "STATUS",
+        "STAGE",
+        "DATE",
+        "PROJECT",
+        "LAUNCH",
+        "TOKENS IN",
+        "TOKENS OUT",
+        "REASONING",
+        "CACHE",
+        "NEW",
+        "TURNS",
+        "COST",
+    ];
     let mut rows: Vec<Vec<String>> = Vec::new();
 
     for (id, state_json_path) in state::list_state_dirs() {
@@ -401,6 +448,27 @@ fn ls_direct(here: bool, cwd: &Path) -> Result<(), String> {
             .unwrap_or("")
             .to_string();
 
+        let token_usage = state_map.get("token_usage").and_then(|v| v.as_object());
+        let prompt_tokens = token_usage
+            .and_then(|tu| tu.get("prompt_tokens"))
+            .and_then(|v| v.as_u64());
+        let completion_tokens = token_usage
+            .and_then(|tu| tu.get("completion_tokens"))
+            .and_then(|v| v.as_u64());
+        let reasoning_tokens = token_usage
+            .and_then(|tu| tu.get("reasoning_tokens"))
+            .and_then(|v| v.as_u64());
+        let cached_input_tokens = token_usage
+            .and_then(|tu| tu.get("cached_input_tokens"))
+            .and_then(|v| v.as_u64());
+        let cache_creation_input_tokens = token_usage
+            .and_then(|tu| tu.get("cache_creation_input_tokens"))
+            .and_then(|v| v.as_u64());
+        let turns = token_usage
+            .and_then(|tu| tu.get("turns"))
+            .and_then(|v| v.as_u64());
+        let total_cost_usd = state_map.get("total_cost_usd").and_then(|v| v.as_f64());
+
         rows.push(vec![
             id,
             direct_status_display(&state_map, "status"),
@@ -408,6 +476,15 @@ fn ls_direct(here: bool, cwd: &Path) -> Result<(), String> {
             map_field_display(&state_map, "started_at"),
             project.to_string(),
             launch,
+            crate::tui::format_token_count(prompt_tokens),
+            crate::tui::format_token_count(completion_tokens),
+            crate::tui::format_token_count(reasoning_tokens),
+            crate::tui::format_cache_pct(prompt_tokens, cached_input_tokens),
+            crate::tui::format_token_count(cache_creation_input_tokens),
+            turns
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            crate::tui::format_cost_usd(total_cost_usd),
         ]);
     }
 
@@ -723,6 +800,8 @@ fn info_direct(id: &str) -> Result<(), String> {
         "model": gremlin.state.read_str("model"),
         "attempt": gremlin.state.read_str("attempt"),
         "kind": gremlin.state.read_str("kind"),
+        "token_usage": gremlin.state.read_field("token_usage").unwrap_or(Value::Null),
+        "total_cost_usd": gremlin.state.read_field("total_cost_usd").unwrap_or(Value::Null),
         "bail_info": gremlin
             .state
             .stage_error()

@@ -121,6 +121,13 @@ fn fetch_run_snapshot(
                                 cached_input_tokens: entry
                                     .get("cached_input_tokens")
                                     .and_then(|v| v.as_u64()),
+                                cache_creation_input_tokens: entry
+                                    .get("cache_creation_input_tokens")
+                                    .and_then(|v| v.as_u64()),
+                                turns: entry
+                                    .get("turns")
+                                    .and_then(|v| v.as_u64())
+                                    .map(|v| v as usize),
                                 cost_usd: entry.get("cost_usd").and_then(|v| v.as_f64()),
                             },
                         );
@@ -683,6 +690,8 @@ enum DebugEvent {
     TurnComplete {
         text: String,
         tool_calls: Vec<String>,
+        stats: Option<serde_json::Value>,
+        total: Option<serde_json::Value>,
     },
     Done {
         text: String,
@@ -734,6 +743,8 @@ fn parse_debug_event(value: &serde_json::Value) -> DebugEvent {
                         .collect()
                 })
                 .unwrap_or_default(),
+            stats: value.get("stats").cloned(),
+            total: value.get("totals").cloned(),
         },
         Some("done") => DebugEvent::Done {
             text: value
@@ -824,7 +835,7 @@ pub(crate) const REASONING_COMPLETED_TITLE: &str = "clawnked";
 /// millions (with the second decimal trimmed when zero, so 1.00M renders as
 /// 1.0M). Promotion to millions happens at 999_950, when the thousands
 /// display would reach 1000.0k. Missing values render as a dash.
-fn compact_tokens(value: Option<u64>) -> String {
+pub(crate) fn compact_tokens(value: Option<u64>) -> String {
     match value {
         None => "-".to_string(),
         Some(v) if v < 1_000 => v.to_string(),
@@ -858,7 +869,7 @@ fn compact_tokens(value: Option<u64>) -> String {
 /// (`↑`) and cache are always sourced from the per-turn `usage`.
 /// Missing values render as dashes. A zero or absent prompt denominator
 /// renders `cache -` and never divides by zero.
-fn usage_title_part(
+pub(crate) fn usage_title_part(
     usage: Option<&serde_json::Value>,
     total: Option<&serde_json::Value>,
 ) -> String {
@@ -2087,6 +2098,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         if run.cost_usd.is_none() {
                             run.cost_usd = prev.cost_usd;
                         }
+                        if run.cache_creation_input_tokens.is_none() {
+                            run.cache_creation_input_tokens = prev.cache_creation_input_tokens;
+                        }
+                        if run.turns.is_none() {
+                            run.turns = prev.turns;
+                        }
                     }
                 }
                 app.active_runs = runs;
@@ -2389,15 +2406,16 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         live_area.mark_debug_ready();
                         live_area.push_debug_output(format!("connected to gremlin {id}"));
                     }
-                    DebugEvent::TurnComplete { text, tool_calls, .. } => {
+                    DebugEvent::TurnComplete { text, tool_calls, stats, total } => {
                         if !text.is_empty() {
                             live_area.push_debug_output(text);
                         }
                         for tc in &tool_calls {
                             live_area.push_debug_output(format!("  [tool: {tc}]"));
                         }
+                        let summary = crate::tui::usage_title_part(stats.as_ref(), total.as_ref());
                         live_area.push_debug_output(
-                            "debug: turn complete — agent paused".to_string(),
+                            format!("debug: turn complete · {summary} — agent paused"),
                         );
                     }
                     DebugEvent::Done { text } => {

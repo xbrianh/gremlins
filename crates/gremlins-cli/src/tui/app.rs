@@ -70,6 +70,8 @@ pub struct ActiveRun {
     pub completion_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+    pub turns: Option<usize>,
     /// Total cost in USD from the daemon's ls response.
     pub cost_usd: Option<f64>,
 }
@@ -85,6 +87,8 @@ impl ActiveRun {
             completion_tokens: None,
             reasoning_tokens: None,
             cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            turns: None,
             cost_usd: None,
         }
     }
@@ -215,6 +219,19 @@ impl App {
             .get("cached_input_tokens")
             .and_then(|v| v.as_u64())
             .or_else(|| existing.as_ref().and_then(|r| r.cached_input_tokens));
+        let cache_creation_input_tokens = entry
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|r| r.cache_creation_input_tokens)
+            });
+        let turns = entry
+            .get("turns")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .or_else(|| existing.as_ref().and_then(|r| r.turns));
         let cost_usd = entry
             .get("cost_usd")
             .and_then(|v| v.as_f64())
@@ -231,6 +248,8 @@ impl App {
                 completion_tokens,
                 reasoning_tokens,
                 cached_input_tokens,
+                cache_creation_input_tokens,
+                turns,
                 cost_usd,
             },
         );
@@ -249,6 +268,8 @@ impl App {
                 completion_tokens: None,
                 reasoning_tokens: None,
                 cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                turns: None,
                 cost_usd: None,
             },
         );
