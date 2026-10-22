@@ -127,6 +127,10 @@ pub fn file_to_module(file: &Path, packages: &[PackageInfo]) -> Option<(String, 
 pub fn dependency_graph(pkg: &PackageInfo) -> Result<Vec<(String, String)>, String> {
     match pkg {
         PackageInfo::Rust(r) => {
+            // `r.dir` is the canonicalized directory containing the package's
+            // Cargo.toml. `cargo modules` resolves the workspace by walking up
+            // from that manifest, so the package manifest is a valid anchor
+            // even when the process CWD is outside the workspace.
             let manifest_path = r.dir.join("Cargo.toml");
             rust::rust_dependency_graph(&r.pkg_name, &manifest_path)
         }

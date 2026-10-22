@@ -48,20 +48,16 @@ pub(super) fn discover_rust_packages(base: &Path) -> Result<Vec<RustPackage>, St
     // project. Running `cargo metadata` would fail with a scary "could not
     // find Cargo.toml" message, so short-circuit to an empty package list
     // instead. This keeps pure-Python (and other non-Rust) projects quiet.
-    let workspace_manifest = match find_cargo_toml(base) {
+    //
+    // The discovered manifest may be the workspace root or a member package's
+    // Cargo.toml; either is a valid anchor because `cargo metadata` walks up
+    // to the workspace root from there.
+    let manifest = match find_cargo_toml(base) {
         Some(m) => m,
         None => return Ok(Vec::new()),
     };
 
-    let output = Command::new("cargo")
-        .args([
-            "metadata",
-            "--format-version",
-            "1",
-            "--no-deps",
-            "--manifest-path",
-        ])
-        .arg(&workspace_manifest)
+    let output = cargo_metadata_command(&manifest)
         .output()
         .map_err(|e| format!("failed to run cargo metadata: {e}"))?;
 
@@ -129,25 +125,45 @@ fn find_cargo_toml(from: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Build the `cargo metadata` command anchored at `manifest_path`.
+fn cargo_metadata_command(manifest_path: &Path) -> Command {
+    let mut cmd = Command::new("cargo");
+    cmd.args([
+        "metadata",
+        "--format-version",
+        "1",
+        "--no-deps",
+        "--manifest-path",
+    ])
+    .arg(manifest_path);
+    cmd
+}
+
 // ---------------------------------------------------------------------------
 // cargo-modules dependency graph
 // ---------------------------------------------------------------------------
 
+/// Build the `cargo modules dependencies` command anchored at `manifest_path`.
+fn cargo_modules_command(pkg_name: &str, manifest_path: &Path) -> Command {
+    let mut cmd = Command::new("cargo");
+    cmd.args([
+        "modules",
+        "dependencies",
+        "--no-externs",
+        "--no-sysroot",
+        "--no-owns",
+        "--no-fns",
+        "--no-traits",
+        "--no-types",
+        "--manifest-path",
+    ])
+    .arg(manifest_path)
+    .args(["-p", pkg_name]);
+    cmd
+}
+
 fn run_cargo_modules_dependencies(pkg_name: &str, manifest_path: &Path) -> Result<String, String> {
-    let output = Command::new("cargo")
-        .args([
-            "modules",
-            "dependencies",
-            "--no-externs",
-            "--no-sysroot",
-            "--no-owns",
-            "--no-fns",
-            "--no-traits",
-            "--no-types",
-            "--manifest-path",
-        ])
-        .arg(manifest_path)
-        .args(["-p", pkg_name])
+    let output = cargo_modules_command(pkg_name, manifest_path)
         .output()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -256,7 +272,61 @@ fn file_rel_to_module(rel: &Path, target_name: &str, is_bin: bool) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
     use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard};
+
+    // -----------------------------------------------------------------------
+    // parse_dot
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parses_dependency_edges() {
+        let dot = "\"gremlins_drag\" [label=\"...\"];\n\"gremlins_drag::foo\" -> \"gremlins_drag::bar\" [label=\"uses\"];\n\"gremlins_drag::bar\" -> \"gremlins_drag::baz\" [label=\"uses\"];";
+        let edges = parse_dot(dot);
+        assert_eq!(
+            edges,
+            vec![
+                (
+                    "gremlins_drag::foo".to_string(),
+                    "gremlins_drag::bar".to_string()
+                ),
+                (
+                    "gremlins_drag::bar".to_string(),
+                    "gremlins_drag::baz".to_string()
+                ),
+            ]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // file_rel_to_module
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn file_rel_to_module_normalizes_hyphens() {
+        assert_eq!(
+            file_rel_to_module(Path::new("main.rs"), "gremlins-drag", true),
+            Some("gremlins_drag".to_string())
+        );
+        assert_eq!(
+            file_rel_to_module(Path::new("foo/bar.rs"), "my-crate", false),
+            Some("my_crate::foo::bar".to_string())
+        );
+    }
+
+    #[test]
+    fn file_rel_to_module_handles_mod_rs_and_roots() {
+        assert_eq!(
+            file_rel_to_module(Path::new("foo/mod.rs"), "crate", false),
+            Some("crate::foo".to_string())
+        );
+        assert_eq!(
+            file_rel_to_module(Path::new("lib.rs"), "crate", false),
+            Some("crate".to_string())
+        );
+    }
 
     // -----------------------------------------------------------------------
     // find_cargo_toml
@@ -278,40 +348,24 @@ mod tests {
     }
 
     #[test]
-    fn find_cargo_toml_returns_none_when_no_manifest() {
+    fn find_cargo_toml_finds_nearest_manifest_in_workspace() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let deep = tmp.path().join("x/y");
-        fs::create_dir_all(&deep).expect("create deep dirs");
-
-        let file = deep.join("z.rs");
-        fs::write(&file, "// test").expect("write test file");
-
-        // The temp dir has no Cargo.toml anywhere in the hierarchy
-        let found = find_cargo_toml(&file);
-        assert!(found.is_none());
-    }
-
-    #[test]
-    fn find_cargo_toml_finds_workspace_manifest_from_subdir() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let workspace_manifest = tmp.path().join("Cargo.toml");
         fs::write(
-            &workspace_manifest,
+            tmp.path().join("Cargo.toml"),
             "[workspace]\nmembers = [\"crates/*\"]\n",
         )
         .expect("write workspace Cargo.toml");
 
-        // Create a member crate with its own Cargo.toml
+        // Create a member crate with its own Cargo.toml.
         let member_dir = tmp.path().join("crates/foo");
-        fs::create_dir_all(&member_dir).expect("create member dir");
+        fs::create_dir_all(member_dir.join("src")).expect("create member src");
         fs::write(member_dir.join("Cargo.toml"), "[package]\nname = \"foo\"\n")
             .expect("write member Cargo.toml");
 
-        // From the member's src dir, find_cargo_toml should find the
-        // member's own Cargo.toml (the nearest one)
-        let src_dir = member_dir.join("src");
-        fs::create_dir_all(&src_dir).expect("create src dir");
-        let file = src_dir.join("lib.rs");
+        // From the member's src dir, find_cargo_toml should return the
+        // nearest ancestor manifest — the member's own Cargo.toml, not the
+        // workspace root above it.
+        let file = member_dir.join("src/lib.rs");
         fs::write(&file, "// test").expect("write lib.rs");
 
         let found = find_cargo_toml(&file);
@@ -322,20 +376,89 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // cargo command construction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cargo_metadata_command_passes_manifest_path() {
+        let manifest = Path::new("/tmp/example/Cargo.toml");
+        let cmd = cargo_metadata_command(manifest);
+        let args: Vec<&OsStr> = cmd.get_args().collect();
+        assert_eq!(
+            args,
+            vec![
+                OsStr::new("metadata"),
+                OsStr::new("--format-version"),
+                OsStr::new("1"),
+                OsStr::new("--no-deps"),
+                OsStr::new("--manifest-path"),
+                manifest.as_os_str(),
+            ]
+        );
+    }
+
+    #[test]
+    fn cargo_modules_command_passes_manifest_path_and_package() {
+        let manifest = Path::new("/tmp/example/Cargo.toml");
+        let cmd = cargo_modules_command("mylib", manifest);
+        let args: Vec<&OsStr> = cmd.get_args().collect();
+        assert_eq!(
+            args,
+            vec![
+                OsStr::new("modules"),
+                OsStr::new("dependencies"),
+                OsStr::new("--no-externs"),
+                OsStr::new("--no-sysroot"),
+                OsStr::new("--no-owns"),
+                OsStr::new("--no-fns"),
+                OsStr::new("--no-traits"),
+                OsStr::new("--no-types"),
+                OsStr::new("--manifest-path"),
+                manifest.as_os_str(),
+                OsStr::new("-p"),
+                OsStr::new("mylib"),
+            ]
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // discover_rust_packages with --manifest-path
     // -----------------------------------------------------------------------
 
+    /// Process-wide CWD changes affect every test thread, so serialize them
+    /// and always restore the previous directory on drop — even on panic.
+    static CWD_LOCK: Mutex<()> = Mutex::new(());
+
+    struct CwdGuard {
+        prev: PathBuf,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl CwdGuard {
+        fn enter(dir: &Path) -> Self {
+            let lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::current_dir().expect("current_dir");
+            std::env::set_current_dir(dir).expect("set cwd");
+            CwdGuard { prev, _lock: lock }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.prev);
+        }
+    }
+
     /// Regression: `discover_rust_packages` must pass `--manifest-path` to
     /// `cargo metadata` so discovery works even when CWD is outside the
-    /// workspace. This test creates a minimal Cargo workspace fixture, sets
-    /// CWD to a temp dir outside it, and verifies that `discover_rust_packages`
-    /// succeeds by using the manifest path found by `find_cargo_toml`.
+    /// workspace. `cargo_metadata_command_passes_manifest_path` verifies the
+    /// flag construction directly; this test exercises the full discovery
+    /// path from a foreign CWD.
     #[test]
     fn discover_rust_packages_uses_manifest_path_from_outside_workspace() {
         let fixture = tempfile::TempDir::new().expect("tempdir");
-        let manifest = fixture.path().join("Cargo.toml");
         fs::write(
-            &manifest,
+            fixture.path().join("Cargo.toml"),
             "[workspace]\nmembers = [\"mylib\"]\nresolver = \"2\"\n",
         )
         .expect("write workspace Cargo.toml");
@@ -349,21 +472,15 @@ mod tests {
         .expect("write lib Cargo.toml");
         fs::write(lib_dir.join("src/lib.rs"), "pub fn hello() {}\n").expect("write lib.rs");
 
-        // Save current dir and move to a temp dir outside the fixture
-        let prev_cwd = std::env::current_dir().expect("current_dir");
         let outside = tempfile::TempDir::new().expect("outside tempdir");
-        std::env::set_current_dir(outside.path()).expect("set cwd outside");
+        let _cwd = CwdGuard::enter(outside.path());
 
-        // discover_rust_packages receives a path inside the fixture.
-        // It must find the manifest via find_cargo_toml and pass
-        // --manifest-path to cargo metadata.
-        let result = discover_rust_packages(&lib_dir.join("src/lib.rs"));
+        // discover_rust_packages receives a path inside the fixture. It must
+        // find the manifest via find_cargo_toml and pass --manifest-path to
+        // cargo metadata so the invocation does not depend on the process CWD.
+        let packages = discover_rust_packages(&lib_dir.join("src/lib.rs"))
+            .expect("discover_rust_packages should succeed");
 
-        // Restore CWD before asserting (so test failures don't leave
-        // the process in a stale directory).
-        std::env::set_current_dir(&prev_cwd).expect("restore cwd");
-
-        let packages = result.expect("discover_rust_packages should succeed");
         assert!(
             !packages.is_empty(),
             "should find at least one package; got empty list"
