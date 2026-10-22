@@ -16,6 +16,11 @@ pub enum CommandResult {
     ShowRuns,
     /// Enter the full-screen interactive debug session.
     Debug(String),
+    /// Activate a skill by name. The TUI event loop adds it to the in-memory
+    /// active set and includes it in the next chat request.
+    ActivateSkill(String),
+    /// List discovered skills grouped by source.
+    ListSkills,
 }
 
 /// Parse `input` (minus the leading `/`) and dispatch.
@@ -230,6 +235,17 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
                 payload: serde_json::json!({"op": "model", "model": spec}),
             })
         }
+        "skills" => Some(CommandResult::ListSkills),
+        "skill" => {
+            let name = args.first().copied().unwrap_or("");
+            if name.is_empty() {
+                return Some(CommandResult::Lines(vec![
+                    "> /skill".to_string(),
+                    "usage: /skill <name>".to_string(),
+                ]));
+            }
+            Some(CommandResult::ActivateSkill(name.to_string()))
+        }
         _ => Some(CommandResult::Lines(vec![format!(
             "unknown command: /{cmd} — type /help for available commands"
         )])),
@@ -281,6 +297,8 @@ fn help_text() -> Vec<String> {
         "  /debug <id>      — open a full-screen interactive debug session".to_string(),
         "  /model           — show, set (/model <spec>), or clear (/model clear) the TUI chat model"
             .to_string(),
+        "  /skills          — list available operator skills".to_string(),
+        "  /skill <name>    — activate a skill for the chat session".to_string(),
         "  /chat            — chat is always active (type directly)".to_string(),
         "  /clear, /new     — restart chat".to_string(),
         "  /help            — show this help".to_string(),
@@ -326,6 +344,8 @@ mod tests {
             "/watch",
             "/debug",
             "/model",
+            "/skills",
+            "/skill",
             "/chat",
             "/clear",
             "/new",

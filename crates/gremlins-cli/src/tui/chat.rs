@@ -69,6 +69,12 @@ pub enum ChatEvent {
         message: String,
         turn: Option<String>,
     },
+    /// Non-fatal warning surfaced to the chat transcript (e.g. unresolved
+    /// skill names). The turn continues normally after display.
+    SystemWarning {
+        message: String,
+        turn: Option<String>,
+    },
 }
 
 /// Parse a daemon chat-protocol JSON line into a [`ChatEvent`].
@@ -196,6 +202,14 @@ pub(crate) fn parse_chat_event(value: &Value) -> Option<ChatEvent> {
                 turn,
             })
         }
+        Some("system_warning") => Some(ChatEvent::SystemWarning {
+            message: value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            turn,
+        }),
         _ => None,
     }
 }

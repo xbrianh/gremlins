@@ -11,6 +11,7 @@ pub mod landscape;
 pub mod model_uri;
 pub mod prelude;
 pub mod schemas;
+pub mod skills;
 pub mod stage_spec;
 
 /// Build version shared by CLI and daemon.
