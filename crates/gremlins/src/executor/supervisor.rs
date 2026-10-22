@@ -137,9 +137,9 @@ struct ClientSession {
     /// Set when teardown has begun. Teardown is idempotent under this flag,
     /// but the flag is *not* set by request-side closure (`closed`).
     torn_down: bool,
-    /// Session-scoped in-memory set of active skill names. Never persisted to
-    /// `state.json` or the transcript. `/clear` resets it.
-    active_skills: Vec<String>,
+    /// Session-scoped set of active skill names. Shared with the agent loop
+    /// so the LoadSkill tool can add names mid-turn. `/clear` resets it.
+    active_skills: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl ClientSession {
@@ -153,7 +153,7 @@ impl ClientSession {
             aux_sockets: Vec::new(),
             closed: false,
             torn_down: false,
-            active_skills: Vec::new(),
+            active_skills: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 }
@@ -2336,8 +2336,9 @@ async fn handle_chat(
     //    added skills take effect without a daemon restart. Discovery runs in
     //    spawn_blocking so filesystem I/O does not stall the async executor.
     {
-        let mut s = session.lock().await;
-        s.active_skills = requested_skills.clone();
+        let s = session.lock().await;
+        let mut guard = s.active_skills.lock().unwrap();
+        *guard = requested_skills.clone();
     }
     let project_root_for_skills = project_root.clone();
     let all_skills =
@@ -2346,10 +2347,15 @@ async fn handle_chat(
             .unwrap_or_default();
     let active_skills = {
         let s = session.lock().await;
-        s.active_skills.clone()
+        let guard = s.active_skills.lock().unwrap();
+        guard.clone()
     };
     let (trusted_section, unresolved_skills) =
         crate::skills::build_system_prompt_section(&all_skills, &active_skills);
+    let active_skills_arc = {
+        let s = session.lock().await;
+        Arc::clone(&s.active_skills)
+    };
     let system_prompt = build_chat_system_prompt(context, &trusted_section);
 
     // 4. Get or create the session's chat gremlin. The session owns at most
@@ -2458,6 +2464,9 @@ async fn handle_chat(
     // and reused across turns, so a later turn's operator environment must
     // replace the one captured at creation rather than freeze at first contact.
     gremlin.env = env;
+    // Wire up skills for the LoadSkill tool.
+    gremlin.active_skills = Some(active_skills_arc);
+    gremlin.discovered_skills = Some(Arc::new(all_skills));
 
     // Point the run-map handle's cancel token at this turn so `stop` cancels
     // the in-flight stage rather than a stale persistent token.
@@ -3341,6 +3350,8 @@ fn create_chat_gremlin(
         clean_cmds: Vec::new(),
         enclosing_task_models: None,
         enclosing_model: None,
+        discovered_skills: None,
+        active_skills: None,
     })
 }
 

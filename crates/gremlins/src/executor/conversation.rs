@@ -2003,7 +2003,7 @@ mod tests {
         let with_tools = completion_request_overhead(
             "hi",
             None,
-            crate::clients::tools::tool_definitions(None).as_slice(),
+            crate::clients::tools::tool_definitions(None, false).as_slice(),
         );
 
         assert!(with_system > base, "system prompt must be measured");
@@ -2014,7 +2014,7 @@ mod tests {
     fn completion_request_overhead_tracks_serialized_request() {
         let prompt = "line one\n\"quoted\" and a backslash \\";
         let system = "system\nwith \"escapes\"";
-        let tools = crate::clients::tools::tool_definitions(None);
+        let tools = crate::clients::tools::tool_definitions(None, false);
         let overhead = completion_request_overhead(prompt, Some(system), &tools);
 
         let history = vec![Message::user(

@@ -293,6 +293,10 @@ pub struct Gremlin {
     /// parallel group's `model:` (or its outer composite's `model:`) keeps
     /// beating the selected profile's stage map.
     pub(crate) enclosing_model: Option<ModelURI>,
+    /// Skills discovered at turn start (chat-only).
+    pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
+    /// Active skill names — shared with LoadSkill tool and supervisor session.
+    pub(crate) active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 }
 
 impl Gremlin {
@@ -490,6 +494,8 @@ impl Gremlin {
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
             enclosing_model: None,
+            discovered_skills: None,
+            active_skills: None,
         };
 
         // 5. Create an empty log file.
@@ -627,6 +633,8 @@ impl Gremlin {
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
             enclosing_model: None,
+            discovered_skills: None,
+            active_skills: None,
         })
     }
 
@@ -998,6 +1006,8 @@ impl Gremlin {
             clean_cmds: self.clean_cmds.clone(),
             enclosing_task_models: self.enclosing_task_models.clone(),
             enclosing_model: effective_model.cloned(),
+            discovered_skills: None,
+            active_skills: None,
         })
     }
 
@@ -2101,6 +2111,8 @@ mod tests {
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
             enclosing_model: None,
+            discovered_skills: None,
+            active_skills: None,
         }
     }
 
