@@ -2315,7 +2315,8 @@ async fn handle_chat(
         let s = session.lock().await;
         s.active_skills.clone()
     };
-    let trusted_section = crate::skills::build_system_prompt_section(&all_skills, &active_skills);
+    let (trusted_section, unresolved_skills) =
+        crate::skills::build_system_prompt_section(&all_skills, &active_skills);
     let system_prompt = build_chat_system_prompt(context, &trusted_section);
 
     // 4. Get or create the session's chat gremlin. The session owns at most
@@ -2496,6 +2497,18 @@ async fn handle_chat(
             serde_json::json!({"id": id, "status": "streaming"}),
         ))
         .await;
+
+    // Surface unresolved skill names as a non-fatal warning so the
+    // operator knows a previously-activated skill is no longer available.
+    if !unresolved_skills.is_empty() {
+        let msg = format!("skill(s) not found: {}", unresolved_skills.join(", "));
+        let warning = serde_json::json!({
+            "type": "system_warning",
+            "message": msg,
+            "turn": turn,
+        });
+        let _ = writer.write_json_line(&warning).await;
+    }
 }
 
 /// Return the session's parked chat gremlin id, waiting for an in-flight

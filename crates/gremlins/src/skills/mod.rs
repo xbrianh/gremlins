@@ -465,23 +465,39 @@ fn scan_skills_dir(root: &Path, source: SkillSource) -> Vec<LoadedSkill> {
     skills
 }
 
-/// List bundled files in a skill directory, excluding `SKILL.md`.
+/// List bundled files in a skill directory recursively, excluding `SKILL.md`.
+/// Subdirectory paths are preserved relative to the skill root and directory
+/// symlinks are not followed (to avoid cycles).
 fn list_skill_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
+    collect_skill_files(dir, dir, &mut files);
+    files.sort();
+    files
+}
+
+fn collect_skill_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
-        Err(_) => return files,
+        Err(_) => return,
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_file() && path.file_name().is_some_and(|n| n != "SKILL.md") {
-            if let Ok(rel) = path.strip_prefix(dir) {
-                files.push(rel.to_path_buf());
+        let ft = match path.symlink_metadata() {
+            Ok(m) => m.file_type(),
+            Err(_) => continue,
+        };
+        if ft.is_dir() {
+            // Skip symlink directories to avoid cycles.
+            if ft.is_symlink() {
+                continue;
+            }
+            collect_skill_files(root, &path, out);
+        } else if ft.is_file() && path.file_name().is_some_and(|n| n != "SKILL.md") {
+            if let Ok(rel) = path.strip_prefix(root) {
+                out.push(rel.to_path_buf());
             }
         }
     }
-    files.sort();
-    files
 }
 
 // ---------------------------------------------------------------------------
@@ -582,12 +598,26 @@ pub fn find_skill<'a>(
 ///
 /// Includes:
 /// 1. A skill index (names and descriptions).
-/// 2. Bodies of any skills active for the session, plus their bundled files.
+/// 2. Bodies of any skills active for the session, plus their bundled files
+///    and the skill directory (so the model can resolve relative resource
+///    paths).
 ///
+/// Returns `(section_text, unresolved_names)`. `unresolved_names` lists
+/// every requested active-skill name that was not found during discovery —
+/// the caller should surface these to the operator as a non-fatal warning.
 /// Returns an empty string when there are no skills.
-pub fn build_system_prompt_section(all_skills: &[LoadedSkill], active_names: &[String]) -> String {
+pub fn build_system_prompt_section(
+    all_skills: &[LoadedSkill],
+    active_names: &[String],
+) -> (String, Vec<String>) {
+    let mut unresolved: Vec<String> = Vec::new();
+
     if all_skills.is_empty() {
-        return String::new();
+        // All requested names are unresolved when discovery is empty.
+        for name in active_names {
+            unresolved.push(name.clone());
+        }
+        return (String::new(), unresolved);
     }
 
     let mut out = String::new();
@@ -625,8 +655,14 @@ pub fn build_system_prompt_section(all_skills: &[LoadedSkill], active_names: &[S
                     found_any = true;
                 }
                 out.push_str(&format!(
-                    "### {}\n\n{}\n",
+                    "### {}\n\n{}",
                     loaded.skill.name, loaded.skill.body
+                ));
+                // Include the skill directory so the model can resolve
+                // relative bundled-resource paths from the project root.
+                out.push_str(&format!(
+                    "\n\n**Skill directory:** `{}`\n",
+                    loaded.skill.dir.display()
                 ));
                 // List bundled files so the model knows where scripts live.
                 if !loaded.files.is_empty() {
@@ -636,16 +672,18 @@ pub fn build_system_prompt_section(all_skills: &[LoadedSkill], active_names: &[S
                     }
                     out.push('\n');
                 }
+            } else {
+                unresolved.push(name.clone());
             }
         }
     }
 
     if !opened {
-        return String::new();
+        return (String::new(), unresolved);
     }
 
     out.push_str("<!-- END TRUSTED SKILLS BLOCK -->\n");
-    out
+    (out, unresolved)
 }
 
 // ---------------------------------------------------------------------------
@@ -909,8 +947,15 @@ mod tests {
 
     #[test]
     fn discover_finds_skill() {
+        let mut env = crate::test_support::EnvGuard::lock();
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path().join("project");
+
+        // Isolate HOME so user-global skills don't affect discovery.
+        let empty_home = tmp.path().join("empty-home");
+        std::fs::create_dir_all(&empty_home).unwrap();
+        env.set("HOME", empty_home.to_string_lossy().as_ref());
+
         let skills_dir = project_root
             .join(".gremlins")
             .join("skills")
@@ -1006,18 +1051,20 @@ mod tests {
             files: vec![],
         }];
 
-        let section = build_system_prompt_section(&skills, &["pdf".to_string()]);
+        let (section, unresolved) = build_system_prompt_section(&skills, &["pdf".to_string()]);
         assert!(section.contains("Available skills"));
         assert!(section.contains("**pdf** — PDF tools"));
         assert!(section.contains("Active skills"));
         assert!(section.contains("Use pdftotext."));
         assert!(section.contains("TRUSTED SKILLS BLOCK"));
+        assert!(unresolved.is_empty());
     }
 
     #[test]
     fn build_system_prompt_empty_when_no_skills() {
-        let section = build_system_prompt_section(&[], &[]);
+        let (section, unresolved) = build_system_prompt_section(&[], &[]);
         assert!(section.is_empty());
+        assert!(unresolved.is_empty());
     }
 
     #[test]
@@ -1051,6 +1098,65 @@ mod tests {
     }
 
     // ── Split tool list ──
+
+    #[test]
+    fn build_system_prompt_reports_unresolved_names() {
+        let skills = vec![LoadedSkill {
+            skill: Skill {
+                name: "present".into(),
+                description: "Here".into(),
+                body: "body".into(),
+                source: SkillSource::Project,
+                ..Default::default()
+            },
+            files: vec![],
+        }];
+        let active = vec!["present".to_string(), "gone".to_string()];
+        let (section, unresolved) = build_system_prompt_section(&skills, &active);
+        assert_eq!(unresolved, vec!["gone"]);
+        assert!(section.contains("present"));
+        assert!(!section.contains("gone"));
+    }
+
+    #[test]
+    fn build_system_prompt_includes_skill_directory() {
+        let skills = vec![LoadedSkill {
+            skill: Skill {
+                name: "tool".into(),
+                description: "desc".into(),
+                body: "body".into(),
+                dir: PathBuf::from("/home/user/.gremlins/skills/tool"),
+                source: SkillSource::User,
+                ..Default::default()
+            },
+            files: vec![PathBuf::from("script.sh")],
+        }];
+        let (section, _) = build_system_prompt_section(&skills, &["tool".to_string()]);
+        assert!(section.contains("Skill directory:"));
+        assert!(section.contains("/home/user/.gremlins/skills/tool"));
+        assert!(section.contains("script.sh"));
+    }
+
+    #[test]
+    fn list_skill_files_traverses_subdirectories() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("skill");
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "---\nname: test\n---\nbody\n").unwrap();
+        std::fs::write(dir.join("README.md"), "readme").unwrap();
+        std::fs::write(dir.join("scripts").join("run.py"), "print('hi')").unwrap();
+        std::fs::write(dir.join("scripts").join("helper.sh"), "#!/bin/sh").unwrap();
+
+        let files = list_skill_files(&dir);
+        // Top-level file.
+        assert!(files.contains(&PathBuf::from("README.md")));
+        // Nested files with relative paths.
+        assert!(files.contains(&PathBuf::from("scripts/run.py")));
+        assert!(files.contains(&PathBuf::from("scripts/helper.sh")));
+        // SKILL.md excluded.
+        assert!(!files.contains(&PathBuf::from("SKILL.md")));
+        assert_eq!(files.len(), 3);
+    }
 
     #[test]
     fn split_tool_list_handles_mixed_separators() {

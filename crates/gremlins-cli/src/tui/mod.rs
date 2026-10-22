@@ -2157,7 +2157,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     | ChatEvent::TurnComplete { turn, .. }
                     | ChatEvent::Done { turn, .. }
                     | ChatEvent::Ended { turn, .. }
-                    | ChatEvent::Error { turn, .. } => turn.clone(),
+                    | ChatEvent::Error { turn, .. }
+                    | ChatEvent::SystemWarning { turn, .. } => turn.clone(),
                 };
                 match (&active_turn, &event_turn) {
                     (Some(active), Some(ev)) if active != ev => {
@@ -2302,6 +2303,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // Repaint immediately so the error state is visible
                         // without waiting for the next input event.
                         live_area.compose(&app)?;
+                    }
+                    ChatEvent::SystemWarning { message: msg, .. } => {
+                        if !live_area.has_current_turn() {
+                            continue;
+                        }
+                        let full = format!("⚠ {msg}");
+                        live_area.push_transcript_line(full);
                     }
                 }
             }
