@@ -448,10 +448,7 @@ async fn run_agent(
     } else {
         None
     };
-    let system_prompt = assemble_system_prompt(
-        &prepared.system_prompt(),
-        landscape.as_deref(),
-    );
+    let system_prompt = assemble_system_prompt(&prepared.system_prompt(), landscape.as_deref());
 
     let stage_env = gremlin.env.clone();
 
