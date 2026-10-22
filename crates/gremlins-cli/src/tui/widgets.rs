@@ -729,12 +729,16 @@ impl TranscriptWidget {
 
     /// Reconcile the streamed response against authoritative full text.
     pub fn reconcile_response(&mut self, text: &str) {
-        // Skip any prefix already sealed into the FIFO at tool boundaries.
-        let text = if self.sealed_response_len > 0 && self.sealed_response_len < text.len() {
-            &text[self.sealed_response_len..]
-        } else if self.sealed_response_len > 0 {
-            // Entire text was already sealed — nothing to reconcile.
-            return;
+        // Snap sealed_response_len to a valid UTF-8 char boundary in
+        // `text`, only forward (never backward). The accumulator-length-
+        // based offset may not coincide with a char boundary in the
+        // authoritative text when their byte layouts diverge.
+        let text = if self.sealed_response_len > 0 {
+            if self.sealed_response_len >= text.len() {
+                return;
+            }
+            let offset = text.ceil_char_boundary(self.sealed_response_len);
+            &text[offset..]
         } else {
             text
         };
@@ -3323,6 +3327,28 @@ mod tests {
         transcript.push_response("héllo wörld");
         transcript.reconcile_response("wörld done");
         assert_eq!(transcript.response_accumulator, "héllo wörld done");
+    }
+
+    /// When `sealed_response_len` lands mid-character in the authoritative
+    /// `text`, the offset must snap forward to the next char boundary
+    /// rather than panic.
+    #[test]
+    fn reconcile_response_snaps_sealed_offset_past_char_boundary() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.submit_prompt("prompt".to_string());
+        // Accumulator: "ab" (2 ASCII bytes). Seal via tool chunk so
+        // sealed_response_len becomes 2.
+        transcript.push_response("ab");
+        transcript.push_tool_output_chunk("id1", "tool", "output");
+        // Accumulator is now empty (sealed into FIFO). Push "XYZ".
+        transcript.push_response("XYZ");
+        // Authoritative text: "a" + U+00E9 ("é", 2 bytes) + "XYZ done".
+        // Byte offset 2 lands in the middle of é.
+        // Before the fix this would panic with a char-boundary assertion.
+        transcript.reconcile_response("aéXYZ done");
+        // After snapping sealed offset forward past é, remaining text
+        // "XYZ done" is reconciled against accumulator "XYZ" — full match.
+        assert_eq!(transcript.response_accumulator, "XYZ done");
     }
 
     #[test]
