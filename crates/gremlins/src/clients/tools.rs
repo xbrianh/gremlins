@@ -3366,7 +3366,11 @@ mod tests {
             let perms = std::fs::Permissions::from_mode(0o000);
             std::fs::set_permissions(&broken, perms).unwrap();
         }
-        let args = serde_json::json!({"file_path": ".", "depth": 2}).to_string();
+        // Pass an explicit token_budget so the test never consults the
+        // global config (which can race with other tests that call
+        // init_global() in parallel).
+        let args =
+            serde_json::json!({"file_path": ".", "depth": 2, "token_budget": 100_000}).to_string();
         let out = landscape_invoke(&c, &args).await;
         assert!(
             out.contains("broken.rs") && out.contains("(unreadable)"),
