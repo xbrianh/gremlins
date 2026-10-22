@@ -47,6 +47,11 @@ struct Cli {
     #[arg(long, default_value_t = 3.0)]
     w3: f64,
 
+    /// Weight for the consumer discount (subtracted). More consumers =
+    /// the module boundary is pulling its weight, so drag is reduced.
+    #[arg(long, default_value_t = 2.0)]
+    w4: f64,
+
     /// Added to comprehensibility before taking ln() to avoid ln(0).
     #[arg(long, default_value_t = 0.01)]
     epsilon: f64,
@@ -66,6 +71,12 @@ struct Cli {
     /// (e.g. `drag/comprehensibility-cache.jsonl`).
     #[arg(long)]
     cache: Option<PathBuf>,
+
+    /// Delete the comprehensibility cache file and exit.
+    /// The cache path is resolved from `--cache` if given, otherwise
+    /// the default location is used (same logic as the main run).
+    #[arg(long)]
+    clear_cache: bool,
 
     /// Print drag curves showing how token count, graph complexity, and
     /// comprehensibility contribute to ln_drag at the current weights.
@@ -89,6 +100,7 @@ struct DragConfig {
     w1: f64,
     w2: f64,
     w3: f64,
+    w4: f64,
     epsilon: f64,
 }
 
@@ -104,7 +116,7 @@ struct ModuleDrag {
     /// `exp(ln_drag)`. A monotonic transform of `ln_drag`; it adds no
     /// additional ranking information.
     drag: f64,
-    /// The drag metric: `w1*ln(tokens) + w2*ln(complexity) - w3*ln(comp)`.
+    /// The drag metric: `w1*ln(tokens) + w2*ln(complexity) - w4*ln(1+consumers) - w3*ln(comp)`.
     ln_drag: f64,
 }
 
@@ -123,14 +135,39 @@ async fn main() {
 async fn run() -> Result<(), String> {
     let cli = Cli::parse();
 
+    // Initialize config early so cache path resolution (and --clear-cache)
+    // respect any configured state-root overrides.
+    gremlins::config::init_global().map_err(|e| e.to_string())?;
+
+    // ── resolve cache path (needed by --curves? no, but --clear-cache needs it) ──
+    let cache_path: PathBuf = match &cli.cache {
+        Some(p) => p.clone(),
+        None => {
+            let state = gremlins::config::state_root();
+            state.join("drag").join("comprehensibility-cache.jsonl")
+        }
+    };
+
+    if cli.clear_cache {
+        if cache_path.exists() {
+            std::fs::remove_file(&cache_path).map_err(|e| {
+                format!("failed to remove cache file {}: {e}", cache_path.display())
+            })?;
+            eprintln!("Cache cleared: {}", cache_path.display());
+        } else {
+            eprintln!("No cache file found at: {}", cache_path.display());
+        }
+        return Ok(());
+    }
+
     if cli.curves {
-        print_curves(cli.w1, cli.w2, cli.w3, cli.epsilon);
+        print_curves(cli.w1, cli.w2, cli.w3, cli.w4, cli.epsilon);
         return Ok(());
     }
 
     let path = cli
         .path
-        .ok_or_else(|| "<PATH> is required unless --curves is used".to_string())?;
+        .ok_or_else(|| "<PATH> is required unless --curves or --clear-cache is used".to_string())?;
 
     // 1. Discover packages (Rust + Python, best-effort) anchored at the
     //    user-supplied path so that packages are found regardless of cwd.
@@ -162,15 +199,6 @@ async fn run() -> Result<(), String> {
 
     // ── resolve model & cache path early (both needed for key computation) ──
     let model_spec = resolve_comprehensibility_model(cli.model.as_deref())?;
-
-    // Resolve the effective cache path: --cache overrides the default.
-    let cache_path: PathBuf = match &cli.cache {
-        Some(p) => p.clone(),
-        None => {
-            let state = gremlins::config::state_root();
-            state.join("drag").join("comprehensibility-cache.jsonl")
-        }
-    };
 
     let cache_map = load_cache(&cache_path)?;
     eprintln!(
@@ -287,12 +315,16 @@ async fn run() -> Result<(), String> {
     // 8. Compute the final drag scores once, after any scoring.
     for s in &mut scores {
         s.ln_drag = compute_ln_drag(
-            cli.w1,
-            cli.w2,
-            cli.w3,
-            cli.epsilon,
+            &DragConfig {
+                w1: cli.w1,
+                w2: cli.w2,
+                w3: cli.w3,
+                w4: cli.w4,
+                epsilon: cli.epsilon,
+            },
             s.token_count,
             s.graph_complexity,
+            s.fan_in,
             s.comprehensibility,
         );
         s.drag = s.ln_drag.exp();
@@ -312,6 +344,7 @@ async fn run() -> Result<(), String> {
                 w1: cli.w1,
                 w2: cli.w2,
                 w3: cli.w3,
+                w4: cli.w4,
                 epsilon: cli.epsilon,
             },
             modules: scores,
@@ -433,17 +466,17 @@ fn count_tokens(tokenizer: &tiktoken_rs::CoreBPE, file: &Path) -> Result<usize, 
 /// was removed). The `Option` remains for backward compatibility with
 /// minimal refactoring but the `None` branch is effectively unreachable.
 fn compute_ln_drag(
-    w1: f64,
-    w2: f64,
-    w3: f64,
-    epsilon: f64,
+    config: &DragConfig,
     token_count: usize,
     graph_complexity: usize,
+    consumers: usize,
     comprehensibility: Option<f64>,
 ) -> f64 {
-    let ln = w1 * (token_count.max(1) as f64).ln() + w2 * (graph_complexity.max(1) as f64).ln();
+    let ln = config.w1 * (token_count.max(1) as f64).ln()
+        + config.w2 * (graph_complexity.max(1) as f64).ln()
+        - config.w4 * ((consumers + 1).max(1) as f64).ln();
     match comprehensibility {
-        Some(c) => ln - w3 * (c + epsilon).ln(),
+        Some(c) => ln - config.w3 * (c + config.epsilon).ln(),
         None => ln,
     }
 }
@@ -1171,12 +1204,13 @@ fn remove_trailing_commas(json: &str) -> String {
 // Drag curves
 // ---------------------------------------------------------------------------
 
-fn print_curves(w1: f64, w2: f64, w3: f64, epsilon: f64) {
+fn print_curves(w1: f64, w2: f64, w3: f64, w4: f64, epsilon: f64) {
     let contrib_tokens = |n: usize| -> f64 { w1 * (n.max(1) as f64).ln() };
     let contrib_complexity = |c: usize| -> f64 { w2 * (c.max(1) as f64).ln() };
     let contrib_comp = |c: f64| -> f64 { -w3 * (c + epsilon).ln() };
+    let contrib_consumers = |n: usize| -> f64 { -w4 * ((n + 1).max(1) as f64).ln() };
 
-    println!("Drag curves (w1={w1}, w2={w2}, w3={w3}, ε={epsilon}):\n");
+    println!("Drag curves (w1={w1}, w2={w2}, w3={w3}, w4={w4}, ε={epsilon}):\n");
 
     println!("  Token count (w1={w1}):");
     for tokens in [100, 250, 500, 1000, 2000, 5000] {
@@ -1188,13 +1222,18 @@ fn print_curves(w1: f64, w2: f64, w3: f64, epsilon: f64) {
         println!("    {c:>3}  → {:>7.2}", contrib_complexity(c));
     }
 
+    println!("\n  Consumers discount (w4={w4}, fan-in):");
+    for n in [0, 1, 2, 3, 5, 10] {
+        println!("    {n:>2} consumers  → {:>7.2}", contrib_consumers(n));
+    }
+
     println!("\n  Comprehensibility (w3={w3}, ε={epsilon}):");
     for comp in [0.10, 0.25, 0.50, 0.75, 0.90] {
         println!("    {comp:.2}  → {:>7.2}", contrib_comp(comp));
     }
 
     println!("\n  Higher positive values = more drag.");
-    println!("  Negative comprehensibility contribution reduces drag.");
+    println!("  Negative values (consumers, comprehensibility) reduce drag.");
 }
 
 // ---------------------------------------------------------------------------
@@ -1322,8 +1361,32 @@ mod tests {
 
     #[test]
     fn ln_drag_omits_comprehensibility_term_when_unscored() {
-        let no_comp = compute_ln_drag(1.0, 0.4, 0.4, 0.01, 100, 2, None);
-        let with_comp = compute_ln_drag(1.0, 0.4, 0.4, 0.01, 100, 2, Some(1.0));
+        let no_comp = compute_ln_drag(
+            &DragConfig {
+                w1: 1.0,
+                w2: 0.4,
+                w3: 0.4,
+                w4: 2.0,
+                epsilon: 0.01,
+            },
+            100,
+            2,
+            0,
+            None,
+        );
+        let with_comp = compute_ln_drag(
+            &DragConfig {
+                w1: 1.0,
+                w2: 0.4,
+                w3: 0.4,
+                w4: 2.0,
+                epsilon: 0.01,
+            },
+            100,
+            2,
+            0,
+            Some(1.0),
+        );
         assert!((no_comp - with_comp - 0.4 * 1.01f64.ln()).abs() < 1e-12);
     }
 
