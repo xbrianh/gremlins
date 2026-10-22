@@ -62,6 +62,13 @@ pub struct ActiveRun {
     pub definition: String,
     /// Project associated with the run.
     pub project: String,
+    /// Token usage fields from the daemon's ls response.
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    /// Total cost in USD from the daemon's ls response.
+    pub cost_usd: Option<f64>,
 }
 
 impl ActiveRun {
@@ -71,6 +78,11 @@ impl ActiveRun {
             stage: String::new(),
             definition: String::new(),
             project: String::new(),
+            prompt_tokens: None,
+            completion_tokens: None,
+            reasoning_tokens: None,
+            cached_input_tokens: None,
+            cost_usd: None,
         }
     }
 }
@@ -183,6 +195,26 @@ impl App {
         } else {
             project.to_string()
         };
+        let prompt_tokens = entry
+            .get("prompt_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| existing.as_ref().and_then(|r| r.prompt_tokens));
+        let completion_tokens = entry
+            .get("completion_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| existing.as_ref().and_then(|r| r.completion_tokens));
+        let reasoning_tokens = entry
+            .get("reasoning_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| existing.as_ref().and_then(|r| r.reasoning_tokens));
+        let cached_input_tokens = entry
+            .get("cached_input_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| existing.as_ref().and_then(|r| r.cached_input_tokens));
+        let cost_usd = entry
+            .get("cost_usd")
+            .and_then(|v| v.as_f64())
+            .or_else(|| existing.as_ref().and_then(|r| r.cost_usd));
 
         self.active_runs.insert(
             id,
@@ -191,6 +223,11 @@ impl App {
                 stage,
                 definition,
                 project,
+                prompt_tokens,
+                completion_tokens,
+                reasoning_tokens,
+                cached_input_tokens,
+                cost_usd,
             },
         );
     }
@@ -204,6 +241,11 @@ impl App {
                 stage,
                 definition,
                 project: self.project_name.clone(),
+                prompt_tokens: None,
+                completion_tokens: None,
+                reasoning_tokens: None,
+                cached_input_tokens: None,
+                cost_usd: None,
             },
         );
         self.ensure_watch_selection();
