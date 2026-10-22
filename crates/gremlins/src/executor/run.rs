@@ -553,6 +553,8 @@ async fn run_agent(
         stream_events: gremlin.runtime_config.stream_events.clone(),
         prepopulated_messages,
         compaction_opts,
+        discovered_skills: gremlin.discovered_skills.clone(),
+        active_skills: gremlin.active_skills.clone(),
     };
 
     let effective_model = params
@@ -1310,6 +1312,8 @@ mod tests {
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
             enclosing_model: None,
+            discovered_skills: None,
+            active_skills: None,
         };
         (sandbox, gremlin)
     }

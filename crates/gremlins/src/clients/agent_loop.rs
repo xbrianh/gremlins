@@ -369,8 +369,11 @@ pub(crate) async fn run_agent_loop(
         parent_history: None,
         id_prefix: String::new(),
         telemetry,
+        active_skills: ctx.params.active_skills.clone(),
+        discovered_skills: ctx.params.discovered_skills.clone(),
     };
-    let tool_defs = tools::tool_definitions(opts.tool_filter);
+    let tool_defs =
+        tools::tool_definitions(opts.tool_filter, ctx.params.discovered_skills.is_some());
 
     // Wire up the Task runner before entering the turn loop.
     let runner = super::task::make_task_runner(
@@ -450,10 +453,14 @@ pub(crate) async fn run_agent_loop_nested(
         temperature,
         max_tokens,
     };
-    let tool_defs = tools::tool_definitions(tool_filter);
+    // Nested loops never expose LoadSkill even when the parent has skills.
+    let nested_chat_mode = false;
+    let tool_defs = tools::tool_definitions(tool_filter, nested_chat_mode);
     let mut raw: Option<std::fs::File> = None;
     let mut captured: Option<Vec<serde_json::Value>> = None;
     let mut nested_tool_ctx = tool_ctx.clone();
+    nested_tool_ctx.discovered_skills = None;
+    nested_tool_ctx.active_skills = None;
     // Nested loops keep the parent's stream (so their `ToolResult` events reach
     // the parent TUI) and inherit the parent's tool-output sender rather than
     // owning a second forwarder. Only the top-level loop runs the live-output
@@ -3202,6 +3209,8 @@ mod tests {
                 stream_events: None,
                 prepopulated_messages: None,
                 compaction_opts: None,
+                discovered_skills: None,
+                active_skills: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
@@ -6120,6 +6129,8 @@ mod tests {
                 stream_events: None,
                 tool_output: None,
             },
+            active_skills: None,
+            discovered_skills: None,
         }
     }
 
@@ -6234,7 +6245,7 @@ mod tests {
 
         let mut tool_ctx = test_tool_ctx();
         tool_ctx.sandbox = tools::SandboxMode::Roots(vec![dir.clone()]);
-        let tool_defs = tools::tool_definitions(None);
+        let tool_defs = tools::tool_definitions(None, false);
         let cancel = CancelToken::new();
         let opts = loop_opts(None);
 
@@ -6611,7 +6622,7 @@ mod tests {
         );
 
         let tool_ctx = test_tool_ctx();
-        let tool_defs = tools::tool_definitions(None);
+        let tool_defs = tools::tool_definitions(None, false);
         let cancel = CancelToken::new();
         let opts = loop_opts(None);
         let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();

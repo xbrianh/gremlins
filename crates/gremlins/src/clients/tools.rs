@@ -13,6 +13,7 @@ use super::agent_loop::format_tool_call_parts;
 use super::interactive::StreamEventSender;
 use super::task_kind::TaskKind;
 use crate::landscape::{LandscapeError, LandscapeExplorer};
+use crate::skills::LoadedSkill;
 
 const GREP_MAX_LINES: usize = 2000;
 const BASH_TIMEOUT_SECS: u64 = 120;
@@ -119,6 +120,12 @@ pub(crate) struct AgentLoopRuntime {
     pub(crate) id_prefix: String,
     /// Bundled send-side telemetry channels. Cloned into every nested loop.
     pub(crate) telemetry: AgentLoopTelemetry,
+    /// Shared mutable reference to session active skill names.
+    /// The LoadSkill tool pushes names here; the supervisor reads them
+    /// at the next turn boundary.
+    pub(crate) active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    /// Discovered skills, set when skills are available (chat-only).
+    pub(crate) discovered_skills: Option<Arc<Vec<LoadedSkill>>>,
 }
 
 impl AgentLoopRuntime {
@@ -1235,6 +1242,7 @@ fn check_tool(name: &str, ctx: &AgentLoopRuntime, args: &serde_json::Value) -> O
         ),
         // Network I/O has no filesystem path to sandbox.
         "WebSearch" => None,
+        "LoadSkill" => None,
         _ => None,
     }
 }
@@ -2446,6 +2454,7 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool
         "Done" => Some(vec![("summary", "string", true)]),
         "WebSearch" => Some(vec![("url", "string", true), ("timeout", "integer", false)]),
         "Mischief" => Some(vec![]),
+        "LoadSkill" => Some(vec![("name", "string", true)]),
         _ => None,
     }
 }
@@ -2573,7 +2582,10 @@ pub(crate) async fn invoke(
     args_json: &str,
 ) -> String {
     if let Some(allowed) = &ctx.allowed_tools {
-        if !always_available(name) && !allowed.iter().any(|n| n == name) {
+        // LoadSkill is chat-only; allow it through the gate even when the
+        // default allowlist doesn't include it. The handler will return an
+        // error when skills aren't configured.
+        if !always_available(name) && name != "LoadSkill" && !allowed.iter().any(|n| n == name) {
             return format!("Error: unknown tool {name}");
         }
     }
@@ -2665,6 +2677,7 @@ pub(crate) async fn invoke(
             format!("Done. {summary}")
         }
         "Mischief" => include_str!("mischief_dsl.md").to_string(),
+        "LoadSkill" => load_skill_invoke(ctx, &args),
         other => format!("Error: unknown tool {other}"),
     };
     audit(
@@ -2698,7 +2711,67 @@ pub(crate) async fn invoke(
     res
 }
 
-pub(crate) fn tool_definitions(filter: Option<&[String]>) -> Vec<ToolDefinition> {
+/// Invoke handler for the LoadSkill tool.
+fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String {
+    let name = match args.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => return "Error: missing 'name' for LoadSkill tool".to_string(),
+    };
+
+    let (discovered, active) = match (&ctx.discovered_skills, &ctx.active_skills) {
+        (Some(d), Some(a)) => (d, a),
+        _ => return "Error: LoadSkill is only available in chat sessions".to_string(),
+    };
+
+    // Look up the skill by name.
+    let loaded = match crate::skills::find_skill(discovered, name, true) {
+        Some(l) => l,
+        None => return format!("Error: skill {name:?} not found"),
+    };
+
+    // Reject skills that disable model invocation. Discovery retains them
+    // and `render_index` only hides them, so a model that learns the name
+    // from a file or user message could otherwise load and activate an
+    // operator-only skill. `user-invocable: false` is still allowed — the
+    // model self-selects skills.
+    if loaded.skill.disable_model_invocation {
+        return format!("Error: skill {name:?} is not available for model invocation");
+    }
+
+    // Single critical section: check containment AND push so two
+    // concurrent LoadSkill calls for the same name cannot both pass
+    // the check and both push.
+    let mut active_guard = match active.lock() {
+        Ok(g) => g,
+        Err(e) => return format!("Error: internal lock error: {e}"),
+    };
+    if active_guard.contains(&name.to_string()) {
+        return format!("Skill {name:?} is already active.");
+    }
+    active_guard.push(name.to_string());
+    drop(active_guard);
+
+    // Return a body-free acknowledgement. The skill body is injected as a
+    // trusted system-prompt amendment at the next turn boundary, not written
+    // into the transcript. Putting the body here would leak it into archived
+    // records and cross-turn history, where later turns would replay it
+    // alongside the trusted amendment (doubling the body in context).
+    let n_files = loaded.files.len();
+    let mut result = format!("Skill {name:?} loaded successfully.");
+    if n_files > 0 {
+        result.push_str(&format!(" {n_files} bundled file(s) available."));
+    }
+    result.push_str(&format!(
+        "\n\n**Skill directory:** `{}`\n",
+        loaded.skill.dir.display()
+    ));
+    result
+}
+
+pub(crate) fn tool_definitions(
+    filter: Option<&[String]>,
+    include_load_skill: bool,
+) -> Vec<ToolDefinition> {
     let mut all = vec![
         ToolDefinition {
             name: "Read".into(),
@@ -2943,10 +3016,31 @@ message to finish. The summary parameter briefly describes what you accomplished
             "additionalProperties": false
         }),
     });
+    if include_load_skill {
+        all.push(ToolDefinition {
+            name: "LoadSkill".into(),
+            description: "Load a chat skill by name. Use this when a task matches a skill's description from the available skills index. Returns the skill body and a listing of its bundled files. The skill is then active for the rest of the session.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Name of the skill to load"
+                    }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }),
+        });
+    }
     match filter {
         Some(names) => all
             .into_iter()
-            .filter(|t| always_available(&t.name) || names.iter().any(|n| n == &t.name))
+            .filter(|t| {
+                always_available(&t.name)
+                    || (include_load_skill && t.name == "LoadSkill")
+                    || names.iter().any(|n| n == &t.name)
+            })
             .collect(),
         None => all,
     }
@@ -3023,6 +3117,8 @@ mod tests {
                 stream_events: None,
                 tool_output: None,
             },
+            active_skills: None,
+            discovered_skills: None,
         }
     }
 
@@ -3580,6 +3676,8 @@ mod tests {
                 stream_events: None,
                 tool_output: None,
             },
+            active_skills: None,
+            discovered_skills: None,
         };
         let args = serde_json::json!({"command": "pwd; ls"}).to_string();
         let output = bash_invoke(&c, &args, "tool-test-id").await;
@@ -3617,6 +3715,8 @@ mod tests {
                 stream_events: None,
                 tool_output: None,
             },
+            active_skills: None,
+            discovered_skills: None,
         };
         let expected = canonicalize_or_ancestor(&dir);
         let args = serde_json::json!({"command": "pwd"}).to_string();
@@ -3652,6 +3752,8 @@ mod tests {
                 stream_events: None,
                 tool_output: None,
             },
+            active_skills: None,
+            discovered_skills: None,
         };
         let expected = canonicalize_or_ancestor(&project);
         // Ensure the daemon cwd is genuinely different from project root.
@@ -4038,12 +4140,12 @@ mod tests {
 
     #[test]
     fn tool_definitions_filter() {
-        let all = tool_definitions(None);
+        let all = tool_definitions(None, false);
         assert_eq!(all.len(), 11);
         let all_names: Vec<_> = all.iter().map(|t| t.name.as_str()).collect();
         assert!(all_names.contains(&"Landscape"), "got: {all_names:?}");
         assert!(all_names.contains(&"WebSearch"), "got: {all_names:?}");
-        let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]));
+        let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), false);
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
         // Task, Done, and Mischief are always available regardless of the filter.
         assert_eq!(names, ["Read", "Bash", "Mischief", "Done", "Task"]);
@@ -4052,12 +4154,133 @@ mod tests {
 
     #[test]
     fn task_and_done_always_available() {
-        let filtered = tool_definitions(Some(&["Read".to_string()]));
+        let filtered = tool_definitions(Some(&["Read".to_string()]), false);
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"Task"), "got: {names:?}");
         assert!(names.contains(&"Done"), "got: {names:?}");
         assert!(names.contains(&"Mischief"), "got: {names:?}");
         assert!(names.contains(&"Read"), "got: {names:?}");
+    }
+
+    #[test]
+    fn load_skill_in_tool_definitions_when_chat_mode() {
+        let defs = tool_definitions(None, true);
+        assert_eq!(defs.len(), 12);
+        let names: Vec<_> = defs.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"LoadSkill"), "got: {names:?}");
+    }
+
+    #[test]
+    fn load_skill_not_in_tool_definitions_when_not_chat_mode() {
+        let defs = tool_definitions(None, false);
+        let names: Vec<_> = defs.iter().map(|t| t.name.as_str()).collect();
+        assert!(!names.contains(&"LoadSkill"), "got: {names:?}");
+    }
+
+    #[test]
+    fn load_skill_passes_filter_when_chat_mode() {
+        // With include_load_skill=true, LoadSkill must appear even when a
+        // restrictive filter is active — the default native_block filter
+        // does not include LoadSkill, and chat sessions must always expose it.
+        let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), true);
+        let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"LoadSkill"), "got: {names:?}");
+        assert!(names.contains(&"Read"), "got: {names:?}");
+        assert!(names.contains(&"Bash"), "got: {names:?}");
+    }
+
+    #[test]
+    fn validate_tool_args_load_skill() {
+        // Valid: has name.
+        assert!(validate_tool_args("LoadSkill", &serde_json::json!({"name": "pdf"})).is_none());
+        // Missing required name.
+        let err = validate_tool_args("LoadSkill", &serde_json::json!({})).unwrap();
+        assert!(err.contains("missing 'name'"), "got: {err}");
+        assert!(err.contains("LoadSkill"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn load_skill_invoke_missing_name() {
+        let c = ctx(&tmp());
+        let result = load_skill_invoke(&c, &serde_json::json!({}));
+        assert!(result.starts_with("Error: missing 'name'"), "got: {result}");
+    }
+
+    #[test]
+    fn load_skill_invoke_no_skills_configured() {
+        let c = ctx(&tmp());
+        let result = load_skill_invoke(&c, &serde_json::json!({"name": "pdf"}));
+        assert!(
+            result.starts_with("Error: LoadSkill is only available in chat sessions"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn load_skill_unknown_name() {
+        let mut c = ctx(&tmp());
+        c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
+        c.discovered_skills = Some(Arc::new(vec![]));
+        let result = load_skill_invoke(&c, &serde_json::json!({"name": "nonexistent"}));
+        assert!(
+            result.starts_with("Error: skill \"nonexistent\" not found"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn load_skill_rejects_disable_model_invocation() {
+        let mut c = ctx(&tmp());
+        c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
+        let skill = crate::skills::Skill {
+            name: "secret-ops".into(),
+            description: "operator-only skill".into(),
+            disable_model_invocation: true,
+            user_invocable: true,
+            body: "secret body".into(),
+            dir: PathBuf::from("/tmp"),
+            ..Default::default()
+        };
+        let loaded = crate::skills::LoadedSkill {
+            skill,
+            files: vec![],
+        };
+        c.discovered_skills = Some(Arc::new(vec![loaded]));
+        let result = load_skill_invoke(&c, &serde_json::json!({"name": "secret-ops"}));
+        assert!(
+            result.starts_with("Error: skill \"secret-ops\" is not available for model invocation"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn load_skill_success_body_free() {
+        // A successful LoadSkill must return a body-free acknowledgement.
+        // The skill body is injected as a trusted system-prompt amendment at
+        // the next turn boundary, not written into the transcript.
+        let mut c = ctx(&tmp());
+        c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
+        let skill = crate::skills::Skill {
+            name: "pdf".into(),
+            description: "PDF skill".into(),
+            body: "SECRET SKILL BODY".into(),
+            dir: PathBuf::from("/tmp/pdf-skill"),
+            ..Default::default()
+        };
+        let loaded = crate::skills::LoadedSkill {
+            skill,
+            files: vec![],
+        };
+        c.discovered_skills = Some(Arc::new(vec![loaded]));
+        let result = load_skill_invoke(&c, &serde_json::json!({"name": "pdf"}));
+        assert!(
+            result.starts_with("Skill \"pdf\" loaded successfully."),
+            "got: {result}"
+        );
+        assert!(
+            !result.contains("SECRET SKILL BODY"),
+            "skill body must not leak into tool result: {result}"
+        );
     }
 
     #[test]
@@ -4788,6 +5011,8 @@ mod tests {
                 stream_events: None,
                 tool_output: None,
             },
+            active_skills: None,
+            discovered_skills: None,
         };
         let write_args =
             serde_json::json!({"file_path": target.to_str().unwrap(), "content": "nope"})
@@ -5200,6 +5425,8 @@ mod tests {
                 stream_events: None,
                 tool_output: None,
             },
+            active_skills: None,
+            discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -5230,6 +5457,8 @@ mod tests {
                 stream_events: None,
                 tool_output: None,
             },
+            active_skills: None,
+            discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -5258,6 +5487,8 @@ mod tests {
                 stream_events: None,
                 tool_output: None,
             },
+            active_skills: None,
+            discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": ""}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -5293,6 +5524,8 @@ mod tests {
                 stream_events: None,
                 tool_output: None,
             },
+            active_skills: None,
+            discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Bogus", "prompt": "go"}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -5323,6 +5556,8 @@ mod tests {
                 stream_events: None,
                 tool_output: None,
             },
+            active_skills: None,
+            discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
         assert_eq!(
@@ -5764,6 +5999,8 @@ mod tests {
                 stream_events: None,
                 tool_output: None,
             },
+            active_skills: None,
+            discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
@@ -5796,6 +6033,8 @@ mod tests {
                 stream_events: None,
                 tool_output: None,
             },
+            active_skills: None,
+            discovered_skills: None,
         }
     }
 

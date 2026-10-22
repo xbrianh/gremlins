@@ -137,9 +137,13 @@ struct ClientSession {
     /// Set when teardown has begun. Teardown is idempotent under this flag,
     /// but the flag is *not* set by request-side closure (`closed`).
     torn_down: bool,
-    /// Session-scoped in-memory set of active skill names. Never persisted to
-    /// `state.json` or the transcript. `/clear` resets it.
-    active_skills: Vec<String>,
+    /// Session-scoped set of active skill names. Shared with the agent loop
+    /// so the LoadSkill tool can add names mid-turn. `/clear` resets it.
+    active_skills: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Skill names the operator explicitly requested on the last turn
+    /// (the `skills` field from the chat request). Used to compute the
+    /// delta when merging operator toggles with model LoadSkill pushes.
+    operator_skills: Vec<String>,
 }
 
 impl ClientSession {
@@ -153,7 +157,8 @@ impl ClientSession {
             aux_sockets: Vec::new(),
             closed: false,
             torn_down: false,
-            active_skills: Vec::new(),
+            active_skills: Arc::new(std::sync::Mutex::new(Vec::new())),
+            operator_skills: Vec::new(),
         }
     }
 }
@@ -2327,33 +2332,13 @@ async fn handle_chat(
         }
     };
 
-    // 3. Update the session's active skill set and build the system prompt.
-    //    The supervisor queues the operator's prompt text onto the ChatDefinition
-    //    before each turn; the definition constructs the Agent stage on demand
-    //    via next_stage().
+    // 3. Wait for any in-flight turn to finish so that LoadSkill pushes
+    //    from the running turn are visible in the shared active set before
+    //    we snapshot it. This avoids a race where a queued turn's system
+    //    prompt is built from a stale snapshot.
     //
-    //    Skills are discovered from the project root on each turn so newly
-    //    added skills take effect without a daemon restart. Discovery runs in
-    //    spawn_blocking so filesystem I/O does not stall the async executor.
-    {
-        let mut s = session.lock().await;
-        s.active_skills = requested_skills.clone();
-    }
-    let project_root_for_skills = project_root.clone();
-    let all_skills =
-        tokio::task::spawn_blocking(move || crate::skills::discover(&project_root_for_skills))
-            .await
-            .unwrap_or_default();
-    let active_skills = {
-        let s = session.lock().await;
-        s.active_skills.clone()
-    };
-    let (trusted_section, unresolved_skills) =
-        crate::skills::build_system_prompt_section(&all_skills, &active_skills);
-    let system_prompt = build_chat_system_prompt(context, &trusted_section);
-
-    // 4. Get or create the session's chat gremlin. The session owns at most
-    //    one chat gremlin today, but representations keep a map for multiple.
+    //    The session owns at most one chat gremlin today, but
+    //    representations keep a map for multiple.
     let mut id = reusable_chat_gremlin_id(session).await;
     if let Some(existing) = &id {
         // The gremlin may have been removed from the run map by a control-side
@@ -2369,6 +2354,44 @@ async fn handle_chat(
             id = None;
         }
     }
+
+    // 4. Update the session's active skill set and build the system prompt.
+    //    The supervisor queues the operator's prompt text onto the ChatDefinition
+    //    before each turn; the definition constructs the Agent stage on demand
+    //    via next_stage().
+    //
+    //    Skills are discovered from the project root on each turn so newly
+    //    added skills take effect without a daemon restart. Discovery runs in
+    //    spawn_blocking so filesystem I/O does not stall the async executor.
+    let project_root_for_skills = project_root.clone();
+    let all_skills =
+        tokio::task::spawn_blocking(move || crate::skills::discover(&project_root_for_skills))
+            .await
+            .unwrap_or_default();
+    let (active_skills, active_skills_arc) = {
+        let mut s = session.lock().await;
+        let skills_arc = Arc::clone(&s.active_skills);
+        let prev_operator = std::mem::take(&mut s.operator_skills);
+        let mut guard = skills_arc.lock().unwrap();
+        // Merge operator toggles into the active set: add names the operator
+        // newly requested, remove names the operator explicitly dropped.
+        for name in &requested_skills {
+            if !guard.contains(name) {
+                guard.push(name.clone());
+            }
+        }
+        guard.retain(|name| requested_skills.contains(name) || !prev_operator.contains(name));
+        s.operator_skills = requested_skills.clone();
+        let names = guard.clone();
+        drop(guard);
+        (names, skills_arc)
+    };
+    let (trusted_section, unresolved_skills) =
+        crate::skills::build_system_prompt_section(&all_skills, &active_skills);
+    let system_prompt = build_chat_system_prompt(context, &trusted_section);
+
+    // 5. Get or create the session's chat gremlin (id was resolved in step 3
+    //    after waiting for the in-flight turn).
 
     let id = match id {
         Some(id) => id,
@@ -2410,7 +2433,7 @@ async fn handle_chat(
         s.chat_ids.insert(id.clone());
     }
 
-    // 5. Take the gremlin out of the session, install this turn's definition,
+    // 6. Take the gremlin out of the session, install this turn's definition,
     //    stream channel, and a fresh per-turn cancel token, then drop the
     //    session lock before running so other ops are not serialized.
     let (stream_tx, stream_rx) = tokio::sync::mpsc::channel::<InteractiveEvent>(256);
@@ -2458,6 +2481,9 @@ async fn handle_chat(
     // and reused across turns, so a later turn's operator environment must
     // replace the one captured at creation rather than freeze at first contact.
     gremlin.env = env;
+    // Wire up skills for the LoadSkill tool.
+    gremlin.active_skills = Some(active_skills_arc);
+    gremlin.discovered_skills = Some(Arc::new(all_skills));
 
     // Point the run-map handle's cancel token at this turn so `stop` cancels
     // the in-flight stage rather than a stale persistent token.
@@ -2492,7 +2518,7 @@ async fn handle_chat(
         crate::executor::run::clear_chat_turn_artifact(&gremlin, turn_num).await;
     }
 
-    // 6. Run the stage in the background. Events are forwarded as
+    // 7. Run the stage in the background. Events are forwarded as
     //    unsolicited JSON lines to this connection while the dispatch
     //    loop stays live for cancel_chat and close_session.
     let done = Arc::new(tokio::sync::Notify::new());
@@ -3341,6 +3367,8 @@ fn create_chat_gremlin(
         clean_cmds: Vec::new(),
         enclosing_task_models: None,
         enclosing_model: None,
+        discovered_skills: None,
+        active_skills: None,
     })
 }
 

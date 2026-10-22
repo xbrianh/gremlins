@@ -63,6 +63,10 @@ pub struct RunParams {
     /// (and the first-request/read-time pass inside the agent loop); `None`
     /// keeps the loop's byte-accounting behavior unchanged.
     pub(crate) compaction_opts: Option<CompactionOpts>,
+    /// Skills discovered at turn start. `None` outside chat.
+    pub discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
+    /// Shared mutable reference to active skill names.
+    pub active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 }
 
 impl Clone for RunParams {
@@ -90,6 +94,8 @@ impl Clone for RunParams {
             stream_events: self.stream_events.clone(),
             prepopulated_messages: self.prepopulated_messages.clone(),
             compaction_opts: self.compaction_opts,
+            discovered_skills: self.discovered_skills.clone(),
+            active_skills: self.active_skills.clone(),
         }
     }
 }

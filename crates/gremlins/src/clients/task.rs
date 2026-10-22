@@ -569,6 +569,8 @@ mod tests {
                 stream_events: None,
                 tool_output: None,
             },
+            active_skills: None,
+            discovered_skills: None,
         }
     }
 
