@@ -19,8 +19,8 @@ use lang::PackageInfo;
 struct Cli {
     /// Source file or directory to score. Recognized extensions: .rs, .py.
     /// If a file, scores that module. If a directory, scores all modules
-    /// under it.
-    path: PathBuf,
+    /// under it. Required unless --curves is used.
+    path: Option<PathBuf>,
 
     /// Output JSON instead of a human-readable table.
     #[arg(long)]
@@ -40,11 +40,11 @@ struct Cli {
     w1: f64,
 
     /// Weight for graph_complexity in the ln_drag formula.
-    #[arg(long, default_value_t = 0.4)]
+    #[arg(long, default_value_t = 2.0)]
     w2: f64,
 
     /// Weight for comprehensibility in the ln_drag formula (subtracted).
-    #[arg(long, default_value_t = 0.4)]
+    #[arg(long, default_value_t = 3.0)]
     w3: f64,
 
     /// Added to comprehensibility before taking ln() to avoid ln(0).
@@ -66,6 +66,12 @@ struct Cli {
     /// (e.g. `drag/comprehensibility-cache.jsonl`).
     #[arg(long)]
     cache: Option<PathBuf>,
+
+    /// Print drag curves showing how token count, graph complexity, and
+    /// comprehensibility contribute to ln_drag at the current weights.
+    /// Exits immediately after printing; no modules are scored.
+    #[arg(long)]
+    curves: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -117,12 +123,21 @@ async fn main() {
 async fn run() -> Result<(), String> {
     let cli = Cli::parse();
 
+    if cli.curves {
+        print_curves(cli.w1, cli.w2, cli.w3, cli.epsilon);
+        return Ok(());
+    }
+
+    let path = cli
+        .path
+        .ok_or_else(|| "<PATH> is required unless --curves is used".to_string())?;
+
     // 1. Discover packages (Rust + Python, best-effort) anchored at the
     //    user-supplied path so that packages are found regardless of cwd.
-    let packages = lang::discover_packages(&cli.path);
+    let packages = lang::discover_packages(&path);
 
     // 2. Resolve the input path to a list of recognized source files
-    let target_files = resolve_path_files(&cli.path)?;
+    let target_files = resolve_path_files(&path)?;
 
     // 3. Map files to module paths, tracking which package each belongs to.
     let mut target_modules: Vec<(String, PathBuf, String)> = Vec::new(); // (module, file, pkg_key)
@@ -141,7 +156,7 @@ async fn run() -> Result<(), String> {
             .join(", ");
         return Err(format!(
             "no recognized modules ({exts}) found at: {}",
-            cli.path.display()
+            path.display()
         ));
     }
 
@@ -1150,6 +1165,36 @@ fn remove_trailing_commas(json: &str) -> String {
     }
 
     out
+}
+
+// ---------------------------------------------------------------------------
+// Drag curves
+// ---------------------------------------------------------------------------
+
+fn print_curves(w1: f64, w2: f64, w3: f64, epsilon: f64) {
+    let contrib_tokens = |n: usize| -> f64 { w1 * (n.max(1) as f64).ln() };
+    let contrib_complexity = |c: usize| -> f64 { w2 * (c.max(1) as f64).ln() };
+    let contrib_comp = |c: f64| -> f64 { -w3 * (c + epsilon).ln() };
+
+    println!("Drag curves (w1={w1}, w2={w2}, w3={w3}, ε={epsilon}):\n");
+
+    println!("  Token count (w1={w1}):");
+    for tokens in [100, 250, 500, 1000, 2000, 5000] {
+        println!("    {tokens:>5} tokens  → {:>7.2}", contrib_tokens(tokens));
+    }
+
+    println!("\n  Graph complexity (w2={w2}):");
+    for c in [1, 5, 10, 20, 50, 100] {
+        println!("    {c:>3}  → {:>7.2}", contrib_complexity(c));
+    }
+
+    println!("\n  Comprehensibility (w3={w3}, ε={epsilon}):");
+    for comp in [0.10, 0.25, 0.50, 0.75, 0.90] {
+        println!("    {comp:.2}  → {:>7.2}", contrib_comp(comp));
+    }
+
+    println!("\n  Higher positive values = more drag.");
+    println!("  Negative comprehensibility contribution reduces drag.");
 }
 
 // ---------------------------------------------------------------------------
