@@ -1,5 +1,4 @@
 //! Single-instance executor supervisor.
-//!
 //! The supervisor owns the run map and the accept loop. It holds a
 //! `HashMap<String, RunHandle>` and dispatches socket requests to the
 //! appropriate handler.
@@ -515,7 +514,12 @@ async fn handle_connection(
         dispatch_op(&op, &request, &state_root, &shutdown_tx, &writer).await;
         // Unblock events *after* the response is written so one-shot
         // clients always read the response before any broadcast event.
-        let _ = event_start_tx.send(true);
+        // Skip for "version" — the version handshake is a one-shot
+        // probe before the caller's actual request; unblocking here
+        // would let a run event arrive before the real response.
+        if op != "version" {
+            let _ = event_start_tx.send(true);
+        }
     }
 
     // Abort the event-forwarding subtask so it doesn't leak the write
@@ -965,6 +969,7 @@ async fn dispatch_op(
     writer: &SharedWriter,
 ) {
     let resp = match op {
+        "version" => ok_response(serde_json::json!({"version": crate::VERSION})),
         "launch" => handle_launch(request, state_root, shutdown_tx).await,
         "create_session" => handle_create_session(request, state_root, shutdown_tx).await,
         "stop" => {

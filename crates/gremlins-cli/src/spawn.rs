@@ -177,6 +177,44 @@ pub(crate) async fn send_request(
     }
 }
 
+/// Send a version-check request and compare the daemon's reported version
+/// to the CLI's own build version. Returns an error on mismatch or when the
+/// daemon is too old to understand the "version" op.
+pub(crate) async fn check_version(stream: &mut tokio::net::UnixStream) -> Result<(), String> {
+    let resp = send_request(stream, serde_json::json!({"op": "version"})).await?;
+
+    if resp.get("type").and_then(|v| v.as_str()) == Some("error") {
+        let msg = resp.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        if msg.contains("unknown op") {
+            return Err(format!(
+                "version mismatch: CLI is {}, daemon is too old to report its version",
+                gremlins::VERSION,
+            ));
+        }
+        return Err(format!("version check failed: {msg}"));
+    }
+
+    let daemon_version = match resp.get("version").and_then(|v| v.as_str()) {
+        Some(v) => v,
+        None => {
+            return Err(
+                "version check failed: daemon returned an unrecognized response (no version field)"
+                    .to_string(),
+            );
+        }
+    };
+
+    if daemon_version != gremlins::VERSION {
+        return Err(format!(
+            "version mismatch: CLI is {}, daemon is {}",
+            gremlins::VERSION,
+            daemon_version,
+        ));
+    }
+
+    Ok(())
+}
+
 /// Check if the error is "connection refused" (no executor running).
 pub(crate) fn is_connection_refused(error: &str) -> bool {
     error.contains("Connection refused")

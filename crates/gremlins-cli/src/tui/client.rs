@@ -410,11 +410,14 @@ pub async fn connect() -> Result<
         raw_tx,
     });
 
+    // 0. Version-check before sending anything else.
+    let mut control_stream = crate::spawn::ensure_executor().await?;
+    crate::spawn::check_version(&mut control_stream).await?;
+
     // 1. Connect the control socket and hand it to a permanent reader
     //    before sending `create_session`, so the create response and any
     //    events that follow it are never dropped from a transient
     //    `BufReader`.
-    let control_stream = crate::spawn::ensure_executor().await?;
     let (control_read_half, mut control_write_half) = control_stream.into_split();
     let mut control_reader = BufReader::new(control_read_half);
 
