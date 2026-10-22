@@ -24,7 +24,7 @@
 #         and edits the target to reduce drag.
 #      b. Commit — git add + commit in the isolated worktree.
 #      c. Score + converge — run gremlins-drag on the refactored code.  If
-#         the max ln_drag did not improve, write a convergence marker
+#         the sum of drag did not improve, write a convergence marker
 #         (stopping the loop early).  Otherwise update the tracking best.
 #   3. Land — merge the worktree back into the main branch (manual via
 #      `gremlins land`).
@@ -87,8 +87,8 @@ stages:
           gremlins-drag --json --comprehensibility-estimates $EST {target} $MODEL_ARG > {report}
         - cp {report} "$GREMLINS_STATE_DIR/drag_current.json"
         - |
-          cat {report} | python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(m["ln_drag"] for m in data["modules"]))' > {drag_best}
-        - 'echo "baseline sum ln_drag = $(cat {drag_best})"'
+          cat {report} | python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(m["drag"] for m in data["modules"]))' > {drag_best}
+        - 'echo "baseline sum drag = $(cat {drag_best})"'
 
   # ── drag curves (generated from current weights) ─────────────────────
   - name: curves
@@ -153,43 +153,47 @@ stages:
             {drag_context}
 
             ## What drag means
-            ln_drag = w1*ln(token_count) + w2*ln(graph_complexity) − w4*ln(1 + consumers) − w3*ln(comprehensibility + ε)
+            drag = token_count^w1 · (1+deps)^w2 · (1 + k·(1−comprehensibility))
 
             Higher drag = the module is harder to maintain and change. The optimizer
-            minimizes the **sum** of ln_drag across all scored modules — not any
-            single module in isolation.
+            minimizes the **sum** of drag across all scored modules — not any
+            single module in isolation. `deps` is the total token count of every
+            module transitively reachable from the module (excluding itself), so
+            a module drags its whole downstream footprint with it.
 
-            ## Drag curves (how each term responds to change)
+            ## Drag curves (how each factor responds to change)
 
             {curves}
 
             ## Strategy
             1. **Reduce token_count** — extract helpers, deduplicate, trim boilerplate,
                remove dead code. This is the largest absolute contributor.
-            2. **Lower graph_complexity** — flatten deep nesting, decouple cross-cutting
-               concerns, reduce fan-in/fan-out.
-            3. **Increase consumers** — modules depended on by many others are carrying
-               their weight. Inlining a module with few consumers into its sole
-               consumer removes a low-value boundary and reduces total drag.
-            4. **Improve comprehensibility** — clearer names, simpler control flow,
-               better documentation where it aids understanding. Highest leverage
-               per unit of change with w3=3.0.
+            2. **Lower deps/footprint** — decouple cross-cutting concerns and avoid
+               deep dependency chains; every downstream token counts against the
+               modules that reach it.
+            3. **Improve comprehensibility** — clearer names, simpler control flow,
+               better documentation where it aids understanding. The penalty is
+               multiplicative: low comprehensibility scales the whole footprint by
+               up to (1+k).
 
             ### Splitting trap (CRITICAL)
-            Splitting one module into two INCREASES total drag unless the new
-            modules gain significant consumers or comprehensibility improves
-            enough to compensate:
+            Splitting one module into two usually INCREASES total drag because
+            each piece still carries the shared transitive footprint (deps):
 
-            One module (2000 tokens, complexity 50, 3 consumers, comp 0.5):
-              ln_drag = 7.60 + 7.82 − 2.77 + 2.02 = 14.67
+            One module (2000 tokens, deps 3000, comp 0.5, w1=1, w2=0.5, k=1):
+              drag = 2000 · (1+3000)^0.5 · 1.5 ≈ 2000 · 54.8 · 1.5 ≈ 164,400
 
-            Two modules (1000 tokens each, same complexity, 0 consumers, same comp):
-              ln_drag = (6.91 + 7.82 − 0.00 + 2.02) + (6.91 + 7.82 − 0.00 + 2.02) = 33.50
+            Split into A (1000 tokens) and B (1000 tokens), where A depends on B
+            and both still depend on the shared downstream deps (3000 tokens):
+              drag(A) = 1000 · (1+4000)^0.5 · 1.5 ≈ 1000 · 63.3 · 1.5 ≈ 94,950
+              drag(B) = 1000 · (1+3000)^0.5 · 1.5 ≈ 1000 · 54.8 · 1.5 ≈ 82,200
+              total ≈ 177,150
 
-            → Splitting more than DOUBLED drag! Only split if the resulting modules
-              gain consumers or are significantly simpler (lower complexity) or
-              more comprehensible. Prefer inlining, deduplication, and dead-code
-              removal over splitting.
+            → Splitting increased drag even though token_count was unchanged, because
+              both halves still carry the shared deps footprint. Only split if the
+              resulting modules are dramatically smaller, more comprehensible, or
+              sever real dependency edges. Prefer inlining, deduplication, and
+              dead-code removal over splitting.
 
             ## Rules
             - Do NOT break correctness. After changes, verify the code still
@@ -199,7 +203,7 @@ stages:
             - If no safe refactoring can reduce drag, say so clearly and explain why.
             - **Tests and drag:** `gremlins-drag` reads entire source files — it does
               NOT strip `#[cfg(test)]` modules or `tests/` directories. Every `.rs`
-              file found under the target directory contributes tokens, fan-in/out,
+              file found under the target directory contributes tokens, deps/footprint,
               and comprehensibility. Moving tests out of a Rust module (e.g. from a
               `#[cfg(test)] mod tests` block into `tests/foo_test.rs`) does NOT
               reduce drag — it just redistributes it to another scored module.
@@ -268,7 +272,7 @@ stages:
             - |
               BEST="{drag_best_val}"
               [ -z "$BEST" ] && BEST=0
-              CURR=$(cat {report} | python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(m["ln_drag"] for m in data["modules"]))')
+              CURR=$(cat {report} | python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(m["drag"] for m in data["modules"]))')
               if awk "BEGIN{exit !($CURR >= $BEST)}"; then
                 touch {converged}
                 echo "converged — drag $CURR >= best $BEST"
@@ -293,11 +297,11 @@ stages:
         - |
           BEST="{drag_best_val}"
           [ -z "$BEST" ] && BEST="N/A"
-          BASE_SUM=$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(round(sum(m["ln_drag"] for m in data["modules"]), 2))' < {baseline_report})
+          BASE_SUM=$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(round(sum(m["drag"] for m in data["modules"]), 2))' < {baseline_report})
           {
             echo "drag-optimizer: reduce drag for {target}"
             echo ""
-            echo "Baseline ln_drag sum: $BASE_SUM \u2192 Best: $BEST"
+            echo "Baseline drag sum: $BASE_SUM \u2192 Best: $BEST"
             echo "Target: {target}"
           } > {commit_message}
 

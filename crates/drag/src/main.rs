@@ -1,4 +1,7 @@
 mod lang;
+mod scoring;
+
+use scoring::{compute_deps, compute_drag};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -35,26 +38,17 @@ struct Cli {
     #[arg(long, default_value = "o200k_base")]
     tokenizer: String,
 
-    /// Weight for token_count in the ln_drag formula.
+    /// Weight for token_count in the drag formula.
     #[arg(long, default_value_t = 1.0)]
     w1: f64,
 
-    /// Weight for graph_complexity in the ln_drag formula.
-    #[arg(long, default_value_t = 2.0)]
+    /// Weight for the footprint/deps term in the drag formula.
+    #[arg(long, default_value_t = 0.5)]
     w2: f64,
 
-    /// Weight for comprehensibility in the ln_drag formula (subtracted).
-    #[arg(long, default_value_t = 3.0)]
-    w3: f64,
-
-    /// Weight for the consumer discount (subtracted). More consumers =
-    /// the module boundary is pulling its weight, so drag is reduced.
-    #[arg(long, default_value_t = 2.0)]
-    w4: f64,
-
-    /// Added to comprehensibility before taking ln() to avoid ln(0).
-    #[arg(long, default_value_t = 0.01)]
-    epsilon: f64,
+    /// Multiplier for the comprehensibility penalty in the drag formula.
+    #[arg(long, default_value_t = 1.0)]
+    k: f64,
 
     /// Print the resolved model spec and diagnostic information.
     #[arg(short = 'v', long)]
@@ -78,8 +72,8 @@ struct Cli {
     #[arg(long)]
     clear_cache: bool,
 
-    /// Print drag curves showing how token count, graph complexity, and
-    /// comprehensibility contribute to ln_drag at the current weights.
+    /// Print drag curves showing how token count, dependency footprint, and
+    /// comprehensibility contribute to drag at the current weights.
     /// Exits immediately after printing; no modules are scored.
     #[arg(long)]
     curves: bool,
@@ -99,9 +93,7 @@ struct DragReport {
 struct DragConfig {
     w1: f64,
     w2: f64,
-    w3: f64,
-    w4: f64,
-    epsilon: f64,
+    k: f64,
 }
 
 #[derive(Serialize)]
@@ -109,15 +101,14 @@ struct ModuleDrag {
     module: String,
     file: String,
     token_count: usize,
-    fan_in: usize,
-    fan_out: usize,
-    graph_complexity: usize,
+    /// Total token count of the module's transitive dependency closure
+    /// (excluding the module itself).
+    deps: usize,
+    /// `token_count + deps` — the module's full footprint.
+    footprint: usize,
     comprehensibility: Option<f64>,
-    /// `exp(ln_drag)`. A monotonic transform of `ln_drag`; it adds no
-    /// additional ranking information.
+    /// The drag metric: `tokens^w1 · (1+deps)^w2 · (1 + k·(1−comp))`.
     drag: f64,
-    /// The drag metric: `w1*ln(tokens) + w2*ln(complexity) - w4*ln(1+consumers) - w3*ln(comp)`.
-    ln_drag: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +152,7 @@ async fn run() -> Result<(), String> {
     }
 
     if cli.curves {
-        print_curves(cli.w1, cli.w2, cli.w3, cli.w4, cli.epsilon);
+        print_curves(cli.w1, cli.w2, cli.k);
         return Ok(());
     }
 
@@ -227,7 +218,7 @@ async fn run() -> Result<(), String> {
         eprintln!("  {cache_hit_count} modules have complete cache hits");
     }
 
-    // 4. Build dependency graph (fan-out per package in parallel).
+    // 4. Build dependency graph (one graph per package, in parallel).
     let mut edges: Vec<(String, String)> = Vec::new();
 
     let relevant_packages: HashSet<String> = target_modules
@@ -261,35 +252,46 @@ async fn run() -> Result<(), String> {
         }
     }
 
-    // 5. Compute fan-in / fan-out
-    let (fan_out_map, fan_in_map) = compute_degrees(&edges);
-
-    // 6. Count tokens and assemble per-module metrics.
-    //    Use cached values when available; compute fresh otherwise.
+    // 5. Load the tokenizer once and count tokens for every in-package
+    //    module.  `deps(m)` sums token counts across a module's transitive
+    //    dependency closure, so the full package source tree is needed even
+    //    when only a subset of modules is scored.
     let tokenizer = parse_tokenizer(&cli.tokenizer)?;
     let bpe = tiktoken_rs::bpe_for_tokenizer(tokenizer)
         .map_err(|e| format!("failed to load tokenizer {}: {e}", cli.tokenizer))?;
 
+    let mut token_counts: HashMap<String, usize> = HashMap::new();
+    for pkg in &scoring_packages {
+        let files = lang::package_files(pkg)
+            .map_err(|e| format!("failed to enumerate files for {}: {e}", pkg.name()))?;
+        for file in files {
+            if let Some((module, _)) = lang::file_to_module(&file, &packages) {
+                let n = count_tokens(bpe, &file)?;
+                token_counts.insert(module, n);
+            }
+        }
+    }
+
+    // 6. Compute transitive dependency footprints and assemble per-module
+    //    metrics.  Comprehensibility stays scoped to `--target` modules only.
+    let deps_map = compute_deps(&edges, &token_counts);
+
     let mut scores: Vec<ModuleDrag> = Vec::new();
     for (module, file, _pkg_key) in &target_modules {
-        // Token count is tokenizer-dependent and always recomputed fresh.
-        // Cached token counts are not reused because the cache key does not
-        // include the tokenizer selection.
-        let token_count = count_tokens(bpe, file)?;
-        let fan_out = fan_out_map.get(module).copied().unwrap_or(0);
-        let fan_in = fan_in_map.get(module).copied().unwrap_or(0);
-        let graph_complexity = fan_in + fan_out;
+        let token_count = match token_counts.get(module) {
+            Some(n) => *n,
+            None => count_tokens(bpe, file)?,
+        };
+        let deps = deps_map.get(module).copied().unwrap_or(0);
 
         scores.push(ModuleDrag {
             module: module.clone(),
             file: file.to_string_lossy().into_owned(),
             token_count,
-            fan_in,
-            fan_out,
-            graph_complexity,
+            deps,
+            footprint: token_count + deps,
             comprehensibility: None,
             drag: 0.0,
-            ln_drag: 0.0,
         });
     }
 
@@ -314,26 +316,22 @@ async fn run() -> Result<(), String> {
 
     // 8. Compute the final drag scores once, after any scoring.
     for s in &mut scores {
-        s.ln_drag = compute_ln_drag(
+        s.drag = compute_drag(
             &DragConfig {
                 w1: cli.w1,
                 w2: cli.w2,
-                w3: cli.w3,
-                w4: cli.w4,
-                epsilon: cli.epsilon,
+                k: cli.k,
             },
             s.token_count,
-            s.graph_complexity,
-            s.fan_in,
+            s.deps,
             s.comprehensibility,
         );
-        s.drag = s.ln_drag.exp();
     }
 
-    // 9. Sort by ln_drag descending
+    // 9. Sort by drag descending
     scores.sort_by(|a, b| {
-        b.ln_drag
-            .partial_cmp(&a.ln_drag)
+        b.drag
+            .partial_cmp(&a.drag)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -343,9 +341,7 @@ async fn run() -> Result<(), String> {
             config: DragConfig {
                 w1: cli.w1,
                 w2: cli.w2,
-                w3: cli.w3,
-                w4: cli.w4,
-                epsilon: cli.epsilon,
+                k: cli.k,
             },
             modules: scores,
         };
@@ -428,24 +424,7 @@ fn parse_tokenizer(name: &str) -> Result<tiktoken_rs::tokenizer::Tokenizer, Stri
 // ---------------------------------------------------------------------------
 // Graph computations
 // ---------------------------------------------------------------------------
-
-/// Compute fan-out and fan-in maps from edge list.
-/// Self-edges (src == dst) are excluded — they do not represent
-/// inter-module dependencies and inflate complexity.
-fn compute_degrees(edges: &[(String, String)]) -> (HashMap<String, usize>, HashMap<String, usize>) {
-    let mut fan_out: HashMap<String, usize> = HashMap::new();
-    let mut fan_in: HashMap<String, usize> = HashMap::new();
-
-    for (src, dst) in edges {
-        if src == dst {
-            continue;
-        }
-        *fan_out.entry(src.clone()).or_insert(0) += 1;
-        *fan_in.entry(dst.clone()).or_insert(0) += 1;
-    }
-
-    (fan_out, fan_in)
-}
+// (see `crates/drag/src/scoring.rs` for compute_deps and compute_drag)
 
 // ---------------------------------------------------------------------------
 // Token counting
@@ -460,26 +439,10 @@ fn count_tokens(tokenizer: &tiktoken_rs::CoreBPE, file: &Path) -> Result<usize, 
     Ok(tokenizer.encode_with_special_tokens(&source).len())
 }
 
-/// Compute the log-drag score for a module.
-///
-/// Comprehensibility is always scored now (the `--comprehensibility` flag
-/// was removed). The `Option` remains for backward compatibility with
-/// minimal refactoring but the `None` branch is effectively unreachable.
-fn compute_ln_drag(
-    config: &DragConfig,
-    token_count: usize,
-    graph_complexity: usize,
-    consumers: usize,
-    comprehensibility: Option<f64>,
-) -> f64 {
-    let ln = config.w1 * (token_count.max(1) as f64).ln()
-        + config.w2 * (graph_complexity.max(1) as f64).ln()
-        - config.w4 * ((consumers + 1).max(1) as f64).ln();
-    match comprehensibility {
-        Some(c) => ln - config.w3 * (c + config.epsilon).ln(),
-        None => ln,
-    }
-}
+// ---------------------------------------------------------------------------
+// Drag formula
+// ---------------------------------------------------------------------------
+// `compute_drag` lives in `crates/drag/src/scoring.rs`.
 
 // ---------------------------------------------------------------------------
 // Comprehensibility scoring
@@ -519,10 +482,11 @@ struct ComprehensibilityScores {
 ///
 /// **What the cache actually fast-paths:** only `token_count` and
 /// `comprehensibility` are restored on a cache hit. The remaining fields
-/// (`file`, `model`, `fan_in`, `fan_out`, `graph_complexity`, `breakdown`)
-/// are stored for inspection/debugging but are never read back — graph
-/// metrics are position/context-dependent and always recomputed fresh.
+/// (`file`, `model`, `breakdown`) are stored for inspection/debugging but
+/// are never read back — dependency footprints are position/context-dependent
+/// and always recomputed fresh.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 struct CacheEntry {
     /// BLAKE3 hash of (content || "\0" || model_uri),
     /// hex-encoded, first 16 chars. This is the lookup key.
@@ -533,12 +497,6 @@ struct CacheEntry {
     model: String,
     /// Token count from tiktoken BPE (model-independent; stored here for convenience).
     token_count: usize,
-    /// Fan-in count from the dependency graph (model-independent).
-    fan_in: usize,
-    /// Fan-out count from the dependency graph (model-independent).
-    fan_out: usize,
-    /// Graph complexity = fan_in + fan_out.
-    graph_complexity: usize,
     /// Number of estimates used to produce the median.
     #[serde(default = "default_estimates")]
     estimates: usize,
@@ -647,7 +605,7 @@ struct CompEstimate {
     abs_path: String,
     model_spec: String,
     cache_key: String,
-    cached_metrics: Option<(usize, usize, usize, usize)>,
+    token_count: usize,
     breakdown: ComprehensibilityScores,
 }
 
@@ -694,15 +652,10 @@ async fn score_comprehensibility(
     // Scores collected so far (cache hits go straight here).
     let mut by_module: HashMap<String, Vec<f64>> = HashMap::new();
 
-    // Build a module → metrics lookup from scores for cache-miss writeback.
-    let metrics: HashMap<String, (usize, usize, usize, usize)> = scores
+    // Build a module → token count lookup from scores for cache-miss writeback.
+    let module_tokens: HashMap<String, usize> = scores
         .iter()
-        .map(|s| {
-            (
-                s.module.clone(),
-                (s.token_count, s.fan_in, s.fan_out, s.graph_complexity),
-            )
-        })
+        .map(|s| (s.module.clone(), s.token_count))
         .collect();
 
     for (module, file, _pkg) in modules.iter() {
@@ -739,7 +692,7 @@ async fn score_comprehensibility(
         let fence = lang::code_fence(file);
         let prompt = format!("SOURCE FILE ({module}):\n\n```{fence}\n{source}\n```");
 
-        let cached_metrics = metrics.get(module.as_str()).copied();
+        let token_count = module_tokens.get(module.as_str()).copied().unwrap_or(0);
 
         for _ in 0..estimates {
             let module = module.clone();
@@ -770,7 +723,7 @@ async fn score_comprehensibility(
                                 abs_path,
                                 model_spec,
                                 cache_key,
-                                cached_metrics,
+                                token_count,
                                 breakdown: c,
                             });
                         }
@@ -872,24 +825,18 @@ async fn score_comprehensibility(
         // ── Write a single cache entry with the median score (cache-miss only) ──
         if let Some(estimates_vec) = estimates_map.get(module.as_str()) {
             if let Some(first) = estimates_vec.first() {
-                if let Some(metrics) = first.cached_metrics {
-                    let cp = &cache_state;
-                    let (tc, fi, fo, gc) = metrics;
-                    let entry = CacheEntry {
-                        key: first.cache_key.clone(),
-                        file: first.abs_path.clone(),
-                        model: first.model_spec.clone(),
-                        token_count: tc,
-                        fan_in: fi,
-                        fan_out: fo,
-                        graph_complexity: gc,
-                        estimates,
-                        comprehensibility: med,
-                        breakdown: first.breakdown.clone(),
-                    };
-                    if let Err(e) = append_cache_entry(cp, &entry) {
-                        eprintln!("  [{module}] WARNING: failed to append cache entry: {e}");
-                    }
+                let cp = &cache_state;
+                let entry = CacheEntry {
+                    key: first.cache_key.clone(),
+                    file: first.abs_path.clone(),
+                    model: first.model_spec.clone(),
+                    token_count: first.token_count,
+                    estimates,
+                    comprehensibility: med,
+                    breakdown: first.breakdown.clone(),
+                };
+                if let Err(e) = append_cache_entry(cp, &entry) {
+                    eprintln!("  [{module}] WARNING: failed to append cache entry: {e}");
                 }
             }
         }
@@ -1204,36 +1151,31 @@ fn remove_trailing_commas(json: &str) -> String {
 // Drag curves
 // ---------------------------------------------------------------------------
 
-fn print_curves(w1: f64, w2: f64, w3: f64, w4: f64, epsilon: f64) {
-    let contrib_tokens = |n: usize| -> f64 { w1 * (n.max(1) as f64).ln() };
-    let contrib_complexity = |c: usize| -> f64 { w2 * (c.max(1) as f64).ln() };
-    let contrib_comp = |c: f64| -> f64 { -w3 * (c + epsilon).ln() };
-    let contrib_consumers = |n: usize| -> f64 { -w4 * ((n + 1).max(1) as f64).ln() };
+fn print_curves(w1: f64, w2: f64, k: f64) {
+    let factor_tokens = |n: usize| -> f64 { (n as f64).powf(w1) };
+    let factor_deps = |d: usize| -> f64 { (1.0 + d as f64).powf(w2) };
+    let factor_comp = |c: f64| -> f64 { 1.0 + k * (1.0 - c) };
 
-    println!("Drag curves (w1={w1}, w2={w2}, w3={w3}, w4={w4}, ε={epsilon}):\n");
+    println!("Drag curves (w1={w1}, w2={w2}, k={k}):\n");
+    println!("  drag = tokens^w1 · (1+deps)^w2 · (1 + k·(1−comp))");
 
-    println!("  Token count (w1={w1}):");
+    println!("  Token count factor (tokens^w1, w1={w1}):");
     for tokens in [100, 250, 500, 1000, 2000, 5000] {
-        println!("    {tokens:>5} tokens  → {:>7.2}", contrib_tokens(tokens));
+        println!("    {tokens:>5} tokens  → {:>10.3}", factor_tokens(tokens));
     }
 
-    println!("\n  Graph complexity (w2={w2}):");
-    for c in [1, 5, 10, 20, 50, 100] {
-        println!("    {c:>3}  → {:>7.2}", contrib_complexity(c));
+    println!("\n  Dependency footprint factor ((1+deps)^w2, w2={w2}):");
+    for deps in [0, 5, 10, 50, 100, 500, 1000, 5000] {
+        println!("    {deps:>5} deps  → {:>10.3}", factor_deps(deps));
     }
 
-    println!("\n  Consumers discount (w4={w4}, fan-in):");
-    for n in [0, 1, 2, 3, 5, 10] {
-        println!("    {n:>2} consumers  → {:>7.2}", contrib_consumers(n));
+    println!("\n  Comprehensibility factor (1 + k·(1−comp), k={k}):");
+    for comp in [0.10, 0.25, 0.50, 0.75, 0.90, 1.00] {
+        println!("    {comp:.2}  → {:>10.3}", factor_comp(comp));
     }
 
-    println!("\n  Comprehensibility (w3={w3}, ε={epsilon}):");
-    for comp in [0.10, 0.25, 0.50, 0.75, 0.90] {
-        println!("    {comp:.2}  → {:>7.2}", contrib_comp(comp));
-    }
-
-    println!("\n  Higher positive values = more drag.");
-    println!("  Negative values (consumers, comprehensibility) reduce drag.");
+    println!("\n  All factors are multiplied together; larger values mean more drag.");
+    println!("  Comprehensibility below 1.0 amplifies drag by up to (1+k).");
 }
 
 // ---------------------------------------------------------------------------
@@ -1247,40 +1189,38 @@ fn print_human_table(scores: &[ModuleDrag]) {
 
     if has_comp {
         println!(
-            "{:<55} {:>8} {:>8} {:>8} {:>12} {:>6} {:>10}",
-            "module", "tokens", "fan-in", "fan-out", "complexity", "comp", "drag (ln)"
+            "{:<55} {:>8} {:>10} {:>10} {:>6} {:>14}",
+            "module", "tokens", "deps", "footprint", "comp", "drag"
         );
-        println!("{}", "-".repeat(116));
+        println!("{}", "-".repeat(112));
     } else {
         println!(
-            "{:<55} {:>8} {:>8} {:>8} {:>12} {:>10}",
-            "module", "tokens", "fan-in", "fan-out", "complexity", "drag (ln)"
+            "{:<55} {:>8} {:>10} {:>10} {:>14}",
+            "module", "tokens", "deps", "footprint", "drag"
         );
-        println!("{}", "-".repeat(110));
+        println!("{}", "-".repeat(106));
     }
 
     for s in scores {
         if has_comp {
             let c = s.comprehensibility.expect("has_comp guarantees Some");
             println!(
-                "{:<55} {:>8} {:>8} {:>8} {:>12} {:>6.2} {:>10.2}",
+                "{:<55} {:>8} {:>10} {:>10} {:>6.2} {:>14.1}",
                 truncate(&s.module, 54),
                 s.token_count,
-                s.fan_in,
-                s.fan_out,
-                s.graph_complexity,
+                s.deps,
+                s.footprint,
                 c,
-                s.ln_drag,
+                s.drag,
             );
         } else {
             println!(
-                "{:<55} {:>8} {:>8} {:>8} {:>12} {:>10.2}",
+                "{:<55} {:>8} {:>10} {:>10} {:>14.1}",
                 truncate(&s.module, 54),
                 s.token_count,
-                s.fan_in,
-                s.fan_out,
-                s.graph_complexity,
-                s.ln_drag,
+                s.deps,
+                s.footprint,
+                s.drag,
             );
         }
     }
@@ -1323,71 +1263,10 @@ mod tests {
     }
 
     #[test]
-    fn computes_degrees() {
-        let edges = vec![
-            ("a".to_string(), "b".to_string()),
-            ("a".to_string(), "c".to_string()),
-            ("b".to_string(), "c".to_string()),
-        ];
-        let (fan_out, fan_in) = compute_degrees(&edges);
-        assert_eq!(fan_out.get("a"), Some(&2));
-        assert_eq!(fan_out.get("b"), Some(&1));
-        assert_eq!(fan_in.get("c"), Some(&2));
-        assert_eq!(fan_in.get("b"), Some(&1));
-    }
-
-    #[test]
-    fn self_edges_filtered() {
-        let edges = vec![
-            ("a".to_string(), "a".to_string()),
-            ("a".to_string(), "b".to_string()),
-            ("b".to_string(), "b".to_string()),
-        ];
-        let (fan_out, fan_in) = compute_degrees(&edges);
-        // Self-edges are excluded; only a→b is counted.
-        assert_eq!(fan_out.get("a"), Some(&1));
-        assert_eq!(fan_in.get("b"), Some(&1));
-        // a→a and b→b are not present in either map.
-        assert_eq!(fan_in.get("a"), None);
-        assert_eq!(fan_out.get("b"), None);
-    }
-
-    #[test]
     fn truncate_is_char_boundary_safe() {
         // "é" is two bytes; cutting at byte 1 would be a non-boundary.
         assert_eq!(truncate("éx", 1), "");
         assert_eq!(truncate("abc", 2), "ab");
-    }
-
-    #[test]
-    fn ln_drag_omits_comprehensibility_term_when_unscored() {
-        let no_comp = compute_ln_drag(
-            &DragConfig {
-                w1: 1.0,
-                w2: 0.4,
-                w3: 0.4,
-                w4: 2.0,
-                epsilon: 0.01,
-            },
-            100,
-            2,
-            0,
-            None,
-        );
-        let with_comp = compute_ln_drag(
-            &DragConfig {
-                w1: 1.0,
-                w2: 0.4,
-                w3: 0.4,
-                w4: 2.0,
-                epsilon: 0.01,
-            },
-            100,
-            2,
-            0,
-            Some(1.0),
-        );
-        assert!((no_comp - with_comp - 0.4 * 1.01f64.ln()).abs() < 1e-12);
     }
 
     // ── JSON extraction tests ──
@@ -1551,7 +1430,7 @@ mod tests {
         // Write a file where line 2 is blank.
         std::fs::write(
             &cache_path,
-            "{\"key\":\"abc\",\"file\":\"/f.rs\",\"model\":\"m\",\"token_count\":10,\"fan_in\":0,\"fan_out\":0,\"graph_complexity\":0,\"comprehensibility\":0.5,\"breakdown\":{\"naming\":2,\"control_flow\":2,\"data_flow\":2,\"abstractions\":2}}\n\n",
+            "{\"key\":\"abc\",\"file\":\"/f.rs\",\"model\":\"m\",\"token_count\":10,\"comprehensibility\":0.5,\"breakdown\":{\"naming\":2,\"control_flow\":2,\"data_flow\":2,\"abstractions\":2}}\n\n",
         )
         .unwrap();
         let err = load_cache(&cache_path).unwrap_err();
@@ -1589,7 +1468,7 @@ mod tests {
         let dir = std::env::temp_dir().join("drag-test-valid");
         let _ = std::fs::create_dir_all(&dir);
         let cache_path = dir.join("cache.jsonl");
-        let line = "{\"key\":\"deadbeef12345678\",\"file\":\"/src/main.rs\",\"model\":\"openai/gpt-4o\",\"token_count\":42,\"fan_in\":1,\"fan_out\":2,\"graph_complexity\":3,\"comprehensibility\":0.75,\"breakdown\":{\"naming\":3,\"control_flow\":3,\"data_flow\":3,\"abstractions\":3}}\n";
+        let line = "{\"key\":\"deadbeef12345678\",\"file\":\"/src/main.rs\",\"model\":\"openai/gpt-4o\",\"token_count\":42,\"comprehensibility\":0.75,\"breakdown\":{\"naming\":3,\"control_flow\":3,\"data_flow\":3,\"abstractions\":3}}\n";
         std::fs::write(&cache_path, line).unwrap();
         let map = load_cache(&cache_path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -1597,6 +1476,25 @@ mod tests {
         let entry = map.get("deadbeef12345678").unwrap();
         assert_eq!(entry.comprehensibility, 0.75);
         assert_eq!(entry.breakdown.naming, 3);
+    }
+
+    #[test]
+    fn load_cache_rejects_v1_entries_with_graph_fields() {
+        let dir = std::env::temp_dir().join("drag-test-v1-reject");
+        let _ = std::fs::create_dir_all(&dir);
+        let cache_path = dir.join("cache.jsonl");
+        let line = "{\"key\":\"deadbeef12345678\",\"file\":\"/src/main.rs\",\"model\":\"openai/gpt-4o\",\"token_count\":42,\"fan_in\":1,\"fan_out\":2,\"graph_complexity\":3,\"comprehensibility\":0.75,\"breakdown\":{\"naming\":3,\"control_flow\":3,\"data_flow\":3,\"abstractions\":3}}\n";
+        std::fs::write(&cache_path, line).unwrap();
+        let err = load_cache(&cache_path).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            err.contains(&cache_path.display().to_string()),
+            "error should contain cache file path, got: {err}"
+        );
+        assert!(
+            err.contains("unknown field") || err.contains("fan_in"),
+            "error should reject v1 entries because of unknown graph fields, got: {err}"
+        );
     }
 
     #[test]
@@ -1609,9 +1507,6 @@ mod tests {
             file: "/abs/path/module.rs".to_string(),
             model: "openai/gpt-4o".to_string(),
             token_count: 100,
-            fan_in: 2,
-            fan_out: 3,
-            graph_complexity: 5,
             estimates: 1,
             comprehensibility: 0.5,
             breakdown: ComprehensibilityScores {
