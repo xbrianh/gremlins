@@ -3752,6 +3752,8 @@ mod tests {
                 stream_events: None,
                 tool_output: None,
             },
+            active_skills: None,
+            discovered_skills: None,
         };
         let expected = canonicalize_or_ancestor(&project);
         // Ensure the daemon cwd is genuinely different from project root.
