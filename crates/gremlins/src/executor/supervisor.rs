@@ -34,7 +34,7 @@ use rig_core::completion::Message;
 // SharedWriter — Arc<Mutex<WriteHalf>> for concurrent socket writes
 // ---------------------------------------------------------------------------
 
-struct SharedWriter {
+pub(crate) struct SharedWriter {
     inner: Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
 }
 
@@ -45,7 +45,7 @@ impl SharedWriter {
         }
     }
 
-    async fn write_json_line(&self, value: &Value) -> Result<(), String> {
+    pub(crate) async fn write_json_line(&self, value: &Value) -> Result<(), String> {
         let mut guard = self.inner.lock().await;
         socket::write_json_line(&mut *guard, value).await
     }
@@ -296,6 +296,8 @@ pub(crate) struct RunHandle {
     pub state_tx: watch::Sender<RunState>,
     /// Broadcast sender for live log subscribers (Op::Log with follow:true).
     pub log_broadcast: broadcast::Sender<String>,
+    /// Broadcast sender for stage-aware live stream subscribers (Op::StageStream with follow:true).
+    pub stage_stream_broadcast: broadcast::Sender<String>,
     /// Interactive handle (supervisor → agent loop).
     pub interactive: InteractiveHandle,
     /// State store handle — stored so handle_status / handle_info / handle_ls
@@ -517,6 +519,19 @@ async fn handle_connection(
         if op == "debug" {
             let _ = event_start_tx.send(true);
             handle_debug(&request, &state_root, reader, &writer).await;
+            break;
+        }
+
+        // stage_stream — delegated to `executor::stage_stream`.
+        if op == "stage_stream" {
+            let _ = event_start_tx.send(true);
+            crate::executor::stage_stream::handle_stage_stream(
+                &request,
+                &state_root,
+                reader,
+                &writer,
+            )
+            .await;
             break;
         }
 
@@ -865,6 +880,12 @@ async fn handle_session_aux(
         "log" => {
             handle_log(&request, state_root, reader, &writer).await;
         }
+        "stage_stream" => {
+            crate::executor::stage_stream::handle_stage_stream(
+                &request, state_root, reader, &writer,
+            )
+            .await;
+        }
         "debug" => {
             handle_debug(&request, state_root, reader, &writer).await;
         }
@@ -1004,7 +1025,7 @@ fn ok_response(data: Value) -> Value {
     Value::Object(map)
 }
 
-fn error_response(message: &str) -> Value {
+pub(crate) fn error_response(message: &str) -> Value {
     serde_json::json!({"type": "error", "message": message})
 }
 
@@ -3235,7 +3256,8 @@ async fn cleanup_chat_gremlin(id: &str) {
 async fn register_chat_gremlin(session: &SessionHandle, mut gremlin: Gremlin) {
     let id = gremlin.id.to_string();
 
-    let (log_broadcast, interactive_handle) = setup_gremlin_channels(&mut gremlin, None);
+    let (log_broadcast, stage_stream_broadcast, interactive_handle) =
+        setup_gremlin_channels(&mut gremlin, None);
     let store = gremlin.state.store_handle();
 
     let cancel_token = CancelToken::new();
@@ -3256,6 +3278,7 @@ async fn register_chat_gremlin(session: &SessionHandle, mut gremlin: Gremlin) {
         aborted: Arc::new(AtomicBool::new(false)),
         state_tx,
         log_broadcast,
+        stage_stream_broadcast,
         interactive: interactive_handle,
         store,
         scratch_dir,
@@ -3377,7 +3400,9 @@ fn create_chat_gremlin(
 // ---------------------------------------------------------------------------
 
 /// Resolve state store: live run-map handle, or persisted under `config::state_root()`.
-fn resolve_store_for_id(id: &str) -> Result<Arc<dyn state::StateStore + Send + Sync>, Value> {
+pub(crate) fn resolve_store_for_id(
+    id: &str,
+) -> Result<Arc<dyn state::StateStore + Send + Sync>, Value> {
     let live = {
         let map = get_run_map().lock().unwrap();
         map.get(id).map(|handle| handle.store.clone())
@@ -3529,12 +3554,17 @@ fn state_view_for_id(id: &str) -> Result<StateView, Value> {
     Ok(StateView::from_persisted(&gremlin, state_dir, scratch_dir))
 }
 
-/// Set up log + interactive channels on a gremlin. Returns the log broadcast
-/// sender and interactive handle for insertion into the run map.
+/// Set up log + interactive + stage-stream channels on a gremlin. Returns the
+/// log broadcast sender, the stage-stream broadcast sender, and interactive
+/// handle for insertion into the run map.
 fn setup_gremlin_channels(
     gremlin: &mut Gremlin,
     relay: Option<LogRelay>,
-) -> (broadcast::Sender<String>, InteractiveHandle) {
+) -> (
+    broadcast::Sender<String>,
+    broadcast::Sender<String>,
+    InteractiveHandle,
+) {
     let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
     let (log_broadcast, _) = broadcast::channel(256);
     gremlin.runtime_config.log_tx = Some(log_tx);
@@ -3542,9 +3572,22 @@ fn setup_gremlin_channels(
     let (interactive_handle, interactive_session) = channels.split();
     gremlin.runtime_config.interactive = Some(interactive_handle.clone());
     gremlin.interactive_session = Some(interactive_session);
+
+    // Stage-aware live stream: a dedicated broadcast that carries JSON lines
+    // for agent events (reasoning/text/tool) and exec stdout/stderr. The
+    // interactive-event forwarder below converts agent `InteractiveEvent`s
+    // into stage-stream lines; exec output is fed directly by the exec runner
+    // via `runtime_config.stage_stream_tx`.
+    let (stage_stream_broadcast, _) = broadcast::channel(256);
+    gremlin.runtime_config.stage_stream_tx = Some(stage_stream_broadcast.clone());
+    crate::executor::stage_stream::spawn_stage_stream_forwarder(
+        interactive_handle.evt_tx.subscribe(),
+        stage_stream_broadcast.clone(),
+    );
+
     let store = gremlin.state.store_handle();
     spawn_log_writer(log_rx, store, log_broadcast.clone(), relay);
-    (log_broadcast, interactive_handle)
+    (log_broadcast, stage_stream_broadcast, interactive_handle)
 }
 
 async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i32, Gremlin) {
@@ -3555,6 +3598,11 @@ async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i
             if let Some(tx) = &gremlin.runtime_config.log_tx {
                 let _ = tx.send(format!("error: {e}"));
             }
+            crate::executor::stage_stream::send_stage_boundary(
+                &gremlin.runtime_config.stage_stream_tx,
+                "",
+                "other",
+            );
             gremlin.state.write_terminal_state(1);
             1
         }
@@ -3633,7 +3681,8 @@ fn spawn_gremlin_runner(
     definition_name: &str,
     shutdown_tx: &watch::Sender<bool>,
 ) {
-    let (log_broadcast, interactive_handle) = setup_gremlin_channels(&mut gremlin, None);
+    let (log_broadcast, stage_stream_broadcast, interactive_handle) =
+        setup_gremlin_channels(&mut gremlin, None);
     gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
         interactive_handle.evt_tx.clone(),
     ));
@@ -3671,6 +3720,7 @@ fn spawn_gremlin_runner(
         aborted,
         state_tx,
         log_broadcast,
+        stage_stream_broadcast,
         interactive: interactive_handle,
         store,
         scratch_dir,
@@ -3803,7 +3853,8 @@ pub(crate) struct LogRelay {
 pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> LaunchResult {
     let id = gremlin.id.to_string();
 
-    let (log_broadcast, interactive_handle) = setup_gremlin_channels(&mut gremlin, relay);
+    let (log_broadcast, stage_stream_broadcast, interactive_handle) =
+        setup_gremlin_channels(&mut gremlin, relay);
     gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
         interactive_handle.evt_tx.clone(),
     ));
@@ -3857,6 +3908,7 @@ pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> Lau
         aborted: aborted.clone(),
         state_tx,
         log_broadcast,
+        stage_stream_broadcast,
         interactive: interactive_handle,
         store: store.clone(),
         scratch_dir,
@@ -4034,9 +4086,13 @@ mod tests {
         handle_model, resolve_chat_env, resolve_filepath_source_values, usage_stats_from_state,
     };
     use crate::clients::client::{Client, ModelURI};
+    use crate::clients::interactive::InteractiveEvent;
     use crate::clients::protocol::UsageStats;
     use crate::executor::gremlin::Gremlin;
     use crate::executor::socket;
+    use crate::executor::stage_stream::{
+        agent_stream_line, exec_stream_line, interactive_event_to_stage_line, stage_line_envelope,
+    };
     use crate::schemas::bootstrap::{InputSource, InputSources};
     use crate::test_support::Sandbox;
     use serde_json::Value;
@@ -4631,6 +4687,7 @@ model-profiles:
             started_at: String::new(),
         });
         let (log_broadcast, _) = broadcast::channel(1);
+        let (stage_stream_broadcast, _) = broadcast::channel(1);
 
         let handle = super::RunHandle {
             cancel: super::CancelToken::new(),
@@ -4638,6 +4695,7 @@ model-profiles:
             aborted: Arc::new(AtomicBool::new(false)),
             state_tx,
             log_broadcast,
+            stage_stream_broadcast,
             interactive,
             store: store.clone(),
             scratch_dir: PathBuf::new(),
@@ -5483,5 +5541,87 @@ model-profiles:
         assert_eq!(value["call"], "Grep(pattern=\"fn\")");
         assert_eq!(value["output"], "x.rs:1:fn");
         assert_eq!(value["turn"], "t-9");
+    }
+
+    #[test]
+    fn interactive_event_to_stage_line_maps_agent_events() {
+        let line = interactive_event_to_stage_line(&InteractiveEvent::StreamChunk {
+            text: "hi".to_string(),
+        })
+        .unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["kind"], "text");
+        assert_eq!(v["text"], "hi");
+
+        let line = interactive_event_to_stage_line(&InteractiveEvent::ReasoningChunk {
+            text: "think".to_string(),
+        })
+        .unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["kind"], "reasoning");
+        assert_eq!(v["text"], "think");
+
+        let line = interactive_event_to_stage_line(&InteractiveEvent::ToolResult {
+            id: "call_1".to_string(),
+            name: "Bash".to_string(),
+            call: "Bash(command=\"ls\")".to_string(),
+            output: "ok".to_string(),
+        })
+        .unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["kind"], "tool_result");
+        assert_eq!(v["name"], "Bash");
+
+        // Lifecycle events are not stage content.
+        assert!(interactive_event_to_stage_line(&InteractiveEvent::Ready { turn: 0 }).is_none());
+        assert!(interactive_event_to_stage_line(&InteractiveEvent::Ended {
+            reason: "resumed".to_string(),
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn agent_stream_line_derives_kind_from_type() {
+        assert_eq!(
+            agent_stream_line(r#"{"type":"stream_chunk","text":"hi"}"#)["kind"],
+            "text"
+        );
+        assert_eq!(
+            agent_stream_line(r#"{"type":"reasoning_chunk","text":"x"}"#)["kind"],
+            "reasoning"
+        );
+        assert_eq!(
+            agent_stream_line(r#"{"type":"tool_result","output":"y"}"#)["kind"],
+            "tool_result"
+        );
+        assert_eq!(
+            agent_stream_line(r#"{"type":"stream_reset"}"#)["kind"],
+            "stream_reset"
+        );
+        // Unrecognized event types fall back to `unknown`.
+        assert_eq!(
+            agent_stream_line(r#"{"type":"assistant","text":"z"}"#)["kind"],
+            "unknown"
+        );
+        // Non-JSON input is tolerated.
+        assert_eq!(agent_stream_line("not json")["kind"], "unknown");
+    }
+
+    #[test]
+    fn exec_stream_line_tags_all_as_stdout() {
+        // Historical blobs have interleaved stdout/stderr without tagging;
+        // we can't distinguish them, so everything is stdout.
+        assert_eq!(exec_stream_line("plain output")["kind"], "stdout");
+        assert_eq!(exec_stream_line("plain output")["text"], "plain output");
+        assert_eq!(exec_stream_line("[stderr] boom")["kind"], "stdout");
+    }
+
+    #[test]
+    fn stage_line_envelope_flattens_payload() {
+        let v = stage_line_envelope(serde_json::json!({"kind": "text", "text": "hi"}), 3);
+        assert_eq!(v["type"], "stage_stream_line");
+        assert_eq!(v["kind"], "text");
+        assert_eq!(v["text"], "hi");
+        assert_eq!(v["offset"], 3);
     }
 }

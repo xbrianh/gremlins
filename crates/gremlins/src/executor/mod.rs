@@ -98,6 +98,7 @@ pub mod gremlin;
 pub mod parallel;
 pub mod run;
 pub mod socket;
+pub mod stage_stream;
 pub mod state;
 pub mod supervisor;
 pub mod vars;

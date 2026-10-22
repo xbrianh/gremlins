@@ -842,6 +842,14 @@ const WATCH_STREAM_MAX_LINES: usize = 2_000;
 /// the followed id.
 pub struct RunsView {
     stream_lines: VecDeque<String>,
+    /// Kind of the most recent logical text/reasoning line, if any.
+    stream_tail_kind: Option<String>,
+    /// Whether the most recent logical text/reasoning line can still be
+    /// appended to (i.e. it has not been terminated by a newline).
+    stream_tail_open: bool,
+    /// Agent response text accumulated since the last `stream_reset`; used to
+    /// avoid re-displaying `Done.text` that was already streamed.
+    streamed_agent_text: String,
 }
 
 /// Truncate a string to at most `max_width` terminal columns.
@@ -1009,21 +1017,156 @@ impl RunsView {
     pub fn new() -> Self {
         Self {
             stream_lines: VecDeque::new(),
+            stream_tail_kind: None,
+            stream_tail_open: false,
+            streamed_agent_text: String::new(),
         }
     }
 
-    /// Append a line to the inline stream pane, dropping the oldest raw lines
-    /// once the bounded buffer is full.
+    /// Append a line to the inline stream pane.
+    ///
+    /// Incremental agent `text`/`reasoning` fragments are folded into styled
+    /// logical lines before retention so the 2,000-entry cap counts output
+    /// lines rather than individual stream deltas.
     pub fn push_stream_line(&mut self, line: String) {
-        self.stream_lines.push_back(line);
-        while self.stream_lines.len() > WATCH_STREAM_MAX_LINES {
-            self.stream_lines.pop_front();
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
+            match obj.get("kind").and_then(|v| v.as_str()) {
+                Some("text") => {
+                    let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    self.push_text_fragment("text", text);
+                    self.trim_stream_lines();
+                    return;
+                }
+                Some("reasoning") => {
+                    let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    self.push_text_fragment("reasoning", text);
+                    self.trim_stream_lines();
+                    return;
+                }
+                Some("stream_reset") => {
+                    self.streamed_agent_text.clear();
+                    self.stream_tail_kind = None;
+                    self.stream_tail_open = false;
+                    self.stream_lines.push_back(line);
+                    self.trim_stream_lines();
+                    return;
+                }
+                Some("done") => {
+                    self.push_done_line(&obj, line);
+                    self.trim_stream_lines();
+                    return;
+                }
+                _ => {}
+            }
         }
+
+        self.stream_tail_kind = None;
+        self.stream_tail_open = false;
+        self.stream_lines.push_back(line);
+        self.trim_stream_lines();
     }
 
     /// Clear the inline stream pane's log buffer.
     pub fn clear_stream(&mut self) {
         self.stream_lines.clear();
+        self.stream_tail_kind = None;
+        self.stream_tail_open = false;
+        self.streamed_agent_text.clear();
+    }
+
+    /// Append a `text`/`reasoning` delta, splitting on embedded newlines and
+    /// continuing the previous logical line when it has not been terminated.
+    fn push_text_fragment(&mut self, kind: &str, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        let ends_with_newline = text.ends_with('\n');
+        let mut parts: Vec<&str> = text.split('\n').collect();
+        if ends_with_newline {
+            parts.pop();
+        }
+
+        for (idx, part) in parts.iter().enumerate() {
+            let line_terminated = idx + 1 < parts.len() || ends_with_newline;
+            if idx == 0 && self.stream_tail_kind.as_deref() == Some(kind) && self.stream_tail_open {
+                self.append_fragment_to_last(kind, part);
+            } else {
+                self.stream_lines
+                    .push_back(serde_json::json!({ "kind": kind, "text": part }).to_string());
+            }
+            self.stream_tail_kind = Some(kind.to_string());
+            self.stream_tail_open = !line_terminated;
+
+            if kind == "text" {
+                self.streamed_agent_text.push_str(part);
+                if line_terminated {
+                    self.streamed_agent_text.push('\n');
+                }
+            }
+        }
+    }
+
+    fn append_fragment_to_last(&mut self, kind: &str, text: &str) {
+        if let Some(last) = self.stream_lines.back_mut() {
+            if let Ok(mut obj) = serde_json::from_str::<serde_json::Value>(last) {
+                if obj.get("kind").and_then(|v| v.as_str()) == Some(kind) {
+                    let combined = format!(
+                        "{}{}",
+                        obj.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+                        text
+                    );
+                    if let Some(map) = obj.as_object_mut() {
+                        map.insert(
+                            "text".to_string(),
+                            serde_json::Value::String(combined.clone()),
+                        );
+                    }
+                    *last = serde_json::to_string(&obj).unwrap_or(combined);
+                    return;
+                }
+            }
+        }
+        self.stream_lines
+            .push_back(serde_json::json!({ "kind": kind, "text": text }).to_string());
+    }
+
+    fn push_done_line(&mut self, obj: &serde_json::Value, raw: String) {
+        let done_text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        let summary = obj.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+        let fallback = if done_text.is_empty() {
+            summary
+        } else {
+            done_text
+        };
+
+        // When the model finished without streaming text, agent_loop places
+        // the Done summary in `Done.text`. Surface that final answer instead
+        // of discarding it behind the `── done` delimiter.
+        if self.streamed_agent_text.is_empty() && !fallback.is_empty() {
+            self.push_text_fragment("text", fallback);
+        }
+        if !summary.is_empty() && summary != fallback {
+            self.stream_tail_kind = None;
+            self.stream_tail_open = false;
+            self.stream_lines.push_back(
+                serde_json::json!({ "kind": "done_summary", "text": summary }).to_string(),
+            );
+        }
+
+        self.stream_tail_kind = None;
+        self.stream_tail_open = false;
+        self.stream_lines.push_back(raw);
+    }
+
+    fn trim_stream_lines(&mut self) {
+        while self.stream_lines.len() > WATCH_STREAM_MAX_LINES {
+            self.stream_lines.pop_front();
+        }
+        if self.stream_lines.is_empty() {
+            self.stream_tail_kind = None;
+            self.stream_tail_open = false;
+        }
     }
 
     fn listed_runs<'a>(
@@ -1366,10 +1509,126 @@ impl RunsView {
             .stream_lines
             .iter()
             .map(|line| {
-                Line::from(Span::styled(
-                    line.clone(),
-                    Style::default().fg(DEFAULT_THEME.text),
-                ))
+                // Try to parse as a stage-stream JSON line
+                if let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) {
+                    match obj.get("kind").and_then(|v| v.as_str()) {
+                        Some("reasoning") => {
+                            let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            Line::from(Span::styled(
+                                text.to_string(),
+                                Style::default()
+                                    .fg(DEFAULT_THEME.accent_secondary)
+                                    .add_modifier(Modifier::ITALIC),
+                            ))
+                        }
+                        Some("text") => {
+                            let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            Line::from(Span::styled(
+                                text.to_string(),
+                                Style::default().fg(DEFAULT_THEME.text),
+                            ))
+                        }
+                        Some("log") => {
+                            // Operational-log fallback line — render the text field.
+                            let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            Line::from(Span::styled(
+                                text.to_string(),
+                                Style::default().fg(DEFAULT_THEME.text),
+                            ))
+                        }
+                        Some("lagged") => {
+                            let skipped = obj.get("skipped").and_then(|v| v.as_i64()).unwrap_or(0);
+                            Line::from(Span::styled(
+                                format!("[skipped {skipped} lines]"),
+                                Style::default()
+                                    .fg(DEFAULT_THEME.subtle)
+                                    .add_modifier(Modifier::DIM),
+                            ))
+                        }
+                        Some("tool_output") | Some("tool_result") | Some("tool_call") => {
+                            let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let text = obj
+                                .get("text")
+                                .or(obj.get("output"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            // Truncate to first line to avoid multi-line
+                            // output breaking the pane layout.
+                            let first_line = text.lines().next().unwrap_or("");
+                            Line::from(Span::styled(
+                                format!("◆ {} {}", name, first_line),
+                                Style::default().fg(DEFAULT_THEME.subtle),
+                            ))
+                        }
+                        Some("done_summary") => {
+                            let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            Line::from(Span::styled(
+                                format!("── summary: {text}"),
+                                Style::default()
+                                    .fg(DEFAULT_THEME.chrome)
+                                    .add_modifier(Modifier::ITALIC),
+                            ))
+                        }
+                        Some("turn_complete") | Some("done") | Some("stream_reset") => {
+                            Line::from(Span::styled(
+                                format!(
+                                    "── {}",
+                                    obj.get("kind").and_then(|v| v.as_str()).unwrap_or("")
+                                ),
+                                Style::default()
+                                    .fg(DEFAULT_THEME.chrome)
+                                    .add_modifier(Modifier::BOLD),
+                            ))
+                        }
+                        Some("stage_boundary") => {
+                            let stage = obj.get("stage").and_then(|v| v.as_str()).unwrap_or("");
+                            let stage_type =
+                                obj.get("stage_type").and_then(|v| v.as_str()).unwrap_or("");
+                            let label = if stage.is_empty() {
+                                "── idle".to_string()
+                            } else {
+                                format!("── {stage} ({stage_type})")
+                            };
+                            Line::from(Span::styled(
+                                label,
+                                Style::default()
+                                    .fg(DEFAULT_THEME.chrome)
+                                    .add_modifier(Modifier::BOLD),
+                            ))
+                        }
+                        Some("stdout") => {
+                            let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            Line::from(Span::styled(
+                                text.to_string(),
+                                Style::default().fg(DEFAULT_THEME.text),
+                            ))
+                        }
+                        Some("stderr") => {
+                            let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            Line::from(Span::styled(
+                                text.to_string(),
+                                Style::default()
+                                    .fg(DEFAULT_THEME.subtle)
+                                    .add_modifier(Modifier::DIM),
+                            ))
+                        }
+                        _ => {
+                            // Unknown kind: prefer the `text` field, fall back
+                            // to the raw JSON.
+                            let display = obj.get("text").and_then(|v| v.as_str()).unwrap_or(line);
+                            Line::from(Span::styled(
+                                display.to_string(),
+                                Style::default().fg(DEFAULT_THEME.text),
+                            ))
+                        }
+                    }
+                } else {
+                    // Not JSON — operational log fallback, render as plain text
+                    Line::from(Span::styled(
+                        line.clone(),
+                        Style::default().fg(DEFAULT_THEME.text),
+                    ))
+                }
             })
             .collect();
 
