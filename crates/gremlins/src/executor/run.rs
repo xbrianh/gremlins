@@ -1,14 +1,7 @@
-//! The sequential stage run loop.
+//! Sequential stage run loop: one gremlin, one stage at a time.
 //!
-//! One gremlin, one stage at a time: [`Gremlin::run`] walks the definition's
-//! stages in declaration order and drives each through [`run_stage`], while the
-//! scoped dispatcher below carries the two pieces of bookkeeping the Python
-//! executor kept around every stage — the artifact guard (`skip_if_exists`)
-//! checked before dispatch, and the scope key (`a/b`, `loop~2`) a stage is
-//! tracked under for bail lookups.
-//!
-//! This is sequencing only. Parallel groups are a later milestone and say so
-//! rather than pretending to fan out.
+//! [`Gremlin::run`] walks the definition's stages and drives each through
+//! [`run_stage`]. Parallel groups delegate to [`run_parallel`].
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -21,7 +14,7 @@ use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::{Client, ModelURI};
 use crate::clients::task_kind::TaskKind;
 use crate::config;
-use crate::definition::{ExecutorStage, GremlinDefinition};
+use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
 use crate::executor::bootstrap::run_definition_bootstrap;
 use crate::executor::conversation;
@@ -30,30 +23,110 @@ use crate::executor::gremlin::Gremlin;
 #[cfg(test)]
 use crate::executor::gremlin::{GremlinConfig, ScratchDir, WorkDir};
 use crate::executor::parallel::run_parallel;
+use crate::executor::send_log;
 use crate::executor::state;
 use crate::executor::state::{Checkout, Collision, FileSystemStateStore, StateStore};
 use crate::executor::supervisor::get_run_map;
-use crate::executor::system_prompt::{agent_system_prompt, landscape_block};
 use crate::executor::vars;
 use crate::executor::RunError;
+use crate::landscape::{LandscapeBlock, LandscapeError, LandscapeExplorer};
 use indexmap::IndexMap;
 use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::completion::Message;
 
-/// Send a log line through the per-gremlin channel if one is configured.
-fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: String) {
-    if let Some(tx) = tx {
-        let _ = tx.send(msg);
+// ---------------------------------------------------------------------------
+// System prompt assembly
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// System prompt assembly
+// ---------------------------------------------------------------------------
+
+/// Compute the gremlin's stage-start landscape block.
+async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -> String {
+    let (block, file_count, item_count) = build_landscape_snapshot(
+        gremlin.cwd(),
+        gremlin.runtime_config.log_tx.clone(),
+        has_outline_tool,
+    )
+    .await;
+
+    if file_count > 0 {
+        if let Some(tx) = &gremlin.runtime_config.log_tx {
+            let tokens = crate::landscape::count_tokens(&block).unwrap_or(0);
+            let _ = tx.send(format!(
+                "[landscape] {file_count} files, {item_count} items, {tokens} tokens"
+            ));
+        }
+    }
+
+    block
+}
+
+/// Build a system prompt by optionally appending a landscape block.
+fn assemble_system_prompt(base: &str, landscape: Option<&str>) -> String {
+    match landscape.filter(|b| !b.is_empty()) {
+        Some(block) => format!("{base}\n\n{block}"),
+        None => base.to_string(),
     }
 }
 
-/// The on-disk path the agent raw stream is written to.
-///
-/// Routed through the store's blob seam (validating the name and creating the
-/// parent directory) and derived from the concrete filesystem store's root,
-/// preserving the historical `artifacts/` location. Fails — rather than falling
-/// back to `config::state_root()` — when the store is not filesystem-backed or
-/// the blob cannot be opened.
+/// Build and format a landscape block for one workspace root.
+async fn build_landscape_snapshot(
+    cwd: PathBuf,
+    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    has_outline_tool: bool,
+) -> (String, usize, usize) {
+    let log_warn = |msg: &str| {
+        log::warn!("{msg}");
+        send_log(&log_tx, msg);
+    };
+    let root = cwd.clone();
+    let log_tx2 = log_tx.clone();
+    let outlines =
+        tokio::task::spawn_blocking(move || match LandscapeExplorer.build(&cwd, usize::MAX) {
+            Ok(outlines) => outlines,
+            Err(LandscapeError::Read(e)) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => {
+                let msg = format!("landscape build failed for {}: {error}", cwd.display());
+                log::warn!("{msg}");
+                send_log(&log_tx2, &msg);
+                Vec::new()
+            }
+        })
+        .await
+        .unwrap_or_else(|error| {
+            let msg = format!("landscape build task failed: {error}");
+            log::warn!("{msg}");
+            send_log(&log_tx, &msg);
+            Vec::new()
+        });
+
+    let budget: u64 = crate::config::max_landscape_tokens();
+    let landscape = match crate::landscape::format_landscape_block(
+        &outlines,
+        &root,
+        usize::try_from(budget).unwrap_or(usize::MAX),
+        has_outline_tool,
+    ) {
+        Ok(block) => block,
+        Err(e) => {
+            let msg = match e {
+                LandscapeError::BudgetExceeded => format!(
+                    "[landscape] block for {} exceeds {budget} token budget; omitting",
+                    root.display(),
+                ),
+                other => format!("landscape block formatting failed: {other}"),
+            };
+            log_warn(&msg);
+            LandscapeBlock::empty()
+        }
+    };
+
+    (landscape.block, landscape.file_count, landscape.item_count)
+}
+
+/// On-disk path for the agent raw stream, routed through the store's blob seam.
 fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunError> {
     let store = gremlin.state.store_ref();
     let fs = store
@@ -64,8 +137,6 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
         })?;
     let safe_name = crate::core::proc::sanitize_log_filename(name);
     let blob_name = format!("artifacts/stream-{safe_name}.jsonl");
-    // Validate the blob name and create its parent directory through the store
-    // seam; the agent loop re-opens the same path for append.
     store
         .open(&blob_name, state::BlobMode::Append)
         .map_err(|e| RunError::Message(format!("agent raw stream: {e}")))?;
@@ -76,8 +147,7 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
 // Scope bookkeeping
 // ---------------------------------------------------------------------------
 
-/// The identity a stage is tracked under: its enclosing scope, or its own
-/// name at the top level. Mirrors the Python path propagation (`a/b`).
+/// Stage identity: `{scope}/{name}` or just `name` at top level.
 pub(crate) fn stage_key(scope: &str, name: &str) -> String {
     if scope.is_empty() {
         name.to_string()
@@ -100,11 +170,7 @@ pub(crate) async fn run_stage(
     run_stage_scoped(stage, gremlin, "", None, None).await
 }
 
-/// Run one stage, tracking it under `scope`.
-///
-/// The skip guard only runs for Sequence stages — leaf stages (Agent, Exec)
-/// no longer carry `skip_if_exists`; the guard lives on the enclosing
-/// Sequence that wraps them.
+/// Run one stage under `scope`.
 async fn run_stage_scoped(
     stage: &ExecutorStage,
     gremlin: &mut Gremlin,
@@ -112,17 +178,11 @@ async fn run_stage_scoped(
     enclosing_model: Option<&ModelURI>,
     enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
-    let _attempt = gremlin.state.read_str("attempt");
-    // Fall back to the gremlin's inherited task-models when the caller
-    // doesn't pass an explicit enclosing map (e.g. parallel children
-    // dispatched via run_stage). Clone to avoid borrowing conflicts.
-    let inherited = gremlin.enclosing_task_models.clone();
-    let enclosing_task_models = enclosing_task_models.or(inherited.as_ref());
-    // Forked parallel children carry the group's effective model as an
-    // inherited enclosing model; it must keep beating profile stage-model
-    // resolution, exactly as it would if passed explicitly down the tree.
-    let inherited_model = gremlin.enclosing_model.clone();
-    let enclosing_model = enclosing_model.or(inherited_model.as_ref());
+    let _ = gremlin.state.read_str("attempt");
+    let tm = gremlin.enclosing_task_models.clone();
+    let enc_tm = enclosing_task_models.or(tm.as_ref());
+    let m = gremlin.enclosing_model.clone();
+    let enc_model = enclosing_model.or(m.as_ref());
     send_log(
         &gremlin.runtime_config.log_tx,
         format!(
@@ -133,116 +193,59 @@ async fn run_stage_scoped(
     );
 
     match stage {
-        ExecutorStage::Agent { .. } => {
-            run_agent(stage, gremlin, enclosing_model, enclosing_task_models).await
-        }
-        ExecutorStage::Exec { .. } => {
-            run_exec(stage, gremlin, enclosing_model, enclosing_task_models).await
-        }
-        ExecutorStage::Sequence(_) => {
-            log::debug!("stage '{}': entering sequence", stage.name());
-            run_sequence(
-                stage,
-                gremlin,
-                scope,
-                enclosing_model,
-                enclosing_task_models,
-            )
-            .await
-        }
-        ExecutorStage::Parallel { .. } => {
-            log::debug!("dispatching stage '{}' to run_parallel", stage.name());
-            run_parallel(stage, gremlin, enclosing_model, enclosing_task_models).await
-        }
+        ExecutorStage::Agent { .. } => run_agent(stage, gremlin, enc_model, enc_tm).await,
+        ExecutorStage::Exec { .. } => run_exec(stage, gremlin, enc_model, enc_tm).await,
+        ExecutorStage::Sequence(_) => run_sequence(stage, gremlin, scope, enc_model, enc_tm).await,
+        ExecutorStage::Parallel { .. } => run_parallel(stage, gremlin, enc_model, enc_tm).await,
         ExecutorStage::Done => Ok(()),
     }
 }
 
-/// Resolve the model spec for a stage, consulting:
-/// 1. The stage's own `model:` field (always wins)
-/// 2. The enclosing composite's explicit `model:` (new — the `fill_model` replacement)
-/// 3. The selected default profile's `model-by-stage` (exact → longest prefix)
-/// 4. `default-model-by-stage` from runtime config (exact → longest prefix)
-/// 5. The definition's `default_model`
+/// Resolve model spec for a stage, consulting in order:
+/// 1. Stage's own `model:` (always wins)
+/// 2. Enclosing composite's explicit `model:`
+/// 3. Selected profile's `model-by-stage` (exact → longest prefix)
+/// 4. `default-model-by-stage` from runtime config
+/// 5. Definition's `default_model`
 fn resolve_model_spec(
     stage: &ExecutorStage,
     gremlin: &Gremlin,
     enclosing_model: Option<&ModelURI>,
 ) -> Result<ModelURI, RunError> {
-    // 1. Explicit stage model always wins
     if let Some(spec) = stage.model() {
         return Ok(spec.clone());
     }
-
-    // 2. Enclosing composite's explicit model
     if let Some(model) = enclosing_model {
         return Ok(model.clone());
     }
 
     let stage_name = stage.name();
-    let parse = |model_spec: &str| {
-        ModelURI::parse(model_spec).map_err(|message| RunError::StageFailed {
-            stage: stage_name.to_string(),
-            message,
-        })
-    };
+    let parse = |spec: &str| ModelURI::parse(spec).map_err(|m| stage_failed(stage_name, m));
 
-    // 3. Consult the selected default profile's model-by-stage map.
-    if let Some(model_spec) = resolve_from_stage_models(
-        stage_name,
-        &gremlin.runtime_config.profile_stage_models_exact,
-        &gremlin.runtime_config.profile_stage_models_prefix,
-    ) {
-        return parse(model_spec);
+    let cfg = &gremlin.runtime_config;
+    for (exact, prefix) in [
+        (
+            &cfg.profile_stage_models_exact,
+            &cfg.profile_stage_models_prefix,
+        ),
+        (&cfg.stage_models_exact, &cfg.stage_models_prefix),
+    ] {
+        // Exact beats prefix; longest prefix wins.
+        if let Some(spec) = exact.get(stage_name).or_else(|| {
+            prefix
+                .iter()
+                .filter(|(k, _)| stage_name.starts_with(k.as_str()))
+                .max_by_key(|(k, _)| k.len())
+                .map(|(_, v)| v)
+        }) {
+            return parse(spec);
+        }
     }
 
-    // 4. Consult default-model-by-stage from runtime config
-    if let Some(model_spec) = resolve_from_stage_models(
-        stage_name,
-        &gremlin.runtime_config.stage_models_exact,
-        &gremlin.runtime_config.stage_models_prefix,
-    ) {
-        return parse(model_spec);
-    }
-
-    // 5. Fall back to definition default
     Ok(gremlin.definition.default_model().clone())
 }
 
-/// Look up `stage_name` in an (exact, prefix) stage-model pair.
-///
-/// Exact keys always beat prefix keys. When multiple prefixes match, the
-/// longest prefix wins.
-fn resolve_from_stage_models<'a>(
-    stage_name: &str,
-    exact: &'a HashMap<String, String>,
-    prefix: &'a HashMap<String, String>,
-) -> Option<&'a str> {
-    if let Some(model_spec) = exact.get(stage_name) {
-        return Some(model_spec);
-    }
-
-    let mut best: Option<(&str, &str)> = None;
-    for (prefix_key, model_spec) in prefix {
-        if stage_name.starts_with(prefix_key.as_str()) {
-            match best {
-                Some((prev_key, _prev_spec)) if prefix_key.len() > prev_key.len() => {
-                    best = Some((prefix_key, model_spec));
-                }
-                None => {
-                    best = Some((prefix_key, model_spec));
-                }
-                _ => {}
-            }
-        }
-    }
-    best.map(|(_prefix_key, model_spec)| model_spec)
-}
-
-/// The client a stage runs with: resolved via [`resolve_model_spec`], then
-/// parsed. When the resolved spec equals the definition default, the gremlin's
-/// already-constructed client handle is reused to avoid building a second
-/// backend for the same spec.
+/// Resolve the client for a stage.
 fn resolve_client(
     stage: &ExecutorStage,
     gremlin: &Gremlin,
@@ -252,10 +255,7 @@ fn resolve_client(
     if &spec == gremlin.definition.default_model() {
         Ok(gremlin.client.clone())
     } else {
-        Client::from_uri(spec).map_err(|message| RunError::StageFailed {
-            stage: stage.name().to_string(),
-            message,
-        })
+        Client::from_uri(spec).map_err(|m| stage_failed(stage.name(), m))
     }
 }
 
@@ -263,14 +263,7 @@ fn resolve_client(
 // Agent
 // ---------------------------------------------------------------------------
 
-/// Resolve the effective task-model lookup map for an agent stage, merging
-/// the three runtime layers (global defaults, enclosing composite, stage-local)
-/// and parsing the result into a kind-keyed `HashMap`.
-///
-/// This is the map handed to [`build_task_selector`]; it describes
-/// task-kind → model-spec entries, *not* the stage-name → model-spec
-/// entries held in `RuntimeConfig::stage_models_*`. Keeping the two apart is
-/// what this helper exists to make testable.
+/// Merge task-model layers into a kind-keyed map.
 fn resolve_task_models(
     global: Option<&IndexMap<String, String>>,
     enclosing: Option<&IndexMap<String, String>>,
@@ -278,6 +271,112 @@ fn resolve_task_models(
 ) -> Result<HashMap<TaskKind, String>, config::ConfigError> {
     let effective = config::merge_task_models_runtime(global, enclosing, stage);
     config::parse_task_models_map(effective.as_ref())
+}
+
+/// Resolve content interpolation and collect artifact checkout keys from
+/// an outputs map and interpolation map. Shared by agent and exec paths.
+async fn collect_checkout_keys(
+    store: &dyn StateStore,
+    interpolation_map: &HashMap<String, String>,
+    outputs_map: &HashMap<String, String>,
+    options: &HashMap<String, serde_json::Value>,
+    loop_iter: &str,
+    framework_subs: &HashMap<String, String>,
+    stage_name: &str,
+) -> Result<Vec<String>, RunError> {
+    let str_opts = vars::string_options(options);
+    let (content_map, filepath_map) =
+        crate::artifacts::resolve::split_interpolation_map(interpolation_map);
+    let content_interpolated =
+        crate::artifacts::resolve::resolve_interpolation_map(store, &content_map, loop_iter)
+            .await
+            .map_err(|error| missing_artifact_bail_or_stage_fail(error, stage_name))?;
+
+    let mut uri_subs = content_interpolated;
+    uri_subs.extend(framework_subs.clone());
+
+    let mut keys: Vec<String> = Vec::new();
+    for raw in outputs_map.values().chain(filepath_map.values()) {
+        let resolved = vars::substitute_vars(raw, &str_opts, &uri_subs, framework_subs);
+        let resolved = resolved.split('?').next().unwrap_or("");
+        let resolved = if loop_iter.is_empty() {
+            resolved.to_string()
+        } else {
+            resolved.replace("{loop_iter}", loop_iter)
+        };
+        if resolved.starts_with("artifact://") {
+            keys.push(resolved);
+        }
+    }
+    Ok(keys)
+}
+
+/// Map a ResolveError into either Bail (missing artifact) or StageFailed.
+fn missing_artifact_bail_or_stage_fail(error: ResolveError, stage_name: &str) -> RunError {
+    match error {
+        ResolveError::MissingArtifact(key) => RunError::Bail {
+            reason: format!("artifact not bound: {key:?}"),
+        },
+        other => stage_failed(stage_name, other),
+    }
+}
+
+fn stage_failed(stage: &str, error: impl ToString) -> RunError {
+    RunError::StageFailed {
+        stage: stage.to_string(),
+        message: error.to_string(),
+    }
+}
+
+fn agent_prepare_err(error: AgentError, name: &str) -> RunError {
+    match error {
+        AgentError::Resolve {
+            source: ResolveError::MissingArtifact(key),
+            ..
+        } => RunError::Bail {
+            reason: format!("artifact not bound: {key:?}"),
+        },
+        other => stage_failed(name, other),
+    }
+}
+fn agent_commit_err(error: AgentError, name: &str) -> RunError {
+    match error {
+        AgentError::MissingArtifact { .. } => RunError::Bail {
+            reason: error.to_string(),
+        },
+        other => stage_failed(name, other),
+    }
+}
+fn exec_prepare_err(error: ExecError, name: &str) -> RunError {
+    match error {
+        ExecError::Resolve {
+            source: ResolveError::MissingArtifact(key),
+            ..
+        } => RunError::Bail {
+            reason: format!("artifact not bound: {key:?}"),
+        },
+        other => stage_failed(name, other),
+    }
+}
+fn exec_commit_err(error: ExecError, name: &str) -> RunError {
+    match error {
+        ExecError::MissingArtifact { .. } => RunError::Bail {
+            reason: error.to_string(),
+        },
+        other => stage_failed(name, other),
+    }
+}
+
+fn client_run_err(error: ClientError, name: &str) -> RunError {
+    match error {
+        ClientError::Bail { reason } => RunError::Bail { reason },
+        ClientError::Cancelled { message, messages } => RunError::Cancelled { message, messages },
+        ClientError::Runtime { message } if message == "cancelled" => RunError::Cancelled {
+            message,
+            messages: None,
+        },
+        other => stage_failed(name, other),
+    }
 }
 
 async fn run_agent(
@@ -300,78 +399,23 @@ async fn run_agent(
         enclosing_task_models,
         stage_task_models.as_ref(),
     )
-    .map_err(|e| RunError::StageFailed {
-        stage: agent.name.clone(),
-        message: e.to_string(),
-    })?;
+    .map_err(|e| stage_failed(&agent.name, e))?;
 
     let client = resolve_client(node, gremlin, enclosing_model)?;
     let framework_subs = gremlin.framework_subs(&agent.name);
     let _attempt = gremlin.state.read_str("attempt");
     let loop_iter = gremlin.loop_iter.clone();
 
-    // Compute checkout keys: outputs_map keys + filepath-style interpolation keys.
-    // Content interpolation keys are NOT included — they're read once at prepare time.
-    //
-    // We need to resolve template variables in the URIs before looking them up.
-    // Do a preliminary content-only resolution against the main registry, then
-    // use those values + framework_subs + string_options to substitute URIs.
-    let str_opts = vars::string_options(&agent.options);
-    let (content_map, filepath_map) =
-        crate::artifacts::resolve::split_interpolation_map(&agent.interpolation_map);
-    let content_interpolated = crate::artifacts::resolve::resolve_interpolation_map(
+    let checkout_keys = collect_checkout_keys(
         gremlin.state.store_ref(),
-        &content_map,
+        &agent.interpolation_map,
+        &agent.outputs_map,
+        &agent.options,
         &loop_iter,
+        &framework_subs,
+        &agent.name,
     )
-    .await
-    .map_err(|error| match error {
-        ResolveError::MissingArtifact(key) => RunError::Bail {
-            reason: format!("artifact not bound: {key:?}"),
-        },
-        other => RunError::StageFailed {
-            stage: agent.name.clone(),
-            message: other.to_string(),
-        },
-    })?;
-
-    // Build substitution map for URI resolution: content-interpolated values +
-    // framework_subs. (Bind paths and filepath interpolation aren't available yet.)
-    let mut uri_subs: HashMap<String, String> = content_interpolated.clone();
-    uri_subs.extend(framework_subs.clone());
-
-    let mut checkout_keys: Vec<String> = Vec::new();
-    for raw_uri_str in agent.outputs_map.values() {
-        let resolved = vars::substitute_vars(raw_uri_str, &str_opts, &uri_subs, &framework_subs);
-        // Strip optional marker (? or ?fallback).
-        let resolved = match resolved.find('?') {
-            Some(pos) => &resolved[..pos],
-            None => &resolved[..],
-        };
-        if !loop_iter.is_empty() {
-            let resolved = resolved.replace("{loop_iter}", &loop_iter);
-            if resolved.starts_with("artifact://") {
-                checkout_keys.push(resolved);
-            }
-        } else if resolved.starts_with("artifact://") {
-            checkout_keys.push(resolved.to_string());
-        }
-    }
-    for raw in filepath_map.values() {
-        let resolved = vars::substitute_vars(raw, &str_opts, &uri_subs, &framework_subs);
-        let resolved = match resolved.find('?') {
-            Some(pos) => &resolved[..pos],
-            None => &resolved[..],
-        };
-        if !loop_iter.is_empty() {
-            let resolved = resolved.replace("{loop_iter}", &loop_iter);
-            if resolved.starts_with("artifact://") {
-                checkout_keys.push(resolved);
-            }
-        } else if resolved.starts_with("artifact://") {
-            checkout_keys.push(resolved.to_string());
-        }
-    }
+    .await?;
 
     let Checkout {
         store: local_registry,
@@ -380,10 +424,7 @@ async fn run_agent(
         .state
         .checkout_registry(&checkout_keys)
         .await
-        .map_err(|error| RunError::StageFailed {
-            stage: agent.name.clone(),
-            message: error.to_string(),
-        })?;
+        .map_err(|error| stage_failed(&agent.name, error))?;
 
     let mut prepared = prepare_agent(
         agent,
@@ -393,38 +434,21 @@ async fn run_agent(
         &framework_subs,
     )
     .await
-    .map_err(|error| match error {
-        // An unbound interpolation input is a bail, not a crash: the run
-        // cannot proceed, but nothing is broken.
-        AgentError::Resolve {
-            source: ResolveError::MissingArtifact(key),
-            ..
-        } => RunError::Bail {
-            reason: format!("artifact not bound: {key:?}"),
-        },
-        other => RunError::StageFailed {
-            stage: agent.name.clone(),
-            message: other.to_string(),
-        },
-    })?;
+    .map_err(|e| agent_prepare_err(e, &agent.name))?;
 
     prepared.cwd = gremlin.cwd().to_string_lossy().into_owned();
     prepared.artifact_dir = artifact_dir.to_string_lossy().into_owned();
 
     std::fs::create_dir_all(&artifact_dir)?;
 
-    // The landscape is recomputed before every agent stage. After an `exec`
-    // stage mutates files, the next agent stage therefore sees a fresh
-    // snapshot. Chat rebuilds once per turn (every edit shifts line numbers,
-    // so a per-session memo would go stale quickly).
-    let system_prompt = agent_system_prompt(
-        prepared.system_prompt(),
-        if agent.landscape {
-            Some(landscape_block(gremlin, client.has_tool("Landscape")).await)
-        } else {
-            None
-        },
-    );
+    // Landscape is recomputed before every agent stage so the next
+    // agent sees fresh files after any exec stage mutations.
+    let landscape = if agent.landscape {
+        Some(landscape_block(gremlin, client.has_tool("Landscape")).await)
+    } else {
+        None
+    };
+    let system_prompt = assemble_system_prompt(&prepared.system_prompt(), landscape.as_deref());
 
     let stage_env = gremlin.env.clone();
 
@@ -433,21 +457,10 @@ async fn run_agent(
         &task_models_by_kind,
     );
 
-    // Chat gremlins pre-populate the agent loop's history from previous
-    // per-turn conversation artifacts so full model context flows between
-    // turns. For stage "chat-NNNN", we walk all artifacts from
-    // `conversation/0001.json` onward until one is missing, concatenating
-    // their message arrays. On a re-run (soft-interrupt recovery) the
-    // current turn's artifact may already exist with partial messages.
-    // A missing artifact at turn 1 yields no prefix. An artifact that
-    // exists but fails to parse is fatal: running without it would
-    // destroy recoverable history.
     let is_chat = gremlin.state.read_str("kind") == "chat";
     let chat_turn: Option<usize> = chat_turn_from_stage_name(&agent.name);
-    // Messages from turns *before* the current one — the canonical baseline
-    // used for diff computation. Stored as a Vec (not just a length) so the
-    // rollback-baseline check can compare the loaded prefix against
-    // completed.messages rather than comparing a slice with itself.
+    // Messages from turns before the current one — the canonical baseline
+    // used for diff computation on rollback.
     let mut canonical_prefix: Vec<Message> = Vec::new();
     let verbatim_history = if is_chat {
         let Some(current_turn) = chat_turn else {
@@ -457,74 +470,45 @@ async fn run_agent(
             )));
         };
 
-        // Load baseline: turns 1..current_turn-1. Each must exist and parse.
-        // A missing or unparseable prior-turn artifact is fatal — running
-        // without it would silently drop history context.
+        // Load baseline: turns 1..current_turn-1.
         for t in 1..current_turn {
-            let uri = format!("artifact://conversation/{:04}.json", t);
-            match gremlin.state.content(&uri, None).await {
-                Ok(json) => match messages_from_conversation(&json) {
-                    Ok(msgs) => canonical_prefix.extend(msgs),
-                    Err(e) => {
-                        return Err(RunError::Message(format!(
-                            "conversation artifact {} unparseable: {}",
-                            uri, e
-                        )));
-                    }
-                },
-                Err(e) => {
-                    return Err(RunError::Message(format!(
-                        "failed to read conversation artifact {}: {}",
-                        uri, e
-                    )));
-                }
-            }
+            let uri = conversation_uri(t);
+            let json = gremlin.state.content(&uri, None).await.map_err(|e| {
+                RunError::Message(format!("failed to read conversation artifact {uri}: {e}"))
+            })?;
+            let msgs = messages_from_conversation(&json).map_err(|e| {
+                RunError::Message(format!("conversation artifact {uri} unparseable: {e}"))
+            })?;
+            canonical_prefix.extend(msgs);
         }
 
         let mut all_msgs = canonical_prefix.clone();
 
-        // Soft-interrupt recovery: the current turn's artifact may already
-        // contain partial messages from a prior attempt. Load it if present.
-        let cur_uri = format!("artifact://conversation/{:04}.json", current_turn);
+        // Recover partial messages from a prior attempt (soft-interrupt).
+        let cur_uri = conversation_uri(current_turn);
         match gremlin.state.content(&cur_uri, None).await {
-            Ok(json) => match messages_from_conversation(&json) {
-                Ok(msgs) => {
-                    all_msgs.extend(msgs);
-                }
-                Err(e) => {
-                    return Err(RunError::Message(format!(
-                        "current-turn conversation artifact {} unparseable: {}",
-                        cur_uri, e
-                    )));
-                }
-            },
-            Err(e) => {
+            Ok(json) => all_msgs.extend(messages_from_conversation(&json).map_err(|e| {
+                RunError::Message(format!(
+                    "current-turn conversation artifact {cur_uri} unparseable: {e}"
+                ))
+            })?),
+            Err(e)
                 if e.downcast_ref::<crate::executor::state::MissingArtifact>()
-                    .is_some()
-                {
-                    // First attempt at this turn — no artifact yet.
-                } else {
-                    return Err(RunError::Message(format!(
-                        "failed to read current-turn conversation artifact {}: {}",
-                        cur_uri, e
-                    )));
-                }
+                    .is_some() => {}
+            Err(e) => {
+                return Err(RunError::Message(format!(
+                    "failed to read current-turn conversation artifact {cur_uri}: {e}"
+                )))
             }
         }
 
-        if all_msgs.is_empty() {
-            None
-        } else {
-            Some(all_msgs)
-        }
+        (!all_msgs.is_empty()).then_some(all_msgs)
     } else {
         None
     };
 
-    // Compaction is an in-memory transform applied inside the agent loop
-    // before each request. The loop receives the verbatim archive so the
-    // persisted artifact is always reconstructed from full context, never from
-    // compacted working memory.
+    // Compaction is in-memory; the verbatim archive is preserved for
+    // artifact persistence, never compacted.
     let compaction_opts = if is_chat {
         let threshold = config::chat_compaction_threshold_bytes();
         Some(conversation::CompactionOpts {
@@ -543,12 +527,10 @@ async fn run_agent(
             .model
             .clone()
             .or_else(|| Some(client.model().to_string())),
-        raw_path: Some(agent_raw_stream_path(gremlin, &prepared.name).map_err(|e| {
-            RunError::StageFailed {
-                stage: prepared.name.clone(),
-                message: e.to_string(),
-            }
-        })?),
+        raw_path: Some(
+            agent_raw_stream_path(gremlin, &prepared.name)
+                .map_err(|e| stage_failed(&prepared.name, e))?,
+        ),
         capture_events: false,
         on_timeout_prompt: None,
         max_retries: 3,
@@ -587,33 +569,21 @@ async fn run_agent(
         ),
     );
 
-    // Build interactive session separately from RunParams.
-    // Use the pre-created session from launch time if available.
-    // The handle's cmd_tx is already paired with this session's
-    // cmd_rx from the original split().
-    // If the session was already consumed (subsequent stages),
-    // create a fresh cmd channel pair and swap the handle's cmd_tx.
+    // Interactive session: take the pre-created handle or create a fresh one.
     let interactive = gremlin.interactive_session.take().or_else(|| {
         let (tx, rx) = tokio::sync::mpsc::channel(8);
-        let pause = gremlin
-            .runtime_config
-            .interactive
-            .as_ref()
-            .map(|h| h.pause.clone());
+        let interactive = gremlin.runtime_config.interactive.as_ref();
+        let pause = interactive.map(|h| h.pause.clone());
         if let Ok(mut map) = get_run_map().lock() {
             if let Some(handle) = map.get_mut(gremlin.id.as_str()) {
                 handle.interactive.cmd_tx = tx;
             }
         }
-        let evt_tx = gremlin
-            .runtime_config
-            .interactive
-            .as_ref()
-            .map(|h| h.evt_tx.clone());
-        evt_tx.map(|evt_tx| crate::clients::interactive::InteractiveSession {
+        let pause = pause?;
+        interactive.map(|h| crate::clients::interactive::InteractiveSession {
             cmd_rx: rx,
-            evt_tx,
-            pause: pause.expect("pause token must be present when evt_tx is"),
+            evt_tx: h.evt_tx.clone(),
+            pause,
         })
     });
 
@@ -624,23 +594,10 @@ async fn run_agent(
         params.model.as_deref().unwrap_or("default")
     );
 
-    let completed = client
-        .run(params, interactive)
-        .await
-        .map_err(|error| match error {
-            ClientError::Bail { reason } => RunError::Bail { reason },
-            ClientError::Cancelled { message, messages } => {
-                RunError::Cancelled { message, messages }
-            }
-            ClientError::Runtime { message } if message == "cancelled" => RunError::Cancelled {
-                message,
-                messages: None,
-            },
-            other => RunError::StageFailed {
-                stage: prepared.name.clone(),
-                message: other.to_string(),
-            },
-        })?;
+    let completed = client.run(params, interactive).await.map_err(|error| {
+        let name = prepared.name.clone();
+        client_run_err(error, &name)
+    })?;
 
     send_log(
         &gremlin.runtime_config.log_tx,
@@ -653,84 +610,54 @@ async fn run_agent(
     );
 
     if let Some(usage) = &completed.token_usage {
-        // Persist only the counters the provider actually reported. Writing
-        // `unwrap_or(0)` here would turn an absent stat into a measured zero
-        // that later reads back as `Some(0)` and re-appears in chat totals.
         let mut delta: HashMap<String, i64> = HashMap::new();
         delta.insert("turns".to_string(), usage.turns as i64);
-        for (key, value) in [
-            ("prompt_tokens", usage.prompt_tokens),
-            ("completion_tokens", usage.completion_tokens),
-            ("cached_input_tokens", usage.cached_input_tokens),
-            (
-                "cache_creation_input_tokens",
-                usage.cache_creation_input_tokens,
-            ),
-            ("reasoning_tokens", usage.reasoning_tokens),
-        ] {
-            if let Some(value) = value {
-                delta.insert(key.to_string(), value as i64);
-            }
-        }
+        delta.extend(
+            [
+                ("prompt_tokens", usage.prompt_tokens),
+                ("completion_tokens", usage.completion_tokens),
+                ("cached_input_tokens", usage.cached_input_tokens),
+                (
+                    "cache_creation_input_tokens",
+                    usage.cache_creation_input_tokens,
+                ),
+                ("reasoning_tokens", usage.reasoning_tokens),
+            ]
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
+        );
         gremlin.state.accumulate_token_usage(&delta);
     }
 
-    // Chat gremlins persist only the *new* messages from this turn as a
-    // per-turn diff artifact (`conversation/{turn}.json`). The agent loop
-    // keeps `history` verbatim and never rewrites it, so `completed.messages`
-    // is the full transcript: the prior archive plus every message from this
-    // turn. We strip the canonical prefix (messages from turns before this
-    // one) to compute the diff. When the prefix doesn't match (rollback where
-    // the artifact baseline changed), treat the entire `completed.messages`
-    // as the diff and overwrite the turn artifact.
     if is_chat {
         if let (Some(messages), Some(turn_num)) = (&completed.messages, chat_turn) {
-            let diff: Vec<Message> = if canonical_prefix.is_empty() {
-                messages.clone()
-            } else if messages.len() >= canonical_prefix.len() {
-                let completed_prefix = &messages[..canonical_prefix.len()];
-                // Compare the artifact-loaded canonical prefix against the
-                // actual prefix of completed.messages (not against itself).
-                let completed_prefix_json =
-                    serde_json::to_string(completed_prefix).unwrap_or_default();
-                let canonical_prefix_json =
-                    serde_json::to_string(&canonical_prefix).unwrap_or_default();
-                if canonical_prefix_json == completed_prefix_json {
-                    messages[canonical_prefix.len()..].to_vec()
-                } else {
+            let diff: Vec<Message> =
+                if canonical_prefix.is_empty() || messages.len() < canonical_prefix.len() {
                     messages.clone()
-                }
-            } else {
-                messages.clone()
-            };
-            // Always write — an empty diff `[]` overwrites a stale artifact
-            // from an abandoned rollback branch.
+                } else {
+                    let cp = &messages[..canonical_prefix.len()];
+                    let same = serde_json::to_string(cp).unwrap_or_default()
+                        == serde_json::to_string(&canonical_prefix).unwrap_or_default();
+                    if same {
+                        messages[canonical_prefix.len()..].to_vec()
+                    } else {
+                        messages.clone()
+                    }
+                };
             persist_chat_conversation_turn(gremlin, turn_num, &diff).await;
         }
     }
 
     commit_agent(&prepared, local_registry.as_ref())
         .await
-        .map_err(|error| match error {
-            // A declared output that never materialised is the agent's bail.
-            AgentError::MissingArtifact { .. } => RunError::Bail {
-                reason: error.to_string(),
-            },
-            other => RunError::StageFailed {
-                stage: prepared.name.clone(),
-                message: other.to_string(),
-            },
-        })?;
+        .map_err(|error| agent_commit_err(error, &prepared.name))?;
 
     // Merge the localized registry back into the main registry.
     gremlin
         .state
         .join(local_registry.as_ref(), Collision::Ignore, None)
         .await
-        .map_err(|error| RunError::StageFailed {
-            stage: prepared.name.clone(),
-            message: error.to_string(),
-        })?;
+        .map_err(|error| stage_failed(&prepared.name, error))?;
 
     Ok(())
 }
@@ -763,62 +690,17 @@ async fn run_exec(
         format!("[{}] exec: preparing", exec.name),
     );
 
-    // Compute checkout keys: outputs_map keys + filepath-style interpolation keys.
-    // Content interpolation keys are NOT included — they're read once at prepare time.
-    let str_opts = vars::string_options(&exec.options);
-    let (content_map, filepath_map) =
-        crate::artifacts::resolve::split_interpolation_map(&exec.interpolation_map);
-    let content_interpolated = crate::artifacts::resolve::resolve_interpolation_map(
+    // Compute checkout keys from outputs_map + filepath interpolation map.
+    let checkout_keys = collect_checkout_keys(
         gremlin.state.store_ref(),
-        &content_map,
+        &exec.interpolation_map,
+        &exec.outputs_map,
+        &exec.options,
         &loop_iter,
+        &framework_subs,
+        &exec.name,
     )
-    .await
-    .map_err(|error| match error {
-        ResolveError::MissingArtifact(key) => RunError::Bail {
-            reason: format!("artifact not bound: {key:?}"),
-        },
-        other => RunError::StageFailed {
-            stage: exec.name.clone(),
-            message: other.to_string(),
-        },
-    })?;
-
-    let mut uri_subs: HashMap<String, String> = content_interpolated.clone();
-    uri_subs.extend(framework_subs.clone());
-
-    let mut checkout_keys: Vec<String> = Vec::new();
-    for raw_uri_str in exec.outputs_map.values() {
-        let resolved = vars::substitute_vars(raw_uri_str, &str_opts, &uri_subs, &framework_subs);
-        // Strip optional marker (? or ?fallback).
-        let resolved = match resolved.find('?') {
-            Some(pos) => &resolved[..pos],
-            None => &resolved[..],
-        };
-        if !loop_iter.is_empty() {
-            let resolved = resolved.replace("{loop_iter}", &loop_iter);
-            if resolved.starts_with("artifact://") {
-                checkout_keys.push(resolved);
-            }
-        } else if resolved.starts_with("artifact://") {
-            checkout_keys.push(resolved.to_string());
-        }
-    }
-    for raw in filepath_map.values() {
-        let resolved = vars::substitute_vars(raw, &str_opts, &uri_subs, &framework_subs);
-        let resolved = match resolved.find('?') {
-            Some(pos) => &resolved[..pos],
-            None => &resolved[..],
-        };
-        if !loop_iter.is_empty() {
-            let resolved = resolved.replace("{loop_iter}", &loop_iter);
-            if resolved.starts_with("artifact://") {
-                checkout_keys.push(resolved);
-            }
-        } else if resolved.starts_with("artifact://") {
-            checkout_keys.push(resolved.to_string());
-        }
-    }
+    .await?;
 
     let Checkout {
         store: local_registry,
@@ -827,10 +709,7 @@ async fn run_exec(
         .state
         .checkout_registry(&checkout_keys)
         .await
-        .map_err(|error| RunError::StageFailed {
-            stage: exec.name.clone(),
-            message: error.to_string(),
-        })?;
+        .map_err(|error| stage_failed(&exec.name, error))?;
 
     let mut prepared = prepare_exec(
         exec,
@@ -840,18 +719,7 @@ async fn run_exec(
         &framework_subs,
     )
     .await
-    .map_err(|error| match error {
-        ExecError::Resolve {
-            source: ResolveError::MissingArtifact(key),
-            ..
-        } => RunError::Bail {
-            reason: format!("artifact not bound: {key:?}"),
-        },
-        other => RunError::StageFailed {
-            stage: exec.name.clone(),
-            message: other.to_string(),
-        },
-    })?;
+    .map_err(|e| exec_prepare_err(e, &exec.name))?;
 
     prepared.cwd = gremlin.cwd();
     prepared.artifact_dir = artifact_dir;
@@ -875,34 +743,19 @@ async fn run_exec(
         // artifact it wrote is what the enclosing loop or the run loop reads.
         run_shell(&prepared, &gremlin.state)
             .await
-            .map_err(|error| RunError::StageFailed {
-                stage: prepared.name.clone(),
-                message: error.to_string(),
-            })?;
+            .map_err(|error| stage_failed(&prepared.name, error))?;
     }
 
     commit_exec(&prepared, local_registry.as_ref())
         .await
-        .map_err(|error| match error {
-            // An unproduced output that is not a bail URI aborts the run.
-            ExecError::MissingArtifact { .. } => RunError::Bail {
-                reason: error.to_string(),
-            },
-            other => RunError::StageFailed {
-                stage: prepared.name.clone(),
-                message: other.to_string(),
-            },
-        })?;
+        .map_err(|error| exec_commit_err(error, &prepared.name))?;
 
     // Merge the localized registry back into the main registry.
     gremlin
         .state
         .join(local_registry.as_ref(), Collision::Ignore, None)
         .await
-        .map_err(|error| RunError::StageFailed {
-            stage: prepared.name.clone(),
-            message: error.to_string(),
-        })?;
+        .map_err(|error| stage_failed(&prepared.name, error))?;
 
     Ok(())
 }
@@ -912,13 +765,6 @@ async fn run_exec(
 // ---------------------------------------------------------------------------
 
 /// Run a sequence's children in order, repeating when `max_iterations > 1`.
-///
-/// The `skip_if_exists` guard is checked before the first iteration (skip)
-/// and after each subsequent iteration (stop).  When `interval` is set and
-/// `max_iterations > 1`, the executor sleeps between iterations.
-///
-/// On resume, `goto` already positions execution at the correct top-level
-/// stage; iterations naturally replay the body from that child.
 async fn run_sequence(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
@@ -931,30 +777,28 @@ async fn run_sequence(
     };
 
     let enclosing_model = seq.model.as_ref().or(enclosing_model);
-    let merged_task_models = config::merge_task_models_runtime(
-        None, // global defaults already baked into enclosing
-        enclosing_task_models,
-        seq.task_models.as_ref(),
-    );
-    let enclosing_task_models = merged_task_models.as_ref();
+    let merged =
+        config::merge_task_models_runtime(None, enclosing_task_models, seq.task_models.as_ref());
+    let enclosing_task_models = merged.as_ref();
 
     let key = stage_key(scope, &seq.name);
     let max_iterations = seq.max_iterations.max(1);
     let skip_guard = &seq.skip_if_exists;
 
-    // Non-repeating: run children once under the sequence's own scope key,
-    // exactly like the old unconditional Sequence.  Do not touch
-    // `gremlin.loop_iter` — only repeating sequences push iteration scopes.
+    // Non-repeating: run children once.
     if max_iterations == 1 {
-        if !skip_guard.is_empty() {
-            let resolved = skip_guard.replace("{loop_iter}", &gremlin.loop_iter);
-            if is_registered_uri(gremlin.state.store_ref(), &resolved).await {
-                send_log(
-                    &gremlin.runtime_config.log_tx,
-                    format!("sequence '{}': skipped (artifact exists)", seq.name),
-                );
-                return Ok(());
-            }
+        if !skip_guard.is_empty()
+            && is_registered_uri(
+                gremlin.state.store_ref(),
+                &skip_guard.replace("{loop_iter}", &gremlin.loop_iter),
+            )
+            .await
+        {
+            send_log(
+                &gremlin.runtime_config.log_tx,
+                format!("sequence '{}': skipped (artifact exists)", seq.name),
+            );
+            return Ok(());
         }
         for child in &seq.stages {
             Box::pin(run_stage_scoped(
@@ -969,7 +813,7 @@ async fn run_sequence(
         return Ok(());
     }
 
-    // Repeating: iteration loop with guard checks before and after the body.
+    // Repeating: iteration loop.
     let saved_loop_iter = gremlin.loop_iter.clone();
     let mut outcome: Result<(), RunError> = Ok(());
     let mut stopped = false;
@@ -986,25 +830,32 @@ async fn run_sequence(
         };
         let loop_iter = gremlin.loop_iter.clone();
 
-        // Guard before body: skip on iteration 1, stop on later iterations.
-        if !skip_guard.is_empty() {
-            let resolved = skip_guard.replace("{loop_iter}", &loop_iter);
-            if is_registered_uri(gremlin.state.store_ref(), &resolved).await {
-                if iteration == 1 {
-                    send_log(
-                        &gremlin.runtime_config.log_tx,
-                        format!("sequence '{}': skipped (artifact exists)", seq.name),
-                    );
-                    gremlin.loop_iter = saved_loop_iter;
-                    return Ok(());
-                }
-                send_log(
-                    &gremlin.runtime_config.log_tx,
-                    format!("sequence '{}': stopped (artifact exists)", seq.name),
-                );
-                stopped = true;
-                break;
+        // Guard before body: skip/stops if artifact exists.
+        if !skip_guard.is_empty()
+            && is_registered_uri(
+                gremlin.state.store_ref(),
+                &skip_guard.replace("{loop_iter}", &loop_iter),
+            )
+            .await
+        {
+            send_log(
+                &gremlin.runtime_config.log_tx,
+                format!(
+                    "sequence '{}': {}",
+                    seq.name,
+                    if iteration == 1 {
+                        "skipped (artifact exists)"
+                    } else {
+                        "stopped (artifact exists)"
+                    }
+                ),
+            );
+            if iteration == 1 {
+                gremlin.loop_iter = saved_loop_iter;
+                return Ok(());
             }
+            stopped = true;
+            break;
         }
 
         send_log(
@@ -1031,18 +882,20 @@ async fn run_sequence(
             }
         }
 
-        // Guard after body: an artifact produced this iteration stops the
-        // loop immediately (checked with the *current* iteration scope).
-        if !skip_guard.is_empty() {
-            let resolved = skip_guard.replace("{loop_iter}", &loop_iter);
-            if is_registered_uri(gremlin.state.store_ref(), &resolved).await {
-                send_log(
-                    &gremlin.runtime_config.log_tx,
-                    format!("sequence '{}': stopped (artifact produced)", seq.name),
-                );
-                stopped = true;
-                break;
-            }
+        // Guard after body: produced artifact stops loop.
+        if !skip_guard.is_empty()
+            && is_registered_uri(
+                gremlin.state.store_ref(),
+                &skip_guard.replace("{loop_iter}", &loop_iter),
+            )
+            .await
+        {
+            send_log(
+                &gremlin.runtime_config.log_tx,
+                format!("sequence '{}': stopped (artifact produced)", seq.name),
+            );
+            stopped = true;
+            break;
         }
 
         if let Some(seconds) = seq.interval {
@@ -1070,34 +923,18 @@ async fn run_sequence(
 // ---------------------------------------------------------------------------
 
 impl Gremlin {
-    /// Drive every stage from the definition to the end, returning the exit code.
-    ///
-    /// `resume_from` names a stage to resume from; pass `None` for a fresh start.
-    ///
-    /// Mirrors the Python `run_definition` walk: a bail records `bail_<attempt>.json`
-    /// and yields exit code 1, any other failure is recorded and propagated, and
-    /// the terminal state is written either way so `status` and the `finished`
-    /// marker always agree with what actually happened.
+    /// Drive every stage to the end, returning the exit code.
+    /// `resume_from` names a stage to resume from (None = fresh start).
     pub async fn run(&mut self, resume_from: Option<&str>) -> Result<i32, RunError> {
-        // Loading the definition, building the registry, creating the client and
-        // resolving the environment are all deferred out of the constructors so
-        // that a handle nobody runs is cheap. This is the one place they happen
-        // — and the one place a missing definition becomes a hard error.
         self.init_runtime(resume_from).await?;
 
-        // A first start owes its checkout a bootstrap before any stage can use
-        // it. The Python guard was `worktree_dir and not resume_from and
-        // _has_bootstrap`; a run without a worktree has no dev environment to
-        // prepare, and a resumed run's was prepared by the attempt that made
-        // the worktree.
         let bootstrap = self.definition.bootstrap();
         let is_fork = !self.state.read_str("parent_id").is_empty();
         let has_bootstrap = !bootstrap.cmds.is_empty()
             || (!is_fork && (!bootstrap.launch_cmds.is_empty() || !bootstrap.cli_out.is_empty()));
-        let first_start = self.workdir.is_some() && resume_from.is_none();
-        if first_start && has_bootstrap {
+        if self.workdir.is_some() && resume_from.is_none() && has_bootstrap {
             if let Err(error) = run_definition_bootstrap(self, is_fork).await {
-                send_log(&self.runtime_config.log_tx, "bootstrap failed".to_string());
+                send_log(&self.runtime_config.log_tx, "bootstrap failed");
                 self.state.record_stage_error(
                     "other",
                     &truncate(&format!("bootstrap failed: {error}"), 200),
@@ -1127,10 +964,9 @@ impl Gremlin {
                 break;
             }
 
-            // Check for cancellation before each stage.
-            if let Some(ref cancel_token) = self.cancel_token {
-                if cancel_token.is_cancelled() {
-                    send_log(&self.runtime_config.log_tx, "cancelled".to_string());
+            if let Some(ref ct) = self.cancel_token {
+                if ct.is_cancelled() {
+                    send_log(&self.runtime_config.log_tx, "cancelled");
                     self.finish(-1);
                     return Ok(-1);
                 }
@@ -1138,14 +974,6 @@ impl Gremlin {
 
             self.state.set_stage(stage.name(), None, "");
 
-            // Reuse the existing attempt on resume so that artifact scopes —
-            // and therefore done markers in run_parallel — are stable across
-            // retries. A fresh token is generated only when the state has no
-            // prior attempt for this stage.
-            //
-            // Stale bail files from the previous run are removed when the
-            // attempt is reused so that stage_error (checked after the
-            // stage runs) does not spuriously flag the resumed run as bailed.
             let existing_attempt = self.state.read_str("attempt");
             let attempt = if existing_attempt.starts_with(&format!("{}-", stage.name())) {
                 self.state.clear_stage_error(&existing_attempt);
@@ -1157,9 +985,6 @@ impl Gremlin {
             fields.insert("attempt".into(), Value::String(attempt.clone()));
             self.state.patch(&[], &fields);
 
-            // Update loop_iter to include the per-stage attempt so artifact
-            // namespaces are distinct across retries — the same pattern
-            // run_sequence already applies for nested sequences.
             let saved_loop_iter = self.loop_iter.clone();
             self.loop_iter = format!("{}~{}", saved_loop_iter, attempt);
 
@@ -1173,9 +998,6 @@ impl Gremlin {
             );
 
             let stage_result = run_stage(&stage, self).await;
-            // Restore loop_iter before any early exit so the next stage
-            // (or the enclosing loop) sees the original base value, not
-            // the per-attempt decorated form.
             self.loop_iter = saved_loop_iter;
 
             match stage_result {
@@ -1205,18 +1027,14 @@ impl Gremlin {
         }
     }
 
-    /// Reap the clients, fold subprocess spend into the run's total cost, and
-    /// write the terminal state — the bookkeeping every exit path owes the
-    /// operator, whether the run succeeded, bailed, or blew up.
+    /// Reap clients, fold subprocess cost into total, write terminal state.
     fn finish(&mut self, exit_code: i32) {
         send_log(
             &self.runtime_config.log_tx,
-            format!("finished (exit_code={})", exit_code),
+            format!("finished (exit_code={exit_code})"),
         );
         self.client.reap_all(self.id.as_str());
         let mut total = self.client.total_cost_usd().unwrap_or(0.0);
-        // Subprocess spend is only meaningful when it is a real, non-negative
-        // number; a blank or junk field must not poison the total.
         let subprocess = self
             .state
             .read_str("subprocess_cost_usd")
@@ -1230,50 +1048,37 @@ impl Gremlin {
             fields.insert("total_cost_usd".into(), Value::from(total));
             self.state.patch(&[], &fields);
         }
-
         self.state.write_terminal_state(exit_code);
     }
 }
 
-/// Reconstruct a `Vec<Message>` from the serialized conversation artifact
-/// (`artifact://conversation.json`). The artifact is a JSON array of rig
-/// `Message` values (role-tagged), so deserialization round-trips all variants
-/// (system, user, assistant with text and tool calls, tool result).
-///
-/// Returns `None` on a parse failure so the caller can distinguish a missing
-/// or unreadable artifact from a genuinely empty history and avoid persisting
-/// an empty prefix over the prior artifact.
-pub(crate) fn messages_from_conversation(
-    json: &str,
-) -> Result<Vec<rig_core::completion::Message>, String> {
+/// Deserialize a conversation artifact (JSON array of rig `Message` values).
+fn messages_from_conversation(json: &str) -> Result<Vec<rig_core::completion::Message>, String> {
     serde_json::from_str::<Vec<rig_core::completion::Message>>(json)
         .map_err(|e| format!("chat: failed to parse conversation artifact: {e}"))
 }
 
-/// Persist messages to a per-turn artifact
-/// (`artifact://conversation/{turn:04}.json`).
-///
-/// On serialize failure, log and leave any prior artifact untouched.
-pub(crate) async fn persist_chat_conversation_turn(
+/// Persist messages to `artifact://conversation/{turn:04}.json`.
+async fn persist_chat_conversation_turn(
     gremlin: &Gremlin,
     turn: usize,
     messages: &[rig_core::completion::Message],
 ) {
-    let uri_str = format!("artifact://conversation/{:04}.json", turn);
     match serde_json::to_string(messages) {
         Ok(json) => {
-            if let Ok(uri) = Uri::parse(&uri_str) {
+            if let Ok(uri) = Uri::parse(&conversation_uri(turn)) {
                 let _ = gremlin.state.write_into_registry(&uri, &json).await;
             }
         }
         Err(e) => {
-            log::warn!(
-                "chat: failed to serialize conversation artifact for turn {}: {}",
-                turn,
-                e
-            );
+            log::warn!("chat: failed to serialize conversation artifact for turn {turn}: {e}")
         }
     }
+}
+
+/// Format a per-turn conversation artifact URI.
+fn conversation_uri(turn: usize) -> String {
+    format!("artifact://conversation/{turn:04}.json")
 }
 
 /// Derive a turn number from a chat stage name like `chat-0001`.
@@ -1281,80 +1086,46 @@ pub(crate) fn chat_turn_from_stage_name(name: &str) -> Option<usize> {
     name.strip_prefix("chat-").and_then(|s| s.parse().ok())
 }
 
-/// Clear a per-turn conversation artifact by writing an empty message array.
-///
-/// Used by the soft-interrupt recovery path's hard-cancel branch to restore
-/// the pre-turn baseline: the current turn's artifact is overwritten with
-/// `[]` so the next turn's concatenated history won't include partial
-/// messages from the cancelled turn.
+/// Clear a per-turn conversation artifact by writing `[]`.
+/// Used by soft-interrupt recovery to clear partial messages from a cancelled turn.
 pub(crate) async fn clear_chat_turn_artifact(gremlin: &Gremlin, turn: usize) {
-    let uri_str = format!("artifact://conversation/{:04}.json", turn);
-    if let Ok(uri) = Uri::parse(&uri_str) {
+    if let Ok(uri) = Uri::parse(&conversation_uri(turn)) {
         let _ = gremlin.state.write_into_registry(&uri, "[]").await;
     }
 }
 
-/// Read the chat gremlin's persisted conversation from per-turn artifacts.
-///
-/// Walks `artifact://conversation/0001.json`, `0002.json`, ... until a
-/// missing artifact is encountered or `max_turn` is reached, concatenating
-/// their message arrays. Missing or unparseable artifacts after the first
-/// missing one are treated as end-of-list; gaps are tolerated but shouldn't
-/// occur.
-///
-/// `max_turn` caps the walk at the given 1-based turn number (inclusive).
-/// Pass `None` to walk all available artifacts. After rollback via `goto`,
-/// pass the turn number of the stage about to run minus one so abandoned
-/// future artifacts are excluded from the baseline.
+/// Walk per-turn conversation artifacts concatenating message arrays.
 pub(crate) async fn read_chat_conversation(
     gremlin: &Gremlin,
     max_turn: Option<usize>,
 ) -> Vec<Message> {
     let mut all_msgs = Vec::new();
     for t in 1.. {
-        if let Some(max) = max_turn {
-            if t > max {
-                break;
-            }
+        if max_turn.is_some_and(|max| t > max) {
+            break;
         }
-        let uri = format!("artifact://conversation/{:04}.json", t);
+        let uri = conversation_uri(t);
         match gremlin.state.content(&uri, None).await {
-            Ok(json) => {
-                match messages_from_conversation(&json) {
-                    Ok(msgs) => all_msgs.extend(msgs),
-                    Err(_e) => {
-                        // Unparseable — log and stop; with per-turn
-                        // artifacts there should be no gaps.
-                        log::warn!(
-                            "chat: conversation artifact {} unparseable; stopping walk",
-                            uri
-                        );
-                        break;
-                    }
-                }
-            }
-            Err(e) => {
-                if e.downcast_ref::<crate::executor::state::MissingArtifact>()
-                    .is_some()
-                {
-                    // No more turn artifacts.
+            Ok(json) => match messages_from_conversation(&json) {
+                Ok(msgs) => all_msgs.extend(msgs),
+                Err(_) => {
+                    log::warn!("chat: conversation artifact {uri} unparseable; stopping walk");
                     break;
                 }
-                // Other error — skip and keep walking.
-                continue;
+            },
+            Err(e)
+                if e.downcast_ref::<crate::executor::state::MissingArtifact>()
+                    .is_some() =>
+            {
+                break
             }
+            Err(_) => continue,
         }
     }
     all_msgs
 }
 
-/// Append messages to a specific turn's conversation artifact.
-///
-/// Reads only the current turn's artifact (`conversation/{turn:04}.json`),
-/// appends the given messages, and writes the result back. This is used by
-/// the soft-interrupt recovery path to make partial turn messages available
-/// to the re-run agent without duplicating earlier-turn history into this
-/// turn's file.
+/// Append messages to a per-turn conversation artifact.
 pub(crate) async fn append_chat_conversation_turn(
     gremlin: &Gremlin,
     turn: usize,
@@ -1363,34 +1134,26 @@ pub(crate) async fn append_chat_conversation_turn(
     if messages.is_empty() {
         return;
     }
-    let uri_str = format!("artifact://conversation/{:04}.json", turn);
+    let uri_str = conversation_uri(turn);
     let mut existing = match gremlin.state.content(&uri_str, None).await {
-        Ok(json) => match messages_from_conversation(&json) {
-            Ok(msgs) => msgs,
-            Err(e) => {
-                // Unparseable current-turn artifact — do not overwrite it
-                // with a partial suffix; the prior artifact may still hold
-                // recoverable messages.
-                log::warn!(
-                    "chat: current-turn artifact {} unparseable; refusing to append: {}",
-                    uri_str,
-                    e
-                );
-                return;
+        Ok(json) => {
+            match messages_from_conversation(&json) {
+                Ok(msgs) => msgs,
+                Err(e) => {
+                    log::warn!("chat: current-turn artifact {uri_str} unparseable; refusing to append: {e}");
+                    return;
+                }
             }
-        },
-        Err(e) => {
+        }
+        Err(e)
             if e.downcast_ref::<crate::executor::state::MissingArtifact>()
-                .is_some()
-            {
-                Vec::new()
-            } else {
-                log::warn!(
-                    "chat: failed to read current-turn artifact for append: {}",
-                    e
-                );
-                return;
-            }
+                .is_some() =>
+        {
+            Vec::new()
+        }
+        Err(e) => {
+            log::warn!("chat: failed to read current-turn artifact for append: {e}");
+            return;
         }
     };
     existing.extend_from_slice(messages);
@@ -1398,83 +1161,60 @@ pub(crate) async fn append_chat_conversation_turn(
 }
 
 /// Strip trailing messages left dangling by a mid-tool-call cancellation.
-///
-/// The agent loop pushes the assistant tool-use message before executing its
-/// tool batch, so cancelling during the batch can leave a trailing assistant
-/// message with no results. Cancellation can also race a tool-result send and
-/// leave a trailing tool-result message whose originating assistant tool-use
-/// message is absent. Both are invalid transcript suffixes and are dropped
-/// before the synthetic interruption message is injected.
 pub(crate) fn strip_unpaired_tool_messages(messages: &mut Vec<Message>) {
-    fn is_tool_result_user(message: &Message) -> bool {
-        match message {
-            Message::User { content } => content
+    fn count_tool_calls(m: &Message) -> (bool, usize) {
+        if let Message::Assistant { content, .. } = m {
+            let n = content
                 .iter()
-                .any(|item| matches!(item, UserContent::ToolResult(_))),
-            _ => false,
+                .filter(|i| matches!(i, AssistantContent::ToolCall(_)))
+                .count();
+            (n > 0, n)
+        } else {
+            (false, 0)
         }
     }
-
-    fn assistant_has_tool_call(message: &Message) -> bool {
-        match message {
-            Message::Assistant { content, .. } => content
+    fn count_tool_results(m: &Message) -> (bool, usize) {
+        if let Message::User { content } = m {
+            let n = content
                 .iter()
-                .any(|item| matches!(item, AssistantContent::ToolCall(_))),
-            _ => false,
+                .filter(|i| matches!(i, UserContent::ToolResult(_)))
+                .count();
+            (n > 0, n)
+        } else {
+            (false, 0)
         }
     }
-
-    fn count_tool_calls(message: &Message) -> usize {
-        match message {
-            Message::Assistant { content, .. } => content
-                .iter()
-                .filter(|item| matches!(item, AssistantContent::ToolCall(_)))
-                .count(),
-            _ => 0,
-        }
-    }
-
-    fn count_tool_results(message: &Message) -> usize {
-        match message {
-            Message::User { content } => content
-                .iter()
-                .filter(|item| matches!(item, UserContent::ToolResult(_)))
-                .count(),
-            _ => 0,
-        }
-    }
-
     loop {
         let before = messages.len();
-
         if let Some(last) = messages.last() {
-            if assistant_has_tool_call(last) {
+            if count_tool_calls(last).0 {
                 messages.pop();
                 continue;
             }
         }
-
-        if messages.last().is_some_and(is_tool_result_user) {
+        if messages.last().is_some_and(|m| count_tool_results(m).0) {
             let mut idx = messages.len();
-            let mut result_count = 0usize;
-            while idx > 0 && is_tool_result_user(&messages[idx - 1]) {
-                result_count += count_tool_results(&messages[idx - 1]);
-                idx -= 1;
-            }
-            if idx > 0 && assistant_has_tool_call(&messages[idx - 1]) {
-                let call_count = count_tool_calls(&messages[idx - 1]);
-                if call_count == result_count {
-                    // Paired: every tool call has a matching result.
+            let mut result_count = 0;
+            while idx > 0 {
+                let (is_result, n) = count_tool_results(&messages[idx - 1]);
+                if !is_result {
                     break;
                 }
-                // Partial results: drop the assistant message AND the
-                // orphaned tool results.
+                result_count += n;
                 idx -= 1;
+            }
+            if idx > 0 {
+                let (has_call, call_count) = count_tool_calls(&messages[idx - 1]);
+                if has_call && call_count == result_count {
+                    break;
+                }
+                if has_call {
+                    idx -= 1;
+                }
             }
             messages.truncate(idx);
             continue;
         }
-
         if messages.len() == before {
             break;
         }
@@ -1482,18 +1222,11 @@ pub(crate) fn strip_unpaired_tool_messages(messages: &mut Vec<Message>) {
 }
 
 /// Clamp `text` to at most `max` bytes, cutting on a char boundary.
-///
-/// The Python executor sliced the operator-facing reason (`reason[:200]`) for
-/// the bail file; this keeps that budget without splitting a codepoint.
 pub(crate) fn truncate(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }
-    let mut end = max;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text[..end].to_string()
+    text[..text.floor_char_boundary(max)].to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1503,8 +1236,6 @@ pub(crate) fn truncate(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use crate::config;
 
     use crate::artifacts::uri::Uri;
     use crate::builders::agent::AgentBuilder;
@@ -1523,8 +1254,7 @@ mod tests {
         ModelURI::parse(spec).unwrap()
     }
 
-    /// A gremlin with no git, no worktree, and a seeded state directory: the
-    /// smallest thing `run_stage` needs to dispatch a stage.
+    /// A minimal gremlin for testing: no git, no worktree, seeded state.
     fn test_gremlin(stages: Vec<StageSpec>, default_model: &str) -> (Sandbox, Gremlin) {
         test_gremlin_with_bootstrap(stages, default_model, Bootstrap::default())
     }
@@ -1545,40 +1275,30 @@ mod tests {
     ) -> (Sandbox, Gremlin) {
         let sandbox = Sandbox::new();
         let state_dir = config::state_root().join("gr-test");
-        let artifact_dir = state_dir.join("artifacts");
-        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::create_dir_all(state_dir.join("artifacts")).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
 
-        let data = serde_json::json!({
-            "id": "gr-test",
-            "attempt": "test-0001",
-            "stage": "starting",
-            "model": default_model,
-        });
+        let data = serde_json::json!({"id":"gr-test","attempt":"test-0001","stage":"starting","model":default_model});
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
-
-        let state_data = StateData::open("gr-test").unwrap();
-
-        let definition = StaticDefinition::new(
-            "test".to_string(),
-            PathBuf::from("test.yaml"),
-            model(default_model),
-            bootstrap,
-            stages,
-            land,
-            vec![],
-            serde_yaml::Value::Null,
-            None,
-        );
 
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),
+            definition: Box::new(StaticDefinition::new(
+                "test".to_string(),
+                PathBuf::from("test.yaml"),
+                model(default_model),
+                bootstrap,
+                stages,
+                land,
+                vec![],
+                serde_yaml::Value::Null,
+                None,
+            )),
             definition_path: None,
             model_override: None,
-            definition: Box::new(definition),
             workdir: None,
             project_root: sandbox.path().to_path_buf(),
-            state: state_data,
+            state: StateData::open("gr-test").unwrap(),
             env: HashMap::new(),
             client: Client::parse(default_model).unwrap(),
             loop_iter: "1".to_string(),
@@ -1622,11 +1342,8 @@ mod tests {
         assert_eq!(truncate("aé", 2), "a");
     }
 
-    /// `messages_from_conversation` must round-trip every `Message` variant
-    /// the chat gremlin persists: system, user, assistant (with text), and
-    /// tool result. The artifact is a JSON array of role-tagged `Message`
-    /// values, so re-serializing the deserialized result must reproduce the
-    /// original bytes exactly.
+    /// `messages_from_conversation` must round-trip all `Message` variants.
+    /// The artifact is a JSON array of role-tagged `Message` values.
     #[test]
     fn messages_from_conversation_round_trips_all_variants() {
         use rig_core::completion::message::{CallId, ToolName};
@@ -1794,167 +1511,169 @@ mod tests {
 
     // --- agent ---
 
-    /// The wiring regression: `run_agent` must hand `build_task_selector` the
-    /// *task*-client maps (task-description → model-spec), never the
-    /// `RuntimeConfig::stage_models_*` fields (stage-name → model-spec). The
-    /// two have the same `HashMap<String, String>` type, so a swapped argument
-    /// compiles cleanly — this boundary test pins the source of the maps.
+    /// Regression: ensure task-model maps aren't confused with stage-model maps.
     #[test]
     fn resolve_task_models_uses_task_maps_not_stage_maps() {
         let (_sandbox, mut gremlin) = test_gremlin(vec![], "cmd/true");
-
-        // A stage-model entry keyed by the *stage name* — the wrong map.
         gremlin
             .runtime_config
             .stage_models_exact
-            .insert("writer".to_string(), "cmd/stage-model".to_string());
+            .insert("writer".into(), "cmd/stage-model".into());
         gremlin
             .runtime_config
             .stage_models_prefix
-            .insert("wri".to_string(), "cmd/stage-prefix".to_string());
-
-        // A task-model entry keyed by a *task kind* — the right map.
-        let global = IndexMap::from([("Scout".to_string(), "openai/mini".to_string())]);
-        gremlin.runtime_config.default_task_models = Some(global);
-
+            .insert("wri".into(), "cmd/stage-prefix".into());
+        gremlin.runtime_config.default_task_models =
+            Some(IndexMap::from([("Scout".into(), "openai/mini".into())]));
         let by_kind = resolve_task_models(
             gremlin.runtime_config.default_task_models.as_ref(),
             None,
             None,
         )
         .unwrap();
-
-        // The task-kind key survives; the stage-name keys do not leak in.
         assert_eq!(
             by_kind.get(&TaskKind::Scout),
-            Some(&"openai/mini".to_string()),
-            "the task-model entry must be present"
+            Some(&"openai/mini".to_string())
         );
         assert!(
             !by_kind.contains_key(&TaskKind::Implement),
-            "stage-model entries must not appear in the task-model map"
+            "stage-model entries must not leak"
         );
+    }
+
+    // --- model resolution ---
+
+    /// Shared helper for resolve_model_spec assertions.
+    async fn assert_resolved(
+        stage_name: &str,
+        stage_model: Option<&str>,
+        enclosing: Option<&ModelURI>,
+        setup: impl FnOnce(&mut Gremlin),
+        expected: &str,
+    ) {
+        let mut b = AgentBuilder::new(stage_name).prompt("hi");
+        if let Some(m) = stage_model {
+            b = b.model(model(m));
+        }
+        let (_sandbox, mut gremlin) = test_gremlin(vec![b.build().unwrap()], "cmd/default");
+        setup(&mut gremlin);
+        let stage = take_first_stage(&mut gremlin).await;
+        let resolved = resolve_model_spec(&stage, &gremlin, enclosing).unwrap();
+        assert_eq!(resolved.to_string(), expected);
     }
 
     #[tokio::test]
     async fn resolve_model_spec_profile_map_wins_over_global_map() {
-        let stages = vec![AgentBuilder::new("plan").prompt("hi").build().unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/default");
-
-        gremlin
-            .runtime_config
-            .profile_stage_models_exact
-            .insert("plan".to_string(), "cmd/profile-plan".to_string());
-        gremlin
-            .runtime_config
-            .stage_models_exact
-            .insert("plan".to_string(), "cmd/global-plan".to_string());
-
-        let stage = take_first_stage(&mut gremlin).await;
-        let resolved = resolve_model_spec(&stage, &gremlin, None).unwrap();
-        assert_eq!(resolved.to_string(), "cmd/profile-plan");
+        assert_resolved(
+            "plan",
+            None,
+            None,
+            |g| {
+                g.runtime_config
+                    .profile_stage_models_exact
+                    .insert("plan".into(), "cmd/profile-plan".into());
+                g.runtime_config
+                    .stage_models_exact
+                    .insert("plan".into(), "cmd/global-plan".into());
+            },
+            "cmd/profile-plan",
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn resolve_model_spec_profile_exact_beats_profile_prefix() {
-        let stages = vec![AgentBuilder::new("plan-stage")
-            .prompt("hi")
-            .build()
-            .unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/default");
-
-        gremlin
-            .runtime_config
-            .profile_stage_models_exact
-            .insert("plan-stage".to_string(), "cmd/profile-exact".to_string());
-        gremlin
-            .runtime_config
-            .profile_stage_models_prefix
-            .insert("plan-".to_string(), "cmd/profile-prefix".to_string());
-
-        let stage = take_first_stage(&mut gremlin).await;
-        let resolved = resolve_model_spec(&stage, &gremlin, None).unwrap();
-        assert_eq!(resolved.to_string(), "cmd/profile-exact");
+        assert_resolved(
+            "plan-stage",
+            None,
+            None,
+            |g| {
+                g.runtime_config
+                    .profile_stage_models_exact
+                    .insert("plan-stage".into(), "cmd/profile-exact".into());
+                g.runtime_config
+                    .profile_stage_models_prefix
+                    .insert("plan-".into(), "cmd/profile-prefix".into());
+            },
+            "cmd/profile-exact",
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn resolve_model_spec_profile_prefix_wins_over_global_prefix() {
-        let stages = vec![AgentBuilder::new("plan-work").prompt("hi").build().unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/default");
-
-        gremlin
-            .runtime_config
-            .profile_stage_models_prefix
-            .insert("plan-".to_string(), "cmd/profile-prefix".to_string());
-        gremlin
-            .runtime_config
-            .stage_models_prefix
-            .insert("plan-".to_string(), "cmd/global-prefix".to_string());
-
-        let stage = take_first_stage(&mut gremlin).await;
-        let resolved = resolve_model_spec(&stage, &gremlin, None).unwrap();
-        assert_eq!(resolved.to_string(), "cmd/profile-prefix");
+        assert_resolved(
+            "plan-work",
+            None,
+            None,
+            |g| {
+                g.runtime_config
+                    .profile_stage_models_prefix
+                    .insert("plan-".into(), "cmd/profile-prefix".into());
+                g.runtime_config
+                    .stage_models_prefix
+                    .insert("plan-".into(), "cmd/global-prefix".into());
+            },
+            "cmd/profile-prefix",
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn resolve_model_spec_stage_model_beats_profile_map() {
-        let stages = vec![AgentBuilder::new("plan")
-            .model(model("cmd/stage"))
-            .prompt("hi")
-            .build()
-            .unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/default");
-
-        gremlin
-            .runtime_config
-            .profile_stage_models_exact
-            .insert("plan".to_string(), "cmd/profile-plan".to_string());
-
-        let stage = take_first_stage(&mut gremlin).await;
-        let resolved = resolve_model_spec(&stage, &gremlin, None).unwrap();
-        assert_eq!(resolved.to_string(), "cmd/stage");
+        assert_resolved(
+            "plan",
+            Some("cmd/stage"),
+            None,
+            |g| {
+                g.runtime_config
+                    .profile_stage_models_exact
+                    .insert("plan".into(), "cmd/profile-plan".into());
+            },
+            "cmd/stage",
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn resolve_model_spec_enclosing_model_beats_profile_map() {
-        let stages = vec![AgentBuilder::new("plan").prompt("hi").build().unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/default");
-
-        gremlin
-            .runtime_config
-            .profile_stage_models_exact
-            .insert("plan".to_string(), "cmd/profile-plan".to_string());
-
-        let stage = take_first_stage(&mut gremlin).await;
-        let enclosing = model("cmd/enclosing");
-        let resolved = resolve_model_spec(&stage, &gremlin, Some(&enclosing)).unwrap();
-        assert_eq!(resolved.to_string(), "cmd/enclosing");
+        let enc = model("cmd/enclosing");
+        assert_resolved(
+            "plan",
+            None,
+            Some(&enc),
+            |g| {
+                g.runtime_config
+                    .profile_stage_models_exact
+                    .insert("plan".into(), "cmd/profile-plan".into());
+            },
+            "cmd/enclosing",
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn resolve_model_spec_falls_back_to_global_map() {
-        let stages = vec![AgentBuilder::new("review").prompt("hi").build().unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/default");
-
-        gremlin
-            .runtime_config
-            .stage_models_exact
-            .insert("review".to_string(), "cmd/global-review".to_string());
-
-        let stage = take_first_stage(&mut gremlin).await;
-        let resolved = resolve_model_spec(&stage, &gremlin, None).unwrap();
-        assert_eq!(resolved.to_string(), "cmd/global-review");
+        assert_resolved(
+            "review",
+            None,
+            None,
+            |g| {
+                g.runtime_config
+                    .stage_models_exact
+                    .insert("review".into(), "cmd/global-review".into());
+            },
+            "cmd/global-review",
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn resolve_model_spec_falls_back_to_definition_default() {
-        let stages = vec![AgentBuilder::new("review").prompt("hi").build().unwrap()];
-        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/default");
-
-        let stage = take_first_stage(&mut gremlin).await;
-        let resolved = resolve_model_spec(&stage, &gremlin, None).unwrap();
-        assert_eq!(resolved.to_string(), "cmd/default");
+        assert_resolved("review", None, None, |_| {}, "cmd/default").await;
     }
+
+    // --- agent ---
 
     #[tokio::test]
     async fn agent_skips_when_the_guard_artifact_is_live() {
@@ -2042,37 +1761,14 @@ mod tests {
 
     #[test]
     fn agent_landscape_flag_controls_system_prompt_assembly() {
-        // Exercises the agent_system_prompt helper that run_agent calls:
-        //   - landscape: true  → agent_system_prompt(base, Some(block))
-        //   - landscape: false → agent_system_prompt(base, None)
-        //
-        // This is the same code path as the production flag handling — if the
-        // `agent.landscape` conditional in run_agent is ever removed or
-        // inverted, the `None` arm here will fail.
-        let base = "base prompt".to_string();
-        let block = "<!-- LANDSCAPE BLOCK -->".to_string();
-
-        // When landscape is true, the block appears in the assembled prompt.
-        let with_landscape = agent_system_prompt(base.clone(), Some(block.clone()));
-        assert!(
-            with_landscape.contains(&block),
-            "landscape block must be present when landscape flag is true"
-        );
-        assert!(
-            with_landscape.starts_with(&base),
-            "base prompt must come before the landscape block"
-        );
-
-        // When landscape is false, the block is absent.
-        let without_landscape = agent_system_prompt(base.clone(), None);
-        assert!(
-            !without_landscape.contains(&block),
-            "landscape block must be absent when landscape flag is false"
-        );
-        assert_eq!(
-            without_landscape, base,
-            "assembled prompt must equal base when landscape is false"
-        );
+        let block = "<!-- LANDSCAPE BLOCK -->";
+        let with = assemble_system_prompt("base", Some(block));
+        assert!(with.contains(block) && with.starts_with("base"));
+        let without = assemble_system_prompt("base", None);
+        assert!(!without.contains(block) && without == "base");
+        // Empty string treated as absent.
+        let empty = assemble_system_prompt("base", Some(""));
+        assert_eq!(empty, "base");
     }
 
     // --- exec ---
@@ -2453,9 +2149,7 @@ mod tests {
         );
         assert_eq!(state_after["status"], "stopped");
 
-        // The successful child "good" has a done marker in the registry. The
-        // scope uses a resume-stable base (the attempt suffix is stripped),
-        // so the marker URI is artifact://1/group/done/good.
+        // Verify the successful child "good" is marked done.
         let scope = stage_key("1", "group");
         let good_done_uri = format!("artifact://{scope}/done/good");
         assert!(
@@ -2463,8 +2157,7 @@ mod tests {
             "good child should be marked done at {good_done_uri}"
         );
 
-        // Clear terminal markers so run() treats this as a resumable run.
-        // `finished` file and `exit_code` must be removed; `status` reset.
+        // Reset terminal state for resume.
         let finished = state_dir.join("finished");
         if finished.exists() {
             std::fs::remove_file(&finished).unwrap();
@@ -2477,8 +2170,7 @@ mod tests {
         fields.insert("status".into(), Value::String("running".to_string()));
         gremlin.state.patch(&["exit_code".to_string()], &fields);
 
-        // Resume: "bad" fails again, but the attempt is reused so "good" is
-        // skipped rather than re-run.
+        // Resume: attempt is reused so "good" is skipped.
         match gremlin.run(Some("group")).await {
             Err(RunError::StageFailed { stage, .. }) => assert_eq!(stage, "bad"),
             other => panic!("expected StageFailed on resume, got {other:?}"),
@@ -2493,8 +2185,7 @@ mod tests {
             "attempt was regenerated on resume: {first_attempt} vs {second_attempt}"
         );
 
-        // The good child's done marker must still be present under the
-        // original scope — confirming it was skipped, not overwritten.
+        // Good child's done marker must survive resume.
         assert!(
             gremlin.state.is_registered(&good_done_uri).await,
             "good child done marker should survive resume at {good_done_uri}"
@@ -2528,8 +2219,7 @@ mod tests {
 
     // --- bootstrap integration ---
 
-    /// The run-loop half of bootstrap: `run` runs the block before the stage
-    /// walk, and a failure is a bail — recorded and terminal, never a crash.
+    /// `run` runs the bootstrap before the stage walk; failure is a bail.
     #[tokio::test]
     async fn run_fails_the_bootstrap_and_records_a_bail() {
         let stages = vec![ExecBuilder::new("never")
@@ -2618,11 +2308,8 @@ mod tests {
     // --- git-backed end to end ---
 
     #[tokio::test]
-    // The shared env guard holds a plain `std::sync::Mutex` across the run's
-    // awaits. That is safe here: `#[tokio::test]` drives a current-thread
-    // runtime, so no other task can be scheduled on this thread while the lock
-    // is held, and the lock exists precisely to keep the sandbox override from
-    // being observed half-swapped by another test.
+    // Holding a plain std::sync::Mutex across awaits is safe on #[tokio::test]
+    // (current-thread runtime). The lock guards the sandbox env override.
     #[allow(clippy::await_holding_lock)]
     async fn create_then_run_end_to_end() {
         let fx = GitSandbox::with_definition(
@@ -2760,5 +2447,56 @@ mod tests {
         assert_eq!(messages.len(), 3);
         super::strip_unpaired_tool_messages(&mut messages);
         assert_eq!(messages.len(), 1);
+    }
+
+    // --- System prompt assembly (inlined, tested above) ---
+
+    #[tokio::test]
+    async fn missing_cwd_produces_empty_block() {
+        let (block, file_count, item_count) = build_landscape_snapshot(
+            PathBuf::from("/definitely/not/present/landscape-cwd"),
+            None,
+            true,
+        )
+        .await;
+        assert_eq!(block, "");
+        assert_eq!(file_count, 0);
+        assert_eq!(item_count, 0);
+    }
+
+    #[tokio::test]
+    async fn dropped_block_reports_zero_stats() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("thin.rs"), "fn only() {}\n").unwrap();
+        let (block, file_count, item_count) =
+            build_landscape_snapshot(dir.path().to_path_buf(), None, true).await;
+        assert_eq!(block, "");
+        assert_eq!(file_count, 0);
+        assert_eq!(item_count, 0);
+    }
+
+    #[tokio::test]
+    async fn nonempty_outline_flows_through_assemble() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.rs"),
+            "fn main() {}\nstruct Config {}\nimpl Config {}\n",
+        )
+        .unwrap();
+        let (block, file_count, item_count) =
+            build_landscape_snapshot(dir.path().to_path_buf(), None, true).await;
+        assert!(block.contains("<!-- BEGIN LANDSCAPE BLOCK -->"));
+        assert!(block.contains(&format!("<!-- root: {} -->\n", dir.path().display())));
+        assert!(block.lines().any(|line| line.starts_with("main.rs:")));
+        assert!(!block.contains(&format!("{}:", dir.path().join("main.rs").display())));
+        assert!(block.contains("1|fn|main"));
+        assert!(block.contains("2|struct|Config"));
+        assert!(block.contains("3|impl|Config"));
+        assert_eq!(file_count, 1);
+        assert_eq!(item_count, 3);
+
+        let prompt = assemble_system_prompt("base prompt", Some(&block));
+        assert!(prompt.starts_with("base prompt\n\n"));
+        assert!(prompt.contains(&block));
     }
 }

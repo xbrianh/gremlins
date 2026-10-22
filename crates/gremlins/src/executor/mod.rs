@@ -6,12 +6,36 @@
 //! owns the sequential run loop that walks a definition's stages and drives each
 //! one through its guard, scope, and bail bookkeeping.
 
+use serde_json::{Map, Value};
 use thiserror::Error;
 
 use rig_core::completion::Message;
 
 use crate::clients::backend::ClientError;
 use crate::executor::state::StateError;
+
+/// Send a line through the per-gremlin log channel when one is configured.
+pub(crate) fn send_log(
+    tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    msg: impl AsRef<str>,
+) {
+    if let Some(tx) = tx {
+        let _ = tx.send(msg.as_ref().to_string());
+    }
+}
+
+/// Read a string field from a JSON object, defaulting to `""`.
+pub(crate) fn str_field(map: &Map<String, Value>, field: &str) -> String {
+    map.get(field)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Read a field or return `Value::Null` when it is absent or not a string.
+pub(crate) fn null_field(tree: &Map<String, Value>, key: &str) -> Value {
+    tree.get(key).cloned().unwrap_or(Value::Null)
+}
 
 /// Why a gremlin run failed.
 ///
@@ -76,7 +100,6 @@ pub mod run;
 pub mod socket;
 pub mod state;
 pub mod supervisor;
-pub(crate) mod system_prompt;
 pub mod vars;
 
 pub use supervisor::DaemonEvent;

@@ -28,6 +28,7 @@ use crate::definition::ChatDefinition;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin, GremlinConfig};
 use crate::executor::socket::{self, GremlinsDaemonLock};
 use crate::executor::state::{self, FileSystemStateStore};
+use crate::executor::{null_field, str_field};
 use rig_core::completion::Message;
 
 // ---------------------------------------------------------------------------
@@ -59,13 +60,7 @@ impl Clone for SharedWriter {
     }
 }
 
-/// RAII guard that makes aborting a debug connection safe.
-///
-/// `handle_debug` pauses a pipeline gremlin for the lifetime of the debug
-/// socket. If the supervisor aborts the aux task (session teardown), the
-/// future is dropped and the normal disconnect path never runs. Dropping
-/// this guard restores the pause token and sends `Quit` synchronously via
-/// `try_send`, so a paused agent is not left waiting forever.
+/// RAII guard that restores pause and sends Quit on drop (even during abort).
 struct DebugDetachGuard {
     interactive: Option<InteractiveHandle>,
 }
@@ -114,12 +109,9 @@ struct CurrentTurn {
 
 /// Daemon-side assets for one interactive front-end session.
 ///
-/// The session owns the gremlins, the in-flight turn, and every socket
-/// opened on the session socket. Its lifetime is bound to the main
-/// session-socket connection: when that connection reaches EOF/error the
-/// session is torn down, gremlins are dropped, and auxiliary sockets are
-/// closed. Chat gremlins still appear in the run map so `ls`/`stop`/`debug`
-/// keep working, but their ownership lives here.
+/// Owns chat gremlins, the in-flight turn, and all session-socket connections.
+/// Lifetime is bound to the main session-socket connection; teardown drops
+/// gremlins and closes aux sockets.
 struct ClientSession {
     session_id: String,
     /// The task that owns the session's [`UnixListener`]. Stored so teardown
@@ -163,13 +155,10 @@ impl ClientSession {
     }
 }
 
-/// Shared handle to a [`ClientSession`]. The supervisor keeps one per
-/// active session, keyed by session id in [`session_map`].
+/// Shared handle to a [`ClientSession`], keyed by session id.
 type SessionHandle = Arc<tokio::sync::Mutex<ClientSession>>;
 
-/// The global session map. Session ids are unforgeable and are returned by
-/// `create_session`; they are never accepted from a connection that is not
-/// bound to the same session socket.
+/// Global session map. Ids are unforgeable, returned by `create_session`.
 static SESSION_MAP: OnceLock<Arc<std::sync::Mutex<HashMap<String, SessionHandle>>>> =
     OnceLock::new();
 
@@ -262,10 +251,7 @@ fn get_connection_count() -> &'static AtomicUsize {
     init_connection_counter().as_ref()
 }
 
-/// RAII guard that keeps the global connection count accurate even when a
-/// spawned connection task is aborted. The decrement (and idle-shutdown
-/// check) runs on drop, which tokio guarantees before an aborted task's
-/// handle is considered finished.
+/// RAII guard: decrements connection count on drop, signals idle-shutdown.
 struct ConnectionGuard {
     shutdown_tx: Option<watch::Sender<bool>>,
 }
@@ -383,25 +369,7 @@ pub(crate) fn get_run_map() -> &'static Arc<Mutex<HashMap<String, RunHandle>>> {
     RUN_MAP.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
-// ---------------------------------------------------------------------------
-// Field extraction helpers — reduce repetition when reading from
-// serde_json::Map / Value trees that dominate the handle_* functions.
-// ---------------------------------------------------------------------------
-
-fn str_field(tree: &Map<String, Value>, key: &str) -> String {
-    tree.get(key)
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
-}
-
-fn null_field(tree: &Map<String, Value>, key: &str) -> Value {
-    tree.get(key).cloned().unwrap_or(Value::Null)
-}
-
-/// Extract and validate the `"id"` field from a JSON-RPC-style request.
-/// Returns `Ok(id)` when the field is present and passes `validate_gremlin_id`, or
-/// `Err(response)` with an error JSON object ready to send back to the caller.
+/// Validate `"id"` field from a JSON-RPC-style request against [`validate_gremlin_id`].
 fn valid_id(request: &Value) -> Result<&str, Value> {
     let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
     if id.is_empty() {
@@ -413,10 +381,8 @@ fn valid_id(request: &Value) -> Result<&str, Value> {
     Ok(id)
 }
 
-/// The `_lock` file holds the executor's exclusive advisory flock for the
-/// lifetime of the supervisor. When the process exits (after the last
-/// gremlin drains and the last connection closes), the file descriptor
-/// closes and the kernel releases the lock automatically.
+/// Run the accept loop. The `_lock` file holds the executor's exclusive advisory
+/// flock for the lifetime of the supervisor.
 pub async fn run_supervisor(
     listener: UnixListener,
     state_root: PathBuf,
@@ -546,7 +512,7 @@ async fn handle_connection(
             break;
         }
 
-        let _outcome = dispatch_op(&op, &request, &state_root, &shutdown_tx, &writer).await;
+        dispatch_op(&op, &request, &state_root, &shutdown_tx, &writer).await;
         // Unblock events *after* the response is written so one-shot
         // clients always read the response before any broadcast event.
         let _ = event_start_tx.send(true);
@@ -565,11 +531,8 @@ async fn handle_connection(
 // Session connections
 // ---------------------------------------------------------------------------
 
-/// Run the accept loop for one session socket (`sess-<id>.sock`).
-///
-/// The first connection becomes the session main connection and owns the
-/// session's lifetime; subsequent connections are auxiliary sockets (log
-/// follow, debug) that are closed when the session dies.
+/// Accept loop for one session socket.
+/// First connection = session main; subsequent = aux (log, debug).
 async fn run_session_listener(
     listener: UnixListener,
     session_id: String,
@@ -677,12 +640,8 @@ async fn run_session_listener(
     }
 }
 
-/// Serve the single main connection of a session.
-///
-/// Reading is split from op handling: the reader stays on the socket so EOF
-/// is observed immediately even when an op (e.g. a chat turn) is blocked, and
-/// dispatches requests over a channel to a sequential op task. The dispatcher
-/// owns all request/response writes, preserving FIFO ordering.
+/// Serve the session main connection. Reader and dispatcher run concurrently;
+/// EOF on the reader marks the session closed.
 async fn handle_session_main(
     main_read: OwnedReadHalf,
     writer: SharedWriter,
@@ -729,9 +688,8 @@ async fn handle_session_main(
     teardown_session(&session, state_root).await;
 }
 
-/// Read JSON-lines from the main session socket and forward them to the op
-/// dispatcher. On EOF/error mark the session closed and cancel the in-flight
-/// turn so a blocked `chat` handler returns promptly.
+/// Read JSON-lines from main socket, forward to dispatcher. On EOF/error,
+/// mark session closed and cancel in-flight turn.
 async fn run_session_main_reader(
     main_read: OwnedReadHalf,
     request_tx: mpsc::Sender<Value>,
@@ -770,8 +728,7 @@ enum SessionOp {
     CloseRequested,
 }
 
-/// Process session-socket requests sequentially, preserving the response
-/// order the client's FIFO relies on.
+/// Process session-socket requests sequentially (FIFO response order).
 async fn run_session_dispatcher(
     mut request_rx: mpsc::Receiver<Value>,
     writer: SharedWriter,
@@ -861,10 +818,8 @@ async fn session_is_closed(session: &SessionHandle) -> bool {
     session.lock().await.closed
 }
 
-/// Serve a single auxiliary connection on a session socket.
-///
-/// The first (and only) request names a streaming op. `log`/`debug` are
-/// supported; anything else receives an error.
+/// Serve a single auxiliary connection. First request names a streaming op
+/// (`log`/`debug`).
 async fn handle_session_aux(
     read_half: OwnedReadHalf,
     write_half: tokio::net::unix::OwnedWriteHalf,
@@ -907,7 +862,7 @@ async fn handle_session_aux(
     }
 }
 
-/// Verify that `request` names the session this socket is bound to.
+/// Verify `request` names the session this socket is bound to.
 fn verify_session_id(request: &Value, expected: &str) -> Result<(), Value> {
     match request.get("session_id").and_then(|v| v.as_str()) {
         Some(id) if id == expected => Ok(()),
@@ -923,16 +878,13 @@ fn verify_session_id(request: &Value, expected: &str) -> Result<(), Value> {
     }
 }
 
-/// Tear down a session: cancel the in-flight turn, abort aux sockets, drop
-/// chat gremlins, remove session state, and unlink the session socket.
+/// Tear down a session: cancel in-flight turn, abort aux sockets, drop chat
+/// gremlins, remove session state, unlink session socket.
 async fn teardown_session(session: &SessionHandle, state_root: &Path) {
     teardown_session_impl(session, state_root, true).await;
 }
 
-/// Listener-exit variant of [`teardown_session`].
-///
-/// The listener calls this on accept error/timeout and must not abort its
-/// own task; every other teardown caller wants the listener stopped too.
+/// Listener-exit variant of [`teardown_session`] — does NOT abort the listener.
 async fn teardown_session_from_listener(session: &SessionHandle, state_root: &Path) {
     teardown_session_impl(session, state_root, false).await;
 }
@@ -1005,74 +957,41 @@ async fn teardown_session_impl(session: &SessionHandle, state_root: &Path, abort
 // Op dispatch
 // ---------------------------------------------------------------------------
 
-enum DispatchOutcome {
-    /// Request-response: the handler wrote a reply; continue the request loop.
-    Continue,
-}
-
 async fn dispatch_op(
     op: &str,
     request: &Value,
     state_root: &Path,
     shutdown_tx: &watch::Sender<bool>,
     writer: &SharedWriter,
-) -> DispatchOutcome {
-    /// Write `resp` to `writer` and return Continue.
-    async fn reply(writer: &SharedWriter, resp: Value) -> DispatchOutcome {
-        let _ = writer.write_json_line(&resp).await;
-        DispatchOutcome::Continue
-    }
-    match op {
-        "launch" => {
-            reply(
-                writer,
-                handle_launch(request, state_root, shutdown_tx).await,
-            )
-            .await
-        }
-        "create_session" => {
-            reply(
-                writer,
-                handle_create_session(request, state_root, shutdown_tx).await,
-            )
-            .await
-        }
+) {
+    let resp = match op {
+        "launch" => handle_launch(request, state_root, shutdown_tx).await,
+        "create_session" => handle_create_session(request, state_root, shutdown_tx).await,
         "stop" => {
             if let Some(id) = request.get("id").and_then(|v| v.as_str()) {
                 stop_session_chat_gremlin(id).await;
             }
-            reply(writer, handle_stop(request, shutdown_tx).await).await
+            handle_stop(request, shutdown_tx).await
         }
-        "resume" => {
-            reply(
-                writer,
-                handle_resume(request, state_root, shutdown_tx).await,
-            )
-            .await
-        }
-        "ls" => reply(writer, handle_ls(request, state_root).await).await,
-        "status" => reply(writer, handle_status(request, state_root).await).await,
-        "info" => reply(writer, handle_info(request, state_root).await).await,
-        "artifact" => reply(writer, handle_artifact(request).await).await,
-        "model" => reply(writer, handle_model(request).await).await,
-        _ => reply(writer, error_response(&format!("unknown op: {op:?}"))).await,
-    }
+        "resume" => handle_resume(request, state_root, shutdown_tx).await,
+        "ls" => handle_ls(request, state_root).await,
+        "status" => handle_status(request, state_root).await,
+        "info" => handle_info(request, state_root).await,
+        "artifact" => handle_artifact(request).await,
+        "model" => handle_model(request).await,
+        _ => error_response(&format!("unknown op: {op:?}")),
+    };
+    let _ = writer.write_json_line(&resp).await;
 }
 
 fn ok_response(data: Value) -> Value {
-    let mut map = Map::new();
+    let mut map = data.as_object().cloned().unwrap_or_default();
     map.insert("type".to_string(), Value::String("ok".to_string()));
-    for (k, v) in data.as_object().into_iter().flatten() {
-        map.insert(k.clone(), v.clone());
-    }
     Value::Object(map)
 }
 
 fn error_response(message: &str) -> Value {
-    let mut map = Map::new();
-    map.insert("type".to_string(), Value::String("error".to_string()));
-    map.insert("message".to_string(), Value::String(message.to_string()));
-    Value::Object(map)
+    serde_json::json!({"type": "error", "message": message})
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,8 +1060,8 @@ async fn handle_create_session(
     }))
 }
 
-/// Session-scoped `stop`: marks the id dead in this session, cancels its
-/// in-flight turn (if any), then runs the normal stop cleanup.
+/// Session-scoped `stop`: removes the id from this session, cancels in-flight
+/// turn, then runs normal stop cleanup.
 async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value {
     if let Some(id) = request.get("id").and_then(|v| v.as_str()) {
         let mut s = session.lock().await;
@@ -1158,10 +1077,8 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
     handle_stop(request, &watch::channel(false).0).await
 }
 
-/// Remove a chat gremlin from whichever session owns it and cancel its
-/// in-flight turn (if any). Called by the control-socket `stop` so
-/// `gremlins stop` cannot reap the run-map entry while the session keeps
-/// running its agent.
+/// Remove a chat gremlin from whichever session owns it and cancel its turn.
+/// Called by control-socket `stop`.
 async fn stop_session_chat_gremlin(id: &str) {
     let sessions: Vec<SessionHandle> = session_map().lock().unwrap().values().cloned().collect();
     for session in sessions {
@@ -1179,10 +1096,8 @@ async fn stop_session_chat_gremlin(id: &str) {
     }
 }
 
-/// Clear the `soft_cancel` flag for a chat gremlin's in-flight turn across
-/// all sessions. Called from [`handle_stop`] before cancelling the run-map
-/// token so a `gremlins stop` always forces a hard cancel even when a soft
-/// interrupt is in progress.
+/// Clear `soft_cancel` flag across all sessions so `stop` always does a hard
+/// cancel even during a soft interrupt.
 async fn clear_soft_cancel_for(id: &str) {
     let sessions: Vec<SessionHandle> = session_map().lock().unwrap().values().cloned().collect();
     for session in sessions {
@@ -1204,8 +1119,7 @@ async fn send_debug_status(writer: &SharedWriter, stage: &str) {
 // launch
 // ---------------------------------------------------------------------------
 
-/// Open a persisted gremlin by id. Returns the gremlin and its state directory,
-/// or an error response ready to send back to the caller.
+/// Open a persisted gremlin by id, returning the gremlin and its state dir.
 fn open_persisted_gremlin(id: &str) -> Result<(Gremlin, PathBuf), Value> {
     let state_dir = config::state_root().join(id);
     let state_file = state_dir.join("state.json");
@@ -1299,7 +1213,6 @@ async fn handle_launch(
         .get("ephemeral")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-
     let gremlin = match Gremlin::init(
         definition_name,
         &definition_path,
@@ -1319,21 +1232,13 @@ async fn handle_launch(
             .map(|arg| shell_escape(&arg))
             .collect::<Vec<_>>()
             .join(" ");
-        let mut cli_meta = Map::new();
-        cli_meta.insert("launch_cmd".to_string(), Value::String(launch_cmd));
-        let mut meta_field = Map::new();
-        meta_field.insert("cli".to_string(), Value::Object(cli_meta));
-        let mut outer = Map::new();
-        outer.insert("metadata".to_string(), Value::Object(meta_field));
-        gremlin.state.patch(&[], &outer);
+        let patch = serde_json::json!({
+            "metadata": { "cli": { "launch_cmd": launch_cmd } }
+        });
+        gremlin.state.patch(&[], patch.as_object().unwrap());
     }
 
     let id = gremlin.id.to_string();
-
-    let definition_name = definition_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("gremlin");
 
     spawn_gremlin_runner(gremlin, &id, "starting", None, definition_name, shutdown_tx);
 
@@ -1381,20 +1286,7 @@ async fn handle_stop(request: &Value, _shutdown_tx: &watch::Sender<bool>) -> Val
     };
 
     if stopped_live {
-        // Write terminal state to disk so the aborted run isn't
-        // reported as orphan and has a recorded exit_code.
-        if let Ok(sd) = state::StateData::open(id) {
-            sd.write_terminal_state(1);
-        }
-        // Reap backend resources that the aborted task would have
-        // reaped in Gremlin::finish.
-        reap_client_for(id);
-        // Chat gremlins owned by a session are removed from that session by
-        // `handle_session_stop` (or session teardown); nothing to do here.
-        emit_event(DaemonEvent::RunStopped { id: id.to_string() });
-        // Shutdown is signalled by handle_connection after dispatch_op
-        // writes the response — do not signal here to avoid the
-        // connection task being dropped before the response is sent.
+        terminate_and_reap(id);
         return ok_response(serde_json::json!({"id": id, "status": "stopping"}));
     }
 
@@ -1487,14 +1379,15 @@ async fn handle_resume(
     let finished = state_dir.join("finished");
     let _ = std::fs::remove_file(&finished);
 
-    let mut fields = Map::new();
-    fields.insert("status".to_string(), Value::String("running".to_string()));
-    fields.insert("ended_at".to_string(), Value::Null);
-    fields.insert("exit_code".to_string(), Value::Null);
     let current_attempt = gremlin.state.read_str("attempt");
     let new_attempt = format!("{current_attempt}-resume-{}", state::token_hex(2));
-    fields.insert("attempt".to_string(), Value::String(new_attempt));
-    gremlin.state.patch(&[], &fields);
+    let fields = serde_json::json!({
+        "status": "running",
+        "ended_at": null,
+        "exit_code": null,
+        "attempt": new_attempt,
+    });
+    gremlin.state.patch(&[], fields.as_object().unwrap());
 
     let resume_stage = stage.clone();
     let resume_stage_for_response = resume_stage.clone();
@@ -1618,89 +1511,10 @@ async fn handle_status(request: &Value, _state_root: &Path) -> Value {
         Ok(id) => id,
         Err(resp) => return resp,
     };
-
-    // Check the run_map first — live gremlins (including ephemeral ones
-    // whose state is in a TempDir) have their store handle stored in the
-    // RunHandle.
-    let live = {
-        let map = get_run_map().lock().unwrap();
-        map.get(id).map(|h| h.store.clone())
-    };
-
-    if let Some(store) = live {
-        let tree = store.state_tree();
-        if tree.is_empty() {
-            return error_response(&format!("gremlin {id}: state is empty"));
-        }
-
-        let state_dir = live_state_dir(&store, id);
-        let status = "running".to_string();
-        let stage = str_field(&tree, "stage");
-        let definition = tree
-            .get("definition_path")
-            .and_then(|v| v.as_str())
-            .and_then(|s| {
-                std::path::Path::new(s)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(String::from)
-            })
-            .unwrap_or_else(|| str_field(&tree, "kind"));
-        let project_root = str_field(&tree, "project_root");
-        let workdir = str_field(&tree, "workdir");
-        let artifact_dir = state_dir.join("artifacts");
-        let started_at = str_field(&tree, "started_at");
-        let ended_at = null_field(&tree, "ended_at");
-        let exit_code = null_field(&tree, "exit_code");
-        let pid = null_field(&tree, "pid");
-        let client = str_field(&tree, "model");
-        let attempt = str_field(&tree, "attempt");
-        let kind = str_field(&tree, "kind");
-
-        return ok_response(serde_json::json!({
-            "id": id,
-            "status": status,
-            "stage": stage,
-            "definition": definition,
-            "project_root": project_root,
-            "workdir": workdir,
-            "state_dir": state_dir.to_string_lossy(),
-            "artifact_dir": artifact_dir.to_string_lossy(),
-            "started_at": started_at,
-            "ended_at": ended_at,
-            "exit_code": exit_code,
-            "pid": pid,
-            "model": client,
-            "attempt": attempt,
-            "kind": kind,
-        }));
+    match state_view_for_id(id) {
+        Ok(view) => ok_response(Value::Object(view.common_json())),
+        Err(resp) => resp,
     }
-
-    // Not live — fall back to open_persisted_gremlin.
-    let (gremlin, state_dir) = match open_persisted_gremlin(id) {
-        Ok(g) => g,
-        Err(resp) => return resp,
-    };
-
-    let status = status_or_orphan(false, &gremlin);
-
-    ok_response(serde_json::json!({
-        "id": gremlin.id.as_str(),
-        "status": status,
-        "stage": gremlin.state.read_str("stage"),
-        "definition": definition_display_name(&gremlin),
-        "project_root": gremlin.project_root.to_string_lossy(),
-        "workdir": gremlin.workdir.as_ref().map(|w| w.path().to_string_lossy().to_string()).unwrap_or_default(),
-        "state_dir": state_dir.to_string_lossy(),
-        "artifact_dir": state_dir.join("artifacts").to_string_lossy(),
-        "started_at": gremlin.state.read_str("started_at"),
-        "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
-        "exit_code": gremlin.state.read_field("exit_code").unwrap_or(Value::Null),
-        "pid": gremlin.state.read_field("pid").unwrap_or(Value::Null),
-        "model": gremlin.state.read_str("model"),
-        "attempt": gremlin.state.read_str("attempt"),
-        "kind": gremlin.state.read_str("kind"),
-    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1712,103 +1526,21 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
         Ok(id) => id,
         Err(resp) => return resp,
     };
-
-    // Check the run_map first — live gremlins (including ephemeral ones
-    // whose state is in a TempDir) have their store handle stored in the
-    // RunHandle.
-    let live = {
-        let map = get_run_map().lock().unwrap();
-        map.get(id)
-            .map(|h| (h.store.clone(), h.scratch_dir.clone()))
-    };
-
-    if let Some((store, scratch_dir)) = live {
-        let tree = store.state_tree();
-        if tree.is_empty() {
-            return error_response(&format!("gremlin {id}: state is empty"));
-        }
-
-        let state_dir = live_state_dir(&store, id);
-        let status = "running".to_string();
-        let stage = str_field(&tree, "stage");
-        let definition = tree
-            .get("definition_path")
-            .and_then(|v| v.as_str())
-            .and_then(|s| {
-                std::path::Path::new(s)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(String::from)
-            })
-            .unwrap_or_else(|| str_field(&tree, "kind"));
-        let project_root = str_field(&tree, "project_root");
-        let workdir = str_field(&tree, "workdir");
-        let artifact_dir = state_dir.join("artifacts");
-        let log_file = state_dir.join("log");
-        let started_at = str_field(&tree, "started_at");
-        let ended_at = null_field(&tree, "ended_at");
-        let exit_code = null_field(&tree, "exit_code");
-        let pid = null_field(&tree, "pid");
-        let client = str_field(&tree, "model");
-        let attempt = str_field(&tree, "attempt");
-        let kind = str_field(&tree, "kind");
-        // Read bail info from the store rather than joining a path onto a
-        // resolved state directory.
-        let bail_info = store
-            .stage_error()
-            .map(Value::Object)
-            .unwrap_or(Value::Null);
-
-        return ok_response(serde_json::json!({
-            "id": id,
-            "status": status,
-            "stage": stage,
-            "definition": definition,
-            "project_root": project_root,
-            "workdir": workdir,
-            "state_dir": state_dir.to_string_lossy(),
-            "artifact_dir": artifact_dir.to_string_lossy(),
-            "scratch_dir": scratch_dir.to_string_lossy(),
-            "log_file": log_file.to_string_lossy(),
-            "started_at": started_at,
-            "ended_at": ended_at,
-            "exit_code": exit_code,
-            "pid": pid,
-            "model": client,
-            "attempt": attempt,
-            "kind": kind,
-            "bail_info": bail_info,
-        }));
-    }
-
-    // Not live — fall back to open_persisted_gremlin.
-    let (gremlin, state_dir) = match open_persisted_gremlin(id) {
-        Ok(g) => g,
+    let view = match state_view_for_id(id) {
+        Ok(view) => view,
         Err(resp) => return resp,
     };
-
-    let status = status_or_orphan(false, &gremlin);
-
-    ok_response(serde_json::json!({
-        "id": gremlin.id.as_str(),
-        "status": status,
-        "stage": gremlin.state.read_str("stage"),
-        "definition": definition_display_name(&gremlin),
-        "project_root": gremlin.project_root.to_string_lossy(),
-        "workdir": gremlin.workdir.as_ref().map(|w| w.path().to_string_lossy().to_string()).unwrap_or_default(),
-        "state_dir": state_dir.to_string_lossy(),
-        "artifact_dir": state_dir.join("artifacts").to_string_lossy(),
-        "scratch_dir": config::scratch_root(Some(id)).to_string_lossy(),
-        "log_file": state_dir.join("log").to_string_lossy(),
-        "started_at": gremlin.state.read_str("started_at"),
-        "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
-        "exit_code": gremlin.state.read_field("exit_code").unwrap_or(Value::Null),
-        "pid": gremlin.state.read_field("pid").unwrap_or(Value::Null),
-        "model": gremlin.state.read_str("model"),
-        "attempt": gremlin.state.read_str("attempt"),
-        "kind": gremlin.state.read_str("kind"),
-        "bail_info": gremlin.state.stage_error().map(Value::Object).unwrap_or(Value::Null),
-    }))
+    let mut map = view.common_json();
+    map.insert(
+        "scratch_dir".to_string(),
+        Value::String(view.scratch_dir.to_string_lossy().to_string()),
+    );
+    map.insert(
+        "log_file".to_string(),
+        Value::String(view.state_dir.join("log").to_string_lossy().to_string()),
+    );
+    map.insert("bail_info".to_string(), view.bail_info.clone());
+    ok_response(Value::Object(map))
 }
 
 // ---------------------------------------------------------------------------
@@ -1822,27 +1554,10 @@ async fn handle_artifact(request: &Value) -> Value {
     };
 
     // Resolve the store: run map first for live gremlins (including ephemeral
-    // ones whose state lives in a TempDir), otherwise open the persisted
-    // state. The open happens after dropping the run-map lock so a disk
-    // lookup never blocks other run-map users.
-    let live_store = {
-        let map = get_run_map().lock().unwrap();
-        map.get(id).map(|handle| handle.store.clone())
-    };
-    let store: Arc<dyn state::StateStore + Send + Sync> = if let Some(store) = live_store {
-        store
-    } else {
-        // A bare directory under the state root is not a gremlin; require the
-        // state file before opening the persisted store, matching
-        // handle_status / handle_info.
-        let state_dir = config::state_root().join(id);
-        if !state_dir.is_dir() || !state_dir.join("state.json").is_file() {
-            return error_response(&format!("unknown gremlin {id:?}"));
-        }
-        match state::StateData::open(id) {
-            Ok(sd) => sd.store_handle(),
-            Err(e) => return error_response(&format!("gremlin {id}: {e}")),
-        }
+    // ones whose state lives in a TempDir), otherwise the persisted state.
+    let store = match resolve_store_for_id(id) {
+        Ok(store) => store,
+        Err(resp) => return resp,
     };
 
     let list = request
@@ -1873,14 +1588,8 @@ async fn handle_artifact(request: &Value) -> Value {
 // model
 // ---------------------------------------------------------------------------
 
-/// Show, set, or clear the gremlins-managed TUI chat model override.
-///
-/// - no `model` / no `clear` — show the resolved chat model
-/// - `model: "<spec>"`       — validate and persist the override
-/// - `clear: true`           — remove the override
-///
-/// Responses always echo the resolved model (or null when unset) so the TUI
-/// never needs to read `tui.json` directly.
+/// Show, set, or clear the TUI chat model override.
+/// - no args → show; `model` → set; `clear: true` → remove.
 async fn handle_model(request: &Value) -> Value {
     if let Err(e) = config::init_global() {
         return error_response(&format!("config init: {e}"));
@@ -1937,13 +1646,8 @@ async fn handle_model(request: &Value) -> Value {
     }
 }
 
-/// Read the active chat gremlin's resolved model from its `state.json`.
-///
-/// The op is session-scoped: the dispatcher verifies the request's
-/// `session_id` against the socket it arrived on before calling this handler,
-/// so the handler reads only that session's gremlin. When no chat gremlin
-/// exists, the response reports `model: null` so the TUI can degrade its info
-/// bar gracefully. This is a pure read — it never mutates state or files.
+/// Read the active chat gremlin's resolved model from `state.json`. Session-scoped.
+/// Reports `null` when no chat gremlin exists or model field is empty.
 async fn handle_chat_model(_request: &Value, session: &SessionHandle) -> Value {
     let (id, parked_model) = {
         let s = session.lock().await;
@@ -2022,22 +1726,14 @@ async fn handle_log(
         Path(PathBuf),
     }
 
-    let (source, unknown) = {
-        let map = get_run_map().lock().unwrap();
-        if let Some(handle) = map.get(id) {
-            (LogSource::Store(handle.store.clone()), false)
-        } else {
-            match state::StateData::open(id) {
-                Ok(sd) => (LogSource::Store(sd.store_handle()), false),
-                Err(_) => {
-                    let sd = config::state_root().join(id);
-                    let sf = sd.join("state.json");
-                    if !sd.is_dir() || !sf.is_file() {
-                        (LogSource::Path(PathBuf::new()), true)
-                    } else {
-                        (LogSource::Path(sd), false)
-                    }
-                }
+    let (source, unknown) = match resolve_store_for_id(id) {
+        Ok(store) => (LogSource::Store(store), false),
+        Err(_) => {
+            let sd = config::state_root().join(id);
+            if sd.is_dir() && sd.join("state.json").is_file() {
+                (LogSource::Path(sd), false)
+            } else {
+                (LogSource::Path(PathBuf::new()), true)
             }
         }
     };
@@ -2084,16 +1780,16 @@ async fn handle_log(
     };
 
     let mut offset: u64 = 0;
+    // Forward each line as a JSON log_line event.
+    macro_rules! log_line {
+        ($line:expr) => {
+            let payload = serde_json::json!({"type": "log_line", "line": $line, "offset": offset});
+            if writer.write_json_line(&payload).await.is_err() { return; }
+            offset += 1;
+        };
+    }
     for line in content.lines() {
-        let payload = serde_json::json!({
-            "type": "log_line",
-            "line": line,
-            "offset": offset,
-        });
-        if writer.write_json_line(&payload).await.is_err() {
-            return;
-        }
-        offset += 1;
+        log_line!(line);
     }
 
     // 2. If follow, drain duplicates (lines broadcast during file replay),
@@ -2107,35 +1803,14 @@ async fn handle_log(
             tokio::select! {
                 result = rx.recv() => {
                     match result {
-                        Ok(line) => {
-                            let payload = serde_json::json!({
-                                "type": "log_line",
-                                "line": line,
-                                "offset": offset,
-                            });
-                            if writer.write_json_line(&payload).await.is_err() {
-                                break;
-                            }
-                            offset += 1;
-                        }
+                        Ok(line) => { log_line!(line); }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
-                            let payload = serde_json::json!({
-                                "type": "log_line",
-                                "line": format!("[skipped {n} lines]"),
-                                "offset": offset,
-                            });
-                            if writer.write_json_line(&payload).await.is_err() {
-                                break;
-                            }
-                            offset += 1;
+                            log_line!(format!("[skipped {n} lines]"));
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
-                // Client disconnect: read half yields EOF.
-                _ = socket::read_json_line(&mut reader) => {
-                    break;
-                }
+                _ = socket::read_json_line(&mut reader) => { break; }
             }
         }
     }
@@ -2152,18 +1827,15 @@ async fn handle_debug(
     writer: &SharedWriter,
 ) {
     let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    log::debug!("handle_debug: received debug request for {id:?}");
     send_debug_status(writer, "validating_id").await;
 
     if id.is_empty() {
-        log::debug!("handle_debug: missing 'id' field");
         let resp = error_response("missing 'id' field");
         let _ = writer.write_json_line(&resp).await;
         return;
     }
 
     if validate_gremlin_id(id).is_err() {
-        log::debug!("handle_debug: invalid gremlin id {id:?}");
         let resp = error_response(&format!("invalid gremlin id {id:?}"));
         let _ = writer.write_json_line(&resp).await;
         return;
@@ -2171,48 +1843,13 @@ async fn handle_debug(
 
     // Resolve a StateStore: for live gremlins (including ephemeral) use the
     // handle stored in the RunHandle; otherwise open the persistent store
-    // under `config::state_root()`. The non-live open happens outside the
-    // run_map lock so disk IO never stalls other supervisor lookups, and its
-    // error is reported rather than folded into "unknown".
-    enum StoreSource {
-        Live(Arc<dyn state::StateStore + Send + Sync>),
-        PendingPersistent,
-        Unknown,
-    }
-
-    let source = {
-        let map = get_run_map().lock().unwrap();
-        match map.get(id) {
-            Some(handle) => StoreSource::Live(handle.store.clone()),
-            None => {
-                let sd = config::state_root().join(id);
-                let sf = sd.join("state.json");
-                if !sd.is_dir() || !sf.is_file() {
-                    StoreSource::Unknown
-                } else {
-                    StoreSource::PendingPersistent
-                }
-            }
-        }
-    };
-
-    let store = match source {
-        StoreSource::Live(store) => store,
-        StoreSource::Unknown => {
-            log::debug!("handle_debug: unknown gremlin {id:?}");
-            let resp = error_response(&format!("unknown gremlin {id:?}"));
+    // under `config::state_root()`.
+    let store = match resolve_store_for_id(id) {
+        Ok(store) => store,
+        Err(resp) => {
             let _ = writer.write_json_line(&resp).await;
             return;
         }
-        StoreSource::PendingPersistent => match state::StateData::open(id) {
-            Ok(sd) => sd.store_handle(),
-            Err(e) => {
-                log::debug!("handle_debug: failed to open state store for {id:?}: {e}");
-                let resp = error_response(&format!("gremlin {id}: failed to open state: {e}"));
-                let _ = writer.write_json_line(&resp).await;
-                return;
-            }
-        },
     };
 
     // Validate that the gremlin is currently in an agent stage.
@@ -2228,7 +1865,6 @@ async fn handle_debug(
             .to_string();
 
         if stage_name.is_empty() {
-            log::debug!("handle_debug: gremlin {id} has no recorded stage");
             let resp = error_response(&format!("gremlin {id} has no recorded stage"));
             let _ = writer.write_json_line(&resp).await;
             return;
@@ -2264,13 +1900,11 @@ async fn handle_debug(
         let is_agent = match is_agent {
             Ok(Ok(agent)) => agent,
             Ok(Err(e)) => {
-                log::debug!("handle_debug: gremlin {id}: {e}");
                 let resp = error_response(&format!("gremlin {id}: {e}"));
                 let _ = writer.write_json_line(&resp).await;
                 return;
             }
             Err(e) => {
-                log::debug!("handle_debug: gremlin {id}: blocking task failed: {e}");
                 let resp = error_response(&format!("gremlin {id}: {e}"));
                 let _ = writer.write_json_line(&resp).await;
                 return;
@@ -2278,9 +1912,6 @@ async fn handle_debug(
         };
 
         if !is_agent {
-            log::debug!(
-                "handle_debug: gremlin {id} is not in an agent stage (current: {stage_name})"
-            );
             let resp = error_response(&format!(
                 "gremlin {id} is not in an agent stage (current: {stage_name})"
             ));
@@ -2298,7 +1929,6 @@ async fn handle_debug(
     let interactive_handle = match interactive_handle {
         Some(h) => h,
         None => {
-            log::debug!("handle_debug: gremlin {id} is not in the run map");
             send_debug_status(writer, "not_running").await;
             let resp = error_response(&format!("gremlin {id} is not running"));
             let _ = writer.write_json_line(&resp).await;
@@ -2306,7 +1936,6 @@ async fn handle_debug(
         }
     };
 
-    log::debug!("handle_debug: got interactive handle for {id}");
     send_debug_status(writer, "got_handle").await;
 
     // Subscribe to interactive events *before* triggering pause so we don't miss
@@ -2314,53 +1943,36 @@ async fn handle_debug(
     let mut evt_rx = interactive_handle.evt_tx.subscribe();
 
     // Signal the agent loop to pause at its next yield point.
-    log::debug!("handle_debug: calling pause() for {id}");
-    // Arm the abort guard before pausing: from here until normal disconnect,
-    // dropping this future (task abort on session teardown) must send `Quit`
-    // and clear the pause token.
     let mut detach_guard = DebugDetachGuard::new(interactive_handle.clone());
     interactive_handle.pause.pause();
-    log::debug!("handle_debug: pause() called, waiting for Ready from agent…");
     send_debug_status(writer, "sent_pause_signal").await;
     send_debug_status(writer, "waiting_for_ready").await;
 
-    // Wait for Ready from the agent loop.
-    //
-    // Race against cmd_tx.closed(): if the agent session has already exited
-    // (cmd_rx dropped), the cmd_tx sender will close. Without this branch
-    // the select! would hang forever because evt_rx cannot close while this
-    // handle_debug owns an evt_tx clone.
+    // Wait for Ready from the agent loop, racing against cmd_tx.closed().
     let cmd_tx_closed = interactive_handle.cmd_tx.closed();
     tokio::pin!(cmd_tx_closed);
     let ready = loop {
         tokio::select! {
             result = evt_rx.recv() => {
                 match result {
-                    Ok(InteractiveEvent::Ready { turn }) => {
-                        log::debug!("handle_debug: received Ready event (turn={turn}) for {id}");
+                    Ok(InteractiveEvent::Ready { turn: _turn }) => {
                         break true;
                     }
-                    Ok(InteractiveEvent::Ended { reason }) => {
-                        log::debug!("handle_debug: received Ended event ({reason}) for {id}");
+                    Ok(InteractiveEvent::Ended { reason: _reason }) => {
                         break false;
                     }
-                    Ok(other) => {
-                        log::debug!("handle_debug: ignoring event while waiting for Ready: {other:?}");
+                    Ok(_other) => {
                         continue;
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        log::debug!("handle_debug: broadcast lagged ({n}) for {id}, continuing");
+                    Err(broadcast::error::RecvError::Lagged(_n)) => {
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        log::debug!("handle_debug: broadcast channel closed for {id}");
                         break false;
                     }
                 }
             }
             _ = &mut cmd_tx_closed => {
-                // Agent session exited — cmd_rx was dropped.
-                log::debug!("handle_debug: cmd_tx closed for {id} — agent session exited");
                 break false;
             }
             result = socket::read_json_line(&mut reader) => {
@@ -2368,7 +1980,6 @@ async fn handle_debug(
                 // If it's a quit, propagate to the agent so it doesn't stay paused.
                 if let Ok(Some(cmd)) = result {
                     let op = cmd.get("op").and_then(|v| v.as_str());
-                    log::debug!("handle_debug: client message before Ready: op={op:?}");
                     if op == Some("quit") {
                         let _ = interactive_handle
                             .cmd_tx
@@ -2382,20 +1993,17 @@ async fn handle_debug(
     };
 
     if !ready {
-        log::debug!("handle_debug: agent did not become ready for {id}, resetting pause");
         interactive_handle.pause.reset();
         detach_guard.disarm();
         return;
     }
 
     // Send ready to the client.
-    log::debug!("handle_debug: sending ready for {id}");
     let ready_payload = serde_json::json!({
         "type": "ready",
         "id": id,
     });
     if writer.write_json_line(&ready_payload).await.is_err() {
-        log::debug!("handle_debug: failed to send ready for {id}, client disconnected");
         let _ = interactive_handle
             .cmd_tx
             .send(InteractiveCommand::Quit)
@@ -2408,6 +2016,13 @@ async fn handle_debug(
 
     // Bidirectional loop: read commands from client, forward to agent.
     loop {
+        macro_rules! cmd {
+            ($cmd:expr) => {
+                if interactive_handle.cmd_tx.send($cmd).await.is_err() {
+                    break;
+                }
+            };
+        }
         tokio::select! {
             // Read from the client.
             result = socket::read_json_line(&mut reader) => {
@@ -2417,25 +2032,17 @@ async fn handle_debug(
                         match op {
                             "talk" => {
                                 let text = cmd.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                                if interactive_handle.cmd_tx.send(InteractiveCommand::Inject(text.to_string())).await.is_err() {
-                                    break;
-                                }
+                                cmd!(InteractiveCommand::Inject(text.to_string()));
                             }
                             "continue" => {
-                                if interactive_handle.cmd_tx.send(InteractiveCommand::RunTurn).await.is_err() {
-                                    break;
-                                }
+                                cmd!(InteractiveCommand::RunTurn);
                             }
                             "bail" => {
                                 let reason = cmd.get("reason").and_then(|v| v.as_str()).unwrap_or("operator bailed");
-                                if interactive_handle.cmd_tx.send(InteractiveCommand::Bail(reason.to_string())).await.is_err() {
-                                    break;
-                                }
+                                cmd!(InteractiveCommand::Bail(reason.to_string()));
                             }
                             "quit" => {
-                                if interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await.is_err() {
-                                    break;
-                                }
+                                cmd!(InteractiveCommand::Quit);
                             }
                             _ => {
                                 let resp = error_response(&format!("unknown debug op: {op:?}"));
@@ -2452,24 +2059,23 @@ async fn handle_debug(
             }
             // Read events from the agent loop.
             result = evt_rx.recv() => {
+                macro_rules! emit {
+                    ($payload:expr) => {
+                        if writer.write_json_line(&$payload).await.is_err() {
+                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
+                            break;
+                        }
+                    };
+                }
                 match result {
                     Ok(InteractiveEvent::Ready { .. }) => {
                         // Agent re-entered interactive mode (after RunOneTurn).
-                        // No action needed — we're already in the interactive loop.
                     }
                     Ok(InteractiveEvent::TurnComplete { turn, text, tool_calls, stats, totals }) => {
-                        let payload = serde_json::json!({"type": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls, "stats": stats, "totals": totals});
-                        if writer.write_json_line(&payload).await.is_err() {
-                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
-                            break;
-                        }
+                        emit!(serde_json::json!({"type": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls, "stats": stats, "totals": totals}));
                     }
                     Ok(InteractiveEvent::Done { text, usage, .. }) => {
-                        let payload = serde_json::json!({"type": "done", "text": text, "usage": usage});
-                        if writer.write_json_line(&payload).await.is_err() {
-                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
-                            break;
-                        }
+                        emit!(serde_json::json!({"type": "done", "text": text, "usage": usage}));
                     }
                     Ok(InteractiveEvent::Ended { reason }) => {
                         let payload = serde_json::json!({"type": "ended", "reason": reason});
@@ -2477,39 +2083,19 @@ async fn handle_debug(
                         break;
                     }
                     Ok(InteractiveEvent::StreamChunk { text }) => {
-                        let payload = serde_json::json!({"type": "stream_chunk", "text": text});
-                        if writer.write_json_line(&payload).await.is_err() {
-                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
-                            break;
-                        }
+                        emit!(serde_json::json!({"type": "stream_chunk", "text": text}));
                     }
                     Ok(InteractiveEvent::ReasoningChunk { text }) => {
-                        let payload = serde_json::json!({"type": "reasoning_chunk", "text": text});
-                        if writer.write_json_line(&payload).await.is_err() {
-                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
-                            break;
-                        }
+                        emit!(serde_json::json!({"type": "reasoning_chunk", "text": text}));
                     }
                     Ok(InteractiveEvent::ToolOutputChunk { id, name, call, text }) => {
-                        let payload = serde_json::json!({"type": "tool_output_chunk", "id": id, "name": name, "call": call, "text": text});
-                        if writer.write_json_line(&payload).await.is_err() {
-                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
-                            break;
-                        }
+                        emit!(serde_json::json!({"type": "tool_output_chunk", "id": id, "name": name, "call": call, "text": text}));
                     }
                     Ok(InteractiveEvent::StreamReset) => {
-                        let payload = serde_json::json!({"type": "stream_reset"});
-                        if writer.write_json_line(&payload).await.is_err() {
-                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
-                            break;
-                        }
+                        emit!(serde_json::json!({"type": "stream_reset"}));
                     }
                     Ok(InteractiveEvent::ToolResult { id, name, call, output }) => {
-                        let payload = serde_json::json!({"type": "tool_result", "id": id, "name": name, "call": call, "output": output});
-                        if writer.write_json_line(&payload).await.is_err() {
-                            let _ = interactive_handle.cmd_tx.send(InteractiveCommand::Quit).await;
-                            break;
-                        }
+                        emit!(serde_json::json!({"type": "tool_result", "id": id, "name": name, "call": call, "output": output}));
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -2527,22 +2113,15 @@ async fn handle_debug(
 // chat
 // ---------------------------------------------------------------------------
 
-/// Chat system prompt, loaded from the bundled prompt file so that
-/// major behavioral instructions live in a pipeline-owned prompt file
-/// rather than embedded in harness code.
+/// Chat system prompt, loaded from `prompts/chat_system.md`.
 const CHAT_SYSTEM_PROMPT: &str = include_str!("../../prompts/chat_system.md");
 
 const REPOSITORY_CONTEXT_END_MARKER: &str = "<!-- END REPOSITORY CONTEXT BLOCK -->";
 const REPOSITORY_CONTEXT_END_MARKER_ESCAPED: &str =
     "<!-- END REPOSITORY CONTEXT BLOCK [context delimiter escaped] -->";
 
-/// Escape the untrusted snapshot so it cannot forge the block's closing
-/// delimiters and escape the low-trust code fence.
-///
-/// A fixed Markdown fence is only safe if no embedded line can close it early.
-/// Replacing every backtick with a backslash-escaped backtick guarantees the
-/// payload contains no three-backtick run, while the end marker is likewise
-/// rewritten when it appears verbatim inside repository-derived text.
+/// Escape the untrusted context snapshot so it cannot close the Markdown fence
+/// or forge the closing delimiter. Replaces backticks and the end marker.
 fn escape_repository_context_delimiters(context: &str) -> String {
     context.replace('`', "\\`").replace(
         REPOSITORY_CONTEXT_END_MARKER,
@@ -2550,13 +2129,8 @@ fn escape_repository_context_delimiters(context: &str) -> String {
     )
 }
 
-/// Append a repository-context snapshot to the chat system prompt as a
-/// clearly-delimited, low-trust metadata block.
-///
-/// The static [`CHAT_SYSTEM_PROMPT`] is always the leading prefix: prior-turn
-/// history (`prepopulated_messages`) therefore keeps preceding the model's
-/// existing view and provider prefix caching is unaffected. Everything after
-/// the static prefix is harness-captured metadata, never operator guidance.
+/// Append repository-context to the system prompt as a low-trust metadata block.
+/// The static prompt is always the leading prefix for caching.
 fn build_chat_system_prompt(context: &str) -> String {
     if context.trim().is_empty() {
         return CHAT_SYSTEM_PROMPT.to_string();
@@ -2580,23 +2154,15 @@ fn build_chat_system_prompt(context: &str) -> String {
     prompt
 }
 
-/// The daemon's process environment, captured once at supervisor startup.
-///
-/// Chat requests without an `env` field fall back to this stored snapshot
-/// rather than re-reading `std::env::vars()` on every turn, so a later
-/// process-environment mutation cannot silently change tool environments.
+/// Daemon process environment, captured once at startup. Requests without `env`
+/// fall back to this snapshot.
 static BASE_PROCESS_ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
 
 fn base_process_env() -> &'static HashMap<String, String> {
     BASE_PROCESS_ENV.get_or_init(|| std::env::vars().collect())
 }
 
-/// Resolve the chat gremlin's in-memory environment for a request.
-///
-/// A JSON object supplied by the TUI wins; otherwise the caller-supplied
-/// daemon baseline is used. Non-string values are ignored so a malformed
-/// object cannot panic the daemon. The resolved map lives only on
-/// `Gremlin.env` and is never persisted to state or logs.
+/// Resolve chat gremlin env: TUI-supplied JSON object wins, otherwise daemon baseline.
 fn resolve_chat_env(
     request: &Value,
     base_env: &HashMap<String, String>,
@@ -2799,14 +2365,9 @@ async fn handle_chat(
         .and_then(|a| a.downcast_mut::<ChatDefinition>())
         .expect("chat gremlin must carry a ChatDefinition")
         .set_pending(text, &chat_model, &system_prompt);
-    // Keep the state.json `model` field in sync too: `/info` reads it from
-    // the live state store rather than the in-memory client handle.
-    let mut state_patch = serde_json::Map::new();
-    state_patch.insert(
-        "model".to_string(),
-        serde_json::Value::String(chat_model.to_string()),
-    );
-    gremlin.state.patch(&[], &state_patch);
+    // Keep the state.json `model` field in sync too.
+    let state_patch = serde_json::json!({"model": chat_model.to_string()});
+    gremlin.state.patch(&[], state_patch.as_object().unwrap());
     gremlin.runtime_config.stream_events = Some(StreamEventSender::Mpsc(stream_tx));
     gremlin.cancel_token = Some(turn_cancel.clone());
     // Refresh the environment on every turn: the chat gremlin is persistent
@@ -2888,7 +2449,7 @@ async fn handle_chat(
 }
 
 /// Return the session's parked chat gremlin id, waiting for an in-flight
-/// turn to re-insert its gremlin when one is temporarily out of the map.
+/// turn to re-insert.
 async fn reusable_chat_gremlin_id(session: &SessionHandle) -> Option<String> {
     loop {
         let (id, wait) = {
@@ -2915,11 +2476,8 @@ async fn reusable_chat_gremlin_id(session: &SessionHandle) -> Option<String> {
     }
 }
 
-/// Re-insert a finished turn's gremlin, or drop it if the session no longer
-/// owns it (stopped or closed). Runs under the session lock so the
-/// check-and-insert is atomic with teardown/`stop`.
-///
-/// Returns `true` if the gremlin was re-inserted.
+/// Re-insert a finished turn's gremlin, or drop if session no longer owns it.
+/// Returns true if re-inserted.
 async fn reinsert_chat_gremlin(id: &str, gremlin: Gremlin, session: &SessionHandle) -> bool {
     let mut s = session.lock().await;
     if !s.chat_ids.contains(id) {
@@ -2937,11 +2495,7 @@ async fn reinsert_chat_gremlin(id: &str, gremlin: Gremlin, session: &SessionHand
     true
 }
 
-/// Read the persisted `state.json.token_usage` object as a [`UsageStats`].
-///
-/// Chat gremlins persist aggregate token usage after each prompt. The chat
-/// forwarder captures this *before* the current turn starts so nested task
-/// runs and the just-completed prompt's usage are not folded in twice.
+/// Read persisted `state.json.token_usage` as [`UsageStats`].
 fn usage_stats_from_state(value: Option<&serde_json::Value>) -> UsageStats {
     let obj = value
         .and_then(|v| v.as_object())
@@ -2974,8 +2528,7 @@ fn add_usage_stats(baseline: &UsageStats, delta: &UsageStats) -> UsageStats {
     }
 }
 
-/// Build a chat-protocol JSON line, tagging it with the client's turn id
-/// (when present) so the TUI can drop stale events from a superseded turn.
+/// Build a chat JSON line, tagged with the client's turn id for stale-event filtering.
 fn chat_payload(turn: &Option<String>, fields: serde_json::Value) -> serde_json::Value {
     let mut obj = match fields {
         serde_json::Value::Object(m) => m,
@@ -3050,10 +2603,21 @@ async fn run_chat_turn(
         (result, gremlin)
     });
 
-    // Await the run task, re-insert the gremlin (or drop it if the session
-    // no longer owns it), clear the session's in-flight turn, and signal
-    // completion. The gremlin is re-inserted *before* the terminal event is
-    // written so a follow-up `chat` never observes the id as unknown.
+    // Clear the in-flight turn and signal completion.
+    async fn clear_turn(
+        turn_cancel: &Arc<CancelToken>,
+        session: &SessionHandle,
+        done: &tokio::sync::Notify,
+    ) {
+        let mut s = session.lock().await;
+        if let Some(cur) = &s.current_turn {
+            if Arc::ptr_eq(&cur.cancel, turn_cancel) {
+                s.current_turn = None;
+            }
+        }
+        done.notify_one();
+    }
+
     async fn finish(
         id: &str,
         run_task: &mut tokio::task::JoinHandle<(Result<(), crate::executor::RunError>, Gremlin)>,
@@ -3069,21 +2633,9 @@ async fn run_chat_turn(
                 log::warn!("handle_chat: run task panicked for {id}: {e}");
             }
         }
-        // Clear the in-flight turn so a late `cancel_chat` (racing a
-        // just-finished `done`) is a no-op rather than cancelling a
-        // subsequent turn.
-        let mut s = session.lock().await;
-        if let Some(cur) = &s.current_turn {
-            if Arc::ptr_eq(&cur.cancel, turn_cancel) {
-                s.current_turn = None;
-            }
-        }
-        done.notify_one();
+        clear_turn(turn_cancel, session, done).await;
     }
 
-    // Re-insert a gremlin and clear the in-flight turn without awaiting a
-    // run task. Used by cancellation and error paths where the run task has
-    // already been awaited to completion.
     async fn reinsert_and_clear(
         id: &str,
         gremlin: Option<Gremlin>,
@@ -3094,69 +2646,47 @@ async fn run_chat_turn(
         if let Some(gremlin) = gremlin {
             reinsert_chat_gremlin(id, gremlin, session).await;
         }
-        let mut s = session.lock().await;
-        if let Some(cur) = &s.current_turn {
-            if Arc::ptr_eq(&cur.cancel, turn_cancel) {
-                s.current_turn = None;
-            }
-        }
-        done.notify_one();
+        clear_turn(turn_cancel, session, done).await;
     }
 
     // Forward stream events until a terminal event, a write error, or a
-    // cancellation. The `biased` select gives stream events priority over
-    // run-task completion: when `run_stage` returns normally, Done/Ended
-    // is already in the channel and is delivered first. When `run_stage`
-    // returns an error without emitting a terminal event, the channel
-    // has no more events and the run-task arm fires as a safety net,
-    // preventing the TUI from staying permanently `active_request`.
+    // cancellation.
     loop {
+        macro_rules! send {
+            ($fields:expr) => {
+                let payload = chat_payload(&turn, $fields);
+                if writer.write_json_line(&payload).await.is_err() {
+                    break;
+                }
+            };
+        }
         tokio::select! {
             biased;
 
             result = stream_rx.recv() => {
                 match result {
                     Some(InteractiveEvent::StreamChunk { text }) => {
-                        let payload = chat_payload(&turn, serde_json::json!({"type": "stream_chunk", "text": text}));
-                        if writer.write_json_line(&payload).await.is_err() {
-                            break;
-                        }
+                        send!(serde_json::json!({"type": "stream_chunk", "text": text}));
                     }
                     Some(InteractiveEvent::ReasoningChunk { text }) => {
-                        let payload = chat_payload(&turn, serde_json::json!({"type": "reasoning_chunk", "text": text}));
-                        if writer.write_json_line(&payload).await.is_err() {
-                            break;
-                        }
+                        send!(serde_json::json!({"type": "reasoning_chunk", "text": text}));
                     }
                     Some(InteractiveEvent::ToolOutputChunk { id, name, call, text }) => {
-                        let payload = chat_payload(&turn, serde_json::json!({"type": "tool_output_chunk", "id": id, "name": name, "call": call, "text": text}));
-                        if writer.write_json_line(&payload).await.is_err() {
-                            break;
-                        }
+                        send!(serde_json::json!({"type": "tool_output_chunk", "id": id, "name": name, "call": call, "text": text}));
                     }
                     Some(InteractiveEvent::StreamReset) => {
-                        let payload = chat_payload(&turn, serde_json::json!({"type": "stream_reset"}));
-                        if writer.write_json_line(&payload).await.is_err() {
-                            break;
-                        }
+                        send!(serde_json::json!({"type": "stream_reset"}));
                     }
                     Some(InteractiveEvent::ToolResult { id, name, call, output }) => {
-                        let payload = chat_payload(&turn, serde_json::json!({"type": "tool_result", "id": id, "name": name, "call": call, "output": output}));
-                        if writer.write_json_line(&payload).await.is_err() {
-                            break;
-                        }
+                        send!(serde_json::json!({"type": "tool_result", "id": id, "name": name, "call": call, "output": output}));
                     }
                     Some(InteractiveEvent::TurnComplete { turn: tc_turn, text, tool_calls, stats, totals }) => {
-                        let total = totals.as_ref().map(|totals| add_usage_stats(&baseline_usage, totals));
-                        let payload = chat_payload(&turn, serde_json::json!({"type": "turn_complete", "loop_turn": tc_turn, "text": text, "tool_calls": tool_calls, "stats": stats, "total": total}));
-                        if writer.write_json_line(&payload).await.is_err() {
-                            break;
-                        }
+                        let total = totals.as_ref().map(|t| add_usage_stats(&baseline_usage, t));
+                        send!(serde_json::json!({"type": "turn_complete", "loop_turn": tc_turn, "text": text, "tool_calls": tool_calls, "stats": stats, "total": total}));
                     }
                     Some(InteractiveEvent::Done { text, summary, usage }) => {
-                        // Re-insert the gremlin before emitting `done`.
                         finish(&id, &mut run_task, &turn_cancel, &session, &done).await;
-                        let usage = usage.as_ref().map(|usage| add_usage_stats(&baseline_usage, usage));
+                        let usage = usage.as_ref().map(|u| add_usage_stats(&baseline_usage, u));
                         let payload = chat_payload(&turn, serde_json::json!({"type": "done", "id": id, "text": text, "summary": summary, "usage": usage}));
                         let _ = writer.write_json_line(&payload).await;
                         return;
@@ -3168,12 +2698,9 @@ async fn run_chat_turn(
                         return;
                     }
                     Some(InteractiveEvent::Ready { .. }) => {
-                        // Ignore Ready in chat mode — the agent runs to
-                        // completion without pausing.
+                        // Ignore Ready in chat mode.
                     }
                     None => {
-                        // The mpsc channel closed without Done/Ended — the
-                        // agent exited before emitting a terminal event.
                         finish(&id, &mut run_task, &turn_cancel, &session, &done).await;
                         let payload = chat_payload(&turn, serde_json::json!({"type": "error", "id": id, "message": "agent exited before completing"}));
                         let _ = writer.write_json_line(&payload).await;
@@ -3426,16 +2953,9 @@ async fn run_chat_turn(
     log::debug!("handle_chat: done forwarding for {id}");
 }
 
-/// Cancel the in-flight chat turn for this connection, if one is active.
-///
-/// The terminal `ended` event is normally emitted by the turn task (which
-/// owns the gremlin re-insertion). For an already-interrupted turn the turn
-/// task has returned; this handler performs the cleanup and emits `ended`
-/// directly.
-///
-/// When the request names a `turn`, only a matching in-flight turn is
-/// cancelled, so a late `cancel_chat` cannot hit a subsequent turn. A no-op
-/// when no matching turn is in flight.
+/// Cancel the in-flight chat turn. Soft cancel persists partial messages;
+/// hard cancel clears the artifact immediately. Turn id matching prevents
+/// late cancels from hitting subsequent turns.
 async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &SessionHandle) {
     let turn = request
         .get("turn")
@@ -3551,10 +3071,8 @@ async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &Se
         .await;
 }
 
-/// Shut down a chat gremlin using the same cleanup sequence as a `stop`
-/// op: remove the run-map entry, write terminal state, reap the client,
-/// drop the persistent gremlin, and emit `RunStopped`. The gremlin is
-/// removed from its session separately by the session teardown path.
+/// Shut down a chat gremlin: remove run-map entry, write terminal state,
+/// reap client, emit RunStopped.
 async fn cleanup_chat_gremlin(id: &str) {
     if validate_gremlin_id(id).is_err() {
         return;
@@ -3589,30 +3107,14 @@ async fn cleanup_chat_gremlin(id: &str) {
         });
     }
 
-    if let Ok(sd) = state::StateData::open(id) {
-        sd.write_terminal_state(1);
-    }
-    reap_client_for(id);
-    emit_event(DaemonEvent::RunStopped { id: id.to_string() });
+    terminate_and_reap(id);
 }
 
-/// Insert a freshly created chat gremlin into the session and the run map
-/// so it is visible to `gremlins ls`, `gremlins debug`, and `gremlins stop`.
 async fn register_chat_gremlin(session: &SessionHandle, mut gremlin: Gremlin) {
     let id = gremlin.id.to_string();
 
-    // Per-gremlin log channel.
-    let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (log_broadcast, _) = broadcast::channel(256);
-    gremlin.runtime_config.log_tx = Some(log_tx.clone());
+    let (log_broadcast, interactive_handle) = setup_gremlin_channels(&mut gremlin, None);
     let store = gremlin.state.store_handle();
-    spawn_log_writer(log_rx, store.clone(), log_broadcast.clone(), None);
-
-    // Interactive channels so debug can attach to the current stage.
-    let channels = InteractiveChannels::new();
-    let (interactive_handle, interactive_session) = channels.split();
-    gremlin.runtime_config.interactive = Some(interactive_handle.clone());
-    gremlin.interactive_session = Some(interactive_session);
 
     let cancel_token = CancelToken::new();
     gremlin.cancel_token = Some(cancel_token.clone());
@@ -3655,13 +3157,8 @@ fn create_chat_gremlin(
     project_root: &Path,
     env: &HashMap<String, String>,
 ) -> Result<Gremlin, String> {
-    use crate::clients::client::Client;
-    use crate::definition::ChatDefinition;
-    use crate::executor::gremlin::{validate_gremlin_id, Gremlin, RuntimeConfig, ScratchDir};
-    use crate::executor::state::{self, BlobMode, StateData};
-    use serde_json::{Map, Value};
-    use std::collections::HashMap;
-    use std::path::PathBuf;
+    use crate::executor::gremlin::{RuntimeConfig, ScratchDir};
+    use crate::executor::state::{BlobMode, StateData};
 
     let project_root = project_root.to_path_buf();
 
@@ -3681,32 +3178,30 @@ fn create_chat_gremlin(
     };
 
     // Build initial state and create StateData (which writes state.json).
-    let mut initial = Map::new();
-    initial.insert("id".to_string(), Value::String(gremlin_id.to_string()));
-    initial.insert("kind".to_string(), Value::String("chat".to_string()));
-    initial.insert(
-        "project_root".to_string(),
-        Value::String(project_root.to_string_lossy().into_owned()),
-    );
-    initial.insert("workdir".to_string(), Value::String(String::new()));
-    initial.insert("status".to_string(), Value::String("running".to_string()));
-    initial.insert("started_at".to_string(), Value::String(state::now_stamp()));
-    initial.insert(
-        "model".to_string(),
-        Value::String(default_model.to_string()),
-    );
-    initial.insert("stage".to_string(), Value::String("chat".to_string()));
-    initial.insert("pid".to_string(), Value::from(std::process::id() as i64));
-    initial.insert("attempt".to_string(), Value::String(String::new()));
-    initial.insert("exit_code".to_string(), Value::Null);
-    initial.insert("definition_path".to_string(), Value::String(String::new()));
-    initial.insert("description".to_string(), Value::String(String::new()));
-    initial.insert("parent_id".to_string(), Value::String(String::new()));
-    initial.insert("definition_args".to_string(), Value::Array(Vec::new()));
-    initial.insert("stage_inputs".to_string(), Value::Object(Map::new()));
-    initial.insert("group_name".to_string(), Value::String(String::new()));
-    initial.insert("child_key".to_string(), Value::String(String::new()));
-    initial.insert("metadata".to_string(), Value::Object(Map::new()));
+    let initial: Map<String, Value> = serde_json::json!({
+        "id": gremlin_id.as_str(),
+        "kind": "chat",
+        "project_root": project_root.to_string_lossy(),
+        "workdir": "",
+        "status": "running",
+        "started_at": state::now_stamp(),
+        "model": default_model.to_string(),
+        "stage": "chat",
+        "pid": std::process::id(),
+        "attempt": "",
+        "exit_code": null,
+        "definition_path": "",
+        "description": "",
+        "parent_id": "",
+        "definition_args": [],
+        "stage_inputs": {},
+        "group_name": "",
+        "child_key": "",
+        "metadata": {},
+    })
+    .as_object()
+    .unwrap()
+    .clone();
 
     let state = StateData::new(gremlin_id.as_str(), &initial, /* ephemeral */ true)
         .map_err(|e| format!("failed to write state: {e}"))?;
@@ -3757,6 +3252,177 @@ fn create_chat_gremlin(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Resolve state store: live run-map handle, or persisted under `config::state_root()`.
+fn resolve_store_for_id(id: &str) -> Result<Arc<dyn state::StateStore + Send + Sync>, Value> {
+    let live = {
+        let map = get_run_map().lock().unwrap();
+        map.get(id).map(|handle| handle.store.clone())
+    };
+    if let Some(store) = live {
+        return Ok(store);
+    }
+    let state_dir = config::state_root().join(id);
+    if !state_dir.is_dir() || !state_dir.join("state.json").is_file() {
+        return Err(error_response(&format!("unknown gremlin {id:?}")));
+    }
+    state::StateData::open(id)
+        .map(|sd| sd.store_handle())
+        .map_err(|e| error_response(&format!("gremlin {id}: {e}")))
+}
+
+/// File-stem of recorded `definition_path`, falling back to `kind`.
+fn definition_name_from_tree(tree: &Map<String, Value>) -> String {
+    tree.get("definition_path")
+        .and_then(|v| v.as_str())
+        .and_then(|s| {
+            std::path::Path::new(s)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| str_field(tree, "kind"))
+}
+
+/// Field-by-field view of a gremlin's state for `status`/`info` serialization.
+struct StateView {
+    id: String,
+    status: String,
+    stage: String,
+    definition: String,
+    project_root: String,
+    workdir: String,
+    state_dir: PathBuf,
+    started_at: String,
+    ended_at: Value,
+    exit_code: Value,
+    pid: Value,
+    model: String,
+    attempt: String,
+    kind: String,
+    scratch_dir: PathBuf,
+    bail_info: Value,
+}
+
+impl StateView {
+    /// Extract fields from a live store's state tree.
+    fn from_live(
+        id: &str,
+        store: &Arc<dyn state::StateStore + Send + Sync>,
+        scratch_dir: PathBuf,
+    ) -> Result<Self, Value> {
+        let tree = store.state_tree();
+        if tree.is_empty() {
+            return Err(error_response(&format!("gremlin {id}: state is empty")));
+        }
+        Ok(Self {
+            id: id.to_string(),
+            status: "running".to_string(),
+            stage: str_field(&tree, "stage"),
+            definition: definition_name_from_tree(&tree),
+            project_root: str_field(&tree, "project_root"),
+            workdir: str_field(&tree, "workdir"),
+            state_dir: live_state_dir(store, id),
+            started_at: str_field(&tree, "started_at"),
+            ended_at: null_field(&tree, "ended_at"),
+            exit_code: null_field(&tree, "exit_code"),
+            pid: null_field(&tree, "pid"),
+            model: str_field(&tree, "model"),
+            attempt: str_field(&tree, "attempt"),
+            kind: str_field(&tree, "kind"),
+            scratch_dir,
+            bail_info: store
+                .stage_error()
+                .map(Value::Object)
+                .unwrap_or(Value::Null),
+        })
+    }
+
+    /// Extract fields from a persisted (non-live) gremlin.
+    fn from_persisted(gremlin: &Gremlin, state_dir: PathBuf, scratch_dir: PathBuf) -> Self {
+        Self {
+            id: gremlin.id.as_str().to_string(),
+            status: status_or_orphan(false, gremlin),
+            stage: gremlin.state.read_str("stage"),
+            definition: definition_display_name(gremlin),
+            project_root: gremlin.project_root.to_string_lossy().to_string(),
+            workdir: gremlin
+                .workdir
+                .as_ref()
+                .map(|w| w.path().to_string_lossy().to_string())
+                .unwrap_or_default(),
+            state_dir,
+            started_at: gremlin.state.read_str("started_at"),
+            ended_at: gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
+            exit_code: gremlin.state.read_field("exit_code").unwrap_or(Value::Null),
+            pid: gremlin.state.read_field("pid").unwrap_or(Value::Null),
+            model: gremlin.state.read_str("model"),
+            attempt: gremlin.state.read_str("attempt"),
+            kind: gremlin.state.read_str("kind"),
+            scratch_dir,
+            bail_info: gremlin
+                .state
+                .stage_error()
+                .map(Value::Object)
+                .unwrap_or(Value::Null),
+        }
+    }
+
+    /// The fields common to `status` and `info` responses.
+    fn common_json(&self) -> Map<String, Value> {
+        let value = serde_json::json!({
+            "id": self.id,
+            "status": self.status,
+            "stage": self.stage,
+            "definition": self.definition,
+            "project_root": self.project_root,
+            "workdir": self.workdir,
+            "state_dir": self.state_dir.to_string_lossy(),
+            "artifact_dir": self.state_dir.join("artifacts").to_string_lossy(),
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "exit_code": self.exit_code,
+            "pid": self.pid,
+            "model": self.model,
+            "attempt": self.attempt,
+            "kind": self.kind,
+        });
+        value.as_object().cloned().unwrap_or_default()
+    }
+}
+
+/// Prefer a live run-map store, falling back to the persisted gremlin.
+fn state_view_for_id(id: &str) -> Result<StateView, Value> {
+    let live = {
+        let map = get_run_map().lock().unwrap();
+        map.get(id)
+            .map(|h| (h.store.clone(), h.scratch_dir.clone()))
+    };
+    if let Some((store, scratch_dir)) = live {
+        return StateView::from_live(id, &store, scratch_dir);
+    }
+    let (gremlin, state_dir) = open_persisted_gremlin(id)?;
+    let scratch_dir = config::scratch_root(Some(id));
+    Ok(StateView::from_persisted(&gremlin, state_dir, scratch_dir))
+}
+
+/// Set up log + interactive channels on a gremlin. Returns the log broadcast
+/// sender and interactive handle for insertion into the run map.
+fn setup_gremlin_channels(
+    gremlin: &mut Gremlin,
+    relay: Option<LogRelay>,
+) -> (broadcast::Sender<String>, InteractiveHandle) {
+    let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (log_broadcast, _) = broadcast::channel(256);
+    gremlin.runtime_config.log_tx = Some(log_tx);
+    let channels = InteractiveChannels::new();
+    let (interactive_handle, interactive_session) = channels.split();
+    gremlin.runtime_config.interactive = Some(interactive_handle.clone());
+    gremlin.interactive_session = Some(interactive_session);
+    let store = gremlin.state.store_handle();
+    spawn_log_writer(log_rx, store, log_broadcast.clone(), relay);
+    (log_broadcast, interactive_handle)
+}
+
 async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i32, Gremlin) {
     let exit_code = match gremlin.run(resume_from).await {
         Ok(ec) => ec,
@@ -3772,8 +3438,7 @@ async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i
     (exit_code, gremlin)
 }
 
-/// Spawn a background task that reads from the log channel, appends each
-/// line to the `"log"` state blob, and broadcasts it to live subscribers.
+/// Background task: reads log channel, appends to state blob, broadcasts.
 fn spawn_log_writer(
     mut log_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     store: Arc<dyn state::StateStore + Send + Sync>,
@@ -3836,8 +3501,6 @@ fn spawn_log_writer(
     });
 }
 
-/// Shared setup for launching and resuming a gremlin: wires up log, interactive
-/// channels, cancel token, and spawns the run loop with a oneshot barrier.
 fn spawn_gremlin_runner(
     mut gremlin: Gremlin,
     id: &str,
@@ -3846,20 +3509,11 @@ fn spawn_gremlin_runner(
     definition_name: &str,
     shutdown_tx: &watch::Sender<bool>,
 ) {
-    let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (log_broadcast, _) = broadcast::channel(256);
-    gremlin.runtime_config.log_tx = Some(log_tx.clone());
-
-    let channels = InteractiveChannels::new();
-    let (interactive_handle, interactive_session) = channels.split();
-    gremlin.runtime_config.interactive = Some(interactive_handle.clone());
+    let (log_broadcast, interactive_handle) = setup_gremlin_channels(&mut gremlin, None);
     gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
         interactive_handle.evt_tx.clone(),
     ));
-    gremlin.interactive_session = Some(interactive_session);
-
     let store = gremlin.state.store_handle();
-    spawn_log_writer(log_rx, store.clone(), log_broadcast.clone(), None);
 
     let cancel_token = CancelToken::new();
     let (state_tx, _state_rx) = watch::channel(RunState {
@@ -4021,45 +3675,16 @@ pub(crate) struct LogRelay {
     pub prefix: String,
 }
 
-/// Launch a pre-configured child gremlin, registering it in the run_map so
-/// it appears in `gremlins ls` with live status.
-///
-/// The child must already be forked (artifacts copied, worktree branched,
-/// state written). This function creates cancel and state-watch channels,
-/// spawns a tokio task for [`run_gremlin_task`], inserts a [`RunHandle`]
-/// into the global run map, and returns a [`LaunchResult`] with receivers
-/// that fire when the child reaches a terminal state.
-///
-/// Unlike [`handle_launch`], this does *not* generate an id, resolve a
-/// definition, or call [`Gremlin::init`] — the gremlin is ready before the
-/// call and is consumed by it.
-///
-/// This function is synchronous (no `.await`) so its caller — the parallel
-/// executor — does not produce a non-`Send` future. The run_map uses a
-/// `std::sync::Mutex` so `lock()` never blocks on an async runtime.
+/// Launch a pre-configured child gremlin into the run map. Synchronous — no `.await`.
 pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> LaunchResult {
     let id = gremlin.id.to_string();
 
-    // Set up the per-gremlin log channel.
-    let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (log_broadcast, _) = broadcast::channel(256);
-    gremlin.runtime_config.log_tx = Some(log_tx.clone());
-
-    // Set up interactive channels (idle until a debug session connects).
-    let channels = InteractiveChannels::new();
-    let (interactive_handle, interactive_session) = channels.split();
-    gremlin.runtime_config.interactive = Some(interactive_handle.clone());
+    let (log_broadcast, interactive_handle) = setup_gremlin_channels(&mut gremlin, relay);
     gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
         interactive_handle.evt_tx.clone(),
     ));
-    gremlin.interactive_session = Some(interactive_session);
-
-    // Spawn the log writer.
     let store = gremlin.state.store_handle();
-    spawn_log_writer(log_rx, store.clone(), log_broadcast.clone(), relay);
 
-    // Reuse the cancel token inherited from the parent via Gremlin::fork;
-    // create a fresh one only when there is no parent token.
     let cancel_token = gremlin
         .cancel_token
         .clone()
@@ -4076,12 +3701,7 @@ pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> Lau
     let aborted = Arc::new(AtomicBool::new(false));
     let aborted_for_task = aborted.clone();
 
-    // cancel_token is already set on the gremlin (inherited via fork or
-    // just created above).  No need to overwrite.
-
     let id_clone = id.clone();
-
-    // Capture the scratch_dir before gremlin is moved into the spawned task.
     let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
 
     // Spawn before inserting into run_map so the JoinHandle is available
@@ -4123,17 +3743,7 @@ pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> Lau
 
     // Emit RunStarted so subscribers see the child before its terminal
     // event (finish already emits RunCompleted/RunFailed).
-    let definition_name = store
-        .state_tree()
-        .get("definition_path")
-        .and_then(|v| v.as_str())
-        .and_then(|s| {
-            std::path::Path::new(s)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(String::from)
-        })
-        .unwrap_or_else(|| "child".to_string());
+    let definition_name = definition_name_from_tree(&store.state_tree());
     emit_event(DaemonEvent::RunStarted {
         id: id.clone(),
         definition: definition_name,
@@ -4193,11 +3803,6 @@ pub(crate) async fn stop_child(id: &str) {
     }
 }
 
-/// Reap backend resources for an aborted gremlin by reading its client
-/// spec from state.json and calling [`Client::reap_all`].
-///
-/// If the model spec cannot be read or parsed this is a silent no-op —
-/// the gremlin may not have started running yet.
 fn reap_client_for(id: &str) {
     let spec = state::StateData::open(id)
         .map(|sd| sd.read_str("model"))
@@ -4209,6 +3814,15 @@ fn reap_client_for(id: &str) {
         Ok(client) => client.reap_all(id),
         Err(e) => log::warn!("reap_client_for {id}: failed to parse model spec {spec:?}: {e}"),
     }
+}
+
+/// Write terminal state, reap client, and emit RunStopped.
+fn terminate_and_reap(id: &str) {
+    if let Ok(sd) = state::StateData::open(id) {
+        sd.write_terminal_state(1);
+    }
+    reap_client_for(id);
+    emit_event(DaemonEvent::RunStopped { id: id.to_string() });
 }
 
 // ---------------------------------------------------------------------------
@@ -4297,6 +3911,7 @@ mod tests {
     };
     use crate::clients::client::{Client, ModelURI};
     use crate::clients::protocol::UsageStats;
+    use crate::executor::gremlin::Gremlin;
     use crate::executor::socket;
     use crate::schemas::bootstrap::{InputSource, InputSources};
     use crate::test_support::Sandbox;
@@ -4343,19 +3958,20 @@ mod tests {
     }
 
     /// Wait until the chat gremlin has been re-inserted after its turn, then
-    /// return a snapshot of its in-memory environment.
-    async fn wait_for_chat_gremlin_env(
+    /// extract a value through the provided closure.
+    async fn wait_for_chat_gremlin<T>(
         session: &super::SessionHandle,
         id: &str,
-    ) -> HashMap<String, String> {
+        extract: impl Fn(&Gremlin) -> T,
+    ) -> T {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let env = {
+                let val = {
                     let s = session.lock().await;
-                    s.chat_gremlins.get(id).map(|g| g.env.clone())
+                    s.chat_gremlins.get(id).map(&extract)
                 };
-                if let Some(env) = env {
-                    return env;
+                if let Some(v) = val {
+                    return v;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -4364,42 +3980,34 @@ mod tests {
         .unwrap_or_else(|_| panic!("timed out waiting for chat gremlin {id} to re-insert"))
     }
 
-    /// Wait until the chat gremlin has been re-inserted after its turn, then
-    /// return its parsed client handle.
-    async fn wait_for_chat_gremlin_client(session: &super::SessionHandle, id: &str) -> Client {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let client = {
-                    let s = session.lock().await;
-                    s.chat_gremlins.get(id).map(|g| g.client.clone())
-                };
-                if let Some(client) = client {
-                    return client;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("timed out waiting for chat gremlin {id} to re-insert"))
+    /// Create a Sandbox with project/ and state/ directories pre-created.
+    fn sandbox_dirs(config: Option<&str>) -> (Sandbox, PathBuf, PathBuf) {
+        let sandbox = Sandbox::with_config(config);
+        let project_root = sandbox.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let state_root = sandbox.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+        (sandbox, project_root, state_root)
     }
 
-    /// Wait until the chat gremlin has been re-inserted after its turn, then
-    /// return the `model` value persisted in its state.json.
-    async fn wait_for_chat_gremlin_state_model(session: &super::SessionHandle, id: &str) -> String {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let model = {
-                    let s = session.lock().await;
-                    s.chat_gremlins.get(id).map(|g| g.state.read_str("model"))
-                };
-                if let Some(model) = model {
-                    return model;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("timed out waiting for chat gremlin {id} to re-insert"))
+    /// Create a UnixStream pair, returning (writer, reader, server_read, session).
+    fn chat_pair(
+        name: &str,
+    ) -> (
+        super::SharedWriter,
+        tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+        tokio::net::unix::OwnedReadHalf,
+        super::SessionHandle,
+    ) {
+        let (server, client) = tokio::net::UnixStream::pair().unwrap();
+        let (server_read, server_write) = server.into_split();
+        let writer = super::SharedWriter::new(server_write);
+        let (client_read, _client_write) = client.into_split();
+        let reader = tokio::io::BufReader::new(client_read);
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new(name.to_string()),
+        ));
+        (writer, reader, server_read, session)
     }
 
     #[test]
@@ -4964,25 +4572,14 @@ model-profiles:
 
     #[tokio::test]
     async fn chat_turn_refreshes_env_and_falls_back_to_base_snapshot() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"default-model": "cmd/echo"}"#));
-        let project_root = _sandbox.path().join("project");
-        std::fs::create_dir_all(&project_root).unwrap();
-        let state_root = _sandbox.path().join("state");
-        std::fs::create_dir_all(&state_root).unwrap();
+        let (_sandbox, project_root, state_root) =
+            sandbox_dirs(Some(r#"{"default-model": "cmd/echo"}"#));
 
         // `run_supervisor` captures this at daemon startup; establish the
         // same snapshot here so the absent-field fallback can be asserted.
         let base_env = super::base_process_env().clone();
 
-        let (server, client) = tokio::net::UnixStream::pair().unwrap();
-        let (server_read, server_write) = server.into_split();
-        let writer = super::SharedWriter::new(server_write);
-        let (client_read, _client_write) = client.into_split();
-        let mut reader = tokio::io::BufReader::new(client_read);
-        let _server_read = server_read;
-        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-            super::ClientSession::new("sess-test".to_string()),
-        ));
+        let (writer, mut reader, _server_read, session) = chat_pair("sess-test");
 
         let chat = |turn: &str, env: Option<serde_json::Value>| {
             let mut req = serde_json::json!({
@@ -5011,7 +4608,7 @@ model-profiles:
         let ack = read_until_type(&mut reader, "ok").await;
         let id = ack["id"].as_str().unwrap().to_string();
         {
-            let env = wait_for_chat_gremlin_env(&session, &id).await;
+            let env = wait_for_chat_gremlin(&session, &id, |g| g.env.clone()).await;
             assert_eq!(
                 env.get("GREMLINS_CHAT_ENV_TEST").map(String::as_str),
                 Some("first")
@@ -5031,7 +4628,7 @@ model-profiles:
         .await;
         read_until_type(&mut reader, "ok").await;
         {
-            let env = wait_for_chat_gremlin_env(&session, &id).await;
+            let env = wait_for_chat_gremlin(&session, &id, |g| g.env.clone()).await;
             assert_eq!(
                 env.get("GREMLINS_CHAT_ENV_TEST").map(String::as_str),
                 Some("second")
@@ -5042,7 +4639,7 @@ model-profiles:
         super::handle_chat(&chat("3", None), &state_root, &writer, &session).await;
         read_until_type(&mut reader, "ok").await;
         {
-            let env = wait_for_chat_gremlin_env(&session, &id).await;
+            let env = wait_for_chat_gremlin(&session, &id, |g| g.env.clone()).await;
             assert_eq!(
                 env, base_env,
                 "absent env must fall back to the daemon base process snapshot"
@@ -5070,21 +4667,10 @@ model-profiles:
 
     #[tokio::test]
     async fn chat_reuse_rebuilds_client_after_model_change() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"default-model": "cmd/echo"}"#));
-        let project_root = _sandbox.path().join("project");
-        std::fs::create_dir_all(&project_root).unwrap();
-        let state_root = _sandbox.path().join("state");
-        std::fs::create_dir_all(&state_root).unwrap();
+        let (_sandbox, project_root, state_root) =
+            sandbox_dirs(Some(r#"{"default-model": "cmd/echo"}"#));
 
-        let (server, client) = tokio::net::UnixStream::pair().unwrap();
-        let (server_read, server_write) = server.into_split();
-        let writer = super::SharedWriter::new(server_write);
-        let (client_read, _client_write) = client.into_split();
-        let mut reader = tokio::io::BufReader::new(client_read);
-        let _server_read = server_read;
-        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-            super::ClientSession::new("sess-model-reuse".to_string()),
-        ));
+        let (writer, mut reader, _server_read, session) = chat_pair("sess-model-reuse");
 
         let chat = |turn: &str| {
             serde_json::json!({
@@ -5099,10 +4685,10 @@ model-profiles:
         super::handle_chat(&chat("1"), &state_root, &writer, &session).await;
         let ack = read_until_type(&mut reader, "ok").await;
         let id = ack["id"].as_str().unwrap().to_string();
-        let before = wait_for_chat_gremlin_client(&session, &id).await;
+        let before = wait_for_chat_gremlin(&session, &id, |g| g.client.clone()).await;
         assert_eq!(before, Client::parse("cmd/echo").unwrap());
         assert_eq!(
-            wait_for_chat_gremlin_state_model(&session, &id).await,
+            wait_for_chat_gremlin(&session, &id, |g| g.state.read_str("model")).await,
             "cmd/echo"
         );
 
@@ -5114,10 +4700,10 @@ model-profiles:
 
         super::handle_chat(&chat("2"), &state_root, &writer, &session).await;
         read_until_type(&mut reader, "ok").await;
-        let after = wait_for_chat_gremlin_client(&session, &id).await;
+        let after = wait_for_chat_gremlin(&session, &id, |g| g.client.clone()).await;
         assert_eq!(after, Client::parse("cmd/true").unwrap());
         assert_eq!(
-            wait_for_chat_gremlin_state_model(&session, &id).await,
+            wait_for_chat_gremlin(&session, &id, |g| g.state.read_str("model")).await,
             "cmd/true"
         );
 
@@ -5138,22 +4724,10 @@ model-profiles:
 
     #[tokio::test]
     async fn chat_model_is_session_scoped_and_reads_parked_gremlin() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"default-model": "cmd/echo"}"#));
-        let project_root = _sandbox.path().join("project");
-        std::fs::create_dir_all(&project_root).unwrap();
-        let state_root = _sandbox.path().join("state");
-        std::fs::create_dir_all(&state_root).unwrap();
+        let (_sandbox, project_root, state_root) =
+            sandbox_dirs(Some(r#"{"default-model": "cmd/echo"}"#));
 
-        let (server, client) = tokio::net::UnixStream::pair().unwrap();
-        let (server_read, server_write) = server.into_split();
-        let writer = super::SharedWriter::new(server_write);
-        let (client_read, _client_write) = client.into_split();
-        let mut reader = tokio::io::BufReader::new(client_read);
-        let _server_read = server_read;
-
-        let session_a: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-            super::ClientSession::new("sess-model-a".to_string()),
-        ));
+        let (writer, mut reader, _server_read, session_a) = chat_pair("sess-model-a");
         let session_b: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
             super::ClientSession::new("sess-model-b".to_string()),
         ));
@@ -5173,7 +4747,7 @@ model-profiles:
         let ack = read_until_type(&mut reader, "ok").await;
         let id = ack["id"].as_str().unwrap().to_string();
         assert_eq!(
-            wait_for_chat_gremlin_state_model(&session_a, &id).await,
+            wait_for_chat_gremlin(&session_a, &id, |g| g.state.read_str("model")).await,
             "cmd/echo"
         );
 
@@ -5192,21 +4766,10 @@ model-profiles:
 
     #[tokio::test]
     async fn chat_model_reports_null_when_model_field_is_empty() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"default-model": "cmd/echo"}"#));
-        let project_root = _sandbox.path().join("project");
-        std::fs::create_dir_all(&project_root).unwrap();
-        let state_root = _sandbox.path().join("state");
-        std::fs::create_dir_all(&state_root).unwrap();
+        let (_sandbox, project_root, state_root) =
+            sandbox_dirs(Some(r#"{"default-model": "cmd/echo"}"#));
 
-        let (server, client) = tokio::net::UnixStream::pair().unwrap();
-        let (server_read, server_write) = server.into_split();
-        let writer = super::SharedWriter::new(server_write);
-        let (client_read, _client_write) = client.into_split();
-        let mut reader = tokio::io::BufReader::new(client_read);
-        let _server_read = server_read;
-        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-            super::ClientSession::new("sess-model-empty".to_string()),
-        ));
+        let (writer, mut reader, _server_read, session) = chat_pair("sess-model-empty");
 
         super::handle_chat(
             &serde_json::json!({
@@ -5223,7 +4786,7 @@ model-profiles:
         let ack = read_until_type(&mut reader, "ok").await;
         let id = ack["id"].as_str().unwrap().to_string();
         assert_eq!(
-            wait_for_chat_gremlin_state_model(&session, &id).await,
+            wait_for_chat_gremlin(&session, &id, |g| g.state.read_str("model")).await,
             "cmd/echo"
         );
 
@@ -5246,21 +4809,10 @@ model-profiles:
 
     #[tokio::test]
     async fn chat_model_falls_back_to_run_map_while_turn_is_in_flight() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"default-model": "cmd/echo"}"#));
-        let project_root = _sandbox.path().join("project");
-        std::fs::create_dir_all(&project_root).unwrap();
-        let state_root = _sandbox.path().join("state");
-        std::fs::create_dir_all(&state_root).unwrap();
+        let (_sandbox, project_root, state_root) =
+            sandbox_dirs(Some(r#"{"default-model": "cmd/echo"}"#));
 
-        let (server, client) = tokio::net::UnixStream::pair().unwrap();
-        let (server_read, server_write) = server.into_split();
-        let writer = super::SharedWriter::new(server_write);
-        let (client_read, _client_write) = client.into_split();
-        let mut reader = tokio::io::BufReader::new(client_read);
-        let _server_read = server_read;
-        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-            super::ClientSession::new("sess-model-inflight".to_string()),
-        ));
+        let (writer, mut reader, _server_read, session) = chat_pair("sess-model-inflight");
 
         super::handle_chat(
             &serde_json::json!({
@@ -5277,7 +4829,7 @@ model-profiles:
         let ack = read_until_type(&mut reader, "ok").await;
         let id = ack["id"].as_str().unwrap().to_string();
         assert_eq!(
-            wait_for_chat_gremlin_state_model(&session, &id).await,
+            wait_for_chat_gremlin(&session, &id, |g| g.state.read_str("model")).await,
             "cmd/echo"
         );
 
@@ -5310,26 +4862,14 @@ model-profiles:
 
     #[tokio::test]
     async fn chat_stage_model_wins_over_default_model_by_stage() {
-        let _sandbox = Sandbox::with_config(Some(
+        let (_sandbox, project_root, state_root) = sandbox_dirs(Some(
             r#"default-model: "cmd/default"
 default-model-by-stage:
   chat: cmd/echo
 "#,
         ));
-        let project_root = _sandbox.path().join("project");
-        std::fs::create_dir_all(&project_root).unwrap();
-        let state_root = _sandbox.path().join("state");
-        std::fs::create_dir_all(&state_root).unwrap();
 
-        let (server, client) = tokio::net::UnixStream::pair().unwrap();
-        let (server_read, server_write) = server.into_split();
-        let writer = super::SharedWriter::new(server_write);
-        let (client_read, _client_write) = client.into_split();
-        let mut reader = tokio::io::BufReader::new(client_read);
-        let _server_read = server_read;
-        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-            super::ClientSession::new("sess-stage-model".to_string()),
-        ));
+        let (writer, mut reader, _server_read, session) = chat_pair("sess-stage-model");
 
         let set = handle_model(&serde_json::json!({ "op": "model", "model": "cmd/true" })).await;
         assert_eq!(set["model"], "cmd/true");
@@ -5375,27 +4915,15 @@ default-model-by-stage:
 
     #[tokio::test]
     async fn chat_resolves_profile_default_model() {
-        let _sandbox = Sandbox::with_config(Some(
+        let (_sandbox, project_root, state_root) = sandbox_dirs(Some(
             r#"default-model: "profile/fast"
 model-profiles:
   fast:
     model: cmd/echo
 "#,
         ));
-        let project_root = _sandbox.path().join("project");
-        std::fs::create_dir_all(&project_root).unwrap();
-        let state_root = _sandbox.path().join("state");
-        std::fs::create_dir_all(&state_root).unwrap();
 
-        let (server, client) = tokio::net::UnixStream::pair().unwrap();
-        let (server_read, server_write) = server.into_split();
-        let writer = super::SharedWriter::new(server_write);
-        let (client_read, _client_write) = client.into_split();
-        let mut reader = tokio::io::BufReader::new(client_read);
-        let _server_read = server_read;
-        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-            super::ClientSession::new("sess-profile-test".to_string()),
-        ));
+        let (writer, mut reader, _server_read, session) = chat_pair("sess-profile-test");
 
         let request = serde_json::json!({
             "op": "chat",
@@ -5414,27 +4942,15 @@ model-profiles:
 
     #[tokio::test]
     async fn chat_reports_error_on_unknown_profile() {
-        let _sandbox = Sandbox::with_config(Some(
+        let (_sandbox, project_root, state_root) = sandbox_dirs(Some(
             r#"default-model: "profile/nope"
 model-profiles:
   fast:
     model: cmd/echo
 "#,
         ));
-        let project_root = _sandbox.path().join("project");
-        std::fs::create_dir_all(&project_root).unwrap();
-        let state_root = _sandbox.path().join("state");
-        std::fs::create_dir_all(&state_root).unwrap();
 
-        let (server, client) = tokio::net::UnixStream::pair().unwrap();
-        let (server_read, server_write) = server.into_split();
-        let writer = super::SharedWriter::new(server_write);
-        let (client_read, _client_write) = client.into_split();
-        let mut reader = tokio::io::BufReader::new(client_read);
-        let _server_read = server_read;
-        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-            super::ClientSession::new("sess-unknown-profile".to_string()),
-        ));
+        let (writer, mut reader, _server_read, session) = chat_pair("sess-unknown-profile");
 
         let request = serde_json::json!({
             "op": "chat",
@@ -5458,27 +4974,15 @@ model-profiles:
 
     #[tokio::test]
     async fn chat_reports_error_on_empty_profile_model() {
-        let _sandbox = Sandbox::with_config(Some(
+        let (_sandbox, project_root, state_root) = sandbox_dirs(Some(
             r#"default-model: "profile/empty"
 model-profiles:
   empty:
     model: ""
 "#,
         ));
-        let project_root = _sandbox.path().join("project");
-        std::fs::create_dir_all(&project_root).unwrap();
-        let state_root = _sandbox.path().join("state");
-        std::fs::create_dir_all(&state_root).unwrap();
 
-        let (server, client) = tokio::net::UnixStream::pair().unwrap();
-        let (server_read, server_write) = server.into_split();
-        let writer = super::SharedWriter::new(server_write);
-        let (client_read, _client_write) = client.into_split();
-        let mut reader = tokio::io::BufReader::new(client_read);
-        let _server_read = server_read;
-        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-            super::ClientSession::new("sess-empty-profile".to_string()),
-        ));
+        let (writer, mut reader, _server_read, session) = chat_pair("sess-empty-profile");
 
         let request = serde_json::json!({
             "op": "chat",
