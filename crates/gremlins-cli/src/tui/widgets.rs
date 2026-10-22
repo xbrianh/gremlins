@@ -727,6 +727,20 @@ impl TranscriptWidget {
         &self.response_accumulator
     }
 
+    /// Snap an offset to the nearest valid UTF-8 char boundary at or
+    /// after it, never before it. Offsets beyond the string's length are
+    /// clamped to the length.
+    fn ceil_char_boundary(text: &str, offset: usize) -> usize {
+        if offset >= text.len() {
+            return text.len();
+        }
+        let mut boundary = offset;
+        while !text.is_char_boundary(boundary) {
+            boundary += 1;
+        }
+        boundary
+    }
+
     /// Reconcile the streamed response against authoritative full text.
     pub fn reconcile_response(&mut self, text: &str) {
         // Snap sealed_response_len to a valid UTF-8 char boundary in
@@ -737,7 +751,7 @@ impl TranscriptWidget {
             if self.sealed_response_len >= text.len() {
                 return;
             }
-            let offset = text.ceil_char_boundary(self.sealed_response_len);
+            let offset = Self::ceil_char_boundary(text, self.sealed_response_len);
             &text[offset..]
         } else {
             text
