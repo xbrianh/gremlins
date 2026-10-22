@@ -24,6 +24,16 @@ use super::model::{GremlinsModel, GremlinsModelError};
 use super::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 
+/// System-prompt amendment applied during debug/pause interactive mode.
+const DEBUG_NOTE: &str = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
+
+fn amend_system_prompt_with_debug_note(current: &Option<String>) -> String {
+    match current {
+        Some(sp) => format!("{sp}{DEBUG_NOTE}"),
+        None => DEBUG_NOTE.trim_start().to_string(),
+    }
+}
+
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
     if let Some(tx) = tx {
         let _ = tx.send(format!("{prefix}{msg}"));
@@ -891,12 +901,7 @@ async fn run_agent_loop_core(
                 }
 
                 // Amend system prompt with operator note.
-                let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
-                let amended_system = match &system_prompt {
-                    Some(sp) => format!("{sp}{debug_note}"),
-                    None => debug_note.trim_start().to_string(),
-                };
-                system_prompt = Some(amended_system);
+                system_prompt = Some(amend_system_prompt_with_debug_note(&system_prompt));
 
                 let mut session = InteractiveSession {
                     cmd_rx: cmd_rx.take().unwrap(),
@@ -1067,12 +1072,7 @@ async fn run_agent_loop_core(
                     log::debug!("agent_loop: entering interactive mode mid-stream (label={})", prefix);
 
                     // Amend system prompt with operator note (same as turn-boundary path).
-                    let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
-                    let amended_system = match &system_prompt {
-                        Some(sp) => format!("{sp}{debug_note}"),
-                        None => debug_note.trim_start().to_string(),
-                    };
-                    system_prompt = Some(amended_system);
+                    system_prompt = Some(amend_system_prompt_with_debug_note(&system_prompt));
 
                     // Enter interactive mode inline.
                     if cmd_rx.is_some() && evt_tx.is_some() && pause.is_some() {
@@ -1844,12 +1844,7 @@ async fn run_agent_loop_core(
                 history.pop(); // next_prompt
 
                 // Amend system prompt with operator note.
-                let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
-                let amended_system = match &system_prompt {
-                    Some(sp) => format!("{sp}{debug_note}"),
-                    None => debug_note.trim_start().to_string(),
-                };
-                system_prompt = Some(amended_system);
+                system_prompt = Some(amend_system_prompt_with_debug_note(&system_prompt));
 
                 // Enter interactive mode.
                 if cmd_rx.is_some() && evt_tx.is_some() && pause.is_some() {

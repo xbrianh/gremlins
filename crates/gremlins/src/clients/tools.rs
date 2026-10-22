@@ -142,6 +142,25 @@ impl AgentLoopRuntime {
                 .await;
         }
     }
+
+    /// Apply `base_env` / `extra_env` and cwd to a tokio `Command`.
+    /// Shared by `bash_invoke` and `websearch_invoke_with_cap`.
+    fn configure_command(&self, cmd: &mut Command) {
+        if let Some(cwd) = &self.cwd {
+            cmd.current_dir(cwd);
+        }
+        if let Some(base) = &self.base_env {
+            let mut env = base.clone();
+            if let Some(extra) = &self.extra_env {
+                env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+            cmd.env_clear().envs(env);
+        } else if let Some(extra) = &self.extra_env {
+            let mut env: HashMap<String, String> = std::env::vars().collect();
+            env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
+            cmd.env_clear().envs(env);
+        }
+    }
 }
 
 pub(crate) fn project_root() -> PathBuf {
@@ -1049,26 +1068,9 @@ pub(crate) async fn bash_invoke(ctx: &AgentLoopRuntime, args_json: &str, id: &st
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // Start `bash` in its own process group. `kill_on_drop` only kills
-        // the direct `bash` child; making it a group leader lets the timeout
-        // path (and the dropped-tool-future path, via `kill_on_drop` plus
-        // the timeout killpg below) stop every descendant too.
         cmd.as_std_mut().process_group(0);
     }
-    if let Some(cwd) = &ctx.cwd {
-        cmd.current_dir(cwd);
-    }
-    if let Some(base) = &ctx.base_env {
-        let mut env = base.clone();
-        if let Some(extra) = &ctx.extra_env {
-            env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
-        }
-        cmd.env_clear().envs(env);
-    } else if let Some(extra) = &ctx.extra_env {
-        let mut env: HashMap<String, String> = std::env::vars().collect();
-        env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
-        cmd.env_clear().envs(env);
-    }
+    ctx.configure_command(&mut cmd);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return format!("Error: {e}"),
@@ -1252,20 +1254,7 @@ async fn websearch_invoke_with_cap(
         use std::os::unix::process::CommandExt;
         cmd.as_std_mut().process_group(0);
     }
-    if let Some(cwd) = &ctx.cwd {
-        cmd.current_dir(cwd);
-    }
-    if let Some(base) = &ctx.base_env {
-        let mut env = base.clone();
-        if let Some(extra) = &ctx.extra_env {
-            env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
-        }
-        cmd.env_clear().envs(env);
-    } else if let Some(extra) = &ctx.extra_env {
-        let mut env: HashMap<String, String> = std::env::vars().collect();
-        env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
-        cmd.env_clear().envs(env);
-    }
+    ctx.configure_command(&mut cmd);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return format!("Error: {e}"),
@@ -1800,6 +1789,16 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool
     }
 }
 
+fn json_type_name(val: &serde_json::Value) -> &'static str {
+    if val.is_string() { "string" }
+    else if val.is_array() { "array" }
+    else if val.is_number() { "number" }
+    else if val.is_object() { "object" }
+    else if val.is_null() { "null" }
+    else if val.is_boolean() { "bool" }
+    else { "?" }
+}
+
 /// Validate tool arguments against the expected schema before dispatching
 /// to the handler. Returns an error message with the expected shape on mismatch,
 /// or `None` if valid.
@@ -1860,23 +1859,9 @@ fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
                     _ => true,
                 };
                 if !ok {
-                    let actual = if val.is_string() {
-                        "string"
-                    } else if val.is_array() {
-                        "array"
-                    } else if val.is_number() {
-                        "number"
-                    } else if val.is_object() {
-                        "object"
-                    } else if val.is_null() {
-                        "null"
-                    } else if val.is_boolean() {
-                        "bool"
-                    } else {
-                        "?"
-                    };
                     return Some(format!(
-                        "Error: '{field}' for {name} must be {expected_type}, got {actual}"
+                        "Error: '{field}' for {name} must be {expected_type}, got {}",
+                        json_type_name(val)
                     ));
                 }
             }
