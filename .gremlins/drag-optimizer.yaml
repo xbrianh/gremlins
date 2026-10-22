@@ -10,7 +10,7 @@
 #   drag-model                (optional)  model for comprehensibility scoring (gremlins-drag --model)
 #   instructions              (optional)  extra guidance injected into the per-iteration refactoring prompt
 #   base_ref                  (optional)  git ref to check out for the isolated worktree (default: HEAD)
-#   comprehensibility-estimates (optional)  number of LLM estimates per module for comprehensibility scoring (default: 5)
+#   comprehensibility-estimates (optional)  number of LLM estimates per module (default: 5)
 #
 # NOTE: the bootstrap source is named `drag-model` (not `model`) because `model`
 # collides with gremlins' own global --model flag.  Pass `--drag-model provider/model`
@@ -45,7 +45,6 @@ bootstrap:
     comprehensibility-estimates:
       type: string
       optional: true
-      default: "5"
   launch_cmds:
     - 'printf "%s" {target} > "$GREMLINS_STATE_DIR/artifacts/target.txt"'
     - 'printf "%s" {drag-model} > "$GREMLINS_STATE_DIR/artifacts/drag_model.txt"'
@@ -83,7 +82,9 @@ stages:
         - |
           MODEL_ARG=""
           [ -n "{drag_model}" ] && MODEL_ARG="--model {drag_model}"
-        - gremlins-drag --json --comprehensibility-estimates {comprehensibility_estimates} {target} $MODEL_ARG > {report}
+          EST="{comprehensibility_estimates}"
+          [ -z "$EST" ] && EST=5
+          gremlins-drag --json --comprehensibility-estimates $EST {target} $MODEL_ARG > {report}
         - cp {report} "$GREMLINS_STATE_DIR/drag_current.json"
         - |
           cat {report} | python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(m["ln_drag"] for m in data["modules"]))' > {drag_best}
@@ -97,7 +98,7 @@ stages:
         curves: "artifact://curves.txt"
     options:
       cmds:
-        - gremlins-drag --curves
+        - gremlins-drag --curves > {curves}
 
   # ── optimize loop ─────────────────────────────────────────────────────
   - name: optimize
@@ -245,13 +246,14 @@ stages:
           outputs:
             report: "artifact://{loop_iter}/report.json"
             converged?: "artifact://{loop_iter}/converged"
-            drag_best: "artifact://drag_best.txt"
         options:
           cmds:
             - |
               MODEL_ARG=""
               [ -n "{drag_model}" ] && MODEL_ARG="--model {drag_model}"
-            - gremlins-drag --json --comprehensibility-estimates {comprehensibility_estimates} {target} $MODEL_ARG > {report}
+              EST="{comprehensibility_estimates}"
+              [ -z "$EST" ] && EST=5
+              gremlins-drag --json --comprehensibility-estimates $EST {target} $MODEL_ARG > {report}
             - |
               STATE_DIR="$GREMLINS_STATE_DIR"
               if [ -f "$STATE_DIR/drag_current.json" ]; then
@@ -265,9 +267,9 @@ stages:
               if awk "BEGIN{exit !($CURR >= $BEST)}"; then
                 touch {converged}
                 echo "converged — drag $CURR >= best $BEST"
-                printf "%s" "$BEST" > {drag_best}
+                printf "%s" "$BEST" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"
               else
-                printf "%s" "$CURR" > {drag_best}
+                printf "%s" "$CURR" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"
                 echo "improved — drag $CURR < $BEST (was $BEST)"
               fi
 
@@ -278,12 +280,14 @@ stages:
       inputs:
         target: content("artifact://target.txt")
         baseline_report: "artifact://baseline/report.json"
+        drag_best_val: content("artifact://drag_best.txt")
       outputs:
         commit_message: "artifact://commit_message.txt"
     options:
       cmds:
         - |
-          BEST=$(cat "$GREMLINS_STATE_DIR/drag_best" 2>/dev/null || echo "N/A")
+          BEST="{drag_best_val}"
+          [ -z "$BEST" ] && BEST="N/A"
           BASE_SUM=$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(round(sum(m["ln_drag"] for m in data["modules"]), 2))' < {baseline_report})
           {
             echo "drag-optimizer: reduce drag for {target}"
