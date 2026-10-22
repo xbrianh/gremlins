@@ -2674,7 +2674,7 @@ pub(crate) async fn invoke(
             format!("Done. {summary}")
         }
         "Mischief" => include_str!("mischief_dsl.md").to_string(),
-        "LoadSkill" => load_skill_invoke(ctx, &args).await,
+        "LoadSkill" => load_skill_invoke(ctx, &args),
         other => format!("Error: unknown tool {other}"),
     };
     audit(
@@ -2709,7 +2709,7 @@ pub(crate) async fn invoke(
 }
 
 /// Invoke handler for the LoadSkill tool.
-async fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String {
+fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String {
     let name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => return "Error: missing 'name' for LoadSkill tool".to_string(),
@@ -2726,38 +2726,18 @@ async fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> 
         None => return format!("Error: skill {name:?} not found"),
     };
 
-    // Check if already active (and content matches).
-    {
-        let active_guard = match active.lock() {
-            Ok(g) => g,
-            Err(e) => return format!("Error: internal lock error: {e}"),
-        };
-        if active_guard.contains(&name.to_string()) {
-            // Skill is already active — note it without duplicating.
-            let mut result = format!("Skill {name:?} is already active.\n\n");
-            result.push_str(&loaded.skill.body);
-            if !loaded.files.is_empty() {
-                result.push_str("\n\n**Bundled files:**\n");
-                for f in &loaded.files {
-                    result.push_str(&format!("- `{}`\n", f.display()));
-                }
-            }
-            result.push_str(&format!(
-                "\n**Skill directory:** `{}`\n",
-                loaded.skill.dir.display()
-            ));
-            return result;
-        }
+    // Single critical section: check containment AND push so two
+    // concurrent LoadSkill calls for the same name cannot both pass
+    // the check and both push.
+    let mut active_guard = match active.lock() {
+        Ok(g) => g,
+        Err(e) => return format!("Error: internal lock error: {e}"),
+    };
+    if active_guard.contains(&name.to_string()) {
+        return format!("Skill {name:?} is already active.");
     }
-
-    // Add to active skills.
-    {
-        let mut active_guard = match active.lock() {
-            Ok(g) => g,
-            Err(e) => return format!("Error: internal lock error: {e}"),
-        };
-        active_guard.push(name.to_string());
-    }
+    active_guard.push(name.to_string());
+    drop(active_guard);
 
     // Return the skill body plus bundled files listing.
     let mut result = String::new();
@@ -4192,26 +4172,26 @@ mod tests {
     #[tokio::test]
     async fn load_skill_invoke_missing_name() {
         let c = ctx(&tmp());
-        let result = load_skill_invoke(&c, &serde_json::json!({})).await;
+        let result = load_skill_invoke(&c, &serde_json::json!({}));
         assert!(result.starts_with("Error: missing 'name'"), "got: {result}");
     }
 
-    #[tokio::test]
-    async fn load_skill_invoke_no_skills_configured() {
+    #[test]
+    fn load_skill_invoke_no_skills_configured() {
         let c = ctx(&tmp());
-        let result = load_skill_invoke(&c, &serde_json::json!({"name": "pdf"})).await;
+        let result = load_skill_invoke(&c, &serde_json::json!({"name": "pdf"}));
         assert!(
             result.starts_with("Error: LoadSkill is only available in chat sessions"),
             "got: {result}"
         );
     }
 
-    #[tokio::test]
-    async fn load_skill_unknown_name() {
+    #[test]
+    fn load_skill_unknown_name() {
         let mut c = ctx(&tmp());
         c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
         c.discovered_skills = Some(Arc::new(vec![]));
-        let result = load_skill_invoke(&c, &serde_json::json!({"name": "nonexistent"})).await;
+        let result = load_skill_invoke(&c, &serde_json::json!({"name": "nonexistent"}));
         assert!(
             result.starts_with("Error: skill \"nonexistent\" not found"),
             "got: {result}"

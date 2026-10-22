@@ -553,7 +553,6 @@ async fn run_agent(
         stream_events: gremlin.runtime_config.stream_events.clone(),
         prepopulated_messages,
         compaction_opts,
-        chat_mode: is_chat,
         discovered_skills: gremlin.discovered_skills.clone(),
         active_skills: gremlin.active_skills.clone(),
     };
