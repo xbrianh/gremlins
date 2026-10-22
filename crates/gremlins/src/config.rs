@@ -291,13 +291,16 @@ impl Config {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(DEFAULT_MAX_LANDSCAPE_TOKENS);
+                let max_landscape_tool_tokens = std::env::var("GREMLINS_MAX_LANDSCAPE_TOOL_TOKENS")
+                    .ok()
+                    .and_then(|v| v.parse().ok());
                 return Ok(Config {
                     default_model: env_default_model(),
                     max_tool_output_bytes,
                     chat_compaction_threshold_bytes,
                     max_prompt_bytes,
                     max_landscape_tokens,
-                    max_landscape_tool_tokens: None,
+                    max_landscape_tool_tokens,
                     ..Config::default()
                 });
             }
@@ -1128,13 +1131,7 @@ pub(crate) fn max_landscape_tokens() -> u64 {
 /// Settings.yaml `landscape.max-tool-tokens` takes precedence over the env
 /// var. Returns `None` when neither is set (no cap).
 pub(crate) fn max_landscape_tool_tokens() -> Option<u64> {
-    get_global()
-        .and_then(|c| c.max_landscape_tool_tokens())
-        .or_else(|| {
-            std::env::var("GREMLINS_MAX_LANDSCAPE_TOOL_TOKENS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-        })
+    get_global().and_then(|c| c.max_landscape_tool_tokens())
 }
 
 /// GREMLINS_MAX_TOOL_OUTPUT_BYTES — cap tool output at this many bytes.

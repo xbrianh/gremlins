@@ -3286,6 +3286,7 @@ mod tests {
     async fn landscape_directory_matches_block_format() {
         let dir = tmp();
         let c = ctx(&dir);
+        crate::config::clear_global();
         std::fs::create_dir(dir.join("sub")).unwrap();
         std::fs::write(dir.join("sub/lib.rs"), "fn a() {}\nstruct B;\nimpl B {}\n").unwrap();
 
@@ -3356,6 +3357,7 @@ mod tests {
         // `build_with_failures` surfaces the path as an inline annotation.
         let dir = tmp();
         let c = ctx(&dir);
+        crate::config::clear_global();
         std::fs::create_dir(dir.join("sub")).unwrap();
         let broken = dir.join("sub/broken.rs");
         std::fs::write(&broken, "fn x() {}\nstruct X;\nimpl X {}\n").unwrap();
@@ -5701,5 +5703,71 @@ mod tests {
         // never "allow all".
         let err = bash_check(&[], "cat /etc/passwd", Some(&dir)).unwrap();
         assert!(err.contains("invalid sandbox root"), "got: {err}");
+    }
+
+    // --- landscape_sync token_budget fallback ------------------------------
+
+    #[test]
+    fn landscape_sync_config_token_budget_fallback_caps_output() {
+        // Config has max-tool-tokens: 0 → landscape_sync without
+        // token_budget falls back to the config value and hits the cap.
+        let _sandbox = crate::test_support::Sandbox::with_config(Some(
+            r#"{"landscape": {"max-tool-tokens": 0}}"#,
+        ));
+        crate::config::clear_global();
+        crate::config::init_global().unwrap();
+
+        let dir = tmp();
+        std::fs::write(dir.join("a.rs"), "fn main() {}").unwrap();
+
+        let result = landscape_sync(Some(&dir), None, r#"{"file_path": "."}"#);
+        assert!(
+            result.contains("Error: budget exceeded"),
+            "expected budget-exceeded, got: {result}"
+        );
+        crate::config::clear_global();
+    }
+
+    #[test]
+    fn landscape_sync_no_config_no_token_budget_is_unlimited() {
+        // No config → no fallback cap → full-depth output with no error.
+        let _sandbox = crate::test_support::Sandbox::new();
+        crate::config::clear_global();
+        crate::config::init_global().unwrap();
+
+        let dir = tmp();
+        std::fs::write(dir.join("a.rs"), "fn main() {}").unwrap();
+
+        let result = landscape_sync(Some(&dir), None, r#"{"file_path": "."}"#);
+        assert!(
+            !result.contains("Error: budget exceeded"),
+            "should not be capped, got: {result}"
+        );
+        assert!(!result.is_empty(), "output should not be empty");
+    }
+
+    #[test]
+    fn landscape_sync_model_token_budget_overrides_config() {
+        // Config has max-tool-tokens: 0 (would cap), but the model passes
+        // an explicit token_budget → model's value wins, no cap error.
+        let _sandbox = crate::test_support::Sandbox::with_config(Some(
+            r#"{"landscape": {"max-tool-tokens": 0}}"#,
+        ));
+        crate::config::clear_global();
+        crate::config::init_global().unwrap();
+
+        let dir = tmp();
+        std::fs::write(dir.join("a.rs"), "fn main() {}").unwrap();
+
+        let result = landscape_sync(
+            Some(&dir),
+            None,
+            r#"{"file_path": ".", "token_budget": 999999}"#,
+        );
+        assert!(
+            !result.contains("Error: budget exceeded"),
+            "model budget should override config, got: {result}"
+        );
+        assert!(!result.is_empty(), "output should not be empty");
     }
 }
