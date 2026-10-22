@@ -1602,7 +1602,16 @@ impl RunsView {
                         Some("turn_complete") => {
                             let stats = obj.get("stats");
                             let totals = obj.get("totals");
-                            let summary = crate::tui::usage_title_part(stats, totals);
+                            let mut summary = crate::tui::usage_title_part(stats, totals);
+                            if let Some(new) = stats
+                                .and_then(|s| s.get("cache_creation_input_tokens"))
+                                .and_then(|v| v.as_u64())
+                            {
+                                summary.push_str(&format!(
+                                    " · new {}",
+                                    crate::tui::compact_tokens(Some(new))
+                                ));
+                            }
                             Line::from(Span::styled(
                                 format!("── turn_complete · {summary}"),
                                 Style::default()

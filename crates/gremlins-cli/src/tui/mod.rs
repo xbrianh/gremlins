@@ -835,7 +835,7 @@ pub(crate) const REASONING_COMPLETED_TITLE: &str = "clawnked";
 /// millions (with the second decimal trimmed when zero, so 1.00M renders as
 /// 1.0M). Promotion to millions happens at 999_950, when the thousands
 /// display would reach 1000.0k. Missing values render as a dash.
-fn compact_tokens(value: Option<u64>) -> String {
+pub(crate) fn compact_tokens(value: Option<u64>) -> String {
     match value {
         None => "-".to_string(),
         Some(v) if v < 1_000 => v.to_string(),
@@ -2097,6 +2097,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         }
                         if run.cost_usd.is_none() {
                             run.cost_usd = prev.cost_usd;
+                        }
+                        if run.cache_creation_input_tokens.is_none() {
+                            run.cache_creation_input_tokens = prev.cache_creation_input_tokens;
+                        }
+                        if run.turns.is_none() {
+                            run.turns = prev.turns;
                         }
                     }
                 }
