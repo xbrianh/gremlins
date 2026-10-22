@@ -844,6 +844,46 @@ pub struct RunsView {
     stream_lines: VecDeque<String>,
 }
 
+/// Truncate a string to at most `max_width` Unicode scalar values.
+fn truncate_str(s: &str, max_width: usize) -> String {
+    s.chars().take(max_width).collect()
+}
+
+/// Render a token count as a thousands-separated integer, or `-` when absent.
+fn format_token_count(value: Option<u64>) -> String {
+    match value {
+        Some(n) => {
+            let digits = n.to_string();
+            let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+            for (i, ch) in digits.chars().enumerate() {
+                if i > 0 && (digits.len() - i) % 3 == 0 {
+                    out.push(',');
+                }
+                out.push(ch);
+            }
+            out
+        }
+        None => "-".to_string(),
+    }
+}
+
+/// Render the cache-hit rate as an integer percentage of prompt tokens,
+/// or `-` when either side is missing or the prompt count is zero.
+fn format_cache_pct(prompt: Option<u64>, cached: Option<u64>) -> String {
+    match (prompt, cached) {
+        (Some(p), Some(c)) if p > 0 => format!("{:.0}%", (c as f64 / p as f64) * 100.0),
+        _ => "-".to_string(),
+    }
+}
+
+/// Render a USD cost with four decimal places, or `-` when absent.
+fn format_cost_usd(cost: Option<f64>) -> String {
+    match cost {
+        Some(c) => format!("${c:.4}"),
+        None => "-".to_string(),
+    }
+}
+
 impl RunsView {
     pub fn new() -> Self {
         Self {
@@ -877,24 +917,6 @@ impl RunsView {
     }
 
     fn run_row(id: &str, run: &crate::tui::app::ActiveRun, selected: bool) -> Line<'static> {
-        let glyph = match run.status.as_str() {
-            "running" => motif::glyph::RUNNING,
-            "done" => motif::glyph::DONE,
-            "failed" => motif::glyph::FAILED,
-            "stopped" => motif::glyph::STOPPED,
-            _ => motif::glyph::DONE,
-        };
-        let text = if selected {
-            format!(
-                "▶ {id}  {glyph} {}  {}  {}",
-                run.status, run.stage, run.definition
-            )
-        } else {
-            format!(
-                "  {id}  {glyph} {}  {}  {}",
-                run.status, run.stage, run.definition
-            )
-        };
         let style = if selected {
             Style::default()
                 .fg(DEFAULT_THEME.midnight)
@@ -903,6 +925,30 @@ impl RunsView {
         } else {
             Style::default().fg(DEFAULT_THEME.text)
         };
+
+        let glyph = match run.status.as_str() {
+            "running" => motif::glyph::RUNNING,
+            "done" => motif::glyph::DONE,
+            "failed" => motif::glyph::FAILED,
+            "stopped" => motif::glyph::STOPPED,
+            _ => motif::glyph::DONE,
+        };
+
+        let sel = if selected { "▶" } else { " " };
+        let id_str = truncate_str(id, 7); // 7 + 1 space = 8 cols
+        let status_str = truncate_str(&format!("{glyph} {}", run.status), 11);
+        let stage_str = truncate_str(&run.stage, 11);
+        let def_str = truncate_str(&run.definition, 15);
+        let tokens_in = format_token_count(run.prompt_tokens);
+        let tokens_out = format_token_count(run.completion_tokens);
+        let reasoning = format_token_count(run.reasoning_tokens);
+        let cache = format_cache_pct(run.prompt_tokens, run.cached_input_tokens);
+        let cost = format_cost_usd(run.cost_usd);
+
+        // Build as a single styled span with fixed-width columns.
+        let text = format!(
+            "{sel} {id_str:<7}  {status_str:<11}  {stage_str:<11}  {def_str:<15}  {tokens_in:>7}  {tokens_out:>7}  {reasoning:>7}  {cache:>5}  {cost:>9}",
+        );
         Line::from(Span::styled(text, style))
     }
 
@@ -2206,6 +2252,11 @@ mod tests {
                 stage: "build".to_string(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
+                prompt_tokens: None,
+                completion_tokens: None,
+                reasoning_tokens: None,
+                cached_input_tokens: None,
+                cost_usd: None,
             },
         );
 
@@ -2255,6 +2306,11 @@ mod tests {
                 stage: "build".to_string(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
+                prompt_tokens: None,
+                completion_tokens: None,
+                reasoning_tokens: None,
+                cached_input_tokens: None,
+                cost_usd: None,
             },
         );
 
@@ -2315,6 +2371,11 @@ mod tests {
                 stage: "build".to_string(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
+                prompt_tokens: None,
+                completion_tokens: None,
+                reasoning_tokens: None,
+                cached_input_tokens: None,
+                cost_usd: None,
             },
         );
 
@@ -2350,6 +2411,11 @@ mod tests {
                 stage: "build".to_string(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
+                prompt_tokens: None,
+                completion_tokens: None,
+                reasoning_tokens: None,
+                cached_input_tokens: None,
+                cost_usd: None,
             },
         );
 
@@ -2401,6 +2467,11 @@ mod tests {
                 stage: "done".to_string(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
+                prompt_tokens: None,
+                completion_tokens: None,
+                reasoning_tokens: None,
+                cached_input_tokens: None,
+                cost_usd: None,
             },
         );
 

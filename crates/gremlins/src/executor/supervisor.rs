@@ -1415,6 +1415,31 @@ async fn handle_resume(
 // ls
 // ---------------------------------------------------------------------------
 
+/// Build the optional token-usage / cost fields for an `ls` row from a state
+/// tree. Every field is *omitted* (key absent) when the underlying value is
+/// missing, rather than serialized as null or zero.
+fn extract_token_cost_fields(tree: &Map<String, Value>) -> serde_json::Map<String, Value> {
+    let mut fields = serde_json::Map::new();
+    if let Some(tu) = tree.get("token_usage").and_then(|v| v.as_object()) {
+        if let Some(v) = tu.get("prompt_tokens").and_then(|v| v.as_u64()) {
+            fields.insert("prompt_tokens".into(), v.into());
+        }
+        if let Some(v) = tu.get("completion_tokens").and_then(|v| v.as_u64()) {
+            fields.insert("completion_tokens".into(), v.into());
+        }
+        if let Some(v) = tu.get("reasoning_tokens").and_then(|v| v.as_u64()) {
+            fields.insert("reasoning_tokens".into(), v.into());
+        }
+        if let Some(v) = tu.get("cached_input_tokens").and_then(|v| v.as_u64()) {
+            fields.insert("cached_input_tokens".into(), v.into());
+        }
+    }
+    if let Some(v) = tree.get("total_cost_usd").and_then(|v| v.as_f64()) {
+        fields.insert("cost_usd".into(), v.into());
+    }
+    fields
+}
+
 async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
     let mut rows: Vec<Value> = Vec::new();
 
@@ -1444,14 +1469,18 @@ async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
                 .unwrap_or("")
                 .to_string();
 
-            rows.push(serde_json::json!({
+            let mut row = serde_json::json!({
                 "id": id,
                 "status": "running",
                 "stage": stage,
                 "started_at": started_at,
                 "project": project,
                 "launch": launch,
-            }));
+            });
+            if let Some(obj) = row.as_object_mut() {
+                obj.extend(extract_token_cost_fields(&tree));
+            }
+            rows.push(row);
         }
     }
 
@@ -1488,14 +1517,18 @@ async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
             status
         };
 
-        rows.push(serde_json::json!({
+        let mut row = serde_json::json!({
             "id": id,
             "status": display_status,
             "stage": stage,
             "started_at": started_at,
             "project": project,
             "launch": launch,
-        }));
+        });
+        if let Some(obj) = row.as_object_mut() {
+            obj.extend(extract_token_cost_fields(&raw));
+        }
+        rows.push(row);
     }
 
     rows.sort_by(|a, b| {

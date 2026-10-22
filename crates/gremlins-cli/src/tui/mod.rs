@@ -1954,6 +1954,21 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                                     .unwrap_or("")
                                                     .to_string(),
                                                 project,
+                                                prompt_tokens: entry
+                                                    .get("prompt_tokens")
+                                                    .and_then(|v| v.as_u64()),
+                                                completion_tokens: entry
+                                                    .get("completion_tokens")
+                                                    .and_then(|v| v.as_u64()),
+                                                reasoning_tokens: entry
+                                                    .get("reasoning_tokens")
+                                                    .and_then(|v| v.as_u64()),
+                                                cached_input_tokens: entry
+                                                    .get("cached_input_tokens")
+                                                    .and_then(|v| v.as_u64()),
+                                                cost_usd: entry
+                                                    .get("cost_usd")
+                                                    .and_then(|v| v.as_f64()),
                                             },
                                         );
                                     }
@@ -2440,16 +2455,65 @@ fn format_socket_response(op: &str, resp: &serde_json::Value) -> Vec<String> {
     }
 }
 
+fn format_token_count(v: Option<u64>) -> String {
+    match v {
+        Some(n) => {
+            let s = n.to_string();
+            let mut result = String::new();
+            for (i, c) in s.chars().rev().enumerate() {
+                if i > 0 && i % 3 == 0 {
+                    result.push(',');
+                }
+                result.push(c);
+            }
+            result.chars().rev().collect()
+        }
+        None => "-".to_string(),
+    }
+}
+
+fn format_cache_pct(prompt: Option<u64>, cached: Option<u64>) -> String {
+    match (prompt, cached) {
+        (Some(p), Some(c)) if p > 0 => format!("{:.0}%", (c as f64 / p as f64) * 100.0),
+        _ => "-".to_string(),
+    }
+}
+
+fn format_cost_usd(v: Option<f64>) -> String {
+    match v {
+        Some(c) => format!("${c:.4}"),
+        None => "-".to_string(),
+    }
+}
+
 fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
     let gremlins = match resp.get("gremlins").and_then(|v| v.as_array()) {
         Some(g) => g,
         None => return vec!["(no gremlins)".to_string()],
     };
 
-    let headers = ["ID", "STATUS", "STAGE", "DATE", "PROJECT", "LAUNCH"];
+    let headers = [
+        "ID",
+        "STATUS",
+        "STAGE",
+        "DATE",
+        "PROJECT",
+        "LAUNCH",
+        "TOKENS IN",
+        "TOKENS OUT",
+        "REASONING",
+        "CACHE",
+        "COST",
+    ];
     let mut rows: Vec<Vec<String>> = Vec::new();
 
     for entry in gremlins {
+        let prompt_tokens = entry.get("prompt_tokens").and_then(|v| v.as_u64());
+        let completion_tokens = entry.get("completion_tokens").and_then(|v| v.as_u64());
+        let reasoning_tokens = entry.get("reasoning_tokens").and_then(|v| v.as_u64());
+        let cached_input_tokens = entry.get("cached_input_tokens").and_then(|v| v.as_u64());
+        let cost_usd = entry.get("cost_usd").and_then(|v| v.as_f64());
+
         rows.push(vec![
             entry
                 .get("id")
@@ -2481,6 +2545,11 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
+            format_token_count(prompt_tokens),
+            format_token_count(completion_tokens),
+            format_token_count(reasoning_tokens),
+            format_cache_pct(prompt_tokens, cached_input_tokens),
+            format_cost_usd(cost_usd),
         ]);
     }
 
