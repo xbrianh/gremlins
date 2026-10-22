@@ -1144,7 +1144,8 @@ fn bash_result_tail(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::completion::message::{CallId, ToolFunction, ToolName};
+    use rig_core::completion::message::{CallId, Text, ToolFunction, ToolName};
+    use rig_core::message::ToolResult as ToolResultMsg;
 
     fn assemble_working(memory: String, window: &[Message]) -> Vec<Message> {
         let mut working = Vec::with_capacity(2 + window.len());
@@ -1769,6 +1770,31 @@ mod tests {
                 "Actions taken this turn:\n- Bash cargo check {batch}\n"
             )));
         }
+        // Append a Done turn with the merged text+tool_result user message
+        // pattern (mirroring the agent loop's Done completion path fix).
+        let done_call = tool_call(
+            "done_1",
+            "Done",
+            serde_json::json!({"summary": "completed the work"}),
+        );
+        history.push(assistant_with_tools(&[done_call]));
+        // Single user message with both text and tool_result.
+        history.push(Message::User {
+            content: vec![
+                UserContent::Text(Text {
+                    text: "Actions taken this turn:\n- Done completed the work\n".to_string(),
+                    additional_params: None,
+                }),
+                UserContent::ToolResult(ToolResultMsg {
+                    call: CallId::from_wire("done_1".to_string()),
+                    name: ToolName::new("Done".to_string()).unwrap(),
+                    content: vec![ToolResultContent::Text(Text {
+                        text: "Done accepted.".to_string(),
+                        additional_params: None,
+                    })],
+                }),
+            ],
+        });
 
         let working = compact_round(&history, 0, 4096, 0);
         for (index, message) in working.iter().enumerate() {
@@ -1797,6 +1823,29 @@ mod tests {
             !assistant_has_tool_call(&history[compacted.cut - 1]),
             "a cut must never split a tool-use from its results"
         );
+
+        // Verify that the Done tool_use is not orphaned: after compaction,
+        // every assistant message containing a Done tool_use must be
+        // immediately followed by a user message with a matching ToolResult.
+        for (index, message) in working.iter().enumerate() {
+            if assistant_has_done_call(message) {
+                assert!(
+                    index + 1 < working.len(),
+                    "Done tool_use at {index} has no following message"
+                );
+                assert!(
+                    tool_result_text(&working[index + 1]).is_some(),
+                    "Done tool_use at {index} is not followed by a tool_result"
+                );
+            }
+        }
+    }
+
+    fn assistant_has_done_call(message: &Message) -> bool {
+        matches!(message, Message::Assistant { content, .. }
+        if content.iter().any(|item| {
+            matches!(item, AssistantContent::ToolCall(tc) if tc.function.name == "Done")
+        }))
     }
 
     #[test]
