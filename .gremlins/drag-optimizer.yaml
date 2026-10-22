@@ -1,0 +1,225 @@
+# Drag score optimizer — iterative refactoring loop driven by gremlins-drag.
+#
+# Usage:
+#   gremlins launch drag-optimizer --target crates/gremlins/src/lib.rs
+#   gremlins launch drag-optimizer --target src/ --drag-model openai/gpt-4o
+#   gremlins launch drag-optimizer --target my_pkg/ --instructions "focus on cyclomatic complexity"
+#
+# Parameters (launch-time):
+#   target         (required)  module file or package directory to refactor
+#   drag-model     (optional)  model for comprehensibility scoring (gremlins-drag --model)
+#   instructions   (optional)  extra guidance injected into the per-iteration refactoring prompt
+#   base_ref       (optional)  git ref to check out for the isolated worktree (default: HEAD)
+#
+# NOTE: the bootstrap source is named `drag-model` (not `model`) because `model`
+# collides with gremlins' own global --model flag.  Pass `--drag-model provider/model`
+# to forward a model spec to gremlins-drag.
+#
+# How it works:
+#   1. Baseline — run gremlins-drag once to capture the starting score.
+#   2. Loop (max 5 iterations):
+#      a. Refactor — an agent stage inspects the baseline drag report and
+#         edits the target to reduce drag.
+#      b. Commit — git add + commit in the isolated worktree.
+#      c. Score + converge — run gremlins-drag on the refactored code.  If
+#         the max ln_drag did not improve, write a convergence marker
+#         (stopping the loop early).  Otherwise update the tracking best.
+#   3. Land — merge the worktree back into the main branch (manual via
+#      `gremlins land`).
+
+bootstrap:
+  source:
+    target:
+      type: string
+    drag-model:
+      type: string
+      optional: true
+    instructions:
+      type: string
+      optional: true
+    base_ref:
+      type: string
+      optional: true
+  launch_cmds:
+    - 'printf "%s" {target} > "$GREMLINS_STATE_DIR/artifacts/target.txt"'
+    - 'printf "%s" {drag-model} > "$GREMLINS_STATE_DIR/artifacts/drag_model.txt"'
+    - 'printf "%s" {instructions} > "$GREMLINS_STATE_DIR/artifacts/instructions.txt"'
+    - 'BASE_REF={base_ref} && SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "${BASE_REF:-HEAD}") && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && printf "%s" "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"'
+  cli_out:
+    target: "artifact://target.txt"
+    drag_model: "artifact://drag_model.txt"
+    instructions: "artifact://instructions.txt"
+    base_sha: "artifact://base_sha"
+  env: |
+    export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'
+    THE_ENV="${GREMLINS_PROJECT_ROOT}/.gremlins/env"
+    if [ -f "$THE_ENV" ]; then
+        source "$THE_ENV"
+    fi
+    export PATH="${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}"
+
+stages:
+  # ── baseline ──────────────────────────────────────────────────────────
+  - name: baseline
+    type: exec
+    interpolation:
+      inputs:
+        target: content("artifact://target.txt")
+        drag_model: content("artifact://drag_model.txt")
+      outputs:
+        report: "artifact://baseline/report.json"
+    options:
+      cmds:
+        - |
+          MODEL_ARG=""
+          [ -n "{drag_model}" ] && MODEL_ARG="--model {drag_model}"
+        - gremlins-drag --json {target} $MODEL_ARG > {report}
+        - |
+          cat {report} | python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(m["ln_drag"] for m in data["modules"]))' > .gremlins_drag_best
+        - 'echo "baseline sum ln_drag = $(cat .gremlins_drag_best)"'
+
+  # ── optimize loop ─────────────────────────────────────────────────────
+  - name: optimize
+    type: sequence
+    max-iterations: 5
+    skip_if_exists: "artifact://{loop_iter}/converged"
+    body:
+      # --- refactor ---
+      - name: refactor
+        type: agent
+        interpolation:
+          inputs:
+            target: content("artifact://target.txt")
+            baseline_report: content("artifact://baseline/report.json")
+            instructions: content("artifact://instructions.txt")
+          outputs:
+            summary: "artifact://{loop_iter}/summary.md"
+        prompt:
+          - |
+            Refactor the target at {target} to reduce its drag score.
+
+            ## Initial (baseline) drag analysis (JSON)
+            ```json
+            {baseline_report}
+            ```
+
+            ## What drag means
+            ln_drag = w1*ln(token_count) + w2*ln(graph_complexity) − w3*ln(comprehensibility + ε)
+
+            Higher drag = the module is harder to maintain and change. The optimizer
+            minimizes the **sum** of ln_drag across all scored modules — not any
+            single module in isolation. This means splitting a large module into
+            several smaller ones can still be a win if the total drag decreases.
+            1. **Reduce token_count** — extract helpers, deduplicate, trim boilerplate.
+            2. **Lower graph_complexity** — split large modules, flatten deep nesting,
+               decouple cross-cutting concerns.
+            3. **Improve comprehensibility** — clearer names, simpler control flow,
+               better documentation where it aids understanding.
+
+            ## Rules
+            - Do NOT break correctness. After changes, verify the code still
+              compiles / runs / imports cleanly (use whatever toolchain is available:
+              `cargo check`, `python3 -m py_compile`, etc.).
+            - Run tests if a test runner is available.
+            - If no safe refactoring can reduce drag, say so clearly and explain why.
+            - **Tests and drag:** `gremlins-drag` reads entire source files — it does
+              NOT strip `#[cfg(test)]` modules or `tests/` directories. Every `.rs`
+              file found under the target directory contributes tokens, fan-in/out,
+              and comprehensibility. Moving tests out of a Rust module (e.g. from a
+              `#[cfg(test)] mod tests` block into `tests/foo_test.rs`) does NOT
+              reduce drag — it just redistributes it to another scored module.
+              Removing or weakening tests that provide real coverage constitutes
+              breaking correctness and is not allowed.
+            - Write a concise summary of what you changed (or why you couldn't) to
+              `{summary}`.
+
+            ## Additional guidance
+            {instructions}
+        options:
+          idle_timeout: 600
+
+      - name: cleanup-build-artifacts
+        type: exec
+        options:
+          cmds:
+            - cargo clean 2>/dev/null || true
+            - find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+            - find . -type f -name '*.pyc' -delete 2>/dev/null || true
+
+      - name: commit
+        type: exec
+        options:
+          cmds:
+            - git add -A
+            - |
+              git diff --cached --quiet || git commit -m 'refactor: reduce drag (iter {loop_iter})'
+
+      - name: require-progress
+        type: exec
+        interpolation:
+          inputs:
+            base_sha: content("artifact://base_sha")
+        options:
+          cmds:
+            - git merge-base --is-ancestor "{base_sha}" HEAD
+            - test `git rev-list --count "{base_sha}..HEAD"` -gt 0
+
+      # --- score + convergence (after refactor, so the comparison is fair) ---
+      - name: score-converge
+        type: exec
+        interpolation:
+          inputs:
+            target: content("artifact://target.txt")
+            drag_model: content("artifact://drag_model.txt")
+          outputs:
+            report: "artifact://{loop_iter}/report.json"
+            converged?: "artifact://{loop_iter}/converged"
+        options:
+          cmds:
+            - |
+              MODEL_ARG=""
+              [ -n "{drag_model}" ] && MODEL_ARG="--model {drag_model}"
+            - gremlins-drag --json {target} $MODEL_ARG > {report}
+            - |
+              BEST=$(cat .gremlins_drag_best 2>/dev/null || echo 0)
+              CURR=$(cat {report} | python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(m["ln_drag"] for m in data["modules"]))')
+              if awk "BEGIN{exit !($CURR >= $BEST)}"; then
+                touch {converged}
+                echo "converged — drag $CURR >= best $BEST"
+              else
+                printf "%s" "$CURR" > .gremlins_drag_best
+                echo "improved — drag $CURR < $BEST (was $BEST)"
+              fi
+
+  # ── commit message ────────────────────────────────────────────────────
+  - name: commit-message
+    type: exec
+    interpolation:
+      inputs:
+        target: content("artifact://target.txt")
+        baseline_report: "artifact://baseline/report.json"
+      outputs:
+        commit_message: "artifact://commit_message.txt"
+    options:
+      cmds:
+        - |
+          BEST=$(cat .gremlins_drag_best 2>/dev/null || echo "N/A")
+          BASE_SUM=$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(round(sum(m["ln_drag"] for m in data["modules"]), 2))' < {baseline_report})
+          {
+            echo "drag-optimizer: reduce drag for {target}"
+            echo ""
+            echo "Baseline ln_drag sum: $BASE_SUM \u2192 Best: $BEST"
+            echo "Target: {target}"
+          } > {commit_message}
+
+land:
+  interpolation:
+    inputs:
+      message: artifact://commit_message.txt
+  land_cmds:
+    - WORKTREE_HEAD=$(git -C "$GREMLIN_WORKDIR" rev-parse HEAD)
+    - git merge --squash "$WORKTREE_HEAD"
+    - 'git diff --cached --quiet || git commit -F "{message}"'
+  clean_cmds:
+    - git worktree remove --force "$GREMLIN_WORKDIR" || true
+    - git worktree prune
