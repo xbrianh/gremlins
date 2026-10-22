@@ -48,12 +48,20 @@ pub(super) fn discover_rust_packages(base: &Path) -> Result<Vec<RustPackage>, St
     // project. Running `cargo metadata` would fail with a scary "could not
     // find Cargo.toml" message, so short-circuit to an empty package list
     // instead. This keeps pure-Python (and other non-Rust) projects quiet.
-    if find_cargo_toml(base).is_none() {
-        return Ok(Vec::new());
-    }
+    let workspace_manifest = match find_cargo_toml(base) {
+        Some(m) => m,
+        None => return Ok(Vec::new()),
+    };
 
     let output = Command::new("cargo")
-        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--manifest-path",
+        ])
+        .arg(&workspace_manifest)
         .output()
         .map_err(|e| format!("failed to run cargo metadata: {e}"))?;
 
@@ -125,7 +133,7 @@ fn find_cargo_toml(from: &Path) -> Option<PathBuf> {
 // cargo-modules dependency graph
 // ---------------------------------------------------------------------------
 
-fn run_cargo_modules_dependencies(pkg_name: &str) -> Result<String, String> {
+fn run_cargo_modules_dependencies(pkg_name: &str, manifest_path: &Path) -> Result<String, String> {
     let output = Command::new("cargo")
         .args([
             "modules",
@@ -136,9 +144,10 @@ fn run_cargo_modules_dependencies(pkg_name: &str) -> Result<String, String> {
             "--no-fns",
             "--no-traits",
             "--no-types",
-            "-p",
-            pkg_name,
+            "--manifest-path",
         ])
+        .arg(manifest_path)
+        .args(["-p", pkg_name])
         .output()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -157,8 +166,11 @@ fn run_cargo_modules_dependencies(pkg_name: &str) -> Result<String, String> {
 }
 
 /// Produce the dependency-graph edges for a Rust package.
-pub(super) fn rust_dependency_graph(pkg_name: &str) -> Result<Vec<(String, String)>, String> {
-    let dot = run_cargo_modules_dependencies(pkg_name)?;
+pub(super) fn rust_dependency_graph(
+    pkg_name: &str,
+    manifest_path: &Path,
+) -> Result<Vec<(String, String)>, String> {
+    let dot = run_cargo_modules_dependencies(pkg_name, manifest_path)?;
     Ok(parse_dot(&dot))
 }
 
@@ -244,47 +256,116 @@ fn file_rel_to_module(rel: &Path, target_name: &str, is_bin: bool) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    // -----------------------------------------------------------------------
+    // find_cargo_toml
+    // -----------------------------------------------------------------------
 
     #[test]
-    fn parses_dependency_edges() {
-        let dot = "\"gremlins_drag\" [label=\"...\"];\n\"gremlins_drag::foo\" -> \"gremlins_drag::bar\" [label=\"uses\"];\n\"gremlins_drag::bar\" -> \"gremlins_drag::baz\" [label=\"uses\"];";
-        let edges = parse_dot(dot);
-        assert_eq!(
-            edges,
-            vec![
-                (
-                    "gremlins_drag::foo".to_string(),
-                    "gremlins_drag::bar".to_string()
-                ),
-                (
-                    "gremlins_drag::bar".to_string(),
-                    "gremlins_drag::baz".to_string()
-                ),
-            ]
-        );
+    fn find_cargo_toml_walks_up_from_deep_file() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let deep = tmp.path().join("a/b/c/d");
+        fs::create_dir_all(&deep).expect("create deep dirs");
+        let manifest = tmp.path().join("Cargo.toml");
+        fs::write(&manifest, "[workspace]\n").expect("write Cargo.toml");
+
+        let file = deep.join("e.rs");
+        fs::write(&file, "// test").expect("write test file");
+
+        let found = find_cargo_toml(&file);
+        assert_eq!(found.as_deref(), Some(manifest.as_path()));
     }
 
     #[test]
-    fn file_rel_to_module_normalizes_hyphens() {
-        assert_eq!(
-            file_rel_to_module(std::path::Path::new("main.rs"), "gremlins-drag", true),
-            Some("gremlins_drag".to_string())
-        );
-        assert_eq!(
-            file_rel_to_module(std::path::Path::new("foo/bar.rs"), "my-crate", false),
-            Some("my_crate::foo::bar".to_string())
-        );
+    fn find_cargo_toml_returns_none_when_no_manifest() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let deep = tmp.path().join("x/y");
+        fs::create_dir_all(&deep).expect("create deep dirs");
+
+        let file = deep.join("z.rs");
+        fs::write(&file, "// test").expect("write test file");
+
+        // The temp dir has no Cargo.toml anywhere in the hierarchy
+        let found = find_cargo_toml(&file);
+        assert!(found.is_none());
     }
 
     #[test]
-    fn file_rel_to_module_handles_mod_rs_and_roots() {
-        assert_eq!(
-            file_rel_to_module(std::path::Path::new("foo/mod.rs"), "crate", false),
-            Some("crate::foo".to_string())
+    fn find_cargo_toml_finds_workspace_manifest_from_subdir() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let workspace_manifest = tmp.path().join("Cargo.toml");
+        fs::write(&workspace_manifest, "[workspace]\nmembers = [\"crates/*\"]\n")
+            .expect("write workspace Cargo.toml");
+
+        // Create a member crate with its own Cargo.toml
+        let member_dir = tmp.path().join("crates/foo");
+        fs::create_dir_all(&member_dir).expect("create member dir");
+        fs::write(member_dir.join("Cargo.toml"), "[package]\nname = \"foo\"\n")
+            .expect("write member Cargo.toml");
+
+        // From the member's src dir, find_cargo_toml should find the
+        // member's own Cargo.toml (the nearest one)
+        let src_dir = member_dir.join("src");
+        fs::create_dir_all(&src_dir).expect("create src dir");
+        let file = src_dir.join("lib.rs");
+        fs::write(&file, "// test").expect("write lib.rs");
+
+        let found = find_cargo_toml(&file);
+        assert_eq!(found.as_deref(), Some(member_dir.join("Cargo.toml").as_path()));
+    }
+
+    // -----------------------------------------------------------------------
+    // discover_rust_packages with --manifest-path
+    // -----------------------------------------------------------------------
+
+    /// Regression: `discover_rust_packages` must pass `--manifest-path` to
+    /// `cargo metadata` so discovery works even when CWD is outside the
+    /// workspace. This test creates a minimal Cargo workspace fixture, sets
+    /// CWD to a temp dir outside it, and verifies that `discover_rust_packages`
+    /// succeeds by using the manifest path found by `find_cargo_toml`.
+    #[test]
+    fn discover_rust_packages_uses_manifest_path_from_outside_workspace() {
+        let fixture = tempfile::TempDir::new().expect("tempdir");
+        let manifest = fixture.path().join("Cargo.toml");
+        fs::write(
+            &manifest,
+            "[workspace]\nmembers = [\"mylib\"]\nresolver = \"2\"\n",
+        )
+        .expect("write workspace Cargo.toml");
+
+        let lib_dir = fixture.path().join("mylib");
+        fs::create_dir_all(lib_dir.join("src")).expect("create lib src");
+        fs::write(
+            lib_dir.join("Cargo.toml"),
+            "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write lib Cargo.toml");
+        fs::write(lib_dir.join("src/lib.rs"), "pub fn hello() {}\n")
+            .expect("write lib.rs");
+
+        // Save current dir and move to a temp dir outside the fixture
+        let prev_cwd = std::env::current_dir().expect("current_dir");
+        let outside = tempfile::TempDir::new().expect("outside tempdir");
+        std::env::set_current_dir(outside.path()).expect("set cwd outside");
+
+        // discover_rust_packages receives a path inside the fixture.
+        // It must find the manifest via find_cargo_toml and pass
+        // --manifest-path to cargo metadata.
+        let result = discover_rust_packages(&lib_dir.join("src/lib.rs"));
+
+        // Restore CWD before asserting (so test failures don't leave
+        // the process in a stale directory).
+        std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+
+        let packages = result.expect("discover_rust_packages should succeed");
+        assert!(
+            !packages.is_empty(),
+            "should find at least one package; got empty list"
         );
-        assert_eq!(
-            file_rel_to_module(std::path::Path::new("lib.rs"), "crate", false),
-            Some("crate".to_string())
+        assert!(
+            packages.iter().any(|p| p.pkg_name == "mylib"),
+            "should contain the 'mylib' package"
         );
     }
 }

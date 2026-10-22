@@ -126,7 +126,10 @@ pub fn file_to_module(file: &Path, packages: &[PackageInfo]) -> Option<(String, 
 /// Produce the language-specific dependency-graph edges for the given package.
 pub fn dependency_graph(pkg: &PackageInfo) -> Result<Vec<(String, String)>, String> {
     match pkg {
-        PackageInfo::Rust(r) => rust::rust_dependency_graph(&r.pkg_name),
+        PackageInfo::Rust(r) => {
+            let manifest_path = r.dir.join("Cargo.toml");
+            rust::rust_dependency_graph(&r.pkg_name, &manifest_path)
+        }
         PackageInfo::Python(p) => python::python_dependency_graph(&p.root_dir, &p.dir),
     }
 }
