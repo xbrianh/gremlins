@@ -6,11 +6,10 @@ use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use rig_core::completion::message::{
-    AssistantContent, CallId, Reasoning, Sealed, ToolCall, ToolName, ToolResultContent, UserContent,
+    AssistantContent, CallId, Reasoning, Sealed, ToolCall, ToolName, UserContent,
 };
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
 use rig_core::error::ProviderError;
-use rig_core::message::ToolResult as ToolResultMsg;
 use rig_core::streaming::{Item, StreamEvent};
 use tokio::sync::{mpsc, Notify};
 
@@ -1482,15 +1481,21 @@ async fn run_agent_loop_core(
                             &reasoning_items,
                             std::slice::from_ref(done_tc),
                         ));
-                        history.push(Message::tool_result(
-                            done_tc.id.clone(),
-                            done_tc.function.name.clone(),
-                            reminder.clone(),
-                        ));
-                        next_prompt = Message::user(format!(
+                        // Build a single merged user message with both the
+                        // rejection ledger and the Done tool_result so the
+                        // persisted history never produces consecutive User
+                        // messages. Don't push to history here — the
+                        // acceptance path will append next_prompt once.
+                        let rejected_ledger = format!(
                             "Actions taken this turn:\n- Done {} (rejected)\n\n{}",
                             done_summary, reminder
-                        ));
+                        );
+                        next_prompt = conversation::done_user_message(
+                            &rejected_ledger,
+                            done_tc.id.clone(),
+                            done_tc.function.name.clone(),
+                            &reminder,
+                        );
                         continue;
                     }
                     // Budget exhausted (or no missing artifacts) — accept
@@ -1567,24 +1572,12 @@ async fn run_agent_loop_core(
                 // block; merging the ledger text and the Done tool_result into
                 // one message satisfies that invariant.
                 let done_ledger = format!("Actions taken this turn:\n- Done {}\n", done_summary);
-                messages.push(Message::User {
-                    content: vec![
-                        UserContent::Text(rig_core::completion::message::Text {
-                            text: done_ledger,
-                            additional_params: None,
-                        }),
-                        UserContent::ToolResult(ToolResultMsg {
-                            call: done_tc.id.clone(),
-                            name: done_tc.function.name.clone(),
-                            content: vec![ToolResultContent::Text(
-                                rig_core::completion::message::Text {
-                                    text: "Done accepted.".to_string(),
-                                    additional_params: None,
-                                },
-                            )],
-                        }),
-                    ],
-                });
+                messages.push(conversation::done_user_message(
+                    &done_ledger,
+                    done_tc.id.clone(),
+                    done_tc.function.name.clone(),
+                    "Done accepted.",
+                ));
                 return Ok(completed_run(
                     Some(result_text),
                     Some(done_summary),
@@ -6834,10 +6827,9 @@ mod tests {
         );
     }
 
-    /// When the artifact-reminder budget is exhausted, Done is accepted
-    /// anyway. The persisted history from this path must also avoid
-    /// consecutive User messages and must not duplicate the user prompt /
-    /// assistant message pair.
+    /// When the artifact-reminder budget is exhausted (zero), Done is
+    /// accepted immediately even with missing artifacts. The persisted
+    /// history must also avoid consecutive User messages.
     #[tokio::test]
     async fn loop_done_artifact_reminder_exhausted_no_consecutive_user_messages() {
         let dir = std::env::temp_dir().join(format!(
@@ -6851,28 +6843,22 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("never-written.md");
 
-        // Turn 1: text-only → reminder injected.
-        // Turn 2: Done call with reminder budget 0 → accepted anyway.
-        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
-            vec![
-                rig_core::test_utils::MockStreamEvent::text("first try"),
-                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-            ],
-            vec![
-                rig_core::test_utils::MockStreamEvent::text("still no write"),
-                rig_core::test_utils::MockStreamEvent::tool_call(
-                    "done1",
-                    "Done",
-                    serde_json::json!({"summary": "done without artifact"}),
-                ),
-                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-            ],
-        ]);
+        // Single Done turn with reminder budget 0 — accepted immediately
+        // via the exhausted-acceptance path.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
+            rig_core::test_utils::MockStreamEvent::text("still no write"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "done without artifact"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
         let mut ctx = test_ctx(Some(dir.clone()), None);
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         ctx.expected_artifact_paths = vec![target.clone()];
-        ctx.reminder_budget = 1; // first Done gets reminder, second (retry) exhausts
+        ctx.reminder_budget = 0; // exhausted — Done accepted with missing artifacts
         ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
         let result = run_agent_loop(
