@@ -153,7 +153,7 @@ stages:
             {drag_context}
 
             ## What drag means
-            ln_drag = w1*ln(token_count) + w2*ln(graph_complexity) − w3*ln(comprehensibility + ε)
+            ln_drag = w1*ln(token_count) + w2*ln(graph_complexity) − w4*ln(1 + consumers) − w3*ln(comprehensibility + ε)
 
             Higher drag = the module is harder to maintain and change. The optimizer
             minimizes the **sum** of ln_drag across all scored modules — not any
@@ -168,23 +168,28 @@ stages:
                remove dead code. This is the largest absolute contributor.
             2. **Lower graph_complexity** — flatten deep nesting, decouple cross-cutting
                concerns, reduce fan-in/fan-out.
-            3. **Improve comprehensibility** — clearer names, simpler control flow,
+            3. **Increase consumers** — modules depended on by many others are carrying
+               their weight. Inlining a module with few consumers into its sole
+               consumer removes a low-value boundary and reduces total drag.
+            4. **Improve comprehensibility** — clearer names, simpler control flow,
                better documentation where it aids understanding. Highest leverage
-               per unit of change with w3=2.0.
+               per unit of change with w3=3.0.
 
             ### Splitting trap (CRITICAL)
-            Splitting one module into two INCREASES total drag unless complexity or
-            comprehensibility improves enough to compensate:
+            Splitting one module into two INCREASES total drag unless the new
+            modules gain significant consumers or comprehensibility improves
+            enough to compensate:
 
-            One module (2000 tokens, complexity 50, comp 0.5):
-              ln_drag = 7.60 + 7.82 + 2.02 = 17.44
+            One module (2000 tokens, complexity 50, 3 consumers, comp 0.5):
+              ln_drag = 7.60 + 7.82 − 2.77 + 2.02 = 14.67
 
-            Two modules (1000 tokens each, same complexity and comp):
-              ln_drag = (6.91 + 7.82 + 2.02) + (6.91 + 7.82 + 2.02) = 33.50
+            Two modules (1000 tokens each, same complexity, 0 consumers, same comp):
+              ln_drag = (6.91 + 7.82 − 0.00 + 2.02) + (6.91 + 7.82 − 0.00 + 2.02) = 33.50
 
-            → Splitting nearly DOUBLED drag! Only split if the resulting modules are
-              significantly simpler (lower complexity) or more comprehensible.
-              Prefer inlining, deduplication, and dead-code removal over splitting.
+            → Splitting more than DOUBLED drag! Only split if the resulting modules
+              gain consumers or are significantly simpler (lower complexity) or
+              more comprehensible. Prefer inlining, deduplication, and dead-code
+              removal over splitting.
 
             ## Rules
             - Do NOT break correctness. After changes, verify the code still

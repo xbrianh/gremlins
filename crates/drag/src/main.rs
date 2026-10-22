@@ -47,6 +47,11 @@ struct Cli {
     #[arg(long, default_value_t = 3.0)]
     w3: f64,
 
+    /// Weight for the consumer discount (subtracted). More consumers =
+    /// the module boundary is pulling its weight, so drag is reduced.
+    #[arg(long, default_value_t = 2.0)]
+    w4: f64,
+
     /// Added to comprehensibility before taking ln() to avoid ln(0).
     #[arg(long, default_value_t = 0.01)]
     epsilon: f64,
@@ -89,6 +94,7 @@ struct DragConfig {
     w1: f64,
     w2: f64,
     w3: f64,
+    w4: f64,
     epsilon: f64,
 }
 
@@ -104,7 +110,7 @@ struct ModuleDrag {
     /// `exp(ln_drag)`. A monotonic transform of `ln_drag`; it adds no
     /// additional ranking information.
     drag: f64,
-    /// The drag metric: `w1*ln(tokens) + w2*ln(complexity) - w3*ln(comp)`.
+    /// The drag metric: `w1*ln(tokens) + w2*ln(complexity) - w4*ln(1+consumers) - w3*ln(comp)`.
     ln_drag: f64,
 }
 
@@ -124,7 +130,7 @@ async fn run() -> Result<(), String> {
     let cli = Cli::parse();
 
     if cli.curves {
-        print_curves(cli.w1, cli.w2, cli.w3, cli.epsilon);
+        print_curves(cli.w1, cli.w2, cli.w3, cli.w4, cli.epsilon);
         return Ok(());
     }
 
@@ -290,9 +296,11 @@ async fn run() -> Result<(), String> {
             cli.w1,
             cli.w2,
             cli.w3,
+            cli.w4,
             cli.epsilon,
             s.token_count,
             s.graph_complexity,
+            s.fan_in,
             s.comprehensibility,
         );
         s.drag = s.ln_drag.exp();
@@ -312,6 +320,7 @@ async fn run() -> Result<(), String> {
                 w1: cli.w1,
                 w2: cli.w2,
                 w3: cli.w3,
+                w4: cli.w4,
                 epsilon: cli.epsilon,
             },
             modules: scores,
@@ -436,12 +445,16 @@ fn compute_ln_drag(
     w1: f64,
     w2: f64,
     w3: f64,
+    w4: f64,
     epsilon: f64,
     token_count: usize,
     graph_complexity: usize,
+    consumers: usize,
     comprehensibility: Option<f64>,
 ) -> f64 {
-    let ln = w1 * (token_count.max(1) as f64).ln() + w2 * (graph_complexity.max(1) as f64).ln();
+    let ln = w1 * (token_count.max(1) as f64).ln()
+        + w2 * (graph_complexity.max(1) as f64).ln()
+        - w4 * ((consumers + 1).max(1) as f64).ln();
     match comprehensibility {
         Some(c) => ln - w3 * (c + epsilon).ln(),
         None => ln,
@@ -1171,12 +1184,13 @@ fn remove_trailing_commas(json: &str) -> String {
 // Drag curves
 // ---------------------------------------------------------------------------
 
-fn print_curves(w1: f64, w2: f64, w3: f64, epsilon: f64) {
+fn print_curves(w1: f64, w2: f64, w3: f64, w4: f64, epsilon: f64) {
     let contrib_tokens = |n: usize| -> f64 { w1 * (n.max(1) as f64).ln() };
     let contrib_complexity = |c: usize| -> f64 { w2 * (c.max(1) as f64).ln() };
     let contrib_comp = |c: f64| -> f64 { -w3 * (c + epsilon).ln() };
+    let contrib_consumers = |n: usize| -> f64 { -w4 * ((n + 1).max(1) as f64).ln() };
 
-    println!("Drag curves (w1={w1}, w2={w2}, w3={w3}, ε={epsilon}):\n");
+    println!("Drag curves (w1={w1}, w2={w2}, w3={w3}, w4={w4}, ε={epsilon}):\n");
 
     println!("  Token count (w1={w1}):");
     for tokens in [100, 250, 500, 1000, 2000, 5000] {
@@ -1188,13 +1202,18 @@ fn print_curves(w1: f64, w2: f64, w3: f64, epsilon: f64) {
         println!("    {c:>3}  → {:>7.2}", contrib_complexity(c));
     }
 
+    println!("\n  Consumers discount (w4={w4}, fan-in):");
+    for n in [0, 1, 2, 3, 5, 10] {
+        println!("    {n:>2} consumers  → {:>7.2}", contrib_consumers(n));
+    }
+
     println!("\n  Comprehensibility (w3={w3}, ε={epsilon}):");
     for comp in [0.10, 0.25, 0.50, 0.75, 0.90] {
         println!("    {comp:.2}  → {:>7.2}", contrib_comp(comp));
     }
 
     println!("\n  Higher positive values = more drag.");
-    println!("  Negative comprehensibility contribution reduces drag.");
+    println!("  Negative values (consumers, comprehensibility) reduce drag.");
 }
 
 // ---------------------------------------------------------------------------
@@ -1322,8 +1341,8 @@ mod tests {
 
     #[test]
     fn ln_drag_omits_comprehensibility_term_when_unscored() {
-        let no_comp = compute_ln_drag(1.0, 0.4, 0.4, 0.01, 100, 2, None);
-        let with_comp = compute_ln_drag(1.0, 0.4, 0.4, 0.01, 100, 2, Some(1.0));
+        let no_comp = compute_ln_drag(1.0, 0.4, 0.4, 2.0, 0.01, 100, 2, 0, None);
+        let with_comp = compute_ln_drag(1.0, 0.4, 0.4, 2.0, 0.01, 100, 2, 0, Some(1.0));
         assert!((no_comp - with_comp - 0.4 * 1.01f64.ln()).abs() < 1e-12);
     }
 
