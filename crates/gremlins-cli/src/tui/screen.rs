@@ -915,6 +915,8 @@ struct ColumnWidths {
     tokens_out: usize,
     reasoning: usize,
     cache: usize,
+    tokens_new: usize,
+    turns: usize,
     cost: usize,
 }
 
@@ -929,6 +931,8 @@ impl ColumnWidths {
             tokens_out: 10, // "TOKENS OUT" header
             reasoning: 9,   // "REASONING" header
             cache: 5,       // "CACHE" header
+            tokens_new: 3,  // "NEW" header
+            turns: 5,       // "TURNS" header
             cost: 4,        // "COST" header
         };
         for (id, run) in runs {
@@ -947,6 +951,11 @@ impl ColumnWidths {
             let to = format_token_count(run.completion_tokens);
             let tr = format_token_count(run.reasoning_tokens);
             let tc = format_cache_pct(run.prompt_tokens, run.cached_input_tokens);
+            let tn = format_token_count(run.cache_creation_input_tokens);
+            let tu = run
+                .turns
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "-".to_string());
             let cd = format_cost_usd(run.cost_usd);
 
             // For text columns we measure display width, not byte length.
@@ -964,6 +973,8 @@ impl ColumnWidths {
             w.tokens_out = w.tokens_out.max(to.len());
             w.reasoning = w.reasoning.max(tr.len());
             w.cache = w.cache.max(tc.len());
+            w.tokens_new = w.tokens_new.max(tn.len());
+            w.turns = w.turns.max(tu.len());
             w.cost = w.cost.max(cd.len());
         }
         w
@@ -974,10 +985,16 @@ impl ColumnWidths {
     /// (id, status, stage, definition) give up space proportionally.
     fn clamp(&mut self, max_width: usize) {
         // Fixed overhead per row: "▶ " (2) + "  " separator between each of
-        // the 9 columns (8 gaps × 2 spaces = 16).
-        const OVERHEAD: usize = 2 + 8 * 2;
-        let fixed =
-            OVERHEAD + self.tokens_in + self.tokens_out + self.reasoning + self.cache + self.cost;
+        // the 11 columns (10 gaps × 2 spaces = 20).
+        const OVERHEAD: usize = 2 + 10 * 2;
+        let fixed = OVERHEAD
+            + self.tokens_in
+            + self.tokens_out
+            + self.reasoning
+            + self.cache
+            + self.tokens_new
+            + self.turns
+            + self.cost;
         let text_budget = max_width.saturating_sub(fixed);
         let text_desired = self.id + self.status + self.stage + self.definition;
         if text_desired <= text_budget {
@@ -1213,6 +1230,11 @@ impl RunsView {
         let tokens_out = format_token_count(run.completion_tokens);
         let reasoning = format_token_count(run.reasoning_tokens);
         let cache = format_cache_pct(run.prompt_tokens, run.cached_input_tokens);
+        let tokens_new = format_token_count(run.cache_creation_input_tokens);
+        let turns = run
+            .turns
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "-".to_string());
         let cost = format_cost_usd(run.cost_usd);
 
         // Build with display-width padding so Unicode stage/definition
@@ -1234,6 +1256,10 @@ impl RunsView {
             pad_to_display_width(&reasoning, w.reasoning),
             "  ".to_string(),
             pad_to_display_width(&cache, w.cache),
+            "  ".to_string(),
+            pad_to_display_width(&tokens_new, w.tokens_new),
+            "  ".to_string(),
+            pad_to_display_width(&turns, w.turns),
             "  ".to_string(),
             cost,
         ];
@@ -1281,6 +1307,10 @@ impl RunsView {
                 pad_to_display_width("REASONING", widths.reasoning),
                 "  ".to_string(),
                 pad_to_display_width("CACHE", widths.cache),
+                "  ".to_string(),
+                pad_to_display_width("NEW", widths.tokens_new),
+                "  ".to_string(),
+                pad_to_display_width("TURNS", widths.turns),
                 "  ".to_string(),
                 "COST".to_string(),
             ];
@@ -1569,17 +1599,26 @@ impl RunsView {
                                     .add_modifier(Modifier::ITALIC),
                             ))
                         }
-                        Some("turn_complete") | Some("done") | Some("stream_reset") => {
+                        Some("turn_complete") => {
+                            let stats = obj.get("stats");
+                            let totals = obj.get("totals");
+                            let summary = crate::tui::usage_title_part(stats, totals);
                             Line::from(Span::styled(
-                                format!(
-                                    "── {}",
-                                    obj.get("kind").and_then(|v| v.as_str()).unwrap_or("")
-                                ),
+                                format!("── turn_complete · {summary}"),
                                 Style::default()
                                     .fg(DEFAULT_THEME.chrome)
                                     .add_modifier(Modifier::BOLD),
                             ))
                         }
+                        Some("done") | Some("stream_reset") => Line::from(Span::styled(
+                            format!(
+                                "── {}",
+                                obj.get("kind").and_then(|v| v.as_str()).unwrap_or("")
+                            ),
+                            Style::default()
+                                .fg(DEFAULT_THEME.chrome)
+                                .add_modifier(Modifier::BOLD),
+                        )),
                         Some("stage_boundary") => {
                             let stage = obj.get("stage").and_then(|v| v.as_str()).unwrap_or("");
                             let stage_type =
@@ -2694,6 +2733,8 @@ mod tests {
                 completion_tokens: None,
                 reasoning_tokens: None,
                 cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                turns: None,
                 cost_usd: None,
             },
         );
@@ -2748,6 +2789,8 @@ mod tests {
                 completion_tokens: None,
                 reasoning_tokens: None,
                 cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                turns: None,
                 cost_usd: None,
             },
         );
@@ -2813,6 +2856,8 @@ mod tests {
                 completion_tokens: None,
                 reasoning_tokens: None,
                 cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                turns: None,
                 cost_usd: None,
             },
         );
@@ -2853,6 +2898,8 @@ mod tests {
                 completion_tokens: None,
                 reasoning_tokens: None,
                 cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                turns: None,
                 cost_usd: None,
             },
         );
@@ -2909,6 +2956,8 @@ mod tests {
                 completion_tokens: None,
                 reasoning_tokens: None,
                 cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                turns: None,
                 cost_usd: None,
             },
         );

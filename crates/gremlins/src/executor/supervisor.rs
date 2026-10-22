@@ -1463,6 +1463,15 @@ fn extract_token_cost_fields(tree: &Map<String, Value>) -> serde_json::Map<Strin
         if let Some(v) = tu.get("cached_input_tokens").and_then(|v| v.as_u64()) {
             fields.insert("cached_input_tokens".into(), v.into());
         }
+        if let Some(v) = tu
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+        {
+            fields.insert("cache_creation_input_tokens".into(), v.into());
+        }
+        if let Some(v) = tu.get("turns").and_then(|v| v.as_u64()) {
+            fields.insert("turns".into(), v.into());
+        }
     }
     if let Some(v) = tree.get("total_cost_usd").and_then(|v| v.as_f64()) {
         fields.insert("cost_usd".into(), v.into());
@@ -3450,6 +3459,8 @@ struct StateView {
     kind: String,
     scratch_dir: PathBuf,
     bail_info: Value,
+    token_usage: Option<Value>,
+    total_cost_usd: Option<f64>,
 }
 
 impl StateView {
@@ -3483,6 +3494,8 @@ impl StateView {
                 .stage_error()
                 .map(Value::Object)
                 .unwrap_or(Value::Null),
+            token_usage: tree.get("token_usage").cloned(),
+            total_cost_usd: tree.get("total_cost_usd").and_then(|v| v.as_f64()),
         })
     }
 
@@ -3513,6 +3526,11 @@ impl StateView {
                 .stage_error()
                 .map(Value::Object)
                 .unwrap_or(Value::Null),
+            token_usage: gremlin.state.read_field("token_usage"),
+            total_cost_usd: gremlin
+                .state
+                .read_field("total_cost_usd")
+                .and_then(|v| v.as_f64()),
         }
     }
 
@@ -3534,6 +3552,8 @@ impl StateView {
             "model": self.model,
             "attempt": self.attempt,
             "kind": self.kind,
+            "token_usage": self.token_usage,
+            "total_cost_usd": self.total_cost_usd,
         });
         value.as_object().cloned().unwrap_or_default()
     }

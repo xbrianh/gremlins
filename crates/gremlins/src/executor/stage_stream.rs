@@ -901,10 +901,10 @@ pub(crate) fn interactive_event_to_stage_line(event: &InteractiveEvent) -> Optio
             turn,
             text,
             tool_calls,
-            stats: _,
-            totals: _,
+            stats,
+            totals,
         } => Some(
-            json!({"kind": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls})
+            json!({"kind": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls, "stats": stats, "totals": totals})
                 .to_string(),
         ),
         InteractiveEvent::Done {
