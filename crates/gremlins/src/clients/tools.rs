@@ -1336,7 +1336,8 @@ fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str
                 }
             }
         } else {
-            None
+            // Model omitted token_budget — fall back to config / env var.
+            crate::config::max_landscape_tool_tokens().map(|n| n as usize)
         };
 
     // Reject a symlink root so the directory walk does not follow it.
