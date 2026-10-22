@@ -3570,6 +3570,11 @@ async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i
             if let Some(tx) = &gremlin.runtime_config.log_tx {
                 let _ = tx.send(format!("error: {e}"));
             }
+            crate::executor::stage_stream::send_stage_boundary(
+                &gremlin.runtime_config.stage_stream_tx,
+                "",
+                "other",
+            );
             gremlin.state.write_terminal_state(1);
             1
         }

@@ -267,9 +267,11 @@ pub async fn run_shell(
                         "ts": ts,
                     })
                     .to_string();
-                    if bcast.send(line).is_err() {
-                        break;
-                    }
+                    // A broadcast send fails when there are no subscribers
+                    // (normal before Ctrl+O is opened). Keep draining the
+                    // process channel so later subscribers still receive
+                    // output; history replay covers the unwatched gap.
+                    let _ = bcast.send(line);
                 }
             });
             tx

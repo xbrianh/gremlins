@@ -193,13 +193,41 @@ async fn run_stage_scoped(
         ),
     );
 
-    match stage {
+    // Scoped (sequence/parallel child) stages are not announced by the
+    // top-level run loop. Publish their active leaf identity so a stage-stream
+    // follow can switch from the enclosing composite's operational log to the
+    // child's agent/exec output.
+    let scoped = !scope.is_empty();
+    if scoped {
+        send_stage_boundary(
+            &gremlin.runtime_config.stage_stream_tx,
+            stage.name(),
+            stage.stage_type(),
+        );
+    }
+
+    // Keep `state.stage` pointed at the active leaf so a Ctrl+O pane opened
+    // mid-child classifies and replays the child rather than its enclosing
+    // sequence (which is otherwise reported as `Other`).
+    if matches!(
+        stage,
+        ExecutorStage::Agent { .. } | ExecutorStage::Exec { .. }
+    ) {
+        gremlin.state.set_stage(stage.name(), None, "");
+    }
+
+    let result = match stage {
         ExecutorStage::Agent { .. } => run_agent(stage, gremlin, enc_model, enc_tm).await,
         ExecutorStage::Exec { .. } => run_exec(stage, gremlin, enc_model, enc_tm).await,
         ExecutorStage::Sequence(_) => run_sequence(stage, gremlin, scope, enc_model, enc_tm).await,
         ExecutorStage::Parallel { .. } => run_parallel(stage, gremlin, enc_model, enc_tm).await,
         ExecutorStage::Done => Ok(()),
+    };
+
+    if scoped {
+        send_stage_boundary(&gremlin.runtime_config.stage_stream_tx, "", "other");
     }
+    result
 }
 
 /// Resolve model spec for a stage, consulting in order:
@@ -1006,6 +1034,7 @@ impl Gremlin {
 
             let stage_result = run_stage(&stage, self).await;
             self.loop_iter = saved_loop_iter;
+            send_stage_boundary(&self.runtime_config.stage_stream_tx, "", "other");
 
             match stage_result {
                 Ok(()) => {}
@@ -1036,6 +1065,7 @@ impl Gremlin {
 
     /// Reap clients, fold subprocess cost into total, write terminal state.
     fn finish(&mut self, exit_code: i32) {
+        send_stage_boundary(&self.runtime_config.stage_stream_tx, "", "other");
         send_log(
             &self.runtime_config.log_tx,
             format!("finished (exit_code={exit_code})"),

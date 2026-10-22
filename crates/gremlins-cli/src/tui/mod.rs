@@ -2007,7 +2007,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         log::info!("[run completed] {id} (exit {exit_code})");
                         if app.watch_following.as_deref() == Some(id.as_str()) {
                             app.watch_follow_error = None;
-                            abort_watch_follow(&mut watch_follow_handle);
                         }
                         app.on_run_completed(id);
                         fetch_run_snapshot(&client, &snapshot_tx, app.project_name_str().to_string());
@@ -2021,7 +2020,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         }
                         if app.watch_following.as_deref() == Some(id.as_str()) {
                             app.watch_follow_error = None;
-                            abort_watch_follow(&mut watch_follow_handle);
                         }
                         app.on_run_failed(id);
                         fetch_run_snapshot(&client, &snapshot_tx, app.project_name_str().to_string());
@@ -2030,7 +2028,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         log::info!("[run stopped] {id}");
                         if app.watch_following.as_deref() == Some(id.as_str()) {
                             app.watch_follow_error = None;
-                            abort_watch_follow(&mut watch_follow_handle);
                         }
                         app.on_run_stopped(id);
                         fetch_run_snapshot(&client, &snapshot_tx, app.project_name_str().to_string());
@@ -2102,7 +2099,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         .unwrap_or(false);
                     if !still_running {
                         app.watch_follow_error = None;
-                        abort_watch_follow(&mut watch_follow_handle);
                     }
                 }
             }
