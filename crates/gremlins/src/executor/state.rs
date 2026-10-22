@@ -858,6 +858,40 @@ impl FileSystemStateStore {
             artifact_dir,
         })
     }
+
+    /// Seed a forked child's registry from this parent, remapping file paths
+    /// that point inside `parent_ad` to point into `child_ad` instead.
+    /// When `clear_first` the child registry is cleared before seeding.
+    async fn seed_fork_registry(
+        &self,
+        child: &FileSystemStateStore,
+        child_ad: &Path,
+        parent_ad: &Path,
+        clear_first: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let parent_registry = self.read_registry_json().await;
+        if parent_registry.is_empty() && !clear_first {
+            return Ok(());
+        }
+        let parent_ad_str = parent_ad.to_string_lossy().to_string();
+        child
+            .locked_write(|data| {
+                if clear_first {
+                    data.clear();
+                }
+                for (key, path) in &parent_registry {
+                    if is_file_artifact(path) && path.starts_with(&parent_ad_str) {
+                        let rel = path.strip_prefix(&parent_ad_str).unwrap_or(path);
+                        let rel = rel.trim_start_matches('/');
+                        data.insert(key.clone(), child_ad.join(rel).to_string_lossy().to_string());
+                    } else {
+                        data.insert(key.clone(), path.clone());
+                    }
+                }
+                Ok(())
+            })
+            .await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1128,106 +1162,35 @@ impl StateStore for FileSystemStateStore {
         child_gremlin_id: &str,
     ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
         validate_gremlin_id_component(child_gremlin_id)?;
+        let parent_ad = self.artifact_dir();
 
         if self.root.is_temp() {
-            // Temp-backed parent: create a new TempDir for the child.
             let child_temp = tempfile::TempDir::new().map_err(StateError::Io)?;
             let child_dir = child_temp.path().to_path_buf();
-            let child_artifact_dir = child_dir.join("artifacts");
-            std::fs::create_dir_all(&child_artifact_dir)?;
-
-            let parent_artifact_dir = self.artifact_dir();
-            if parent_artifact_dir.is_dir() {
-                copy_dir_sync(&parent_artifact_dir, &child_artifact_dir)?;
+            let child_ad = child_dir.join("artifacts");
+            std::fs::create_dir_all(&child_ad)?;
+            if parent_ad.is_dir() {
+                copy_dir_sync(&parent_ad, &child_ad)?;
             }
-
-            let child_store = FileSystemStateStore {
-                root: StateRoot::Temp(child_temp),
-            };
-
-            let parent_registry = self.read_registry_json().await;
-            if !parent_registry.is_empty() {
-                let parent_ad_str = parent_artifact_dir.to_string_lossy().to_string();
-                child_store
-                    .locked_write(|data| {
-                        for (key, path) in &parent_registry {
-                            if is_file_artifact(path) && path.starts_with(&parent_ad_str) {
-                                let rel = path.strip_prefix(&parent_ad_str).unwrap_or(path);
-                                let rel = rel.trim_start_matches('/');
-                                data.insert(
-                                    key.clone(),
-                                    child_artifact_dir.join(rel).to_string_lossy().to_string(),
-                                );
-                            } else {
-                                data.insert(key.clone(), path.clone());
-                            }
-                        }
-                        Ok(())
-                    })
-                    .await?;
-            }
-
+            let child_store = FileSystemStateStore { root: StateRoot::Temp(child_temp) };
+            self.seed_fork_registry(&child_store, &child_ad, &parent_ad, false).await?;
             let mut initial = Map::new();
             initial.insert("id".into(), Value::String(child_gremlin_id.to_string()));
             child_store.write_state(&initial)?;
-
             Ok(Box::new(child_store))
         } else {
-            // Persistent parent: create child under config::state_root().
             let child_dir = config::state_root().join(child_gremlin_id);
             tokio::fs::create_dir_all(&child_dir).await?;
-            let child_artifact_dir = child_dir.join("artifacts");
-            tokio::fs::create_dir_all(&child_artifact_dir).await?;
-
-            let parent_artifact_dir = self.artifact_dir();
-
-            // Copy parent artifact files.
-            if parent_artifact_dir.is_dir() {
-                copy_dir_sync(&parent_artifact_dir, &child_artifact_dir)?;
+            let child_ad = child_dir.join("artifacts");
+            tokio::fs::create_dir_all(&child_ad).await?;
+            if parent_ad.is_dir() {
+                copy_dir_sync(&parent_ad, &child_ad)?;
             }
-
-            // Seed registry from parent, remapping file-backed bindings
-            // that point into the parent artifact directory to the
-            // corresponding child paths.
-            //
-            // The child directory may already exist from a prior fork
-            // (e.g. on resume). Clear stale entries before seeding so
-            // that artifacts from a completed prior fork don't cause
-            // spurious duplicate-producer errors.
             let child_store = FileSystemStateStore::open(child_gremlin_id)?;
-            let parent_registry = self.read_registry_json().await;
-            let parent_ad_str = parent_artifact_dir.to_string_lossy().to_string();
-            child_store
-                .locked_write(|data| {
-                    // Clear stale entries before seeding — do this
-                    // unconditionally so an empty parent registry
-                    // doesn't leave stale child entries behind.
-                    data.clear();
-                    for (key, path) in &parent_registry {
-                        // If the binding points inside the parent artifact
-                        // directory, remap it to the child's artifact
-                        // directory. External / non-file URIs are kept
-                        // as-is.
-                        if is_file_artifact(path) && path.starts_with(&parent_ad_str) {
-                            let rel = path.strip_prefix(&parent_ad_str).unwrap_or(path);
-                            let rel = rel.trim_start_matches('/');
-                            data.insert(
-                                key.clone(),
-                                child_artifact_dir.join(rel).to_string_lossy().to_string(),
-                            );
-                        } else {
-                            data.insert(key.clone(), path.clone());
-                        }
-                    }
-                    Ok(())
-                })
-                .await?;
-
-            // Write initial state.json with id stamped.
+            self.seed_fork_registry(&child_store, &child_ad, &parent_ad, true).await?;
             let mut initial = Map::new();
             initial.insert("id".into(), Value::String(child_gremlin_id.to_string()));
             child_store.write_state(&initial)?;
-
             Ok(Box::new(child_store))
         }
     }
@@ -1259,6 +1222,69 @@ impl StateStore for FileSystemStateStore {
     fn artifact_uri_display(&self) -> String {
         self.artifact_dir().display().to_string()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Delegation macros — reduce boilerplate for wrapper types that forward
+// most StateStore calls to an inner field.
+// ---------------------------------------------------------------------------
+
+/// Generate simple delegation methods (`self.$field.method(args)`).
+macro_rules! delegate {
+    // Sync method with return
+    ($field:ident, fn $name:ident(&self $(, $arg:ident: $aty:ty)*) -> $ret:ty) => {
+        fn $name(&self $(, $arg: $aty)*) -> $ret {
+            self.$field.$name($($arg),*)
+        }
+    };
+    // Sync method without return
+    ($field:ident, fn $name:ident(&self $(, $arg:ident: $aty:ty)*)) => {
+        fn $name(&self $(, $arg: $aty)*) {
+            self.$field.$name($($arg),*)
+        }
+    };
+    // Async method with return
+    ($field:ident, async fn $name:ident(&self $(, $arg:ident: $aty:ty)*) -> $ret:ty) => {
+        async fn $name(&self $(, $arg: $aty)*) -> $ret {
+            self.$field.$name($($arg),*).await
+        }
+    };
+    // Public sync with return
+    (pub $field:ident, fn $name:ident(&self $(, $arg:ident: $aty:ty)*) -> $ret:ty) => {
+        pub fn $name(&self $(, $arg: $aty)*) -> $ret {
+            self.$field.$name($($arg),*)
+        }
+    };
+    // Public sync without return
+    (pub $field:ident, fn $name:ident(&self $(, $arg:ident: $aty:ty)*)) => {
+        pub fn $name(&self $(, $arg: $aty)*) {
+            self.$field.$name($($arg),*)
+        }
+    };
+    // Public async with return
+    (pub $field:ident, async fn $name:ident(&self $(, $arg:ident: $aty:ty)*) -> $ret:ty) => {
+        pub async fn $name(&self $(, $arg: $aty)*) -> $ret {
+            self.$field.$name($($arg),*).await
+        }
+    };
+    // pub(crate) sync with return
+    (pub(crate) $field:ident, fn $name:ident(&self $(, $arg:ident: $aty:ty)*) -> $ret:ty) => {
+        pub(crate) fn $name(&self $(, $arg: $aty)*) -> $ret {
+            self.$field.$name($($arg),*)
+        }
+    };
+    // pub(crate) sync without return
+    (pub(crate) $field:ident, fn $name:ident(&self $(, $arg:ident: $aty:ty)*)) => {
+        pub(crate) fn $name(&self $(, $arg: $aty)*) {
+            self.$field.$name($($arg),*)
+        }
+    };
+    // pub(crate) async with return
+    (pub(crate) $field:ident, async fn $name:ident(&self $(, $arg:ident: $aty:ty)*) -> $ret:ty) => {
+        pub(crate) async fn $name(&self $(, $arg: $aty)*) -> $ret {
+            self.$field.$name($($arg),*).await
+        }
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -1299,65 +1325,21 @@ impl Debug for ScopedFileSystemStateStore {
 impl StateStore for ScopedFileSystemStateStore {
     // --- state methods: delegate to inner ---
 
-    fn state_tree(&self) -> Map<String, Value> {
-        self.inner.state_tree()
-    }
-
-    fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError> {
-        self.inner.write_state(data)
-    }
-
-    fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError> {
-        self.inner.open(name, mode)
-    }
-
-    fn exists(&self, name: &str) -> bool {
-        self.inner.exists(name)
-    }
-
-    fn clear_stage_error(&self, attempt: &str) {
-        self.inner.clear_stage_error(attempt)
-    }
-
-    fn read_str(&self, field: &str) -> String {
-        self.inner.read_str(field)
-    }
-
-    fn read_field(&self, field: &str) -> Option<Value> {
-        self.inner.read_field(field)
-    }
-
-    fn get_field(&self, field: &str) -> Option<Value> {
-        self.inner.get_field(field)
-    }
-
-    fn stage_error(&self) -> Option<Map<String, Value>> {
-        self.inner.stage_error()
-    }
-
-    fn patch(&self, delete: &[String], fields: &Map<String, Value>) {
-        self.inner.patch(delete, fields)
-    }
-
-    fn record_stage_error(&self, class: &str, detail: &str) {
-        self.inner.record_stage_error(class, detail)
-    }
-
-    fn accumulate_token_usage(&self, usage: &HashMap<String, i64>) {
-        self.inner.accumulate_token_usage(usage)
-    }
-
-    fn write_terminal_state(&self, exit_code: i32) {
-        self.inner.write_terminal_state(exit_code)
-    }
-
-    fn add_subprocess_cost(&self, amount: f64) {
-        self.inner.add_subprocess_cost(amount)
-    }
-
-    fn patch_parallel_attempt(&self, child_key: &str, attempt: &str) {
-        self.inner.patch_parallel_attempt(child_key, attempt)
-    }
+    delegate!(inner, fn state_tree(&self) -> Map<String, Value>);
+    delegate!(inner, fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError>);
+    delegate!(inner, fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError>);
+    delegate!(inner, fn exists(&self, name: &str) -> bool);
+    delegate!(inner, fn clear_stage_error(&self, attempt: &str));
+    delegate!(inner, fn read_str(&self, field: &str) -> String);
+    delegate!(inner, fn read_field(&self, field: &str) -> Option<Value>);
+    delegate!(inner, fn get_field(&self, field: &str) -> Option<Value>);
+    delegate!(inner, fn stage_error(&self) -> Option<Map<String, Value>>);
+    delegate!(inner, fn patch(&self, delete: &[String], fields: &Map<String, Value>));
+    delegate!(inner, fn record_stage_error(&self, class: &str, detail: &str));
+    delegate!(inner, fn accumulate_token_usage(&self, usage: &HashMap<String, i64>));
+    delegate!(inner, fn write_terminal_state(&self, exit_code: i32));
+    delegate!(inner, fn add_subprocess_cost(&self, amount: f64));
+    delegate!(inner, fn patch_parallel_attempt(&self, child_key: &str, attempt: &str));
 
     // --- artifact methods: check key, then delegate ---
 
@@ -1371,7 +1353,6 @@ impl StateStore for ScopedFileSystemStateStore {
         })?;
         self.inner.data_uri(key).await
     }
-
     async fn content(
         &self,
         uri_str: &str,
@@ -1412,8 +1393,6 @@ impl StateStore for ScopedFileSystemStateStore {
         &self,
         child_gremlin_id: &str,
     ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
-        // Delegate to the inner store, which already handles both temp and
-        // persistent backing correctly.
         self.inner.fork(child_gremlin_id).await
     }
 
@@ -1423,18 +1402,9 @@ impl StateStore for ScopedFileSystemStateStore {
     ) -> Result<Checkout, Box<dyn std::error::Error>> {
         self.inner.checkout_registry(keys).await
     }
-
-    fn clean(&self) {
-        self.inner.clean()
-    }
-
-    fn state_uri_display(&self) -> String {
-        self.inner.state_uri_display()
-    }
-
-    fn artifact_uri_display(&self) -> String {
-        self.inner.artifact_uri_display()
-    }
+    delegate!(inner, fn clean(&self));
+    delegate!(inner, fn state_uri_display(&self) -> String);
+    delegate!(inner, fn artifact_uri_display(&self) -> String);
 }
 
 // ---------------------------------------------------------------------------
@@ -1494,154 +1464,45 @@ impl StateData {
 
     // --- delegating reads ---
 
-    pub fn get_field(&self, name: &str) -> Option<Value> {
-        self.store.get_field(name)
-    }
-
-    pub fn read_field(&self, field: &str) -> Option<Value> {
-        self.store.read_field(field)
-    }
-
-    pub fn read_str(&self, field: &str) -> String {
-        self.store.read_str(field)
-    }
-
-    pub fn stage_error(&self) -> Option<Map<String, Value>> {
-        self.store.stage_error()
-    }
+    delegate!(pub store, fn get_field(&self, name: &str) -> Option<Value>);
+    delegate!(pub store, fn read_field(&self, field: &str) -> Option<Value>);
+    delegate!(pub store, fn read_str(&self, field: &str) -> String);
+    delegate!(pub store, fn stage_error(&self) -> Option<Map<String, Value>>);
 
     // --- delegating writes ---
 
-    pub fn patch(&self, delete: &[String], fields: &Map<String, Value>) {
-        self.store.patch(delete, fields);
-    }
-
-    pub fn record_stage_error(&self, class: &str, detail: &str) {
-        self.store.record_stage_error(class, detail);
-    }
-
-    pub fn accumulate_token_usage(&self, usage: &HashMap<String, i64>) {
-        self.store.accumulate_token_usage(usage);
-    }
-
-    pub fn state_tree(&self) -> Map<String, Value> {
-        self.store.state_tree()
-    }
-
-    pub fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError> {
-        self.store.write_state(data)
-    }
-
-    pub(crate) fn open_blob(
-        &self,
-        name: &str,
-        mode: BlobMode,
-    ) -> Result<Box<dyn StateBlob>, StateError> {
+    delegate!(pub store, fn patch(&self, delete: &[String], fields: &Map<String, Value>));
+    delegate!(pub store, fn record_stage_error(&self, class: &str, detail: &str));
+    delegate!(pub store, fn accumulate_token_usage(&self, usage: &HashMap<String, i64>));
+    delegate!(pub store, fn state_tree(&self) -> Map<String, Value>);
+    delegate!(pub store, fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError>);
+    pub(crate) fn open_blob(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError> {
         self.store.open(name, mode)
     }
-
-    pub(crate) fn exists(&self, name: &str) -> bool {
-        self.store.exists(name)
-    }
-
-    pub fn clear_stage_error(&self, attempt: &str) {
-        self.store.clear_stage_error(attempt);
-    }
-
-    pub fn add_subprocess_cost(&self, amount: f64) {
-        self.store.add_subprocess_cost(amount);
-    }
-
-    pub fn patch_parallel_attempt(&self, child_key: &str, attempt: &str) {
-        self.store.patch_parallel_attempt(child_key, attempt);
-    }
+    delegate!(pub(crate) store, fn exists(&self, name: &str) -> bool);
+    delegate!(pub store, fn clear_stage_error(&self, attempt: &str));
+    delegate!(pub store, fn add_subprocess_cost(&self, amount: f64));
+    delegate!(pub store, fn patch_parallel_attempt(&self, child_key: &str, attempt: &str));
 
     // --- locality ---
 
-    /// Opaque, human-readable description of the store's state location.
-    pub fn state_uri_display(&self) -> String {
-        self.store.state_uri_display()
-    }
-
-    /// Opaque, human-readable description of the store's artifact location.
-    pub fn artifact_uri_display(&self) -> String {
-        self.store.artifact_uri_display()
-    }
-
-    /// Remove the store's private state directory. Best-effort — delegates to
-    /// the underlying store's `clean`.
-    pub fn clean(&self) {
-        self.store.clean();
-    }
+    delegate!(pub store, fn state_uri_display(&self) -> String);
+    delegate!(pub store, fn artifact_uri_display(&self) -> String);
+    delegate!(pub store, fn clean(&self));
 
     // --- artifact delegating methods ---
 
-    pub async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact> {
-        self.store.data_uri(key).await
-    }
-
-    pub async fn content(
-        &self,
-        uri_str: &str,
-        json_path: Option<&str>,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        self.store.content(uri_str, json_path).await
-    }
-
-    pub async fn is_registered(&self, key: &str) -> bool {
-        self.store.is_registered(key).await
-    }
-
-    pub async fn path_for_uri(&self, uri: &Uri) -> Result<String, Box<dyn std::error::Error>> {
-        self.store.path_for_uri(uri).await
-    }
-
-    pub async fn commit(&self, key: &str, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        self.store.commit(key, path).await
-    }
-
-    pub async fn write_into_registry(
-        &self,
-        uri: &Uri,
-        content: &str,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        self.store.write_into_registry(uri, content).await
-    }
-
-    pub async fn copy_into_registry(
-        &self,
-        uri: &Uri,
-        source: &Path,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        self.store.copy_into_registry(uri, source).await
-    }
-
-    pub async fn keys(&self) -> Vec<String> {
-        self.store.keys().await
-    }
-
-    pub async fn join(
-        &self,
-        other: &(dyn StateStore + Sync),
-        collision: Collision,
-        key_prefix: Option<&str>,
-    ) -> Result<usize, Box<dyn std::error::Error>> {
-        self.store.join(other, collision, key_prefix).await
-    }
-
-    pub async fn fork(
-        &self,
-        child_gremlin_id: &str,
-    ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
-        self.store.fork(child_gremlin_id).await
-    }
-
-    pub async fn checkout_registry(
-        &self,
-        keys: &[String],
-    ) -> Result<Checkout, Box<dyn std::error::Error>> {
-        self.store.checkout_registry(keys).await
-    }
+    delegate!(pub store, async fn data_uri(&self, key: &str) -> Result<String, MissingArtifact>);
+    delegate!(pub store, async fn content(&self, uri_str: &str, json_path: Option<&str>) -> Result<String, Box<dyn std::error::Error>>);
+    delegate!(pub store, async fn is_registered(&self, key: &str) -> bool);
+    delegate!(pub store, async fn path_for_uri(&self, uri: &Uri) -> Result<String, Box<dyn std::error::Error>>);
+    delegate!(pub store, async fn commit(&self, key: &str, path: &str) -> Result<(), Box<dyn std::error::Error>>);
+    delegate!(pub store, async fn write_into_registry(&self, uri: &Uri, content: &str) -> Result<String, Box<dyn std::error::Error>>);
+    delegate!(pub store, async fn copy_into_registry(&self, uri: &Uri, source: &Path) -> Result<String, Box<dyn std::error::Error>>);
+    delegate!(pub store, async fn keys(&self) -> Vec<String>);
+    delegate!(pub store, async fn join(&self, other: &(dyn StateStore + Sync), collision: Collision, key_prefix: Option<&str>) -> Result<usize, Box<dyn std::error::Error>>);
+    delegate!(pub store, async fn fork(&self, child_gremlin_id: &str) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>>);
+    delegate!(pub store, async fn checkout_registry(&self, keys: &[String]) -> Result<Checkout, Box<dyn std::error::Error>>);
 
     // --- methods with guards that stay on StateData ---
 
@@ -1735,6 +1596,20 @@ fn now_utc() -> libc::tm {
     tm
 }
 
+fn now_components() -> (libc::tm, u32, u32) {
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = since_epoch.as_secs();
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        let t = secs as libc::time_t;
+        libc::gmtime_r(std::ptr::addr_of!(t), std::ptr::addr_of_mut!(tm));
+        tm
+    };
+    (tm, since_epoch.subsec_millis(), since_epoch.subsec_micros())
+}
+
 /// `%Y-%m-%dT%H:%M:%SZ` — second precision, UTC.
 pub fn now_stamp() -> String {
     let tm = now_utc();
@@ -1752,18 +1627,7 @@ pub fn now_stamp() -> String {
 /// `[YYYY-MM-DDTHH:MM:SS.sssZ]` — millisecond precision, UTC.
 /// Matches `env_logger`'s `format_timestamp_millis()` format.
 pub fn now_stamp_millis() -> String {
-    let now = std::time::SystemTime::now();
-    let since_epoch = now
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = since_epoch.as_secs();
-    let millis = since_epoch.subsec_millis();
-    let tm = unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        let t = secs as libc::time_t;
-        libc::gmtime_r(std::ptr::addr_of!(t), std::ptr::addr_of_mut!(tm));
-        tm
-    };
+    let (tm, millis, _) = now_components();
     format!(
         "[{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z]",
         tm.tm_year + 1900,
@@ -1778,18 +1642,7 @@ pub fn now_stamp_millis() -> String {
 
 /// ISO-8601 with microseconds and `+00:00`, matching Python `datetime.isoformat()`.
 pub fn now_iso() -> String {
-    let now = std::time::SystemTime::now();
-    let since_epoch = now
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = since_epoch.as_secs();
-    let micros = since_epoch.subsec_micros();
-    let tm = unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        let t = secs as libc::time_t;
-        libc::gmtime_r(std::ptr::addr_of!(t), std::ptr::addr_of_mut!(tm));
-        tm
-    };
+    let (tm, _, micros) = now_components();
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}+00:00",
         tm.tm_year + 1900,

@@ -383,6 +383,36 @@ pub(crate) fn get_run_map() -> &'static Arc<Mutex<HashMap<String, RunHandle>>> {
     RUN_MAP.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
+// ---------------------------------------------------------------------------
+// Field extraction helpers — reduce repetition when reading from
+// serde_json::Map / Value trees that dominate the handle_* functions.
+// ---------------------------------------------------------------------------
+
+fn str_field(tree: &Map<String, Value>, key: &str) -> String {
+    tree.get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn null_field(tree: &Map<String, Value>, key: &str) -> Value {
+    tree.get(key).cloned().unwrap_or(Value::Null)
+}
+
+/// Extract and validate the `"id"` field from a JSON-RPC-style request.
+/// Returns `Ok(id)` when the field is present and passes `validate_gremlin_id`, or
+/// `Err(response)` with an error JSON object ready to send back to the caller.
+fn valid_id(request: &Value) -> Result<&str, Value> {
+    let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    if id.is_empty() {
+        return Err(error_response("missing 'id' field"));
+    }
+    if validate_gremlin_id(id).is_err() {
+        return Err(error_response(&format!("invalid gremlin id {id:?}")));
+    }
+    Ok(id)
+}
+
 /// The `_lock` file holds the executor's exclusive advisory flock for the
 /// lifetime of the supervisor. When the process exits (after the last
 /// gremlin drains and the last connection closes), the file descriptor
@@ -987,60 +1017,29 @@ async fn dispatch_op(
     shutdown_tx: &watch::Sender<bool>,
     writer: &SharedWriter,
 ) -> DispatchOutcome {
+    /// Write `resp` to `writer` and return Continue.
+    async fn reply(writer: &SharedWriter, resp: Value) -> DispatchOutcome {
+        let _ = writer.write_json_line(&resp).await;
+        DispatchOutcome::Continue
+    }
     match op {
-        "launch" => {
-            let resp = handle_launch(request, state_root, shutdown_tx).await;
-            let _ = writer.write_json_line(&resp).await;
-            DispatchOutcome::Continue
-        }
+        "launch" => reply(writer, handle_launch(request, state_root, shutdown_tx).await).await,
         "create_session" => {
-            let resp = handle_create_session(request, state_root, shutdown_tx).await;
-            let _ = writer.write_json_line(&resp).await;
-            DispatchOutcome::Continue
+            reply(writer, handle_create_session(request, state_root, shutdown_tx).await).await
         }
         "stop" => {
             if let Some(id) = request.get("id").and_then(|v| v.as_str()) {
                 stop_session_chat_gremlin(id).await;
             }
-            let resp = handle_stop(request, shutdown_tx).await;
-            let _ = writer.write_json_line(&resp).await;
-            DispatchOutcome::Continue
+            reply(writer, handle_stop(request, shutdown_tx).await).await
         }
-        "resume" => {
-            let resp = handle_resume(request, state_root, shutdown_tx).await;
-            let _ = writer.write_json_line(&resp).await;
-            DispatchOutcome::Continue
-        }
-        "ls" => {
-            let resp = handle_ls(request, state_root).await;
-            let _ = writer.write_json_line(&resp).await;
-            DispatchOutcome::Continue
-        }
-        "status" => {
-            let resp = handle_status(request, state_root).await;
-            let _ = writer.write_json_line(&resp).await;
-            DispatchOutcome::Continue
-        }
-        "info" => {
-            let resp = handle_info(request, state_root).await;
-            let _ = writer.write_json_line(&resp).await;
-            DispatchOutcome::Continue
-        }
-        "artifact" => {
-            let resp = handle_artifact(request).await;
-            let _ = writer.write_json_line(&resp).await;
-            DispatchOutcome::Continue
-        }
-        "model" => {
-            let resp = handle_model(request).await;
-            let _ = writer.write_json_line(&resp).await;
-            DispatchOutcome::Continue
-        }
-        _ => {
-            let resp = error_response(&format!("unknown op: {op:?}"));
-            let _ = writer.write_json_line(&resp).await;
-            DispatchOutcome::Continue
-        }
+        "resume" => reply(writer, handle_resume(request, state_root, shutdown_tx).await).await,
+        "ls" => reply(writer, handle_ls(request, state_root).await).await,
+        "status" => reply(writer, handle_status(request, state_root).await).await,
+        "info" => reply(writer, handle_info(request, state_root).await).await,
+        "artifact" => reply(writer, handle_artifact(request).await).await,
+        "model" => reply(writer, handle_model(request).await).await,
+        _ => reply(writer, error_response(&format!("unknown op: {op:?}"))).await,
     }
 }
 
@@ -1189,6 +1188,19 @@ async fn send_debug_status(writer: &SharedWriter, stage: &str) {
 // launch
 // ---------------------------------------------------------------------------
 
+/// Open a persisted gremlin by id. Returns the gremlin and its state directory,
+/// or an error response ready to send back to the caller.
+fn open_persisted_gremlin(id: &str) -> Result<(Gremlin, PathBuf), Value> {
+    let state_dir = config::state_root().join(id);
+    let state_file = state_dir.join("state.json");
+    if !state_dir.is_dir() || !state_file.is_file() {
+        return Err(error_response(&format!("unknown gremlin {id:?}")));
+    }
+    let gremlin =
+        Gremlin::from(id).map_err(|e| error_response(&format!("gremlin {id}: {e}")))?;
+    Ok((gremlin, state_dir))
+}
+
 async fn handle_launch(
     request: &Value,
     _state_root: &Path,
@@ -1273,7 +1285,7 @@ async fn handle_launch(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let mut gremlin = match Gremlin::init(
+    let gremlin = match Gremlin::init(
         definition_name,
         &definition_path,
         &gremlin_def,
@@ -1303,88 +1315,12 @@ async fn handle_launch(
 
     let id = gremlin.id.to_string();
 
-    // Set up the per-gremlin log channel.
-    let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (log_broadcast, _) = broadcast::channel(256);
-    gremlin.runtime_config.log_tx = Some(log_tx.clone());
-
-    // Set up interactive channels (idle until a debug session connects).
-    let channels = InteractiveChannels::new();
-    let (interactive_handle, interactive_session) = channels.split();
-    gremlin.runtime_config.interactive = Some(interactive_handle.clone());
-    gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
-        interactive_handle.evt_tx.clone(),
-    ));
-    gremlin.interactive_session = Some(interactive_session);
-
-    // Spawn the log writer: reads from the channel, appends to the state
-    // store's `log` blob, and broadcasts to live subscribers.
-    let store = gremlin.state.store_handle();
-    spawn_log_writer(log_rx, store.clone(), log_broadcast.clone(), None);
-
-    let cancel_token = CancelToken::new();
-    let (state_tx, _state_rx) = watch::channel(RunState {
-        id: id.clone(),
-        status: "running".to_string(),
-        stage: "starting".to_string(),
-        started_at: state::now_stamp(),
-    });
-
-    let id_clone = id.clone();
-    let state_tx_clone = state_tx.clone();
-    let shutdown_tx_clone = shutdown_tx.clone();
-
-    let aborted = Arc::new(AtomicBool::new(false));
-    let aborted_for_task = aborted.clone();
-
-    // Thread the cancel token into the gremlin so the run loop can pass it
-    // to the backend.
-    gremlin.cancel_token = Some(cancel_token.clone());
-
-    // Capture the scratch_dir before gremlin is moved into the spawned task.
-    let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
-
-    // Spawn before inserting into run_map so the JoinHandle is available
-    // from the moment the entry exists. A oneshot barrier prevents the
-    // task from running (and potentially finishing) before the entry is
-    // inserted — no race window in either direction.
-    let (go_tx, go_rx) = tokio::sync::oneshot::channel();
-    let join_handle = tokio::spawn(async move {
-        let _ = go_rx.await;
-        let (result, _gremlin) = run_gremlin_task(gremlin, None).await;
-        if !aborted_for_task.load(Ordering::Relaxed) {
-            RunHandle::finish(&id_clone, result, &state_tx_clone, Some(&shutdown_tx_clone));
-        }
-    });
-
-    let handle = RunHandle {
-        cancel: cancel_token,
-        task: Some(join_handle),
-        aborted: aborted.clone(),
-        state_tx,
-        log_broadcast,
-        interactive: interactive_handle,
-        store,
-        scratch_dir,
-    };
     let definition_name = definition_path
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("gremlin")
-        .to_string();
+        .unwrap_or("gremlin");
 
-    get_run_map().lock().unwrap().insert(id.clone(), handle);
-
-    // Emit RunStarted *before* releasing the barrier so subscribers
-    // always see the start event before any terminal event.
-    emit_event(DaemonEvent::RunStarted {
-        id: id.clone(),
-        definition: definition_name,
-        stage: "starting".to_string(),
-    });
-
-    // Now the entry is visible — let the task proceed.
-    let _ = go_tx.send(());
+    spawn_gremlin_runner(gremlin, &id, "starting", None, definition_name, shutdown_tx);
 
     ok_response(serde_json::json!({"id": id}))
 }
@@ -1394,14 +1330,10 @@ async fn handle_launch(
 // ---------------------------------------------------------------------------
 
 async fn handle_stop(request: &Value, _shutdown_tx: &watch::Sender<bool>) -> Value {
-    let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    if id.is_empty() {
-        return error_response("missing 'id' field");
-    }
-
-    if validate_gremlin_id(id).is_err() {
-        return error_response(&format!("invalid gremlin id {id:?}"));
-    }
+    let id = match valid_id(request) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
 
     // Clear soft_cancel on any session that owns this chat gremlin so
     // `gremlins stop` always produces a hard cancel.
@@ -1492,14 +1424,10 @@ async fn handle_resume(
     state_root: &Path,
     shutdown_tx: &watch::Sender<bool>,
 ) -> Value {
-    let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    if id.is_empty() {
-        return error_response("missing 'id' field");
-    }
-
-    if validate_gremlin_id(id).is_err() {
-        return error_response(&format!("invalid gremlin id {id:?}"));
-    }
+    let id = match valid_id(request) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
 
     {
         let map = get_run_map().lock().unwrap();
@@ -1514,7 +1442,7 @@ async fn handle_resume(
         return error_response(&format!("unknown gremlin {id:?}"));
     }
 
-    let mut gremlin = match Gremlin::from(id) {
+    let gremlin = match Gremlin::from(id) {
         Ok(g) => g,
         Err(e) => return error_response(&format!("gremlin {id}: {e}")),
     };
@@ -1556,80 +1484,9 @@ async fn handle_resume(
     let resume_stage = stage.clone();
     let resume_stage_for_response = resume_stage.clone();
 
-    // Set up the per-gremlin log channel.
-    let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (log_broadcast, _) = broadcast::channel(256);
-    gremlin.runtime_config.log_tx = Some(log_tx.clone());
-
-    // Set up interactive channels (idle until a debug session connects).
-    let channels = InteractiveChannels::new();
-    let (interactive_handle, interactive_session) = channels.split();
-    gremlin.runtime_config.interactive = Some(interactive_handle.clone());
-    gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
-        interactive_handle.evt_tx.clone(),
-    ));
-    gremlin.interactive_session = Some(interactive_session);
-
-    // Spawn the log writer.
-    let store = gremlin.state.store_handle();
-    spawn_log_writer(log_rx, store.clone(), log_broadcast.clone(), None);
-
-    let cancel_token = CancelToken::new();
-    let (state_tx, _state_rx) = watch::channel(RunState {
-        id: id.to_string(),
-        status: "running".to_string(),
-        stage: stage.clone(),
-        started_at: state::now_stamp(),
-    });
-
-    let id_clone = id.to_string();
-    let state_tx_clone = state_tx.clone();
-    let shutdown_tx_clone = shutdown_tx.clone();
-
-    let aborted = Arc::new(AtomicBool::new(false));
-    let aborted_for_task = aborted.clone();
-
-    gremlin.cancel_token = Some(cancel_token.clone());
-
-    // Capture the scratch_dir before gremlin is moved into the spawned task.
-    let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
     let definition_name = gremlin.state.read_str("kind");
 
-    // Spawn before inserting into run_map so the JoinHandle is available
-    // from the moment the entry exists. A oneshot barrier prevents the
-    // task from running (and potentially finishing) before the entry is
-    // inserted — no race window in either direction.
-    let (go_tx, go_rx) = tokio::sync::oneshot::channel();
-    let join_handle = tokio::spawn(async move {
-        let _ = go_rx.await;
-        let (result, _gremlin) = run_gremlin_task(gremlin, Some(&resume_stage)).await;
-        if !aborted_for_task.load(Ordering::Relaxed) {
-            RunHandle::finish(&id_clone, result, &state_tx_clone, Some(&shutdown_tx_clone));
-        }
-    });
-
-    let handle = RunHandle {
-        cancel: cancel_token,
-        task: Some(join_handle),
-        aborted: aborted.clone(),
-        state_tx,
-        log_broadcast,
-        interactive: interactive_handle,
-        store,
-        scratch_dir,
-    };
-    get_run_map().lock().unwrap().insert(id.to_string(), handle);
-
-    // Emit RunStarted *before* releasing the barrier so subscribers
-    // always see the start event before any terminal event.
-    emit_event(DaemonEvent::RunStarted {
-        id: id.to_string(),
-        definition: definition_name,
-        stage: resume_stage_for_response.clone(),
-    });
-
-    // Now the entry is visible — let the task proceed.
-    let _ = go_tx.send(());
+    spawn_gremlin_runner(gremlin, id, &resume_stage, Some(&resume_stage), &definition_name, shutdown_tx);
 
     ok_response(serde_json::json!({"id": id, "resume_from": resume_stage_for_response}))
 }
@@ -1656,21 +1513,9 @@ async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
 
         for (id, store) in &pairs {
             let tree = store.state_tree();
-            let stage = tree
-                .get("stage")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let started_at = tree
-                .get("started_at")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let project = tree
-                .get("project_root")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let stage = str_field(&tree, "stage");
+            let started_at = str_field(&tree, "started_at");
+            let project = str_field(&tree, "project_root");
             let launch = tree
                 .get("metadata")
                 .and_then(|v| v.get("cli"))
@@ -1706,21 +1551,9 @@ async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let stage = raw
-            .get("stage")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let started_at = raw
-            .get("started_at")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let project = raw
-            .get("project_root")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let stage = str_field(&raw, "stage");
+        let started_at = str_field(&raw, "started_at");
+        let project = str_field(&raw, "project_root");
         let launch = raw
             .get("metadata")
             .and_then(|v| v.get("cli"))
@@ -1759,14 +1592,10 @@ async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
 // ---------------------------------------------------------------------------
 
 async fn handle_status(request: &Value, _state_root: &Path) -> Value {
-    let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    if id.is_empty() {
-        return error_response("missing 'id' field");
-    }
-
-    if validate_gremlin_id(id).is_err() {
-        return error_response(&format!("invalid gremlin id {id:?}"));
-    }
+    let id = match valid_id(request) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
 
     // Check the run_map first — live gremlins (including ephemeral ones
     // whose state is in a TempDir) have their store handle stored in the
@@ -1784,11 +1613,7 @@ async fn handle_status(request: &Value, _state_root: &Path) -> Value {
 
         let state_dir = live_state_dir(&store, id);
         let status = "running".to_string();
-        let stage = tree
-            .get("stage")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let stage = str_field(&tree, "stage");
         let definition = tree
             .get("definition_path")
             .and_then(|v| v.as_str())
@@ -1798,46 +1623,17 @@ async fn handle_status(request: &Value, _state_root: &Path) -> Value {
                     .and_then(|s| s.to_str())
                     .map(String::from)
             })
-            .unwrap_or_else(|| {
-                tree.get("kind")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string()
-            });
-        let project_root = tree
-            .get("project_root")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let workdir = tree
-            .get("workdir")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+            .unwrap_or_else(|| str_field(&tree, "kind"));
+        let project_root = str_field(&tree, "project_root");
+        let workdir = str_field(&tree, "workdir");
         let artifact_dir = state_dir.join("artifacts");
-        let started_at = tree
-            .get("started_at")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let ended_at = tree.get("ended_at").cloned().unwrap_or(Value::Null);
-        let exit_code = tree.get("exit_code").cloned().unwrap_or(Value::Null);
-        let pid = tree.get("pid").cloned().unwrap_or(Value::Null);
-        let client = tree
-            .get("model")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let attempt = tree
-            .get("attempt")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let kind = tree
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let started_at = str_field(&tree, "started_at");
+        let ended_at = null_field(&tree, "ended_at");
+        let exit_code = null_field(&tree, "exit_code");
+        let pid = null_field(&tree, "pid");
+        let client = str_field(&tree, "model");
+        let attempt = str_field(&tree, "attempt");
+        let kind = str_field(&tree, "kind");
 
         return ok_response(serde_json::json!({
             "id": id,
@@ -1858,16 +1654,10 @@ async fn handle_status(request: &Value, _state_root: &Path) -> Value {
         }));
     }
 
-    // Not live — fall back to Gremlin::from for persistent gremlins.
-    let state_dir = config::state_root().join(id);
-    let state_file = state_dir.join("state.json");
-    if !state_dir.is_dir() || !state_file.is_file() {
-        return error_response(&format!("unknown gremlin {id:?}"));
-    }
-
-    let gremlin = match Gremlin::from(id) {
+    // Not live — fall back to open_persisted_gremlin.
+    let (gremlin, state_dir) = match open_persisted_gremlin(id) {
         Ok(g) => g,
-        Err(e) => return error_response(&format!("gremlin {id}: {e}")),
+        Err(resp) => return resp,
     };
 
     let status = status_or_orphan(false, &gremlin);
@@ -1896,14 +1686,10 @@ async fn handle_status(request: &Value, _state_root: &Path) -> Value {
 // ---------------------------------------------------------------------------
 
 async fn handle_info(request: &Value, _state_root: &Path) -> Value {
-    let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    if id.is_empty() {
-        return error_response("missing 'id' field");
-    }
-
-    if validate_gremlin_id(id).is_err() {
-        return error_response(&format!("invalid gremlin id {id:?}"));
-    }
+    let id = match valid_id(request) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
 
     // Check the run_map first — live gremlins (including ephemeral ones
     // whose state is in a TempDir) have their store handle stored in the
@@ -1922,11 +1708,7 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
 
         let state_dir = live_state_dir(&store, id);
         let status = "running".to_string();
-        let stage = tree
-            .get("stage")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let stage = str_field(&tree, "stage");
         let definition = tree
             .get("definition_path")
             .and_then(|v| v.as_str())
@@ -1936,47 +1718,18 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
                     .and_then(|s| s.to_str())
                     .map(String::from)
             })
-            .unwrap_or_else(|| {
-                tree.get("kind")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string()
-            });
-        let project_root = tree
-            .get("project_root")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let workdir = tree
-            .get("workdir")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+            .unwrap_or_else(|| str_field(&tree, "kind"));
+        let project_root = str_field(&tree, "project_root");
+        let workdir = str_field(&tree, "workdir");
         let artifact_dir = state_dir.join("artifacts");
         let log_file = state_dir.join("log");
-        let started_at = tree
-            .get("started_at")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let ended_at = tree.get("ended_at").cloned().unwrap_or(Value::Null);
-        let exit_code = tree.get("exit_code").cloned().unwrap_or(Value::Null);
-        let pid = tree.get("pid").cloned().unwrap_or(Value::Null);
-        let client = tree
-            .get("model")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let attempt = tree
-            .get("attempt")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let kind = tree
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let started_at = str_field(&tree, "started_at");
+        let ended_at = null_field(&tree, "ended_at");
+        let exit_code = null_field(&tree, "exit_code");
+        let pid = null_field(&tree, "pid");
+        let client = str_field(&tree, "model");
+        let attempt = str_field(&tree, "attempt");
+        let kind = str_field(&tree, "kind");
         // Read bail info from the store rather than joining a path onto a
         // resolved state directory.
         let bail_info = store
@@ -2006,16 +1759,10 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
         }));
     }
 
-    // Not live — fall back to Gremlin::from for persistent gremlins.
-    let state_dir = config::state_root().join(id);
-    let state_file = state_dir.join("state.json");
-    if !state_dir.is_dir() || !state_file.is_file() {
-        return error_response(&format!("unknown gremlin {id:?}"));
-    }
-
-    let gremlin = match Gremlin::from(id) {
+    // Not live — fall back to open_persisted_gremlin.
+    let (gremlin, state_dir) = match open_persisted_gremlin(id) {
         Ok(g) => g,
-        Err(e) => return error_response(&format!("gremlin {id}: {e}")),
+        Err(resp) => return resp,
     };
 
     let status = status_or_orphan(false, &gremlin);
@@ -2047,14 +1794,10 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
 // ---------------------------------------------------------------------------
 
 async fn handle_artifact(request: &Value) -> Value {
-    let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    if id.is_empty() {
-        return error_response("missing 'id' field");
-    }
-
-    if validate_gremlin_id(id).is_err() {
-        return error_response(&format!("invalid gremlin id {id:?}"));
-    }
+    let id = match valid_id(request) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
 
     // Resolve the store: run map first for live gremlins (including ephemeral
     // ones whose state lives in a TempDir), otherwise open the persisted
@@ -4069,6 +3812,79 @@ fn spawn_log_writer(
             }
         }
     });
+}
+
+/// Shared setup for launching and resuming a gremlin: wires up log, interactive
+/// channels, cancel token, and spawns the run loop with a oneshot barrier.
+fn spawn_gremlin_runner(
+    mut gremlin: Gremlin,
+    id: &str,
+    stage_label: &str,
+    resume_from: Option<&str>,
+    definition_name: &str,
+    shutdown_tx: &watch::Sender<bool>,
+) {
+    let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (log_broadcast, _) = broadcast::channel(256);
+    gremlin.runtime_config.log_tx = Some(log_tx.clone());
+
+    let channels = InteractiveChannels::new();
+    let (interactive_handle, interactive_session) = channels.split();
+    gremlin.runtime_config.interactive = Some(interactive_handle.clone());
+    gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
+        interactive_handle.evt_tx.clone(),
+    ));
+    gremlin.interactive_session = Some(interactive_session);
+
+    let store = gremlin.state.store_handle();
+    spawn_log_writer(log_rx, store.clone(), log_broadcast.clone(), None);
+
+    let cancel_token = CancelToken::new();
+    let (state_tx, _state_rx) = watch::channel(RunState {
+        id: id.to_string(),
+        status: "running".to_string(),
+        stage: stage_label.to_string(),
+        started_at: state::now_stamp(),
+    });
+
+    let aborted = Arc::new(AtomicBool::new(false));
+    gremlin.cancel_token = Some(cancel_token.clone());
+    let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
+    let id_owned = id.to_string();
+    let state_tx_clone = state_tx.clone();
+    let shutdown_tx_clone = shutdown_tx.clone();
+    let resume_from_owned = resume_from.map(String::from);
+    let aborted_for_task = aborted.clone();
+
+    let (go_tx, go_rx) = tokio::sync::oneshot::channel();
+    let join_handle = tokio::spawn(async move {
+        let _ = go_rx.await;
+        let (result, _gremlin) =
+            run_gremlin_task(gremlin, resume_from_owned.as_deref()).await;
+        if !aborted_for_task.load(Ordering::Relaxed) {
+            RunHandle::finish(&id_owned, result, &state_tx_clone, Some(&shutdown_tx_clone));
+        }
+    });
+
+    let handle = RunHandle {
+        cancel: cancel_token,
+        task: Some(join_handle),
+        aborted,
+        state_tx,
+        log_broadcast,
+        interactive: interactive_handle,
+        store,
+        scratch_dir,
+    };
+    get_run_map().lock().unwrap().insert(id.to_string(), handle);
+
+    emit_event(DaemonEvent::RunStarted {
+        id: id.to_string(),
+        definition: definition_name.to_string(),
+        stage: stage_label.to_string(),
+    });
+
+    let _ = go_tx.send(());
 }
 
 /// The on-disk state directory for a live gremlin's store. Prefers the
