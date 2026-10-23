@@ -2013,6 +2013,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     gremlins::executor::DaemonEvent::RunStarted { id, definition, stage } => {
                         log::info!("[run started] {id} ({definition}) stage={stage}");
                         app.on_run_started(id, definition, stage);
+                        // Invalidate any in-flight ls snapshot so a stale
+                        // response cannot later prune this newly started run
+                        // (the snapshot predates the daemon event).
+                        status_generation = status_generation.wrapping_add(1);
                     }
                     gremlins::executor::DaemonEvent::RunCompleted { id, exit_code } => {
                         log::info!("[run completed] {id} (exit {exit_code})");
@@ -2046,6 +2050,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
                         }
                         app.on_run_removed(&id);
+                        // Invalidate any in-flight ls snapshot so a stale
+                        // response cannot resurrect this run after it was
+                        // already removed from active_runs.
+                        status_generation = status_generation.wrapping_add(1);
                     }
                     gremlins::executor::DaemonEvent::StageTransition { id, stage } => {
                         log::info!("[{id}] stage → {stage}");
@@ -2201,33 +2209,32 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                 }
             }
 
-            // ── Status resync after event_lagged ──────────
+            // ── Status resync after event_lagged / ShowRuns ─
             Some((runs, generation)) = status_rx.recv() => {
-                // Drop stale responses — a newer fetch already superseded this one.
+                // Drop stale responses — a newer fetch already superseded this one,
+                // or a lifecycle event (RunStarted / RunRemoved) invalidated the
+                // snapshot.
                 if generation != status_generation {
                     continue;
                 }
-                // Collect ids present in the daemon's ls response.
-                // Short-circuit: when the counts match there can't be stale
-                // entries to prune (a removed gremlin would reduce the count).
-                if app.active_runs.len() > runs.len() {
-                    let live_ids: std::collections::HashSet<&str> =
-                        runs.iter().map(|r| r.id.as_str()).collect();
-                    // Prune entries that are no longer in the daemon's ls output
-                    // (gremlins rm'd from another terminal, etc.). Collect first
-                    // to avoid borrow conflicts with the per-run loop below.
-                    let stale: Vec<String> = app
-                        .active_runs
-                        .keys()
-                        .filter(|id| !live_ids.contains(id.as_str()))
-                        .cloned()
-                        .collect();
-                    for id in &stale {
-                        if app.watch_following.as_deref() == Some(id.as_str()) {
-                            close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
-                        }
-                        app.on_run_removed(id);
+                // Prune entries that are no longer in the daemon's ls output
+                // (gremlins rm'd from another terminal, etc.). Always compute
+                // the ID difference — equal row counts do not guarantee
+                // matching IDs. Collect first to avoid borrow conflicts with
+                // the per-run loop below.
+                let live_ids: std::collections::HashSet<&str> =
+                    runs.iter().map(|r| r.id.as_str()).collect();
+                let stale: Vec<String> = app
+                    .active_runs
+                    .keys()
+                    .filter(|id| !live_ids.contains(id.as_str()))
+                    .cloned()
+                    .collect();
+                for id in &stale {
+                    if app.watch_following.as_deref() == Some(id.as_str()) {
+                        close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
                     }
+                    app.on_run_removed(id);
                 }
                 for r in runs {
                     app.update_run_status(&r.id, &r.status);
