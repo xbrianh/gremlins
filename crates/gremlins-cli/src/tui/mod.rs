@@ -84,7 +84,8 @@ struct ResyncRun {
 /// ensure the /watch columns are never left stale.
 fn fetch_run_statuses(
     client: &Arc<client::DaemonClient>,
-    status_tx: &tokio::sync::mpsc::UnboundedSender<Vec<ResyncRun>>,
+    status_tx: &tokio::sync::mpsc::UnboundedSender<(Vec<ResyncRun>, u64)>,
+    generation: u64,
 ) {
     let c = Arc::clone(client);
     let tx = status_tx.clone();
@@ -125,7 +126,7 @@ fn fetch_run_statuses(
                     }
                 }
             }
-            let _ = tx.send(runs);
+            let _ = tx.send((runs, generation));
         }
     });
 }
@@ -1242,7 +1243,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     let (model_tx, mut model_rx) = mpsc::unbounded_channel::<ChatModelQuery>();
 
     // ── Channel for lightweight status resync after event_lagged ──
-    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<Vec<ResyncRun>>();
+    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<(Vec<ResyncRun>, u64)>();
+    let mut status_generation: u64 = 0;
 
     // ── Log follow state ──────────────────────────────────────────
     let mut log_follow_handle: Option<tokio::task::JoinHandle<()>> = None;
@@ -1683,7 +1685,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         live_area.show_runs();
                                         // Trigger a fresh ls so the table reflects the daemon's
                                         // current state, including any gremlins rm'd outside the TUI.
-                                        fetch_run_statuses(&client, &status_tx);
+                                        status_generation = status_generation.wrapping_add(1);
+                                        fetch_run_statuses(&client, &status_tx, status_generation);
                                     }
                                     CommandResult::Debug(id) => {
                                         close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
@@ -2039,6 +2042,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     }
                     gremlins::executor::DaemonEvent::RunRemoved { id } => {
                         log::info!("[run removed] {id}");
+                        if app.watch_following.as_deref() == Some(id.as_str()) {
+                            close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
+                        }
                         app.on_run_removed(&id);
                     }
                     gremlins::executor::DaemonEvent::StageTransition { id, stage } => {
@@ -2078,7 +2084,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     // Resync lifecycle status from the daemon so terminal
                     // events (RunCompleted / RunFailed / RunStopped) that
                     // were dropped are not permanently stuck at "running".
-                    fetch_run_statuses(&client, &status_tx);
+                    status_generation = status_generation.wrapping_add(1);
+                    fetch_run_statuses(&client, &status_tx, status_generation);
                 } else if raw.get("type").and_then(|v| v.as_str()) == Some("error") {
                     let msg = raw
                         .get("message")
@@ -2195,21 +2202,32 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             }
 
             // ── Status resync after event_lagged ──────────
-            Some(runs) = status_rx.recv() => {
+            Some((runs, generation)) = status_rx.recv() => {
+                // Drop stale responses — a newer fetch already superseded this one.
+                if generation != status_generation {
+                    continue;
+                }
                 // Collect ids present in the daemon's ls response.
-                let live_ids: std::collections::HashSet<&str> =
-                    runs.iter().map(|r| r.id.as_str()).collect();
-                // Prune entries that are no longer in the daemon's ls output
-                // (gremlins rm'd from another terminal, etc.). Collect first
-                // to avoid borrow conflicts with the per-run loop below.
-                let stale: Vec<String> = app
-                    .active_runs
-                    .keys()
-                    .filter(|id| !live_ids.contains(id.as_str()))
-                    .cloned()
-                    .collect();
-                for id in &stale {
-                    app.on_run_removed(id);
+                // Short-circuit: when the counts match there can't be stale
+                // entries to prune (a removed gremlin would reduce the count).
+                if app.active_runs.len() > runs.len() {
+                    let live_ids: std::collections::HashSet<&str> =
+                        runs.iter().map(|r| r.id.as_str()).collect();
+                    // Prune entries that are no longer in the daemon's ls output
+                    // (gremlins rm'd from another terminal, etc.). Collect first
+                    // to avoid borrow conflicts with the per-run loop below.
+                    let stale: Vec<String> = app
+                        .active_runs
+                        .keys()
+                        .filter(|id| !live_ids.contains(id.as_str()))
+                        .cloned()
+                        .collect();
+                    for id in &stale {
+                        if app.watch_following.as_deref() == Some(id.as_str()) {
+                            close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
+                        }
+                        app.on_run_removed(id);
+                    }
                 }
                 for r in runs {
                     app.update_run_status(&r.id, &r.status);

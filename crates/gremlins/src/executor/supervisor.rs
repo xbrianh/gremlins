@@ -1622,6 +1622,17 @@ async fn handle_rm(request: &Value, _state_root: &Path) -> Value {
         log::warn!("gremlin {id}: could not load definition for clean commands: {e}");
     }
 
+    // Re-check RUN_MAP immediately before the destructive clean: a concurrent
+    // resume/start could have inserted the gremlin while the lock was released.
+    {
+        let map = get_run_map().lock().unwrap();
+        if map.contains_key(id) {
+            return error_response(&format!(
+                "gremlin {id} is running — use `gremlins stop {id}` first"
+            ));
+        }
+    }
+
     gremlin.clean(true).await;
 
     emit_event(DaemonEvent::RunRemoved { id: id.to_string() });
