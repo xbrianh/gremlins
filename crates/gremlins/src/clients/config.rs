@@ -23,8 +23,10 @@ Think and write in a terse, to-the-point style. Make brief statements that get t
 <tools>\n\
 Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
-by pattern), Bash (shell commands), Task, Done\n\
+by pattern), Landscape (structural outline), Bash (shell commands), Task, Done\n\
 </tools>\n\
+Prefer Landscape for structural questions — where functions, types, and \
+headings live — over reading whole files.\n\
 Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Work root:     {work}\n\
@@ -45,8 +47,10 @@ pub(crate) fn task_system_prompt(work_root: &Path, scratch_root: &Path) -> Strin
 <tools>\n\
 Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
-by pattern), Bash (shell commands), Task, Done\n\
+by pattern), Landscape (structural outline), Bash (shell commands), Task, Done\n\
 </tools>\n\
+Prefer Landscape for structural questions — where functions, types, and \
+headings live — over reading whole files.\n\
 Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Work root:     {work}\n\
@@ -69,8 +73,10 @@ pub(crate) fn fork_system_prompt(work_root: &Path, scratch_root: &Path) -> Strin
 <tools>\n\
 Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
-by pattern), Bash (shell commands), Done\n\
+by pattern), Landscape (structural outline), Bash (shell commands), Done\n\
 </tools>\n\
+Prefer Landscape for structural questions — where functions, types, and \
+headings live — over reading whole files.\n\
 This is a forked child agent with the parent's full context. Do not call \
 Task.\n\
 Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
