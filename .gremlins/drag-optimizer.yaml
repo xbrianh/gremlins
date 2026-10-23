@@ -45,11 +45,19 @@ bootstrap:
     comprehensibility-estimates:
       type: string
       optional: true
+    p:
+      type: string
+      optional: true
+    skip-maintainability:
+      type: string
+      optional: true
   launch_cmds:
     - 'printf "%s" {target} > "$GREMLINS_STATE_DIR/artifacts/target.txt"'
     - 'printf "%s" {drag-model} > "$GREMLINS_STATE_DIR/artifacts/drag_model.txt"'
     - 'printf "%s" {instructions} > "$GREMLINS_STATE_DIR/artifacts/instructions.txt"'
     - 'printf "%s" {comprehensibility-estimates} > "$GREMLINS_STATE_DIR/artifacts/comp_estimates.txt"'
+    - 'printf "%s" {p} > "$GREMLINS_STATE_DIR/artifacts/p.txt"'
+    - 'printf "%s" {skip-maintainability} > "$GREMLINS_STATE_DIR/artifacts/skip_maint.txt"'
     - 'BASE_REF={base_ref} && SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "${BASE_REF:-HEAD}") && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && printf "%s" "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"'
   cli_out:
     target: "artifact://target.txt"
@@ -57,6 +65,8 @@ bootstrap:
     instructions: "artifact://instructions.txt"
     base_sha: "artifact://base_sha"
     comprehensibility_estimates: "artifact://comp_estimates.txt"
+    p: "artifact://p.txt"
+    skip_maintainability: "artifact://skip_maint.txt"
   env: |
     export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'
     THE_ENV="${GREMLINS_PROJECT_ROOT}/.gremlins/env"
@@ -73,6 +83,8 @@ stages:
       inputs:
         target: content("artifact://target.txt")
         drag_model: content("artifact://drag_model.txt")
+        p: content("artifact://p.txt")
+        skip_maintainability: content("artifact://skip_maint.txt")
         comprehensibility_estimates: content("artifact://comp_estimates.txt")
       outputs:
         report: "artifact://baseline/report.json"
@@ -84,10 +96,14 @@ stages:
           [ -n "{drag_model}" ] && MODEL_ARG="--model {drag_model}"
           EST="{comprehensibility_estimates}"
           [ -z "$EST" ] && EST=5
-          gremlins-drag --json --comprehensibility-estimates $EST {target} $MODEL_ARG > {report}
+          P_ARG=""
+          [ -n "{p}" ] && P_ARG="--p {p}"
+          SKIP_MAINT=""
+          [ -n "{skip_maintainability}" ] && SKIP_MAINT="--skip-maintainability"
+          gremlins-drag --json --comprehensibility-estimates $EST {target} $MODEL_ARG $P_ARG $SKIP_MAINT > {report}
         - cp {report} "$GREMLINS_STATE_DIR/drag_current.json"
         - |
-          cat {report} | python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(m["drag"] for m in data["modules"]))' > {drag_best}
+          cat {report} | python3 -c 'import json,sys; data=json.load(sys.stdin); pkgs=data.get("packages",[]); print(sum(p["drag"] for p in pkgs) if pkgs else sum(m["drag"] for m in data["modules"]))' > {drag_best}
         - 'echo "baseline sum drag = $(cat {drag_best})"'
 
   # ── drag curves (generated from current weights) ─────────────────────
@@ -153,7 +169,17 @@ stages:
             {drag_context}
 
             ## What drag means
-            drag = (1+footprint)^w2 · exp(2.5·(1−comprehensibility))
+
+            Module-level:
+            drag(m) = (1+footprint)^w2 · exp(m·(1−comprehensibility))
+
+            Package-level:
+            drag(p) = exp(p·(1−maint)) · Σ drag(m)
+            
+            Package maintainability multiplies all module drags: improving
+            decomposition, interface design, consistency, or change isolation
+            reduces the package-level multiplier. Low package maintainability
+            can amplify the total drag by up to exp(p) ≈ exp(2.5) ≈ 12.2.
 
             Higher drag = the module is harder to maintain and change. The optimizer
             minimizes the **sum** of drag across all scored modules — not any
@@ -175,6 +201,10 @@ stages:
                better documentation where it aids understanding. The penalty is
                multiplicative: low comprehensibility scales the whole footprint by
                up to exp(2.5) ≈ 12.2.
+            4. **Improve package maintainability** — better decomposition into
+               focused modules, clearer cross-module interfaces, consistent naming
+               and error handling, and isolating changes to fewer files all reduce
+               the package-level multiplier.
 
             ### Splitting trap (CRITICAL)
             Splitting one module into two usually INCREASES total drag because
@@ -251,6 +281,8 @@ stages:
           inputs:
             target: content("artifact://target.txt")
             drag_model: content("artifact://drag_model.txt")
+            p: content("artifact://p.txt")
+            skip_maintainability: content("artifact://skip_maint.txt")
             comprehensibility_estimates: content("artifact://comp_estimates.txt")
             drag_best_val: content("artifact://drag_best.txt")
           outputs:
@@ -263,7 +295,11 @@ stages:
               [ -n "{drag_model}" ] && MODEL_ARG="--model {drag_model}"
               EST="{comprehensibility_estimates}"
               [ -z "$EST" ] && EST=5
-              gremlins-drag --json --comprehensibility-estimates $EST {target} $MODEL_ARG > {report}
+              P_ARG=""
+              [ -n "{p}" ] && P_ARG="--p {p}"
+              SKIP_MAINT=""
+              [ -n "{skip_maintainability}" ] && SKIP_MAINT="--skip-maintainability"
+              gremlins-drag --json --comprehensibility-estimates $EST {target} $MODEL_ARG $P_ARG $SKIP_MAINT > {report}
             - |
               STATE_DIR="$GREMLINS_STATE_DIR"
               if [ -f "$STATE_DIR/drag_current.json" ]; then
@@ -273,7 +309,7 @@ stages:
             - |
               BEST="{drag_best_val}"
               [ -z "$BEST" ] && BEST=0
-              CURR=$(cat {report} | python3 -c 'import json,sys; data=json.load(sys.stdin); print(sum(m["drag"] for m in data["modules"]))')
+              CURR=$(cat {report} | python3 -c 'import json,sys; data=json.load(sys.stdin); pkgs=data.get("packages",[]); print(sum(p["drag"] for p in pkgs) if pkgs else sum(m["drag"] for m in data["modules"]))')
               if awk "BEGIN{exit !($CURR >= $BEST)}"; then
                 touch {converged}
                 echo "converged — drag $CURR >= best $BEST"
@@ -298,7 +334,7 @@ stages:
         - |
           BEST="{drag_best_val}"
           [ -z "$BEST" ] && BEST="N/A"
-          BASE_SUM=$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(round(sum(m["drag"] for m in data["modules"]), 2))' < {baseline_report})
+          BASE_SUM=$(python3 -c 'import json,sys; data=json.load(sys.stdin); pkgs=data.get("packages",[]); print(round(sum(p["drag"] for p in pkgs) if pkgs else sum(m["drag"] for m in data["modules"]), 2))' < {baseline_report})
           {
             echo "drag-optimizer: reduce drag for {target}"
             echo ""

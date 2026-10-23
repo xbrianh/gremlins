@@ -1,4 +1,5 @@
 mod lang;
+mod maint;
 mod scoring;
 
 use scoring::{compute_drag, compute_footprint};
@@ -47,6 +48,15 @@ struct Cli {
     #[arg(long, default_value_t = 2.5)]
     m: f64,
 
+    /// Exponent for the package maintainability penalty.
+    #[arg(long, default_value_t = 2.5)]
+    p: f64,
+
+    /// Skip package-level maintainability scoring; only compute
+    /// module-level drag.
+    #[arg(long)]
+    skip_maintainability: bool,
+
     /// Print the resolved model spec and diagnostic information.
     #[arg(short = 'v', long)]
     verbose: bool,
@@ -84,12 +94,15 @@ struct Cli {
 struct DragReport {
     config: DragConfig,
     modules: Vec<ModuleDrag>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    packages: Vec<PackageDrag>,
 }
 
 #[derive(Serialize)]
 struct DragConfig {
     w2: f64,
     m: f64,
+    p: f64,
 }
 
 #[derive(Serialize)]
@@ -102,6 +115,34 @@ struct ModuleDrag {
     footprint: usize,
     comprehensibility: Option<f64>,
     /// The drag metric: `(1+footprint)^w2 · exp(m·(1−comp))`.
+    drag: f64,
+}
+
+/// Scores from the package maintainability agent.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct PackageMaintainability {
+    decomposition: u8,
+    interface_design: u8,
+    consistency: u8,
+    change_isolation: u8,
+}
+
+impl PackageMaintainability {
+    fn maint_score(&self) -> f64 {
+        let sum = self.decomposition as f64
+            + self.interface_design as f64
+            + self.consistency as f64
+            + self.change_isolation as f64;
+        (sum / 16.0).clamp(0.0, 1.0)
+    }
+}
+
+/// Per-package drag summary emitted in JSON output.
+#[derive(Serialize)]
+struct PackageDrag {
+    package: String,
+    maint_score: f64,
+    module_drag_sum: f64,
     drag: f64,
 }
 
@@ -146,7 +187,7 @@ async fn run() -> Result<(), String> {
     }
 
     if cli.curves {
-        print_curves(cli.w2, cli.m);
+        print_curves(cli.w2, cli.m, cli.p);
         return Ok(());
     }
 
@@ -309,22 +350,64 @@ async fn run() -> Result<(), String> {
         cli.comprehensibility_estimates,
         &target_modules,
         &mut scores,
-        cache_state,
+        cache_state.clone(),
         module_cache,
     )
     .await?;
 
     // 8. Compute the final drag scores once, after any scoring.
     for s in &mut scores {
-        s.drag = compute_drag(
-            &DragConfig {
-                w2: cli.w2,
-                m: cli.m,
-            },
-            s.footprint,
-            s.comprehensibility,
-        );
+        s.drag = compute_drag(cli.w2, cli.m, s.footprint, s.comprehensibility);
     }
+
+    // ── Package-level maintainability ──
+    let package_drags: Vec<PackageDrag> = if !cli.skip_maintainability {
+        let maint_scores = maint::score_package_maintainability(
+            &model_spec,
+            cli.verbose,
+            cli.comprehensibility_estimates,
+            &scoring_packages,
+            cache_state.clone(),
+        )
+        .await?;
+
+        // Build a lookup: (module, file) → pkg_key.
+        let module_pkg: HashMap<(&str, &str), &str> = target_modules
+            .iter()
+            .map(|(m, f, pkg)| ((m.as_str(), f.to_str().unwrap_or("")), pkg.as_str()))
+            .collect();
+
+        // Group module drags by package key.
+        let mut pkg_module_drags: HashMap<String, Vec<f64>> = HashMap::new();
+        for s in &scores {
+            let key = (s.module.as_str(), s.file.as_str());
+            if let Some(pkg_key) = module_pkg.get(&key) {
+                pkg_module_drags
+                    .entry((*pkg_key).to_string())
+                    .or_default()
+                    .push(s.drag);
+            }
+        }
+
+        let mut pdrags = Vec::new();
+        for pkg in &scoring_packages {
+            let pkg_key = pkg.key();
+            let pkg_name = pkg.name().to_string();
+            let maint = maint_scores.get(&pkg_key).copied().unwrap_or(1.0);
+            let module_drags = pkg_module_drags.get(&pkg_key);
+            let module_drag_sum: f64 = module_drags.map(|v| v.iter().sum()).unwrap_or(0.0);
+            let drag = maint::compute_package_drag(cli.p, maint, module_drag_sum);
+            pdrags.push(PackageDrag {
+                package: pkg_name,
+                maint_score: maint,
+                module_drag_sum,
+                drag,
+            });
+        }
+        pdrags
+    } else {
+        Vec::new()
+    };
 
     // 9. Sort by drag descending
     scores.sort_by(|a, b| {
@@ -339,15 +422,17 @@ async fn run() -> Result<(), String> {
             config: DragConfig {
                 w2: cli.w2,
                 m: cli.m,
+                p: cli.p,
             },
             modules: scores,
+            packages: package_drags,
         };
         println!(
             "{}",
             serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
         );
     } else {
-        print_human_table(&scores);
+        print_human_table(&scores, &package_drags, cli.skip_maintainability);
     }
 
     Ok(())
@@ -450,7 +535,7 @@ const COMP_BACKOFF: [f64; 2] = [1.0, 2.0];
 
 /// Classification of an error from [`run_comp_agent`].
 #[derive(Debug)]
-enum CompAgentError {
+pub(crate) enum CompAgentError {
     /// A transient failure worth retrying (model produced no/malformed JSON).
     Retryable(String),
     /// A non-retryable failure (bail, missing artifact after agent loop exhausted retries).
@@ -587,7 +672,7 @@ fn resolve_comprehensibility_model(cli_model: Option<&str>) -> Result<String, St
 }
 
 /// Shared comprehensibility cache: the JSONL file path it is persisted to.
-type CacheState = PathBuf;
+pub(crate) type CacheState = PathBuf;
 
 /// Handle for a single comprehensibility scoring task.
 /// On success returns all the info needed to compute the median and write the cache.
@@ -958,7 +1043,7 @@ async fn run_comp_agent(
 /// 1. Strip markdown code fences (` ```json ` / ` ``` `).
 /// 2. Find the outermost `{...}` pair (handles text before/after JSON).
 /// 3. Clean common JSON formatting errors (trailing commas, comments).
-fn extract_json(text: &str) -> Option<String> {
+pub(crate) fn extract_json(text: &str) -> Option<String> {
     let text = text.trim();
 
     // ── 1. Strip markdown code fences ──
@@ -1148,14 +1233,16 @@ fn remove_trailing_commas(json: &str) -> String {
 // Drag curves
 // ---------------------------------------------------------------------------
 
-fn print_curves(w2: f64, m: f64) {
+fn print_curves(w2: f64, m: f64, p: f64) {
     let factor_footprint = |f: usize| -> f64 { (1.0 + f as f64).powf(w2) };
     let factor_comp = |c: f64| -> f64 { (m * (1.0 - c)).exp() };
+    let factor_maint = |c: f64| -> f64 { (p * (1.0 - c)).exp() };
 
-    println!("Drag curves (w2={w2}, m={m}):\n");
-    println!("  drag = (1+footprint)^w2 · exp(m·(1−comp))");
+    println!("Drag curves (w2={w2}, m={m}, p={p}):\n");
+    println!("  drag(m) = (1+footprint)^w2 · exp(m·(1−comp))");
+    println!("  drag(p) = exp(p·(1−maint)) · Σ drag(m)");
 
-    println!("  Footprint factor ((1+footprint)^w2, w2={w2}):");
+    println!("\n  Footprint factor ((1+footprint)^w2, w2={w2}):");
     for footprint in [0, 5, 10, 50, 100, 500, 1000, 5000] {
         println!(
             "    {footprint:>5} footprint  → {:>10.3}",
@@ -1168,15 +1255,21 @@ fn print_curves(w2: f64, m: f64) {
         println!("    {comp:.2}  → {:>10.3}", factor_comp(comp));
     }
 
-    println!("\n  Both factors are multiplied together; larger values mean more drag.");
+    println!("\n  Maintainability factor (exp(p·(1−maint)), p={p}):");
+    for maint in [0.10, 0.25, 0.50, 0.75, 0.90, 1.00] {
+        println!("    {maint:.2}  → {:>10.3}", factor_maint(maint));
+    }
+
+    println!("\n  All factors are multiplied together; larger values mean more drag.");
     println!("  Comprehensibility below 1.0 amplifies drag by up to exp(m).");
+    println!("  Maintainability below 1.0 amplifies package drag by up to exp(p).");
 }
 
 // ---------------------------------------------------------------------------
 // Output
 // ---------------------------------------------------------------------------
 
-fn print_human_table(scores: &[ModuleDrag]) {
+fn print_human_table(scores: &[ModuleDrag], package_drags: &[PackageDrag], skip_maint: bool) {
     // Show a "comp" column only when every module was scored (i.e. after a
     // successful comprehensibility run). When unscored, all are None.
     let has_comp = scores.iter().all(|s| s.comprehensibility.is_some());
@@ -1216,9 +1309,27 @@ fn print_human_table(scores: &[ModuleDrag]) {
             );
         }
     }
+
+    if !skip_maint && !package_drags.is_empty() {
+        println!();
+        println!(
+            "{:<55} {:>12} {:>14} {:>14}",
+            "package", "maint", "Σ module drag", "package drag"
+        );
+        println!("{}", "-".repeat(99));
+        for p in package_drags {
+            println!(
+                "{:<55} {:>12.3} {:>14.1} {:>14.1}",
+                truncate(&p.package, 54),
+                p.maint_score,
+                p.module_drag_sum,
+                p.drag,
+            );
+        }
+    }
 }
 
-fn truncate(s: &str, max_len: usize) -> &str {
+pub(crate) fn truncate(s: &str, max_len: usize) -> &str {
     if s.len() <= max_len {
         return s;
     }
@@ -1232,7 +1343,7 @@ fn truncate(s: &str, max_len: usize) -> &str {
 /// Return the median of a non-empty slice of f64 values.
 /// Odd-length: middle element after sort. Even-length: average of the two
 /// middle elements.
-fn median(values: &[f64]) -> f64 {
+pub(crate) fn median(values: &[f64]) -> f64 {
     debug_assert!(!values.is_empty(), "median of empty slice");
     let mut sorted: Vec<f64> = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));

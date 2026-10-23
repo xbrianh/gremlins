@@ -363,7 +363,7 @@ fn should_skip_dir(path: &Path) -> bool {
 /// brackets (e.g. `From<T> for String`) stay readable. Newlines become their
 /// visible escape form and `|` is replaced with the visually-similar broken bar
 /// so the three-field `line|kind|name` format stays unambiguous.
-pub(crate) fn escape_landscape_delimiters(text: &str) -> String {
+pub fn escape_landscape_delimiters(text: &str) -> String {
     text.replace("<!--", "&lt;!--")
         .replace("-->", "--&gt;")
         .replace('\n', "\\n")
@@ -377,7 +377,7 @@ pub(crate) fn escape_landscape_delimiters(text: &str) -> String {
 /// This is the single source of truth for the item format used by both the
 /// system-prompt landscape block and the `Landscape` tool. Keeping it here
 /// means the two rendering paths cannot drift out of sync.
-pub(crate) fn format_outline_items(items: &[OutlineItem]) -> String {
+pub fn format_outline_items(items: &[OutlineItem]) -> String {
     items
         .iter()
         .map(|item| {
@@ -390,6 +390,50 @@ pub(crate) fn format_outline_items(items: &[OutlineItem]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+// ── Skeletonization ──────────────────────────────────────────────────────
+
+/// Format a slice of [`FileOutline`]s as a landscape string (one file per line
+/// with `line|kind|name` items), suitable for embedding in LLM prompts.
+///
+/// Files with no items or that were skipped are omitted. Paths are rendered
+/// relative to `root`.
+pub fn format_landscape(outlines: &[FileOutline], root: &Path) -> String {
+    let mut entries: Vec<(&Path, &[OutlineItem])> = outlines
+        .iter()
+        .filter(|o| !o.skipped && !o.items.is_empty())
+        .map(|o| (o.path.as_path(), o.items.as_slice()))
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut result = String::new();
+    let mut last_dir: Option<PathBuf> = None;
+
+    for (path, items) in &entries {
+        let rel = path.strip_prefix(root).unwrap_or(path);
+        let parent = rel.parent();
+
+        // Emit directory header when directory changes.
+        if parent != last_dir.as_deref() {
+            if let Some(dir) = parent {
+                if !dir.as_os_str().is_empty() {
+                    result.push_str(&format!("{}/\n", dir.display()));
+                }
+            }
+            last_dir = parent.map(|p| p.to_path_buf());
+        }
+
+        let file_name = rel.file_name().unwrap_or_default().to_string_lossy();
+        let items_rendered = format_outline_items(items);
+        if items_rendered.is_empty() {
+            result.push_str(&format!("  {}:\n", file_name));
+        } else {
+            result.push_str(&format!("  {}: {}\n", file_name, items_rendered));
+        }
+    }
+
+    result
 }
 
 // ── Skeletonization ──────────────────────────────────────────────────────

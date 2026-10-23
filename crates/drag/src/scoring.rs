@@ -1,7 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::DragConfig;
-
 /// Compute the multiplicative drag score for a module.
 ///
 /// `drag = (1+footprint)^w2 · exp(m·(1−comp))`.
@@ -12,13 +10,14 @@ use crate::DragConfig;
 /// When comprehensibility is `None` (scoring skipped or failed), the
 /// comprehensibility factor is treated as neutral (`1.0`).
 pub(crate) fn compute_drag(
-    config: &DragConfig,
+    w2: f64,
+    m: f64,
     footprint: usize,
     comprehensibility: Option<f64>,
 ) -> f64 {
-    let footprint_factor = (1.0 + footprint as f64).powf(config.w2);
+    let footprint_factor = (1.0 + footprint as f64).powf(w2);
     let comp_factor = match comprehensibility {
-        Some(c) => (config.m * (1.0 - c)).exp(),
+        Some(c) => (m * (1.0 - c)).exp(),
         None => 1.0,
     };
 
@@ -75,30 +74,26 @@ pub(crate) fn compute_footprint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DragConfig;
 
     #[test]
     fn compute_drag_uses_multiplicative_formula() {
-        let config = DragConfig { w2: 0.5, m: 1.0 };
         // (1+3)^0.5 * exp(1.0*(1-0.5)) = 2 * exp(0.5) ≈ 3.2974
-        let drag = compute_drag(&config, 3, Some(0.5));
+        let drag = compute_drag(0.5, 1.0, 3, Some(0.5));
         let expected = 2.0 * 0.5_f64.exp();
         assert!((drag - expected).abs() < 1e-12);
     }
 
     #[test]
     fn compute_drag_treats_unscored_comprehensibility_as_neutral() {
-        let config = DragConfig { w2: 0.5, m: 1.0 };
         // (1+3)^0.5 * exp(1.0*(1-1.0)) = 2 * exp(0) = 2.0
-        let drag = compute_drag(&config, 3, None);
+        let drag = compute_drag(0.5, 1.0, 3, None);
         assert!((drag - 2.0).abs() < 1e-12);
     }
 
     #[test]
     fn compute_drag_zero_footprint_with_comp() {
-        let config = DragConfig { w2: 0.5, m: 1.0 };
-        // (1+0)^0.5 * exp(1.0*(1-0.5)) = 1 * exp(0.5) ≈ 1.6487
-        let drag = compute_drag(&config, 0, Some(0.5));
+        // (1+0)^05 * exp(1.0*(1-0.5)) = 1 * exp(0.5) ≈ 1.6487
+        let drag = compute_drag(0.5, 1.0, 0, Some(0.5));
         assert!((drag - 0.5_f64.exp()).abs() < 1e-12);
     }
 
@@ -106,11 +101,10 @@ mod tests {
     fn compute_drag_comp_factor_is_multiplicative() {
         // Sanity check that the comprehensibility factor is a multiplier,
         // not an additive term in log space.
-        let config = DragConfig { w2: 0.0, m: 2.0 };
         // (1+10)^0 * exp(2.0*(1-1.0)) = exp(0) = 1.0
-        let no_comp = compute_drag(&config, 10, None);
+        let no_comp = compute_drag(0.0, 2.0, 10, None);
         // (1+10)^0 * exp(2.0*(1-0.5)) = exp(1.0) ≈ 2.718
-        let with_comp = compute_drag(&config, 10, Some(0.5));
+        let with_comp = compute_drag(0.0, 2.0, 10, Some(0.5));
         assert!((no_comp - 1.0).abs() < 1e-12);
         assert!((with_comp - 1.0_f64.exp()).abs() < 1e-12);
     }
