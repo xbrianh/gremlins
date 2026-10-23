@@ -1539,10 +1539,10 @@ async fn land(id: &str) -> Result<(), String> {
 async fn bundle(definition: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
     let project_root = config::project_root();
-    let definition_path = discovery::resolve_definition_path(definition, project_root)
+    let definition_path = discovery::resolve_definition_path(definition, project_root.clone())
         .map_err(|e| format!("definition not found: {e}"))?;
 
-    let bundled = gremlins::definition::bundle_definition(&definition_path)
+    let bundled = gremlins::definition::bundle_definition(&definition_path, &project_root)
         .map_err(|e| format!("failed to bundle: {e}"))?;
 
     let yaml_str =
