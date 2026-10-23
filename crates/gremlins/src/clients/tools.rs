@@ -3261,7 +3261,8 @@ message to finish. The summary parameter briefly describes what you accomplished
     });
     all.push(ToolDefinition {
         name: "Task".into(),
-        description: format!("Delegate a self-contained task to a worker. Non-Fork kinds start with a clean conversation context; the Fork kind inherits the parent conversation history. Multiple Task calls in the same message run concurrently, up to {TASK_MAX_PER_TURN} per message (the harness supports up to {MAX_CONCURRENT_TOOLS} total concurrent tool calls). Returns the worker's final text output."),        parameters: serde_json::json!({
+        description: format!("Delegate a self-contained task to a worker. Non-Fork kinds start with a clean conversation context; the Fork kind inherits the parent conversation history. Multiple Task calls in the same message run concurrently, up to {TASK_MAX_PER_TURN} per message (the harness supports up to {MAX_CONCURRENT_TOOLS} total concurrent tool calls). Returns the worker's final text output."),
+        parameters: serde_json::json!({
             "type": "object",
             "properties": {
                 "kind": {

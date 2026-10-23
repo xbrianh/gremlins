@@ -880,7 +880,7 @@ async fn run_agent_loop_core(
         args: String,
         call: String,
         key: String,
-        over_cap: bool,
+        over_cap: Option<String>,
     }
 
     let mut interactive_active: bool = false;
@@ -1833,18 +1833,32 @@ async fn run_agent_loop_core(
                 args: args_json,
                 call: format_tool_call_parts(&tc.function.name, &tc.function.arguments),
                 key: ledger_key_arg(&tc.function.arguments),
-                over_cap: tc.function.name == "Task" && {
+                over_cap: if jobs.len() >= tools::MAX_CONCURRENT_TOOLS {
+                    Some(format!(
+                        "Error: at most {} total tool calls per message",
+                        tools::MAX_CONCURRENT_TOOLS
+                    ))
+                } else if tc.function.name == "Task" && {
                     task_count += 1;
                     task_count > tools::TASK_MAX_PER_TURN
+                } {
+                    Some(format!(
+                        "Error: at most {} Task calls per message",
+                        tools::TASK_MAX_PER_TURN
+                    ))
+                } else {
+                    None
                 },
             });
         }
 
         // Phase 2: concurrent execution. All tools in the batch run in
         // parallel via join_all. The model is prompted to batch independent
-        // calls (up to MAX_CONCURRENT_TOOLS) for lowest wall-clock latency.
-        // Over-cap Task calls short-circuit so a single response cannot spawn
-        // an unbounded number of child loops.        // Wrapped in a tokio::select! with maybe_pause so the operator can
+        // calls for lowest wall-clock latency; the harness enforces
+        // MAX_CONCURRENT_TOOLS and TASK_MAX_PER_TURN caps.
+        // Over-cap calls short-circuit with an error so a single response
+        // cannot spawn an unbounded number of child loops.
+        // Wrapped in a tokio::select! with maybe_pause so the operator can
         // interrupt a long-running tool batch.
         let mut ctx = tool_ctx.clone();
         ctx.parent_history = fork_parent_history;
@@ -1888,11 +1902,8 @@ async fn run_agent_loop_core(
         let exec_fut = join_all(jobs.iter().map(|j| {
             let ctx = &ctx;
             async move {
-                if j.over_cap {
-                    format!(
-                        "Error: at most {} Task calls per message",
-                        tools::TASK_MAX_PER_TURN
-                    )
+                if let Some(msg) = &j.over_cap {
+                    msg.clone()
                 } else {
                     tools::invoke(&j.id, &j.name, ctx, &j.args).await
                 }

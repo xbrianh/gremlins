@@ -29,7 +29,7 @@ Before every turn, scan the tools you're about to call. When two or more \
 calls are independent (neither depends on the other's result), batch them in \
 a single message. The harness executes concurrent calls in parallel, so \
 batching reduces wall-clock time. Serial chains of single-call turns are the \
-most expensive pattern — avoid them.\n\
+most expensive pattern — avoid them. `Done` signals turn completion and must be the sole call in its message — never batch it with other tools.\n\
 Prefer Landscape for structural questions — where functions, types, and \
 headings live — over reading whole files.\n\
 Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
@@ -58,7 +58,7 @@ Before every turn, scan the tools you're about to call. When two or more \
 calls are independent (neither depends on the other's result), batch them in \
 a single message. The harness executes concurrent calls in parallel, so \
 batching reduces wall-clock time. Serial chains of single-call turns are the \
-most expensive pattern — avoid them.\n\
+most expensive pattern — avoid them. `Done` signals turn completion and must be the sole call in its message — never batch it with other tools.\n\
 Prefer Landscape for structural questions — where functions, types, and \
 headings live — over reading whole files.\n\
 Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
@@ -89,7 +89,7 @@ Before every turn, scan the tools you're about to call. When two or more \
 calls are independent (neither depends on the other's result), batch them in \
 a single message. The harness executes concurrent calls in parallel, so \
 batching reduces wall-clock time. Serial chains of single-call turns are the \
-most expensive pattern — avoid them.\n\
+most expensive pattern — avoid them. `Done` signals turn completion and must be the sole call in its message — never batch it with other tools.\n\
 Prefer Landscape for structural questions — where functions, types, and \
 headings live — over reading whole files.\n\
 This is a forked child agent with the parent's full context. Do not call \
@@ -105,6 +105,7 @@ Scratch root:  {scratch}\n\
         scratch = scratch_root.display(),
     )
 }
+
 // ---------------------------------------------------------------------------
 // ProviderAuth
 // ---------------------------------------------------------------------------
