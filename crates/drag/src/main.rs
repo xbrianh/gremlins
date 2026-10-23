@@ -118,25 +118,6 @@ struct ModuleDrag {
     drag: f64,
 }
 
-/// Scores from the package maintainability agent.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct PackageMaintainability {
-    decomposition: u8,
-    interface_design: u8,
-    consistency: u8,
-    change_isolation: u8,
-}
-
-impl PackageMaintainability {
-    fn maint_score(&self) -> f64 {
-        let sum = self.decomposition as f64
-            + self.interface_design as f64
-            + self.consistency as f64
-            + self.change_isolation as f64;
-        (sum / 16.0).clamp(0.0, 1.0)
-    }
-}
-
 /// Per-package drag summary emitted in JSON output.
 #[derive(Serialize)]
 struct PackageDrag {

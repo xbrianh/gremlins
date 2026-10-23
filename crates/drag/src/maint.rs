@@ -2,8 +2,8 @@
 //
 // This module handles:
 // - Building a landscape of a package directory.
-// - Prompting an ephemeral Agent stage to score four dimensions:
-//   decomposition, interface_design, consistency, change_isolation.
+// - Prompting an ephemeral Agent stage to score five dimensions:
+//   decomposition, interface_design, consistency, change_isolation, duplication.
 // - Caching the median score per package (one entry per scored package,
 //   not per estimate).
 // - Computing the package-level drag formula.
@@ -18,7 +18,29 @@ use gremlins::executor::gremlin::{Gremlin, GremlinConfig};
 use gremlins::model_uri::ModelURI;
 
 use crate::lang::PackageInfo;
-use crate::{median, truncate, CacheState, CompAgentError, PackageMaintainability};
+use crate::{median, truncate, CacheState, CompAgentError};
+
+/// Maintainability scores (0-4 each) for five dimensions.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub(crate) struct PackageMaintainability {
+    pub decomposition: u8,
+    pub interface_design: u8,
+    pub consistency: u8,
+    pub change_isolation: u8,
+    #[serde(default)]
+    pub duplication: u8,
+}
+
+impl PackageMaintainability {
+    pub(crate) fn maint_score(&self) -> f64 {
+        let sum = self.decomposition as f64
+            + self.interface_design as f64
+            + self.consistency as f64
+            + self.change_isolation as f64
+            + self.duplication as f64;
+        (sum / 20.0).clamp(0.0, 1.0)
+    }
+}
 
 const MAX_MAINT_RETRIES: u32 = 3;
 const MAINT_BACKOFF: [f64; 2] = [1.0, 2.0];
@@ -233,6 +255,7 @@ pub(crate) async fn score_package_maintainability(
                     interface_design: 0,
                     consistency: 0,
                     change_isolation: 0,
+                    duplication: 0,
                 },
             };
             let _guard = cache_mutex.lock().unwrap();
@@ -294,7 +317,7 @@ async fn run_maint_agent(
              Target audience: an experienced developer evaluating whether the \
              package is well-organized for long-term maintenance. Judge \
              the package's structure — not correctness, not performance.\n\n\
-             Score four dimensions on a 0-4 scale:\n\
+             Score five dimensions on a 0-4 scale:\n\
              4: Exemplary — would serve as a model for other packages.\n\
              3: Good — minor improvements possible.\n\
              2: Adequate — room for meaningful improvement.\n\
@@ -307,9 +330,11 @@ async fn run_maint_agent(
              - **Consistency**: Do naming, error handling, and abstraction \
              levels stay uniform across the package?\n\
              - **Change isolation**: Would a typical feature change touch one \
-             module or scatter across many?\n\n\
-             Produce a JSON object with four fields: decomposition, \
-             interface_design, consistency, change_isolation. \
+             module or scatter across many?\n\
+             - **Code duplication**: Are repeated blocks of logic extracted \
+             into shared helpers? Is copy-paste minimal across the package?\n\n\
+             Produce a JSON object with five fields: decomposition, \
+             interface_design, consistency, change_isolation, duplication. \
              Write the JSON to {{maintainability}}."
         ))
         .output("maintainability", output("artifact://maintainability"))
@@ -364,12 +389,12 @@ async fn run_maint_agent(
     let scores: PackageMaintainability = serde_json::from_str(&json_str)
         .map_err(|e| CompAgentError::Retryable(format!("parse: {e}")))?;
 
-    // Validate every dimension is in 0–4 range.
     for (name, val) in [
         ("decomposition", scores.decomposition),
         ("interface_design", scores.interface_design),
         ("consistency", scores.consistency),
         ("change_isolation", scores.change_isolation),
+        ("duplication", scores.duplication),
     ] {
         if val > 4 {
             return Err(CompAgentError::Retryable(format!(
@@ -377,7 +402,6 @@ async fn run_maint_agent(
             )));
         }
     }
-
     Ok(scores)
 }
 
@@ -433,6 +457,7 @@ fn read_public_api_module(pkg: &PackageInfo) -> Result<String, String> {
 /// Compute a BLAKE3-based cache key for a package maintainability entry.
 fn maint_cache_key(pkg_key: &str, landscape: &str) -> String {
     let mut hasher = blake3::Hasher::new();
+    hasher.update(b"v2\0");
     hasher.update(pkg_key.as_bytes());
     hasher.update(b"\0");
     hasher.update(landscape.as_bytes());
