@@ -1583,6 +1583,13 @@ fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
             None => return format!("Error: edit {} is not an object in {file_path}", i + 1),
         };
         let has_start = obj.contains_key("start_line");
+        let has_old = obj.contains_key("old_string");
+        if has_start && has_old {
+            return format!(
+                "Error: edit {} specifies both 'old_string' and 'start_line' — use one mode only (match or range) in {file_path}",
+                i + 1
+            );
+        }
         if has_start {
             // --- Range edit ---
             let start_line = match obj.get("start_line").and_then(|v| v.as_u64()) {
@@ -1677,6 +1684,23 @@ fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
         offs
     };
     let eof = content.len();
+    let line_count = line_offsets
+        .len()
+        .saturating_sub(if content.ends_with('\n') { 1 } else { 0 });
+
+    // Validate range edits against file line count.
+    for (i, edit) in edits.iter().enumerate() {
+        if let EditOp::Range { start, .. } = edit {
+            if *start > line_count {
+                return format!(
+                    "Error: edit {} 'start_line' ({}) exceeds file line count ({}) in {file_path}",
+                    i + 1,
+                    start,
+                    line_count
+                );
+            }
+        }
+    }
 
     let ranges: Vec<(usize, usize)> = edits
         .iter()
@@ -1686,13 +1710,12 @@ fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
                 (pos, pos + old_str.len())
             }
             EditOp::Range { start, end, .. } => {
-                let start_byte = line_offsets.get(*start - 1).copied().unwrap_or(eof);
-                let end_byte = if *end >= line_offsets.len() {
-                    // end_line beyond EOF — clamp to EOF (extend)
-                    eof
+                let start_byte = line_offsets[*start - 1];
+                let end_byte = if *end < line_offsets.len() {
+                    line_offsets[*end]
                 } else {
-                    // end_line is inclusive, so go to end of that line
-                    line_offsets.get(*end).copied().unwrap_or(eof)
+                    // end_line beyond last line — clamp to EOF (extend)
+                    eof
                 };
                 (start_byte, end_byte)
             }
@@ -2743,6 +2766,45 @@ fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
                             i + 1
                         ));
                     }
+                    // Validate numeric constraints for range mode.
+                    let start_line = match obj.get("start_line").and_then(|v| v.as_u64()) {
+                        Some(n) if n > 0 => n,
+                        Some(_) => {
+                            return Some(format!(
+                                "Error: edit {} 'start_line' must be a positive integer for Edit tool",
+                                i + 1
+                            ));
+                        }
+                        None => {
+                            return Some(format!(
+                                "Error: edit {} 'start_line' must be an integer for Edit tool",
+                                i + 1
+                            ));
+                        }
+                    };
+                    let end_line = match obj.get("end_line").and_then(|v| v.as_u64()) {
+                        Some(n) if n > 0 => n,
+                        Some(_) => {
+                            return Some(format!(
+                                "Error: edit {} 'end_line' must be a positive integer for Edit tool",
+                                i + 1
+                            ));
+                        }
+                        None => {
+                            return Some(format!(
+                                "Error: edit {} 'end_line' must be an integer for Edit tool",
+                                i + 1
+                            ));
+                        }
+                    };
+                    if start_line > end_line {
+                        return Some(format!(
+                            "Error: edit {} 'start_line' ({}) > 'end_line' ({}) for Edit tool",
+                            i + 1,
+                            start_line,
+                            end_line
+                        ));
+                    }
                 }
             }
         }
@@ -2996,7 +3058,7 @@ pub(crate) fn tool_definitions(
         },
         ToolDefinition {
             name: "Edit".into(),
-            description: "Make one or more non-overlapping replacements in a file. Each edit replaces old_string with new_string (requires unique match), or replaces lines start_line through end_line (1-based, inclusive) with replacement text. Edits are validated against the original file content and must not overlap. When a substring appears multiple times, include 2-3 lines of surrounding context in old_string to make it unique. After a failed edit due to non-uniqueness, re-read only the failing region (with offset/limit), not the whole file. Prefer the line-range form (start_line/end_line/replacement) when you have line numbers from a recent Read. All edits in the array target the same file, specified by the top-level `file_path` parameter — do not nest `file_path` inside individual edit objects.".into(),
+            description: "Make one or more non-overlapping replacements in a file. Each edit replaces old_string with new_string (requires unique match), or replaces lines start_line through end_line (1-based, inclusive) with replacement text. Edits are validated against the original file content and must not overlap. When a substring appears multiple times, include 2-3 lines of surrounding context in old_string to make it unique. After a failed edit due to non-uniqueness, re-read only the failing region (with offset/limit), not the whole file. Prefer the line-range form (start_line/end_line/replacement) when you have line numbers from a recent Read. Line-range edits replace entire lines including their trailing newlines; when you replace a line that should remain separate from the next line, ensure replacement ends with \\n. All edits in the array target the same file, specified by the top-level `file_path` parameter — do not nest `file_path` inside individual edit objects.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -3024,11 +3086,11 @@ pub(crate) fn tool_definitions(
                                 },
                                 "end_line": {
                                     "type": "integer",
-                                    "description": "1-based end line number (inclusive, for range edits; clamped to EOF if beyond file end)"
+                                    "description": "1-based end line number (inclusive, for range edits; clamped to EOF if beyond last line)"
                                 },
                                 "replacement": {
                                     "type": "string",
-                                    "description": "Replacement text for line-range edits"
+                                    "description": "Replacement text for line-range edits. Replaces the entire line span including trailing newlines; include a trailing \\n to keep the next line separate."
                                 }
                             },
                             "additionalProperties": false
@@ -4583,6 +4645,17 @@ mod tests {
     }
 
     #[test]
+    fn validate_tool_args_edit_both_modes_error() {
+        let err = validate_tool_args(
+            "Edit",
+            &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "start_line": 1, "end_line": 1, "replacement": "b"}]}),
+        )
+        .unwrap();
+        assert!(err.contains("specifies both 'old_string' and 'start_line'"));
+        assert!(err.contains("edit 1"));
+    }
+
+    #[test]
     fn validate_tool_args_edit_item_not_object() {
         let err = validate_tool_args(
             "Edit",
@@ -5969,6 +6042,32 @@ mod tests {
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
         assert!(result.contains("missing 'old_string'"));
+    }
+
+    #[test]
+    fn edit_both_modes_error() {
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"old_string": "line1", "new_string": "x", "start_line": 1, "end_line": 1, "replacement": "y"}]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.contains("specifies both 'old_string' and 'start_line'"));
+    }
+
+    #[test]
+    fn edit_range_start_line_beyond_eof_error() {
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"start_line": 3, "end_line": 3, "replacement": "x"}]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.contains("exceeds file line count"));
     }
 
     #[test]
