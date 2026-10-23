@@ -1681,6 +1681,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
                                         app.show_runs();
                                         live_area.show_runs();
+                                        // Trigger a fresh ls so the table reflects the daemon's
+                                        // current state, including any gremlins rm'd outside the TUI.
+                                        fetch_run_statuses(&client, &status_tx);
                                     }
                                     CommandResult::Debug(id) => {
                                         close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
@@ -2034,6 +2037,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         }
                         app.on_run_stopped(id);
                     }
+                    gremlins::executor::DaemonEvent::RunRemoved { id } => {
+                        log::info!("[run removed] {id}");
+                        app.on_run_removed(&id);
+                    }
                     gremlins::executor::DaemonEvent::StageTransition { id, stage } => {
                         log::info!("[{id}] stage → {stage}");
                         app.on_stage_transition(id, stage);
@@ -2189,6 +2196,21 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
             // ── Status resync after event_lagged ──────────
             Some(runs) = status_rx.recv() => {
+                // Collect ids present in the daemon's ls response.
+                let live_ids: std::collections::HashSet<&str> =
+                    runs.iter().map(|r| r.id.as_str()).collect();
+                // Prune entries that are no longer in the daemon's ls output
+                // (gremlins rm'd from another terminal, etc.). Collect first
+                // to avoid borrow conflicts with the per-run loop below.
+                let stale: Vec<String> = app
+                    .active_runs
+                    .keys()
+                    .filter(|id| !live_ids.contains(id.as_str()))
+                    .cloned()
+                    .collect();
+                for id in &stale {
+                    app.on_run_removed(id);
+                }
                 for r in runs {
                     app.update_run_status(&r.id, &r.status);
                     // When a run became terminal during broadcast lag its

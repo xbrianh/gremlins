@@ -1167,6 +1167,8 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// Remove a single gremlin by id.
+/// Routes through the daemon when reachable so it can broadcast RunRemoved.
+/// Falls back to direct `Gremlin::clean(true)` when the daemon is down.
 async fn rm_one(id: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
@@ -1182,7 +1184,70 @@ async fn rm_one(id: &str) -> Result<(), String> {
         ));
     }
 
-    let gremlin = match Gremlin::from(id) {
+    // Check if the gremlin is running via the daemon (when reachable) or
+    // fall back to reading state.json directly.
+    {
+        let gremlin = match Gremlin::from(id) {
+            Ok(g) => g,
+            Err(e) => {
+                if !state_dir.is_dir() || !state_file.is_file() {
+                    println!("gremlin {id} is already removed");
+                    return Ok(());
+                }
+                return Err(format!("gremlin {id}: {e}"));
+            }
+        };
+        let status = gremlin.state.read_str("status");
+        if status == "running" {
+            match is_live_in_executor(id).await {
+                Ok(true) => {
+                    return Err(format!(
+                        "gremlin {id} is running — use `gremlins stop {id}` first"
+                    ));
+                }
+                Err(e) => return Err(e),
+                Ok(false) => {}
+            }
+        }
+    }
+
+    // Try the daemon first so it broadcasts RunRemoved.
+    match spawn::connect().await {
+        Ok(mut stream) => {
+            match spawn::check_version(&mut stream).await {
+                Ok(()) => {
+                    let response =
+                        spawn::send_request(&mut stream, serde_json::json!({"op": "rm", "id": id}))
+                            .await;
+                    match response {
+                        Ok(resp) => {
+                            if resp.get("type").and_then(|v| v.as_str()) == Some("error") {
+                                let msg = resp
+                                    .get("message")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown error");
+                                return Err(msg.to_string());
+                            }
+                            println!("gremlin {id} removed");
+                            return Ok(());
+                        }
+                        Err(_) => {
+                            // Daemon dropped the connection; fall through to direct path.
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Version mismatch; fall through to direct path.
+                }
+            }
+        }
+        Err(_) => {
+            // Daemon unreachable; fall through to direct path.
+        }
+    }
+
+    // Direct fallback: daemon is unreachable.
+    let mut gremlin = match Gremlin::from(id) {
         Ok(g) => g,
         Err(e) => {
             if !state_dir.is_dir() || !state_file.is_file() {
@@ -1193,23 +1258,6 @@ async fn rm_one(id: &str) -> Result<(), String> {
         }
     };
 
-    let status = gremlin.state.read_str("status");
-    if status == "running" {
-        match is_live_in_executor(id).await {
-            Ok(true) => {
-                return Err(format!(
-                    "gremlin {id} is running — use `gremlins stop {id}` first"
-                ));
-            }
-            Err(e) => return Err(e),
-            Ok(false) => {}
-        }
-    }
-
-    // Load clean_cmds from the run's hermetic definition snapshot — no
-    // bootstrap.env sourcing, no client build, no stage traversal. Clean
-    // commands must run even when the full runtime init would fail.
-    let mut gremlin = gremlin;
     if let Err(e) = gremlin.attach_clean_cmds() {
         log::warn!("gremlin {id}: could not load definition for clean commands: {e}");
     }
