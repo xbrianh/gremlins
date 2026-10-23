@@ -2,7 +2,7 @@
 //!
 //! Skills are markdown files with YAML frontmatter, placed under
 //! `.gremlins/skills/<name>/SKILL.md` (project) or
-//! `~/.gremlins/skills/<name>/SKILL.md` (user-global). Project skills shadow
+//! `~/.config/gremlins/skills/<name>/SKILL.md` (user-global). Project skills shadow
 //! user-global skills on name collision.
 //!
 //! The on-disk format is the Claude Code `SKILL.md` spec: a `---`-delimited
@@ -406,17 +406,15 @@ pub struct LoadedSkill {
 }
 
 /// Discover all skills under `project_root/.gremlins/skills/` and
-/// `~/.gremlins/skills/`. Project skills shadow user-global skills on name
+/// `~/.config/gremlins/skills/`. Project skills shadow user-global skills on name
 /// collision.
 pub fn discover(project_root: &Path) -> Vec<LoadedSkill> {
     let mut by_name: HashMap<String, LoadedSkill> = HashMap::new();
 
     // User-global skills first.
-    if let Some(home) = dirs::home_dir() {
-        let user_dir = home.join(".gremlins").join("skills");
-        for loaded in scan_skills_dir(&user_dir, SkillSource::User) {
-            by_name.entry(loaded.skill.name.clone()).or_insert(loaded);
-        }
+    let user_dir = crate::config::resolve_user_config_root(None).join("skills");
+    for loaded in scan_skills_dir(&user_dir, SkillSource::User) {
+        by_name.entry(loaded.skill.name.clone()).or_insert(loaded);
     }
 
     // Project skills second (shadow user-global).
@@ -981,7 +979,11 @@ mod tests {
 
         // Create a fake home with a user-global skill.
         let home = tmp.path().join("home");
-        let user_skills = home.join(".gremlins").join("skills").join("shared");
+        let user_skills = home
+            .join(".config")
+            .join("gremlins")
+            .join("skills")
+            .join("shared");
         std::fs::create_dir_all(&user_skills).unwrap();
         std::fs::write(
             user_skills.join("SKILL.md"),
@@ -1002,7 +1004,11 @@ mod tests {
         env.set("HOME", home.to_string_lossy().as_ref());
 
         // Also create a user-only skill to confirm user-global discovery runs.
-        let user_only = home.join(".gremlins").join("skills").join("user-only");
+        let user_only = home
+            .join(".config")
+            .join("gremlins")
+            .join("skills")
+            .join("user-only");
         std::fs::create_dir_all(&user_only).unwrap();
         std::fs::write(
             user_only.join("SKILL.md"),
@@ -1125,7 +1131,7 @@ mod tests {
                 name: "tool".into(),
                 description: "desc".into(),
                 body: "body".into(),
-                dir: PathBuf::from("/home/user/.gremlins/skills/tool"),
+                dir: PathBuf::from("/home/user/.config/gremlins/skills/tool"),
                 source: SkillSource::User,
                 ..Default::default()
             },
@@ -1133,7 +1139,7 @@ mod tests {
         }];
         let (section, _) = build_system_prompt_section(&skills, &["tool".to_string()]);
         assert!(section.contains("Skill directory:"));
-        assert!(section.contains("/home/user/.gremlins/skills/tool"));
+        assert!(section.contains("/home/user/.config/gremlins/skills/tool"));
         assert!(section.contains("script.sh"));
     }
 
