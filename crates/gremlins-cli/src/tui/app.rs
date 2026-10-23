@@ -255,24 +255,36 @@ impl App {
         );
     }
 
-    /// Update state when a run starts.
+    /// Update state when a run starts. If a placeholder was already inserted
+    /// by an early `TokenUsage` event, merge into it instead of overwriting.
     pub fn on_run_started(&mut self, id: String, definition: String, stage: String) {
-        self.active_runs.insert(
-            id,
-            ActiveRun {
-                status: "running".to_string(),
-                stage,
-                definition,
-                project: self.project_name.clone(),
-                prompt_tokens: None,
-                completion_tokens: None,
-                reasoning_tokens: None,
-                cached_input_tokens: None,
-                cache_creation_input_tokens: None,
-                turns: None,
-                cost_usd: None,
-            },
-        );
+        use std::collections::hash_map::Entry;
+        match self.active_runs.entry(id) {
+            Entry::Occupied(mut e) => {
+                let run = e.get_mut();
+                run.status = "running".to_string();
+                run.stage = stage;
+                run.definition = definition;
+                if run.project.is_empty() {
+                    run.project = self.project_name.clone();
+                }
+            }
+            Entry::Vacant(e) => {
+                e.insert(ActiveRun {
+                    status: "running".to_string(),
+                    stage,
+                    definition,
+                    project: self.project_name.clone(),
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    reasoning_tokens: None,
+                    cached_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    turns: None,
+                    cost_usd: None,
+                });
+            }
+        }
         self.ensure_watch_selection();
     }
 
@@ -298,7 +310,53 @@ impl App {
         }
     }
 
-    fn update_run_status(&mut self, id: &str, status: &str) {
+    /// Update token usage fields from a live `TokenUsage` daemon event.
+    /// If the run doesn't exist yet (event arrived before RunStarted),
+    /// insert a placeholder so the /watch table never shows stale `-`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_token_usage(
+        &mut self,
+        id: String,
+        prompt_tokens: Option<u64>,
+        completion_tokens: Option<u64>,
+        reasoning_tokens: Option<u64>,
+        cached_input_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
+        turns: usize,
+        cost_usd: Option<f64>,
+    ) {
+        use std::collections::hash_map::Entry;
+        match self.active_runs.entry(id) {
+            Entry::Occupied(mut e) => {
+                let run = e.get_mut();
+                run.prompt_tokens = prompt_tokens;
+                run.completion_tokens = completion_tokens;
+                run.reasoning_tokens = reasoning_tokens;
+                run.cached_input_tokens = cached_input_tokens;
+                run.cache_creation_input_tokens = cache_creation_input_tokens;
+                run.turns = Some(turns);
+                run.cost_usd = cost_usd.or(run.cost_usd);
+            }
+            Entry::Vacant(e) => {
+                e.insert(ActiveRun {
+                    status: "running".to_string(),
+                    stage: String::new(),
+                    definition: String::new(),
+                    project: self.project_name.clone(),
+                    prompt_tokens,
+                    completion_tokens,
+                    reasoning_tokens,
+                    cached_input_tokens,
+                    cache_creation_input_tokens,
+                    turns: Some(turns),
+                    cost_usd,
+                });
+                self.ensure_watch_selection();
+            }
+        }
+    }
+
+    pub(crate) fn update_run_status(&mut self, id: &str, status: &str) {
         match self.active_runs.get_mut(id) {
             Some(run) => run.status = status.to_string(),
             None => {
