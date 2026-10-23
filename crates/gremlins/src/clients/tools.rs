@@ -1714,7 +1714,7 @@ fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
                 let end_byte = if *end < line_offsets.len() {
                     line_offsets[*end]
                 } else {
-                    // end_line beyond last line — clamp to EOF (extend)
+                    // end_line beyond last line — clamp to EOF (replace through end of file)
                     eof
                 };
                 (start_byte, end_byte)
