@@ -168,14 +168,21 @@ pub(crate) async fn run_stage(
     stage: &ExecutorStage,
     gremlin: &mut Gremlin,
 ) -> Result<(), RunError> {
-    run_stage_scoped(stage, gremlin, "", None, None).await
+    run_stage_scoped(stage, gremlin, "", "", None, None).await
 }
 
 /// Run one stage under `scope`.
+///
+/// `display_stage` is the human-readable stage name for `ls`, `info`, and
+/// `/watch` — it is the immediate enclosing composite's name (or empty for
+/// top-level stages).  This is separate from `scope`, which is the
+/// execution key used for routing (may contain nested paths or iteration
+/// keys).
 async fn run_stage_scoped(
     stage: &ExecutorStage,
     gremlin: &mut Gremlin,
     scope: &str,
+    display_stage: &str,
     enclosing_model: Option<&ModelURI>,
     enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
@@ -206,19 +213,24 @@ async fn run_stage_scoped(
         );
     }
 
-    // Keep `state.stage` pointed at the active leaf so a Ctrl+O pane opened
-    // mid-child classifies and replays the child rather than its enclosing
-    // sequence (which is otherwise reported as `Other`).
+    // Keep `state.stage` pointed at the enclosing composite so `ls`,
+    // `info`, and `/watch` show the human-readable stage name (not an
+    // internal execution key like `reviews/checks` or `1~reviews~1`).
+    // The leaf name goes into `sub_stage` for Ctrl+O classification.
     if matches!(
         stage,
         ExecutorStage::Agent { .. } | ExecutorStage::Exec { .. }
     ) {
-        gremlin.state.set_stage(stage.name(), None, scope);
-        let display_stage = if scoped { scope } else { stage.name() };
+        gremlin.state.set_stage(stage.name(), None, display_stage);
+        let event_stage = if display_stage.is_empty() {
+            stage.name()
+        } else {
+            display_stage
+        };
         crate::executor::supervisor::emit_event(
             crate::executor::supervisor::DaemonEvent::StageTransition {
                 id: gremlin.id.to_string(),
-                stage: display_stage.to_string(),
+                stage: event_stage.to_string(),
             },
         );
     }
@@ -896,6 +908,7 @@ async fn run_sequence(
                 child,
                 gremlin,
                 &key,
+                &seq.name,
                 enclosing_model,
                 enclosing_task_models,
             ))
@@ -962,6 +975,7 @@ async fn run_sequence(
                 child,
                 gremlin,
                 &loop_iter,
+                &seq.name,
                 enclosing_model,
                 enclosing_task_models,
             ))

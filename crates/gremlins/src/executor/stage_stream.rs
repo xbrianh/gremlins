@@ -740,6 +740,12 @@ pub(crate) fn exec_stream_line(line: &str) -> Value {
 // ---------------------------------------------------------------------------
 
 /// Classify the gremlin's current stage for stage-stream routing.
+///
+/// Searches the definition's stage tree recursively — top-level stages
+/// first, then children of composite stages (sequence / parallel bodies).
+/// This ensures that a leaf stage nested inside a sequence (e.g.
+/// `github-review-pull-request` inside `reviews`) is correctly classified
+/// as an agent or exec stage.
 async fn classify_stage_stream(
     store: &Arc<dyn state::StateStore + Send + Sync>,
     stage_name: &str,
@@ -765,10 +771,7 @@ async fn classify_stage_stream(
             default_model.as_deref(),
         )
         .ok()?;
-        def.stages
-            .iter()
-            .find(|s| s.name() == stage_name_owned.as_str())
-            .map(|s| s.stage_type().to_string())
+        find_stage_type_in_tree(&def.stages, &stage_name_owned)
     })
     .await
     .ok()
@@ -778,6 +781,23 @@ async fn classify_stage_stream(
         Some("exec") => StageStreamKind::Exec,
         _ => StageStreamKind::Other,
     }
+}
+
+/// Recursively search a list of [`StageSpec`] nodes for a stage by name
+/// and return its type (`"agent"`, `"exec"`, etc.).  Looks at direct
+/// children first, then descends into composite body nodes.
+fn find_stage_type_in_tree(stages: &[crate::definition::StageSpec], name: &str) -> Option<String> {
+    for stage in stages {
+        if stage.name() == name {
+            return Some(stage.stage_type().to_string());
+        }
+    }
+    for stage in stages {
+        if let Some(found) = find_stage_type_in_tree(stage.body(), name) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------

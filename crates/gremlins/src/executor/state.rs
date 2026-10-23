@@ -1533,12 +1533,19 @@ impl StateData {
         }
     }
 
-    pub fn set_stage(&self, stage: &str, sub_stage: Option<&Value>, parent_stage: &str) {
+    /// Set the gremlin's current stage identity for `ls`, `info`, and stage-stream
+    /// routing.
+    ///
+    /// `leaf_name` is the name of the active leaf stage (agent or exec).
+    /// `display_stage` is the human-readable enclosing composite name (or empty
+    /// for top-level stages).  When non-empty, `state.stage` is pinned to the
+    /// display name and `state.sub_stage` holds the leaf name.
+    pub fn set_stage(&self, leaf_name: &str, sub_stage: Option<&Value>, display_stage: &str) {
         if self.gremlin_id.as_deref().unwrap_or("").is_empty() {
             return;
         }
-        let scoped = !parent_stage.is_empty();
-        let target_stage = if scoped { parent_stage } else { stage };
+        let scoped = !display_stage.is_empty();
+        let target_stage = if scoped { display_stage } else { leaf_name };
         if target_stage.is_empty() {
             return;
         }
@@ -1546,7 +1553,7 @@ impl StateData {
         fields.insert("stage".into(), Value::String(target_stage.to_string()));
         fields.insert("stage_updated_at".into(), Value::String(now_stamp()));
         match if scoped {
-            Some(Value::String(stage.to_string()))
+            Some(Value::String(leaf_name.to_string()))
         } else {
             sub_stage.cloned()
         } {
