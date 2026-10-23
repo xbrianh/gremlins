@@ -101,6 +101,11 @@ enum Cmds {
         /// Gremlin id whose land block to run.
         id: String,
     },
+    /// Expand a modular definition into a self-contained YAML monolith.
+    Bundle {
+        /// Gremlin definition: a bare name (resolved under .gremlins/) or a path.
+        definition: String,
+    },
     #[command(hide = true, name = "serve")]
     Serve {
         /// Lock file descriptor (internal, inherited from parent).
@@ -113,7 +118,6 @@ enum Cmds {
     #[command(external_subcommand)]
     External(Vec<OsString>),
 }
-
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -162,6 +166,7 @@ async fn main() {
             }
         }
         Some(Cmds::Land { id }) => land(&id).await,
+        Some(Cmds::Bundle { definition }) => bundle(&definition).await,
         Some(Cmds::Serve { lock_fd }) => serve_daemon(lock_fd).await,
         Some(Cmds::Version) => version_cmd().await,
         Some(Cmds::External(args)) => status_external(&args).await,
@@ -1530,6 +1535,22 @@ async fn land(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Print a bundled (self-contained) YAML for the given definition to stdout.
+async fn bundle(definition: &str) -> Result<(), String> {
+    config::init_global().map_err(|e| e.to_string())?;
+    let project_root = config::project_root();
+    let definition_path = discovery::resolve_definition_path(definition, project_root)
+        .map_err(|e| format!("definition not found: {e}"))?;
+
+    let bundled = gremlins::definition::bundle_definition(&definition_path)
+        .map_err(|e| format!("failed to bundle: {e}"))?;
+
+    let yaml_str =
+        serde_yaml::to_string(&bundled).map_err(|e| format!("failed to serialize: {e}"))?;
+
+    print!("{yaml_str}");
+    Ok(())
+}
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

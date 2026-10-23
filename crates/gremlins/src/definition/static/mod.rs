@@ -17,6 +17,7 @@ fn default_model_placeholder() -> ModelURI {
     ModelURI::parse("cmd/true").expect("'cmd/true' is always a valid model spec")
 }
 
+pub(crate) mod bundle;
 pub(crate) mod expand;
 pub(crate) mod loader;
 pub(crate) mod prompts;
