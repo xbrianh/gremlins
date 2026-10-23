@@ -1535,6 +1535,18 @@ fn edit_not_found_diagnostic(
     )
 }
 
+enum EditOp {
+    Match {
+        old_str: String,
+        new_str: String,
+    },
+    Range {
+        start: usize,
+        end: usize,
+        replacement: String,
+    },
+}
+
 fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
@@ -1563,48 +1575,131 @@ fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
         Err(e) => return format!("Error: {e}"),
     };
 
-    // Collect old/new pairs with validation.
-    let mut edits: Vec<(&str, &str)> = Vec::with_capacity(edits_arr.len());
+    // Collect parsed edits with validation.
+    let mut edits: Vec<EditOp> = Vec::with_capacity(edits_arr.len());
     for (i, e) in edits_arr.iter().enumerate() {
         let obj = match e.as_object() {
             Some(o) => o,
             None => return format!("Error: edit {} is not an object in {file_path}", i + 1),
         };
-        let old_str = match obj.get("old_string").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => return format!("Error: edit {} missing 'old_string' in {file_path}", i + 1),
-        };
-        let new_str = match obj.get("new_string").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => return format!("Error: edit {} missing 'new_string' in {file_path}", i + 1),
-        };
-        edits.push((old_str, new_str));
+        let has_start = obj.contains_key("start_line");
+        if has_start {
+            // --- Range edit ---
+            let start_line = match obj.get("start_line").and_then(|v| v.as_u64()) {
+                Some(n) if n > 0 => n as usize,
+                Some(_) => {
+                    return format!(
+                        "Error: edit {} 'start_line' must be a positive integer in {file_path}",
+                        i + 1
+                    )
+                }
+                None => {
+                    return format!(
+                        "Error: edit {} 'start_line' must be an integer in {file_path}",
+                        i + 1
+                    )
+                }
+            };
+            let end_line = match obj.get("end_line").and_then(|v| v.as_u64()) {
+                Some(n) if n > 0 => n as usize,
+                Some(_) => {
+                    return format!(
+                        "Error: edit {} 'end_line' must be a positive integer in {file_path}",
+                        i + 1
+                    )
+                }
+                None => {
+                    return format!(
+                        "Error: edit {} 'end_line' must be an integer in {file_path}",
+                        i + 1
+                    )
+                }
+            };
+            if start_line > end_line {
+                return format!(
+                    "Error: edit {} 'start_line' ({start_line}) > 'end_line' ({end_line}) in {file_path}",
+                    i + 1
+                );
+            }
+            let replacement = match obj.get("replacement").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => {
+                    return format!("Error: edit {} missing 'replacement' in {file_path}", i + 1)
+                }
+            };
+            edits.push(EditOp::Range {
+                start: start_line,
+                end: end_line,
+                replacement,
+            });
+        } else {
+            // --- Match edit ---
+            let old_str = match obj.get("old_string").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => {
+                    return format!("Error: edit {} missing 'old_string' in {file_path}", i + 1)
+                }
+            };
+            let new_str = match obj.get("new_string").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => {
+                    return format!("Error: edit {} missing 'new_string' in {file_path}", i + 1)
+                }
+            };
+            edits.push(EditOp::Match { old_str, new_str });
+        }
     }
 
-    // Validate all against original content.
-    for (i, (old_str, _)) in edits.iter().enumerate() {
-        if old_str.is_empty() {
-            return format!("Error: old_string is empty in {file_path} (edit {})", i + 1);
-        }
-        if !content.contains(old_str) {
-            return edit_not_found_diagnostic(&content, file_path, old_str, i + 1);
-        }
-        if content.matches(old_str).count() > 1 {
-            return format!(
-                "Error: old_string is not unique in {file_path} (edit {})",
-                i + 1
-            );
+    // Validate match edits against original content.
+    for (i, edit) in edits.iter().enumerate() {
+        if let EditOp::Match { old_str, .. } = edit {
+            if old_str.is_empty() {
+                return format!("Error: old_string is empty in {file_path} (edit {})", i + 1);
+            }
+            if !content.contains(old_str.as_str()) {
+                return edit_not_found_diagnostic(&content, file_path, old_str, i + 1);
+            }
+            if content.matches(old_str.as_str()).count() > 1 {
+                return format!(
+                    "Error: old_string is not unique in {file_path} (edit {})",
+                    i + 1
+                );
+            }
         }
     }
 
-    // Validate non-overlapping.
+    // Compute byte ranges.
+    let line_offsets: Vec<usize> = {
+        let mut offs = vec![0usize];
+        for (idx, _) in content.char_indices().filter(|(_, c)| *c == '\n') {
+            offs.push(idx + 1);
+        }
+        offs
+    };
+    let eof = content.len();
+
     let ranges: Vec<(usize, usize)> = edits
         .iter()
-        .map(|(o, _)| {
-            let pos = content.find(o).unwrap();
-            (pos, pos + o.len())
+        .map(|edit| match edit {
+            EditOp::Match { old_str, .. } => {
+                let pos = content.find(old_str.as_str()).unwrap();
+                (pos, pos + old_str.len())
+            }
+            EditOp::Range { start, end, .. } => {
+                let start_byte = line_offsets.get(*start - 1).copied().unwrap_or(eof);
+                let end_byte = if *end >= line_offsets.len() {
+                    // end_line beyond EOF — clamp to EOF (extend)
+                    eof
+                } else {
+                    // end_line is inclusive, so go to end of that line
+                    line_offsets.get(*end).copied().unwrap_or(eof)
+                };
+                (start_byte, end_byte)
+            }
         })
         .collect();
+
+    // Validate non-overlapping.
     for i in 0..ranges.len() {
         for j in (i + 1)..ranges.len() {
             if ranges[i].0 < ranges[j].1 && ranges[j].0 < ranges[i].1 {
@@ -1618,16 +1713,22 @@ fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
     }
 
     // Apply in reverse byte-order.
-    let mut indexed: Vec<(usize, &str, &str)> = edits
+    let mut indexed: Vec<(usize, usize, &str)> = edits
         .iter()
-        .map(|(o, n)| (content.find(o).unwrap(), *o, *n))
+        .zip(ranges.iter())
+        .map(|(edit, &(start, end))| {
+            let replacement: &str = match edit {
+                EditOp::Match { new_str, .. } => new_str,
+                EditOp::Range { replacement, .. } => replacement,
+            };
+            (start, end, replacement)
+        })
         .collect();
     indexed.sort_by_key(|a| std::cmp::Reverse(a.0));
 
     let mut updated = content;
-    for (pos, old_str, new_str) in &indexed {
-        let end = *pos + old_str.len();
-        updated.replace_range(*pos..end, new_str);
+    for (start, end, replacement) in &indexed {
+        updated.replace_range(*start..*end, replacement);
     }
 
     if let Err(e) = std::fs::write(&path, updated) {
@@ -2609,17 +2710,39 @@ fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
                         ));
                     }
                 };
-                if !obj.contains_key("old_string") {
+                let has_old = obj.contains_key("old_string");
+                let has_start = obj.contains_key("start_line");
+                if has_old && has_start {
                     return Some(format!(
-                        "Error: edit {} missing 'old_string' for Edit tool",
+                        "Error: edit {} specifies both 'old_string' and 'start_line' — use one mode only (match or range)",
                         i + 1
                     ));
                 }
-                if !obj.contains_key("new_string") {
+                if !has_old && !has_start {
                     return Some(format!(
-                        "Error: edit {} missing 'new_string' for Edit tool",
+                        "Error: edit {} must have either 'old_string' (match mode) or 'start_line' (range mode)",
                         i + 1
                     ));
+                }
+                if has_old && !obj.contains_key("new_string") {
+                    return Some(format!(
+                        "Error: edit {} missing 'new_string' for Edit tool (match mode)",
+                        i + 1
+                    ));
+                }
+                if has_start {
+                    if !obj.contains_key("end_line") {
+                        return Some(format!(
+                            "Error: edit {} missing 'end_line' for Edit tool (range mode)",
+                            i + 1
+                        ));
+                    }
+                    if !obj.contains_key("replacement") {
+                        return Some(format!(
+                            "Error: edit {} missing 'replacement' for Edit tool (range mode)",
+                            i + 1
+                        ));
+                    }
                 }
             }
         }
@@ -2873,7 +2996,7 @@ pub(crate) fn tool_definitions(
         },
         ToolDefinition {
             name: "Edit".into(),
-            description: "Make one or more non-overlapping replacements in a file. Each edit replaces old_string with new_string (requires unique match). Edits are validated against the original file content and must not overlap. When a substring appears multiple times, include 2-3 lines of surrounding context in old_string to make it unique. After a failed edit due to non-uniqueness, re-read only the failing region (with offset/limit), not the whole file. All edits in the array target the same file, specified by the top-level `file_path` parameter — do not nest `file_path` inside individual edit objects.".into(),
+            description: "Make one or more non-overlapping replacements in a file. Each edit replaces old_string with new_string (requires unique match), or replaces lines start_line through end_line (1-based, inclusive) with replacement text. Edits are validated against the original file content and must not overlap. When a substring appears multiple times, include 2-3 lines of surrounding context in old_string to make it unique. After a failed edit due to non-uniqueness, re-read only the failing region (with offset/limit), not the whole file. Prefer the line-range form (start_line/end_line/replacement) when you have line numbers from a recent Read. All edits in the array target the same file, specified by the top-level `file_path` parameter — do not nest `file_path` inside individual edit objects.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2894,9 +3017,20 @@ pub(crate) fn tool_definitions(
                                 "new_string": {
                                     "type": "string",
                                     "description": "Replacement text"
+                                },
+                                "start_line": {
+                                    "type": "integer",
+                                    "description": "1-based start line number (inclusive, for range edits)"
+                                },
+                                "end_line": {
+                                    "type": "integer",
+                                    "description": "1-based end line number (inclusive, for range edits; clamped to EOF if beyond file end)"
+                                },
+                                "replacement": {
+                                    "type": "string",
+                                    "description": "Replacement text for line-range edits"
                                 }
                             },
-                            "required": ["old_string", "new_string"],
                             "additionalProperties": false
                         }
                     }
@@ -4442,7 +4576,9 @@ mod tests {
             &serde_json::json!({"file_path": "x", "edits": [{}]}),
         )
         .unwrap();
-        assert!(err.contains("missing 'old_string'"));
+        assert!(
+            err.contains("must have either 'old_string' (match mode) or 'start_line' (range mode)")
+        );
         assert!(err.contains("edit 1"));
     }
 
@@ -5715,6 +5851,176 @@ mod tests {
         let args = serde_json::json!({"file_path": "x.txt"}).to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
         assert!(result.contains("missing 'edits'"));
+    }
+
+    // --- Range edit tests ---
+
+    #[test]
+    fn edit_range_basic_replacement() {
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\nline2\nline3\nline4\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"start_line": 2, "end_line": 3, "replacement": "new2\nnew3\n"}]
+        })
+        .to_string();
+        assert_eq!(
+            edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args),
+            "OK"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "line1\nnew2\nnew3\nline4\n"
+        );
+    }
+
+    #[test]
+    fn edit_range_end_beyond_eof() {
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"start_line": 2, "end_line": 5, "replacement": "new2"}]
+        })
+        .to_string();
+        assert_eq!(
+            edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args),
+            "OK"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "line1\nnew2"
+        );
+    }
+
+    #[test]
+    fn edit_mixed_match_and_range() {
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "alpha\nbeta\ngamma\ndelta\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [
+                {"old_string": "alpha", "new_string": "A"},
+                {"start_line": 3, "end_line": 3, "replacement": "C\n"}
+            ]
+        })
+        .to_string();
+        assert_eq!(
+            edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args),
+            "OK"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "A\nbeta\nC\ndelta\n"
+        );
+    }
+
+    #[test]
+    fn edit_mixed_overlap_rejected() {
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\nline2\nline3\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [
+                {"old_string": "line1\n", "new_string": "x"},
+                {"start_line": 1, "end_line": 1, "replacement": "y\n"}
+            ]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.contains("overlap"));
+    }
+
+    #[test]
+    fn edit_range_start_gt_end_error() {
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"start_line": 3, "end_line": 2, "replacement": "x"}]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.contains("start_line"));
+        assert!(result.contains(">"));
+    }
+
+    #[test]
+    fn edit_range_missing_replacement_error() {
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"start_line": 1, "end_line": 1}]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.contains("replacement"));
+    }
+
+    #[test]
+    fn edit_neither_old_string_nor_start_line_error() {
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"new_string": "x"}]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.contains("missing 'old_string'"));
+    }
+
+    #[test]
+    fn edit_range_start_line_zero_error() {
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"start_line": 0, "end_line": 1, "replacement": "x"}]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.contains("positive integer"));
+    }
+
+    #[test]
+    fn edit_range_delete_line() {
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "keep\nremove\nkeep\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"start_line": 2, "end_line": 2, "replacement": ""}]
+        })
+        .to_string();
+        assert_eq!(
+            edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args),
+            "OK"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "keep\nkeep\n"
+        );
+    }
+
+    #[test]
+    fn edit_range_insert_before_line() {
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
+        // Replacing line 2 with extra content before it
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"start_line": 2, "end_line": 2, "replacement": "inserted\nline2\n"}]
+        })
+        .to_string();
+        assert_eq!(
+            edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args),
+            "OK"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "line1\ninserted\nline2\n"
+        );
     }
 
     // --- Part 3: Task tests ---
