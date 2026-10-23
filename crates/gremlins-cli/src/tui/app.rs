@@ -303,6 +303,19 @@ impl App {
         self.update_run_status(&id, "stopped");
     }
 
+    /// Remove a run from the watch table entirely (the gremlin was rm'd).
+    pub fn on_run_removed(&mut self, id: &str) {
+        self.active_runs.remove(id);
+        if self.watch_selection.as_deref() == Some(id) {
+            self.watch_selection = None;
+        }
+        if self.watch_following.as_deref() == Some(id) {
+            self.watch_following = None;
+            self.watch_follow_error = None;
+        }
+        self.ensure_watch_selection();
+    }
+
     /// Update the stage of an existing run in-place.
     pub fn on_stage_transition(&mut self, id: String, stage: String) {
         if let Some(run) = self.active_runs.get_mut(&id) {

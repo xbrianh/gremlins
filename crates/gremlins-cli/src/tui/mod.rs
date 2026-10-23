@@ -84,7 +84,8 @@ struct ResyncRun {
 /// ensure the /watch columns are never left stale.
 fn fetch_run_statuses(
     client: &Arc<client::DaemonClient>,
-    status_tx: &tokio::sync::mpsc::UnboundedSender<Vec<ResyncRun>>,
+    status_tx: &tokio::sync::mpsc::UnboundedSender<(Vec<ResyncRun>, u64)>,
+    generation: u64,
 ) {
     let c = Arc::clone(client);
     let tx = status_tx.clone();
@@ -125,7 +126,7 @@ fn fetch_run_statuses(
                     }
                 }
             }
-            let _ = tx.send(runs);
+            let _ = tx.send((runs, generation));
         }
     });
 }
@@ -1242,7 +1243,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     let (model_tx, mut model_rx) = mpsc::unbounded_channel::<ChatModelQuery>();
 
     // ── Channel for lightweight status resync after event_lagged ──
-    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<Vec<ResyncRun>>();
+    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<(Vec<ResyncRun>, u64)>();
+    let mut status_generation: u64 = 0;
 
     // ── Log follow state ──────────────────────────────────────────
     let mut log_follow_handle: Option<tokio::task::JoinHandle<()>> = None;
@@ -1681,6 +1683,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
                                         app.show_runs();
                                         live_area.show_runs();
+                                        // Trigger a fresh ls so the table reflects the daemon's
+                                        // current state, including any gremlins rm'd outside the TUI.
+                                        status_generation = status_generation.wrapping_add(1);
+                                        fetch_run_statuses(&client, &status_tx, status_generation);
                                     }
                                     CommandResult::Debug(id) => {
                                         close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
@@ -2007,6 +2013,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     gremlins::executor::DaemonEvent::RunStarted { id, definition, stage } => {
                         log::info!("[run started] {id} ({definition}) stage={stage}");
                         app.on_run_started(id, definition, stage);
+                        // Invalidate any in-flight ls snapshot so a stale
+                        // response cannot later prune this newly started run
+                        // (the snapshot predates the daemon event).
+                        status_generation = status_generation.wrapping_add(1);
                     }
                     gremlins::executor::DaemonEvent::RunCompleted { id, exit_code } => {
                         log::info!("[run completed] {id} (exit {exit_code})");
@@ -2033,6 +2043,17 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             app.watch_follow_error = None;
                         }
                         app.on_run_stopped(id);
+                    }
+                    gremlins::executor::DaemonEvent::RunRemoved { id } => {
+                        log::info!("[run removed] {id}");
+                        if app.watch_following.as_deref() == Some(id.as_str()) {
+                            close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
+                        }
+                        app.on_run_removed(&id);
+                        // Invalidate any in-flight ls snapshot so a stale
+                        // response cannot resurrect this run after it was
+                        // already removed from active_runs.
+                        status_generation = status_generation.wrapping_add(1);
                     }
                     gremlins::executor::DaemonEvent::StageTransition { id, stage } => {
                         log::info!("[{id}] stage → {stage}");
@@ -2071,7 +2092,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     // Resync lifecycle status from the daemon so terminal
                     // events (RunCompleted / RunFailed / RunStopped) that
                     // were dropped are not permanently stuck at "running".
-                    fetch_run_statuses(&client, &status_tx);
+                    status_generation = status_generation.wrapping_add(1);
+                    fetch_run_statuses(&client, &status_tx, status_generation);
                 } else if raw.get("type").and_then(|v| v.as_str()) == Some("error") {
                     let msg = raw
                         .get("message")
@@ -2187,8 +2209,33 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                 }
             }
 
-            // ── Status resync after event_lagged ──────────
-            Some(runs) = status_rx.recv() => {
+            // ── Status resync after event_lagged / ShowRuns ─
+            Some((runs, generation)) = status_rx.recv() => {
+                // Drop stale responses — a newer fetch already superseded this one,
+                // or a lifecycle event (RunStarted / RunRemoved) invalidated the
+                // snapshot.
+                if generation != status_generation {
+                    continue;
+                }
+                // Prune entries that are no longer in the daemon's ls output
+                // (gremlins rm'd from another terminal, etc.). Always compute
+                // the ID difference — equal row counts do not guarantee
+                // matching IDs. Collect first to avoid borrow conflicts with
+                // the per-run loop below.
+                let live_ids: std::collections::HashSet<&str> =
+                    runs.iter().map(|r| r.id.as_str()).collect();
+                let stale: Vec<String> = app
+                    .active_runs
+                    .keys()
+                    .filter(|id| !live_ids.contains(id.as_str()))
+                    .cloned()
+                    .collect();
+                for id in &stale {
+                    if app.watch_following.as_deref() == Some(id.as_str()) {
+                        close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
+                    }
+                    app.on_run_removed(id);
+                }
                 for r in runs {
                     app.update_run_status(&r.id, &r.status);
                     // When a run became terminal during broadcast lag its

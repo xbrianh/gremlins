@@ -213,6 +213,8 @@ pub enum DaemonEvent {
     },
     #[serde(rename = "run_stopped")]
     RunStopped { id: String },
+    #[serde(rename = "run_removed")]
+    RunRemoved { id: String },
     #[serde(rename = "token_usage")]
     TokenUsage {
         id: String,
@@ -385,6 +387,24 @@ static RUN_MAP: OnceLock<Arc<Mutex<HashMap<String, RunHandle>>>> = OnceLock::new
 
 pub(crate) fn get_run_map() -> &'static Arc<Mutex<HashMap<String, RunHandle>>> {
     RUN_MAP.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+// ---------------------------------------------------------------------------
+// Per-ID async mutex that serialises rm and resume for the same gremlin id,
+// preventing clean(true) from nuking a workspace that a concurrent resume
+// just registered in RUN_MAP.
+// ---------------------------------------------------------------------------
+
+type IdLockMap = HashMap<String, Arc<tokio::sync::Mutex<()>>>;
+
+static ID_LOCKS: OnceLock<Mutex<IdLockMap>> = OnceLock::new();
+
+fn get_id_lock(id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let map = ID_LOCKS.get_or_init(|| Mutex::new(IdLockMap::new()));
+    let mut map = map.lock().unwrap();
+    map.entry(id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
 }
 
 /// Validate `"id"` field from a JSON-RPC-style request against [`validate_gremlin_id`].
@@ -1018,6 +1038,7 @@ async fn dispatch_op(
         }
         "resume" => handle_resume(request, state_root, shutdown_tx).await,
         "ls" => handle_ls(request, state_root).await,
+        "rm" => handle_rm(request, state_root).await,
         "status" => handle_status(request, state_root).await,
         "info" => handle_info(request, state_root).await,
         "artifact" => handle_artifact(request).await,
@@ -1379,6 +1400,11 @@ async fn handle_resume(
         Err(resp) => return resp,
     };
 
+    // Serialise with concurrent rm for this id so that a clean cannot
+    // destroy the workspace after we've registered in RUN_MAP.
+    let id_lock = get_id_lock(id);
+    let _guard = id_lock.lock().await;
+
     {
         let map = get_run_map().lock().unwrap();
         if map.contains_key(id) {
@@ -1585,6 +1611,51 @@ async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
             .cmp(b["started_at"].as_str().unwrap_or(""))
     });
     ok_response(serde_json::json!({"gremlins": rows}))
+}
+
+// ---------------------------------------------------------------------------
+// rm
+// ---------------------------------------------------------------------------
+
+async fn handle_rm(request: &Value, _state_root: &Path) -> Value {
+    let id = match valid_id(request) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    // Serialise with concurrent resume/launch for this id so that a
+    // resume cannot register the gremlin in RUN_MAP while we're about
+    // to destroy its workspace.
+    let id_lock = get_id_lock(id);
+    let _guard = id_lock.lock().await;
+
+    // Reject if the gremlin is currently running.
+    {
+        let map = get_run_map().lock().unwrap();
+        if map.contains_key(id) {
+            return error_response(&format!(
+                "gremlin {id} is running — use `gremlins stop {id}` first"
+            ));
+        }
+    }
+
+    // Lock released before we run potentially-async clean commands.
+    let gremlin = match Gremlin::from(id) {
+        Ok(g) => g,
+        Err(e) => return error_response(&format!("gremlin {id}: {e}")),
+    };
+
+    // Load clean_cmds from the run's hermetic definition snapshot.
+    let mut gremlin = gremlin;
+    if let Err(e) = gremlin.attach_clean_cmds() {
+        log::warn!("gremlin {id}: could not load definition for clean commands: {e}");
+    }
+
+    gremlin.clean(true).await;
+
+    emit_event(DaemonEvent::RunRemoved { id: id.to_string() });
+
+    ok_response(serde_json::json!({"id": id, "removed": true}))
 }
 
 // ---------------------------------------------------------------------------
