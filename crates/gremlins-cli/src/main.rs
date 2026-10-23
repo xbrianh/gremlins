@@ -1542,7 +1542,7 @@ async fn bundle(definition: &str) -> Result<(), String> {
     let definition_path = discovery::resolve_definition_path(definition, project_root.clone())
         .map_err(|e| format!("definition not found: {e}"))?;
 
-    let bundled = gremlins::definition::bundle_definition(&definition_path, &project_root)
+    let bundled = gremlins::definition::bundle_definition(&definition_path)
         .map_err(|e| format!("failed to bundle: {e}"))?;
 
     let yaml_str =
