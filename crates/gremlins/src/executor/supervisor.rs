@@ -2656,7 +2656,7 @@ async fn reinsert_chat_gremlin(id: &str, gremlin: Gremlin, session: &SessionHand
 }
 
 /// Read persisted `state.json.token_usage` as [`UsageStats`].
-fn usage_stats_from_state(value: Option<&serde_json::Value>) -> UsageStats {
+pub(crate) fn usage_stats_from_state(value: Option<&serde_json::Value>) -> UsageStats {
     let obj = value
         .and_then(|v| v.as_object())
         .cloned()
@@ -2674,7 +2674,7 @@ fn usage_stats_from_state(value: Option<&serde_json::Value>) -> UsageStats {
 }
 
 /// Add a per-prompt usage delta to a conversation baseline.
-fn add_usage_stats(baseline: &UsageStats, delta: &UsageStats) -> UsageStats {
+pub(crate) fn add_usage_stats(baseline: &UsageStats, delta: &UsageStats) -> UsageStats {
     UsageStats {
         prompt_tokens: add_opt(baseline.prompt_tokens, delta.prompt_tokens),
         completion_tokens: add_opt(baseline.completion_tokens, delta.completion_tokens),

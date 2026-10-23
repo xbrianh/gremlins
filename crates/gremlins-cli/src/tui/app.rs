@@ -335,7 +335,7 @@ impl App {
                 run.cached_input_tokens = cached_input_tokens;
                 run.cache_creation_input_tokens = cache_creation_input_tokens;
                 run.turns = Some(turns);
-                run.cost_usd = cost_usd;
+                run.cost_usd = cost_usd.or(run.cost_usd);
             }
             Entry::Vacant(e) => {
                 e.insert(ActiveRun {

@@ -63,12 +63,28 @@ fn close_watch_follow(
     live_area.clear_watch_stream();
 }
 
-/// Spawn a one-shot `ls` request that only refreshes lifecycle status
-/// on existing runs. Token and cost fields are left untouched — those
-/// arrive via live `TokenUsage` events.
+/// Snapshot of a single run's lifecycle + token/cost state returned by the
+/// `ls`-based resync triggered after broadcast lag.
+struct ResyncRun {
+    id: String,
+    status: String,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+    turns: Option<usize>,
+    cost_usd: Option<f64>,
+}
+
+/// Spawn a one-shot `ls` request that refreshes lifecycle status
+/// *and* token/cost fields on existing runs. When a run becomes
+/// terminal during broadcast lag its last `TokenUsage` may be
+/// permanently skipped; the persisted cost and usage carried here
+/// ensure the /watch columns are never left stale.
 fn fetch_run_statuses(
     client: &Arc<client::DaemonClient>,
-    status_tx: &tokio::sync::mpsc::UnboundedSender<Vec<(String, String)>>,
+    status_tx: &tokio::sync::mpsc::UnboundedSender<Vec<ResyncRun>>,
 ) {
     let c = Arc::clone(client);
     let tx = status_tx.clone();
@@ -77,18 +93,39 @@ fn fetch_run_statuses(
             .send_control_request(serde_json::json!({"op": "ls"}))
             .await
         {
-            let mut statuses = Vec::new();
+            let mut runs = Vec::new();
             if let Some(gremlins) = resp.get("gremlins").and_then(|v| v.as_array()) {
                 for entry in gremlins {
                     if let (Some(id), Some(status)) = (
                         entry.get("id").and_then(|v| v.as_str()),
                         entry.get("status").and_then(|v| v.as_str()),
                     ) {
-                        statuses.push((id.to_string(), status.to_string()));
+                        runs.push(ResyncRun {
+                            id: id.to_string(),
+                            status: status.to_string(),
+                            prompt_tokens: entry.get("prompt_tokens").and_then(|v| v.as_u64()),
+                            completion_tokens: entry
+                                .get("completion_tokens")
+                                .and_then(|v| v.as_u64()),
+                            reasoning_tokens: entry
+                                .get("reasoning_tokens")
+                                .and_then(|v| v.as_u64()),
+                            cached_input_tokens: entry
+                                .get("cached_input_tokens")
+                                .and_then(|v| v.as_u64()),
+                            cache_creation_input_tokens: entry
+                                .get("cache_creation_input_tokens")
+                                .and_then(|v| v.as_u64()),
+                            turns: entry
+                                .get("turns")
+                                .and_then(|v| v.as_u64())
+                                .map(|v| v as usize),
+                            cost_usd: entry.get("cost_usd").and_then(|v| v.as_f64()),
+                        });
                     }
                 }
             }
-            let _ = tx.send(statuses);
+            let _ = tx.send(runs);
         }
     });
 }
@@ -872,7 +909,11 @@ fn stats_title(
 fn is_daemon_broadcast(value: &serde_json::Value) -> bool {
     match value.get("type").and_then(|v| v.as_str()) {
         Some(t) if t.starts_with("run_") => true,
-        Some("event") | Some("stage_transition") | Some("log_line") | Some("bail") => true,
+        Some("event")
+        | Some("stage_transition")
+        | Some("token_usage")
+        | Some("log_line")
+        | Some("bail") => true,
         _ => false,
     }
 }
@@ -1201,7 +1242,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     let (model_tx, mut model_rx) = mpsc::unbounded_channel::<ChatModelQuery>();
 
     // ── Channel for lightweight status resync after event_lagged ──
-    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<Vec<(String, String)>>();
+    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<Vec<ResyncRun>>();
 
     // ── Log follow state ──────────────────────────────────────────
     let mut log_follow_handle: Option<tokio::task::JoinHandle<()>> = None;
@@ -2147,9 +2188,25 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             }
 
             // ── Status resync after event_lagged ──────────
-            Some(statuses) = status_rx.recv() => {
-                for (id, status) in statuses {
-                    app.update_run_status(&id, &status);
+            Some(runs) = status_rx.recv() => {
+                for r in runs {
+                    app.update_run_status(&r.id, &r.status);
+                    // When a run became terminal during broadcast lag its
+                    // last TokenUsage may be permanently skipped. The
+                    // persisted cost and usage carried by the ls response
+                    // repair the /watch columns.
+                    if r.status == "done" || r.status == "failed" || r.status == "stopped" {
+                        app.on_token_usage(
+                            r.id,
+                            r.prompt_tokens,
+                            r.completion_tokens,
+                            r.reasoning_tokens,
+                            r.cached_input_tokens,
+                            r.cache_creation_input_tokens,
+                            r.turns.unwrap_or(0),
+                            r.cost_usd,
+                        );
+                    }
                 }
             }
 

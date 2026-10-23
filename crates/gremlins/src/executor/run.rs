@@ -214,6 +214,12 @@ async fn run_stage_scoped(
         ExecutorStage::Agent { .. } | ExecutorStage::Exec { .. }
     ) {
         gremlin.state.set_stage(stage.name(), None, "");
+        crate::executor::supervisor::emit_event(
+            crate::executor::supervisor::DaemonEvent::StageTransition {
+                id: gremlin.id.to_string(),
+                stage: stage.name().to_string(),
+            },
+        );
     }
 
     let result = match stage {
@@ -549,6 +555,11 @@ async fn run_agent(
     };
     let prepopulated_messages = verbatim_history.clone();
 
+    // ── Live usage tracker for failure persistence ─────
+    let live_usage = std::sync::Arc::new(std::sync::Mutex::new(
+        None::<(crate::clients::protocol::UsageStats, Option<f64>)>,
+    ));
+
     let params = RunParams {
         prompt: prepared.user_prompt(),
         label: prepared.name.clone(),
@@ -584,20 +595,29 @@ async fn run_agent(
         compaction_opts,
         discovered_skills: gremlin.discovered_skills.clone(),
         active_skills: gremlin.active_skills.clone(),
-        token_usage_sink: crate::clients::agent_loop::TokenUsageSink({
+        token_usage_sink: {
             let gremlin_id = gremlin.id.to_string();
-            Some(std::sync::Arc::new(
+            let client_for_cost = client.clone();
+            let baseline_usage = crate::executor::supervisor::usage_stats_from_state(
+                gremlin.state.read_field("token_usage").as_ref(),
+            );
+            let live_usage_sink = live_usage.clone();
+            crate::clients::agent_loop::TokenUsageSink(Some(std::sync::Arc::new(
                 move |event: crate::clients::agent_loop::TokenUsageEvent| {
+                    let usage =
+                        crate::executor::supervisor::add_usage_stats(&baseline_usage, &event.usage);
+                    let cost_usd = client_for_cost.total_cost_usd();
+                    *live_usage_sink.lock().unwrap() = Some((usage.clone(), cost_usd));
                     crate::executor::supervisor::emit_event(
                         crate::executor::supervisor::DaemonEvent::TokenUsage {
                             id: gremlin_id.clone(),
-                            usage: event.usage,
-                            cost_usd: event.cost_usd,
+                            usage,
+                            cost_usd,
                         },
                     );
                 },
-            ))
-        }),
+            )))
+        },
     };
 
     let effective_model = params
@@ -639,10 +659,34 @@ async fn run_agent(
         params.model.as_deref().unwrap_or("default")
     );
 
-    let completed = client.run(params, interactive).await.map_err(|error| {
-        let name = prepared.name.clone();
-        client_run_err(error, &name)
-    })?;
+    let completed = match client.run(params, interactive).await {
+        Ok(c) => c,
+        Err(error) => {
+            // Persist the live usage counters from partial (failed) agent-loop
+            // turns so the Gremlin::finish() snapshot has accurate token
+            // totals rather than the previous stage's stale values.
+            if let Some((usage, _cost_usd)) = live_usage.lock().unwrap().take() {
+                let mut delta: HashMap<String, i64> = HashMap::new();
+                delta.insert("turns".to_string(), usage.turns as i64);
+                delta.extend(
+                    [
+                        ("prompt_tokens", usage.prompt_tokens),
+                        ("completion_tokens", usage.completion_tokens),
+                        ("cached_input_tokens", usage.cached_input_tokens),
+                        (
+                            "cache_creation_input_tokens",
+                            usage.cache_creation_input_tokens,
+                        ),
+                        ("reasoning_tokens", usage.reasoning_tokens),
+                    ]
+                    .into_iter()
+                    .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
+                );
+                gremlin.state.accumulate_token_usage(&delta);
+            }
+            return Err(client_run_err(error, &prepared.name));
+        }
+    };
 
     send_log(
         &gremlin.runtime_config.log_tx,
@@ -1019,6 +1063,12 @@ impl Gremlin {
             }
 
             self.state.set_stage(stage.name(), None, "");
+            crate::executor::supervisor::emit_event(
+                crate::executor::supervisor::DaemonEvent::StageTransition {
+                    id: self.id.to_string(),
+                    stage: stage.name().to_string(),
+                },
+            );
 
             let existing_attempt = self.state.read_str("attempt");
             let attempt = if existing_attempt.starts_with(&format!("{}-", stage.name())) {
