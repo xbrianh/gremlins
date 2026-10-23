@@ -120,7 +120,7 @@ stages:
   - name: optimize
     type: sequence
     max-iterations: 5
-    skip_if_exists: "artifact://{loop_iter}/converged"
+    skip_if_exists: "artifact://converged"
     body:
       # --- prepare refactor context (latest report + previous, when available) ---
       - name: prepare-refactor-context
@@ -287,7 +287,7 @@ stages:
             drag_best_val: content("artifact://drag_best.txt")
           outputs:
             report: "artifact://{loop_iter}/report.json"
-            converged?: "artifact://{loop_iter}/converged"
+            converged?: "artifact://converged"
         options:
           cmds:
             - |
@@ -314,7 +314,9 @@ stages:
                 touch {converged}
                 echo "converged — drag $CURR >= best $BEST"
                 printf "%s" "$BEST" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"
+                exit 1
               else
+                rm -f {converged}
                 printf "%s" "$CURR" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"
                 echo "improved — drag $CURR < $BEST (was $BEST)"
               fi
