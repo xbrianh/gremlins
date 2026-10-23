@@ -153,13 +153,13 @@ stages:
             {drag_context}
 
             ## What drag means
-            drag = token_count^w1 · (1+deps)^w2 · (1 + k·(1−comprehensibility))
+            drag = (1+footprint)^w2 · exp(2.5·(1−comprehensibility))
 
             Higher drag = the module is harder to maintain and change. The optimizer
             minimizes the **sum** of drag across all scored modules — not any
-            single module in isolation. `deps` is the total token count of every
-            module transitively reachable from the module (excluding itself), so
-            a module drags its whole downstream footprint with it.
+            single module in isolation. `footprint` is the total token count of
+            every module transitively reachable from the module (including itself),
+            so a module drags its whole downstream footprint with it.
 
             ## Drag curves (how each factor responds to change)
 
@@ -167,30 +167,31 @@ stages:
 
             ## Strategy
             1. **Reduce token_count** — extract helpers, deduplicate, trim boilerplate,
-               remove dead code. This is the largest absolute contributor.
-            2. **Lower deps/footprint** — decouple cross-cutting concerns and avoid
+               remove dead code.
+            2. **Lower footprint** — decouple cross-cutting concerns and avoid
                deep dependency chains; every downstream token counts against the
-               modules that reach it.
+               modules that reach it (including the module itself).
             3. **Improve comprehensibility** — clearer names, simpler control flow,
                better documentation where it aids understanding. The penalty is
                multiplicative: low comprehensibility scales the whole footprint by
-               up to (1+k).
+               up to exp(2.5) ≈ 12.2.
 
             ### Splitting trap (CRITICAL)
             Splitting one module into two usually INCREASES total drag because
-            each piece still carries the shared transitive footprint (deps):
+            each piece still carries the shared transitive footprint:
 
-            One module (2000 tokens, deps 3000, comp 0.5, w1=1, w2=0.5, k=1):
-              drag = 2000 · (1+3000)^0.5 · 1.5 ≈ 2000 · 54.8 · 1.5 ≈ 164,400
+            One module (2000 tokens, footprint 5000, comp 0.5, w2=0.5, m=2.5):
+              drag = (1+5000)^0.5 · exp(2.5·0.5) ≈ 70.7 · 3.49 ≈ 246.8
 
             Split into A (1000 tokens) and B (1000 tokens), where A depends on B
-            and both still depend on the shared downstream deps (3000 tokens):
-              drag(A) = 1000 · (1+4000)^0.5 · 1.5 ≈ 1000 · 63.3 · 1.5 ≈ 94,950
-              drag(B) = 1000 · (1+3000)^0.5 · 1.5 ≈ 1000 · 54.8 · 1.5 ≈ 82,200
-              total ≈ 177,150
+            and both still depend on the shared downstream modules (3000 tokens
+            beyond A/B themselves):
+              drag(A) = (1+5000)^0.5 · exp(2.5·0.5) ≈ 70.7 · 3.49 ≈ 246.8
+              drag(B) = (1+4000)^0.5 · exp(2.5·0.5) ≈ 63.3 · 3.49 ≈ 220.8
+              total ≈ 467.6
 
             → Splitting increased drag even though token_count was unchanged, because
-              both halves still carry the shared deps footprint. Only split if the
+              both halves still carry the shared footprint. Only split if the
               resulting modules are dramatically smaller, more comprehensible, or
               sever real dependency edges. Prefer inlining, deduplication, and
               dead-code removal over splitting.

@@ -1,7 +1,7 @@
 mod lang;
 mod scoring;
 
-use scoring::{compute_deps, compute_drag};
+use scoring::{compute_drag, compute_footprint};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -38,17 +38,14 @@ struct Cli {
     #[arg(long, default_value = "o200k_base")]
     tokenizer: String,
 
-    /// Weight for token_count in the drag formula.
-    #[arg(long, default_value_t = 1.0)]
-    w1: f64,
-
-    /// Weight for the footprint/deps term in the drag formula.
+    /// Weight for the footprint term in the drag formula.
     #[arg(long, default_value_t = 0.5)]
     w2: f64,
 
-    /// Multiplier for the comprehensibility penalty in the drag formula.
-    #[arg(long, default_value_t = 1.0)]
-    k: f64,
+    /// Exponent for the comprehensibility penalty
+    /// (m=2.5 balances merges vs splits).
+    #[arg(long, default_value_t = 2.5)]
+    m: f64,
 
     /// Print the resolved model spec and diagnostic information.
     #[arg(short = 'v', long)]
@@ -72,8 +69,8 @@ struct Cli {
     #[arg(long)]
     clear_cache: bool,
 
-    /// Print drag curves showing how token count, dependency footprint, and
-    /// comprehensibility contribute to drag at the current weights.
+    /// Print drag curves showing how footprint and comprehensibility
+    /// contribute to drag at the current weights.
     /// Exits immediately after printing; no modules are scored.
     #[arg(long)]
     curves: bool,
@@ -91,9 +88,8 @@ struct DragReport {
 
 #[derive(Serialize)]
 struct DragConfig {
-    w1: f64,
     w2: f64,
-    k: f64,
+    m: f64,
 }
 
 #[derive(Serialize)]
@@ -101,13 +97,11 @@ struct ModuleDrag {
     module: String,
     file: String,
     token_count: usize,
-    /// Total token count of the module's transitive dependency closure
-    /// (excluding the module itself).
-    deps: usize,
-    /// `token_count + deps` — the module's full footprint.
+    /// Total token count of the module plus all modules transitively
+    /// reachable from it (including the module itself).
     footprint: usize,
     comprehensibility: Option<f64>,
-    /// The drag metric: `tokens^w1 · (1+deps)^w2 · (1 + k·(1−comp))`.
+    /// The drag metric: `(1+footprint)^w2 · exp(m·(1−comp))`.
     drag: f64,
 }
 
@@ -152,7 +146,7 @@ async fn run() -> Result<(), String> {
     }
 
     if cli.curves {
-        print_curves(cli.w1, cli.w2, cli.k);
+        print_curves(cli.w2, cli.m);
         return Ok(());
     }
 
@@ -253,9 +247,9 @@ async fn run() -> Result<(), String> {
     }
 
     // 5. Load the tokenizer once and count tokens for every in-package
-    //    module.  `deps(m)` sums token counts across a module's transitive
-    //    dependency closure, so the full package source tree is needed even
-    //    when only a subset of modules is scored.
+    //    module.  `footprint(m)` sums token counts across a module and its
+    //    transitive dependency closure, so the full package source tree is
+    //    needed even when only a subset of modules is scored.
     let tokenizer = parse_tokenizer(&cli.tokenizer)?;
     let bpe = tiktoken_rs::bpe_for_tokenizer(tokenizer)
         .map_err(|e| format!("failed to load tokenizer {}: {e}", cli.tokenizer))?;
@@ -273,23 +267,29 @@ async fn run() -> Result<(), String> {
     }
 
     // 6. Compute transitive dependency footprints and assemble per-module
-    //    metrics.  Comprehensibility stays scoped to `--target` modules only.
-    let deps_map = compute_deps(&edges, &token_counts);
+    //    metrics.  A module's footprint includes its own token count, so
+    //    every scored module needs one — even when it falls outside the
+    //    discovered packages.
+    //    Comprehensibility stays scoped to `--target` modules only.
+    for (module, file, _pkg_key) in &target_modules {
+        if !token_counts.contains_key(module) {
+            let n = count_tokens(bpe, file)?;
+            token_counts.insert(module.clone(), n);
+        }
+    }
+
+    let footprint_map = compute_footprint(&edges, &token_counts);
 
     let mut scores: Vec<ModuleDrag> = Vec::new();
     for (module, file, _pkg_key) in &target_modules {
-        let token_count = match token_counts.get(module) {
-            Some(n) => *n,
-            None => count_tokens(bpe, file)?,
-        };
-        let deps = deps_map.get(module).copied().unwrap_or(0);
+        let token_count = token_counts.get(module).copied().unwrap_or(0);
+        let footprint = footprint_map.get(module).copied().unwrap_or(0);
 
         scores.push(ModuleDrag {
             module: module.clone(),
             file: file.to_string_lossy().into_owned(),
             token_count,
-            deps,
-            footprint: token_count + deps,
+            footprint,
             comprehensibility: None,
             drag: 0.0,
         });
@@ -318,12 +318,10 @@ async fn run() -> Result<(), String> {
     for s in &mut scores {
         s.drag = compute_drag(
             &DragConfig {
-                w1: cli.w1,
                 w2: cli.w2,
-                k: cli.k,
+                m: cli.m,
             },
-            s.token_count,
-            s.deps,
+            s.footprint,
             s.comprehensibility,
         );
     }
@@ -339,9 +337,8 @@ async fn run() -> Result<(), String> {
     if cli.json {
         let report = DragReport {
             config: DragConfig {
-                w1: cli.w1,
                 w2: cli.w2,
-                k: cli.k,
+                m: cli.m,
             },
             modules: scores,
         };
@@ -424,7 +421,7 @@ fn parse_tokenizer(name: &str) -> Result<tiktoken_rs::tokenizer::Tokenizer, Stri
 // ---------------------------------------------------------------------------
 // Graph computations
 // ---------------------------------------------------------------------------
-// (see `crates/drag/src/scoring.rs` for compute_deps and compute_drag)
+// (see `crates/drag/src/scoring.rs` for compute_footprint and compute_drag)
 
 // ---------------------------------------------------------------------------
 // Token counting
@@ -1151,31 +1148,28 @@ fn remove_trailing_commas(json: &str) -> String {
 // Drag curves
 // ---------------------------------------------------------------------------
 
-fn print_curves(w1: f64, w2: f64, k: f64) {
-    let factor_tokens = |n: usize| -> f64 { (n as f64).powf(w1) };
-    let factor_deps = |d: usize| -> f64 { (1.0 + d as f64).powf(w2) };
-    let factor_comp = |c: f64| -> f64 { 1.0 + k * (1.0 - c) };
+fn print_curves(w2: f64, m: f64) {
+    let factor_footprint = |f: usize| -> f64 { (1.0 + f as f64).powf(w2) };
+    let factor_comp = |c: f64| -> f64 { (m * (1.0 - c)).exp() };
 
-    println!("Drag curves (w1={w1}, w2={w2}, k={k}):\n");
-    println!("  drag = tokens^w1 · (1+deps)^w2 · (1 + k·(1−comp))");
+    println!("Drag curves (w2={w2}, m={m}):\n");
+    println!("  drag = (1+footprint)^w2 · exp(m·(1−comp))");
 
-    println!("  Token count factor (tokens^w1, w1={w1}):");
-    for tokens in [100, 250, 500, 1000, 2000, 5000] {
-        println!("    {tokens:>5} tokens  → {:>10.3}", factor_tokens(tokens));
+    println!("  Footprint factor ((1+footprint)^w2, w2={w2}):");
+    for footprint in [0, 5, 10, 50, 100, 500, 1000, 5000] {
+        println!(
+            "    {footprint:>5} footprint  → {:>10.3}",
+            factor_footprint(footprint)
+        );
     }
 
-    println!("\n  Dependency footprint factor ((1+deps)^w2, w2={w2}):");
-    for deps in [0, 5, 10, 50, 100, 500, 1000, 5000] {
-        println!("    {deps:>5} deps  → {:>10.3}", factor_deps(deps));
-    }
-
-    println!("\n  Comprehensibility factor (1 + k·(1−comp), k={k}):");
+    println!("\n  Comprehensibility factor (exp(m·(1−comp)), m={m}):");
     for comp in [0.10, 0.25, 0.50, 0.75, 0.90, 1.00] {
         println!("    {comp:.2}  → {:>10.3}", factor_comp(comp));
     }
 
-    println!("\n  All factors are multiplied together; larger values mean more drag.");
-    println!("  Comprehensibility below 1.0 amplifies drag by up to (1+k).");
+    println!("\n  Both factors are multiplied together; larger values mean more drag.");
+    println!("  Comprehensibility below 1.0 amplifies drag by up to exp(m).");
 }
 
 // ---------------------------------------------------------------------------
@@ -1189,36 +1183,34 @@ fn print_human_table(scores: &[ModuleDrag]) {
 
     if has_comp {
         println!(
-            "{:<55} {:>8} {:>10} {:>10} {:>6} {:>14}",
-            "module", "tokens", "deps", "footprint", "comp", "drag"
+            "{:<55} {:>8} {:>10} {:>6} {:>14}",
+            "module", "tokens", "footprint", "comp", "drag"
         );
-        println!("{}", "-".repeat(112));
+        println!("{}", "-".repeat(97));
     } else {
         println!(
-            "{:<55} {:>8} {:>10} {:>10} {:>14}",
-            "module", "tokens", "deps", "footprint", "drag"
+            "{:<55} {:>8} {:>10} {:>14}",
+            "module", "tokens", "footprint", "drag"
         );
-        println!("{}", "-".repeat(106));
+        println!("{}", "-".repeat(90));
     }
 
     for s in scores {
         if has_comp {
             let c = s.comprehensibility.expect("has_comp guarantees Some");
             println!(
-                "{:<55} {:>8} {:>10} {:>10} {:>6.2} {:>14.1}",
+                "{:<55} {:>8} {:>10} {:>6.2} {:>14.1}",
                 truncate(&s.module, 54),
                 s.token_count,
-                s.deps,
                 s.footprint,
                 c,
                 s.drag,
             );
         } else {
             println!(
-                "{:<55} {:>8} {:>10} {:>10} {:>14.1}",
+                "{:<55} {:>8} {:>10} {:>14.1}",
                 truncate(&s.module, 54),
                 s.token_count,
-                s.deps,
                 s.footprint,
                 s.drag,
             );
