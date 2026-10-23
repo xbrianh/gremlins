@@ -359,6 +359,11 @@ async fn ls(here: bool) -> Result<(), String> {
             }
         }
 
+        let project_display = Path::new(project)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(project);
+
         let prompt_tokens = entry.get("prompt_tokens").and_then(|v| v.as_u64());
         let completion_tokens = entry.get("completion_tokens").and_then(|v| v.as_u64());
         let reasoning_tokens = entry.get("reasoning_tokens").and_then(|v| v.as_u64());
@@ -374,7 +379,7 @@ async fn ls(here: bool) -> Result<(), String> {
             status.to_string(),
             stage.to_string(),
             started_at.to_string(),
-            project.to_string(),
+            project_display.to_string(),
             launch.to_string(),
             crate::tui::format_token_count(prompt_tokens),
             crate::tui::format_token_count(completion_tokens),
@@ -440,6 +445,11 @@ fn ls_direct(here: bool, cwd: &Path) -> Result<(), String> {
             }
         }
 
+        let project_display = Path::new(project)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(project);
+
         let launch = state_map
             .get("metadata")
             .and_then(|v| v.get("cli"))
@@ -474,7 +484,7 @@ fn ls_direct(here: bool, cwd: &Path) -> Result<(), String> {
             direct_status_display(&state_map, "status"),
             map_field_display(&state_map, "stage"),
             map_field_display(&state_map, "started_at"),
-            project.to_string(),
+            project_display.to_string(),
             launch,
             crate::tui::format_token_count(prompt_tokens),
             crate::tui::format_token_count(completion_tokens),
