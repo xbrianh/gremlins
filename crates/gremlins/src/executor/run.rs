@@ -213,11 +213,12 @@ async fn run_stage_scoped(
         stage,
         ExecutorStage::Agent { .. } | ExecutorStage::Exec { .. }
     ) {
-        gremlin.state.set_stage(stage.name(), None, "");
+        gremlin.state.set_stage(stage.name(), None, scope);
+        let display_stage = if scoped { scope } else { stage.name() };
         crate::executor::supervisor::emit_event(
             crate::executor::supervisor::DaemonEvent::StageTransition {
                 id: gremlin.id.to_string(),
-                stage: stage.name().to_string(),
+                stage: display_stage.to_string(),
             },
         );
     }

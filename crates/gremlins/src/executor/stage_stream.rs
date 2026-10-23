@@ -91,8 +91,9 @@ pub(crate) async fn handle_stage_stream(
 
     let state = store.state_tree();
     let stage_name = state
-        .get("stage")
+        .get("sub_stage")
         .and_then(|v| v.as_str())
+        .or_else(|| state.get("stage").and_then(|v| v.as_str()))
         .unwrap_or("")
         .to_string();
 
