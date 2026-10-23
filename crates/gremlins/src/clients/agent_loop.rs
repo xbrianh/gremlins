@@ -1840,9 +1840,11 @@ async fn run_agent_loop_core(
             });
         }
 
-        // Phase 2: concurrent execution. Over-cap Task calls short-circuit so a
-        // single response cannot spawn an unbounded number of child loops.
-        // Wrapped in a tokio::select! with maybe_pause so the operator can
+        // Phase 2: concurrent execution. All tools in the batch run in
+        // parallel via join_all. The model is prompted to batch independent
+        // calls (up to MAX_CONCURRENT_TOOLS) for lowest wall-clock latency.
+        // Over-cap Task calls short-circuit so a single response cannot spawn
+        // an unbounded number of child loops.        // Wrapped in a tokio::select! with maybe_pause so the operator can
         // interrupt a long-running tool batch.
         let mut ctx = tool_ctx.clone();
         ctx.parent_history = fork_parent_history;
