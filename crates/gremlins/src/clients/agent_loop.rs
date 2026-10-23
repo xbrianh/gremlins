@@ -482,8 +482,8 @@ pub(crate) async fn run_agent_loop_nested(
         max_tokens,
     };
     // Nested loops never expose LoadSkill even when the parent has skills.
-    let nested_chat_mode = false;
-    let tool_defs = tools::tool_definitions(tool_filter, nested_chat_mode);
+    let is_chat = false;
+    let tool_defs = tools::tool_definitions(tool_filter, is_chat);
     let mut raw: Option<std::fs::File> = None;
     let mut captured: Option<Vec<serde_json::Value>> = None;
     let mut nested_tool_ctx = tool_ctx.clone();

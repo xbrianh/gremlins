@@ -132,6 +132,9 @@ pub(crate) struct AgentLoopRuntime {
     /// at the next turn boundary.
     pub(crate) active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
     /// Discovered skills, set when skills are available (chat-only).
+    /// This is `Some` only for top-level chat sessions; headless gremlins
+    /// and nested tasks see `None`. It doubles as the canonical chat
+    /// predicate for tool gates (Mischief bypass, LoadSkill inclusion).
     pub(crate) discovered_skills: Option<Arc<Vec<LoadedSkill>>>,
 }
 
@@ -2829,6 +2832,8 @@ pub(crate) async fn invoke(
         // Mischief is chat-only; allow it through the gate only when the
         // session is chat. LoadSkill keeps its old bypass: the handler returns
         // an error when skills aren't configured.
+        // discovered_skills is `Some` only in chat sessions — it is the
+        // canonical chat predicate shared with tool_definitions.
         let chat = ctx.discovered_skills.is_some();
         if !always_available(name)
             && name != "LoadSkill"
@@ -3017,10 +3022,7 @@ fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String
     result
 }
 
-pub(crate) fn tool_definitions(
-    filter: Option<&[String]>,
-    include_load_skill: bool,
-) -> Vec<ToolDefinition> {
+pub(crate) fn tool_definitions(filter: Option<&[String]>, is_chat: bool) -> Vec<ToolDefinition> {
     let mut all = vec![
         ToolDefinition {
             name: "Read".into(),
@@ -3276,7 +3278,7 @@ message to finish. The summary parameter briefly describes what you accomplished
             "additionalProperties": false
         }),
     });
-    if include_load_skill {
+    if is_chat {
         all.push(ToolDefinition {
             name: "LoadSkill".into(),
             description: "Load a chat skill by name. Use this when a task matches a skill's description from the available skills index. Returns the skill body and a listing of its bundled files. The skill is then active for the rest of the session.".into(),
@@ -3298,8 +3300,8 @@ message to finish. The summary parameter briefly describes what you accomplished
             .into_iter()
             .filter(|t| {
                 always_available(&t.name)
-                    || (include_load_skill && t.name == "LoadSkill")
-                    || chat_only_always_available(&t.name, include_load_skill)
+                    || (is_chat && t.name == "LoadSkill")
+                    || chat_only_always_available(&t.name, is_chat)
                     || names.iter().any(|n| n == &t.name)
             })
             .collect(),
@@ -4436,6 +4438,66 @@ mod tests {
         assert!(names.contains(&"Bash"), "got: {names:?}");
     }
 
+    #[tokio::test]
+    async fn mischief_invoke_blocked_in_headless() {
+        // Mischief is chat-only. Headless gremlins with an allowlist that
+        // omits Mischief must get "unknown tool".
+        let dir = tmp();
+        let c = AgentLoopRuntime {
+            cwd: Some(dir.clone()),
+            extra_env: None,
+            base_env: None,
+            sandbox: SandboxMode::Roots(vec![dir.clone()]),
+            audit_log: None,
+            allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
+            task_fn: None,
+            audit_lock: None,
+            parent_history: None,
+            id_prefix: String::new(),
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
+            active_skills: None,
+            discovered_skills: None,
+        };
+        let out = invoke("tool-test-id", "Mischief", &c, "{}").await;
+        assert!(
+            out.contains("unknown tool"),
+            "headless Mischief must be rejected, got: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mischief_invoke_allowed_in_chat() {
+        // Mischief is chat-only but always available in chat sessions even
+        // when the allowlist omits it.
+        let dir = tmp();
+        let c = AgentLoopRuntime {
+            cwd: Some(dir.clone()),
+            extra_env: None,
+            base_env: None,
+            sandbox: SandboxMode::Roots(vec![dir.clone()]),
+            audit_log: None,
+            allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
+            task_fn: None,
+            audit_lock: None,
+            parent_history: None,
+            id_prefix: String::new(),
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
+            active_skills: Some(Arc::new(std::sync::Mutex::new(vec![]))),
+            discovered_skills: Some(Arc::new(vec![])),
+        };
+        let out = invoke("tool-test-id", "Mischief", &c, "{}").await;
+        assert!(
+            out.starts_with("# Gremlins YAML DSL Reference"),
+            "chat Mischief must succeed, got: {out}"
+        );
+    }
+
     #[test]
     fn load_skill_in_tool_definitions_when_chat_mode() {
         let defs = tool_definitions(None, true);
@@ -4453,7 +4515,7 @@ mod tests {
 
     #[test]
     fn load_skill_passes_filter_when_chat_mode() {
-        // With include_load_skill=true, LoadSkill must appear even when a
+        // With is_chat=true, LoadSkill must appear even when a
         // restrictive filter is active — the default native_block filter
         // does not include LoadSkill, and chat sessions must always expose it.
         let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), true);
