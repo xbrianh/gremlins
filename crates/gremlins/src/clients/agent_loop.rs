@@ -24,6 +24,32 @@ use super::model::{GremlinsModel, GremlinsModelError};
 use super::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 
+/// Payload emitted by the agent loop after each turn for live token/cost
+/// tracking. The executor layer wires a sink that maps this into a
+/// [`DaemonEvent::TokenUsage`](crate::executor::supervisor::DaemonEvent).
+#[derive(Debug, Clone)]
+pub struct TokenUsageEvent {
+    #[allow(dead_code)]
+    pub id: String,
+    pub usage: UsageStats,
+    pub cost_usd: Option<f64>,
+}
+
+/// Sink for [`TokenUsageEvent`]s fired at the end of every agent-loop turn.
+///
+/// The executor layer wires this to the daemon event broadcast so the TUI
+/// can update token/cost columns live without polling.
+#[derive(Clone)]
+pub struct TokenUsageSink(pub Option<std::sync::Arc<dyn Fn(TokenUsageEvent) + Send + Sync>>);
+
+impl std::fmt::Debug for TokenUsageSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("TokenUsageSink")
+            .field(&self.0.is_some())
+            .finish()
+    }
+}
+
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
     if let Some(tx) = tx {
         let _ = tx.send(format!("{prefix}{msg}"));
@@ -413,6 +439,7 @@ pub(crate) async fn run_agent_loop(
         ctx.completion_nudge_budget,
         &ctx.params.log_tx,
         ctx.params.gremlin_id.clone(),
+        ctx.params.token_usage_sink.clone(),
         interactive,
         tool_output_rx,
         ctx.prepopulated_messages.clone(),
@@ -498,6 +525,7 @@ pub(crate) async fn run_agent_loop_nested(
         completion_nudge_budget,
         &log_tx,
         None,
+        TokenUsageSink(None),
         None,
         None,
         prepopulated_messages,
@@ -804,6 +832,7 @@ async fn run_agent_loop_core(
     mut completion_nudge_budget: usize,
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     gremlin_id: Option<String>,
+    token_usage_sink: TokenUsageSink,
     interactive: Option<InteractiveSession>,
     tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
     prepopulated_messages: Option<Vec<Message>>,
@@ -1386,20 +1415,15 @@ async fn run_agent_loop_core(
             total_reasoning_tokens,
         );
 
-        // ── Emit cumulative token usage to the daemon broadcast ─────
+        // ── Emit cumulative token usage via injected sink ─────
         if let Some(ref id) = gremlin_id {
-            crate::executor::supervisor::emit_event(
-                crate::executor::supervisor::DaemonEvent::TokenUsage {
+            if let Some(ref sink) = token_usage_sink.0 {
+                sink(TokenUsageEvent {
                     id: id.clone(),
-                    prompt_tokens: total_prompt_tokens,
-                    completion_tokens: total_completion_tokens,
-                    reasoning_tokens: total_reasoning_tokens,
-                    cached_input_tokens: total_cached_tokens,
-                    cache_creation_input_tokens: total_cache_creation_tokens,
-                    turns: totals.turns,
+                    usage: totals.clone(),
                     cost_usd: None,
-                },
-            );
+                });
+            }
         }
 
         emit_turn_stats(prefix, turn_num, turn_stats.as_ref(), &totals, log_tx);
@@ -3266,6 +3290,7 @@ mod tests {
                 compaction_opts: None,
                 discovered_skills: None,
                 active_skills: None,
+                token_usage_sink: TokenUsageSink(None),
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
@@ -6244,6 +6269,7 @@ mod tests {
                 0,
                 &None,
                 None,
+                TokenUsageSink(None),
                 Some(session),
                 None,
                 None,
@@ -6357,6 +6383,7 @@ mod tests {
                 0,
                 &None,
                 None,
+                TokenUsageSink(None),
                 Some(session),
                 None,
                 None,
@@ -6457,6 +6484,7 @@ mod tests {
                 0,
                 &None,
                 None,
+                TokenUsageSink(None),
                 Some(session),
                 None,
                 None,
@@ -6546,6 +6574,7 @@ mod tests {
                 0,
                 &None,
                 None,
+                TokenUsageSink(None),
                 Some(session),
                 None,
                 None,
@@ -6706,6 +6735,7 @@ mod tests {
             0,
             &log_slot,
             None,
+            TokenUsageSink(None),
             None,
             None,
             None,
@@ -6790,6 +6820,7 @@ mod tests {
             0,
             &None,
             None,
+            TokenUsageSink(None),
             None,
             None,
             None,

@@ -584,6 +584,20 @@ async fn run_agent(
         compaction_opts,
         discovered_skills: gremlin.discovered_skills.clone(),
         active_skills: gremlin.active_skills.clone(),
+        token_usage_sink: crate::clients::agent_loop::TokenUsageSink({
+            let gremlin_id = gremlin.id.to_string();
+            Some(std::sync::Arc::new(
+                move |event: crate::clients::agent_loop::TokenUsageEvent| {
+                    crate::executor::supervisor::emit_event(
+                        crate::executor::supervisor::DaemonEvent::TokenUsage {
+                            id: gremlin_id.clone(),
+                            usage: event.usage,
+                            cost_usd: event.cost_usd,
+                        },
+                    );
+                },
+            ))
+        }),
     };
 
     let effective_model = params
@@ -1088,6 +1102,36 @@ impl Gremlin {
             self.state.patch(&[], &fields);
         }
         self.state.write_terminal_state(exit_code);
+
+        // ── Emit final token usage with accumulated cost ─────
+        {
+            let tree = self.state.state_tree();
+            let tu = tree.get("token_usage").and_then(|v| v.as_object());
+            let usage = crate::clients::protocol::UsageStats {
+                prompt_tokens: tu.and_then(|o| o.get("prompt_tokens").and_then(|v| v.as_u64())),
+                completion_tokens: tu
+                    .and_then(|o| o.get("completion_tokens").and_then(|v| v.as_u64())),
+                cached_input_tokens: tu
+                    .and_then(|o| o.get("cached_input_tokens").and_then(|v| v.as_u64())),
+                cache_creation_input_tokens: tu.and_then(|o| {
+                    o.get("cache_creation_input_tokens")
+                        .and_then(|v| v.as_u64())
+                }),
+                reasoning_tokens: tu
+                    .and_then(|o| o.get("reasoning_tokens").and_then(|v| v.as_u64())),
+                turns: tu
+                    .and_then(|o| o.get("turns").and_then(|v| v.as_u64()))
+                    .unwrap_or(0) as usize,
+            };
+            let cost_usd = tree.get("total_cost_usd").and_then(|v| v.as_f64());
+            crate::executor::supervisor::emit_event(
+                crate::executor::supervisor::DaemonEvent::TokenUsage {
+                    id: self.id.to_string(),
+                    usage,
+                    cost_usd,
+                },
+            );
+        }
     }
 }
 

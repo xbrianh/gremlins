@@ -63,6 +63,36 @@ fn close_watch_follow(
     live_area.clear_watch_stream();
 }
 
+/// Spawn a one-shot `ls` request that only refreshes lifecycle status
+/// on existing runs. Token and cost fields are left untouched — those
+/// arrive via live `TokenUsage` events.
+fn fetch_run_statuses(
+    client: &Arc<client::DaemonClient>,
+    status_tx: &tokio::sync::mpsc::UnboundedSender<Vec<(String, String)>>,
+) {
+    let c = Arc::clone(client);
+    let tx = status_tx.clone();
+    tokio::spawn(async move {
+        if let Ok(resp) = c
+            .send_control_request(serde_json::json!({"op": "ls"}))
+            .await
+        {
+            let mut statuses = Vec::new();
+            if let Some(gremlins) = resp.get("gremlins").and_then(|v| v.as_array()) {
+                for entry in gremlins {
+                    if let (Some(id), Some(status)) = (
+                        entry.get("id").and_then(|v| v.as_str()),
+                        entry.get("status").and_then(|v| v.as_str()),
+                    ) {
+                        statuses.push((id.to_string(), status.to_string()));
+                    }
+                }
+            }
+            let _ = tx.send(statuses);
+        }
+    });
+}
+
 /// Open (or switch) the watch stream pane for `id`.
 ///
 /// At most one watch follow socket exists at a time: any prior follow is
@@ -1170,6 +1200,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     // ── Channel for daemon chat-model lookups ─────────────────────
     let (model_tx, mut model_rx) = mpsc::unbounded_channel::<ChatModelQuery>();
 
+    // ── Channel for lightweight status resync after event_lagged ──
+    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<Vec<(String, String)>>();
+
     // ── Log follow state ──────────────────────────────────────────
     let mut log_follow_handle: Option<tokio::task::JoinHandle<()>> = None;
     // Dedicated follow for the inline watch stream pane.
@@ -1974,22 +2007,17 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     }
                     gremlins::executor::DaemonEvent::TokenUsage {
                         id,
-                        prompt_tokens,
-                        completion_tokens,
-                        reasoning_tokens,
-                        cached_input_tokens,
-                        cache_creation_input_tokens,
-                        turns,
+                        usage,
                         cost_usd,
                     } => {
                         app.on_token_usage(
                             id,
-                            prompt_tokens,
-                            completion_tokens,
-                            reasoning_tokens,
-                            cached_input_tokens,
-                            cache_creation_input_tokens,
-                            turns,
+                            usage.prompt_tokens,
+                            usage.completion_tokens,
+                            usage.reasoning_tokens,
+                            usage.cached_input_tokens,
+                            usage.cache_creation_input_tokens,
+                            usage.turns,
                             cost_usd,
                         );
                     }
@@ -1999,8 +2027,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             // ── Raw lines (non-event JSON from the main socket) ─
             Some(raw) = raw_rx.recv() => {
                 if raw.get("type").and_then(|v| v.as_str()) == Some("event_lagged") {
-                    // Channel at 10k capacity makes lag rare; next TokenUsage
-                    // for each running gremlin will refresh stale fields.
+                    // Resync lifecycle status from the daemon so terminal
+                    // events (RunCompleted / RunFailed / RunStopped) that
+                    // were dropped are not permanently stuck at "running".
+                    fetch_run_statuses(&client, &status_tx);
                 } else if raw.get("type").and_then(|v| v.as_str()) == Some("error") {
                     let msg = raw
                         .get("message")
@@ -2113,6 +2143,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                 match result {
                     Ok(model) => app.chat_model = model,
                     Err(e) => log::debug!("chat_model query failed: {e}"),
+                }
+            }
+
+            // ── Status resync after event_lagged ──────────
+            Some(statuses) = status_rx.recv() => {
+                for (id, status) in statuses {
+                    app.update_run_status(&id, &status);
                 }
             }
 

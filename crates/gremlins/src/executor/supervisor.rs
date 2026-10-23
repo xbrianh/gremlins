@@ -216,17 +216,8 @@ pub enum DaemonEvent {
     #[serde(rename = "token_usage")]
     TokenUsage {
         id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        prompt_tokens: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        completion_tokens: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reasoning_tokens: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cached_input_tokens: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache_creation_input_tokens: Option<u64>,
-        turns: usize,
+        #[serde(flatten)]
+        usage: crate::clients::protocol::UsageStats,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_usd: Option<f64>,
     },

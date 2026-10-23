@@ -67,6 +67,9 @@ pub struct RunParams {
     pub discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
     /// Shared mutable reference to active skill names.
     pub active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    /// Sink for per-turn token-usage events emitted by the agent loop.
+    /// The executor layer wires this to the daemon event broadcast.
+    pub token_usage_sink: crate::clients::agent_loop::TokenUsageSink,
 }
 
 impl Clone for RunParams {
@@ -96,6 +99,7 @@ impl Clone for RunParams {
             compaction_opts: self.compaction_opts,
             discovered_skills: self.discovered_skills.clone(),
             active_skills: self.active_skills.clone(),
+            token_usage_sink: self.token_usage_sink.clone(),
         }
     }
 }
