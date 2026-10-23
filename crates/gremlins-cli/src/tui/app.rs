@@ -298,6 +298,54 @@ impl App {
         }
     }
 
+    /// Update token usage fields from a live `TokenUsage` daemon event.
+    /// If the run doesn't exist yet (event arrived before RunStarted),
+    /// insert a placeholder so the /watch table never shows stale `-`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_token_usage(
+        &mut self,
+        id: String,
+        prompt_tokens: Option<u64>,
+        completion_tokens: Option<u64>,
+        reasoning_tokens: Option<u64>,
+        cached_input_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
+        turns: usize,
+        cost_usd: Option<f64>,
+    ) {
+        use std::collections::hash_map::Entry;
+        match self.active_runs.entry(id) {
+            Entry::Occupied(mut e) => {
+                let run = e.get_mut();
+                run.prompt_tokens = prompt_tokens;
+                run.completion_tokens = completion_tokens;
+                run.reasoning_tokens = reasoning_tokens;
+                run.cached_input_tokens = cached_input_tokens;
+                run.cache_creation_input_tokens = cache_creation_input_tokens;
+                run.turns = Some(turns);
+                if cost_usd.is_some() {
+                    run.cost_usd = cost_usd;
+                }
+            }
+            Entry::Vacant(e) => {
+                e.insert(ActiveRun {
+                    status: "running".to_string(),
+                    stage: String::new(),
+                    definition: String::new(),
+                    project: self.project_name.clone(),
+                    prompt_tokens,
+                    completion_tokens,
+                    reasoning_tokens,
+                    cached_input_tokens,
+                    cache_creation_input_tokens,
+                    turns: Some(turns),
+                    cost_usd,
+                });
+                self.ensure_watch_selection();
+            }
+        }
+    }
+
     fn update_run_status(&mut self, id: &str, status: &str) {
         match self.active_runs.get_mut(id) {
             Some(run) => run.status = status.to_string(),

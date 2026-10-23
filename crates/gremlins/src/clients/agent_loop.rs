@@ -412,6 +412,7 @@ pub(crate) async fn run_agent_loop(
         ctx.reminder_budget,
         ctx.completion_nudge_budget,
         &ctx.params.log_tx,
+        ctx.params.gremlin_id.clone(),
         interactive,
         tool_output_rx,
         ctx.prepopulated_messages.clone(),
@@ -496,6 +497,7 @@ pub(crate) async fn run_agent_loop_nested(
         0,
         completion_nudge_budget,
         &log_tx,
+        None,
         None,
         None,
         prepopulated_messages,
@@ -801,6 +803,7 @@ async fn run_agent_loop_core(
     mut reminder_budget: usize,
     mut completion_nudge_budget: usize,
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    gremlin_id: Option<String>,
     interactive: Option<InteractiveSession>,
     tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
     prepopulated_messages: Option<Vec<Message>>,
@@ -1382,6 +1385,22 @@ async fn run_agent_loop_core(
             total_cache_creation_tokens,
             total_reasoning_tokens,
         );
+
+        // ── Emit cumulative token usage to the daemon broadcast ─────
+        if let Some(ref id) = gremlin_id {
+            crate::executor::supervisor::emit_event(
+                crate::executor::supervisor::DaemonEvent::TokenUsage {
+                    id: id.clone(),
+                    prompt_tokens: total_prompt_tokens,
+                    completion_tokens: total_completion_tokens,
+                    reasoning_tokens: total_reasoning_tokens,
+                    cached_input_tokens: total_cached_tokens,
+                    cache_creation_input_tokens: total_cache_creation_tokens,
+                    turns: totals.turns,
+                    cost_usd: None,
+                },
+            );
+        }
 
         emit_turn_stats(prefix, turn_num, turn_stats.as_ref(), &totals, log_tx);
 
@@ -6224,6 +6243,7 @@ mod tests {
                 0,
                 0,
                 &None,
+                None,
                 Some(session),
                 None,
                 None,
@@ -6336,6 +6356,7 @@ mod tests {
                 0,
                 0,
                 &None,
+                None,
                 Some(session),
                 None,
                 None,
@@ -6435,6 +6456,7 @@ mod tests {
                 0,
                 0,
                 &None,
+                None,
                 Some(session),
                 None,
                 None,
@@ -6523,6 +6545,7 @@ mod tests {
                 0,
                 0,
                 &None,
+                None,
                 Some(session),
                 None,
                 None,
@@ -6686,6 +6709,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -6765,6 +6789,7 @@ mod tests {
             0,
             0,
             &None,
+            None,
             None,
             None,
             None,

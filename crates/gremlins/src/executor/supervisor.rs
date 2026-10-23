@@ -213,6 +213,23 @@ pub enum DaemonEvent {
     },
     #[serde(rename = "run_stopped")]
     RunStopped { id: String },
+    #[serde(rename = "token_usage")]
+    TokenUsage {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completion_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cached_input_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_input_tokens: Option<u64>,
+        turns: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
+    },
     // Forward-looking variants — not wired up yet.
     #[serde(rename = "stage_transition")]
     StageTransition { id: String, stage: String },
@@ -230,7 +247,7 @@ static EVENT_BROADCAST: OnceLock<broadcast::Sender<DaemonEvent>> = OnceLock::new
 
 fn init_event_broadcast() -> &'static broadcast::Sender<DaemonEvent> {
     EVENT_BROADCAST.get_or_init(|| {
-        let (tx, _) = broadcast::channel(256);
+        let (tx, _) = broadcast::channel(10_000);
         tx
     })
 }
@@ -239,7 +256,7 @@ fn get_event_tx() -> &'static broadcast::Sender<DaemonEvent> {
     init_event_broadcast()
 }
 
-fn emit_event(event: DaemonEvent) {
+pub(crate) fn emit_event(event: DaemonEvent) {
     if let Some(tx) = EVENT_BROADCAST.get() {
         let _ = tx.send(event);
     }
