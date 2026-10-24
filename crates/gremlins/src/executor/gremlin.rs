@@ -350,7 +350,13 @@ impl Gremlin {
             loop {
                 let hex = state::token_hex(2);
                 let candidate = format!("{definition_name}-{hex}");
-                match std::fs::create_dir(config::state_root().join(&candidate)) {
+                // Reject candidates whose legacy (non-padded) directory
+                // already exists so that a new run never reuses a stale id.
+                let legacy = config::state_root().join(&candidate);
+                if legacy.is_dir() {
+                    continue;
+                }
+                match std::fs::create_dir(state::attempt_dir_path(&candidate, 1)) {
                     Ok(()) => break GremlinId(candidate),
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                     Err(e) => {
@@ -528,26 +534,14 @@ impl Gremlin {
     /// missing definition becomes a hard error.
     pub fn from(id: &str) -> Result<Gremlin, RunError> {
         let gremlin_id = validate_gremlin_id(id).map_err(RunError::Message)?;
-        let state_dir = config::state_root().join(gremlin_id.as_str());
+        let state_data = StateData::open(gremlin_id.as_str())?;
+        let state_dir = state_data.state_dir();
         let state_file = state_dir.join("state.json");
-
-        if !state_dir.is_dir() {
-            return Err(RunError::Message(format!(
-                "no state at {}",
-                state_dir.display()
-            )));
-        }
-        if !state_file.is_file() {
-            return Err(RunError::Message(format!(
-                "no state.json at {}",
-                state_file.display()
-            )));
-        }
 
         // `read_state_json` is permissive by design ({} for missing or
         // unparseable); `from` needs the real reason, so an empty result is
         // re-parsed here to say which it was.
-        let raw = state::read_state_json(Some(&state_file));
+        let raw = state_data.state_tree();
         if raw.is_empty() {
             let text = std::fs::read_to_string(&state_file)?;
             let detail = match serde_json::from_str::<Value>(&text) {
@@ -569,8 +563,6 @@ impl Gremlin {
         };
         let recorded_path = str_field(&raw, "definition_path");
         let workdir = str_field(&raw, "workdir");
-
-        let state_data = StateData::open(gremlin_id.as_str())?;
 
         let workdir: Option<WorkDir> =
             (!workdir.is_empty()).then(|| WorkDir::Persistent(PathBuf::from(&workdir)));
@@ -750,12 +742,14 @@ impl Gremlin {
         )
         .await;
 
+        let state_dir = self.state.state_dir();
         let env = resolve_env(
             bootstrap_script(&definition.bootstrap),
             self.id.as_str(),
             &self.project_root,
             self.workdir.as_ref().map(|w| w.path()),
             self.scratch_dir.path(),
+            &state_dir,
             &self.runtime_config.base_process_env,
         )?;
 
@@ -873,6 +867,22 @@ impl Gremlin {
             "fork: child_id={child_id}, parent_id={parent_id}, group_name={group_name}, child_key={child_key}"
         );
         let child_gremlin_id = validate_gremlin_id(child_id).map_err(RunError::Message)?;
+
+        // Reject child IDs that would collide with the parent's attempt
+        // directory naming scheme (<parent_id>-NNNN). Parallel children are
+        // named `{parent}-{child_name}`, so a child stage named e.g. "0001"
+        // would otherwise produce a state directory that shadows the parent's
+        // own first attempt directory.
+        if !parent_id.is_empty() {
+            let parent_prefix = format!("{parent_id}-");
+            if let Some(suffix) = child_id.strip_prefix(&parent_prefix) {
+                if suffix.len() == 4 && suffix.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(RunError::Message(format!(
+                        "child id {child_id:?} conflicts with parent {parent_id:?} attempt naming",
+                    )));
+                }
+            }
+        }
 
         // Allow effective_model mutation via with_model.
         let mut child_provider = child_provider;
@@ -1285,11 +1295,13 @@ impl Gremlin {
             .collect();
 
         // Build env with system vars.
+        let state_dir = self.state.state_dir();
         let system = system_env(
             self.id.as_str(),
             &self.project_root,
             self.workdir.as_ref().map(|w| w.path()),
             self.scratch_dir.path(),
+            &state_dir,
         );
         let mut env: HashMap<String, String> = if self.env.is_empty() {
             self.runtime_config.base_process_env.clone()
@@ -1509,12 +1521,12 @@ pub fn system_env(
     project_root: &Path,
     workdir: Option<&Path>,
     scratch_dir: &Path,
+    state_dir: &Path,
 ) -> HashMap<String, String> {
     let workdir_path = workdir
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
     let scratch_dir = scratch_dir.to_path_buf();
-    let state_dir = config::state_root().join(gremlin_id);
 
     let mut vars = HashMap::new();
     vars.insert("GREMLINS_GREMLIN_ID".to_string(), gremlin_id.to_string());
@@ -1541,15 +1553,16 @@ pub fn system_env(
 /// workspace), then re-asserted on top afterwards. The script can shape
 /// the environment but can never redirect the harness's paths.
 #[allow(clippy::too_many_arguments)]
-pub fn resolve_env(
+pub(crate) fn resolve_env(
     bootstrap_env: Option<&str>,
     gremlin_id: &str,
     project_root: &Path,
     workdir: Option<&Path>,
     scratch_dir: &Path,
+    state_dir: &Path,
     base_env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, RunError> {
-    let system = system_env(gremlin_id, project_root, workdir, scratch_dir);
+    let system = system_env(gremlin_id, project_root, workdir, scratch_dir, state_dir);
 
     let mut base: HashMap<String, String> = base_env.clone();
     base.extend(system.clone());
@@ -1629,6 +1642,7 @@ mod tests {
             &project_root,
             None,
             &scratch_dir,
+            &scratch_dir,
             &base_env,
         )
         .unwrap();
@@ -1674,6 +1688,7 @@ mod tests {
             &project_root,
             None,
             &scratch_dir,
+            &scratch_dir,
             &base_env,
         )
         .unwrap();
@@ -1707,6 +1722,7 @@ mod tests {
             &project_root,
             Some(&workdir),
             &scratch_dir,
+            &scratch_dir,
             &base_env,
         )
         .unwrap();
@@ -1727,6 +1743,7 @@ mod tests {
             "gr-test",
             dir.path(),
             None,
+            &scratch_dir,
             &scratch_dir,
             &base_env,
         )
@@ -2051,11 +2068,15 @@ mod tests {
             .unwrap();
 
         for (child_id, expected) in [("gr-a", ""), ("gr-b", "gr-root")] {
-            let raw = read_state(&fx.join("state").join(child_id).join("state.json"));
+            let raw = read_state(
+                &fx.join("state")
+                    .join(format!("{child_id}-0001"))
+                    .join("state.json"),
+            );
             assert_eq!(raw["parent_id"], expected, "{child_id}");
         }
 
-        let grouped = read_state(&fx.join("state").join("gr-b").join("state.json"));
+        let grouped = read_state(&fx.join("state").join("gr-b-0001").join("state.json"));
         assert_eq!(grouped["group_name"], "group");
         assert_eq!(grouped["child_key"], "key");
     }
@@ -2273,7 +2294,7 @@ stages:
 "#;
 
     fn write_hermetic_state(sandbox: &Path, id: &str, definition_body: &str) -> (PathBuf, PathBuf) {
-        let state_dir = sandbox.join("state").join(id);
+        let state_dir = sandbox.join("state").join(format!("{id}-0001"));
         std::fs::create_dir_all(&state_dir).unwrap();
 
         let project_root = sandbox.join("project");
@@ -2379,7 +2400,7 @@ stages:
 
         // Manually create a state directory without a definition.yaml so
         // `from` falls back to resolving by kind.
-        let state_dir = fx.join("state").join("gr-noherm");
+        let state_dir = fx.join("state").join("gr-noherm-0001");
         std::fs::create_dir_all(&state_dir).unwrap();
         let project_root = fx.repo_path();
         let state_json = serde_json::json!({
@@ -2426,7 +2447,7 @@ stages:
         let sandbox = tempfile::tempdir().unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
         let id = "gr-clean-cmds";
-        let state_dir = sandbox.path().join("state").join(id);
+        let state_dir = sandbox.path().join("state").join(format!("{id}-0001"));
         let artifact_dir = state_dir.join("artifacts");
         let workdir = sandbox.path().join("workspace");
         let project_root = sandbox.path().join("project");
@@ -2504,7 +2525,7 @@ land:
         env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
 
         let id = "gr-attach-clean";
-        let state_dir = sandbox.path().join("state").join(id);
+        let state_dir = sandbox.path().join("state").join(format!("{id}-0001"));
         let artifact_dir = state_dir.join("artifacts");
         let workdir = sandbox.path().join("workspace");
         let project_root = sandbox.path().join("project");
@@ -2609,7 +2630,7 @@ bootstrap:
         env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
 
         let id = "gr-attach-missing";
-        let state_dir = sandbox.path().join("state").join(id);
+        let state_dir = sandbox.path().join("state").join(format!("{id}-0001"));
         let workdir = sandbox.path().join("workspace");
         let project_root = sandbox.path().join("project");
         let scratch_dir = config::scratch_root(Some(id));
@@ -2664,7 +2685,7 @@ bootstrap:
         env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
 
         let id = "gr-attach-malformed";
-        let state_dir = sandbox.path().join("state").join(id);
+        let state_dir = sandbox.path().join("state").join(format!("{id}-0001"));
         let workdir = sandbox.path().join("workspace");
         let project_root = sandbox.path().join("project");
         let scratch_dir = config::scratch_root(Some(id));

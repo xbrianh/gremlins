@@ -697,8 +697,9 @@ mod tests {
 
     fn test_gremlin(stages: Vec<StageSpec>, default_model: &str) -> (Sandbox, Gremlin) {
         let sandbox = Sandbox::new();
-        let state_dir = config::state_root().join("gr-test");
+        let state_dir = config::state_root().join("gr-test-0001");
         std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(state_dir.join("artifacts")).unwrap();
 
         let data = serde_json::json!({
             "id": "gr-test",

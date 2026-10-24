@@ -23,7 +23,7 @@ use crate::clients::interactive::{
 };
 use crate::clients::protocol::{add_opt, UsageStats};
 use crate::config;
-use crate::definition::ChatDefinition;
+use crate::definition::{ChatDefinition, StageSpec, StaticDefinition};
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin, GremlinConfig};
 use crate::executor::socket::{self, GremlinsDaemonLock};
 use crate::executor::state::{self, FileSystemStateStore};
@@ -1185,12 +1185,8 @@ async fn send_debug_status(writer: &SharedWriter, stage: &str) {
 
 /// Open a persisted gremlin by id, returning the gremlin and its state dir.
 fn open_persisted_gremlin(id: &str) -> Result<(Gremlin, PathBuf), Value> {
-    let state_dir = config::state_root().join(id);
-    let state_file = state_dir.join("state.json");
-    if !state_dir.is_dir() || !state_file.is_file() {
-        return Err(error_response(&format!("unknown gremlin {id:?}")));
-    }
     let gremlin = Gremlin::from(id).map_err(|e| error_response(&format!("gremlin {id}: {e}")))?;
+    let state_dir = gremlin.state.state_dir();
     Ok((gremlin, state_dir))
 }
 
@@ -1355,7 +1351,11 @@ async fn handle_stop(request: &Value, _shutdown_tx: &watch::Sender<bool>) -> Val
     }
 
     // Not in run_map — check for orphaned or already-terminal gremlin.
-    let state_dir = config::state_root().join(id);
+    let state_store = match FileSystemStateStore::open(id) {
+        Ok(store) => store,
+        Err(_) => return error_response(&format!("unknown gremlin {id:?}")),
+    };
+    let state_dir = state_store.root_dir().to_path_buf();
     let state_file = state_dir.join("state.json");
     if state_file.is_file() {
         let raw = state::read_state_json(Some(&state_file));
@@ -1390,9 +1390,131 @@ async fn handle_stop(request: &Value, _shutdown_tx: &watch::Sender<bool>) -> Val
 // resume
 // ---------------------------------------------------------------------------
 
+/// Load the run's hermetic `definition.yaml` snapshot from the state store.
+fn load_definition_snapshot(gremlin: &Gremlin) -> Result<StaticDefinition, Value> {
+    let mut blob = gremlin
+        .state
+        .open_blob("definition.yaml", state::BlobMode::Read)
+        .map_err(|e| {
+            error_response(&format!(
+                "gremlin {}: failed to read definition snapshot: {e}",
+                gremlin.id.as_str()
+            ))
+        })?;
+    let mut bytes = Vec::new();
+    use std::io::Read;
+    blob.read_to_end(&mut bytes).map_err(|e| {
+        error_response(&format!(
+            "gremlin {}: failed to read definition snapshot: {e}",
+            gremlin.id.as_str()
+        ))
+    })?;
+    StaticDefinition::from_expanded_bytes(&bytes, None, None).map_err(|e| {
+        error_response(&format!(
+            "gremlin {}: invalid definition snapshot: {e}",
+            gremlin.id.as_str()
+        ))
+    })
+}
+
+/// Runtime artifact bookkeeping that parallel groups write outside of any
+/// `outputs_map`, so static key analysis cannot see it.
+///
+/// Two shapes exist:
+///
+/// * completion markers `artifact://{scope}/done/{child}`, where `scope` is
+///   `{loop-iteration}/{group-name}` — the loop prefix is not knowable at
+///   resume time, so markers are classified by the trailing group segment;
+/// * child-prefixed merged bindings `artifact://{child}/{original}`, written
+///   by the registry join with the child name as the key prefix.
+///
+/// When rewinding to a stage, groups at or after that stage re-run: a stale
+/// completion marker would skip a child that has not run in this attempt, and
+/// a stale prefixed binding would collide (and be ignored) during the fresh
+/// merge.  Both must therefore be dropped.  Groups strictly before the stage
+/// are already complete and keep their bookkeeping.
+#[derive(Debug, Default)]
+struct ParallelRuntimeKeys {
+    rerun_groups: HashSet<String>,
+    rerun_children: HashSet<String>,
+    kept_groups: HashSet<String>,
+    kept_children: HashSet<String>,
+}
+
+impl ParallelRuntimeKeys {
+    /// Whether `key` was written by a parallel group that re-runs once the
+    /// state is rewound to the stage these keys were classified against.
+    fn is_rerun(&self, key: &str) -> bool {
+        let Some(rest) = key.strip_prefix("artifact://") else {
+            return false;
+        };
+        // Completion marker `artifact://{scope}/done/{child}`.  `scope` ends
+        // with the owning group's name; the loop-iteration prefix before it
+        // cannot be reconstructed statically, so match on that trailing name.
+        if let Some((scope, _child)) = rest.split_once("/done/") {
+            let group = scope.rsplit('/').next().unwrap_or(scope);
+            if self.rerun_groups.contains(group) && !self.kept_groups.contains(group) {
+                return true;
+            }
+        }
+        // Child-prefixed merged binding `artifact://{child}/{original}`.
+        if let Some((child, original)) = rest.split_once('/') {
+            if !original.is_empty()
+                && self.rerun_children.contains(child)
+                && !self.kept_children.contains(child)
+            {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Classify every parallel group declared in `stages` by whether it re-runs
+/// when resuming at `target` (a top-level stage name).
+fn parallel_runtime_keys(stages: &[StageSpec], target: &str) -> ParallelRuntimeKeys {
+    let mut keys = ParallelRuntimeKeys::default();
+    let mut found_target = false;
+    for stage in stages {
+        if stage.name() == target {
+            found_target = true;
+        }
+        collect_parallel_runtime_keys(stage, found_target, &mut keys);
+    }
+    keys
+}
+
+/// Walk `stage`, recording the names of every parallel group and child found
+/// beneath it as either re-running or kept, according to `rerun`.
+fn collect_parallel_runtime_keys(stage: &StageSpec, rerun: bool, keys: &mut ParallelRuntimeKeys) {
+    match stage {
+        StageSpec::Parallel { attrs, body, .. } => {
+            for child in body {
+                let child_name = child.name().to_string();
+                if rerun {
+                    keys.rerun_groups.insert(attrs.name.clone());
+                    keys.rerun_children.insert(child_name);
+                } else {
+                    keys.kept_groups.insert(attrs.name.clone());
+                    keys.kept_children.insert(child_name);
+                }
+            }
+            for child in body {
+                collect_parallel_runtime_keys(child, rerun, keys);
+            }
+        }
+        StageSpec::Sequence { body, .. } => {
+            for child in body {
+                collect_parallel_runtime_keys(child, rerun, keys);
+            }
+        }
+        StageSpec::Agent { .. } | StageSpec::Exec { .. } => {}
+    }
+}
+
 async fn handle_resume(
     request: &Value,
-    state_root: &Path,
+    _state_root: &Path,
     shutdown_tx: &watch::Sender<bool>,
 ) -> Value {
     let id = match valid_id(request) {
@@ -1412,13 +1534,7 @@ async fn handle_resume(
         }
     }
 
-    let state_dir = state_root.join(id);
-    let state_file = state_dir.join("state.json");
-    if !state_dir.is_dir() || !state_file.is_file() {
-        return error_response(&format!("unknown gremlin {id:?}"));
-    }
-
-    let gremlin = match Gremlin::from(id) {
+    let mut gremlin = match Gremlin::from(id) {
         Ok(g) => g,
         Err(e) => return error_response(&format!("gremlin {id}: {e}")),
     };
@@ -1427,28 +1543,104 @@ async fn handle_resume(
     if status == "running" {
         return error_response(&format!("gremlin {id} is already running — use stop first"));
     }
-    if status == "done" {
+
+    let requested_stage = request
+        .get("stage")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let resume_with_stage = requested_stage.is_some();
+
+    if status == "done" && !resume_with_stage {
         return error_response(&format!("gremlin {id} is already done"));
     }
 
     let has_bail = gremlin.state.stage_error().is_some();
-    if status != "stopped" && !has_bail {
+    if status != "stopped" && !has_bail && !(status == "done" && resume_with_stage) {
         return error_response(&format!(
             "gremlin {id} cannot be resumed — status is {status:?}"
         ));
     }
 
-    let stage = gremlin.state.read_str("stage");
-    if stage.is_empty() || stage == "starting" {
-        return error_response(&format!(
-            "gremlin {id} has no recorded stage to resume from"
-        ));
-    }
+    let resume_stage = if let Some(target) = requested_stage {
+        let definition = match load_definition_snapshot(&gremlin) {
+            Ok(d) => d,
+            Err(resp) => return resp,
+        };
+        if !definition.has_top_level_stage(&target) {
+            return error_response(&format!("gremlin {id}: unknown top-level stage {target:?}"));
+        }
 
-    let finished = state_dir.join("finished");
-    let _ = std::fs::remove_file(&finished);
+        let produced_before = match definition.artifact_keys_produced_before(&target) {
+            Ok(keys) => keys,
+            Err(e) => return error_response(&format!("gremlin {id}: {e}")),
+        };
+        let produced_all = definition.artifact_keys_produced();
+        // Parallel groups register runtime-only keys — completion markers and
+        // child-prefixed merged bindings — that `produced_all` cannot contain.
+        // Any group at or after the target re-runs, so its bookkeeping must
+        // not survive the rewind.
+        let parallel_keys = parallel_runtime_keys(&definition.stages, &target);
+        let registered = gremlin.state.keys().await;
+        let mut preserve: HashSet<String> = produced_before;
+        for key in registered {
+            // Artifacts declared by a stage at or after the target are dropped;
+            // those from stages before it were already seeded above.
+            if produced_all.contains(&key) {
+                continue;
+            }
+            // Drop parallel bookkeeping whose group re-runs, so its children
+            // are not skipped and its fresh merges are not blocked.
+            if parallel_keys.is_rerun(&key) {
+                continue;
+            }
+            preserve.insert(key);
+        }
+        let mut keys: Vec<String> = preserve.into_iter().collect();
+        keys.sort();
 
-    let current_attempt = gremlin.state.read_str("attempt");
+        let mut rewind_state = gremlin.state.state_tree();
+        rewind_state.insert("stage".into(), Value::String(target.clone()));
+        rewind_state.insert("status".into(), Value::Null);
+        rewind_state.insert("pid".into(), Value::Null);
+        rewind_state.insert("exit_code".into(), Value::Null);
+        rewind_state.insert("ended_at".into(), Value::Null);
+        rewind_state.insert("subprocess_cost_usd".into(), Value::Null);
+        rewind_state.remove("parallel_attempts");
+
+        let forked = match gremlin
+            .state
+            .store_ref()
+            .fork_to_stage(&keys, &rewind_state)
+            .await
+        {
+            Ok(forked) => forked,
+            Err(e) => return error_response(&format!("gremlin {id}: failed to fork state: {e}")),
+        };
+        gremlin.state.swap_store(forked);
+
+        target
+    } else {
+        let stage = gremlin.state.read_str("stage");
+        if stage.is_empty() || stage == "starting" {
+            return error_response(&format!(
+                "gremlin {id} has no recorded stage to resume from"
+            ));
+        }
+
+        let state_dir = gremlin.state.state_dir();
+        let finished = state_dir.join("finished");
+        let _ = std::fs::remove_file(&finished);
+        stage
+    };
+
+    let current_attempt = {
+        let a = gremlin.state.read_str("attempt");
+        if a.is_empty() {
+            "1".to_string()
+        } else {
+            a
+        }
+    };
     let new_attempt = format!("{current_attempt}-resume-{}", state::token_hex(2));
     let fields = serde_json::json!({
         "status": "running",
@@ -1457,9 +1649,6 @@ async fn handle_resume(
         "attempt": new_attempt,
     });
     gremlin.state.patch(&[], fields.as_object().unwrap());
-
-    let resume_stage = stage.clone();
-    let resume_stage_for_response = resume_stage.clone();
 
     let definition_name = gremlin.state.read_str("kind");
 
@@ -1472,7 +1661,7 @@ async fn handle_resume(
         shutdown_tx,
     );
 
-    ok_response(serde_json::json!({"id": id, "resume_from": resume_stage_for_response}))
+    ok_response(serde_json::json!({ "id": id, "resume_from": resume_stage }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1513,7 +1702,7 @@ fn extract_token_cost_fields(tree: &Map<String, Value>) -> serde_json::Map<Strin
     fields
 }
 
-async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
+async fn handle_ls(_request: &Value, _state_root: &Path) -> Value {
     let mut rows: Vec<Value> = Vec::new();
 
     // Live gremlins: collect (id, store) pairs under the lock, then read
@@ -1561,7 +1750,7 @@ async fn handle_ls(_request: &Value, state_root: &Path) -> Value {
         if live_ids.contains(&id) {
             continue;
         }
-        if state_root.join(&id).join("closed").exists() {
+        if state_json_path.with_file_name("closed").exists() {
             continue;
         }
         let raw = state::read_state_json(Some(&state_json_path));
@@ -1885,7 +2074,9 @@ async fn handle_log(
     let (source, unknown) = match resolve_store_for_id(id) {
         Ok(store) => (LogSource::Store(store), false),
         Err(_) => {
-            let sd = config::state_root().join(id);
+            let sd = FileSystemStateStore::open(id)
+                .map(|store| store.root_dir().to_path_buf())
+                .unwrap_or_else(|_| config::state_root().join(format!("{id}-0001")));
             if sd.is_dir() && sd.join("state.json").is_file() {
                 (LogSource::Path(sd), false)
             } else {
@@ -3498,8 +3689,12 @@ pub(crate) fn resolve_store_for_id(
     if let Some(store) = live {
         return Ok(store);
     }
-    let state_dir = config::state_root().join(id);
-    if !state_dir.is_dir() || !state_dir.join("state.json").is_file() {
+    let state_store = match FileSystemStateStore::open(id) {
+        Ok(store) => store,
+        Err(_) => return Err(error_response(&format!("unknown gremlin {id:?}"))),
+    };
+    let state_dir = state_store.root_dir().to_path_buf();
+    if !state_dir.join("state.json").is_file() {
         return Err(error_response(&format!("unknown gremlin {id:?}")));
     }
     state::StateData::open(id)
@@ -3838,13 +4033,13 @@ fn spawn_gremlin_runner(
 /// The on-disk state directory for a live gremlin's store. Prefers the
 /// concrete filesystem store's real root (ephemeral runs live in a TempDir
 /// and never appear under `config::state_root()`); falls back to
-/// `config::state_root().join(id)` for persistent runs.
+/// `config::state_root().join(format!("{id}-0001"))` for persistent runs.
 fn live_state_dir(store: &Arc<dyn state::StateStore + Send + Sync>, id: &str) -> PathBuf {
     store
         .as_any()
         .and_then(|a| a.downcast_ref::<FileSystemStateStore>())
         .map(|fs| fs.root_dir().to_path_buf())
-        .unwrap_or_else(|| config::state_root().join(id))
+        .unwrap_or_else(|| config::state_root().join(format!("{id}-0001")))
 }
 
 /// When the run_map says the gremlin is live, always report "running".
@@ -4182,7 +4377,8 @@ fn validate_launch_inputs(
 mod tests {
     use super::{
         add_usage_stats, create_chat_gremlin, handle_artifact, handle_chat_model, handle_launch,
-        handle_model, resolve_chat_env, resolve_filepath_source_values, usage_stats_from_state,
+        handle_model, parallel_runtime_keys, resolve_chat_env, resolve_filepath_source_values,
+        usage_stats_from_state,
     };
     use crate::clients::client::{Client, ModelURI};
     use crate::clients::interactive::InteractiveEvent;
@@ -4204,6 +4400,49 @@ mod tests {
 
     fn model(spec: &str) -> ModelURI {
         ModelURI::parse(spec).unwrap()
+    }
+
+    #[test]
+    fn parallel_runtime_keys_classifies_markers_relative_to_target() {
+        let stages = vec![
+            crate::builders::exec::ExecBuilder::new("first")
+                .cmds(vec!["true".to_string()])
+                .build()
+                .unwrap(),
+            crate::builders::composite::ParallelBuilder::new("group")
+                .stage(
+                    crate::builders::exec::ExecBuilder::new("child-a")
+                        .cmds(vec!["true".to_string()])
+                        .build()
+                        .unwrap(),
+                )
+                .stage(
+                    crate::builders::exec::ExecBuilder::new("child-b")
+                        .cmds(vec!["true".to_string()])
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+            crate::builders::exec::ExecBuilder::new("last")
+                .cmds(vec!["true".to_string()])
+                .build()
+                .unwrap(),
+        ];
+
+        // Resuming at the group re-runs it: its completion markers (with the
+        // loop-iteration scope prefix) and child-prefixed bindings are dropped.
+        let at_group = parallel_runtime_keys(&stages, "group");
+        assert!(at_group.is_rerun("artifact://1/group/done/child-a"));
+        assert!(at_group.is_rerun("artifact://1/group/done/child-b"));
+        assert!(at_group.is_rerun("artifact://child-a/report.md"));
+        assert!(!at_group.is_rerun("artifact://project/README.md"));
+
+        // Resuming at a later stage keeps the already-complete group's keys.
+        let at_last = parallel_runtime_keys(&stages, "last");
+        assert!(!at_last.is_rerun("artifact://1/group/done/child-a"));
+        assert!(!at_last.is_rerun("artifact://child-a/report.md"));
+        assert!(!at_last.is_rerun("artifact://project/README.md"));
     }
 
     async fn read_until_type(
@@ -4717,12 +4956,10 @@ model-profiles:
     #[tokio::test]
     async fn handle_artifact_lists_keys_and_reads_content_from_persisted_state() {
         let _sandbox = Sandbox::new();
-        let store = crate::executor::state::FileSystemStateStore::create(
-            "gr-1",
-            &serde_json::Map::new(),
-            false,
-        )
-        .unwrap();
+        let mut initial = serde_json::Map::new();
+        initial.insert("id".into(), Value::String("gr-1".into()));
+        let store =
+            crate::executor::state::FileSystemStateStore::create("gr-1", &initial, false).unwrap();
         store
             .write_into_registry(
                 &crate::artifacts::uri::Uri::parse("artifact://out").unwrap(),
@@ -4833,12 +5070,10 @@ model-profiles:
     #[tokio::test]
     async fn handle_artifact_returns_error_for_unbound_artifact() {
         let _sandbox = Sandbox::new();
-        let _store = crate::executor::state::FileSystemStateStore::create(
-            "gr-2",
-            &serde_json::Map::new(),
-            false,
-        )
-        .unwrap();
+        let mut initial = serde_json::Map::new();
+        initial.insert("id".into(), Value::String("gr-2".into()));
+        let _store =
+            crate::executor::state::FileSystemStateStore::create("gr-2", &initial, false).unwrap();
 
         let resp = handle_artifact(
             &serde_json::json!({"op": "artifact", "id": "gr-2", "artifact": "artifact://missing"}),
