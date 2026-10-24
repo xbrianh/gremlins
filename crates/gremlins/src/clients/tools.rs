@@ -19,9 +19,9 @@ const GREP_MAX_LINES: usize = 2000;
 const BASH_TIMEOUT_SECS: u64 = 120;
 const WEBSEARCH_TIMEOUT_SECS: u64 = 30;
 /// Maximum number of concurrent tool calls the harness will execute from a
-/// single model message. General tools (Read, Write, Grep, Glob, etc.) and
-/// Task calls each count toward this limit. The Task-specific cap
-/// (`TASK_MAX_PER_TURN`) is a separate, stricter bound that also applies.
+/// single model message. General tools (Read, Write, Grep, Glob, etc.) queue
+/// when this limit is exceeded — only Task calls are subject to a hard
+/// rejection cap (`TASK_MAX_PER_TURN`).
 pub(crate) const MAX_CONCURRENT_TOOLS: usize = 8;
 /// Cap on Task calls spawned from a single model message. Without this, one
 /// response could fan out unbounded child loops and overflow the context.
