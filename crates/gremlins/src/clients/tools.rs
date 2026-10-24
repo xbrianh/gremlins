@@ -2662,14 +2662,26 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool
 /// so the error message shows what the model actually sent.
 fn describe_edit_provided_fields(obj: &serde_json::Map<String, serde_json::Value>) -> String {
     let mut parts: Vec<String> = Vec::new();
-    if let Some(v) = obj.get("start_line").and_then(|v| v.as_u64()) {
-        parts.push(format!("start_line={v}"));
-    }
-    if obj.contains_key("old_string") {
-        parts.push("old_string=<provided>".to_string());
-    }
-    if obj.contains_key("new_string") {
-        parts.push("new_string=<provided>".to_string());
+    for key in &[
+        "start_line",
+        "end_line",
+        "replacement",
+        "old_string",
+        "new_string",
+    ] {
+        if let Some(v) = obj.get(*key) {
+            let display = match v {
+                serde_json::Value::String(s) => {
+                    if s.len() > 40 {
+                        format!("{}<{} chars>", key, s.len())
+                    } else {
+                        format!("{key}={s:?}")
+                    }
+                }
+                other => format!("{key}={other}"),
+            };
+            parts.push(display);
+        }
     }
     if parts.is_empty() {
         String::new()
@@ -4793,7 +4805,6 @@ mod tests {
         );
         assert!(err.contains("edit 1"));
     }
-
     #[test]
     fn validate_tool_args_edit_mixed_prefer_range_ok() {
         // Mixed-mode with complete range fields: range mode wins, no error.
@@ -4814,7 +4825,20 @@ mod tests {
         .unwrap();
         assert!(err.contains("missing 'end_line'"), "got: {err}");
         assert!(err.contains("start_line=1"), "got: {err}");
-        assert!(err.contains("old_string=<provided>"), "got: {err}");
+        assert!(err.contains("old_string"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_tool_args_edit_mixed_missing_replacement_error() {
+        // Mixed-mode with start_line and end_line but no replacement: errors with provided info.
+        let err = validate_tool_args(
+            "Edit",
+            &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "start_line": 1, "end_line": 2}]}),
+        )
+        .unwrap();
+        assert!(err.contains("missing 'replacement'"), "got: {err}");
+        assert!(err.contains("start_line=1"), "got: {err}");
+        assert!(err.contains("end_line=2"), "got: {err}");
     }
 
     #[test]
@@ -6209,11 +6233,12 @@ mod tests {
     #[test]
     fn edit_mixed_prefer_range_applies_range() {
         // Mixed-mode with complete range fields: range mode wins, old_string/new_string ignored.
+        // Use old_string NOT present in the file to prove match-mode isn't consulted.
         let dir = tmp();
         std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "edits": [{"old_string": "line1", "new_string": "x", "start_line": 1, "end_line": 1, "replacement": "y\n"}]
+            "edits": [{"old_string": "nonexistent", "new_string": "x", "start_line": 1, "end_line": 1, "replacement": "y\n"}]
         })
         .to_string();
         assert_eq!(
@@ -6238,6 +6263,35 @@ mod tests {
         assert!(result.contains("start_line"), "got: {result}");
     }
 
+    #[test]
+    fn edit_mixed_missing_replacement_error() {
+        // Mixed-mode with start_line and end_line but no replacement: errors with provided info.
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"old_string": "line1", "start_line": 1, "end_line": 2}]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.contains("missing 'replacement'"), "got: {result}");
+        assert!(result.contains("start_line"), "got: {result}");
+    }
+
+    #[test]
+    fn edit_mixed_invalid_bounds_error() {
+        // Mixed-mode with invalid range bounds still fails range validation.
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"old_string": "nonexistent", "new_string": "x", "start_line": 2, "end_line": 1, "replacement": "y"}]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.contains("start_line"), "got: {result}");
+        assert!(result.contains("end_line"), "got: {result}");
+    }
     #[test]
     fn edit_range_start_line_beyond_eof_error() {
         let dir = tmp();
