@@ -68,6 +68,9 @@ enum Cmds {
     Resume {
         /// Gremlin id to resume.
         id: String,
+        /// Rewind to this top-level stage and re-execute from it onward.
+        #[arg(long)]
+        stage: Option<String>,
     },
     /// Follow a gremlin's log file with `less +F`.
     Log {
@@ -152,7 +155,7 @@ async fn main() {
         Some(Cmds::Ls { here }) => ls(here).await,
         Some(Cmds::Info { id }) => info(&id).await,
         Some(Cmds::Stop { id }) => stop(&id).await,
-        Some(Cmds::Resume { id }) => resume(&id).await,
+        Some(Cmds::Resume { id, stage }) => resume(&id, stage.as_deref()).await,
         Some(Cmds::Log { id }) => log_gremlin(&id).await,
         Some(Cmds::Debug { id }) => debug_gremlin(&id).await,
         Some(Cmds::Clean { id, keep }) => clean(&id, keep).await,
@@ -693,15 +696,9 @@ async fn status(id: &str) -> Result<(), String> {
 
 /// Fallback: read status directly from state.json.
 fn status_direct(id: &str) -> Result<(), String> {
-    let state_dir = config::state_root().join(id);
-    let state_file = state_dir.join("state.json");
-    if !state_dir.is_dir() || !state_file.is_file() {
-        return Err(format!(
-            "unknown gremlin {id:?} — use `gremlins ls` to list gremlins"
-        ));
-    }
-
-    let gremlin = Gremlin::from(id).map_err(|e| format!("gremlin {id}: {e}"))?;
+    let gremlin = Gremlin::from(id)
+        .map_err(|_| format!("unknown gremlin {id:?} — use `gremlins ls` to list gremlins"))?;
+    let state_dir = gremlin.state.state_dir();
 
     println!("id:            {}", gremlin.id);
     println!(
@@ -719,11 +716,8 @@ fn status_direct(id: &str) -> Result<(), String> {
             .map(|w| w.path().display().to_string())
             .unwrap_or_default()
     );
-    println!("state_dir:     {}", config::state_root().join(id).display());
-    println!(
-        "artifact_dir:  {}",
-        config::state_root().join(id).join("artifacts").display()
-    );
+    println!("state_dir:     {}", state_dir.display());
+    println!("artifact_dir:  {}", state_dir.join("artifacts").display());
     println!(
         "started_at:    {}",
         field_display(&gremlin.state, "started_at")
@@ -781,15 +775,9 @@ async fn info(id: &str) -> Result<(), String> {
 }
 
 fn info_direct(id: &str) -> Result<(), String> {
-    let state_dir = config::state_root().join(id);
-    let state_file = state_dir.join("state.json");
-    if !state_dir.is_dir() || !state_file.is_file() {
-        return Err(format!(
-            "unknown gremlin {id:?} — use `gremlins show` to list gremlins"
-        ));
-    }
-
-    let gremlin = Gremlin::from(id).map_err(|e| format!("gremlin {id}: {e}"))?;
+    let gremlin = Gremlin::from(id)
+        .map_err(|_| format!("unknown gremlin {id:?} — use `gremlins show` to list gremlins"))?;
+    let state_dir = gremlin.state.state_dir();
 
     let workdir = gremlin
         .workdir
@@ -804,10 +792,10 @@ fn info_direct(id: &str) -> Result<(), String> {
         "definition": definition_display_name(&gremlin.state),
         "project_root": gremlin.project_root.display().to_string(),
         "workdir": workdir,
-        "state_dir": config::state_root().join(id).display().to_string(),
-        "artifact_dir": config::state_root().join(id).join("artifacts").display().to_string(),
+        "state_dir": state_dir.display().to_string(),
+        "artifact_dir": state_dir.join("artifacts").display().to_string(),
         "scratch_dir": config::scratch_root(Some(id)).display().to_string(),
-        "log_file": config::state_root().join(id).join("log").display().to_string(),
+        "log_file": state_dir.join("log").display().to_string(),
         "started_at": gremlin.state.read_str("started_at"),
         "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
         "exit_code": gremlin.state.read_field("exit_code").unwrap_or(Value::Null),
@@ -867,14 +855,22 @@ async fn stop(id: &str) -> Result<(), String> {
 // resume
 // ---------------------------------------------------------------------------
 
-async fn resume(id: &str) -> Result<(), String> {
+async fn resume(id: &str, stage: Option<&str>) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
     validate_gremlin_id(id).map_err(|_| {
         format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
     })?;
 
-    let response = executor_request(serde_json::json!({"op": "resume", "id": id})).await?;
+    let mut request = serde_json::json!({"op": "resume", "id": id});
+    if let Some(stage) = stage {
+        request
+            .as_object_mut()
+            .unwrap()
+            .insert("stage".to_string(), Value::String(stage.to_string()));
+    }
+
+    let response = executor_request(request).await?;
     check_error(&response)?;
 
     println!("{id}");
@@ -1077,6 +1073,8 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
     // Tail the last ~20 lines of the gremlin log for immediate context.
     // Read only the tail of the file (append-only log, no rotation) so
     // startup time and memory stay bounded regardless of log length.
+    // Always use the legacy (non-attempt) path so the log survives
+    // `--stage` resumes that create new attempt directories.
     let log_path = config::state_root().join(id).join("log");
     if let Ok(lines) = tail_log_lines(&log_path, 20).await {
         for line in &lines {
@@ -1191,13 +1189,13 @@ async fn rm_one(id: &str) -> Result<(), String> {
         format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
     })?;
 
-    let state_dir = config::state_root().join(id);
+    let state_store = FileSystemStateStore::open(id)
+        .map_err(|_| format!("unknown gremlin {id:?} — use `gremlins ls` to list gremlins"))?;
+    let state_dir = state_store.root_dir().to_path_buf();
+    // `state_file` is guaranteed to exist: `FileSystemStateStore::open` only
+    // returns a store when `latest_attempt_dir` found a directory with
+    // `state.json` inside.
     let state_file = state_dir.join("state.json");
-    if !state_dir.is_dir() || !state_file.is_file() {
-        return Err(format!(
-            "unknown gremlin {id:?} — use `gremlins ls` to list gremlins"
-        ));
-    }
 
     // Try the daemon first so it broadcasts RunRemoved.
     match spawn::connect().await {
@@ -1403,13 +1401,10 @@ async fn clean(id: &str, keep: bool) -> Result<(), String> {
         format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
     })?;
 
-    let state_dir = config::state_root().join(id);
+    let state_store = FileSystemStateStore::open(id)
+        .map_err(|_| format!("unknown gremlin {id:?} — use `gremlins ls` to list gremlins"))?;
+    let state_dir = state_store.root_dir().to_path_buf();
     let state_file = state_dir.join("state.json");
-    if !state_dir.is_dir() || !state_file.is_file() {
-        return Err(format!(
-            "unknown gremlin {id:?} — use `gremlins ls` to list gremlins"
-        ));
-    }
 
     let gremlin = match Gremlin::from(id) {
         Ok(g) => g,
@@ -1459,17 +1454,13 @@ async fn land(id: &str) -> Result<(), String> {
         format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
     })?;
 
-    let state_dir = config::state_root().join(id);
-    if !state_dir.is_dir() || !state_dir.join("state.json").is_file() {
-        return Err(format!(
-            "unknown gremlin {id:?} — use `gremlins ls` to list gremlins"
-        ));
-    }
+    let store = FileSystemStateStore::open(id)
+        .map_err(|_| format!("unknown gremlin {id:?} — use `gremlins ls` to list gremlins"))?;
+    let state_dir = store.root_dir().to_path_buf();
 
     let default_model = config::global_config()
         .ok()
         .and_then(|c| c.default_model().map(String::from));
-    let store = FileSystemStateStore::from_path(state_dir.to_path_buf());
 
     // Load the hermetic definition through the store blob.
     let definition = {
@@ -1496,7 +1487,7 @@ async fn land(id: &str) -> Result<(), String> {
         }
     };
 
-    let raw = state::read_state_json(Some(&state_dir.join("state.json")));
+    let raw = store.state_tree();
 
     if raw.get("status").and_then(Value::as_str) == Some("running") {
         match is_live_in_executor(id).await {
@@ -1543,6 +1534,7 @@ async fn land(id: &str) -> Result<(), String> {
         &project_root,
         worktree.as_deref(),
         &scratch_dir,
+        &state_dir,
     ));
     for (k, v) in &prepared.substitution_env {
         env.insert(k.clone(), v.clone());

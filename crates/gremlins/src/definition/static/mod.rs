@@ -7,6 +7,8 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use serde_yaml::{Mapping, Value};
 
+use std::collections::HashSet;
+
 use crate::clients::client::ModelURI;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::stage_spec::node::StageSpec;
@@ -161,6 +163,41 @@ impl StaticDefinition {
             clean_cmds: Vec::new(),
             ..self.clone()
         }
+    }
+
+    /// Whether `name` is a top-level stage in this definition.
+    pub(crate) fn has_top_level_stage(&self, name: &str) -> bool {
+        self.stages.iter().any(|stage| stage.name() == name)
+    }
+
+    /// Artifact keys produced by every top-level stage.
+    pub(crate) fn artifact_keys_produced(&self) -> HashSet<String> {
+        self.stages
+            .iter()
+            .flat_map(|stage| stage.produced_artifact_keys())
+            .collect()
+    }
+
+    /// Artifact keys produced by top-level stages before `target`.
+    ///
+    /// Returns an error when `target` is not a top-level stage.
+    pub(crate) fn artifact_keys_produced_before(
+        &self,
+        target: &str,
+    ) -> Result<HashSet<String>, DefinitionError> {
+        if !self.has_top_level_stage(target) {
+            return Err(DefinitionError::Message(format!(
+                "unknown top-level stage {target:?}"
+            )));
+        }
+        let mut keys = HashSet::new();
+        for stage in &self.stages {
+            if stage.name() == target {
+                break;
+            }
+            keys.extend(stage.produced_artifact_keys());
+        }
+        Ok(keys)
     }
 
     /// Serialize this definition to a [`serde_yaml::Value`] matching the
@@ -919,6 +956,89 @@ mod tests {
         bx.goto("y");
         let s = bx.next_stage().await.unwrap();
         assert_eq!(s.name(), "y");
+    }
+
+    #[test]
+    fn artifact_keys_produced_before_walks_top_level_stages_only() {
+        let mut first = parsed_exec("first");
+        match &mut first {
+            StageSpec::Exec { stage, .. } => {
+                stage
+                    .outputs_map
+                    .insert("plan".to_string(), "artifact://plan.md".to_string());
+            }
+            _ => panic!("expected exec"),
+        }
+        let mut second = parsed_agent("second");
+        match &mut second {
+            StageSpec::Agent { stage, .. } => {
+                stage.outputs_map.insert(
+                    "{name}-notes".to_string(),
+                    "artifact://{name}-notes.md".to_string(),
+                );
+            }
+            _ => panic!("expected agent"),
+        }
+
+        let def = definition_with(vec![first, second]);
+
+        let before = def.artifact_keys_produced_before("second").unwrap();
+        assert!(before.contains("artifact://plan"));
+        assert!(before.contains("artifact://plan.md"));
+        assert!(!before.contains("artifact://second-notes.md"));
+
+        let all = def.artifact_keys_produced();
+        assert!(all.contains("artifact://plan.md"));
+        assert!(all.contains("artifact://second-notes.md"));
+
+        assert!(def.artifact_keys_produced_before("missing").is_err());
+    }
+
+    #[test]
+    fn artifact_keys_from_composite_stages_recurse_into_children() {
+        // Build a sequence stage whose children produce artifact keys.
+        let mut a = parsed_exec("a");
+        match &mut a {
+            StageSpec::Exec { stage, .. } => {
+                stage
+                    .outputs_map
+                    .insert("out-a".into(), "artifact://out-a.txt".into());
+            }
+            _ => panic!("expected exec"),
+        }
+        let mut b = parsed_agent("b");
+        match &mut b {
+            StageSpec::Agent { stage, .. } => {
+                stage
+                    .outputs_map
+                    .insert("out-b".into(), "artifact://out-b.txt".into());
+            }
+            _ => panic!("expected agent"),
+        }
+
+        let seq = StageSpec::Sequence {
+            attrs: crate::stage_spec::composite::StageAttrs {
+                name: "group".into(),
+                stage_type: "sequence".into(),
+                path: String::new(),
+                model_explicit: false,
+                skip_if_exists: String::new(),
+            },
+            max_iterations: 1,
+            interval: None,
+            model: None,
+            task_models: None,
+            body: vec![a, b],
+        };
+
+        let def = definition_with(vec![seq]);
+
+        let all = def.artifact_keys_produced();
+        assert!(all.contains("artifact://out-a.txt"));
+        assert!(all.contains("artifact://out-b.txt"));
+
+        let before = def.artifact_keys_produced_before("group").unwrap();
+        assert!(before.is_empty());
     }
 
     // ---- convert_stage variant tests ----

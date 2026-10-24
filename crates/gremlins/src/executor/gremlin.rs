@@ -350,7 +350,7 @@ impl Gremlin {
             loop {
                 let hex = state::token_hex(2);
                 let candidate = format!("{definition_name}-{hex}");
-                match std::fs::create_dir(config::state_root().join(&candidate)) {
+                match std::fs::create_dir(state::attempt_dir_path(&candidate, 1)) {
                     Ok(()) => break GremlinId(candidate),
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                     Err(e) => {
@@ -528,26 +528,14 @@ impl Gremlin {
     /// missing definition becomes a hard error.
     pub fn from(id: &str) -> Result<Gremlin, RunError> {
         let gremlin_id = validate_gremlin_id(id).map_err(RunError::Message)?;
-        let state_dir = config::state_root().join(gremlin_id.as_str());
+        let state_data = StateData::open(gremlin_id.as_str())?;
+        let state_dir = state_data.state_dir();
         let state_file = state_dir.join("state.json");
-
-        if !state_dir.is_dir() {
-            return Err(RunError::Message(format!(
-                "no state at {}",
-                state_dir.display()
-            )));
-        }
-        if !state_file.is_file() {
-            return Err(RunError::Message(format!(
-                "no state.json at {}",
-                state_file.display()
-            )));
-        }
 
         // `read_state_json` is permissive by design ({} for missing or
         // unparseable); `from` needs the real reason, so an empty result is
         // re-parsed here to say which it was.
-        let raw = state::read_state_json(Some(&state_file));
+        let raw = state_data.state_tree();
         if raw.is_empty() {
             let text = std::fs::read_to_string(&state_file)?;
             let detail = match serde_json::from_str::<Value>(&text) {
@@ -569,8 +557,6 @@ impl Gremlin {
         };
         let recorded_path = str_field(&raw, "definition_path");
         let workdir = str_field(&raw, "workdir");
-
-        let state_data = StateData::open(gremlin_id.as_str())?;
 
         let workdir: Option<WorkDir> =
             (!workdir.is_empty()).then(|| WorkDir::Persistent(PathBuf::from(&workdir)));
@@ -750,12 +736,14 @@ impl Gremlin {
         )
         .await;
 
+        let state_dir = self.state.state_dir();
         let env = resolve_env(
             bootstrap_script(&definition.bootstrap),
             self.id.as_str(),
             &self.project_root,
             self.workdir.as_ref().map(|w| w.path()),
             self.scratch_dir.path(),
+            &state_dir,
             &self.runtime_config.base_process_env,
         )?;
 
@@ -1285,11 +1273,13 @@ impl Gremlin {
             .collect();
 
         // Build env with system vars.
+        let state_dir = self.state.state_dir();
         let system = system_env(
             self.id.as_str(),
             &self.project_root,
             self.workdir.as_ref().map(|w| w.path()),
             self.scratch_dir.path(),
+            &state_dir,
         );
         let mut env: HashMap<String, String> = if self.env.is_empty() {
             self.runtime_config.base_process_env.clone()
@@ -1509,12 +1499,12 @@ pub fn system_env(
     project_root: &Path,
     workdir: Option<&Path>,
     scratch_dir: &Path,
+    state_dir: &Path,
 ) -> HashMap<String, String> {
     let workdir_path = workdir
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
     let scratch_dir = scratch_dir.to_path_buf();
-    let state_dir = config::state_root().join(gremlin_id);
 
     let mut vars = HashMap::new();
     vars.insert("GREMLINS_GREMLIN_ID".to_string(), gremlin_id.to_string());
@@ -1541,15 +1531,16 @@ pub fn system_env(
 /// workspace), then re-asserted on top afterwards. The script can shape
 /// the environment but can never redirect the harness's paths.
 #[allow(clippy::too_many_arguments)]
-pub fn resolve_env(
+pub(crate) fn resolve_env(
     bootstrap_env: Option<&str>,
     gremlin_id: &str,
     project_root: &Path,
     workdir: Option<&Path>,
     scratch_dir: &Path,
+    state_dir: &Path,
     base_env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, RunError> {
-    let system = system_env(gremlin_id, project_root, workdir, scratch_dir);
+    let system = system_env(gremlin_id, project_root, workdir, scratch_dir, state_dir);
 
     let mut base: HashMap<String, String> = base_env.clone();
     base.extend(system.clone());
@@ -1629,6 +1620,7 @@ mod tests {
             &project_root,
             None,
             &scratch_dir,
+            &scratch_dir,
             &base_env,
         )
         .unwrap();
@@ -1674,6 +1666,7 @@ mod tests {
             &project_root,
             None,
             &scratch_dir,
+            &scratch_dir,
             &base_env,
         )
         .unwrap();
@@ -1707,6 +1700,7 @@ mod tests {
             &project_root,
             Some(&workdir),
             &scratch_dir,
+            &scratch_dir,
             &base_env,
         )
         .unwrap();
@@ -1727,6 +1721,7 @@ mod tests {
             "gr-test",
             dir.path(),
             None,
+            &scratch_dir,
             &scratch_dir,
             &base_env,
         )
