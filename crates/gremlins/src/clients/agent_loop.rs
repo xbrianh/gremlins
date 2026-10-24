@@ -11,7 +11,7 @@ use rig_core::completion::message::{
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
 use rig_core::error::ProviderError;
 use rig_core::streaming::{Item, StreamEvent};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, Notify, Semaphore};
 
 use crate::executor::conversation;
 
@@ -880,7 +880,7 @@ async fn run_agent_loop_core(
         args: String,
         call: String,
         key: String,
-        over_cap: bool,
+        over_cap: Option<String>,
     }
 
     let mut interactive_active: bool = false;
@@ -1833,15 +1833,25 @@ async fn run_agent_loop_core(
                 args: args_json,
                 call: format_tool_call_parts(&tc.function.name, &tc.function.arguments),
                 key: ledger_key_arg(&tc.function.arguments),
-                over_cap: tc.function.name == "Task" && {
+                over_cap: if tc.function.name == "Task" && {
                     task_count += 1;
                     task_count > tools::TASK_MAX_PER_TURN
+                } {
+                    Some(format!(
+                        "Error: at most {} Task calls per message",
+                        tools::TASK_MAX_PER_TURN
+                    ))
+                } else {
+                    None
                 },
             });
         }
 
-        // Phase 2: concurrent execution. Over-cap Task calls short-circuit so a
-        // single response cannot spawn an unbounded number of child loops.
+        // Phase 2: concurrent execution with backpressure. A semaphore caps
+        // in-flight tools at MAX_CONCURRENT_TOOLS; excess calls queue rather
+        // than being rejected, preserving result order. The Task-specific cap
+        // (TASK_MAX_PER_TURN) remains a hard rejection in Phase 1 because
+        // each Task spawns a child loop.
         // Wrapped in a tokio::select! with maybe_pause so the operator can
         // interrupt a long-running tool batch.
         let mut ctx = tool_ctx.clone();
@@ -1883,15 +1893,15 @@ async fn run_agent_loop_core(
             // sender intentionally outlives an individual tool batch.
             std::future::pending::<()>().await;
         };
+        let sem = Arc::new(Semaphore::new(tools::MAX_CONCURRENT_TOOLS));
         let exec_fut = join_all(jobs.iter().map(|j| {
             let ctx = &ctx;
+            let sem = sem.clone();
             async move {
-                if j.over_cap {
-                    format!(
-                        "Error: at most {} Task calls per message",
-                        tools::TASK_MAX_PER_TURN
-                    )
+                if let Some(msg) = &j.over_cap {
+                    msg.clone()
                 } else {
+                    let _permit = sem.acquire_owned().await;
                     tools::invoke(&j.id, &j.name, ctx, &j.args).await
                 }
             }

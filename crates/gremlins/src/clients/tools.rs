@@ -18,11 +18,15 @@ use crate::skills::LoadedSkill;
 const GREP_MAX_LINES: usize = 2000;
 const BASH_TIMEOUT_SECS: u64 = 120;
 const WEBSEARCH_TIMEOUT_SECS: u64 = 30;
+/// Maximum number of concurrent tool calls the harness will execute from a
+/// single model message. General tools (Read, Write, Grep, Glob, etc.) queue
+/// when this limit is exceeded — only Task calls are subject to a hard
+/// rejection cap (`TASK_MAX_PER_TURN`).
+pub(crate) const MAX_CONCURRENT_TOOLS: usize = 8;
 /// Cap on Task calls spawned from a single model message. Without this, one
 /// response could fan out unbounded child loops and overflow the context.
 pub(crate) const TASK_MAX_PER_TURN: usize = 8;
 const SKIP_DIRS: &[&str] = &["__pycache__", "node_modules", "target"];
-
 /// Tools that stay available even when a tool filter is set. `task_fn`
 /// re-applies both the tool filter and the sandbox mode to every nested agent,
 /// so bypassing the filter here cannot escape containment.
@@ -3257,7 +3261,7 @@ message to finish. The summary parameter briefly describes what you accomplished
     });
     all.push(ToolDefinition {
         name: "Task".into(),
-        description: format!("Delegate a self-contained task to a worker. Non-Fork kinds start with a clean conversation context; the Fork kind inherits the parent conversation history. Multiple Task calls in the same message run concurrently, up to {TASK_MAX_PER_TURN} per message. Returns the worker's final text output."),
+        description: format!("Delegate a self-contained task to a worker. Non-Fork kinds start with a clean conversation context; the Fork kind inherits the parent conversation history. Multiple Task calls in the same message run concurrently, up to {TASK_MAX_PER_TURN} per message (the harness supports up to {MAX_CONCURRENT_TOOLS} total concurrent tool calls). Returns the worker's final text output."),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
