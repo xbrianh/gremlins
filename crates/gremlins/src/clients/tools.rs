@@ -3622,6 +3622,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn landscape_directory_with_only_unrecognized_files() {
+        let dir = tmp();
+        let c = ctx(&dir);
+        let sub = dir.join("plans");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(
+            sub.join("fix-ls-stage-regression.md"),
+            "# Plan\n\nDo the thing.",
+        )
+        .unwrap();
+        std::fs::write(sub.join("notes.txt"), "some random notes").unwrap();
+        let args = serde_json::json!({"file_path": "plans", "token_budget": 1_000_000}).to_string();
+        let out = landscape_invoke(&c, &args).await;
+        assert!(
+            out.contains("fix-ls-stage-regression.md:"),
+            "unrecognized .md file must appear as tree entry: {out:?}"
+        );
+        assert!(
+            out.contains("notes.txt:"),
+            "unrecognized .txt file must appear as tree entry: {out:?}"
+        );
+        assert!(
+            !out.contains("(empty directory)"),
+            "must not report empty for non-empty dir: {out:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn landscape_refuses_symlink_root() {
         let dir = tmp();
         let c = ctx(&dir);
