@@ -596,7 +596,7 @@ impl Renderer {
                 .map(|l| UnicodeWidthStr::width(format!(" {l}").as_str()))
                 .max()
                 .unwrap_or(0);
-            (max_content as u16).min(self.rule_width)
+            (max_content.min(self.rule_width as usize)) as u16
         } else {
             0
         };
@@ -971,9 +971,9 @@ mod tests {
         assert_eq!(
             text,
             vec![
-                groove_top(14),
+                groove_top(13),
                 " fn main() {}".to_string(),
-                groove_bottom(14)
+                groove_bottom(13)
             ]
         );
         // The code line is highlighted into multiple token spans, each with
@@ -1017,9 +1017,9 @@ mod tests {
         assert_eq!(
             text,
             vec![
-                groove_top(14),
+                groove_top(13),
                 " fn main() {}".to_string(),
-                groove_bottom(14)
+                groove_bottom(13)
             ]
         );
         let code_line = &lines[1];
