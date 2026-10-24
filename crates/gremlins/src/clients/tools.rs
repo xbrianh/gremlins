@@ -3051,6 +3051,18 @@ fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String
         return format!("Error: skill {name:?} is not available for model invocation");
     }
 
+    // Run dynamic context (`!` placeholders) once at load time. The result is
+    // stored on the active entry and reused at every subsequent turn boundary.
+    let entry = match crate::skills::activate_loaded_skill(
+        loaded,
+        arguments.clone(),
+        argument_text.clone(),
+        &project_root(),
+    ) {
+        Ok(entry) => entry,
+        Err(e) => return format!("Error: failed to load skill {name:?}: {e}"),
+    };
+
     // Single critical section: check containment AND push so two
     // concurrent LoadSkill calls for the same name cannot both pass
     // the check and both push. If the skill is already active and this
@@ -3059,11 +3071,6 @@ fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String
     let mut active_guard = match active.lock() {
         Ok(g) => g,
         Err(e) => return format!("Error: internal lock error: {e}"),
-    };
-    let entry = crate::skills::ActiveSkill {
-        name: name.to_string(),
-        args: arguments.clone(),
-        argument_text: argument_text.clone(),
     };
     if let Some(existing) = active_guard.iter_mut().find(|s| s.name == name) {
         if arguments.is_empty() {

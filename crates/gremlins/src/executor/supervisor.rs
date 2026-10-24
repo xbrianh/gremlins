@@ -2778,11 +2778,7 @@ async fn handle_chat(
         // Preserve existing args for skills the operator keeps.
         for name in &requested_skills {
             if !guard.iter().any(|s| s.name == *name) {
-                guard.push(crate::skills::ActiveSkill {
-                    name: name.clone(),
-                    args: vec![],
-                    argument_text: String::new(),
-                });
+                guard.push(crate::skills::ActiveSkill::operator(name.clone()));
             }
         }
         guard.retain(|s| requested_skills.contains(&s.name) || !prev_operator.contains(&s.name));

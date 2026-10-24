@@ -66,6 +66,41 @@ impl std::fmt::Display for ProcError {
 
 impl std::error::Error for ProcError {}
 
+impl ProcError {
+    /// Full diagnostic, including captured stdout/stderr for the variants
+    /// that carry output buffers.
+    pub fn full_message(&self) -> String {
+        match self {
+            ProcError::CalledProcessError(rc, stdout, stderr) => {
+                format!("exit status {rc}\n{}", combine_output(stdout, stderr))
+            }
+            ProcError::TimeoutExpired(timeout, stdout, stderr) => {
+                format!(
+                    "timed out after {timeout}s\n{}",
+                    combine_output(stdout, stderr)
+                )
+            }
+            ProcError::Io(e) => e.to_string(),
+            ProcError::EmptyCommand => "empty command".to_string(),
+            ProcError::InvalidTimeout(t) => format!("invalid timeout: {t}"),
+        }
+    }
+}
+
+/// Combine captured stdout and stderr into a single message, keeping a
+/// newline between the two when both are present.
+pub(crate) fn combine_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut out = String::from_utf8_lossy(stdout).into_owned();
+    let err = String::from_utf8_lossy(stderr);
+    if !err.is_empty() {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&err);
+    }
+    out
+}
+
 /// The Python-style returncode for a finished process: its exit code, or the
 /// negated signal number when a signal killed it. Mirrors
 /// `asyncio.subprocess.Process.returncode`, which the parallel supervisor

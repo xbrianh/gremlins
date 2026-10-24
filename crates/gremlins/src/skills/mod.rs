@@ -15,6 +15,9 @@ use std::path::{Path, PathBuf};
 use regex;
 use serde::Deserialize;
 
+mod injection;
+pub(crate) use injection::inject_dynamic_context;
+
 // ---------------------------------------------------------------------------
 // Active skill entries
 // ---------------------------------------------------------------------------
@@ -28,6 +31,41 @@ pub struct ActiveSkill {
     /// Raw argument text as supplied by the model, preserved verbatim for
     /// `$ARGUMENTS` substitution.
     pub argument_text: String,
+    /// Skill body with dynamic context (`!` placeholders) already injected.
+    /// `None` means no injection was attempted (e.g. operator-toggled skills),
+    /// so prompt assembly falls back to the raw body.
+    pub injected_body: Option<String>,
+}
+
+impl ActiveSkill {
+    /// An operator-toggled entry: no dynamic-context injection is attempted,
+    /// so prompt assembly renders the raw skill body.
+    pub(crate) fn operator(name: impl Into<String>) -> Self {
+        ActiveSkill {
+            name: name.into(),
+            args: Vec::new(),
+            argument_text: String::new(),
+            injected_body: None,
+        }
+    }
+}
+
+/// Build the active entry for a model-invoked skill, running dynamic-context
+/// injection once at load time. The injected body is stored on the entry and
+/// reused at every subsequent turn boundary.
+pub(crate) fn activate_loaded_skill(
+    loaded: &LoadedSkill,
+    args: Vec<String>,
+    argument_text: String,
+    project_root: &Path,
+) -> Result<ActiveSkill, SkillError> {
+    let injected_body = inject_dynamic_context(&loaded.skill.body, project_root)?;
+    Ok(ActiveSkill {
+        name: loaded.skill.name.clone(),
+        args,
+        argument_text,
+        injected_body: Some(injected_body),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +298,9 @@ pub enum SkillError {
     Io(std::io::Error),
     /// The YAML frontmatter could not be parsed.
     Yaml(String),
+    /// A dynamic-context (`!` placeholder) command failed. The whole skill
+    /// invocation is rejected rather than partially injecting output.
+    InjectionFailed { command: String, output: String },
 }
 
 impl std::fmt::Display for SkillError {
@@ -268,6 +309,9 @@ impl std::fmt::Display for SkillError {
             SkillError::Missing(path) => write!(f, "no SKILL.md in {path}"),
             SkillError::Io(e) => write!(f, "I/O error reading SKILL.md: {e}"),
             SkillError::Yaml(msg) => write!(f, "YAML parse error in SKILL.md: {msg}"),
+            SkillError::InjectionFailed { command, output } => {
+                write!(f, "dynamic context command failed: {command:?}: {output}")
+            }
         }
     }
 }
@@ -856,8 +900,14 @@ pub fn build_system_prompt_section(
                 }
                 // Substitute `$ARGUMENTS`, positional, named, and
                 // `${GREMLIN_*}` placeholders in the body before injecting it.
+                // Prefer the injected body when LoadSkill ran dynamic
+                // context; fall back to the raw body otherwise.
+                let raw_body = active
+                    .injected_body
+                    .as_deref()
+                    .unwrap_or(&loaded.skill.body);
                 let body = substitute_variables(
-                    &loaded.skill.body,
+                    raw_body,
                     &active.args,
                     &active.argument_text,
                     &loaded.skill.arguments,
@@ -1273,6 +1323,7 @@ mod tests {
                 name: "pdf".into(),
                 args: vec![],
                 argument_text: String::new(),
+                injected_body: None,
             }],
             Path::new("/tmp"),
             "sess-1",
@@ -1342,11 +1393,13 @@ mod tests {
                 name: "present".to_string(),
                 args: vec![],
                 argument_text: String::new(),
+                injected_body: None,
             },
             ActiveSkill {
                 name: "gone".to_string(),
                 args: vec![],
                 argument_text: String::new(),
+                injected_body: None,
             },
         ];
         let (section, unresolved) =
@@ -1375,6 +1428,7 @@ mod tests {
                 name: "tool".into(),
                 args: vec![],
                 argument_text: String::new(),
+                injected_body: None,
             }],
             Path::new("/tmp"),
             "sess-1",
@@ -1719,9 +1773,34 @@ mod tests {
             name: "greet".into(),
             args: vec!["World".to_string(), "/home/world".to_string()],
             argument_text: "World /home/world".into(),
+            injected_body: None,
         }];
         let (section, _) =
             build_system_prompt_section(&skills, &active, Path::new("/project"), "s-1");
         assert!(section.contains("Hello World, your dir is /home/world"));
+    }
+
+    #[test]
+    fn build_section_prefers_injected_body() {
+        let skills = vec![LoadedSkill {
+            skill: Skill {
+                name: "s".into(),
+                description: "desc".into(),
+                body: "raw !`echo hello`".into(),
+                source: SkillSource::Project,
+                ..Default::default()
+            },
+            files: vec![],
+        }];
+        let active = vec![ActiveSkill {
+            name: "s".into(),
+            args: vec![],
+            argument_text: String::new(),
+            injected_body: Some("rendered hello".into()),
+        }];
+        let (section, _) =
+            build_system_prompt_section(&skills, &active, Path::new("/tmp"), "sess-1");
+        assert!(section.contains("rendered hello"));
+        assert!(!section.contains("!`echo hello`"));
     }
 }
