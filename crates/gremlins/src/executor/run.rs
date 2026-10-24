@@ -39,13 +39,13 @@ use rig_core::completion::Message;
 // System prompt assembly
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// System prompt assembly
-// ---------------------------------------------------------------------------
-
 /// Compute the gremlin's stage-start landscape block.
+///
+/// When the client has the Landscape tool and the formatted block is
+/// nonempty, a usage hint is prepended. Otherwise the raw (possibly empty)
+/// block is returned as-is.
 async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -> String {
-    let (block, file_count, item_count) = build_landscape_snapshot(
+    let (mut block, file_count, item_count) = build_landscape_snapshot(
         gremlin.cwd(),
         gremlin.runtime_config.log_tx.clone(),
         has_outline_tool,
@@ -59,19 +59,27 @@ async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -> String {
                 "[landscape] {file_count} files, {item_count} items, {tokens} tokens"
             ));
         }
+        if has_outline_tool {
+            block = format!(
+                "Use the Landscape tool to explore any directory or file in more detail. The outline below shows the repository structure captured at stage start.\n\n\
+{block}"
+            );
+        }
     }
 
     block
 }
 
 /// Build a system prompt by optionally appending a landscape block.
+///
+/// The caller (`landscape_block`) already gates the usage hint on tool
+/// availability, so this function only concatenates.
 fn assemble_system_prompt(base: &str, landscape: Option<&str>) -> String {
     match landscape.filter(|b| !b.is_empty()) {
         Some(block) => format!("{base}\n\n{block}"),
         None => base.to_string(),
     }
 }
-
 /// Build and format a landscape block for one workspace root.
 async fn build_landscape_snapshot(
     cwd: PathBuf,

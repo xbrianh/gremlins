@@ -20,19 +20,23 @@ pub(crate) fn agent_system_prompt(work_root: &Path, scratch_root: &Path) -> Stri
 <important>\n\
 Think and write in a terse, to-the-point style. Make brief statements that get to the point. Do this for reasoning and writing \
 </important>\n\
+<discovery>\n\
+Landscape is your most powerful discovery tool. Use it when starting a new \
+task, exploring an unfamiliar directory, finding where something lives, or \
+getting oriented before reading files. The standard discovery pattern is \
+Landscape first for structure, then Grep for targeted search.\n\
+</discovery>\n\
 <tools>\n\
-Read (read files), Write (create files), Edit (targeted \
+Landscape (structural outline), Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
-by pattern), Landscape (structural outline), Bash (shell commands), Task, Done\n\
+by pattern), Bash (shell commands), Task, Done\n\
 </tools>\n\
 Before every turn, scan the tools you're about to call. When two or more \
 calls are independent (neither depends on the other's result), batch them in \
 a single message. The harness executes concurrent calls in parallel, so \
 batching reduces wall-clock time. Serial chains of single-call turns are the \
 most expensive pattern — avoid them. `Done` signals turn completion and must be the sole call in its message — never batch it with other tools.\n\
-Prefer Landscape for structural questions — where functions, types, and \
-headings live — over reading whole files.\n\
-Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
+ALWAYS use Landscape first when exploring unknown code — it maps structure without reading files.\nCall Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Work root:     {work}\n\
 Scratch root:  {scratch}\n\
@@ -49,19 +53,23 @@ Scratch root:  {scratch}\n\
 pub(crate) fn task_system_prompt(work_root: &Path, scratch_root: &Path) -> String {
     format!(
         "\
+<discovery>\n\
+Landscape is your most powerful discovery tool. Use it when starting a new \
+task, exploring an unfamiliar directory, finding where something lives, or \
+getting oriented before reading files. The standard discovery pattern is \
+Landscape first for structure, then Grep for targeted search.\n\
+</discovery>\n\
 <tools>\n\
-Read (read files), Write (create files), Edit (targeted \
+Landscape (structural outline), Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
-by pattern), Landscape (structural outline), Bash (shell commands), Task, Done\n\
+by pattern), Bash (shell commands), Task, Done\n\
 </tools>\n\
 Before every turn, scan the tools you're about to call. When two or more \
 calls are independent (neither depends on the other's result), batch them in \
 a single message. The harness executes concurrent calls in parallel, so \
 batching reduces wall-clock time. Serial chains of single-call turns are the \
 most expensive pattern — avoid them. `Done` signals turn completion and must be the sole call in its message — never batch it with other tools.\n\
-Prefer Landscape for structural questions — where functions, types, and \
-headings live — over reading whole files.\n\
-Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
+ALWAYS use Landscape first when exploring unknown code — it maps structure without reading files.\nCall Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Work root:     {work}\n\
 Scratch root:  {scratch}\n\
@@ -81,18 +89,16 @@ pub(crate) fn fork_system_prompt(work_root: &Path, scratch_root: &Path) -> Strin
     format!(
         "\
 <tools>\n\
-Read (read files), Write (create files), Edit (targeted \
+Landscape (structural outline), Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
-by pattern), Landscape (structural outline), Bash (shell commands), Done\n\
+by pattern), Bash (shell commands), Done\n\
 </tools>\n\
 Before every turn, scan the tools you're about to call. When two or more \
 calls are independent (neither depends on the other's result), batch them in \
 a single message. The harness executes concurrent calls in parallel, so \
 batching reduces wall-clock time. Serial chains of single-call turns are the \
 most expensive pattern — avoid them. `Done` signals turn completion and must be the sole call in its message — never batch it with other tools.\n\
-Prefer Landscape for structural questions — where functions, types, and \
-headings live — over reading whole files.\n\
-This is a forked child agent with the parent's full context. Do not call \
+Use Landscape first when exploring code — it maps structure without reading files.\nThis is a forked child agent with the parent's full context. Do not call \
 Task.\n\
 Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
