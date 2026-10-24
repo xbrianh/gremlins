@@ -1283,14 +1283,19 @@ impl StateStore for FileSystemStateStore {
             child_store.write_state(&initial)?;
             Ok(Box::new(child_store))
         } else {
-            let child_dir = config::state_root().join(child_gremlin_id);
+            let child_dir = attempt_dir_path(child_gremlin_id, 1);
             tokio::fs::create_dir_all(&child_dir).await?;
             let child_ad = child_dir.join("artifacts");
             tokio::fs::create_dir_all(&child_ad).await?;
             if parent_ad.is_dir() {
                 copy_dir_sync(&parent_ad, &child_ad)?;
             }
-            let child_store = FileSystemStateStore::open(child_gremlin_id)?;
+            // Build the store directly: state.json is not written until after
+            // the registry is seeded, so `open` (which requires a recorded id)
+            // cannot resolve the directory yet.
+            let child_store = FileSystemStateStore {
+                root: StateRoot::Path(child_dir),
+            };
             self.seed_fork_registry(&child_store, &child_ad, &parent_ad, true)
                 .await?;
             let mut initial = Map::new();
@@ -1331,7 +1336,30 @@ impl StateStore for FileSystemStateStore {
                 )
             })?
             .to_string();
-        let (gremlin_id, current) = if let Some(base) = strip_attempt_suffix(&dir_name) {
+        let (gremlin_id, current) = {
+            let base = strip_attempt_suffix(&dir_name).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("directory {dir_name:?} does not use padded attempt naming",),
+                )
+            })?;
+            // Verify the gremlin id embedded in the directory matches the
+            // recorded id in state.json so that a gremlin id that itself ends
+            // in four decimal digits (e.g. `demo-1234`) is never mistaken for
+            // an attempt directory of `demo`.
+            let recorded_id = read_state_json(Some(&self.state_file()))
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if recorded_id.as_deref() != Some(&base) {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "directory {dir_name:?} appears to be attempt {base:?}-* but the \
+                         recorded gremlin id is {recorded_id:?}",
+                    ),
+                )));
+            }
             let current = self.attempt_number().ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::Unsupported,
@@ -1339,9 +1367,6 @@ impl StateStore for FileSystemStateStore {
                 )
             })?;
             (base, current)
-        } else {
-            // Legacy (pre-padded) state directory: treat it as attempt zero.
-            (dir_name, 0)
         };
         let next = current.checked_add(1).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "attempt number overflow")
@@ -1394,6 +1419,30 @@ impl StateStore for FileSystemStateStore {
         // Atomically publish the completed attempt.
         tokio::fs::rename(&tmp_dir, &child_dir).await?;
 
+        // After rename, rewrite any registry paths that still reference the
+        // temporary directory so that all artifact bindings point into the
+        // final attempt directory.
+        let child_ad_final = child_dir.join("artifacts");
+        let tmp_ad_str = child_ad.to_string_lossy().to_string();
+        let child_ad_final_str = child_ad_final.to_string_lossy().to_string();
+        if tmp_ad_str != child_ad_final_str {
+            let child_store_final = FileSystemStateStore {
+                root: StateRoot::Path(child_dir.clone()),
+            };
+            child_store_final
+                .locked_write(|data| {
+                    for path in data.values_mut() {
+                        if path.starts_with(&tmp_ad_str) {
+                            let rel = path.strip_prefix(&tmp_ad_str).unwrap_or(path);
+                            let rel = rel.trim_start_matches('/');
+                            *path = format!("{}/{}", child_ad_final_str, rel);
+                        }
+                    }
+                    Ok(())
+                })
+                .await?;
+        }
+
         Ok(Box::new(FileSystemStateStore {
             root: StateRoot::Path(child_dir),
         }))
@@ -1417,8 +1466,8 @@ impl StateStore for FileSystemStateStore {
 
         // Persistent stores own every attempt directory under the same
         // gremlin id.  Resolve the id from recorded state (falling back to
-        // the directory name) and remove every `<id>-*` attempt dir plus the
-        // legacy `<id>` dir — no per-sibling JSON I/O.
+        // the directory name) and remove every `<id>-NNNN` attempt dir — no
+        // per-sibling JSON I/O.
         let id = read_state_json(Some(&self.state_file()))
             .get("id")
             .and_then(|v| v.as_str())
@@ -1435,15 +1484,6 @@ impl StateStore for FileSystemStateStore {
         };
 
         let root = config::state_root();
-        let legacy_dir = root.join(&id);
-        if legacy_dir.is_dir() {
-            if let Err(error) = std::fs::remove_dir_all(&legacy_dir) {
-                log::warn!(
-                    "clean: could not remove state dir {}: {error}",
-                    legacy_dir.display()
-                );
-            }
-        }
 
         // Remove every `<id>-NNNN` attempt directory.
         if let Ok(entries) = std::fs::read_dir(&root) {
@@ -1455,10 +1495,17 @@ impl StateStore for FileSystemStateStore {
                 let Ok(name) = entry.file_name().into_string() else {
                     continue;
                 };
-                // Accept `<id>-<any suffix>`, not just 4-digit, so that
-                // tmp dirs from failed forks are also cleaned up.
                 if !name.starts_with(&id) || name.as_bytes().get(id.len()) != Some(&b'-') {
                     continue;
+                }
+                // Only match `<id>-NNNN` (four-digit suffix), not arbitrary
+                // `<id>-something` that could belong to a different gremlin.
+                let suffix = &name.as_bytes()[id.len() + 1..];
+                if suffix.len() != 4 || !suffix.iter().all(|b| b.is_ascii_digit()) {
+                    // But still clean up tmp dirs from failed forks.
+                    if !name[id.len() + 1..].starts_with('.') {
+                        continue;
+                    }
                 }
                 if let Err(error) = std::fs::remove_dir_all(&path) {
                     log::warn!(
@@ -2006,45 +2053,17 @@ fn strip_attempt_suffix(name: &str) -> Option<String> {
     }
 }
 
-/// Resolve the latest attempt directory for `gremlin_id`, preferring the
-/// lexicographically largest `<gremlin_id>-*` directory. Falls back to the
-/// legacy `<gremlin_id>` directory when no padded attempts exist.
+/// Resolve the latest attempt directory for `gremlin_id` as the
+/// lexicographically largest valid `<gremlin_id>-NNNN` directory.
 ///
-/// Tries a fast path first (sequential attempt numbers 1..N) to avoid
-/// scanning the entire state root; falls back to a full scan only when
-/// non-contiguous attempt numbers are detected.
+/// Scans the entire state root; only considers directories whose state.json
+/// records the matching gremlin id.
 fn latest_attempt_dir(gremlin_id: &str) -> Result<PathBuf, StateError> {
     let root = config::state_root();
 
-    // Fast path: probe sequential attempt directories 0001, 0002, ...
-    // until one is missing, then take the previous. This avoids a full
-    // `read_dir` scan for the common case of linear attempt creation.
-    let mut last_existing: Option<PathBuf> = None;
-    for n in 1..=9999u32 {
-        let candidate = attempt_dir_path(gremlin_id, n);
-        if candidate.join("state.json").is_file() {
-            last_existing = Some(candidate);
-        } else if candidate.is_dir() {
-            // Directory exists but has no state.json — partial/failed fork.
-            // Skip it and keep looking; the previous valid one is our latest.
-        } else {
-            // No directory at all — we've passed the last attempt.
-            break;
-        }
-    }
-    if let Some(path) = last_existing {
-        return Ok(path);
-    }
-
-    // Legacy fallback: a directory named exactly `<gremlin_id>`.
-    let legacy = root.join(gremlin_id);
-    if legacy.is_dir() {
-        return Ok(legacy);
-    }
-
-    // Slow path: scan for non-contiguous attempt directories (e.g.
-    // after manual intervention). Only considers directories whose
-    // state.json contains the matching gremlin id.
+    // Scan all `<gremlin_id>-NNNN` directories and pick the
+    // lexicographically largest valid one. Only considers directories
+    // whose state.json contains the matching recorded gremlin id.
     let prefix = format!("{gremlin_id}-");
     let mut best: Option<(String, PathBuf)> = None;
 
@@ -2069,7 +2088,9 @@ fn latest_attempt_dir(gremlin_id: &str) -> Result<PathBuf, StateError> {
                 continue;
             }
             // Verify the gremlin id recorded inside matches so that a
-            // stale or mis-planted directory is never selected.
+            // stale or mis-planted directory is never selected, and so
+            // that gremlin ids that themselves end in four digits are not
+            // mistaken for attempt directories of a different gremlin.
             let recorded_id = read_state_json(Some(&state_json))
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -2125,14 +2146,15 @@ pub fn list_state_dirs() -> Vec<(String, PathBuf)> {
             continue;
         };
 
-        // Prefer the recorded gremlin id from state.json; fall back to the
-        // directory name (with an attempt suffix stripped when present).
+        // Prefer the recorded gremlin id from state.json; otherwise use the
+        // directory name with any attempt suffix stripped.
         let id = read_state_json(Some(&state_json_path))
             .get("id")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| strip_attempt_suffix(&name).unwrap_or_else(|| name.clone()));
+            .or_else(|| strip_attempt_suffix(&name))
+            .unwrap_or_else(|| name.clone());
 
         match latest.get(&id) {
             None => {
@@ -2323,8 +2345,12 @@ mod tests {
     use crate::test_support::with_sandbox;
 
     fn seed(sandbox: &crate::test_support::Sandbox, gremlin_id: &str) -> PathBuf {
-        let state_dir = sandbox.path().join("state").join(gremlin_id);
+        let state_dir = sandbox
+            .path()
+            .join("state")
+            .join(format!("{gremlin_id}-0001"));
         std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(state_dir.join("artifacts")).unwrap();
         let sf = state_dir.join("state.json");
         std::fs::write(
             &sf,
@@ -2343,7 +2369,7 @@ mod tests {
         with_sandbox(None, |sandbox| {
             let state_dir = sandbox.path().join("state").join("abc-0001");
             std::fs::create_dir_all(&state_dir).unwrap();
-            std::fs::write(state_dir.join("state.json"), "{}").unwrap();
+            std::fs::write(state_dir.join("state.json"), r#"{"id": "abc"}"#).unwrap();
             let p = resolve_state_file(Some("abc")).unwrap();
             assert!(p.ends_with("abc-0001/state.json"), "{p:?}");
             assert!(resolve_state_file(None).is_none());
@@ -2518,7 +2544,7 @@ mod tests {
 
             let handles: Vec<_> = (0..16)
                 .map(|i| {
-                    let _state_dir = sandbox.path().join("state").join("gr-test");
+                    let _state_dir = sandbox.path().join("state").join("gr-test-0001");
                     std::thread::spawn(move || {
                         let data = StateData::open("gr-test").unwrap();
                         data.record_stage_error("other", &format!("writer-{i}"));
@@ -2648,7 +2674,7 @@ mod tests {
     #[test]
     fn state_data_open_reads_existing() {
         with_sandbox(None, |sandbox| {
-            let state_dir = sandbox.path().join("state").join("existing");
+            let state_dir = sandbox.path().join("state").join("existing-0001");
             std::fs::create_dir_all(&state_dir).unwrap();
             std::fs::write(
                 state_dir.join("state.json"),

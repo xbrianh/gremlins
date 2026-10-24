@@ -649,9 +649,10 @@ mod tests {
         stage_inputs: HashMap<String, String>,
     ) -> (Sandbox, Gremlin) {
         let sandbox = Sandbox::new();
-        let state_dir = config::state_root().join("gr-test");
+        let state_dir = config::state_root().join("gr-test-0001");
         let worktree = sandbox.path().join("worktree");
         std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(state_dir.join("artifacts")).unwrap();
         std::fs::create_dir_all(&worktree).unwrap();
 
         let data = serde_json::json!({

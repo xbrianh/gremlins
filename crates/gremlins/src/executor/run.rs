@@ -1430,7 +1430,7 @@ mod tests {
         bootstrap: Bootstrap,
     ) -> (Sandbox, Gremlin) {
         let sandbox = Sandbox::new();
-        let state_dir = config::state_root().join("gr-test");
+        let state_dir = config::state_root().join("gr-test-0001");
         std::fs::create_dir_all(state_dir.join("artifacts")).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
 
@@ -2198,7 +2198,7 @@ mod tests {
                 .unwrap(),
         ];
         let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
-        let state_dir = sandbox.path().join("state").join("gr-test");
+        let state_dir = sandbox.path().join("state").join("gr-test-0001");
 
         assert_eq!(gremlin.run(None).await.unwrap(), 0);
         assert!(state_dir.join("finished").is_file());
@@ -2219,7 +2219,7 @@ mod tests {
             .build()
             .unwrap()];
         let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
-        let state_dir = sandbox.path().join("state").join("gr-test");
+        let state_dir = sandbox.path().join("state").join("gr-test-0001");
 
         assert_eq!(gremlin.run(None).await.unwrap(), 1);
 
@@ -2290,7 +2290,7 @@ mod tests {
             .build()
             .unwrap()];
         let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
-        let state_dir = sandbox.path().join("state").join("gr-test");
+        let state_dir = sandbox.path().join("state").join("gr-test-0001");
 
         // First run: group fails because "bad" exits non-zero.
         match gremlin.run(None).await {
@@ -2357,7 +2357,7 @@ mod tests {
             .build()
             .unwrap()];
         let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
-        let state_dir = sandbox.path().join("state").join("gr-test");
+        let state_dir = sandbox.path().join("state").join("gr-test-0001");
 
         match gremlin.run(None).await {
             Err(RunError::StageFailed { stage, .. }) => assert_eq!(stage, "broken"),
@@ -2395,7 +2395,7 @@ mod tests {
         let worktree = sandbox.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         gremlin.workdir = Some(WorkDir::Persistent(worktree.clone()));
-        let state_dir = sandbox.path().join("state").join("gr-test");
+        let state_dir = sandbox.path().join("state").join("gr-test-0001");
 
         assert_eq!(gremlin.run(None).await.unwrap(), 1);
         assert!(!worktree.join("never.marker").exists());

@@ -1073,9 +1073,12 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
     // Tail the last ~20 lines of the gremlin log for immediate context.
     // Read only the tail of the file (append-only log, no rotation) so
     // startup time and memory stay bounded regardless of log length.
-    // Always use the legacy (non-attempt) path so the log survives
-    // `--stage` resumes that create new attempt directories.
-    let log_path = config::state_root().join(id).join("log");
+    // Resolve the log through the latest attempt directory — the log is
+    // carried forward on `--stage` resume, so the attempt dir always
+    // has the full history.
+    let log_path = FileSystemStateStore::open(id)
+        .map(|store| store.root_dir().join("log"))
+        .unwrap_or_else(|_| config::state_root().join(id).join("log"));
     if let Ok(lines) = tail_log_lines(&log_path, 20).await {
         for line in &lines {
             eprintln!("log: {line}");

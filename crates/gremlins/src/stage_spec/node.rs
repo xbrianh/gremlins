@@ -134,9 +134,10 @@ impl StageSpec {
     /// produces.
     ///
     /// Mirrors the producer-collection logic in the definition loader:
-    /// `{name}` templates are substituted with the stage name, and plain
-    /// output keys become `artifact://` URIs.  Composite (`sequence` /
-    /// `parallel`) stages recurse into their children.
+    /// `{name}` and stage-option placeholders are substituted the same way
+    /// the executor resolves them at runtime (see `prepare_agent` /
+    /// `prepare_exec`), and plain output keys become `artifact://` URIs.
+    /// Composite (`sequence` / `parallel`) stages recurse into their children.
     pub(crate) fn produced_artifact_keys(&self) -> Vec<String> {
         let mut out = Vec::new();
         self.collect_produced_artifact_keys(&mut out);
@@ -144,9 +145,13 @@ impl StageSpec {
     }
 
     fn collect_produced_artifact_keys(&self, out: &mut Vec<String>) {
-        let (outputs_map, name) = match self {
-            StageSpec::Agent { stage, .. } => (&stage.outputs_map, stage.name.as_str()),
-            StageSpec::Exec { stage, .. } => (&stage.outputs_map, stage.name.as_str()),
+        let (outputs_map, name, options) = match self {
+            StageSpec::Agent { stage, .. } => {
+                (&stage.outputs_map, stage.name.as_str(), &stage.options)
+            }
+            StageSpec::Exec { stage, .. } => {
+                (&stage.outputs_map, stage.name.as_str(), &stage.options)
+            }
             StageSpec::Sequence { body, .. } | StageSpec::Parallel { body, .. } => {
                 for child in body {
                     child.collect_produced_artifact_keys(out);
@@ -154,10 +159,23 @@ impl StageSpec {
                 return;
             }
         };
+        // Resolve placeholders exactly as the executor does at run time:
+        // stringified stage options plus the `{name}` framework substitution.
+        // Without this, a definition like `outputs_map: {"out":
+        // "artifact://{filename}"}` (with `options: {filename: report.txt}`)
+        // would statically collect `artifact://{filename}` while the runtime
+        // registers `artifact://report.txt`, so resume would misclassify the
+        // resolved key as external/bootstrap data.
+        let str_opts = crate::executor::vars::string_options(options);
+        let mut extra = HashMap::new();
+        extra.insert("name".to_string(), name.to_string());
         for (key, val) in outputs_map {
-            let resolved_key = key.replace("{name}", name);
+            let resolved_key =
+                crate::executor::vars::substitute_vars(key, &str_opts, &extra, &HashMap::new());
             if val.starts_with("artifact://") {
-                out.push(val.replace("{name}", name));
+                let resolved_val =
+                    crate::executor::vars::substitute_vars(val, &str_opts, &extra, &HashMap::new());
+                out.push(resolved_val);
             }
             if !resolved_key.ends_with('?') && !resolved_key.contains("://") {
                 out.push(format!("artifact://{resolved_key}"));
@@ -551,4 +569,82 @@ fn parallel_to_yaml(
     let children: Vec<Value> = body.iter().map(StageSpec::to_yaml).collect();
     m.insert(Value::String("body".to_string()), Value::Sequence(children));
     Value::Mapping(m)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stage_spec::composite::StageAttrs;
+
+    fn json_str(s: &str) -> serde_json::Value {
+        serde_json::Value::String(s.to_string())
+    }
+
+    fn agent_spec(
+        name: &str,
+        options: HashMap<String, serde_json::Value>,
+        outputs_map: HashMap<String, String>,
+    ) -> StageSpec {
+        StageSpec::Agent {
+            stage: Agent {
+                name: name.to_string(),
+                prompts: Vec::new(),
+                options,
+                interpolation_map: HashMap::new(),
+                outputs_map,
+                landscape: true,
+            },
+            model: None,
+            task_models: None,
+        }
+    }
+
+    #[test]
+    fn produced_artifact_keys_resolves_option_placeholders() {
+        // The motivating bug: an output URI templated with an option value
+        // must resolve the same way the executor does at run time.
+        let options = HashMap::from([("filename".to_string(), json_str("report.txt"))]);
+        let outputs_map = HashMap::from([("out".to_string(), "artifact://{filename}".to_string())]);
+        let keys = agent_spec("build", options, outputs_map).produced_artifact_keys();
+        assert!(keys.contains(&"artifact://report.txt".to_string()));
+        assert!(!keys.contains(&"artifact://{filename}".to_string()));
+    }
+
+    #[test]
+    fn produced_artifact_keys_resolves_name_placeholder() {
+        let outputs_map =
+            HashMap::from([("out".to_string(), "artifact://{name}/done".to_string())]);
+        let keys = agent_spec("build", HashMap::new(), outputs_map).produced_artifact_keys();
+        assert!(keys.contains(&"artifact://build/done".to_string()));
+    }
+
+    #[test]
+    fn produced_artifact_keys_promotes_plain_keys() {
+        let outputs_map = HashMap::from([("plan".to_string(), "plan".to_string())]);
+        let keys = agent_spec("build", HashMap::new(), outputs_map).produced_artifact_keys();
+        assert!(keys.contains(&"artifact://plan".to_string()));
+    }
+
+    #[test]
+    fn produced_artifact_keys_recurses_into_composites() {
+        let child = agent_spec(
+            "child",
+            HashMap::from([("file".to_string(), json_str("child.md"))]),
+            HashMap::from([("out".to_string(), "artifact://{file}".to_string())]),
+        );
+        let spec = StageSpec::Sequence {
+            attrs: StageAttrs::new("wrap".to_string()),
+            max_iterations: 1,
+            interval: None,
+            model: None,
+            task_models: None,
+            body: vec![child],
+        };
+        let keys = spec.produced_artifact_keys();
+        assert!(keys.contains(&"artifact://child.md".to_string()));
+    }
 }

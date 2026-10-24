@@ -350,6 +350,12 @@ impl Gremlin {
             loop {
                 let hex = state::token_hex(2);
                 let candidate = format!("{definition_name}-{hex}");
+                // Reject candidates whose legacy (non-padded) directory
+                // already exists so that a new run never reuses a stale id.
+                let legacy = config::state_root().join(&candidate);
+                if legacy.is_dir() {
+                    continue;
+                }
                 match std::fs::create_dir(state::attempt_dir_path(&candidate, 1)) {
                     Ok(()) => break GremlinId(candidate),
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -861,6 +867,22 @@ impl Gremlin {
             "fork: child_id={child_id}, parent_id={parent_id}, group_name={group_name}, child_key={child_key}"
         );
         let child_gremlin_id = validate_gremlin_id(child_id).map_err(RunError::Message)?;
+
+        // Reject child IDs that would collide with the parent's attempt
+        // directory naming scheme (<parent_id>-NNNN). Parallel children are
+        // named `{parent}-{child_name}`, so a child stage named e.g. "0001"
+        // would otherwise produce a state directory that shadows the parent's
+        // own first attempt directory.
+        if !parent_id.is_empty() {
+            let parent_prefix = format!("{parent_id}-");
+            if let Some(suffix) = child_id.strip_prefix(&parent_prefix) {
+                if suffix.len() == 4 && suffix.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(RunError::Message(format!(
+                        "child id {child_id:?} conflicts with parent {parent_id:?} attempt naming",
+                    )));
+                }
+            }
+        }
 
         // Allow effective_model mutation via with_model.
         let mut child_provider = child_provider;
@@ -2046,11 +2068,15 @@ mod tests {
             .unwrap();
 
         for (child_id, expected) in [("gr-a", ""), ("gr-b", "gr-root")] {
-            let raw = read_state(&fx.join("state").join(child_id).join("state.json"));
+            let raw = read_state(
+                &fx.join("state")
+                    .join(format!("{child_id}-0001"))
+                    .join("state.json"),
+            );
             assert_eq!(raw["parent_id"], expected, "{child_id}");
         }
 
-        let grouped = read_state(&fx.join("state").join("gr-b").join("state.json"));
+        let grouped = read_state(&fx.join("state").join("gr-b-0001").join("state.json"));
         assert_eq!(grouped["group_name"], "group");
         assert_eq!(grouped["child_key"], "key");
     }
@@ -2268,7 +2294,7 @@ stages:
 "#;
 
     fn write_hermetic_state(sandbox: &Path, id: &str, definition_body: &str) -> (PathBuf, PathBuf) {
-        let state_dir = sandbox.join("state").join(id);
+        let state_dir = sandbox.join("state").join(format!("{id}-0001"));
         std::fs::create_dir_all(&state_dir).unwrap();
 
         let project_root = sandbox.join("project");
@@ -2374,7 +2400,7 @@ stages:
 
         // Manually create a state directory without a definition.yaml so
         // `from` falls back to resolving by kind.
-        let state_dir = fx.join("state").join("gr-noherm");
+        let state_dir = fx.join("state").join("gr-noherm-0001");
         std::fs::create_dir_all(&state_dir).unwrap();
         let project_root = fx.repo_path();
         let state_json = serde_json::json!({
@@ -2421,7 +2447,7 @@ stages:
         let sandbox = tempfile::tempdir().unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
         let id = "gr-clean-cmds";
-        let state_dir = sandbox.path().join("state").join(id);
+        let state_dir = sandbox.path().join("state").join(format!("{id}-0001"));
         let artifact_dir = state_dir.join("artifacts");
         let workdir = sandbox.path().join("workspace");
         let project_root = sandbox.path().join("project");
@@ -2499,7 +2525,7 @@ land:
         env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
 
         let id = "gr-attach-clean";
-        let state_dir = sandbox.path().join("state").join(id);
+        let state_dir = sandbox.path().join("state").join(format!("{id}-0001"));
         let artifact_dir = state_dir.join("artifacts");
         let workdir = sandbox.path().join("workspace");
         let project_root = sandbox.path().join("project");
@@ -2604,7 +2630,7 @@ bootstrap:
         env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
 
         let id = "gr-attach-missing";
-        let state_dir = sandbox.path().join("state").join(id);
+        let state_dir = sandbox.path().join("state").join(format!("{id}-0001"));
         let workdir = sandbox.path().join("workspace");
         let project_root = sandbox.path().join("project");
         let scratch_dir = config::scratch_root(Some(id));
@@ -2659,7 +2685,7 @@ bootstrap:
         env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
 
         let id = "gr-attach-malformed";
-        let state_dir = sandbox.path().join("state").join(id);
+        let state_dir = sandbox.path().join("state").join(format!("{id}-0001"));
         let workdir = sandbox.path().join("workspace");
         let project_root = sandbox.path().join("project");
         let scratch_dir = config::scratch_root(Some(id));
