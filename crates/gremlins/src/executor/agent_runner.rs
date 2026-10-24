@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -36,6 +36,12 @@ pub struct AgentPrepared {
     /// A stage-supplied system prompt override. When present, this replaces
     /// the harness default in [`AgentPrepared::system_prompt`].
     pub system_prompt: Option<String>,
+    /// The scratchpad file the model writes to: `_scratchpad.md` in the scratch
+    /// root. Best-effort — the stage may never write it.
+    pub scratchpad_path: String,
+    /// Where the stage's scratchpad is persisted on commit: the checkout path
+    /// bound to `artifact://_scratchpad/{stage}.md`.
+    pub scratchpad_persist_path: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +161,37 @@ pub async fn prepare_agent(
 
     let expected_artifact_paths: Vec<String> = output_paths.values().cloned().collect();
 
+    // Synthetic scratchpad binding. The stage's persistent scratchpad lives at
+    // `_scratchpad.md` in the scratch root; this binding versions it under
+    // `artifact://_scratchpad/{stage}.md` so a later stage (or the same chat
+    // gremlin on a later turn) can re-inject the accumulated working memory.
+    // It is best-effort: the stage may never write a scratchpad, so the bind
+    // is optional and deliberately excluded from `expected_artifact_paths`
+    // above so it never triggers a missing-artifact reminder.
+    let scratchpad_uri_str = format!("artifact://_scratchpad/{name}.md");
+    let scratchpad_uri = Uri::parse(&scratchpad_uri_str).map_err(|e| AgentError::Generic {
+        name: name.clone(),
+        detail: e.to_string(),
+    })?;
+    let scratchpad_persist_path = local_state
+        .path_for_uri(&scratchpad_uri)
+        .await
+        .map_err(|e| AgentError::Generic {
+            name: name.clone(),
+            detail: e.to_string(),
+        })?;
+    let scratch_root = crate::executor::gremlin::Gremlin::scratch_root_path()
+        .unwrap_or_else(|| PathBuf::from("."));
+    let scratchpad_path = scratch_root
+        .join("_scratchpad.md")
+        .to_string_lossy()
+        .into_owned();
+    output_paths.insert(
+        "_stage_scratchpad".to_string(),
+        scratchpad_persist_path.clone(),
+    );
+    output_uris.push(("_stage_scratchpad".to_string(), scratchpad_uri_str, true));
+
     // Read the hidden sandbox opt-out. It is honored only when the
     // gremlin's kind is "chat" (set programmatically by the chat builder,
     // never by user YAML), so containment cannot be disabled by arbitrary
@@ -186,6 +223,8 @@ pub async fn prepare_agent(
         artifact_dir: String::new(),
         allow_all,
         system_prompt,
+        scratchpad_path,
+        scratchpad_persist_path,
     })
 }
 
@@ -200,6 +239,22 @@ pub async fn commit_agent(
     prepared: &AgentPrepared,
     local_state: &dyn StateStore,
 ) -> Result<(), AgentError> {
+    // Persist the stage scratchpad (best-effort) before the bind loop so the
+    // synthetic `_stage_scratchpad` bind commits it alongside the stage's real
+    // outputs. The model writes `_scratchpad.md` in the scratch root; the
+    // harness versions it under an artifact URI by copying it into the
+    // checkout. A stage that never wrote a scratchpad leaves the file absent,
+    // and the optional bind is simply skipped.
+    if let Ok(content) = tokio::fs::read_to_string(&prepared.scratchpad_path).await {
+        if !content.trim().is_empty() {
+            if let Some(parent) = Path::new(&prepared.scratchpad_persist_path).parent() {
+                tokio::fs::create_dir_all(parent).await.ok();
+            }
+            tokio::fs::write(&prepared.scratchpad_persist_path, content)
+                .await
+                .ok();
+        }
+    }
     for (key, uri_str, optional) in &prepared.output_uris {
         let path = &prepared.output_paths[key];
         let produced = tokio::fs::metadata(path).await.is_ok();
@@ -219,6 +274,38 @@ pub async fn commit_agent(
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Scratchpad accumulation
+// ---------------------------------------------------------------------------
+
+/// Concatenate every persisted stage scratchpad from `store`, in key order.
+///
+/// The harness versions each stage's scratchpad under
+/// `artifact://_scratchpad/{stage}.md`; this reads them back so accumulated
+/// working memory (file paths, discovered patterns, decisions) can be
+/// re-injected into a later stage's prompt — or the same chat gremlin's next
+/// turn — even after conversation compaction or a scratch wipe. Keys are sorted
+/// for a stable, deterministic order. Empty scratchpads are skipped.
+pub async fn accumulate_scratchpads(store: &(dyn StateStore + Send + Sync)) -> String {
+    let mut keys: Vec<String> = store
+        .keys()
+        .await
+        .into_iter()
+        .filter(|k| k.starts_with("artifact://_scratchpad/") || k.starts_with("_scratchpad/"))
+        .collect();
+    keys.sort();
+    let mut accumulated = String::new();
+    for key in &keys {
+        if let Ok(content) = store.content(key, None).await {
+            if !content.trim().is_empty() {
+                accumulated.push_str(content.trim_end());
+                accumulated.push_str("\n\n");
+            }
+        }
+    }
+    accumulated.trim().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -671,8 +758,124 @@ mod tests {
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
-        assert_eq!(prepared.output_uris.len(), 3);
+        // The three real binds plus the synthetic `_stage_scratchpad` bind.
+        assert_eq!(prepared.output_uris.len(), 4);
+        // The synthetic scratchpad bind is optional and excluded from the
+        // expected-artifact set, so it is not counted here.
         assert_eq!(prepared.expected_artifact_paths.len(), 3);
+        assert!(
+            prepared
+                .output_uris
+                .iter()
+                .any(|(k, uri, opt)| k == "_stage_scratchpad"
+                    && uri == "artifact://_scratchpad/test.md"
+                    && *opt),
+            "a synthetic optional scratchpad bind must be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_synthetic_scratchpad_binding() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ad = ensure_artifact_dir(&tmp);
+        let store = make_state_store(ad);
+        let agent = Agent {
+            name: "stage-a".to_string(),
+            prompts: vec!["hi".to_string()],
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            outputs_map: HashMap::new(),
+            landscape: true,
+        };
+        let fw = HashMap::new();
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
+
+        assert_eq!(prepared.output_uris.len(), 1);
+        let (key, uri, optional) = &prepared.output_uris[0];
+        assert_eq!(key, "_stage_scratchpad");
+        assert_eq!(uri, "artifact://_scratchpad/stage-a.md");
+        assert!(*optional);
+        // The checkout path and the model-writable path are recorded.
+        assert!(prepared.scratchpad_persist_path.contains("stage-a.md"));
+        assert_eq!(
+            prepared.output_paths["_stage_scratchpad"],
+            prepared.scratchpad_persist_path
+        );
+        assert!(prepared.scratchpad_path.ends_with("_scratchpad.md"));
+        // No real outputs means no expected artifacts.
+        assert!(prepared.expected_artifact_paths.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_commit_agent_persists_scratchpad_content() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_state_store(ensure_artifact_dir(&tmp));
+        let agent = agent_with_bind("out", "artifact://out.md");
+        let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
+            .await
+            .unwrap();
+        std::fs::write(&prepared.output_paths["out"], "body").unwrap();
+        // Point the scratchpad at a real file and verify it is versioned under
+        // the artifact URI on commit.
+        let scratchpad = tmp.path().join("_scratchpad.md");
+        std::fs::write(&scratchpad, "remember: the answer is 42").unwrap();
+        prepared.scratchpad_path = scratchpad.to_string_lossy().into_owned();
+
+        commit_agent(&prepared, &store).await.unwrap();
+
+        assert!(store.is_registered("artifact://out.md").await);
+        assert!(store.is_registered("artifact://_scratchpad/test.md").await);
+        let committed = store
+            .content("artifact://_scratchpad/test.md", None)
+            .await
+            .unwrap();
+        assert_eq!(committed, "remember: the answer is 42");
+    }
+
+    #[tokio::test]
+    async fn test_commit_agent_skips_absent_scratchpad() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_state_store(ensure_artifact_dir(&tmp));
+        let agent = agent_with_bind("out", "artifact://out.md");
+        let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
+            .await
+            .unwrap();
+        std::fs::write(&prepared.output_paths["out"], "body").unwrap();
+        // Point the scratchpad at a path that does not exist.
+        prepared.scratchpad_path = tmp
+            .path()
+            .join("missing")
+            .join("_scratchpad.md")
+            .to_string_lossy()
+            .into_owned();
+
+        commit_agent(&prepared, &store).await.unwrap();
+
+        assert!(store.is_registered("artifact://out.md").await);
+        assert!(!store.is_registered("artifact://_scratchpad/test.md").await);
+    }
+
+    #[tokio::test]
+    async fn test_accumulate_scratchpads_sorts_and_skips_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_state_store(ensure_artifact_dir(&tmp));
+        let uri_b = Uri::parse("artifact://_scratchpad/b.md").unwrap();
+        let uri_a = Uri::parse("artifact://_scratchpad/a.md").unwrap();
+        let uri_empty = Uri::parse("artifact://_scratchpad/c.md").unwrap();
+        let other = Uri::parse("artifact://unrelated.md").unwrap();
+        store.write_into_registry(&uri_b, "second").await.unwrap();
+        store.write_into_registry(&uri_a, "first").await.unwrap();
+        store.write_into_registry(&uri_empty, "   ").await.unwrap();
+        store
+            .write_into_registry(&other, "not-a-scratchpad")
+            .await
+            .unwrap();
+
+        let accumulated = accumulate_scratchpads(&store).await;
+
+        assert_eq!(accumulated, "first\n\nsecond");
     }
 
     #[tokio::test]

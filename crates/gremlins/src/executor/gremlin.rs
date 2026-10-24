@@ -1390,6 +1390,16 @@ impl Gremlin {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     }
 
+    /// The process-wide scratch root, resolved from `GREMLINS_SCRATCH_DIR`.
+    ///
+    /// Mirrors [`crate::clients::tools::scratch_root`] — the same path the tool
+    /// sandbox admits as an allowed root — so a scratchpad written by the model
+    /// at `<scratch_root>/_scratchpad.md` is the file the harness reads back.
+    /// Returns `None` when the variable is unset or empty.
+    pub fn scratch_root_path() -> Option<PathBuf> {
+        crate::config::scratch_dir(None)
+    }
+
     /// The framework substitution variables for a stage.
     pub fn framework_subs(&self, stage_name: &str) -> HashMap<String, String> {
         let mut subs = framework_subs(

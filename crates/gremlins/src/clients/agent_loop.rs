@@ -1006,6 +1006,26 @@ async fn run_agent_loop_core(
         // queue latency, not just server-side time-to-first-token.
         let turn_start = Instant::now();
 
+        // Inject the persistent scratchpad on every turn of the main
+        // (non-nested) loop. The model writes `_scratchpad.md` in the scratch
+        // root; re-reading it here keeps the working memory in front of the
+        // model even after conversation compaction. Nested (Task) loops are
+        // stateless helpers and are excluded.
+        if !nested {
+            if let Some(scratch_root) = tools::scratch_root() {
+                let scratchpad_path = scratch_root.join("_scratchpad.md");
+                if let Ok(content) = std::fs::read_to_string(&scratchpad_path) {
+                    if !content.trim().is_empty() {
+                        let next_text = user_message_text(&next_prompt);
+                        let combined = format!(
+                            "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
+                        );
+                        next_prompt = Message::user(combined);
+                    }
+                }
+            }
+        }
+
         let next_prompt_text = user_message_text(&next_prompt);
         let overhead = conversation::completion_request_overhead(
             &next_prompt_text,

@@ -2764,6 +2764,19 @@ async fn handle_chat(
         }
     };
     gremlin.client = client;
+    // Re-inject scratchpads persisted by prior turns of this persistent chat
+    // gremlin so working memory survives conversation compaction. The current
+    // turn's stage writes `_scratchpad.md` in the scratch root; on commit it is
+    // versioned under `artifact://_scratchpad/{stage}.md` and read back here.
+    let scratchpad_accumulated =
+        crate::executor::agent_runner::accumulate_scratchpads(gremlin.state.store_ref()).await;
+    let text = if scratchpad_accumulated.is_empty() {
+        text.to_string()
+    } else {
+        format!(
+            "## Scratchpad\n\nThe following is accumulated working memory from prior turns:\n\n{scratchpad_accumulated}\n\n---\n\n{text}"
+        )
+    };
     // Queue this turn's prompt onto the ChatDefinition so that
     // next_stage() builds the agent stage on demand.
     gremlin
@@ -2771,7 +2784,7 @@ async fn handle_chat(
         .as_any_mut()
         .and_then(|a| a.downcast_mut::<ChatDefinition>())
         .expect("chat gremlin must carry a ChatDefinition")
-        .set_pending(text, &chat_model, &system_prompt);
+        .set_pending(&text, &chat_model, &system_prompt);
     // Keep the state.json `model` field in sync too.
     let state_patch = serde_json::json!({"model": chat_model.to_string()});
     gremlin.state.patch(&[], state_patch.as_object().unwrap());
@@ -5623,6 +5636,26 @@ model-profiles:
         assert_eq!(
             super::build_chat_system_prompt("   \n", ""),
             super::CHAT_SYSTEM_PROMPT
+        );
+    }
+
+    #[test]
+    fn chat_system_prompt_documents_scratchpad() {
+        let prompt = super::CHAT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains("## Scratchpad"),
+            "the chat prompt must describe the persistent scratchpad"
+        );
+        assert!(
+            prompt.contains("_scratchpad.md"),
+            "the chat prompt must name the scratchpad file"
+        );
+        // The scratchpad guidance must precede the trailing Guidelines section.
+        let scratchpad = prompt.find("## Scratchpad").unwrap();
+        let guidelines = prompt.find("## Guidelines").unwrap();
+        assert!(
+            scratchpad < guidelines,
+            "the scratchpad section must sit before `## Guidelines`"
         );
     }
 

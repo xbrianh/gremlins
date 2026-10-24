@@ -117,6 +117,17 @@ You have access to standard tools: Landscape, Read, Write, Edit, Grep, Glob, Bas
 
 Before every turn, scan the tools you're about to call. When two or more calls are independent (neither depends on the other's result), batch them in a single message. The harness executes concurrent calls in parallel, so batching reduces wall-clock time. Serial chains of single-call turns are the most expensive pattern — avoid them. `Done` signals turn completion and must be the sole call in its message — never batch it with other tools.
 
+## Scratchpad
+
+You have a persistent scratchpad at `_scratchpad.md` in your scratch root
+directory. Use the Write tool to update it with findings, decisions, and
+context you want to preserve across turns — file paths, discovered
+patterns, TODO items, architectural notes. Keep it concise.
+
+The harness injects the scratchpad into your prompt at the start of
+every turn, so you never need to Read it. To update it, write the full
+revised content with the Write tool.
+
 ## Guidelines
 
 - Use `Landscape` as your first tool when exploring any directory or file — it gives you a structural map in far fewer tokens than reading files.

@@ -41,7 +41,17 @@ ALWAYS use Landscape first when exploring unknown code — it maps structure wit
 Work root:     {work}\n\
 Scratch root:  {scratch}\n\
 (use scratch for test cruft and temporary files)\n\
-</directories>\
+</directories>\n\
+<scratchpad>\n\
+You have a persistent scratchpad at _scratchpad.md in the scratch root\n\
+directory. Use the Write tool to update it with findings, decisions, and\n\
+context you want to preserve across turns — file paths, discovered\n\
+patterns, TODO items, architectural notes. Keep it concise.\n\
+\n\
+The harness injects the scratchpad into your prompt at the start of\n\
+every turn, so you never need to Read it. To update it, write the full\n\
+revised content with the Write tool.\n\
+</scratchpad>\
 ",
         work = work_root.display(),
         scratch = scratch_root.display(),
@@ -74,7 +84,17 @@ ALWAYS use Landscape first when exploring unknown code — it maps structure wit
 Work root:     {work}\n\
 Scratch root:  {scratch}\n\
 (use scratch for test cruft and temporary files)\n\
-</directories>\
+</directories>\n\
+<scratchpad>\n\
+You have a persistent scratchpad at _scratchpad.md in the scratch root\n\
+directory. Use the Write tool to update it with findings, decisions, and\n\
+context you want to preserve across turns — file paths, discovered\n\
+patterns, TODO items, architectural notes. Keep it concise.\n\
+\n\
+The harness injects the scratchpad into your prompt at the start of\n\
+every turn, so you never need to Read it. To update it, write the full\n\
+revised content with the Write tool.\n\
+</scratchpad>\
 ",
         work = work_root.display(),
         scratch = scratch_root.display(),
@@ -105,7 +125,17 @@ Call Done(summary) alongside your final message when your work is complete. The 
 Work root:     {work}\n\
 Scratch root:  {scratch}\n\
 (use scratch for test cruft and temporary files)\n\
-</directories>\
+</directories>\n\
+<scratchpad>\n\
+You have a persistent scratchpad at _scratchpad.md in the scratch root\n\
+directory. Use the Write tool to update it with findings, decisions, and\n\
+context you want to preserve across turns — file paths, discovered\n\
+patterns, TODO items, architectural notes. Keep it concise.\n\
+\n\
+The harness injects the scratchpad into your prompt at the start of\n\
+every turn, so you never need to Read it. To update it, write the full\n\
+revised content with the Write tool.\n\
+</scratchpad>\
 ",
         work = work_root.display(),
         scratch = scratch_root.display(),
@@ -542,6 +572,33 @@ mod tests {
         );
         assert!(prompt.contains("/work"));
         assert!(prompt.contains("/scratch"));
+    }
+
+    #[test]
+    fn test_agent_system_prompt_includes_scratchpad() {
+        let prompt = agent_system_prompt(Path::new("/work"), Path::new("/scratch"));
+        assert!(
+            prompt.contains("<scratchpad>"),
+            "agent prompt must describe the scratchpad; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("_scratchpad.md"),
+            "agent prompt must name the scratchpad file; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_task_system_prompt_includes_scratchpad() {
+        let prompt = task_system_prompt(Path::new("/work"), Path::new("/scratch"));
+        assert!(prompt.contains("<scratchpad>"));
+        assert!(prompt.contains("_scratchpad.md"));
+    }
+
+    #[test]
+    fn test_fork_system_prompt_includes_scratchpad() {
+        let prompt = fork_system_prompt(Path::new("/work"), Path::new("/scratch"));
+        assert!(prompt.contains("<scratchpad>"));
+        assert!(prompt.contains("_scratchpad.md"));
     }
 
     // -----------------------------------------------------------------------

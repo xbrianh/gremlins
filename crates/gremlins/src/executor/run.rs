@@ -462,7 +462,7 @@ async fn run_agent(
     let _attempt = gremlin.state.read_str("attempt");
     let loop_iter = gremlin.loop_iter.clone();
 
-    let checkout_keys = collect_checkout_keys(
+    let mut checkout_keys = collect_checkout_keys(
         gremlin.state.store_ref(),
         &agent.interpolation_map,
         &agent.outputs_map,
@@ -472,6 +472,11 @@ async fn run_agent(
         &agent.name,
     )
     .await?;
+
+    // Also check out the stage's own persisted scratchpad, if any. A re-run or
+    // resume can then repopulate `_scratchpad.md` from the versioned artifact
+    // even after the scratch root was wiped.
+    checkout_keys.push(format!("artifact://_scratchpad/{}.md", agent.name));
 
     let Checkout {
         store: local_registry,
@@ -494,6 +499,18 @@ async fn run_agent(
 
     prepared.cwd = gremlin.cwd().to_string_lossy().into_owned();
     prepared.artifact_dir = artifact_dir.to_string_lossy().into_owned();
+
+    // Re-inject scratchpads persisted by prior stages so working memory (file
+    // paths, discovered patterns, decisions) survives conversation compaction.
+    // Keys are versioned per stage under `artifact://_scratchpad/{stage}.md`.
+    let scratchpad_accumulated =
+        crate::executor::agent_runner::accumulate_scratchpads(gremlin.state.store_ref()).await;
+    if !scratchpad_accumulated.is_empty() {
+        let scratchpad_section = format!(
+            "## Scratchpad\n\nThe following is accumulated working memory from prior stages:\n\n{scratchpad_accumulated}"
+        );
+        prepared.prompt = format!("{scratchpad_section}\n\n{}", prepared.prompt);
+    }
 
     std::fs::create_dir_all(&artifact_dir)?;
 
