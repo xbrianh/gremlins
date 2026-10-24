@@ -631,6 +631,7 @@ impl Renderer {
         }
 
         self.last_block = Some(BlockKind::CodeBlock);
+    }
 
     fn finish(&mut self) {
         self.flush_line();
@@ -831,11 +832,7 @@ mod tests {
         let text = text_of(&lines);
         assert_eq!(
             text,
-            vec![
-                groove_top(11),
-                " let x = 1;".to_string(),
-                groove_bottom(11)
-            ]
+            vec![groove_top(11), " let x = 1;".to_string(), groove_bottom(11)]
         );
         assert!(lines[1].spans[0].style.bg.is_some());
     }
