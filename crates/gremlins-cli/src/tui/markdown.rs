@@ -585,10 +585,26 @@ impl Renderer {
         // or the previous block was also a code block.
         self.blank_line_before_block(BlockKind::CodeBlock);
 
+        // Compute the display-width of the longest content line (including
+        // the single-space indent that fenced blocks receive) so the
+        // top/bottom borders hug the content rather than spanning the full
+        // terminal width.  Clamp to `rule_width` so long lines still hit
+        // the edge.
+        let code_rule_width = if is_fenced {
+            let max_content = block_lines
+                .iter()
+                .map(|l| UnicodeWidthStr::width(format!(" {l}").as_str()))
+                .max()
+                .unwrap_or(0);
+            (max_content as u16).min(self.rule_width)
+        } else {
+            0
+        };
+
         if is_fenced {
             // Top border: brass groove with corner caps.
             self.lines
-                .push(motif::groove_rule(self.rule_width, ("◤", "◥")));
+                .push(motif::groove_rule(code_rule_width, ("◤", "◥")));
         }
 
         let indent = if is_fenced { " " } else { "" };
@@ -608,14 +624,13 @@ impl Renderer {
         if is_fenced {
             // Bottom border: brass groove with corner caps and a lower bar.
             self.lines.push(motif::groove_rule_with_fill(
-                self.rule_width,
+                code_rule_width,
                 ("◣", "◢"),
                 "▁",
             ));
         }
 
         self.last_block = Some(BlockKind::CodeBlock);
-    }
 
     fn finish(&mut self) {
         self.flush_line();
@@ -789,7 +804,7 @@ mod tests {
         let lines = render_preserving_breaks("```\nlet x = 1;\n```", Style::default(), 40);
         assert_eq!(
             text_of(&lines),
-            vec![groove_top(40), " let x = 1;".to_string(), groove_bottom(40)]
+            vec![groove_top(11), " let x = 1;".to_string(), groove_bottom(11)]
         );
     }
 
@@ -817,9 +832,9 @@ mod tests {
         assert_eq!(
             text,
             vec![
-                "◤▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔◥".to_string(),
+                groove_top(11),
                 " let x = 1;".to_string(),
-                "◣▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁◢".to_string()
+                groove_bottom(11)
             ]
         );
         assert!(lines[1].spans[0].style.bg.is_some());
@@ -873,11 +888,11 @@ mod tests {
         assert_eq!(
             text,
             vec![
-                "◤▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔◥".to_string(),
+                groove_top(2),
                 " a".to_string(),
                 " ".to_string(),
                 " b".to_string(),
-                "◣▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁◢".to_string()
+                groove_bottom(2)
             ]
         );
     }
@@ -934,9 +949,9 @@ mod tests {
             vec![
                 "para".to_string(),
                 "".to_string(),
-                groove_top(40),
+                groove_top(5),
                 " code".to_string(),
-                groove_bottom(40)
+                groove_bottom(5)
             ]
         );
     }
@@ -947,7 +962,7 @@ mod tests {
         let text = text_of(&lines);
         assert_eq!(
             text,
-            vec![groove_top(40), " let x = 1;".to_string(), groove_bottom(40)]
+            vec![groove_top(11), " let x = 1;".to_string(), groove_bottom(11)]
         );
         assert!(lines[1].spans[0].style.bg.is_some());
     }
@@ -959,9 +974,9 @@ mod tests {
         assert_eq!(
             text,
             vec![
-                groove_top(40),
+                groove_top(14),
                 " fn main() {}".to_string(),
-                groove_bottom(40)
+                groove_bottom(14)
             ]
         );
         // The code line is highlighted into multiple token spans, each with
@@ -1005,9 +1020,9 @@ mod tests {
         assert_eq!(
             text,
             vec![
-                groove_top(40),
+                groove_top(14),
                 " fn main() {}".to_string(),
-                groove_bottom(40)
+                groove_bottom(14)
             ]
         );
         let code_line = &lines[1];
