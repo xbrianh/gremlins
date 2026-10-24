@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use thiserror::Error;
 
@@ -168,29 +168,49 @@ pub async fn prepare_agent(
     // It is best-effort: the stage may never write a scratchpad, so the bind
     // is optional and deliberately excluded from `expected_artifact_paths`
     // above so it never triggers a missing-artifact reminder.
-    let scratchpad_uri_str = format!("artifact://_scratchpad/{name}.md");
-    let scratchpad_uri = Uri::parse(&scratchpad_uri_str).map_err(|e| AgentError::Generic {
-        name: name.clone(),
-        detail: e.to_string(),
-    })?;
-    let scratchpad_persist_path = local_state
-        .path_for_uri(&scratchpad_uri)
-        .await
-        .map_err(|e| AgentError::Generic {
+    //
+    // When the scratch root is unset (no GREMLINS_SCRATCH_DIR), skip the
+    // synthetic bind entirely rather than falling back to a CWD-relative path
+    // that would diverge from the agent loop's injection logic.
+    let scratchpad_path: String;
+    let scratchpad_persist_path: String;
+    if let Some(scratch_root) = crate::config::scratch_dir(None) {
+        // Reject stage names that could escape the `_scratchpad` directory.
+        if name.contains('/') || name.contains('\\') || name.contains("..") {
+            return Err(AgentError::Generic {
+                name: name.clone(),
+                detail: format!(
+                    "stage name {name:?} contains path separators or '..' — \
+                     cannot construct a safe scratchpad artifact URI"
+                ),
+            });
+        }
+        let scratchpad_uri_str = format!("artifact://_scratchpad/{name}.md");
+        let scratchpad_uri = Uri::parse(&scratchpad_uri_str).map_err(|e| AgentError::Generic {
             name: name.clone(),
             detail: e.to_string(),
         })?;
-    let scratch_root = crate::executor::gremlin::Gremlin::scratch_root_path()
-        .unwrap_or_else(|| PathBuf::from("."));
-    let scratchpad_path = scratch_root
-        .join("_scratchpad.md")
-        .to_string_lossy()
-        .into_owned();
-    output_paths.insert(
-        "_stage_scratchpad".to_string(),
-        scratchpad_persist_path.clone(),
-    );
-    output_uris.push(("_stage_scratchpad".to_string(), scratchpad_uri_str, true));
+        let persist = local_state
+            .path_for_uri(&scratchpad_uri)
+            .await
+            .map_err(|e| AgentError::Generic {
+                name: name.clone(),
+                detail: e.to_string(),
+            })?;
+        scratchpad_path = scratch_root
+            .join("_scratchpad.md")
+            .to_string_lossy()
+            .into_owned();
+        scratchpad_persist_path = persist;
+        output_paths.insert(
+            "_stage_scratchpad".to_string(),
+            scratchpad_persist_path.clone(),
+        );
+        output_uris.push(("_stage_scratchpad".to_string(), scratchpad_uri_str, true));
+    } else {
+        scratchpad_path = String::new();
+        scratchpad_persist_path = String::new();
+    }
 
     // Read the hidden sandbox opt-out. It is honored only when the
     // gremlin's kind is "chat" (set programmatically by the chat builder,
@@ -245,14 +265,25 @@ pub async fn commit_agent(
     // harness versions it under an artifact URI by copying it into the
     // checkout. A stage that never wrote a scratchpad leaves the file absent,
     // and the optional bind is simply skipped.
-    if let Ok(content) = tokio::fs::read_to_string(&prepared.scratchpad_path).await {
-        if !content.trim().is_empty() {
-            if let Some(parent) = Path::new(&prepared.scratchpad_persist_path).parent() {
-                tokio::fs::create_dir_all(parent).await.ok();
+    if !prepared.scratchpad_path.is_empty() {
+        if let Ok(content) = tokio::fs::read_to_string(&prepared.scratchpad_path).await {
+            if !content.trim().is_empty() {
+                if let Some(parent) = Path::new(&prepared.scratchpad_persist_path).parent() {
+                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                        log::warn!(
+                            "scratchpad persist: failed to create parent dir {}: {e}",
+                            parent.display()
+                        );
+                    }
+                }
+                if let Err(e) = tokio::fs::write(&prepared.scratchpad_persist_path, &content).await
+                {
+                    log::warn!(
+                        "scratchpad persist: failed to write {}: {e}",
+                        prepared.scratchpad_persist_path
+                    );
+                }
             }
-            tokio::fs::write(&prepared.scratchpad_persist_path, content)
-                .await
-                .ok();
         }
     }
     for (key, uri_str, optional) in &prepared.output_uris {
@@ -280,15 +311,13 @@ pub async fn commit_agent(
 // Scratchpad accumulation
 // ---------------------------------------------------------------------------
 
-/// Concatenate every persisted stage scratchpad from `store`, in key order.
-///
-/// The harness versions each stage's scratchpad under
-/// `artifact://_scratchpad/{stage}.md`; this reads them back so accumulated
-/// working memory (file paths, discovered patterns, decisions) can be
-/// re-injected into a later stage's prompt — or the same chat gremlin's next
-/// turn — even after conversation compaction or a scratch wipe. Keys are sorted
-/// for a stable, deterministic order. Empty scratchpads are skipped.
-pub async fn accumulate_scratchpads(store: &(dyn StateStore + Send + Sync)) -> String {
+/// Concatenate every persisted stage scratchpad from `store`, in lexical key
+/// order. Chat turn names (`chat-0001`, `chat-0002`, …) are zero-padded so
+/// lexical ordering matches execution order. User-defined sequence stage names
+/// should follow the same convention — zero-pad numeric suffixes — or
+/// deliberately choose names whose lexical order matches the pipeline order.
+/// Empty scratchpads are skipped.
+pub(crate) async fn accumulate_scratchpads(store: &(dyn StateStore + Send + Sync)) -> String {
     let mut keys: Vec<String> = store
         .keys()
         .await
@@ -306,6 +335,17 @@ pub async fn accumulate_scratchpads(store: &(dyn StateStore + Send + Sync)) -> S
         }
     }
     accumulated.trim().to_string()
+}
+
+/// Format accumulated scratchpad content for injection into a user prompt.
+pub(crate) fn format_scratchpad_injection(content: &str) -> String {
+    format!(
+        "## Scratchpad\n\
+         \n\
+         The following is accumulated working memory from prior stages:\n\
+         \n\
+         {content}"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -742,6 +782,9 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
         let store = make_state_store(ad);
+        let scratch = tmp.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::env::set_var("GREMLINS_SCRATCH_DIR", &scratch);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{a} {b} {c}".to_string()],
@@ -779,6 +822,9 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
         let store = make_state_store(ad);
+        let scratch = tmp.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::env::set_var("GREMLINS_SCRATCH_DIR", &scratch);
         let agent = Agent {
             name: "stage-a".to_string(),
             prompts: vec!["hi".to_string()],
@@ -812,6 +858,9 @@ mod tests {
     async fn test_commit_agent_persists_scratchpad_content() {
         let tmp = tempfile::TempDir::new().unwrap();
         let store = make_state_store(ensure_artifact_dir(&tmp));
+        let scratch = tmp.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::env::set_var("GREMLINS_SCRATCH_DIR", &scratch);
         let agent = agent_with_bind("out", "artifact://out.md");
         let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
@@ -838,6 +887,9 @@ mod tests {
     async fn test_commit_agent_skips_absent_scratchpad() {
         let tmp = tempfile::TempDir::new().unwrap();
         let store = make_state_store(ensure_artifact_dir(&tmp));
+        let scratch = tmp.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::env::set_var("GREMLINS_SCRATCH_DIR", &scratch);
         let agent = agent_with_bind("out", "artifact://out.md");
         let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
@@ -1068,5 +1120,33 @@ mod tests {
         let expected =
             crate::clients::config::agent_system_prompt(Path::new("/work"), Path::new("/scratch"));
         assert_eq!(prepared.system_prompt(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_prepare_rejects_stage_name_with_path_traversal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ad = ensure_artifact_dir(&tmp);
+        let store = make_state_store(ad);
+        let scratch = tmp.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::env::set_var("GREMLINS_SCRATCH_DIR", &scratch);
+        for bad_name in &["../escape", "sub/dir", "back\\slash"] {
+            let agent = Agent {
+                name: (*bad_name).to_string(),
+                prompts: vec!["hi".to_string()],
+                options: HashMap::new(),
+                interpolation_map: HashMap::new(),
+                outputs_map: HashMap::new(),
+                landscape: true,
+            };
+            let fw = HashMap::new();
+            let err = prepare_agent(&agent, &store, &store, "", &fw)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, AgentError::Generic { .. }),
+                "stage name {bad_name:?} must be rejected; got {err:?}"
+            );
+        }
     }
 }

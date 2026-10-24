@@ -2773,9 +2773,9 @@ async fn handle_chat(
     let text = if scratchpad_accumulated.is_empty() {
         text.to_string()
     } else {
-        format!(
-            "## Scratchpad\n\nThe following is accumulated working memory from prior turns:\n\n{scratchpad_accumulated}\n\n---\n\n{text}"
-        )
+        let injection =
+            crate::executor::agent_runner::format_scratchpad_injection(&scratchpad_accumulated);
+        format!("{injection}\n\n---\n\n{text}")
     };
     // Queue this turn's prompt onto the ChatDefinition so that
     // next_stage() builds the agent stage on demand.

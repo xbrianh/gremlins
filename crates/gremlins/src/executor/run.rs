@@ -473,9 +473,11 @@ async fn run_agent(
     )
     .await?;
 
-    // Also check out the stage's own persisted scratchpad, if any. A re-run or
-    // resume can then repopulate `_scratchpad.md` from the versioned artifact
-    // even after the scratch root was wiped.
+    // The synthetic scratchpad bind writes into the checkout so
+    // `local_state.commit()` can persist it. This does NOT restore
+    // `_scratchpad.md` in the scratch root — the stage always starts with
+    // a clean slate (reset below). The checkout just reserves space for the
+    // commit path.
     checkout_keys.push(format!("artifact://_scratchpad/{}.md", agent.name));
 
     let Checkout {
@@ -500,16 +502,14 @@ async fn run_agent(
     prepared.cwd = gremlin.cwd().to_string_lossy().into_owned();
     prepared.artifact_dir = artifact_dir.to_string_lossy().into_owned();
 
-    // Re-inject scratchpads persisted by prior stages so working memory (file
-    // paths, discovered patterns, decisions) survives conversation compaction.
-    // Keys are versioned per stage under `artifact://_scratchpad/{stage}.md`.
-    let scratchpad_accumulated =
-        crate::executor::agent_runner::accumulate_scratchpads(gremlin.state.store_ref()).await;
-    if !scratchpad_accumulated.is_empty() {
-        let scratchpad_section = format!(
-            "## Scratchpad\n\nThe following is accumulated working memory from prior stages:\n\n{scratchpad_accumulated}"
-        );
-        prepared.prompt = format!("{scratchpad_section}\n\n{}", prepared.prompt);
+    // Reset the scratchpad file at stage start so the model always begins with
+    // a clean slate. Prior-stage working memory is injected below (headless) or
+    // by the chat supervisor (chat gremlins). The model writes to this file
+    // during the stage; on commit the content is versioned under an artifact
+    // URI. Resetting here prevents a previous stage's scratchpad from leaking
+    // into this stage's commit.
+    if !prepared.scratchpad_path.is_empty() {
+        let _ = std::fs::write(&prepared.scratchpad_path, "");
     }
 
     std::fs::create_dir_all(&artifact_dir)?;
@@ -532,6 +532,21 @@ async fn run_agent(
 
     let is_chat = gremlin.state.read_str("kind") == "chat";
     let chat_turn: Option<usize> = chat_turn_from_stage_name(&agent.name);
+
+    // Re-inject scratchpads persisted by prior stages so working memory (file
+    // paths, discovered patterns, decisions) survives conversation compaction.
+    // Chat gremlins receive this injection in the supervisor so it rides on
+    // the operator prompt — skip it here to avoid doubling up.
+    if !is_chat {
+        let scratchpad_accumulated =
+            crate::executor::agent_runner::accumulate_scratchpads(gremlin.state.store_ref()).await;
+        if !scratchpad_accumulated.is_empty() {
+            let scratchpad_section =
+                crate::executor::agent_runner::format_scratchpad_injection(&scratchpad_accumulated);
+            prepared.prompt = format!("{scratchpad_section}\n\n{}", prepared.prompt);
+        }
+    }
+
     // Messages from turns before the current one — the canonical baseline
     // used for diff computation on rollback.
     let mut canonical_prefix: Vec<Message> = Vec::new();
