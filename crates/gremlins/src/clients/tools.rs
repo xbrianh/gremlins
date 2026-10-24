@@ -1597,15 +1597,24 @@ fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
             None => return format!("Error: edit {} is not an object in {file_path}", i + 1),
         };
         let has_start = obj.contains_key("start_line");
-        let has_old = obj.contains_key("old_string");
-        if has_start && has_old {
-            return format!(
-                "Error: edit {} specifies both 'old_string' and 'start_line' — use one mode only (match or range) in {file_path}",
-                i + 1
-            );
-        }
+        // If both modes are present, prefer range mode.
         if has_start {
-            // --- Range edit ---
+            // --- Range edit (may also include ignored match-mode fields) ---
+            if !obj.contains_key("end_line") {
+                let provided = describe_edit_provided_fields(obj);
+                return format!(
+                    "Error: edit {} missing 'end_line' for Edit tool (range mode){} in {file_path}",
+                    i + 1,
+                    provided
+                );
+            }
+            if !obj.contains_key("replacement") {
+                let provided = describe_edit_provided_fields(obj);
+                return format!(
+                    "Error: edit {} missing 'replacement' for Edit tool (range mode){} in {file_path}",
+                    i + 1, provided
+                );
+            }
             let start_line = match obj.get("start_line").and_then(|v| v.as_u64()) {
                 Some(n) if n > 0 => n as usize,
                 Some(_) => {
@@ -2649,9 +2658,40 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool
     }
 }
 
-/// Validate tool arguments against the expected schema before dispatching
-/// to the handler. Returns an error message with the expected shape on mismatch,
-/// or `None` if valid.
+/// Build a short summary of the fields present in a mixed-mode edit object,
+/// so the error message shows what the model actually sent.
+fn describe_edit_provided_fields(obj: &serde_json::Map<String, serde_json::Value>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for key in &[
+        "start_line",
+        "end_line",
+        "replacement",
+        "old_string",
+        "new_string",
+    ] {
+        if let Some(v) = obj.get(*key) {
+            let display = match v {
+                serde_json::Value::String(s) => {
+                    if s.len() > 40 {
+                        format!("{}<{} chars>", key, s.len())
+                    } else {
+                        format!("{key}={s:?}")
+                    }
+                }
+                other => format!("{key}={other}"),
+            };
+            parts.push(display);
+        }
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" (provided: {})", parts.join(", "))
+    }
+}
+
+/// Check that all required tool arguments are present and have the correct types.
+/// Returns an error message string on failure, or `None` if valid.
 fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
     let schema = tool_param_schema(name)?;
     for (field, expected_type, required) in &schema {
@@ -2749,35 +2789,29 @@ fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
                 };
                 let has_old = obj.contains_key("old_string");
                 let has_start = obj.contains_key("start_line");
-                if has_old && has_start {
-                    return Some(format!(
-                        "Error: edit {} specifies both 'old_string' and 'start_line' — use one mode only (match or range)",
-                        i + 1
-                    ));
-                }
+                // If both modes are present, prefer range mode.
                 if !has_old && !has_start {
                     return Some(format!(
                         "Error: edit {} must have either 'old_string' (match mode) or 'start_line' (range mode)",
                         i + 1
                     ));
                 }
-                if has_old && !obj.contains_key("new_string") {
-                    return Some(format!(
-                        "Error: edit {} missing 'new_string' for Edit tool (match mode)",
-                        i + 1
-                    ));
-                }
                 if has_start {
+                    // --- Range mode (may also include ignored match-mode fields) ---
                     if !obj.contains_key("end_line") {
+                        let provided = describe_edit_provided_fields(obj);
                         return Some(format!(
-                            "Error: edit {} missing 'end_line' for Edit tool (range mode)",
-                            i + 1
+                            "Error: edit {} missing 'end_line' for Edit tool (range mode){}",
+                            i + 1,
+                            provided
                         ));
                     }
                     if !obj.contains_key("replacement") {
+                        let provided = describe_edit_provided_fields(obj);
                         return Some(format!(
-                            "Error: edit {} missing 'replacement' for Edit tool (range mode)",
-                            i + 1
+                            "Error: edit {} missing 'replacement' for Edit tool (range mode){}",
+                            i + 1,
+                            provided
                         ));
                     }
                     // Validate numeric constraints for range mode.
@@ -2817,6 +2851,14 @@ fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
                             i + 1,
                             start_line,
                             end_line
+                        ));
+                    }
+                } else {
+                    // --- Match mode ---
+                    if !obj.contains_key("new_string") {
+                        return Some(format!(
+                            "Error: edit {} missing 'new_string' for Edit tool (match mode)",
+                            i + 1
                         ));
                     }
                 }
@@ -3076,7 +3118,7 @@ pub(crate) fn tool_definitions(filter: Option<&[String]>, is_chat: bool) -> Vec<
         },
         ToolDefinition {
             name: "Edit".into(),
-            description: "Make one or more non-overlapping replacements in a file. Each edit replaces old_string with new_string (requires unique match), or replaces lines start_line through end_line (1-based, inclusive) with replacement text. Edits are validated against the original file content and must not overlap. When a substring appears multiple times, include 2-3 lines of surrounding context in old_string to make it unique. After a failed edit due to non-uniqueness, re-read only the failing region (with offset/limit), not the whole file. Prefer the line-range form (start_line/end_line/replacement) when you have line numbers from a recent Read. Line-range edits replace entire lines including their trailing newlines; when you replace a line that should remain separate from the next line, ensure replacement ends with \\n. All edits in the array target the same file, specified by the top-level `file_path` parameter — do not nest `file_path` inside individual edit objects.".into(),
+            description: "Make one or more non-overlapping replacements in a file. Each edit replaces old_string with new_string (requires unique match), or replaces lines start_line through end_line (1-based, inclusive) with replacement text. Edits are validated against the original file content and must not overlap. When a substring appears multiple times, include 2-3 lines of surrounding context in old_string to make it unique. After a failed edit due to non-uniqueness, re-read only the failing region (with offset/limit), not the whole file. Prefer the line-range form (start_line/end_line/replacement) when you have line numbers from a recent Read. Line-range edits replace entire lines including their trailing newlines; when you replace a line that should remain separate from the next line, ensure replacement ends with \\n. All edits in the array target the same file, specified by the top-level `file_path` parameter — do not nest `file_path` inside individual edit objects. If both match-mode and range-mode fields are present in the same edit object, range mode takes precedence.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -4763,16 +4805,40 @@ mod tests {
         );
         assert!(err.contains("edit 1"));
     }
+    #[test]
+    fn validate_tool_args_edit_mixed_prefer_range_ok() {
+        // Mixed-mode with complete range fields: range mode wins, no error.
+        assert!(validate_tool_args(
+            "Edit",
+            &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "new_string": "z", "start_line": 1, "end_line": 1, "replacement": "b"}]}),
+        )
+        .is_none());
+    }
 
     #[test]
-    fn validate_tool_args_edit_both_modes_error() {
+    fn validate_tool_args_edit_mixed_incomplete_range_error() {
+        // Mixed-mode with incomplete range fields: errors with provided info.
         let err = validate_tool_args(
             "Edit",
-            &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "start_line": 1, "end_line": 1, "replacement": "b"}]}),
+            &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "new_string": "z", "start_line": 1}]}),
         )
         .unwrap();
-        assert!(err.contains("specifies both 'old_string' and 'start_line'"));
-        assert!(err.contains("edit 1"));
+        assert!(err.contains("missing 'end_line'"), "got: {err}");
+        assert!(err.contains("start_line=1"), "got: {err}");
+        assert!(err.contains("old_string"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_tool_args_edit_mixed_missing_replacement_error() {
+        // Mixed-mode with start_line and end_line but no replacement: errors with provided info.
+        let err = validate_tool_args(
+            "Edit",
+            &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "start_line": 1, "end_line": 2}]}),
+        )
+        .unwrap();
+        assert!(err.contains("missing 'replacement'"), "got: {err}");
+        assert!(err.contains("start_line=1"), "got: {err}");
+        assert!(err.contains("end_line=2"), "got: {err}");
     }
 
     #[test]
@@ -6165,18 +6231,67 @@ mod tests {
     }
 
     #[test]
-    fn edit_both_modes_error() {
+    fn edit_mixed_prefer_range_applies_range() {
+        // Mixed-mode with complete range fields: range mode wins, old_string/new_string ignored.
+        // Use old_string NOT present in the file to prove match-mode isn't consulted.
         let dir = tmp();
         std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "edits": [{"old_string": "line1", "new_string": "x", "start_line": 1, "end_line": 1, "replacement": "y"}]
+            "edits": [{"old_string": "nonexistent", "new_string": "x", "start_line": 1, "end_line": 1, "replacement": "y\n"}]
+        })
+        .to_string();
+        assert_eq!(
+            edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args),
+            "OK"
+        );
+        assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "y\n");
+    }
+
+    #[test]
+    fn edit_mixed_incomplete_range_error() {
+        // Mixed-mode with incomplete range fields: errors with actionable detail.
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"old_string": "line1", "new_string": "x", "start_line": 1}]
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("specifies both 'old_string' and 'start_line'"));
+        assert!(result.contains("missing 'end_line'"), "got: {result}");
+        assert!(result.contains("start_line"), "got: {result}");
     }
 
+    #[test]
+    fn edit_mixed_missing_replacement_error() {
+        // Mixed-mode with start_line and end_line but no replacement: errors with provided info.
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"old_string": "line1", "start_line": 1, "end_line": 2}]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.contains("missing 'replacement'"), "got: {result}");
+        assert!(result.contains("start_line"), "got: {result}");
+    }
+
+    #[test]
+    fn edit_mixed_invalid_bounds_error() {
+        // Mixed-mode with invalid range bounds still fails range validation.
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"old_string": "nonexistent", "new_string": "x", "start_line": 2, "end_line": 1, "replacement": "y"}]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.contains("start_line"), "got: {result}");
+        assert!(result.contains("end_line"), "got: {result}");
+    }
     #[test]
     fn edit_range_start_line_beyond_eof_error() {
         let dir = tmp();
