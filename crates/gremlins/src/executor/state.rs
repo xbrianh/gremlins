@@ -222,6 +222,24 @@ pub trait StateStore: Send + Sync + Debug {
         child_gremlin_id: &str,
     ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>>;
 
+    /// Fork this store into a new attempt directory under the same gremlin id.
+    ///
+    /// `keys` are the artifact keys to preserve (stage outputs before the
+    /// resume point plus bootstrap artifacts). `rewind_state` is the rewound
+    /// `state.json` for the new attempt. Backends that do not support resuming
+    /// into a new attempt return [`std::io::ErrorKind::Unsupported`].
+    async fn fork_to_stage(
+        &self,
+        keys: &[String],
+        rewind_state: &Map<String, Value>,
+    ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
+        let _ = (keys, rewind_state);
+        Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "fork_to_stage not supported for this store type",
+        )))
+    }
+
     /// Produce a localized (filesystem-scoped) store containing only the
     /// given subset of keys. The returned store lives in a separate
     /// directory so that unscoped artifacts cannot be discovered by
@@ -446,7 +464,7 @@ impl FileSystemStateStore {
                 root: StateRoot::Temp(temp),
             })
         } else {
-            let state_dir = config::state_root().join(gremlin_id);
+            let state_dir = attempt_dir_path(gremlin_id, 1);
             std::fs::create_dir_all(&state_dir)?;
             std::fs::create_dir_all(state_dir.join("artifacts"))?;
             write_state(&state_dir, initial)?;
@@ -457,15 +475,12 @@ impl FileSystemStateStore {
     }
 
     /// Open an existing state directory. Does NOT write anything.
+    ///
+    /// Lists `state_root/<gremlin_id>-*` and opens the lexicographically
+    /// largest attempt directory.
     pub fn open(gremlin_id: &str) -> Result<Self, StateError> {
         validate_gremlin_id_component(gremlin_id)?;
-        let state_dir = config::state_root().join(gremlin_id);
-        if !state_dir.is_dir() {
-            return Err(StateError::Other(format!(
-                "no state directory: {}",
-                state_dir.display()
-            )));
-        }
+        let state_dir = latest_attempt_dir(gremlin_id)?;
         Ok(FileSystemStateStore {
             root: StateRoot::Path(state_dir),
         })
@@ -486,6 +501,20 @@ impl FileSystemStateStore {
     /// display-only paths — it is not part of the `StateStore` trait.
     pub fn root_dir(&self) -> &Path {
         self.root.path()
+    }
+
+    /// The gremlin id embedded in this store's directory name (the directory
+    /// name with the trailing `-NNNN` attempt suffix removed).
+    fn gremlin_id_from_dir(&self) -> Option<String> {
+        let name = self.root.path().file_name()?.to_string_lossy().into_owned();
+        strip_attempt_suffix(&name)
+    }
+
+    /// The numeric attempt suffix of this store's directory, if present.
+    fn attempt_number(&self) -> Option<u32> {
+        let name = self.root.path().file_name()?.to_string_lossy();
+        let (_, suffix) = name.rsplit_once('-')?;
+        suffix.parse().ok()
     }
 
     // --- registry helpers ---
@@ -895,6 +924,63 @@ impl FileSystemStateStore {
             })
             .await
     }
+
+    /// Seed a new attempt's registry with only the given keys, copying file
+    /// artifacts from the parent attempt into the child attempt's artifact
+    /// directory.
+    async fn seed_fork_registry_keys(
+        &self,
+        child: &FileSystemStateStore,
+        child_ad: &Path,
+        keys: &[String],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let parent_registry = self.read_registry_json().await;
+        if parent_registry.is_empty() {
+            return Ok(());
+        }
+        let parent_ad = self.artifact_dir();
+        let parent_ad_str = parent_ad.to_string_lossy().to_string();
+
+        // Copy preserved files before writing registry bindings.
+        for key in keys {
+            let Some(path) = parent_registry.get(key) else {
+                continue;
+            };
+            if is_file_artifact(path) && path.starts_with(&parent_ad_str) {
+                let src = Path::new(path);
+                if src.is_file() {
+                    let rel = path.strip_prefix(&parent_ad_str).unwrap_or(path);
+                    let rel = rel.trim_start_matches('/');
+                    let dest = child_ad.join(rel);
+                    if let Some(parent) = dest.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    tokio::fs::copy(src, &dest).await?;
+                }
+            }
+        }
+
+        child
+            .locked_write(|data| {
+                for key in keys {
+                    let Some(path) = parent_registry.get(key) else {
+                        continue;
+                    };
+                    if is_file_artifact(path) && path.starts_with(&parent_ad_str) {
+                        let rel = path.strip_prefix(&parent_ad_str).unwrap_or(path);
+                        let rel = rel.trim_start_matches('/');
+                        data.insert(
+                            key.clone(),
+                            child_ad.join(rel).to_string_lossy().to_string(),
+                        );
+                    } else {
+                        data.insert(key.clone(), path.clone());
+                    }
+                }
+                Ok(())
+            })
+            .await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1209,16 +1295,131 @@ impl StateStore for FileSystemStateStore {
         self.checkout_registry(keys).await
     }
 
+    async fn fork_to_stage(
+        &self,
+        keys: &[String],
+        rewind_state: &Map<String, Value>,
+    ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
+        if self.root.is_temp() {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "fork_to_stage requires a persisted state directory",
+            )));
+        }
+
+        let dir_name = self
+            .root
+            .path()
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "state directory has no name",
+                )
+            })?
+            .to_string();
+        let (gremlin_id, current) = if let Some(base) = strip_attempt_suffix(&dir_name) {
+            let current = self.attempt_number().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "fork_to_stage requires a padded attempt directory name",
+                )
+            })?;
+            (base, current)
+        } else {
+            // Legacy (pre-padded) state directory: treat it as attempt zero.
+            (dir_name, 0)
+        };
+        let next = current.checked_add(1).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "attempt number overflow")
+        })?;
+
+        let child_dir = attempt_dir_path(&gremlin_id, next);
+        tokio::fs::create_dir_all(&child_dir).await?;
+        let child_ad = child_dir.join("artifacts");
+        tokio::fs::create_dir_all(&child_ad).await?;
+        let child_store = FileSystemStateStore {
+            root: StateRoot::Path(child_dir),
+        };
+
+        self.seed_fork_registry_keys(&child_store, &child_ad, keys)
+            .await?;
+
+        // Carry the hermetic definition snapshot into the new attempt so
+        // `init_runtime`, `land`, and teardown can keep reading it through
+        // the store even when the original source file has since moved.
+        if self.exists("definition.yaml") {
+            let mut src = self.open("definition.yaml", BlobMode::Read)?;
+            let mut bytes = Vec::new();
+            use std::io::Read;
+            src.read_to_end(&mut bytes)?;
+            let mut dst = child_store.open("definition.yaml", BlobMode::Write)?;
+            use std::io::Write;
+            dst.write_all(&bytes)?;
+        }
+
+        child_store.write_state(rewind_state)?;
+        Ok(Box::new(child_store))
+    }
+
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }
 
     fn clean(&self) {
-        if let Err(error) = std::fs::remove_dir_all(self.root.path()) {
-            log::warn!(
-                "clean: could not remove state dir {}: {error}",
-                self.root.path().display()
-            );
+        // Temp-backed stores remove only their own directory.
+        if self.root.is_temp() {
+            if let Err(error) = std::fs::remove_dir_all(self.root.path()) {
+                log::warn!(
+                    "clean: could not remove state dir {}: {error}",
+                    self.root.path().display()
+                );
+            }
+            return;
+        }
+
+        // Persistent stores own every attempt directory under the same
+        // gremlin id. Identify the gremlin id from the recorded state.json
+        // (falling back to the directory name) and remove every attempt dir
+        // whose recorded id matches.
+        let id = read_state_json(Some(&self.state_file()))
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| self.gremlin_id_from_dir());
+        let Some(id) = id else {
+            if let Err(error) = std::fs::remove_dir_all(self.root.path()) {
+                log::warn!(
+                    "clean: could not remove state dir {}: {error}",
+                    self.root.path().display()
+                );
+            }
+            return;
+        };
+
+        let root = config::state_root();
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let dir_id = read_state_json(Some(&path.join("state.json")))
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let matches = dir_id.as_deref() == Some(id.as_str())
+                    || entry.file_name().to_string_lossy() == id;
+                if matches {
+                    if let Err(error) = std::fs::remove_dir_all(&path) {
+                        log::warn!(
+                            "clean: could not remove state dir {}: {error}",
+                            path.display()
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1409,6 +1610,13 @@ impl StateStore for ScopedFileSystemStateStore {
     ) -> Result<Checkout, Box<dyn std::error::Error>> {
         self.inner.checkout_registry(keys).await
     }
+    async fn fork_to_stage(
+        &self,
+        keys: &[String],
+        rewind_state: &Map<String, Value>,
+    ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
+        self.inner.fork_to_stage(keys, rewind_state).await
+    }
     delegate!(inner, fn clean(&self));
     delegate!(inner, fn state_uri_display(&self) -> String);
     delegate!(inner, fn artifact_uri_display(&self) -> String);
@@ -1454,6 +1662,29 @@ impl StateData {
             gremlin_id,
             store: Arc::from(store),
         }
+    }
+
+    /// Replace the inner [`StateStore`] handle in place, keeping the gremlin
+    /// identity (and any existing handle clones) pointed at the same
+    /// [`StateData`].
+    pub fn swap_store(&mut self, store: Box<dyn StateStore + Send + Sync>) {
+        self.store = Arc::from(store);
+    }
+
+    /// The filesystem directory backing this store, when the concrete store
+    /// is filesystem-backed. Falls back to `state_root/<gremlin_id>` for
+    /// backends that do not expose a directory.
+    pub fn state_dir(&self) -> PathBuf {
+        self.store
+            .as_any()
+            .and_then(|any| any.downcast_ref::<FileSystemStateStore>())
+            .map(|fs| fs.root_dir().to_path_buf())
+            .unwrap_or_else(|| {
+                self.gremlin_id
+                    .as_deref()
+                    .map(|id| config::state_root().join(id))
+                    .unwrap_or_default()
+            })
     }
 
     /// Return a clone of the inner [`StateStore`] [`Arc`] handle so that
@@ -1513,6 +1744,7 @@ impl StateData {
     delegate!(pub store, async fn keys(&self) -> Vec<String>);
     delegate!(pub store, async fn join(&self, other: &(dyn StateStore + Sync), collision: Collision, key_prefix: Option<&str>) -> Result<usize, Box<dyn std::error::Error>>);
     delegate!(pub store, async fn fork(&self, child_gremlin_id: &str) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>>);
+    delegate!(pub store, async fn fork_to_stage(&self, keys: &[String], rewind_state: &Map<String, Value>) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>>);
     delegate!(pub store, async fn checkout_registry(&self, keys: &[String]) -> Result<Checkout, Box<dyn std::error::Error>>);
 
     // --- methods with guards that stay on StateData ---
@@ -1708,22 +1940,91 @@ pub fn field_names() -> [&'static str; 18] {
     ]
 }
 
+/// The first attempt directory for `gremlin_id` under the state root.
+pub(crate) fn attempt_dir_path(gremlin_id: &str, attempt: u32) -> PathBuf {
+    config::state_root().join(format!("{gremlin_id}-{attempt:04}"))
+}
+
+/// Strip a trailing `-NNNN` attempt suffix from a state directory name.
+///
+/// Returns `None` when the name does not look like a padded attempt
+/// directory. The base must itself contain a hyphen: real gremlin ids are
+/// generated as `<definition-name>-<hex>`, so a bare legacy directory like
+/// `gr-test` is never mistaken for an attempt.
+fn strip_attempt_suffix(name: &str) -> Option<String> {
+    let (base, suffix) = name.rsplit_once('-')?;
+    if suffix.len() == 4 && suffix.bytes().all(|b| b.is_ascii_digit()) && base.contains('-') {
+        Some(base.to_string())
+    } else {
+        None
+    }
+}
+
+/// Resolve the latest attempt directory for `gremlin_id`, preferring the
+/// lexicographically largest `<gremlin_id>-*` directory. Falls back to the
+/// legacy `<gremlin_id>` directory when no padded attempts exist.
+fn latest_attempt_dir(gremlin_id: &str) -> Result<PathBuf, StateError> {
+    let root = config::state_root();
+    let prefix = format!("{gremlin_id}-");
+    let mut best: Option<(String, PathBuf)> = None;
+
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if !name.starts_with(&prefix) {
+                continue;
+            }
+            let suffix = &name[prefix.len()..];
+            if suffix.len() != 4 || !suffix.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            if best.as_ref().is_none_or(|(best_name, _)| name > *best_name) {
+                best = Some((name, path));
+            }
+        }
+    }
+
+    if let Some((_, path)) = best {
+        return Ok(path);
+    }
+
+    // Legacy fallback: a directory named exactly `<gremlin_id>`.
+    let legacy = root.join(gremlin_id);
+    if legacy.is_dir() {
+        return Ok(legacy);
+    }
+
+    Err(StateError::Other(format!(
+        "no state directory for {gremlin_id:?}"
+    )))
+}
+
 pub fn resolve_state_file(gremlin_id: Option<&str>) -> Option<PathBuf> {
     let id = gremlin_id.filter(|s| !s.is_empty())?;
-    Some(config::state_root().join(id).join("state.json"))
+    FileSystemStateStore::open(id)
+        .ok()
+        .map(|store| store.state_file())
 }
 
 /// Enumerate `(id, state.json path)` pairs under the state root.
 ///
 /// Only subdirectories that actually contain a `state.json` are returned.
-/// Callers that need to skip closed gremlins check the marker file next to the
-/// returned path themselves.
+/// Attempt directories (`<id>-NNNN`) are collapsed to a single entry per
+/// gremlin id, keeping the lexicographically largest attempt. Callers that
+/// need to skip closed gremlins check the marker file next to the returned
+/// path themselves.
 pub fn list_state_dirs() -> Vec<(String, PathBuf)> {
     let root = config::state_root();
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
-    let mut out = Vec::new();
+    let mut latest: HashMap<String, (String, PathBuf)> = HashMap::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -1736,9 +2037,32 @@ pub fn list_state_dirs() -> Vec<(String, PathBuf)> {
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        out.push((name, state_json_path));
+
+        // Prefer the recorded gremlin id from state.json; fall back to the
+        // directory name (with an attempt suffix stripped when present).
+        let id = read_state_json(Some(&state_json_path))
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| strip_attempt_suffix(&name).unwrap_or_else(|| name.clone()));
+
+        match latest.get(&id) {
+            None => {
+                latest.insert(id.clone(), (name.clone(), state_json_path));
+            }
+            Some((best_name, _)) if name > *best_name => {
+                latest.insert(id.clone(), (name.clone(), state_json_path));
+            }
+            _ => {}
+        }
     }
-    out.sort();
+
+    let mut out: Vec<(String, PathBuf)> = latest
+        .into_iter()
+        .map(|(id, (_name, state_json_path))| (id, state_json_path))
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
@@ -1930,8 +2254,11 @@ mod tests {
     #[test]
     fn resolve_state_file_builds_path() {
         with_sandbox(None, |sandbox| {
+            let state_dir = sandbox.path().join("state").join("abc-0001");
+            std::fs::create_dir_all(&state_dir).unwrap();
+            std::fs::write(state_dir.join("state.json"), "{}").unwrap();
             let p = resolve_state_file(Some("abc")).unwrap();
-            assert!(p.ends_with("abc/state.json"), "{p:?}");
+            assert!(p.ends_with("abc-0001/state.json"), "{p:?}");
             assert!(resolve_state_file(None).is_none());
             assert!(resolve_state_file(Some("")).is_none());
             let _ = sandbox;
@@ -2753,6 +3080,50 @@ mod tests {
     }
 
     // --- artifact_dir tests ---
+
+    #[test]
+    fn fork_to_stage_creates_next_attempt_with_preserved_keys() {
+        with_sandbox(None, |sandbox| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let mut initial = Map::new();
+                initial.insert("id".into(), Value::String("gr-fork".into()));
+                initial.insert("stage".into(), Value::String("build".into()));
+                initial.insert("status".into(), Value::String("stopped".into()));
+                let store = FileSystemStateStore::create("gr-fork", &initial, false).unwrap();
+
+                let uri_a = Uri::new("artifact".into(), "a".into());
+                let uri_b = Uri::new("artifact".into(), "b".into());
+                store.write_into_registry(&uri_a, "A").await.unwrap();
+                store.write_into_registry(&uri_b, "B").await.unwrap();
+
+                let mut rewind = Map::new();
+                rewind.insert("id".into(), Value::String("gr-fork".into()));
+                rewind.insert("stage".into(), Value::String("review".into()));
+                rewind.insert("status".into(), Value::Null);
+
+                let forked = store
+                    .fork_to_stage(&["artifact://a".to_string()], &rewind)
+                    .await
+                    .unwrap();
+
+                let fs = forked
+                    .as_any()
+                    .unwrap()
+                    .downcast_ref::<FileSystemStateStore>()
+                    .unwrap();
+                assert!(fs.root_dir().to_string_lossy().ends_with("gr-fork-0002"));
+                assert_eq!(fs.read_str("stage"), "review");
+                assert!(fs.read_field("status").is_none());
+                assert!(fs.read_field("parallel_attempts").is_none());
+                assert_eq!(fs.keys().await, vec!["artifact://a".to_string()]);
+                assert_eq!(fs.content("artifact://a", None).await.unwrap(), "A");
+                assert!(!fs.is_registered("artifact://b").await);
+
+                let _ = sandbox;
+            });
+        });
+    }
 
     #[tokio::test]
     async fn test_filesystem_artifact_dir() {
