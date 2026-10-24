@@ -1495,6 +1495,7 @@ async fn handle_resume(
         rewind_state.insert("status".into(), Value::Null);
         rewind_state.insert("pid".into(), Value::Null);
         rewind_state.insert("exit_code".into(), Value::Null);
+        rewind_state.insert("ended_at".into(), Value::Null);
         rewind_state.insert("subprocess_cost_usd".into(), Value::Null);
         rewind_state.remove("parallel_attempts");
 
@@ -1524,7 +1525,14 @@ async fn handle_resume(
         stage
     };
 
-    let current_attempt = gremlin.state.read_str("attempt");
+    let current_attempt = {
+        let a = gremlin.state.read_str("attempt");
+        if a.is_empty() {
+            "1".to_string()
+        } else {
+            a
+        }
+    };
     let new_attempt = format!("{current_attempt}-resume-{}", state::token_hex(2));
     let fields = serde_json::json!({
         "status": "running",

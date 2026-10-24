@@ -994,6 +994,53 @@ mod tests {
         assert!(def.artifact_keys_produced_before("missing").is_err());
     }
 
+    #[test]
+    fn artifact_keys_from_composite_stages_recurse_into_children() {
+        // Build a sequence stage whose children produce artifact keys.
+        let mut a = parsed_exec("a");
+        match &mut a {
+            StageSpec::Exec { stage, .. } => {
+                stage
+                    .outputs_map
+                    .insert("out-a".into(), "artifact://out-a.txt".into());
+            }
+            _ => panic!("expected exec"),
+        }
+        let mut b = parsed_agent("b");
+        match &mut b {
+            StageSpec::Agent { stage, .. } => {
+                stage
+                    .outputs_map
+                    .insert("out-b".into(), "artifact://out-b.txt".into());
+            }
+            _ => panic!("expected agent"),
+        }
+
+        let seq = StageSpec::Sequence {
+            attrs: crate::stage_spec::composite::StageAttrs {
+                name: "group".into(),
+                stage_type: "sequence".into(),
+                path: String::new(),
+                model_explicit: false,
+                skip_if_exists: String::new(),
+            },
+            max_iterations: 1,
+            interval: None,
+            model: None,
+            task_models: None,
+            body: vec![a, b],
+        };
+
+        let def = definition_with(vec![seq]);
+
+        let all = def.artifact_keys_produced();
+        assert!(all.contains("artifact://out-a.txt"));
+        assert!(all.contains("artifact://out-b.txt"));
+
+        let before = def.artifact_keys_produced_before("group").unwrap();
+        assert!(before.is_empty());
+    }
+
     // ---- convert_stage variant tests ----
 
     #[tokio::test]

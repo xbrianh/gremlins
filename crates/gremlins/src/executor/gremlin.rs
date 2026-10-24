@@ -1531,7 +1531,7 @@ pub fn system_env(
 /// workspace), then re-asserted on top afterwards. The script can shape
 /// the environment but can never redirect the harness's paths.
 #[allow(clippy::too_many_arguments)]
-pub fn resolve_env(
+pub(crate) fn resolve_env(
     bootstrap_env: Option<&str>,
     gremlin_id: &str,
     project_root: &Path,

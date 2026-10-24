@@ -135,16 +135,25 @@ impl StageSpec {
     ///
     /// Mirrors the producer-collection logic in the definition loader:
     /// `{name}` templates are substituted with the stage name, and plain
-    /// output keys become `artifact://` URIs. Composite stages produce no
-    /// direct artifact keys (their children do).
+    /// output keys become `artifact://` URIs.  Composite (`sequence` /
+    /// `parallel`) stages recurse into their children.
     pub(crate) fn produced_artifact_keys(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_produced_artifact_keys(&mut out);
+        out
+    }
+
+    fn collect_produced_artifact_keys(&self, out: &mut Vec<String>) {
         let (outputs_map, name) = match self {
             StageSpec::Agent { stage, .. } => (&stage.outputs_map, stage.name.as_str()),
             StageSpec::Exec { stage, .. } => (&stage.outputs_map, stage.name.as_str()),
-            StageSpec::Sequence { .. } | StageSpec::Parallel { .. } => return Vec::new(),
+            StageSpec::Sequence { body, .. } | StageSpec::Parallel { body, .. } => {
+                for child in body {
+                    child.collect_produced_artifact_keys(out);
+                }
+                return;
+            }
         };
-
-        let mut out = Vec::new();
         for (key, val) in outputs_map {
             let resolved_key = key.replace("{name}", name);
             if val.starts_with("artifact://") {
@@ -154,7 +163,6 @@ impl StageSpec {
                 out.push(format!("artifact://{resolved_key}"));
             }
         }
-        out
     }
 
     /// The stage's children — empty for leaves.

@@ -1073,9 +1073,9 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
     // Tail the last ~20 lines of the gremlin log for immediate context.
     // Read only the tail of the file (append-only log, no rotation) so
     // startup time and memory stay bounded regardless of log length.
-    let log_path = FileSystemStateStore::open(id)
-        .map(|store| store.root_dir().join("log"))
-        .unwrap_or_else(|_| config::state_root().join(id).join("log"));
+    // Always use the legacy (non-attempt) path so the log survives
+    // `--stage` resumes that create new attempt directories.
+    let log_path = config::state_root().join(id).join("log");
     if let Ok(lines) = tail_log_lines(&log_path, 20).await {
         for line in &lines {
             eprintln!("log: {line}");
@@ -1192,6 +1192,9 @@ async fn rm_one(id: &str) -> Result<(), String> {
     let state_store = FileSystemStateStore::open(id)
         .map_err(|_| format!("unknown gremlin {id:?} — use `gremlins ls` to list gremlins"))?;
     let state_dir = state_store.root_dir().to_path_buf();
+    // `state_file` is guaranteed to exist: `FileSystemStateStore::open` only
+    // returns a store when `latest_attempt_dir` found a directory with
+    // `state.json` inside.
     let state_file = state_dir.join("state.json");
 
     // Try the daemon first so it broadcasts RunRemoved.
