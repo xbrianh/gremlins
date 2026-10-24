@@ -306,7 +306,7 @@ pub struct Gremlin {
     /// Skills discovered at turn start (chat-only).
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
     /// Active skill names — shared with LoadSkill tool and supervisor session.
-    pub(crate) active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    pub(crate) active_skills: Option<Arc<std::sync::Mutex<Vec<crate::skills::ActiveSkill>>>>,
 }
 
 impl Gremlin {

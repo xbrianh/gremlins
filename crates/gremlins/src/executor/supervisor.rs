@@ -139,7 +139,7 @@ struct ClientSession {
     torn_down: bool,
     /// Session-scoped set of active skill names. Shared with the agent loop
     /// so the LoadSkill tool can add names mid-turn. `/clear` resets it.
-    active_skills: Arc<std::sync::Mutex<Vec<String>>>,
+    active_skills: Arc<std::sync::Mutex<Vec<crate::skills::ActiveSkill>>>,
     /// Skill names the operator explicitly requested on the last turn
     /// (the `skills` field from the chat request). Used to compute the
     /// delta when merging operator toggles with model LoadSkill pushes.
@@ -2768,26 +2768,36 @@ async fn handle_chat(
         tokio::task::spawn_blocking(move || crate::skills::discover(&project_root_for_skills))
             .await
             .unwrap_or_default();
-    let (active_skills, active_skills_arc) = {
+    let (active_skill_entries, active_skills_arc, session_id) = {
         let mut s = session.lock().await;
         let skills_arc = Arc::clone(&s.active_skills);
         let prev_operator = std::mem::take(&mut s.operator_skills);
         let mut guard = skills_arc.lock().unwrap();
         // Merge operator toggles into the active set: add names the operator
         // newly requested, remove names the operator explicitly dropped.
+        // Preserve existing args for skills the operator keeps.
         for name in &requested_skills {
-            if !guard.contains(name) {
-                guard.push(name.clone());
+            if !guard.iter().any(|s| s.name == *name) {
+                guard.push(crate::skills::ActiveSkill {
+                    name: name.clone(),
+                    args: vec![],
+                    argument_text: String::new(),
+                });
             }
         }
-        guard.retain(|name| requested_skills.contains(name) || !prev_operator.contains(name));
+        guard.retain(|s| requested_skills.contains(&s.name) || !prev_operator.contains(&s.name));
         s.operator_skills = requested_skills.clone();
-        let names = guard.clone();
+        let entries = guard.clone();
+        let session_id = s.session_id.clone();
         drop(guard);
-        (names, skills_arc)
+        (entries, skills_arc, session_id)
     };
-    let (trusted_section, unresolved_skills) =
-        crate::skills::build_system_prompt_section(&all_skills, &active_skills);
+    let (trusted_section, unresolved_skills) = crate::skills::build_system_prompt_section(
+        &all_skills,
+        &active_skill_entries,
+        &project_root,
+        &session_id,
+    );
     let system_prompt = build_chat_system_prompt(context, &trusted_section);
 
     // 5. Get or create the session's chat gremlin (id was resolved in step 3

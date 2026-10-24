@@ -12,7 +12,23 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use regex;
 use serde::Deserialize;
+
+// ---------------------------------------------------------------------------
+// Active skill entries
+// ---------------------------------------------------------------------------
+
+/// An active skill entry, carrying the skill name, shell-split positional
+/// arguments, and the raw argument text (for `$ARGUMENTS` expansion).
+#[derive(Debug, Clone)]
+pub struct ActiveSkill {
+    pub name: String,
+    pub args: Vec<String>,
+    /// Raw argument text as supplied by the model, preserved verbatim for
+    /// `$ARGUMENTS` substitution.
+    pub argument_text: String,
+}
 
 // ---------------------------------------------------------------------------
 // Skill metadata (frontmatter)
@@ -69,6 +85,16 @@ pub struct Skill {
     #[serde(default)]
     pub allowed_tools: Vec<String>,
 
+    /// Positional argument names. Maps `$name` placeholders to positions.
+    /// `arguments: [issue, branch]` means `$issue` → $0, `$branch` → $1.
+    #[serde(default)]
+    pub arguments: Vec<String>,
+
+    /// When-to-use guidance appended to the description in the index (Phase 3).
+    /// Parsed now for forward compatibility.
+    #[serde(default)]
+    pub when_to_use: String,
+
     /// Raw markdown body (everything after the `---` fence).
     #[serde(skip)]
     pub body: String,
@@ -98,6 +124,8 @@ impl Default for Skill {
             disable_model_invocation: false,
             user_invocable: true,
             allowed_tools: Vec::new(),
+            arguments: Vec::new(),
+            when_to_use: String::new(),
             body: String::new(),
             dir: PathBuf::new(),
             source: SkillSource::Project,
@@ -592,6 +620,178 @@ pub fn find_skill<'a>(
         .find(|s| s.skill.name == name && (allow_not_invocable || s.skill.user_invocable))
 }
 
+// ---------------------------------------------------------------------------
+// Variable substitution
+// ---------------------------------------------------------------------------
+
+/// Substitute `$ARGUMENTS`, `$0`–`$N`, `${GREMLIN_SKILL_DIR}`,
+/// `${GREMLIN_PROJECT_DIR}`, `${GREMLIN_SESSION_ID}`, and named argument
+/// placeholders in a skill body.
+///
+/// Backslash-escaped argument placeholders (`\$1`) are preserved as literal
+/// text. If no placeholder in the body consumed the arguments, `ARGUMENTS: <value>`
+/// is appended to the end of the body.
+///
+/// `positional` is already shell-split; `argument_text` is the raw string for
+/// `$ARGUMENTS` expansion.
+pub(crate) fn substitute_variables(
+    body: &str,
+    positional: &[String],
+    argument_text: &str,
+    named_args: &[String],
+    skill_dir: &Path,
+    project_root: &Path,
+    session_id: &str,
+) -> String {
+    // Does the body contain any argument-like placeholder? Escaped
+    // placeholders still count — the author wrote them on purpose, so the
+    // trailing `ARGUMENTS:` line is only appended for bodies with no
+    // placeholder token at all.
+    static HAS_PLACEHOLDER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\$(?:\d+|ARGUMENTS(?:\[\d+\])?|[A-Za-z_][A-Za-z0-9_]*)").unwrap()
+    });
+    let has_any_arg_placeholder = HAS_PLACEHOLDER.is_match(body);
+
+    // Only protect `\$` when the next char starts an argument placeholder
+    // (digit, letter/underscore — but not `{`, so `${GREMLIN_*}` is left
+    // alone).  The sentinel is restored to `$` after substitution.
+    static PROTECT_ESCAPE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\\\$([0-9A-Za-z_])").unwrap());
+    let protected = PROTECT_ESCAPE.replace_all(body, "\u{0}$1");
+
+    // A single pass, so replacement text is never re-scanned. Alternation
+    // order matters: the longer `$ARGUMENTS[n]` form must precede bare
+    // `$ARGUMENTS`. Capture groups: 1 = indexed, 2 = positional, 3 = named.
+    static SUBST_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(concat!(
+            r"\$\{GREMLIN_SKILL_DIR\}",
+            r"|\$\{GREMLIN_PROJECT_DIR\}",
+            r"|\$\{GREMLIN_SESSION_ID\}",
+            r"|\$ARGUMENTS\[(\d+)\]",
+            r"|\$ARGUMENTS\b",
+            r"|\$(\d+)",
+            r"|\$([A-Za-z_][A-Za-z0-9_]*)",
+        ))
+        .unwrap()
+    });
+
+    let mut result = SUBST_RE
+        .replace_all(&protected, |caps: &regex::Captures| {
+            let whole = &caps[0];
+            match whole {
+                "${GREMLIN_SKILL_DIR}" => return skill_dir.display().to_string(),
+                "${GREMLIN_PROJECT_DIR}" => return project_root.display().to_string(),
+                "${GREMLIN_SESSION_ID}" => return session_id.to_string(),
+                _ => {}
+            }
+            if let Some(m) = caps.get(1) {
+                // `$ARGUMENTS[n]` — indexed. Parse failure or out-of-range
+                // index stays as literal text.
+                match m.as_str().parse::<usize>() {
+                    Ok(idx) => positional
+                        .get(idx)
+                        .cloned()
+                        .unwrap_or_else(|| whole.to_string()),
+                    Err(_) => whole.to_string(),
+                }
+            } else if let Some(m) = caps.get(2) {
+                // `$n` — positional. Out-of-range indices stay literal.
+                let idx: usize = m.as_str().parse().unwrap();
+                positional
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| whole.to_string())
+            } else if let Some(m) = caps.get(3) {
+                // `$name` — named. Only substitute when the name appears
+                // in the skill's `arguments` frontmatter; undeclared
+                // identifiers (e.g. `$HOME`, `$PATH`) stay literal.
+                let name = m.as_str();
+                named_args
+                    .iter()
+                    .position(|n| n == name)
+                    .and_then(|i| positional.get(i).cloned())
+                    .unwrap_or_else(|| whole.to_string())
+            } else {
+                // Bare `$ARGUMENTS` — the full argument text.
+                argument_text.to_string()
+            }
+        })
+        .to_string();
+
+    // Restore escaped dollar signs: sentinel → `$`.
+    result = result.replace('\u{0}', "$");
+
+    // If no argument placeholder consumed the args, append ARGUMENTS line.
+    if !has_any_arg_placeholder && !argument_text.is_empty() {
+        result.push_str(&format!("\n\nARGUMENTS: {}", argument_text));
+    }
+
+    result
+}
+
+/// Simple shell-style argument split: handles single-quoted, double-quoted,
+/// and backslash-escaped tokens. Whitespace-delimited.
+pub(crate) fn split_args(s: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut chars = s.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    // Whether a token has been started (non-whitespace seen or a quote
+    // opened).  Used to emit empty quoted tokens (`""` / `''`).
+    let mut token_started = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' if !in_single => {
+                // In double quotes: only some escapes are special
+                if in_double {
+                    if let Some(&next) = chars.peek() {
+                        if matches!(next, '"' | '\\' | '$') {
+                            current.push(chars.next().unwrap());
+                        } else {
+                            current.push('\\');
+                        }
+                    } else {
+                        current.push('\\');
+                    }
+                } else {
+                    // Outside quotes: backslash escapes the next char.
+                    // If there is no next char, preserve the backslash.
+                    if let Some(next) = chars.next() {
+                        current.push(next);
+                    } else {
+                        current.push('\\');
+                    }
+                }
+                token_started = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                token_started = true;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                token_started = true;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if token_started {
+                    args.push(std::mem::take(&mut current));
+                    token_started = false;
+                }
+            }
+            c => {
+                current.push(c);
+                token_started = true;
+            }
+        }
+    }
+    if token_started {
+        args.push(current);
+    }
+    args
+}
+
 /// Build the trusted skills section for the system prompt.
 ///
 /// Includes:
@@ -606,14 +806,16 @@ pub fn find_skill<'a>(
 /// Returns an empty string when there are no skills.
 pub fn build_system_prompt_section(
     all_skills: &[LoadedSkill],
-    active_names: &[String],
+    active_skills: &[ActiveSkill],
+    project_root: &Path,
+    session_id: &str,
 ) -> (String, Vec<String>) {
     let mut unresolved: Vec<String> = Vec::new();
 
     if all_skills.is_empty() {
         // All requested names are unresolved when discovery is empty.
-        for name in active_names {
-            unresolved.push(name.clone());
+        for active in active_skills {
+            unresolved.push(active.name.clone());
         }
         return (String::new(), unresolved);
     }
@@ -643,19 +845,27 @@ pub fn build_system_prompt_section(
     }
 
     // Active skill bodies.
-    if !active_names.is_empty() {
+    if !active_skills.is_empty() {
         let mut found_any = false;
-        for name in active_names {
-            if let Some(loaded) = find_skill(all_skills, name, true) {
+        for active in active_skills {
+            if let Some(loaded) = find_skill(all_skills, &active.name, true) {
                 if !found_any {
                     ensure_open(&mut out);
                     out.push_str("## Active skills\n\n");
                     found_any = true;
                 }
-                out.push_str(&format!(
-                    "### {}\n\n{}",
-                    loaded.skill.name, loaded.skill.body
-                ));
+                // Substitute `$ARGUMENTS`, positional, named, and
+                // `${GREMLIN_*}` placeholders in the body before injecting it.
+                let body = substitute_variables(
+                    &loaded.skill.body,
+                    &active.args,
+                    &active.argument_text,
+                    &loaded.skill.arguments,
+                    &loaded.skill.dir,
+                    project_root,
+                    session_id,
+                );
+                out.push_str(&format!("### {}\n\n{}", loaded.skill.name, body));
                 // Include the skill directory so the model can resolve
                 // relative bundled-resource paths from the project root.
                 out.push_str(&format!(
@@ -671,7 +881,7 @@ pub fn build_system_prompt_section(
                     out.push('\n');
                 }
             } else {
-                unresolved.push(name.clone());
+                unresolved.push(active.name.clone());
             }
         }
     }
@@ -1057,7 +1267,16 @@ mod tests {
             files: vec![],
         }];
 
-        let (section, unresolved) = build_system_prompt_section(&skills, &["pdf".to_string()]);
+        let (section, unresolved) = build_system_prompt_section(
+            &skills,
+            &[ActiveSkill {
+                name: "pdf".into(),
+                args: vec![],
+                argument_text: String::new(),
+            }],
+            Path::new("/tmp"),
+            "sess-1",
+        );
         assert!(section.contains("Available skills"));
         assert!(section.contains("**pdf** — PDF tools"));
         assert!(section.contains("Active skills"));
@@ -1068,7 +1287,8 @@ mod tests {
 
     #[test]
     fn build_system_prompt_empty_when_no_skills() {
-        let (section, unresolved) = build_system_prompt_section(&[], &[]);
+        let (section, unresolved) =
+            build_system_prompt_section(&[], &[], Path::new("/tmp"), "sess-1");
         assert!(section.is_empty());
         assert!(unresolved.is_empty());
     }
@@ -1117,8 +1337,20 @@ mod tests {
             },
             files: vec![],
         }];
-        let active = vec!["present".to_string(), "gone".to_string()];
-        let (section, unresolved) = build_system_prompt_section(&skills, &active);
+        let active = vec![
+            ActiveSkill {
+                name: "present".to_string(),
+                args: vec![],
+                argument_text: String::new(),
+            },
+            ActiveSkill {
+                name: "gone".to_string(),
+                args: vec![],
+                argument_text: String::new(),
+            },
+        ];
+        let (section, unresolved) =
+            build_system_prompt_section(&skills, &active, Path::new("/tmp"), "sess-1");
         assert_eq!(unresolved, vec!["gone"]);
         assert!(section.contains("present"));
         assert!(!section.contains("gone"));
@@ -1137,7 +1369,16 @@ mod tests {
             },
             files: vec![PathBuf::from("script.sh")],
         }];
-        let (section, _) = build_system_prompt_section(&skills, &["tool".to_string()]);
+        let (section, _) = build_system_prompt_section(
+            &skills,
+            &[ActiveSkill {
+                name: "tool".into(),
+                args: vec![],
+                argument_text: String::new(),
+            }],
+            Path::new("/tmp"),
+            "sess-1",
+        );
         assert!(section.contains("Skill directory:"));
         assert!(section.contains("/home/user/.config/gremlins/skills/tool"));
         assert!(section.contains("script.sh"));
@@ -1172,5 +1413,315 @@ mod tests {
         );
         assert_eq!(split_tool_list(""), Vec::<String>::new());
         assert_eq!(split_tool_list("  ,  "), Vec::<String>::new());
+    }
+
+    // ── Variable substitution ──
+
+    #[test]
+    fn substitute_positional_args() {
+        let body = "Run $0 with $1";
+        let result = substitute_variables(
+            body,
+            &["alpha".to_string(), "beta".to_string()],
+            "alpha beta",
+            &[],
+            Path::new("/tmp/skill"),
+            Path::new("/project"),
+            "sess-1",
+        );
+        assert_eq!(result, "Run alpha with beta");
+    }
+
+    #[test]
+    fn substitute_named_args() {
+        let body = "Fix $issue on $branch";
+        let named = vec!["issue".to_string(), "branch".to_string()];
+        let result = substitute_variables(
+            body,
+            &["BUG-42".to_string(), "main".to_string()],
+            "BUG-42 main",
+            &named,
+            Path::new("/tmp/skill"),
+            Path::new("/project"),
+            "sess-1",
+        );
+        assert_eq!(result, "Fix BUG-42 on main");
+    }
+
+    #[test]
+    fn substitute_arguments_full() {
+        let body = "Args: $ARGUMENTS";
+        let result = substitute_variables(
+            body,
+            &["one".to_string(), "two".to_string(), "three".to_string()],
+            "one two three",
+            &[],
+            Path::new("/tmp/skill"),
+            Path::new("/project"),
+            "sess-1",
+        );
+        assert_eq!(result, "Args: one two three");
+    }
+
+    #[test]
+    fn substitute_arguments_indexed() {
+        let body = "Second: $ARGUMENTS[1]";
+        let result = substitute_variables(
+            body,
+            &[
+                "first".to_string(),
+                "second".to_string(),
+                "third".to_string(),
+            ],
+            "first second third",
+            &[],
+            Path::new("/tmp/skill"),
+            Path::new("/project"),
+            "sess-1",
+        );
+        assert_eq!(result, "Second: second");
+    }
+
+    #[test]
+    fn substitute_gremlin_skill_dir() {
+        let body = "Dir: ${GREMLIN_SKILL_DIR}";
+        let result = substitute_variables(
+            body,
+            &[],
+            "",
+            &[],
+            Path::new("/home/user/skills/my-skill"),
+            Path::new("/project"),
+            "sess-1",
+        );
+        assert_eq!(result, "Dir: /home/user/skills/my-skill");
+    }
+
+    #[test]
+    fn substitute_gremlin_project_dir() {
+        let body = "Project: ${GREMLIN_PROJECT_DIR}";
+        let result = substitute_variables(
+            body,
+            &[],
+            "",
+            &[],
+            Path::new("/tmp/skill"),
+            Path::new("/my/project"),
+            "sess-1",
+        );
+        assert_eq!(result, "Project: /my/project");
+    }
+
+    #[test]
+    fn substitute_session_id() {
+        let body = "Session: ${GREMLIN_SESSION_ID}";
+        let result = substitute_variables(
+            body,
+            &[],
+            "",
+            &[],
+            Path::new("/tmp/skill"),
+            Path::new("/project"),
+            "abc-123",
+        );
+        assert_eq!(result, "Session: abc-123");
+    }
+
+    #[test]
+    fn backslash_escapes_preserved() {
+        let body = r"Literal \$1 and \$ARGUMENTS";
+        let result = substitute_variables(
+            body,
+            &["hello".to_string()],
+            "hello",
+            &[],
+            Path::new("/tmp/skill"),
+            Path::new("/project"),
+            "sess-1",
+        );
+        assert_eq!(result, "Literal $1 and $ARGUMENTS");
+    }
+
+    #[test]
+    fn missing_indexed_arg_stays_literal() {
+        let body = "Got $0 and $1";
+        let result = substitute_variables(
+            body,
+            &["only-one".to_string()],
+            "only-one",
+            &[],
+            Path::new("/tmp/skill"),
+            Path::new("/project"),
+            "sess-1",
+        );
+        assert_eq!(result, "Got only-one and $1");
+    }
+
+    #[test]
+    fn missing_named_arg_expands_to_empty() {
+        let body = "Name: $name, Missing: $gone";
+        let named = vec!["name".to_string()];
+        let result = substitute_variables(
+            body,
+            &["value".to_string()],
+            "value",
+            &named,
+            Path::new("/tmp/skill"),
+            Path::new("/project"),
+            "sess-1",
+        );
+        assert_eq!(result, "Name: value, Missing: $gone");
+    }
+
+    #[test]
+    fn no_placeholder_appends_arguments_line() {
+        let body = "Just a static body.";
+        let result = substitute_variables(
+            body,
+            &["some".to_string(), "args".to_string(), "here".to_string()],
+            "some args here",
+            &[],
+            Path::new("/tmp/skill"),
+            Path::new("/project"),
+            "sess-1",
+        );
+        assert!(result.contains("ARGUMENTS: some args here"));
+        assert!(result.starts_with("Just a static body."));
+    }
+
+    #[test]
+    fn no_args_no_appended_line() {
+        let body = "Static body.";
+        let result = substitute_variables(
+            body,
+            &[],
+            "",
+            &[],
+            Path::new("/tmp/skill"),
+            Path::new("/project"),
+            "sess-1",
+        );
+        assert_eq!(result, "Static body.");
+    }
+
+    #[test]
+    fn shell_split_respects_quoting() {
+        let body = "$0 $1";
+        let result = substitute_variables(
+            body,
+            &["hello world".to_string(), "single quoted".to_string()],
+            "\"hello world\" 'single quoted'",
+            &[],
+            Path::new("/tmp/skill"),
+            Path::new("/project"),
+            "sess-1",
+        );
+        assert_eq!(result, "hello world single quoted");
+    }
+
+    #[test]
+    fn undeclared_name_stays_literal() {
+        // `$HOME` and `$PATH` are not declared in `arguments` frontmatter,
+        // so they stay as literal text rather than expanding to empty.
+        let body = "Env $HOME and $PATH";
+        let named = vec!["issue".to_string()];
+        let result = substitute_variables(
+            body,
+            &["bug-1".to_string()],
+            "bug-1",
+            &named,
+            Path::new("/tmp/skill"),
+            Path::new("/project"),
+            "sess-1",
+        );
+        assert_eq!(result, "Env $HOME and $PATH");
+    }
+
+    #[test]
+    fn arguments_indexed_out_of_range_stays_literal() {
+        let body = "Got $ARGUMENTS[5]";
+        let result = substitute_variables(
+            body,
+            &["a".to_string(), "b".to_string()],
+            "a b",
+            &[],
+            Path::new("/tmp/skill"),
+            Path::new("/project"),
+            "sess-1",
+        );
+        assert_eq!(result, "Got $ARGUMENTS[5]");
+    }
+
+    #[test]
+    fn arguments_indexed_bad_parse_stays_literal() {
+        let body = "Got $ARGUMENTS[99999999999999999999]";
+        let result = substitute_variables(
+            body,
+            &[],
+            "",
+            &[],
+            Path::new("/tmp/skill"),
+            Path::new("/project"),
+            "sess-1",
+        );
+        assert!(result.contains("$ARGUMENTS[99999999999999999999]"));
+    }
+
+    #[test]
+    fn backslash_before_gremlin_vars_still_expands() {
+        // `\$` only protects argument placeholders, not `${GREMLIN_*}`.
+        let body = r"Path: \${GREMLIN_PROJECT_DIR}";
+        let result = substitute_variables(
+            body,
+            &[],
+            "",
+            &[],
+            Path::new("/tmp/skill"),
+            Path::new("/my/project"),
+            "sess-1",
+        );
+        // The backslash is just a literal char, `${GREMLIN_PROJECT_DIR}`
+        // still expands.
+        assert_eq!(result, "Path: \\/my/project");
+    }
+
+    // ── split_args ──
+
+    #[test]
+    fn split_args_empty_quoted_tokens() {
+        assert_eq!(split_args(r#""a" "" "b""#), vec!["a", "", "b"]);
+        assert_eq!(split_args("a '' b"), vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn split_args_trailing_backslash() {
+        assert_eq!(split_args(r#"a\"#), vec!["a\\"]);
+    }
+
+    // ── build_system_prompt_section integration ──
+
+    #[test]
+    fn build_section_preserves_quoted_args() {
+        // Quoted arguments from LoadSkill survive the trip through
+        // ActiveSkill → build_system_prompt_section → substitute_variables
+        // without re-splitting.
+        let skills = vec![LoadedSkill {
+            skill: Skill {
+                name: "greet".into(),
+                description: "Greeter".into(),
+                body: "Hello $0, your dir is $1".into(),
+                source: SkillSource::Project,
+                ..Default::default()
+            },
+            files: vec![],
+        }];
+        let active = vec![ActiveSkill {
+            name: "greet".into(),
+            args: vec!["World".to_string(), "/home/world".to_string()],
+            argument_text: "World /home/world".into(),
+        }];
+        let (section, _) =
+            build_system_prompt_section(&skills, &active, Path::new("/project"), "s-1");
+        assert!(section.contains("Hello World, your dir is /home/world"));
     }
 }

@@ -66,7 +66,7 @@ pub struct RunParams {
     /// Skills discovered at turn start. `None` outside chat.
     pub discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
     /// Shared mutable reference to active skill names.
-    pub active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    pub active_skills: Option<Arc<std::sync::Mutex<Vec<crate::skills::ActiveSkill>>>>,
     /// Sink for per-turn token-usage events emitted by the agent loop.
     /// The executor layer wires this to the daemon event broadcast.
     pub token_usage_sink: crate::clients::agent_loop::TokenUsageSink,

@@ -134,7 +134,7 @@ pub(crate) struct AgentLoopRuntime {
     /// Shared mutable reference to session active skill names.
     /// The LoadSkill tool pushes names here; the supervisor reads them
     /// at the next turn boundary.
-    pub(crate) active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    pub(crate) active_skills: Option<Arc<std::sync::Mutex<Vec<crate::skills::ActiveSkill>>>>,
     /// Discovered skills, set when skills are available (chat-only).
     /// This is `Some` only for top-level chat sessions; headless gremlins
     /// and nested tasks see `None`. It doubles as the canonical chat
@@ -2649,7 +2649,10 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool
         "Done" => Some(vec![("summary", "string", true)]),
         "WebSearch" => Some(vec![("url", "string", true), ("timeout", "integer", false)]),
         "Mischief" => Some(vec![]),
-        "LoadSkill" => Some(vec![("name", "string", true)]),
+        "LoadSkill" => Some(vec![
+            ("name", "string", true),
+            ("arguments", "string", false),
+        ]),
         _ => None,
     }
 }
@@ -3014,6 +3017,20 @@ fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String
         None => return "Error: missing 'name' for LoadSkill tool".to_string(),
     };
 
+    // Extract the optional arguments string and shell-split it into
+    // positional arguments for the skill body's `$0`, `$1`, `$ARGUMENTS`
+    // placeholders. Preserve the raw string for `$ARGUMENTS` expansion.
+    let argument_text = args
+        .get("arguments")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let arguments: Vec<String> = if argument_text.is_empty() {
+        Vec::new()
+    } else {
+        crate::skills::split_args(&argument_text)
+    };
+
     let (discovered, active) = match (&ctx.discovered_skills, &ctx.active_skills) {
         (Some(d), Some(a)) => (d, a),
         _ => return "Error: LoadSkill is only available in chat sessions".to_string(),
@@ -3036,15 +3053,27 @@ fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String
 
     // Single critical section: check containment AND push so two
     // concurrent LoadSkill calls for the same name cannot both pass
-    // the check and both push.
+    // the check and both push. If the skill is already active and this
+    // call supplies arguments, replace the stored entry so an
+    // operator-toggled skill can receive arguments later.
     let mut active_guard = match active.lock() {
         Ok(g) => g,
         Err(e) => return format!("Error: internal lock error: {e}"),
     };
-    if active_guard.contains(&name.to_string()) {
-        return format!("Skill {name:?} is already active.");
+    let entry = crate::skills::ActiveSkill {
+        name: name.to_string(),
+        args: arguments.clone(),
+        argument_text: argument_text.clone(),
+    };
+    if let Some(existing) = active_guard.iter_mut().find(|s| s.name == name) {
+        if arguments.is_empty() {
+            return format!("Skill {name:?} is already active.");
+        }
+        // Replace args on an already-active skill.
+        *existing = entry;
+    } else {
+        active_guard.push(entry);
     }
-    active_guard.push(name.to_string());
     drop(active_guard);
 
     // Return a body-free acknowledgement. The skill body is injected as a
@@ -3056,6 +3085,9 @@ fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String
     let mut result = format!("Skill {name:?} loaded successfully.");
     if n_files > 0 {
         result.push_str(&format!(" {n_files} bundled file(s) available."));
+    }
+    if !arguments.is_empty() {
+        result.push_str(&format!("\n\n**Arguments:** `{}`", arguments.join(" ")));
     }
     result.push_str(&format!(
         "\n\n**Skill directory:** `{}`\n",
@@ -3330,6 +3362,10 @@ message to finish. The summary parameter briefly describes what you accomplished
                     "name": {
                         "type": "string",
                         "description": "Name of the skill to load"
+                    },
+                    "arguments": {
+                        "type": "string",
+                        "description": "Optional arguments to pass to the skill (shell-style, e.g. \"alpha beta\")"
                     }
                 },
                 "required": ["name"],
