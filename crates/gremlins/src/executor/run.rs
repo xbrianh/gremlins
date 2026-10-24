@@ -478,7 +478,15 @@ async fn run_agent(
     // `_scratchpad.md` in the scratch root — the stage always starts with
     // a clean slate (reset below). The checkout just reserves space for the
     // commit path.
-    checkout_keys.push(format!("artifact://_scratchpad/{}.md", agent.name));
+    //
+    // `loop_iter` is included so repeating-sequence iterations produce
+    // distinct, ordered snapshots.
+    let scratchpad_uri = if loop_iter.is_empty() {
+        format!("artifact://_scratchpad/{}.md", agent.name)
+    } else {
+        format!("artifact://_scratchpad/{}-{loop_iter}.md", agent.name)
+    };
+    checkout_keys.push(scratchpad_uri);
 
     let Checkout {
         store: local_registry,
@@ -538,8 +546,12 @@ async fn run_agent(
     // Chat gremlins receive this injection in the supervisor so it rides on
     // the operator prompt — skip it here to avoid doubling up.
     if !is_chat {
-        let scratchpad_accumulated =
-            crate::executor::agent_runner::accumulate_scratchpads(gremlin.state.store_ref()).await;
+        let stage_order: Vec<String> = gremlin.definition.stage_names().to_vec();
+        let scratchpad_accumulated = crate::executor::agent_runner::accumulate_scratchpads(
+            gremlin.state.store_ref(),
+            &stage_order,
+        )
+        .await;
         if !scratchpad_accumulated.is_empty() {
             let scratchpad_section =
                 crate::executor::agent_runner::format_scratchpad_injection(&scratchpad_accumulated);
@@ -670,6 +682,11 @@ async fn run_agent(
                     );
                 },
             )))
+        },
+        scratchpad_path: if prepared.scratchpad_path.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(&prepared.scratchpad_path))
         },
     };
 

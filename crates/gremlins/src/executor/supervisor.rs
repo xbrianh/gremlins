@@ -1575,6 +1575,14 @@ async fn handle_resume(
             Err(e) => return error_response(&format!("gremlin {id}: {e}")),
         };
         let produced_all = definition.artifact_keys_produced();
+        // Stage names at or after the target — used below to also clean up
+        // synthetic scratchpad artifacts from discarded stages.
+        let stages_after_target: HashSet<String> = definition
+            .stages
+            .iter()
+            .skip_while(|s| s.name() != target)
+            .map(|s| s.name().to_string())
+            .collect();
         // Parallel groups register runtime-only keys — completion markers and
         // child-prefixed merged bindings — that `produced_all` cannot contain.
         // Any group at or after the target re-runs, so its bookkeeping must
@@ -1592,6 +1600,20 @@ async fn handle_resume(
             // are not skipped and its fresh merges are not blocked.
             if parallel_keys.is_rerun(&key) {
                 continue;
+            }
+            // Drop synthetic scratchpad artifacts from stages at or after
+            // the target. Scratchpad keys are formatted as
+            // `artifact://_scratchpad/{name}.md` or
+            // `artifact://_scratchpad/{name}-{loop_iter}.md`.
+            if let Some(rest) = key
+                .strip_prefix("artifact://_scratchpad/")
+                .or_else(|| key.strip_prefix("_scratchpad/"))
+            {
+                let rest = rest.strip_suffix(".md").unwrap_or(rest);
+                let name_part = rest.split('-').next().unwrap_or(rest);
+                if stages_after_target.contains(name_part) {
+                    continue;
+                }
             }
             preserve.insert(key);
         }
@@ -2768,8 +2790,11 @@ async fn handle_chat(
     // gremlin so working memory survives conversation compaction. The current
     // turn's stage writes `_scratchpad.md` in the scratch root; on commit it is
     // versioned under `artifact://_scratchpad/{stage}.md` and read back here.
-    let scratchpad_accumulated =
-        crate::executor::agent_runner::accumulate_scratchpads(gremlin.state.store_ref()).await;
+    let scratchpad_accumulated = crate::executor::agent_runner::accumulate_scratchpads(
+        gremlin.state.store_ref(),
+        &[], // chat stages sort correctly lexically
+    )
+    .await;
     let text = if scratchpad_accumulated.is_empty() {
         text.to_string()
     } else {

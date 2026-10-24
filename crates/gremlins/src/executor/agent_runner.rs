@@ -185,7 +185,11 @@ pub async fn prepare_agent(
                 ),
             });
         }
-        let scratchpad_uri_str = format!("artifact://_scratchpad/{name}.md");
+        let scratchpad_uri_str = if loop_iter.is_empty() {
+            format!("artifact://_scratchpad/{name}.md")
+        } else {
+            format!("artifact://_scratchpad/{name}-{loop_iter}.md")
+        };
         let scratchpad_uri = Uri::parse(&scratchpad_uri_str).map_err(|e| AgentError::Generic {
             name: name.clone(),
             detail: e.to_string(),
@@ -202,11 +206,8 @@ pub async fn prepare_agent(
             .to_string_lossy()
             .into_owned();
         scratchpad_persist_path = persist;
-        output_paths.insert(
-            "_stage_scratchpad".to_string(),
-            scratchpad_persist_path.clone(),
-        );
-        output_uris.push(("_stage_scratchpad".to_string(), scratchpad_uri_str, true));
+        output_paths.insert("__gml_scratch".to_string(), scratchpad_persist_path.clone());
+        output_uris.push(("__gml_scratch".to_string(), scratchpad_uri_str, true));
     } else {
         scratchpad_path = String::new();
         scratchpad_persist_path = String::new();
@@ -311,20 +312,36 @@ pub async fn commit_agent(
 // Scratchpad accumulation
 // ---------------------------------------------------------------------------
 
-/// Concatenate every persisted stage scratchpad from `store`, in lexical key
-/// order. Chat turn names (`chat-0001`, `chat-0002`, …) are zero-padded so
-/// lexical ordering matches execution order. User-defined sequence stage names
-/// should follow the same convention — zero-pad numeric suffixes — or
-/// deliberately choose names whose lexical order matches the pipeline order.
+/// Concatenate every persisted stage scratchpad from `store`, in the order
+/// given by `stage_order`. Keys whose stage name does not appear in
+/// `stage_order` are appended after the ordered entries in lexical order.
 /// Empty scratchpads are skipped.
-pub(crate) async fn accumulate_scratchpads(store: &(dyn StateStore + Send + Sync)) -> String {
+pub(crate) async fn accumulate_scratchpads(
+    store: &(dyn StateStore + Send + Sync),
+    stage_order: &[String],
+) -> String {
     let mut keys: Vec<String> = store
         .keys()
         .await
         .into_iter()
         .filter(|k| k.starts_with("artifact://_scratchpad/") || k.starts_with("_scratchpad/"))
         .collect();
-    keys.sort();
+    // Sort by stage order: earlier stages come first. Keys whose stage name
+    // doesn't appear in `stage_order` are sorted after the known entries.
+    keys.sort_by(|a, b| {
+        let a_idx = stage_order
+            .iter()
+            .position(|name| scratchpad_key_contains_stage(a, name));
+        let b_idx = stage_order
+            .iter()
+            .position(|name| scratchpad_key_contains_stage(b, name));
+        match (a_idx, b_idx) {
+            (Some(ai), Some(bi)) => ai.cmp(&bi),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.cmp(b),
+        }
+    });
     let mut accumulated = String::new();
     for key in &keys {
         if let Ok(content) = store.content(key, None).await {
@@ -335,6 +352,24 @@ pub(crate) async fn accumulate_scratchpads(store: &(dyn StateStore + Send + Sync
         }
     }
     accumulated.trim().to_string()
+}
+
+/// Returns true if `key` looks like a scratchpad artifact for `stage_name`.
+fn scratchpad_key_contains_stage(key: &str, stage_name: &str) -> bool {
+    // Keys are formatted as:
+    //   artifact://_scratchpad/{name}.md
+    //   artifact://_scratchpad/{name}-{loop_iter}.md
+    let rest = key
+        .strip_prefix("artifact://_scratchpad/")
+        .or_else(|| key.strip_prefix("_scratchpad/"));
+    let Some(rest) = rest else {
+        return false;
+    };
+    let rest = rest.strip_suffix(".md").unwrap_or(rest);
+    // The stage name is everything before the first `-` (which separates
+    // the name from loop_iter), or the entire remainder if no `-`.
+    let name_part = rest.split('-').next().unwrap_or(rest);
+    name_part == stage_name
 }
 
 /// Format accumulated scratchpad content for injection into a user prompt.
@@ -810,7 +845,7 @@ mod tests {
             prepared
                 .output_uris
                 .iter()
-                .any(|(k, uri, opt)| k == "_stage_scratchpad"
+                .any(|(k, uri, opt)| k == "__gml_scratch"
                     && uri == "artifact://_scratchpad/test.md"
                     && *opt),
             "a synthetic optional scratchpad bind must be present"
@@ -840,13 +875,13 @@ mod tests {
 
         assert_eq!(prepared.output_uris.len(), 1);
         let (key, uri, optional) = &prepared.output_uris[0];
-        assert_eq!(key, "_stage_scratchpad");
+        assert_eq!(key, "__gml_scratch");
         assert_eq!(uri, "artifact://_scratchpad/stage-a.md");
         assert!(*optional);
         // The checkout path and the model-writable path are recorded.
         assert!(prepared.scratchpad_persist_path.contains("stage-a.md"));
         assert_eq!(
-            prepared.output_paths["_stage_scratchpad"],
+            prepared.output_paths["__gml_scratch"],
             prepared.scratchpad_persist_path
         );
         assert!(prepared.scratchpad_path.ends_with("_scratchpad.md"));
@@ -910,9 +945,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_accumulate_scratchpads_sorts_and_skips_empty() {
+    async fn test_accumulate_scratchpads_ordered_and_skips_empty() {
         let tmp = tempfile::TempDir::new().unwrap();
         let store = make_state_store(ensure_artifact_dir(&tmp));
+        // Stages in execution order: a, b, c
+        let stage_order: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
         let uri_b = Uri::parse("artifact://_scratchpad/b.md").unwrap();
         let uri_a = Uri::parse("artifact://_scratchpad/a.md").unwrap();
         let uri_empty = Uri::parse("artifact://_scratchpad/c.md").unwrap();
@@ -925,7 +962,7 @@ mod tests {
             .await
             .unwrap();
 
-        let accumulated = accumulate_scratchpads(&store).await;
+        let accumulated = accumulate_scratchpads(&store, &stage_order).await;
 
         assert_eq!(accumulated, "first\n\nsecond");
     }
