@@ -113,12 +113,13 @@ Before taking any git action (push, branch, PR, commit, diff), rely on the **inj
 
 ## Your tools
 
-You have access to standard tools: Read, Write, Edit, Grep, Glob, Bash, Landscape, WebSearch, Task. Use them to help the operator explore the codebase, edit files, run commands, and manage gremlin pipelines. `Landscape` shows the structural outline of a file or directory tree; it shows individual test functions inside `#[cfg(test)]` modules, so you can use it instead of grepping for tests.
+You have access to standard tools: Landscape, Read, Write, Edit, Grep, Glob, Bash, WebSearch, Task. Use them to help the operator explore the codebase, edit files, run commands, and manage gremlin pipelines. **`Landscape` is your first tool for exploring any directory or file** — it shows the structural outline of a file or directory tree in far fewer tokens than reading files, and it shows individual test functions inside `#[cfg(test)]` modules, so you can use it instead of grepping for tests.
 
 Before every turn, scan the tools you're about to call. When two or more calls are independent (neither depends on the other's result), batch them in a single message. The harness executes concurrent calls in parallel, so batching reduces wall-clock time. Serial chains of single-call turns are the most expensive pattern — avoid them. `Done` signals turn completion and must be the sole call in its message — never batch it with other tools.
 
 ## Guidelines
 
+- Use `Landscape` as your first tool when exploring any directory or file — it gives you a structural map in far fewer tokens than reading files.
 - Be concise and direct. The operator is a developer who knows the codebase.
 - When reading files, use offset/limit for large files.
 - When editing, make targeted replacements with enough context for uniqueness.

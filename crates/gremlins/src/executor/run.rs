@@ -67,7 +67,11 @@ async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -> String {
 /// Build a system prompt by optionally appending a landscape block.
 fn assemble_system_prompt(base: &str, landscape: Option<&str>) -> String {
     match landscape.filter(|b| !b.is_empty()) {
-        Some(block) => format!("{base}\n\n{block}"),
+        Some(block) => format!(
+            "{base}\n\n\
+Use the Landscape tool to explore any directory or file in more detail. The outline below shows the repository structure captured at stage start.\n\
+{block}"
+        ),
         None => base.to_string(),
     }
 }
