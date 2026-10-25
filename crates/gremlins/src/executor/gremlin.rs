@@ -55,7 +55,7 @@ use crate::schemas::bootstrap::Bootstrap;
 /// struct existed.
 #[derive(Debug, Clone, Default)]
 pub struct GremlinConfig {
-    /// When `true`, state and workspace are all backed by
+    /// When `true`, state and workspace are both backed by
     /// [`tempfile::TempDir`]s that vanish when the gremlin is dropped.
     /// The runtime operates identically regardless of backing.
     pub ephemeral: bool,
@@ -2622,6 +2622,7 @@ bootstrap:
         let artifact_dir = state_dir.join("artifacts");
         let workdir = sandbox.path().join("workspace");
 
+        std::fs::create_dir_all(&artifact_dir).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::write(state_dir.join("state.json"), "{}").unwrap();
         std::fs::create_dir_all(&workdir).unwrap();

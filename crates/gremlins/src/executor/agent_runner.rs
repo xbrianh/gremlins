@@ -202,7 +202,7 @@ pub async fn prepare_agent(
         let work_root = framework_subs
             .get("cwd")
             .map(PathBuf::from)
-            .unwrap_or_else(crate::config::work_root);
+            .unwrap_or_else(|| PathBuf::from("/"));
         scratchpad_path = work_root
             .join("_scratchpad.md")
             .to_string_lossy()
