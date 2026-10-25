@@ -1953,6 +1953,18 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.width,
                             );
                         }
+                        KeyCode::Char('j')
+                            if key.modifiers.is_empty()
+                                && app.screen == Screen::Runs =>
+                        {
+                            app.watch_move(1);
+                        }
+                        KeyCode::Char('k')
+                            if key.modifiers.is_empty()
+                                && app.screen == Screen::Runs =>
+                        {
+                            app.watch_move(-1);
+                        }
                         KeyCode::Char(ch) => {
                             if let Some(prompt) = live_area.debug_prompt_mut() {
                                 prompt.push(ch);

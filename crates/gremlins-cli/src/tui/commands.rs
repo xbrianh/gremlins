@@ -309,7 +309,7 @@ fn help_text() -> Vec<String> {
         "  Ctrl+D (empty)   — exit".to_string(),
         "  Ctrl+L           — redraw screen".to_string(),
         "  Ctrl+O           — in /watch: open or close the selected gremlin's live log".to_string(),
-        "  Up/Down          — in /watch: move the gremlin selection".to_string(),
+        "  j/k/Up/Down      — in /watch: move the gremlin selection".to_string(),
         "  Esc              — in /watch: close the live log first, then return to chat; otherwise clear/cancel"
             .to_string(),
         "  Ctrl+G           — open external editor".to_string(),

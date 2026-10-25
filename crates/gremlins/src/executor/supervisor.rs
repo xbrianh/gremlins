@@ -5760,7 +5760,7 @@ model-profiles:
             "must document the external editor keybinding"
         );
         assert!(
-            prompt.contains("`Ctrl+O`") && prompt.contains("arrow keys"),
+            prompt.contains("`Ctrl+O`") && prompt.contains("j/k/arrow keys"),
             "must document watch selection and live-log toggling"
         );
         assert!(
