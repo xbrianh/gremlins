@@ -2186,7 +2186,9 @@ async fn run_agent_loop_core(
                     )
                     .await?;
             }
-            tool_ledger.record(&job.name, &job.key, &output, &job.args);
+            if tools::result_status(&output) == "ok" {
+                tool_ledger.record(&job.name, &job.key, &output, &job.args, turn_num);
+            }
             result_msgs.push(Message::tool_result(
                 CallId::from_wire(job.id.clone()),
                 ToolName::new(job.name.clone()).expect("tool name must not be empty"),
@@ -2884,7 +2886,7 @@ impl ToolLedger {
     }
 
     /// Record a tool execution.
-    fn record(&mut self, name: &str, key: &str, output: &str, args_json: &str) {
+    fn record(&mut self, name: &str, key: &str, output: &str, args_json: &str, turn_num: usize) {
         let args: serde_json::Value =
             serde_json::from_str(args_json).unwrap_or(serde_json::Value::Null);
 
@@ -2894,8 +2896,9 @@ impl ToolLedger {
                 let offset = Self::parse_u64(&args, "offset");
                 let limit = Self::parse_u64(&args, "limit");
                 let content_hash = Self::hash(output);
-                let age = self.seq;
+                let age = turn_num;
                 self.seq += 1;
+                let seq = self.seq;
 
                 let entry_key = (file_path, offset, limit);
                 if let Some(existing) = self.reads.get_mut(&entry_key) {
@@ -2903,9 +2906,11 @@ impl ToolLedger {
                         existing.count += 1;
                         existing.last_age = age;
                     } else {
-                        existing.count += 1;
+                        // Content changed — replace the entry.
+                        existing.count = 1;
                         existing.last_age = age;
                         existing.content_hash = content_hash;
+                        existing.seq = seq;
                     }
                 } else {
                     self.reads.insert(
@@ -2914,7 +2919,7 @@ impl ToolLedger {
                             last_age: age,
                             count: 1,
                             content_hash,
-                            seq: age,
+                            seq,
                         },
                     );
                 }
@@ -2923,8 +2928,9 @@ impl ToolLedger {
                 let pattern = key.to_string();
                 let path = Self::parse_str(&args, "path").to_string();
                 let content_hash = Self::hash(output);
-                let age = self.seq;
+                let age = turn_num;
                 self.seq += 1;
+                let seq = self.seq;
 
                 let entry_key = (pattern, path);
                 if let Some(existing) = self.greps.get_mut(&entry_key) {
@@ -2932,9 +2938,11 @@ impl ToolLedger {
                         existing.count += 1;
                         existing.last_age = age;
                     } else {
-                        existing.count += 1;
+                        // Content changed — replace the entry.
+                        existing.count = 1;
                         existing.last_age = age;
                         existing.content_hash = content_hash;
+                        existing.seq = seq;
                     }
                 } else {
                     self.greps.insert(
@@ -2943,14 +2951,14 @@ impl ToolLedger {
                             last_age: age,
                             count: 1,
                             content_hash,
-                            seq: age,
+                            seq,
                         },
                     );
                 }
             }
-            "Write" | "Edit" => {
+            "Write" => {
                 let file_path = key.to_string();
-                let age = self.seq;
+                let age = turn_num;
                 self.seq += 1;
                 self.writes.insert(file_path.clone(), age);
                 // Invalidate: remove Read entries for this file,
@@ -2959,8 +2967,16 @@ impl ToolLedger {
                 self.greps.clear();
                 self.landscape = None;
             }
+            "Edit" => {
+                // Invalidate reads for this file (content changed) but
+                // do not emit a W entry — Edit is not tracked per plan.
+                let file_path = key.to_string();
+                self.reads.retain(|(fp, _, _), _| fp != &file_path);
+                self.greps.clear();
+                self.landscape = None;
+            }
             "Landscape" => {
-                let age = self.seq;
+                let age = turn_num;
                 self.seq += 1;
                 self.landscape = Some(age);
             }
@@ -2974,104 +2990,119 @@ impl ToolLedger {
     fn format(&self, turn_num: usize) -> String {
         let age_of = |stored: usize| -> usize { turn_num.saturating_sub(stored) };
 
-        // Collect all file paths from reads and writes.
-        let mut file_paths: Vec<String> = Vec::new();
-        {
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for (fp, _, _) in self.reads.keys() {
-                if seen.insert(fp.clone()) {
-                    file_paths.push(fp.clone());
-                }
-            }
-            for fp in self.writes.keys() {
-                if seen.insert(fp.clone()) {
-                    file_paths.push(fp.clone());
-                }
-            }
+        // Build items: (first_seq, display_line) for interleaved output.
+        let mut items: Vec<(usize, String)> = Vec::new();
+
+        // Group reads and writes by file path with first-access seq.
+        let mut file_seqs: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut file_entries: std::collections::HashMap<String, Vec<(&LedgerReadEntry, u64, u64)>> =
+            std::collections::HashMap::new();
+
+        for ((fp, offset, limit), entry) in &self.reads {
+            file_seqs
+                .entry(fp.clone())
+                .and_modify(|s| *s = (*s).min(entry.seq))
+                .or_insert(entry.seq);
+            file_entries
+                .entry(fp.clone())
+                .or_default()
+                .push((entry, *offset, *limit));
+        }
+        for (fp, &s) in &self.writes {
+            file_seqs
+                .entry(fp.clone())
+                .and_modify(|e| *e = (*e).min(s))
+                .or_insert(s);
         }
 
-        // Determine first-access seq for each file path.
-        let file_first_seq = |fp: &str| -> usize {
-            let mut seq = usize::MAX;
-            for ((f, _, _), entry) in &self.reads {
-                if f == fp {
-                    seq = seq.min(entry.seq);
-                }
-            }
-            if let Some(&s) = self.writes.get(fp) {
-                seq = seq.min(s);
-            }
-            seq
-        };
+        let mut keys: Vec<&String> = file_seqs.keys().collect();
+        keys.sort_by_key(|fp| file_seqs[*fp]);
 
-        file_paths.sort_by_key(|fp| file_first_seq(fp));
+        for fp in &keys {
+            let has_write = self.writes.contains_key(*fp);
+            let write_age = self.writes.get(*fp).map(|&s| age_of(s));
 
-        let mut lines: Vec<String> = Vec::new();
+            let mut full_count: usize = 0;
+            let mut full_age: usize = usize::MAX;
+            let mut partials: Vec<(u64, u64, usize, usize)> = Vec::new();
 
-        for fp in &file_paths {
-            let mut partials: Vec<(u64, u64, usize)> = Vec::new();
-            let mut total_count: usize = 0;
-            let mut last_age: usize = 0;
-            for ((f, offset, limit), entry) in &self.reads {
-                if f != fp {
-                    continue;
-                }
-                let age = age_of(entry.last_age);
-                last_age = last_age.max(age);
-                total_count += entry.count;
-                if *offset > 0 || *limit > 0 {
-                    partials.push((*offset, *limit, age));
+            if let Some(entries) = file_entries.get(*fp) {
+                let mut sorted: Vec<_> = entries.iter().collect();
+                sorted.sort_by_key(|(e, _, _)| e.seq);
+                for (entry, offset, limit) in sorted {
+                    let age = age_of(entry.last_age);
+                    if *offset == 0 && *limit == 0 {
+                        full_count += entry.count;
+                        full_age = full_age.min(age);
+                    } else {
+                        partials.push((*offset, *limit, age, entry.count));
+                    }
                 }
             }
 
-            let has_write = self.writes.contains_key(fp);
-            let write_age = self.writes.get(fp).map(|&s| age_of(s));
-
-            let mut file_line = String::new();
-            if total_count > 0 {
-                file_line.push_str(&format!("{} R({}t", fp, last_age));
-                if total_count > 1 {
-                    file_line.push_str(&format!(",{}×", total_count));
+            let mut line = String::new();
+            if full_count > 0 {
+                line.push_str(&format!("{} R({}t", fp, full_age));
+                if full_count > 1 {
+                    line.push_str(&format!(",{}×", full_count));
                 }
-                for (offset, limit, age) in &partials {
-                    file_line.push_str(&format!(".{}-{}:{}t", offset, limit, age));
+                for (offset, limit, age, count) in &partials {
+                    line.push_str(&format!(".{}-{}:{}t", offset, limit, age));
+                    if *count > 1 {
+                        line.push_str(&format!(",{}×", count));
+                    }
                 }
-                file_line.push(')');
+                line.push(')');
+            } else if !partials.is_empty() {
+                let min_age = partials.iter().map(|(_, _, a, _)| *a).min().unwrap();
+                let sum_count: usize = partials.iter().map(|(_, _, _, c)| *c).sum();
+                line.push_str(&format!("{} R({}t", fp, min_age));
+                if sum_count > 1 {
+                    line.push_str(&format!(",{}×", sum_count));
+                }
+                for (offset, limit, age, count) in &partials {
+                    line.push_str(&format!(".{}-{}:{}t", offset, limit, age));
+                    if *count > 1 {
+                        line.push_str(&format!(",{}×", count));
+                    }
+                }
+                line.push(')');
             }
 
             if has_write {
-                if total_count > 0 {
-                    file_line.push(' ');
+                if line.is_empty() {
+                    line.push_str(fp);
+                    line.push(' ');
                 } else {
-                    file_line.push_str(fp);
-                    file_line.push(' ');
+                    line.push(' ');
                 }
-                file_line.push_str(&format!("W({}t)", write_age.unwrap()));
+                line.push_str(&format!("W({}t)", write_age.unwrap()));
             }
 
-            if !file_line.is_empty() {
-                lines.push(file_line);
+            if !line.is_empty() {
+                items.push((file_seqs[*fp], line));
             }
         }
 
         // Grep entries.
-        let mut grep_entries: Vec<(&(String, String), &LedgerGrepEntry)> =
-            self.greps.iter().collect();
-        grep_entries.sort_by_key(|(_, e)| e.seq);
-        for ((pattern, _path), entry) in &grep_entries {
+        for ((pattern, _path), entry) in &self.greps {
             let age = age_of(entry.last_age);
             let mut line = format!("\"{}\" G({}t", pattern, age);
             if entry.count > 1 {
                 line.push_str(&format!(",{}×", entry.count));
             }
             line.push(')');
-            lines.push(line);
+            items.push((entry.seq, line));
         }
 
         // Landscape entry.
         if let Some(stored) = self.landscape {
-            lines.push(format!("L({}t)", age_of(stored)));
+            items.push((stored, format!("L({}t)", age_of(stored))));
         }
+
+        items.sort_by_key(|(se, _)| *se);
+        let lines: Vec<String> = items.into_iter().map(|(_, l)| l).collect();
 
         if lines.is_empty() {
             "[seen]\n(none)".to_string()
@@ -3379,11 +3410,11 @@ mod tests {
         let mut tl = ToolLedger::new();
         let args = serde_json::json!({"file_path": "/tmp/a.rs"}).to_string();
         let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/a.rs"}));
-        tl.record("Read", &key, "content1", &args);
-        tl.record("Read", &key, "content1", &args);
+        tl.record("Read", &key, "content1", &args, 0);
+        tl.record("Read", &key, "content1", &args, 0);
         let args2 = serde_json::json!({"file_path": "/tmp/b.rs"}).to_string();
         let key2 = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/b.rs"}));
-        tl.record("Read", &key2, "content2", &args2);
+        tl.record("Read", &key2, "content2", &args2, 0);
         // Two files, each read; turn 0 for all.
         let out = tl.format(0);
         assert!(out.contains("/tmp/a.rs"), "{out}");
@@ -3396,9 +3427,9 @@ mod tests {
         let mut tl = ToolLedger::new();
         let args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
         let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Read", &key, "same", &args);
-        tl.record("Read", &key, "same", &args);
-        tl.record("Read", &key, "same", &args);
+        tl.record("Read", &key, "same", &args, 0);
+        tl.record("Read", &key, "same", &args, 0);
+        tl.record("Read", &key, "same", &args, 0);
         let out = tl.format(0);
         assert!(
             out.contains(",3×"),
@@ -3407,13 +3438,10 @@ mod tests {
 
         // Different content replaces.
         let mut tl2 = ToolLedger::new();
-        tl2.record("Read", &key, "first", &args);
-        tl2.record("Read", &key, "second", &args);
+        tl2.record("Read", &key, "first", &args, 0);
+        tl2.record("Read", &key, "second", &args, 0);
         let out2 = tl2.format(0);
-        assert!(
-            out2.contains(",2×") || !out2.contains("×"),
-            "different hash still counts: {out2}"
-        );
+        assert!(!out2.contains("×"), "different hash still counts: {out2}");
     }
 
     #[test]
@@ -3421,8 +3449,8 @@ mod tests {
         let mut tl = ToolLedger::new();
         let args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
         let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Read", &key, "content", &args);
-        tl.record("Write", &key, "written", &args);
+        tl.record("Read", &key, "content", &args, 0);
+        tl.record("Write", &key, "written", &args, 0);
         let out = tl.format(0);
         assert!(out.contains("W("), "should have write: {out}");
         assert!(!out.contains("R("), "read should be invalidated: {out}");
@@ -3433,10 +3461,10 @@ mod tests {
         let mut tl = ToolLedger::new();
         let grep_args = serde_json::json!({"pattern": "fn main", "path": "/tmp"}).to_string();
         let grep_key = ledger_key_arg(&serde_json::json!({"pattern": "fn main"}));
-        tl.record("Grep", &grep_key, "results", &grep_args);
+        tl.record("Grep", &grep_key, "results", &grep_args, 0);
         let write_args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
         let write_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Write", &write_key, "written", &write_args);
+        tl.record("Write", &write_key, "written", &write_args, 0);
         let out = tl.format(0);
         assert!(!out.contains("G("), "greps should be invalidated: {out}");
         assert!(
@@ -3450,10 +3478,10 @@ mod tests {
         let mut tl = ToolLedger::new();
         let ls_args = serde_json::json!({"file_path": "/tmp"}).to_string();
         let ls_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp"}));
-        tl.record("Landscape", &ls_key, "tree", &ls_args);
+        tl.record("Landscape", &ls_key, "tree", &ls_args, 0);
         let write_args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
         let write_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Write", &write_key, "written", &write_args);
+        tl.record("Write", &write_key, "written", &write_args, 0);
         let out = tl.format(0);
         assert!(
             !out.contains("L("),
@@ -3467,10 +3495,10 @@ mod tests {
         let args1 =
             serde_json::json!({"file_path": "/tmp/x.rs", "offset": 0, "limit": 100}).to_string();
         let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Read", &key, "chunk1", &args1);
+        tl.record("Read", &key, "chunk1", &args1, 0);
         let args2 =
             serde_json::json!({"file_path": "/tmp/x.rs", "offset": 200, "limit": 300}).to_string();
-        tl.record("Read", &key, "chunk2", &args2);
+        tl.record("Read", &key, "chunk2", &args2, 0);
         let out = tl.format(0);
         assert!(
             out.contains("0-100"),
@@ -3491,7 +3519,7 @@ mod tests {
         let mut tl = ToolLedger::new();
         let args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
         let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Read", &key, "content", &args);
+        tl.record("Read", &key, "content", &args, 0);
         let out = tl.format(5);
         assert!(out.contains("R(5t"), "age should be 5: {out}");
         let out2 = tl.format(1);
