@@ -369,8 +369,9 @@ impl App {
                 run.cache_creation_input_tokens = cache_creation_input_tokens;
                 run.turns = Some(turns);
                 run.cost_usd = cost_usd.or(run.cost_usd);
-                run.last_prompt_tokens = last_prompt_tokens;
-                run.last_cached_input_tokens = last_cached_input_tokens;
+                run.last_prompt_tokens = last_prompt_tokens.or(run.last_prompt_tokens);
+                run.last_cached_input_tokens =
+                    last_cached_input_tokens.or(run.last_cached_input_tokens);
             }
             Entry::Vacant(e) => {
                 e.insert(ActiveRun {
@@ -829,6 +830,56 @@ mod tests {
         app.active_runs.remove("f");
         app.ensure_watch_selection();
         assert_eq!(app.watch_selection.as_deref(), Some("r"));
+    }
+
+    #[test]
+    fn on_token_usage_preserves_last_turn_values_on_none() {
+        let mut app = App::new();
+        // Simulate first live turn event with real cache-hit data.
+        app.on_token_usage(
+            "g1".into(),
+            Some(10_000), // prompt_tokens (cumulative)
+            Some(5_000),  // completion_tokens
+            Some(1_000),  // reasoning_tokens
+            Some(2_000),  // cached_input_tokens (cumulative)
+            Some(500),    // cache_creation_input_tokens
+            2,            // turns
+            Some(0.15),   // cost_usd
+            Some(5_000),  // last_prompt_tokens (this turn)
+            Some(2_500),  // last_cached_input_tokens (50% cache rate)
+        );
+
+        // Simulate terminal-finalize TokenUsage event — fields are None.
+        app.on_token_usage(
+            "g1".into(),
+            Some(10_000),
+            Some(5_000),
+            Some(1_000),
+            Some(2_000),
+            Some(500),
+            2,
+            None, // cost_usd comes in as None
+            None, // last_prompt_tokens is None from terminal
+            None, // last_cached_input_tokens is None from terminal
+        );
+
+        let run = app.active_runs.get("g1").expect("run must exist");
+        // Cumulative fields are overwritten (last write wins).
+        assert_eq!(run.prompt_tokens, Some(10_000));
+        assert_eq!(run.cached_input_tokens, Some(2_000));
+        // cost_usd uses .or() — preserved from first call.
+        assert_eq!(run.cost_usd, Some(0.15));
+        // Last-turn fields must also preserve the earlier Some values.
+        assert_eq!(
+            run.last_prompt_tokens,
+            Some(5_000),
+            "last_prompt_tokens must not be wiped by a None event"
+        );
+        assert_eq!(
+            run.last_cached_input_tokens,
+            Some(2_500),
+            "last_cached_input_tokens must not be wiped by a None event"
+        );
     }
 
     #[test]

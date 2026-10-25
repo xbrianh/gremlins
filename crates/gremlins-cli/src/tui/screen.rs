@@ -2997,6 +2997,49 @@ mod tests {
     }
 
     #[test]
+    fn watch_table_cache_column_uses_last_turn_values_not_cumulative() {
+        // Give the run cumulative totals that would compute a different
+        // cache percentage than the per-turn values.  If the CACHE column
+        // renders the per-turn percentage (75%), the fix is working.
+        let mut live = new_live(120, 8);
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        app.active_runs.insert(
+            "g1".to_string(),
+            ActiveRun {
+                status: "running".to_string(),
+                stage: "build".to_string(),
+                definition: "def".to_string(),
+                project: "gremlins".to_string(),
+                // Cumulative: 10k prompt, 2k cached → would give 20%
+                prompt_tokens: Some(10_000),
+                completion_tokens: Some(5_000),
+                reasoning_tokens: Some(500),
+                cached_input_tokens: Some(2_000),
+                cache_creation_input_tokens: Some(100),
+                turns: Some(3),
+                cost_usd: Some(0.42),
+                // Last-turn: 1k prompt, 750 cached → 75%
+                last_prompt_tokens: Some(1_000),
+                last_cached_input_tokens: Some(750),
+            },
+        );
+
+        app.screen = Screen::Runs;
+        live.show_runs();
+        live.compose(&app).unwrap();
+
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains("75%"),
+            "CACHE column must show last-turn 75%, not cumulative 20%.
+Buffer:
+{visible}"
+        );
+    }
+
+    #[test]
     fn debug_screen_occludes_chat_and_keeps_prompt() {
         let mut live = new_live(80, 24);
         let mut app = App::new();
