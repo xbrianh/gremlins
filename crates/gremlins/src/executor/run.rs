@@ -609,14 +609,16 @@ async fn run_agent(
 
     // Compaction is in-memory; the verbatim archive is preserved for
     // artifact persistence, never compacted.
-    let compaction_opts = if is_chat {
-        let threshold = config::chat_compaction_threshold_bytes();
+    let compaction_opts = {
+        let threshold = if is_chat {
+            config::compaction_threshold_tokens_chat()
+        } else {
+            config::compaction_threshold_tokens()
+        };
         Some(conversation::CompactionOpts {
-            threshold_bytes: threshold,
-            target_bytes: threshold.saturating_mul(55) / 100,
+            threshold_tokens: threshold,
+            target_tokens: threshold.saturating_mul(55) / 100,
         })
-    } else {
-        None
     };
     let prepopulated_messages = verbatim_history.clone();
 

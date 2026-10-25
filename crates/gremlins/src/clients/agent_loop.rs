@@ -765,13 +765,14 @@ fn user_message_text(message: &Message) -> String {
 /// `history` is the verbatim source of truth and is never mutated here. When
 /// compaction is enabled, a cached `CompactedWorking` keeps the request prefix
 /// byte-stable across rounds; a new pass is triggered only when the current
-/// materialized view exceeds the soft threshold.
+/// materialized view exceeds the soft token threshold.
 fn build_request_messages(
     history: &[Message],
     compacted: &mut Option<conversation::CompactedWorking>,
     current_turn_start: usize,
     opts: Option<conversation::CompactionOpts>,
-    overhead: usize,
+    overhead_tokens: usize,
+    overhead_bytes: usize,
 ) -> Vec<Message> {
     let Some(opts) = opts else {
         return history.to_vec();
@@ -790,7 +791,7 @@ fn build_request_messages(
         None => history.to_vec(),
     };
 
-    if conversation::serialized_len(&working) + overhead <= opts.threshold_bytes as usize {
+    if conversation::token_len(&working) + overhead_tokens <= opts.threshold_tokens as usize {
         return working;
     }
 
@@ -800,8 +801,11 @@ fn build_request_messages(
         conversation::CutGranularity::Turn
     };
 
+    let target_bytes = opts
+        .target_tokens
+        .saturating_mul(conversation::BYTES_PER_TOKEN);
     if let Some(fresh) =
-        conversation::compact_working(history, opts.target_bytes, overhead, granularity)
+        conversation::compact_working(history, target_bytes, overhead_bytes, granularity)
     {
         let request = fresh.materialize(history);
         *compacted = Some(fresh);
@@ -1038,7 +1042,12 @@ async fn run_agent_loop_core(
         }
 
         let next_prompt_text = user_message_text(&next_prompt);
-        let overhead = conversation::completion_request_overhead(
+        let overhead_bytes = conversation::completion_request_overhead(
+            &next_prompt_text,
+            system_prompt.as_deref(),
+            tool_defs,
+        );
+        let overhead_tokens = conversation::completion_request_overhead_tokens(
             &next_prompt_text,
             system_prompt.as_deref(),
             tool_defs,
@@ -1048,7 +1057,8 @@ async fn run_agent_loop_core(
             &mut compacted,
             current_turn_start,
             compaction_opts,
-            overhead,
+            overhead_tokens,
+            overhead_bytes,
         );
 
         let mut builder = CompletionRequest::new(next_prompt.clone())
@@ -3389,19 +3399,19 @@ mod tests {
     #[test]
     fn build_request_messages_compacts_mid_turn_with_sticky_prefix() {
         let mut history = padded_history(6, 3_000);
-        let full_len = conversation::serialized_len(&history);
+        let full_len = conversation::token_len(&history);
         let opts = conversation::CompactionOpts {
-            threshold_bytes: full_len as u64 - 1,
-            target_bytes: full_len as u64 / 2,
+            threshold_tokens: full_len as u64 - 1,
+            target_tokens: full_len as u64 / 2,
         };
 
         let mut compacted = None;
-        let first = build_request_messages(&history, &mut compacted, 0, Some(opts), 0);
+        let first = build_request_messages(&history, &mut compacted, 0, Some(opts), 0, 0);
         assert!(
             compacted.is_some(),
             "an over-threshold multi-round turn must compact"
         );
-        assert!(conversation::serialized_len(&first) < full_len);
+        assert!(conversation::token_len(&first) < full_len);
 
         let prefix_before = compacted.as_ref().unwrap().prefix.clone();
         let cut_before = compacted.as_ref().unwrap().cut;
@@ -3414,7 +3424,7 @@ mod tests {
             history.push(Message::user(format!(
                 "Actions taken this turn:\n- small {round}\n"
             )));
-            let request = build_request_messages(&history, &mut compacted, 0, Some(opts), 0);
+            let request = build_request_messages(&history, &mut compacted, 0, Some(opts), 0, 0);
             assert!(compacted.is_some());
             assert_eq!(compacted.as_ref().unwrap().prefix, prefix_before);
             assert_eq!(compacted.as_ref().unwrap().cut, cut_before);
@@ -3427,16 +3437,16 @@ mod tests {
     #[test]
     fn build_request_messages_runs_two_passes_and_keeps_earlier_facts() {
         let mut history = bash_history(6, 2_000);
-        let full_len = conversation::serialized_len(&history);
+        let full_len = conversation::token_len(&history);
         let opts = conversation::CompactionOpts {
-            threshold_bytes: full_len as u64 - 1,
-            target_bytes: full_len as u64 / 2,
+            threshold_tokens: full_len as u64 - 1,
+            target_tokens: full_len as u64 / 2,
         };
 
         let mut compacted = None;
-        let first = build_request_messages(&history, &mut compacted, 0, Some(opts), 0);
+        let first = build_request_messages(&history, &mut compacted, 0, Some(opts), 0, 0);
         assert!(compacted.is_some(), "first pass must compact");
-        assert!(conversation::serialized_len(&first) < full_len);
+        assert!(conversation::token_len(&first) < full_len);
         let first_cut = compacted.as_ref().unwrap().cut;
         let first_prefix = compacted.as_ref().unwrap().prefix.clone();
         assert!(user_message_text(&first_prefix[0]).contains("Bash: cargo check 0"));
@@ -3463,7 +3473,7 @@ mod tests {
             )));
         }
 
-        let second = build_request_messages(&history, &mut compacted, 0, Some(opts), 0);
+        let second = build_request_messages(&history, &mut compacted, 0, Some(opts), 0, 0);
         let fresh = compacted
             .as_ref()
             .expect("a second compaction pass must be cached");
@@ -3471,7 +3481,7 @@ mod tests {
             fresh.cut != first_cut || fresh.prefix != first_prefix,
             "the second over-threshold pass must choose a new sticky prefix"
         );
-        assert!(conversation::serialized_len(&second) < conversation::serialized_len(&history));
+        assert!(conversation::token_len(&second) < conversation::token_len(&history));
 
         let memory = user_message_text(&fresh.prefix[0]);
         assert!(
@@ -3488,7 +3498,7 @@ mod tests {
     fn build_request_messages_uses_verbatim_history_without_opts() {
         let history = padded_history(3, 1_000);
         let mut compacted = None;
-        let request = build_request_messages(&history, &mut compacted, 0, None, 0);
+        let request = build_request_messages(&history, &mut compacted, 0, None, 0, 0);
         assert_eq!(request, history);
         assert!(compacted.is_none());
     }
@@ -3496,14 +3506,14 @@ mod tests {
     #[test]
     fn build_request_messages_resets_cached_cut_after_history_pop() {
         let mut history = padded_history(6, 3_000);
-        let full_len = conversation::serialized_len(&history);
+        let full_len = conversation::token_len(&history);
         let opts = conversation::CompactionOpts {
-            threshold_bytes: full_len as u64 - 1,
-            target_bytes: full_len as u64 / 2,
+            threshold_tokens: full_len as u64 - 1,
+            target_tokens: full_len as u64 / 2,
         };
 
         let mut compacted = None;
-        let _ = build_request_messages(&history, &mut compacted, 0, Some(opts), 0);
+        let _ = build_request_messages(&history, &mut compacted, 0, Some(opts), 0, 0);
         assert!(compacted.is_some());
 
         // Simulate a mid-tool pause re-run popping messages back below the cut.
@@ -3512,7 +3522,7 @@ mod tests {
         }
         history.pop();
 
-        let request = build_request_messages(&history, &mut compacted, 0, Some(opts), 0);
+        let request = build_request_messages(&history, &mut compacted, 0, Some(opts), 0, 0);
         assert!(
             compacted.is_none() || compacted.as_ref().is_some_and(|c| c.cut <= history.len()),
             "a stale cached cut must not survive a history pop"
