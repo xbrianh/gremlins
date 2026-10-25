@@ -591,10 +591,10 @@ impl Renderer {
         let fence_width = if is_fenced {
             let max_content = block_lines
                 .iter()
-                .map(|line| format!("{indent}{line}").width() as u16)
+                .map(|line| format!("{indent}{line}").width())
                 .max()
                 .unwrap_or(0);
-            max_content.min(self.rule_width)
+            max_content.min(self.rule_width as usize) as u16
         } else {
             0
         };
@@ -828,6 +828,19 @@ mod tests {
             vec![groove_top(11), " let x = 1;".to_string(), groove_bottom(11),]
         );
         assert!(lines[1].spans[0].style.bg.is_some());
+    }
+
+    #[test]
+    fn fenced_code_block_long_line_caps_border_at_rule_width() {
+        // Content wider than the 40-char rule width: indent + 42 'x's = 43 wide.
+        let long = "x".repeat(42);
+        let markdown = format!("```\n{long}\n```");
+        let lines = render_default(&markdown);
+        let text = text_of(&lines);
+        assert_eq!(
+            text,
+            vec![groove_top(40), format!(" {long}"), groove_bottom(40)]
+        );
     }
 
     #[test]
