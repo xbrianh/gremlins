@@ -1542,7 +1542,7 @@ mod tests {
             client: Client::parse(default_model).unwrap(),
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
-            runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot(),
+            runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot(None),
             cancel_token: None,
             interactive_session: None,
             clean_cmds: Vec::new(),

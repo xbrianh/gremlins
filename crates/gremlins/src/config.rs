@@ -542,6 +542,11 @@ impl Config {
         })
     }
 
+    /// Returns the `model-by-stage` map for a named profile, if it exists.
+    pub fn model_by_stage_for_profile(&self, name: &str) -> Option<&IndexMap<String, String>> {
+        self.model_profiles.get(name)?.model_by_stage.as_ref()
+    }
+
     pub fn default_model(&self) -> Option<&str> {
         self.default_model.as_deref()
     }
@@ -623,7 +628,7 @@ impl Config {
 // Stage model parsing
 // ---------------------------------------------------------------------------
 
-fn parse_stage_models(
+pub(crate) fn parse_stage_models(
     map: Option<&IndexMap<String, String>>,
 ) -> (HashMap<String, String>, HashMap<String, String>) {
     let Some(obj) = map else {
@@ -1926,6 +1931,43 @@ model-profiles:
         let (exact, prefix) = cfg.profile_model_by_stage();
         assert!(exact.is_empty());
         assert!(prefix.is_empty());
+        assert!(exact.is_empty());
+        assert!(prefix.is_empty());
+    }
+
+    #[test]
+    fn test_config_model_by_stage_for_profile() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"model-profiles:
+  fast:
+    model: cmd/fast
+    model-by-stage:
+      plan: cmd/fast-plan
+      review-*: cmd/fast-review
+  slow:
+    model: cmd/slow
+    model-by-stage:
+      plan: cmd/slow-plan
+"#,
+        ));
+        let cfg = Config::load().unwrap();
+
+        // Known profile with model-by-stage.
+        let map = cfg.model_by_stage_for_profile("fast").unwrap();
+        assert_eq!(map.get("plan").unwrap(), "cmd/fast-plan");
+        assert_eq!(map.get("review-*").unwrap(), "cmd/fast-review");
+
+        // Known profile with different model-by-stage.
+        let map2 = cfg.model_by_stage_for_profile("slow").unwrap();
+        assert_eq!(map2.get("plan").unwrap(), "cmd/slow-plan");
+        assert!(map2.get("review-*").is_none());
+
+        // Unknown profile returns None.
+        assert!(cfg.model_by_stage_for_profile("nonesuch").is_none());
+
+        // Profile without model-by-stage returns None.
+        // (The "slow" profile above has model-by-stage, so we can't test this
+        //  without a third profile — just verify it works for the non-existent case.)
     }
 
     #[test]

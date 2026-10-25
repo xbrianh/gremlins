@@ -687,7 +687,7 @@ mod tests {
             client: Client::parse("cmd/true").unwrap(),
             stage_inputs,
             loop_iter: "1".to_string(),
-            runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot(),
+            runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot(None),
             cancel_token: None,
             interactive_session: None,
             clean_cmds: Vec::new(),

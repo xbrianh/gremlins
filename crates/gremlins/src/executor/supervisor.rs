@@ -3827,7 +3827,7 @@ fn create_chat_gremlin(
         .open_blob("log", BlobMode::Write)
         .map_err(|e| format!("failed to create log: {e}"))?;
 
-    let runtime_config = RuntimeConfig::snapshot();
+    let runtime_config = RuntimeConfig::snapshot(None);
     let client = Client::from_uri(default_model.clone())
         .map_err(|e| format!("invalid default model '{default_model}': {e}"))?;
 
