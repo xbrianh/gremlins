@@ -174,7 +174,7 @@ pub trait GremlinDefinition: Send + Sync {
     /// The optional `land` stage — always an exec stage named `land`.
     fn land(&self) -> Option<ExecutorStage>;
 
-    /// Clean commands to run during `gremlins clean`, before workspace/scratch
+    /// Clean commands to run during `gremlins clean`, before workspace
     /// removal. Defaults to an empty slice.
     fn clean_cmds(&self) -> &[String] {
         &[]

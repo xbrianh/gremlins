@@ -550,7 +550,7 @@ pub(crate) async fn run_parallel(
 
     // --- Clean up children (best-effort) ---
     //
-    // On success: remove everything (state, scratch, workspace).
+    // On success: remove everything (state and workspace).
     // On failure: only remove workspace (preserve state for forensics).
     // The pipeline author handles workspace cleanup in join.cmds; here we
     // clean up workspaces that join didn't handle.
@@ -636,7 +636,7 @@ fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
     }
 }
 
-/// Remove everything a child owns (state, scratch, workspace).
+/// Remove everything a child owns (state and workspace).
 async fn cleanup_child_fully(child_name: &str, gremlin: Option<Gremlin>) {
     match gremlin {
         Some(child) => child.clean(true).await,
@@ -668,7 +668,7 @@ mod tests {
     use crate::config;
     use crate::definition::StageSpec;
     use crate::definition::{ExecutorStage, StaticDefinition};
-    use crate::executor::gremlin::{validate_gremlin_id, RuntimeConfig, ScratchDir};
+    use crate::executor::gremlin::{validate_gremlin_id, RuntimeConfig};
     use crate::executor::state::{self, StateData};
     use crate::schemas::bootstrap::Bootstrap;
     use crate::test_support::Sandbox;
@@ -736,7 +736,6 @@ mod tests {
             runtime_config: RuntimeConfig::snapshot(),
             cancel_token: None,
             interactive_session: None,
-            scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
             enclosing_model: None,

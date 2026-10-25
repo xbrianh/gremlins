@@ -454,7 +454,7 @@ mod tests {
     use crate::clients::client::{Client, ModelURI};
 
     use crate::definition::StaticDefinition;
-    use crate::executor::gremlin::{validate_gremlin_id, ScratchDir, WorkDir};
+    use crate::executor::gremlin::{validate_gremlin_id, WorkDir};
     use crate::executor::state::{self, StateData};
     use crate::schemas::bootstrap::Bootstrap;
     use crate::test_support::Sandbox;
@@ -690,7 +690,6 @@ mod tests {
             runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot(),
             cancel_token: None,
             interactive_session: None,
-            scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
             enclosing_model: None,

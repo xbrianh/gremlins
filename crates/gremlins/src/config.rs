@@ -28,7 +28,6 @@ pub struct PathOverrides {
     pub(crate) config_root: Option<PathBuf>,
     pub project_root: Option<PathBuf>,
     pub(crate) overlay_dir: Option<PathBuf>,
-    pub scratch_root: Option<PathBuf>,
 }
 
 /// The `paths` section of settings.yaml.
@@ -45,8 +44,6 @@ struct PathsSection {
     project_root: Option<StrictString>,
     #[serde(rename = "overlay-dir", default)]
     overlay_dir: Option<StrictString>,
-    #[serde(rename = "scratch-root", default)]
-    scratch_root: Option<StrictString>,
 }
 
 impl From<PathsSection> for PathOverrides {
@@ -57,7 +54,6 @@ impl From<PathsSection> for PathOverrides {
             config_root: paths.config_root.map(|s| PathBuf::from(s.0)),
             project_root: paths.project_root.map(|s| PathBuf::from(s.0)),
             overlay_dir: paths.overlay_dir.map(|s| PathBuf::from(s.0)),
-            scratch_root: paths.scratch_root.map(|s| PathBuf::from(s.0)),
         }
     }
 }
@@ -1264,21 +1260,6 @@ pub(crate) fn timeout_retry_backoff() -> Vec<f64> {
         .unwrap_or_else(|| DEFAULT_TIMEOUT_RETRY_BACKOFF.to_vec())
 }
 
-/// GREMLINS_SCRATCH_DIR for tool scratch space. Creates the directory.
-pub(crate) fn scratch_dir(gremlin_id: Option<&str>) -> Option<PathBuf> {
-    let path: PathBuf = std::env::var("GREMLINS_SCRATCH_DIR")
-        .ok()
-        .filter(|s| !s.is_empty())?
-        .into();
-    let p = if let Some(id) = gremlin_id {
-        path.join(id)
-    } else {
-        path
-    };
-    std::fs::create_dir_all(&p).ok()?;
-    Some(p)
-}
-
 /// HOME directory with platform fallback.
 pub(crate) fn home_dir() -> PathBuf {
     std::env::var("HOME")
@@ -1406,28 +1387,6 @@ pub(crate) fn overlay_dir_without_env(project_root: &Path) -> PathBuf {
     overlay_dir_for(overrides.as_ref(), project_root)
 }
 
-pub fn resolve_scratch_root(
-    overrides: Option<&PathOverrides>,
-    gremlin_id: Option<&str>,
-) -> PathBuf {
-    let sub = gremlin_id.unwrap_or("direct");
-    if let Some(sandbox) = sandbox_override("scratch") {
-        let p = sandbox.join(sub);
-        std::fs::create_dir_all(&p).ok();
-        return p;
-    }
-    if let Some(o) = overrides {
-        if let Some(ref base) = o.scratch_root {
-            let p = base.join(sub);
-            std::fs::create_dir_all(&p).ok();
-            return p;
-        }
-    }
-    let p = std::env::temp_dir().join("gremlins-scratch").join(sub);
-    std::fs::create_dir_all(&p).ok();
-    p
-}
-
 // ---------------------------------------------------------------------------
 // Public entry points — use the process-global config's overrides
 // ---------------------------------------------------------------------------
@@ -1468,11 +1427,6 @@ pub fn project_overlay_dir(project_root: &Path) -> PathBuf {
 pub(crate) fn stage_definition_dirs() -> Vec<PathBuf> {
     let overlay = resolve_project_overlay_dir(None, &project_root());
     vec![overlay.join("stages")]
-}
-
-pub fn scratch_root(gremlin_id: Option<&str>) -> PathBuf {
-    let overrides = get_global().map(|c| c.path_overrides().clone());
-    resolve_scratch_root(overrides.as_ref(), gremlin_id)
 }
 
 /// Path to the project-level persistent scratchpad file that survives chat
@@ -1609,8 +1563,7 @@ model-profiles:
   work-root: /tmp/gremlins-work
   config-root: /tmp/gremlins-config
   project-root: /tmp/gremlins-project
-  overlay-dir: /tmp/gremlins-overlay
-  scratch-root: /tmp/gremlins-scratch"#,
+  overlay-dir: /tmp/gremlins-overlay"#,
         ));
         let overrides = Config::load().unwrap().path_overrides;
         assert_eq!(
@@ -1632,10 +1585,6 @@ model-profiles:
         assert_eq!(
             overrides.overlay_dir,
             Some(PathBuf::from("/tmp/gremlins-overlay"))
-        );
-        assert_eq!(
-            overrides.scratch_root,
-            Some(PathBuf::from("/tmp/gremlins-scratch"))
         );
     }
 
@@ -2282,31 +2231,6 @@ model-profiles:
     #[test]
     fn test_overlay_dirname() {
         assert_eq!(overlay_dirname(), ".gremlins");
-    }
-
-    #[test]
-    fn test_scratch_root_sandbox() {
-        let sandbox = Sandbox::new();
-        let result = resolve_scratch_root(None, Some("my-gremlin"));
-        assert_eq!(result, sandbox.path().join("scratch").join("my-gremlin"));
-        assert!(result.exists());
-    }
-
-    #[test]
-    fn test_scratch_root_default() {
-        let _env = EnvGuard::lock();
-        let result = resolve_scratch_root(None, Some("my-gremlin"));
-        assert!(result.to_str().unwrap().contains("gremlins-scratch"));
-        assert!(result.to_str().unwrap().contains("my-gremlin"));
-        assert!(result.exists());
-    }
-
-    #[test]
-    fn test_scratch_root_no_id() {
-        let _env = EnvGuard::lock();
-        let result = resolve_scratch_root(None, None);
-        assert!(result.to_str().unwrap().contains("direct"));
-        assert!(result.exists());
     }
 
     #[test]

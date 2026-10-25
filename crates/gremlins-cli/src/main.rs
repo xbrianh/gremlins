@@ -794,7 +794,6 @@ fn info_direct(id: &str) -> Result<(), String> {
         "workdir": workdir,
         "state_dir": state_dir.display().to_string(),
         "artifact_dir": state_dir.join("artifacts").display().to_string(),
-        "scratch_dir": config::scratch_root(Some(id)).display().to_string(),
         "log_file": state_dir.join("log").display().to_string(),
         "started_at": gremlin.state.read_str("started_at"),
         "ended_at": gremlin.state.read_field("ended_at").unwrap_or(Value::Null),
@@ -1531,12 +1530,10 @@ async fn land(id: &str) -> Result<(), String> {
         std::env::current_dir().map_err(|e| format!("failed to get current directory: {e}"))?;
 
     let mut env: HashMap<String, String> = std::env::vars().collect();
-    let scratch_dir = config::scratch_root(Some(id));
     env.extend(system_env(
         id,
         &project_root,
         worktree.as_deref(),
-        &scratch_dir,
         &state_dir,
     ));
     for (k, v) in &prepared.substitution_env {

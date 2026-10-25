@@ -119,7 +119,7 @@ Before every turn, scan the tools you're about to call. When two or more calls a
 
 ## Scratchpad
 
-You have a persistent scratchpad at `_scratchpad.md` in your scratch root
+You have a persistent scratchpad at `_scratchpad.md` in your worktree root
 directory. Use the Write tool to update it with findings, decisions, and
 context you want to preserve across turns — file paths, discovered
 patterns, TODO items, architectural notes. Keep it concise.

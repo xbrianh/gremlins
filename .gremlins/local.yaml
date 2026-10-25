@@ -27,7 +27,7 @@ bootstrap:
     if [ -f "$THE_ENV" ]; then
         source "$THE_ENV"
     fi
-    export PREFIX="${GREMLINS_SCRATCH_DIR}/install"
+    export PREFIX="${GREMLINS_STATE_DIR}/install"
     export PATH="${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}"
 
 land:

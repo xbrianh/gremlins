@@ -303,15 +303,10 @@ fn make_task_runner_at_depth(
                 ));
 
                 let work_root = tools::worktree_root(task_cwd.as_deref());
-                let scratch = tools::scratch_root().unwrap_or_else(|| work_root.clone());
                 let system_prompt = if kind == TaskKind::Fork {
-                    Some(crate::clients::config::fork_system_prompt(
-                        &work_root, &scratch,
-                    ))
+                    Some(crate::clients::config::fork_system_prompt(&work_root))
                 } else {
-                    Some(crate::clients::config::task_system_prompt(
-                        &work_root, &scratch,
-                    ))
+                    Some(crate::clients::config::task_system_prompt(&work_root))
                 };
 
                 let prepopulated_messages = if kind == TaskKind::Fork {

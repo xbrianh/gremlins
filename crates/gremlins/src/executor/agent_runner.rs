@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -36,7 +37,7 @@ pub struct AgentPrepared {
     /// A stage-supplied system prompt override. When present, this replaces
     /// the harness default in [`AgentPrepared::system_prompt`].
     pub system_prompt: Option<String>,
-    /// The scratchpad file the model writes to: `_scratchpad.md` in the scratch
+    /// The scratchpad file the model writes to: `_scratchpad.md` in the worktree
     /// root. Best-effort — the stage may never write it.
     pub scratchpad_path: String,
     /// Where the stage's scratchpad is persisted on commit: the checkout path
@@ -162,19 +163,17 @@ pub async fn prepare_agent(
     let expected_artifact_paths: Vec<String> = output_paths.values().cloned().collect();
 
     // Synthetic scratchpad binding. The stage's persistent scratchpad lives at
-    // `_scratchpad.md` in the scratch root; this binding versions it under
+    // `_scratchpad.md` in the worktree root; this binding versions it under
     // `artifact://_scratchpad/{stage}.md` so a later stage (or the same chat
     // gremlin on a later turn) can re-inject the accumulated working memory.
     // It is best-effort: the stage may never write a scratchpad, so the bind
     // is optional and deliberately excluded from `expected_artifact_paths`
     // above so it never triggers a missing-artifact reminder.
     //
-    // When the scratch root is unset (no GREMLINS_SCRATCH_DIR), skip the
-    // synthetic bind entirely rather than falling back to a CWD-relative path
-    // that would diverge from the agent loop's injection logic.
+    // The worktree always exists, so the synthetic bind is always created.
     let scratchpad_path: String;
     let scratchpad_persist_path: String;
-    if let Some(scratch_root) = crate::config::scratch_dir(None) {
+    {
         // Reject stage names that could escape the `_scratchpad` directory.
         if name.contains('/') || name.contains('\\') || name.contains("..") {
             return Err(AgentError::Generic {
@@ -201,16 +200,17 @@ pub async fn prepare_agent(
                 name: name.clone(),
                 detail: e.to_string(),
             })?;
-        scratchpad_path = scratch_root
+        let work_root = framework_subs
+            .get("cwd")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        scratchpad_path = work_root
             .join("_scratchpad.md")
             .to_string_lossy()
             .into_owned();
         scratchpad_persist_path = persist;
         output_paths.insert("__gml_scratch".to_string(), scratchpad_persist_path.clone());
         output_uris.push(("__gml_scratch".to_string(), scratchpad_uri_str, true));
-    } else {
-        scratchpad_path = String::new();
-        scratchpad_persist_path = String::new();
     }
 
     // Read the hidden sandbox opt-out. It is honored only when the
@@ -262,28 +262,43 @@ pub async fn commit_agent(
 ) -> Result<(), AgentError> {
     // Persist the stage scratchpad (best-effort) before the bind loop so the
     // synthetic `_stage_scratchpad` bind commits it alongside the stage's real
-    // outputs. The model writes `_scratchpad.md` in the scratch root; the
+    // outputs. The model writes `_scratchpad.md` in the worktree root; the
     // harness versions it under an artifact URI by copying it into the
     // checkout. A stage that never wrote a scratchpad leaves the file absent,
     // and the optional bind is simply skipped.
     if !prepared.scratchpad_path.is_empty() {
-        if let Ok(content) = tokio::fs::read_to_string(&prepared.scratchpad_path).await {
-            if !content.trim().is_empty() {
-                if let Some(parent) = Path::new(&prepared.scratchpad_persist_path).parent() {
-                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                        log::warn!(
-                            "scratchpad persist: failed to create parent dir {}: {e}",
-                            parent.display()
-                        );
-                    }
-                }
-                if let Err(e) = tokio::fs::write(&prepared.scratchpad_persist_path, &content).await
-                {
+        let root = if !prepared.cwd.is_empty() {
+            Path::new(&prepared.cwd)
+        } else {
+            // Fall back to the parent directory of the scratchpad file itself.
+            Path::new(&prepared.scratchpad_path)
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+        };
+        let content = match read_scratchpad_contained(Path::new(&prepared.scratchpad_path), root) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!(
+                    "scratchpad persist: failed to read {}: {e}",
+                    prepared.scratchpad_path
+                );
+                String::new()
+            }
+        };
+        if !content.trim().is_empty() {
+            if let Some(parent) = Path::new(&prepared.scratchpad_persist_path).parent() {
+                if let Err(e) = tokio::fs::create_dir_all(parent).await {
                     log::warn!(
-                        "scratchpad persist: failed to write {}: {e}",
-                        prepared.scratchpad_persist_path
+                        "scratchpad persist: failed to create parent dir {}: {e}",
+                        parent.display()
                     );
                 }
+            }
+            if let Err(e) = tokio::fs::write(&prepared.scratchpad_persist_path, &content).await {
+                log::warn!(
+                    "scratchpad persist: failed to write {}: {e}",
+                    prepared.scratchpad_persist_path
+                );
             }
         }
     }
@@ -384,6 +399,138 @@ pub(crate) fn format_scratchpad_injection(content: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Scratchpad I/O helpers
+// ---------------------------------------------------------------------------
+
+/// Filename for a chat gremlin’s working scratchpad. Chat sessions share the
+/// project root as their cwd, so the default `_scratchpad.md` would be shared
+/// by every concurrent session. Including the gremlin id (validated safe
+/// path component) gives each chat session its own file.
+pub(crate) fn chat_scratchpad_filename(gremlin_id: &str) -> String {
+    format!("_scratchpad-{gremlin_id}.md")
+}
+
+#[cfg(unix)]
+fn open_scratchpad_read(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_scratchpad_read(path: &Path) -> std::io::Result<std::fs::File> {
+    reject_symlink(path)?;
+    std::fs::File::open(path)
+}
+
+#[cfg(unix)]
+fn create_scratchpad_reset(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_scratchpad_reset(path: &Path) -> std::io::Result<std::fs::File> {
+    reject_symlink(path)?;
+    // Remove any existing symlink before creating a regular file.
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let _ = std::fs::remove_file(path);
+        }
+        _ => {}
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+}
+
+/// Reject a symlink at `path` so callers never inadvertently follow one.
+fn reject_symlink(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("scratchpad path is a symlink: {}", path.display()),
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Read the scratchpad file at `path` with no-follow semantics (symlinks are
+/// rejected) and a root-containment check so a file that escapes the worktree
+/// via directory symlinks is also rejected.
+pub(crate) fn read_scratchpad_contained(path: &Path, root: &Path) -> std::io::Result<String> {
+    reject_symlink(path)?;
+    // Canonicalize both paths to resolve any parent-directory symlinks.
+    let canonical_path = path.canonicalize().map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("cannot resolve scratchpad path {}: {e}", path.display()),
+        )
+    })?;
+    let canonical_root = root.canonicalize().map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("cannot resolve scratchpad root {}: {e}", root.display()),
+        )
+    })?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "scratchpad path escapes allowed root: {} not under {}",
+                canonical_path.display(),
+                canonical_root.display()
+            ),
+        ));
+    }
+    let mut file = open_scratchpad_read(path)?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    Ok(content)
+}
+
+/// Reset (truncate) the scratchpad file at `path` without following symlinks.
+/// If a stale symlink is present it is removed first so the no-follow open
+/// can succeed on a fresh regular file.
+pub(crate) fn reset_scratchpad(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        // On unix the O_NOFOLLOW open is the real defense; remove a stale
+        // symlink first so create+truncate succeeds.
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                std::fs::remove_file(path)?;
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        drop(create_scratchpad_reset(path)?);
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        // On non-unix we rely on the reject_symlink + remove-if-symlink dance
+        // inside `create_scratchpad_reset`.
+        drop(create_scratchpad_reset(path)?);
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Workspace preamble assembly
 // ---------------------------------------------------------------------------
 
@@ -403,9 +550,8 @@ impl AgentPrepared {
         if let Some(override_prompt) = &self.system_prompt {
             return override_prompt.clone();
         }
-        let scratch = Path::new(&self.artifact_dir);
         let cwd = Path::new(&self.cwd);
-        crate::clients::config::agent_system_prompt(cwd, scratch)
+        crate::clients::config::agent_system_prompt(cwd)
     }
 
     /// Workspace preamble + stage prompt (no harness system content).
@@ -817,9 +963,6 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
         let store = make_state_store(ad);
-        let scratch = tmp.path().join("scratch");
-        std::fs::create_dir_all(&scratch).unwrap();
-        std::env::set_var("GREMLINS_SCRATCH_DIR", &scratch);
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{a} {b} {c}".to_string()],
@@ -832,7 +975,7 @@ mod tests {
             ]),
             landscape: true,
         };
-        let fw = HashMap::new();
+        let fw = HashMap::from([("cwd".to_string(), tmp.path().to_string_lossy().into_owned())]);
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
@@ -857,9 +1000,6 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
         let store = make_state_store(ad);
-        let scratch = tmp.path().join("scratch");
-        std::fs::create_dir_all(&scratch).unwrap();
-        std::env::set_var("GREMLINS_SCRATCH_DIR", &scratch);
         let agent = Agent {
             name: "stage-a".to_string(),
             prompts: vec!["hi".to_string()],
@@ -868,7 +1008,7 @@ mod tests {
             outputs_map: HashMap::new(),
             landscape: true,
         };
-        let fw = HashMap::new();
+        let fw = HashMap::from([("cwd".to_string(), tmp.path().to_string_lossy().into_owned())]);
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
@@ -893,9 +1033,6 @@ mod tests {
     async fn test_commit_agent_persists_scratchpad_content() {
         let tmp = tempfile::TempDir::new().unwrap();
         let store = make_state_store(ensure_artifact_dir(&tmp));
-        let scratch = tmp.path().join("scratch");
-        std::fs::create_dir_all(&scratch).unwrap();
-        std::env::set_var("GREMLINS_SCRATCH_DIR", &scratch);
         let agent = agent_with_bind("out", "artifact://out.md");
         let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
@@ -922,9 +1059,6 @@ mod tests {
     async fn test_commit_agent_skips_absent_scratchpad() {
         let tmp = tempfile::TempDir::new().unwrap();
         let store = make_state_store(ensure_artifact_dir(&tmp));
-        let scratch = tmp.path().join("scratch");
-        std::fs::create_dir_all(&scratch).unwrap();
-        std::env::set_var("GREMLINS_SCRATCH_DIR", &scratch);
         let agent = agent_with_bind("out", "artifact://out.md");
         let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
@@ -1153,9 +1287,7 @@ mod tests {
             .await
             .unwrap();
         prepared.cwd = "/work".to_string();
-        prepared.artifact_dir = "/scratch".to_string();
-        let expected =
-            crate::clients::config::agent_system_prompt(Path::new("/work"), Path::new("/scratch"));
+        let expected = crate::clients::config::agent_system_prompt(Path::new("/work"));
         assert_eq!(prepared.system_prompt(), expected);
     }
 
@@ -1164,9 +1296,6 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
         let store = make_state_store(ad);
-        let scratch = tmp.path().join("scratch");
-        std::fs::create_dir_all(&scratch).unwrap();
-        std::env::set_var("GREMLINS_SCRATCH_DIR", &scratch);
         for bad_name in &["../escape", "sub/dir", "back\\slash"] {
             let agent = Agent {
                 name: (*bad_name).to_string(),

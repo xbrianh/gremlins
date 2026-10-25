@@ -15,6 +15,9 @@ target/
 rig-core-extracted/
 ratatui-src/
 
+# Harness scratchpad written to worktree root
+_scratchpad.md
+
 /.gremlins/env
 
 # drag cache files

@@ -56,7 +56,7 @@ pub struct StaticDefinition {
     pub(crate) stage_names: Vec<String>,
     /// The optional `land` stage — always an exec stage named `land`.
     pub(crate) land: Option<StageSpec>,
-    /// Commands to run during `gremlins clean`, before workspace/scratch removal.
+    /// Commands to run during `gremlins clean`, before workspace removal.
     pub(crate) clean_cmds: Vec<String>,
     /// The fully expanded YAML tree, kept for round-tripping via
     /// [`to_expanded_yaml`](StaticDefinition::to_expanded_yaml).
