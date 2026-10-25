@@ -1954,13 +1954,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             );
                         }
                         KeyCode::Char('j')
-                            if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                            if key.modifiers.is_empty()
                                 && app.screen == Screen::Runs =>
                         {
                             app.watch_move(1);
                         }
                         KeyCode::Char('k')
-                            if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                            if key.modifiers.is_empty()
                                 && app.screen == Screen::Runs =>
                         {
                             app.watch_move(-1);
