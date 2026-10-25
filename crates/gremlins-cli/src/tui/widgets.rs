@@ -2821,9 +2821,9 @@ mod tests {
         let lines = transcript.scrollable.visible_lines();
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
 
-        let rule_width = transcript.last_width.saturating_sub(4);
-        let top = motif::groove_rule(rule_width, ("◤", "◥")).to_string();
-        let bottom = motif::groove_rule_with_fill(rule_width, ("◣", "◢"), "▁").to_string();
+        let fence_width = 11; // content width of " let x = 1;"
+        let top = motif::groove_rule(fence_width, ("◤", "◥")).to_string();
+        let bottom = motif::groove_rule_with_fill(fence_width, ("◣", "◢"), "▁").to_string();
         assert_eq!(
             text,
             vec![
