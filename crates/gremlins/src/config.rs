@@ -93,6 +93,24 @@ impl Default for BackoffConfig {
     }
 }
 
+/// Effective proactive-compaction thresholds from `settings.yaml`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CompactionConfig {
+    /// Soft token trigger for headless (pipeline) gremlins.
+    pub(crate) threshold_tokens: u64,
+    /// Soft token trigger for chat gremlins.
+    pub(crate) threshold_tokens_chat: u64,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            threshold_tokens: DEFAULT_COMPACTION_THRESHOLD_TOKENS,
+            threshold_tokens_chat: DEFAULT_COMPACTION_THRESHOLD_TOKENS_CHAT,
+        }
+    }
+}
+
 /// Parsed content of settings.yaml.
 #[derive(Debug, Clone, Default)]
 pub struct Config {
@@ -106,7 +124,7 @@ pub struct Config {
     model_profiles: IndexMap<String, ModelProfile>,
     path_overrides: PathOverrides,
     max_tool_output_bytes: u64,
-    chat_compaction_threshold_bytes: u64,
+    compaction: CompactionConfig,
     max_prompt_bytes: u64,
     max_landscape_tokens: u64,
     max_landscape_tool_tokens: Option<u64>,
@@ -171,6 +189,18 @@ impl<'de> Deserialize<'de> for StrictString {
     }
 }
 
+/// The `compaction` section of settings.yaml.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactionSection {
+    /// Headless (pipeline) soft trigger in tokens.
+    #[serde(rename = "threshold-tokens", default)]
+    threshold_tokens: Option<u64>,
+    /// Chat soft trigger in tokens.
+    #[serde(rename = "threshold-tokens-chat", default)]
+    threshold_tokens_chat: Option<u64>,
+}
+
 /// Typed structure for settings.yaml deserialization.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -188,8 +218,12 @@ struct ConfigFile {
     paths: Option<PathsSection>,
     #[serde(rename = "max-tool-output-bytes", default)]
     max_tool_output_bytes: Option<u64>,
+    #[serde(default)]
+    compaction: Option<CompactionSection>,
+    /// Deprecated: now folded into `compaction.threshold-tokens-chat`.
+    /// Tolerated here so existing settings files continue to load.
     #[serde(rename = "chat-compaction-threshold-bytes", default)]
-    chat_compaction_threshold_bytes: Option<u64>,
+    _chat_compaction_threshold_bytes: Option<u64>,
     #[serde(rename = "max-prompt-bytes", default)]
     max_prompt_bytes: Option<u64>,
     backoff: Option<BackoffSection>,
@@ -278,11 +312,16 @@ impl Config {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES);
-                let chat_compaction_threshold_bytes =
-                    std::env::var("GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES")
+                let compaction_threshold_tokens =
+                    std::env::var("GREMLINS_COMPACTION_THRESHOLD_TOKENS")
                         .ok()
                         .and_then(|v| v.parse().ok())
-                        .unwrap_or(DEFAULT_CHAT_COMPACTION_THRESHOLD_BYTES);
+                        .unwrap_or(DEFAULT_COMPACTION_THRESHOLD_TOKENS);
+                let compaction_threshold_tokens_chat =
+                    std::env::var("GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(DEFAULT_COMPACTION_THRESHOLD_TOKENS_CHAT);
                 let max_prompt_bytes = std::env::var("GREMLINS_MAX_PROMPT_BYTES")
                     .ok()
                     .and_then(|v| v.parse().ok())
@@ -297,7 +336,10 @@ impl Config {
                 return Ok(Config {
                     default_model: env_default_model(),
                     max_tool_output_bytes,
-                    chat_compaction_threshold_bytes,
+                    compaction: CompactionConfig {
+                        threshold_tokens: compaction_threshold_tokens,
+                        threshold_tokens_chat: compaction_threshold_tokens_chat,
+                    },
                     max_prompt_bytes,
                     max_landscape_tokens,
                     max_landscape_tool_tokens,
@@ -429,14 +471,27 @@ impl Config {
             })
             .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES);
 
-        let chat_compaction_threshold_bytes = cfg_file
-            .chat_compaction_threshold_bytes
+        let compaction_threshold_tokens = cfg_file
+            .compaction
+            .as_ref()
+            .and_then(|c| c.threshold_tokens)
             .or_else(|| {
-                std::env::var("GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES")
+                std::env::var("GREMLINS_COMPACTION_THRESHOLD_TOKENS")
                     .ok()
                     .and_then(|v| v.parse().ok())
             })
-            .unwrap_or(DEFAULT_CHAT_COMPACTION_THRESHOLD_BYTES);
+            .unwrap_or(DEFAULT_COMPACTION_THRESHOLD_TOKENS);
+
+        let compaction_threshold_tokens_chat = cfg_file
+            .compaction
+            .as_ref()
+            .and_then(|c| c.threshold_tokens_chat)
+            .or_else(|| {
+                std::env::var("GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+            })
+            .unwrap_or(DEFAULT_COMPACTION_THRESHOLD_TOKENS_CHAT);
 
         let max_prompt_bytes = cfg_file
             .max_prompt_bytes
@@ -480,7 +535,10 @@ impl Config {
             model_profiles,
             path_overrides,
             max_tool_output_bytes,
-            chat_compaction_threshold_bytes,
+            compaction: CompactionConfig {
+                threshold_tokens: compaction_threshold_tokens,
+                threshold_tokens_chat: compaction_threshold_tokens_chat,
+            },
             max_prompt_bytes,
             max_landscape_tokens,
             max_landscape_tool_tokens,
@@ -532,8 +590,12 @@ impl Config {
         self.max_tool_output_bytes
     }
 
-    pub fn chat_compaction_threshold_bytes(&self) -> u64 {
-        self.chat_compaction_threshold_bytes
+    pub fn compaction_threshold_tokens(&self) -> u64 {
+        self.compaction.threshold_tokens
+    }
+
+    pub fn compaction_threshold_tokens_chat(&self) -> u64 {
+        self.compaction.threshold_tokens_chat
     }
 
     pub fn max_prompt_bytes(&self) -> u64 {
@@ -1084,9 +1146,11 @@ pub(crate) fn completion_nudge_budget() -> usize {
 /// Default cap for tool output: 300 000 bytes.
 pub(crate) const DEFAULT_MAX_TOOL_OUTPUT_BYTES: u64 = 300_000;
 
-/// Default chat compaction threshold: 768 KiB (75% of the 1 MiB prompt
-/// ceiling).
-pub(crate) const DEFAULT_CHAT_COMPACTION_THRESHOLD_BYTES: u64 = 786_432;
+/// Default headless (pipeline) compaction threshold: 100 000 tokens.
+pub(crate) const DEFAULT_COMPACTION_THRESHOLD_TOKENS: u64 = 100_000;
+
+/// Default chat compaction threshold: 200 000 tokens.
+pub(crate) const DEFAULT_COMPACTION_THRESHOLD_TOKENS_CHAT: u64 = 200_000;
 
 /// Default ceiling for a serialized prompt: 1 MiB.
 pub(crate) const DEFAULT_MAX_PROMPT_BYTES: u64 = 1_048_576;
@@ -1154,19 +1218,34 @@ pub(crate) fn max_tool_output_bytes() -> u64 {
         .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES)
 }
 
-/// GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES — soft byte trigger for chat
-/// conversation compaction. Default 786 432 (768 KiB). 0 disables proactive
+/// GREMLINS_COMPACTION_THRESHOLD_TOKENS — soft token trigger for headless
+/// (pipeline) conversation compaction. Default 100 000. 0 disables proactive
 /// compaction; the hard `max-prompt-bytes` ceiling still applies. Settings.yaml
-/// `chat-compaction-threshold-bytes` takes precedence over the env var.
-pub(crate) fn chat_compaction_threshold_bytes() -> u64 {
+/// `compaction.threshold-tokens` takes precedence over the env var.
+pub(crate) fn compaction_threshold_tokens() -> u64 {
     get_global()
-        .map(|c| c.chat_compaction_threshold_bytes())
+        .map(|c| c.compaction_threshold_tokens())
         .or_else(|| {
-            std::env::var("GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES")
+            std::env::var("GREMLINS_COMPACTION_THRESHOLD_TOKENS")
                 .ok()
                 .and_then(|v| v.parse().ok())
         })
-        .unwrap_or(DEFAULT_CHAT_COMPACTION_THRESHOLD_BYTES)
+        .unwrap_or(DEFAULT_COMPACTION_THRESHOLD_TOKENS)
+}
+
+/// GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT — soft token trigger for chat
+/// conversation compaction. Default 200 000. 0 disables proactive compaction;
+/// the hard `max-prompt-bytes` ceiling still applies. Settings.yaml
+/// `compaction.threshold-tokens-chat` takes precedence over the env var.
+pub(crate) fn compaction_threshold_tokens_chat() -> u64 {
+    get_global()
+        .map(|c| c.compaction_threshold_tokens_chat())
+        .or_else(|| {
+            std::env::var("GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(DEFAULT_COMPACTION_THRESHOLD_TOKENS_CHAT)
 }
 
 /// Effective turn-level retry schedule from the global config, falling back
@@ -2542,73 +2621,110 @@ model-profiles:
         assert_eq!(cfg.max_tool_output_bytes(), DEFAULT_MAX_TOOL_OUTPUT_BYTES);
     }
 
+    // --- compaction thresholds -----------------------------------------------
+
     #[test]
-    fn test_chat_compaction_threshold_bytes_default() {
+    fn test_compaction_threshold_tokens_default() {
         let _env = EnvGuard::lock();
         assert_eq!(
-            chat_compaction_threshold_bytes(),
-            DEFAULT_CHAT_COMPACTION_THRESHOLD_BYTES
+            compaction_threshold_tokens(),
+            DEFAULT_COMPACTION_THRESHOLD_TOKENS
         );
     }
 
     #[test]
-    fn test_chat_compaction_threshold_bytes_from_env() {
-        let mut env = EnvGuard::lock();
-        env.set("GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES", "5000");
-        assert_eq!(chat_compaction_threshold_bytes(), 5000);
+    fn test_compaction_threshold_tokens_chat_default() {
+        let _env = EnvGuard::lock();
+        assert_eq!(
+            compaction_threshold_tokens_chat(),
+            DEFAULT_COMPACTION_THRESHOLD_TOKENS_CHAT
+        );
     }
 
     #[test]
-    fn test_chat_compaction_threshold_bytes_zero_from_env() {
+    fn test_compaction_threshold_tokens_from_env() {
         let mut env = EnvGuard::lock();
-        env.set("GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES", "0");
-        assert_eq!(chat_compaction_threshold_bytes(), 0);
+        env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS", "5000");
+        assert_eq!(compaction_threshold_tokens(), 5000);
     }
 
     #[test]
-    fn test_chat_compaction_threshold_bytes_from_settings_yaml() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"chat-compaction-threshold-bytes": 12345}"#));
+    fn test_compaction_threshold_tokens_chat_from_env() {
+        let mut env = EnvGuard::lock();
+        env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT", "6000");
+        assert_eq!(compaction_threshold_tokens_chat(), 6000);
+    }
+
+    #[test]
+    fn test_compaction_threshold_tokens_zero_from_env() {
+        let mut env = EnvGuard::lock();
+        env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS", "0");
+        assert_eq!(compaction_threshold_tokens(), 0);
+    }
+
+    #[test]
+    fn test_compaction_threshold_tokens_chat_zero_from_env() {
+        let mut env = EnvGuard::lock();
+        env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT", "0");
+        assert_eq!(compaction_threshold_tokens_chat(), 0);
+    }
+
+    #[test]
+    fn test_compaction_threshold_tokens_from_settings_yaml() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"{"compaction": {"threshold-tokens": 12345, "threshold-tokens-chat": 23456}}"#,
+        ));
         let cfg = Config::load().unwrap();
-        assert_eq!(cfg.chat_compaction_threshold_bytes(), 12345);
+        assert_eq!(cfg.compaction_threshold_tokens(), 12345);
+        assert_eq!(cfg.compaction_threshold_tokens_chat(), 23456);
     }
 
     #[test]
-    fn test_chat_compaction_threshold_bytes_settings_overrides_env() {
+    fn test_compaction_threshold_tokens_settings_overrides_env() {
         let mut env = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
         let config_dir = dir.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
             config_dir.join("settings.yaml"),
-            r#"{"chat-compaction-threshold-bytes": 77777}"#,
+            r#"{"compaction": {"threshold-tokens": 77777, "threshold-tokens-chat": 88888}}"#,
         )
         .unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", dir.path());
-        env.set("GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES", "999");
+        env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS", "999");
+        env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT", "998");
         let cfg = Config::load().unwrap();
-        assert_eq!(cfg.chat_compaction_threshold_bytes(), 77777);
+        assert_eq!(cfg.compaction_threshold_tokens(), 77777);
+        assert_eq!(cfg.compaction_threshold_tokens_chat(), 88888);
     }
 
     #[test]
-    fn test_chat_compaction_threshold_bytes_env_fallback_no_settings_file() {
+    fn test_compaction_threshold_tokens_env_fallback_no_settings_file() {
         let mut env = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", dir.path());
-        env.set("GREMLINS_CHAT_COMPACTION_THRESHOLD_BYTES", "4242");
+        env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS", "4242");
+        env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT", "4343");
         let cfg = Config::load().unwrap();
-        assert_eq!(cfg.chat_compaction_threshold_bytes(), 4242);
+        assert_eq!(cfg.compaction_threshold_tokens(), 4242);
+        assert_eq!(cfg.compaction_threshold_tokens_chat(), 4343);
     }
 
     #[test]
-    fn test_chat_compaction_threshold_bytes_default_no_settings_file() {
+    fn test_compaction_threshold_tokens_default_no_settings_file() {
         let mut env = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", dir.path());
-        // No settings.yaml, no env var — should get the 786_432 default.
+        // No settings.yaml, no env var — should get the 100_000/200_000
+        // defaults.
         let cfg = Config::load().unwrap();
         assert_eq!(
-            cfg.chat_compaction_threshold_bytes(),
-            DEFAULT_CHAT_COMPACTION_THRESHOLD_BYTES
+            cfg.compaction_threshold_tokens(),
+            DEFAULT_COMPACTION_THRESHOLD_TOKENS
+        );
+        assert_eq!(
+            cfg.compaction_threshold_tokens_chat(),
+            DEFAULT_COMPACTION_THRESHOLD_TOKENS_CHAT
         );
     }
 }

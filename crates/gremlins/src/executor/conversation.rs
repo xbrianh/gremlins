@@ -15,15 +15,21 @@ use rig_core::completion::{CompletionRequest, Message, ToolDefinition};
 use rig_core::message::ToolResult as ToolResultMsg;
 
 use crate::clients::tools;
+use std::sync::OnceLock;
 
-/// Chat-only compaction tuning. `threshold_bytes` is the soft trigger; when a
-/// request view exceeds it the loop compacts toward `target_bytes` so one pass
-/// buys many rounds before the next one.
+/// Compaction tuning. `threshold_tokens` is the soft token trigger; when a
+/// request view exceeds it the loop compacts toward `target_tokens` so one
+/// pass buys many rounds before the next one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CompactionOpts {
-    pub(crate) threshold_bytes: u64,
-    pub(crate) target_bytes: u64,
+    pub(crate) threshold_tokens: u64,
+    pub(crate) target_tokens: u64,
 }
+
+/// Conservative bytes-per-token conversion used to hand the token target to
+/// the byte-based fitting path. Dense-content assumption: fitting to this
+/// byte budget under-shoots the token target.
+pub(crate) const BYTES_PER_TOKEN: u64 = 3;
 
 /// Where a compaction pass is allowed to cut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1114,6 +1120,32 @@ pub(crate) fn completion_request_overhead(
         .unwrap_or(0)
 }
 
+/// Token-counting counterpart to [`completion_request_overhead`], used only by
+/// the soft compaction trigger.
+pub(crate) fn completion_request_overhead_tokens(
+    prompt: &str,
+    system_prompt: Option<&str>,
+    tools: &[ToolDefinition],
+) -> usize {
+    let mut request = CompletionRequest::new(Message::user(prompt.to_string()))
+        .messages(Vec::<Message>::new())
+        .tools(tools.to_vec());
+    if let Some(system_prompt) = system_prompt {
+        request = request.preamble(system_prompt.to_string());
+    }
+
+    let json = serde_json::to_string(&request).unwrap_or_default();
+    token_count(&json).saturating_sub(token_count("[]"))
+}
+
+/// Local token estimate for a serialized message array.
+pub(crate) fn token_len(messages: &[Message]) -> usize {
+    let Ok(json) = serde_json::to_string(messages) else {
+        return usize::MAX;
+    };
+    token_count(&json)
+}
+
 pub(crate) fn serialized_len(messages: &[Message]) -> usize {
     serde_json::to_string(messages)
         .map(|json| json.len())
@@ -1124,6 +1156,19 @@ fn serialized_message_len(message: &Message) -> usize {
     serde_json::to_string(message)
         .map(|json| json.len())
         .unwrap_or(usize::MAX)
+}
+
+/// Tokenize `text` with the same `o200k_base` encoder used for landscape
+/// budgets.
+fn token_count(text: &str) -> usize {
+    static BPE: OnceLock<Result<tiktoken_rs::CoreBPE, String>> = OnceLock::new();
+    let Ok(bpe) = BPE
+        .get_or_init(|| tiktoken_rs::o200k_base().map_err(|e| e.to_string()))
+        .as_ref()
+    else {
+        return usize::MAX;
+    };
+    bpe.encode_with_special_tokens(text).len()
 }
 
 /// Keep the first `max` bytes of `text`, cutting on a UTF-8 char boundary.
@@ -2135,6 +2180,45 @@ mod tests {
             overhead + history_len,
             full_len,
             "empty-request envelope plus serialized history must equal the full request"
+        );
+    }
+
+    #[test]
+    fn token_len_counts_serialized_messages() {
+        let empty = token_len(&[]);
+        assert!(empty > 0, "an empty JSON array still tokenizes");
+
+        let messages = vec![Message::user("hello world")];
+        let tokens = token_len(&messages);
+        assert!(
+            tokens > empty,
+            "a message adds tokens beyond the empty array"
+        );
+
+        let bigger = vec![Message::user("hello world".repeat(20))];
+        assert!(
+            token_len(&bigger) > tokens,
+            "more text must produce more tokens"
+        );
+    }
+
+    #[test]
+    fn completion_request_overhead_tokens_reflects_system_prompt_and_tools() {
+        let base = completion_request_overhead_tokens("hi", None, &[]);
+        let with_system = completion_request_overhead_tokens("hi", Some("debug note\n"), &[]);
+        let with_tools = completion_request_overhead_tokens(
+            "hi",
+            None,
+            crate::clients::tools::tool_definitions(None, false).as_slice(),
+        );
+
+        assert!(
+            with_system > base,
+            "system prompt must be measured in tokens"
+        );
+        assert!(
+            with_tools > base,
+            "tool definitions must be measured in tokens"
         );
     }
 }
