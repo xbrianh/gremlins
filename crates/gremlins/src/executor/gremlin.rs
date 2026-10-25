@@ -206,18 +206,39 @@ impl Clone for RuntimeConfig {
 
 impl RuntimeConfig {
     /// Snapshot the current global config and process environment.
-    pub(crate) fn snapshot() -> Self {
+    ///
+    /// When `model_override` is a `profile/<name>` reference, the profile's
+    /// `model-by-stage` entries are merged into `profile_stage_models_exact` /
+    /// `profile_stage_models_prefix`, winning over the global default profile.
+    pub(crate) fn snapshot(model_override: Option<&str>) -> Self {
         let cfg = config::get_global();
         let (stage_exact, stage_prefix) = cfg
             .as_ref()
             .map(|c| c.default_model_by_stage())
             .map(|(e, p)| (e.clone(), p.clone()))
             .unwrap_or_default();
-        let (profile_stage_exact, profile_stage_prefix) = cfg
+
+        // Start with the global default profile's model-by-stage (if any).
+        let (mut profile_stage_exact, mut profile_stage_prefix) = cfg
             .as_ref()
             .map(|c| c.profile_model_by_stage())
             .map(|(e, p)| (e.clone(), p.clone()))
             .unwrap_or_default();
+
+        // If the CLI override is `profile/<name>`, merge that profile's
+        // model-by-stage on top (override wins on conflict).
+        if let Some(raw) = model_override {
+            if let Some(profile_name) = config::profile_name(raw) {
+                if let Some(cfg) = cfg.as_ref() {
+                    if let Some(map) = cfg.model_by_stage_for_profile(profile_name) {
+                        let (ov_exact, ov_prefix) = config::parse_stage_models(Some(map));
+                        profile_stage_exact.extend(ov_exact);
+                        profile_stage_prefix.extend(ov_prefix);
+                    }
+                }
+            }
+        }
+
         let default_model = cfg
             .as_ref()
             .and_then(|c| c.default_model().map(String::from));
@@ -458,7 +479,7 @@ impl Gremlin {
         let stub: Box<dyn GremlinDefinition> = Box::new(stub);
 
         // Snapshot the runtime config before gremlin_id is moved.
-        let runtime_config = RuntimeConfig::snapshot();
+        let runtime_config = RuntimeConfig::snapshot(model_override);
 
         let gremlin = Gremlin {
             id: gremlin_id,
@@ -581,7 +602,7 @@ impl Gremlin {
         let definition: Box<dyn GremlinDefinition> = Box::new(stub);
 
         // Snapshot the runtime config before gremlin_id is moved.
-        let runtime_config = RuntimeConfig::snapshot();
+        let runtime_config = RuntimeConfig::snapshot(None);
 
         Ok(Gremlin {
             id: gremlin_id,
@@ -1515,7 +1536,7 @@ mod tests {
     use super::*;
 
     use crate::executor::state::FileSystemStateStore;
-    use crate::test_support::{EnvGuard, GitSandbox};
+    use crate::test_support::{EnvGuard, GitSandbox, Sandbox};
 
     #[test]
     fn gremlin_is_send_sync() {
@@ -2766,5 +2787,72 @@ bootstrap:
         // clean() on an ephemeral gremlin is harmless — TempDir destructor
         // handles actual cleanup.
         gremlin.clean(true).await;
+    }
+
+    // --- RuntimeConfig::snapshot model-override merge ---
+
+    #[test]
+    fn snapshot_profile_model_override_merges_stage_models() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-model: "profile/deep"
+model-profiles:
+  deep:
+    model: cmd/deep
+    model-by-stage:
+      plan: cmd/deep-plan
+      review: cmd/deep-review
+  drag:
+    model: cmd/drag
+    model-by-stage:
+      plan: cmd/drag-plan
+      compile: cmd/drag-compile
+"#,
+        ));
+        config::init_global().unwrap();
+
+        // With a profile override, profile_stage maps get the override's
+        // entries merged on top of the default profile's entries.
+        let rc = RuntimeConfig::snapshot(Some("profile/drag"));
+        assert_eq!(
+            rc.profile_stage_models_exact.get("plan").unwrap(),
+            "cmd/drag-plan"
+        );
+        assert_eq!(
+            rc.profile_stage_models_exact.get("compile").unwrap(),
+            "cmd/drag-compile"
+        );
+        // "review" is in the global default profile ("deep") but not in "drag",
+        // so it should survive.
+        assert_eq!(
+            rc.profile_stage_models_exact.get("review").unwrap(),
+            "cmd/deep-review"
+        );
+
+        // With a concrete model string (not profile/...), profile_stage maps
+        // are unchanged — only the global default profile's entries exist.
+        let rc2 = RuntimeConfig::snapshot(Some("opernouter/anthropic/claude-sonnet-4"));
+        assert_eq!(
+            rc2.profile_stage_models_exact.get("plan").unwrap(),
+            "cmd/deep-plan"
+        );
+        assert_eq!(
+            rc2.profile_stage_models_exact.get("review").unwrap(),
+            "cmd/deep-review"
+        );
+        assert!(!rc2.profile_stage_models_exact.contains_key("compile"));
+
+        // With None, profile_stage maps just hold the global default profile.
+        let rc3 = RuntimeConfig::snapshot(None);
+        assert_eq!(
+            rc3.profile_stage_models_exact.get("plan").unwrap(),
+            "cmd/deep-plan"
+        );
+        assert_eq!(
+            rc3.profile_stage_models_exact.get("review").unwrap(),
+            "cmd/deep-review"
+        );
+        assert!(!rc3.profile_stage_models_exact.contains_key("compile"));
+
+        config::clear_global();
     }
 }
