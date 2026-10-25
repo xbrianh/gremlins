@@ -301,6 +301,8 @@ pub enum SkillError {
     /// A dynamic-context (`!` placeholder) command failed. The whole skill
     /// invocation is rejected rather than partially injecting output.
     InjectionFailed { command: String, output: String },
+    /// The skill directory name is invalid.
+    InvalidName { name: String, reason: String },
 }
 
 impl std::fmt::Display for SkillError {
@@ -311,6 +313,9 @@ impl std::fmt::Display for SkillError {
             SkillError::Yaml(msg) => write!(f, "YAML parse error in SKILL.md: {msg}"),
             SkillError::InjectionFailed { command, output } => {
                 write!(f, "dynamic context command failed: {command:?}: {output}")
+            }
+            SkillError::InvalidName { name, reason } => {
+                write!(f, "invalid skill name {name:?}: {reason}")
             }
         }
     }
@@ -501,7 +506,9 @@ pub fn discover(project_root: &Path) -> Vec<LoadedSkill> {
 }
 
 /// Scan a single skills directory. Directories without `SKILL.md` are
-/// silently skipped.
+/// silently skipped. Directories with reserved names (`synced`,
+/// `anthropic-skills`) or invalid names are skipped with a log message
+/// before attempting to open `SKILL.md`.
 fn scan_skills_dir(root: &Path, source: SkillSource) -> Vec<LoadedSkill> {
     let mut skills = Vec::new();
 
@@ -513,6 +520,24 @@ fn scan_skills_dir(root: &Path, source: SkillSource) -> Vec<LoadedSkill> {
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
+            continue;
+        }
+
+        // Extract directory name for validation.
+        let dir_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+
+        // Reserved names — skip before even opening SKILL.md.
+        if dir_name == "synced" || dir_name == "anthropic-skills" {
+            log::debug!("skills: skipping reserved directory {dir_name:?}");
+            continue;
+        }
+
+        // Validate name — reject on invalid characters.
+        if let Err(e) = validate_skill_name(&dir_name) {
+            log::warn!("skills: {e}");
             continue;
         }
 
@@ -533,6 +558,111 @@ fn scan_skills_dir(root: &Path, source: SkillSource) -> Vec<LoadedSkill> {
     }
 
     skills
+}
+
+/// Validate a skill directory name against Claude Code naming rules.
+/// Returns `Ok(())` for valid names, `Err(SkillError::InvalidName)` for invalid ones.
+fn validate_skill_name(name: &str) -> Result<(), SkillError> {
+    // Must not be empty.
+    if name.is_empty() {
+        return Err(SkillError::InvalidName {
+            name: name.to_string(),
+            reason: "name is empty".into(),
+        });
+    }
+
+    for ch in name.chars() {
+        let cp = ch as u32;
+
+        // C0 control characters (U+0000–U+001F) except space (U+0020).
+        if cp <= 0x1F && cp != 0x20 {
+            return Err(SkillError::InvalidName {
+                name: name.to_string(),
+                reason: format!("contains control character U+{cp:04X}"),
+            });
+        }
+
+        // DEL (U+007F).
+        if cp == 0x7F {
+            return Err(SkillError::InvalidName {
+                name: name.to_string(),
+                reason: "contains DEL character".into(),
+            });
+        }
+
+        // No-break space.
+        if cp == 0x00A0 {
+            return Err(SkillError::InvalidName {
+                name: name.to_string(),
+                reason: "contains no-break space".into(),
+            });
+        }
+
+        // Zero-width spaces and other invisibles.
+        if (0x200B..=0x200F).contains(&cp) || (0x2028..=0x202F).contains(&cp) || cp == 0xFEFF {
+            return Err(SkillError::InvalidName {
+                name: name.to_string(),
+                reason: format!("contains zero-width character U+{cp:04X}"),
+            });
+        }
+
+        // Bidirectional text-direction characters.
+        if cp == 0x200E
+            || cp == 0x200F
+            || (0x202A..=0x202E).contains(&cp)
+            || (0x2066..=0x2069).contains(&cp)
+        {
+            return Err(SkillError::InvalidName {
+                name: name.to_string(),
+                reason: format!("contains bidi override character U+{cp:04X}"),
+            });
+        }
+
+        // Private-use Unicode.
+        if (0xE000..=0xF8FF).contains(&cp)
+            || (0xF0000..=0xFFFFD).contains(&cp)
+            || (0x100000..=0x10FFFD).contains(&cp)
+        {
+            return Err(SkillError::InvalidName {
+                name: name.to_string(),
+                reason: format!("contains private-use character U+{cp:04X}"),
+            });
+        }
+
+        // Angle brackets.
+        if ch == '<' || ch == '>' {
+            return Err(SkillError::InvalidName {
+                name: name.to_string(),
+                reason: format!("contains angle bracket '{ch}'"),
+            });
+        }
+    }
+
+    // Double spaces.
+    if name.contains("  ") {
+        return Err(SkillError::InvalidName {
+            name: name.to_string(),
+            reason: "contains double spaces".into(),
+        });
+    }
+
+    // Leading spaces.
+    if name.starts_with(' ') {
+        return Err(SkillError::InvalidName {
+            name: name.to_string(),
+            reason: "has leading space".into(),
+        });
+    }
+
+    // Trailing spaces.
+    if name.ends_with(' ') {
+        return Err(SkillError::InvalidName {
+            name: name.to_string(),
+            reason: "has trailing space".into(),
+        });
+    }
+
+    Ok(())
 }
 
 /// List bundled files in a skill directory recursively, excluding `SKILL.md`.
@@ -576,6 +706,8 @@ fn collect_skill_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Render a skill index: one `name — description` line per skill, omitting
 /// skills with `disable-model-invocation: true`, grouped by source.
+/// When `when_to_use` is non-empty, it is appended to the description.
+/// The combined string is truncated at 1,536 characters.
 pub fn render_index(skills: &[LoadedSkill]) -> String {
     let (project, user): (Vec<_>, Vec<_>) = skills
         .iter()
@@ -589,7 +721,8 @@ pub fn render_index(skills: &[LoadedSkill]) -> String {
         for s in &project {
             out.push_str(&format!(
                 "- **{}** — {}\n",
-                s.skill.name, s.skill.description
+                s.skill.name,
+                combined_desc(&s.skill)
             ));
         }
         out.push('\n');
@@ -600,7 +733,8 @@ pub fn render_index(skills: &[LoadedSkill]) -> String {
         for s in &user {
             out.push_str(&format!(
                 "- **{}** — {}\n",
-                s.skill.name, s.skill.description
+                s.skill.name,
+                combined_desc(&s.skill)
             ));
         }
         out.push('\n');
@@ -613,8 +747,27 @@ pub fn render_index(skills: &[LoadedSkill]) -> String {
     out
 }
 
+fn combined_desc(skill: &Skill) -> String {
+    let desc = if skill.when_to_use.is_empty() {
+        skill.description.clone()
+    } else {
+        format!("{} {}", skill.description, skill.when_to_use)
+    };
+    truncate_at_char(&desc, 1536)
+}
+
+/// Truncate a string at `max_chars` Unicode characters.
+fn truncate_at_char(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        s.chars().take(max_chars).collect()
+    }
+}
 /// Render the skill index for the operator's `/skills` command. Hides skills
-/// with `user-invocable: false`.
+/// with `user-invocable: false`. When `when_to_use` is non-empty, it is
+/// appended to the description. The combined string is truncated at 1,536
+/// characters.
 pub fn render_operator_index(skills: &[LoadedSkill]) -> String {
     let (project, user): (Vec<_>, Vec<_>) = skills
         .iter()
@@ -626,7 +779,11 @@ pub fn render_operator_index(skills: &[LoadedSkill]) -> String {
     if !project.is_empty() {
         out.push_str("project skills:\n");
         for s in &project {
-            out.push_str(&format!("  {} — {}\n", s.skill.name, s.skill.description));
+            out.push_str(&format!(
+                "  {} — {}\n",
+                s.skill.name,
+                combined_desc(&s.skill)
+            ));
         }
     }
 
@@ -636,7 +793,11 @@ pub fn render_operator_index(skills: &[LoadedSkill]) -> String {
         }
         out.push_str("user-global skills:\n");
         for s in &user {
-            out.push_str(&format!("  {} — {}\n", s.skill.name, s.skill.description));
+            out.push_str(&format!(
+                "  {} — {}\n",
+                s.skill.name,
+                combined_desc(&s.skill)
+            ));
         }
     }
 
@@ -646,7 +807,6 @@ pub fn render_operator_index(skills: &[LoadedSkill]) -> String {
 
     out
 }
-
 // ---------------------------------------------------------------------------
 // Loading
 // ---------------------------------------------------------------------------
@@ -1802,5 +1962,173 @@ mod tests {
             build_system_prompt_section(&skills, &active, Path::new("/tmp"), "sess-1");
         assert!(section.contains("rendered hello"));
         assert!(!section.contains("!`echo hello`"));
+    }
+
+    // ── Name validation ──
+
+    #[test]
+    fn validate_name_rejects_empty() {
+        assert!(validate_skill_name("").is_err());
+    }
+
+    #[test]
+    fn validate_name_rejects_angle_brackets() {
+        assert!(validate_skill_name("my<skill>").is_err());
+        assert!(validate_skill_name("a<b").is_err());
+    }
+
+    #[test]
+    fn validate_name_rejects_control_chars() {
+        assert!(validate_skill_name("test\u{0000}").is_err());
+        assert!(validate_skill_name("test\u{001F}").is_err());
+        assert!(validate_skill_name("test\u{007F}").is_err());
+    }
+
+    #[test]
+    fn validate_name_rejects_nbsp() {
+        assert!(validate_skill_name("no\u{00A0}break").is_err());
+    }
+
+    #[test]
+    fn validate_name_rejects_zero_width() {
+        assert!(validate_skill_name("zw\u{200B}").is_err());
+        assert!(validate_skill_name("lrm\u{200E}").is_err());
+        assert!(validate_skill_name("rlm\u{200F}").is_err());
+        assert!(validate_skill_name("bom\u{FEFF}").is_err());
+    }
+
+    #[test]
+    fn validate_name_rejects_bidi_override() {
+        assert!(validate_skill_name("lre\u{202A}").is_err());
+        assert!(validate_skill_name("rle\u{202B}").is_err());
+        assert!(validate_skill_name("pdf\u{202C}").is_err());
+        assert!(validate_skill_name("lro\u{202D}").is_err());
+        assert!(validate_skill_name("rlo\u{202E}").is_err());
+        assert!(validate_skill_name("ltri\u{2066}").is_err());
+        assert!(validate_skill_name("rtli\u{2067}").is_err());
+        assert!(validate_skill_name("fsi\u{2068}").is_err());
+        assert!(validate_skill_name("pdi\u{2069}").is_err());
+    }
+
+    #[test]
+    fn validate_name_rejects_private_use() {
+        assert!(validate_skill_name("pua\u{E000}").is_err());
+        assert!(validate_skill_name("pua\u{F8FF}").is_err());
+    }
+
+    #[test]
+    fn validate_name_rejects_double_spaces() {
+        assert!(validate_skill_name("two  spaces").is_err());
+    }
+
+    #[test]
+    fn validate_name_rejects_leading_space() {
+        assert!(validate_skill_name(" leading").is_err());
+    }
+
+    #[test]
+    fn validate_name_rejects_trailing_space() {
+        assert!(validate_skill_name("trailing ").is_err());
+    }
+
+    #[test]
+    fn validate_name_accepts_valid() {
+        assert!(validate_skill_name("my-skill").is_ok());
+        assert!(validate_skill_name("pdf").is_ok());
+        assert!(validate_skill_name("python_tools").is_ok());
+        assert!(validate_skill_name("Git Helper").is_ok()); // space is fine
+    }
+
+    // ── when_to_use rendering ──
+
+    #[test]
+    fn combined_desc_appends_when_to_use() {
+        let skill = Skill {
+            description: "Convert PDF files.".into(),
+            when_to_use: "use this for PDF work".into(),
+            ..Default::default()
+        };
+        let desc = combined_desc(&skill);
+        assert!(desc.starts_with("Convert PDF files. use this for PDF work"));
+    }
+
+    #[test]
+    fn combined_desc_truncates_at_1536() {
+        let long = "a".repeat(2000);
+        let skill = Skill {
+            description: long,
+            ..Default::default()
+        };
+        let desc = combined_desc(&skill);
+        assert_eq!(desc.chars().count(), 1536);
+    }
+
+    #[test]
+    fn combined_desc_no_when_to_use_just_description() {
+        let skill = Skill {
+            description: "Do things.".into(),
+            when_to_use: "".into(),
+            ..Default::default()
+        };
+        let desc = combined_desc(&skill);
+        assert_eq!(desc, "Do things.");
+    }
+
+    #[test]
+    fn render_index_includes_when_to_use() {
+        let skills = vec![LoadedSkill {
+            skill: Skill {
+                name: "pdf".into(),
+                description: "PDF tools".into(),
+                when_to_use: "use for PDFs".into(),
+                source: SkillSource::Project,
+                ..Default::default()
+            },
+            files: vec![],
+        }];
+        let idx = render_index(&skills);
+        assert!(idx.contains("PDF tools use for PDFs"));
+    }
+
+    // ── scan_skills_dir reserved-name and validation ──
+
+    #[test]
+    fn scan_skips_reserved_synced() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("synced")).unwrap();
+        // Even with a valid SKILL.md inside, reserved name means skip.
+        std::fs::write(
+            tmp.path().join("synced").join("SKILL.md"),
+            "---\nname: synced\ndescription: test\n---\n\nbody\n",
+        )
+        .unwrap();
+        let skills = scan_skills_dir(tmp.path(), SkillSource::Project);
+        assert!(skills.is_empty());
+    }
+
+    #[test]
+    fn scan_skips_reserved_anthropic_skills() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("anthropic-skills")).unwrap();
+        std::fs::write(
+            tmp.path().join("anthropic-skills").join("SKILL.md"),
+            "---\nname: anthropic-skills\ndescription: test\n---\n\nbody\n",
+        )
+        .unwrap();
+        let skills = scan_skills_dir(tmp.path(), SkillSource::Project);
+        assert!(skills.is_empty());
+    }
+
+    #[test]
+    fn scan_skips_invalid_name_angle_bracket() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("bad<name>")).unwrap();
+        std::fs::write(
+            tmp.path().join("bad<name>").join("SKILL.md"),
+            "---\nname: bad<name>\ndescription: test\n---\n\nbody\n",
+        )
+        .unwrap();
+        let skills = scan_skills_dir(tmp.path(), SkillSource::Project);
+        assert!(skills.is_empty());
     }
 }
