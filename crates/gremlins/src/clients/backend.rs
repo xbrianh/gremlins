@@ -72,8 +72,7 @@ pub struct RunParams {
     pub token_usage_sink: crate::clients::agent_loop::TokenUsageSink,
     /// Path to the persistent stage scratchpad file (`_scratchpad.md`).
     /// When `Some`, the agent loop reads and re-injects scratchpad content
-    /// on each turn. `None` disables the per-turn injection (e.g. when
-    /// `GREMLINS_SCRATCH_DIR` is not set).
+    /// on each turn. `None` disables the per-turn injection.
     pub scratchpad_path: Option<PathBuf>,
 }
 

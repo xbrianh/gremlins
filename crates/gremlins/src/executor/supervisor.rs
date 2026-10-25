@@ -314,8 +314,6 @@ pub(crate) struct RunHandle {
     /// can read state directly for live gremlins whose state may be in a
     /// TempDir (ephemeral runs) rather than under config::state_root().
     pub store: Arc<dyn state::StateStore + Send + Sync>,
-    /// Scratch directory path for live gremlins.
-    pub scratch_dir: PathBuf,
 }
 
 impl RunHandle {
@@ -1128,19 +1126,16 @@ async fn handle_create_session(
 /// turn, then runs normal stop cleanup.
 async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value {
     if let Some(id) = request.get("id").and_then(|v| v.as_str()) {
-        // Snapshot the scratch directory and project root from the run-map
-        // before touching the session so we can persist _scratchpad.md.
-        let (scratch_dir, project_root) = {
+        // Snapshot the project root from the run-map before touching the
+        // session so we can persist _scratchpad.md.
+        let project_root = {
             let map = get_run_map().lock().unwrap();
             match map.get(id) {
-                Some(handle) => (
-                    Some(handle.scratch_dir.clone()),
-                    handle
-                        .store
-                        .read_field("project_root")
-                        .and_then(|v| v.as_str().map(String::from)),
-                ),
-                None => (None, None),
+                Some(handle) => handle
+                    .store
+                    .read_field("project_root")
+                    .and_then(|v| v.as_str().map(String::from)),
+                None => None,
             }
         };
         let mut s = session.lock().await;
@@ -1156,8 +1151,8 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
         drop(s);
         // Flush the scratchpad before calling handle_stop so working
         // memory is not lost.
-        if let (Some(ref scratch_dir), Some(ref pr)) = (&scratch_dir, &project_root) {
-            persist_project_scratchpad(scratch_dir, Path::new(pr));
+        if let Some(ref pr) = project_root {
+            persist_project_scratchpad(Path::new(pr));
         }
     }
     handle_stop(request, &watch::channel(false).0).await
@@ -1166,13 +1161,16 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
 /// Remove a chat gremlin from whichever session owns it and cancel its turn.
 /// Called by control-socket `stop`.
 async fn stop_session_chat_gremlin(id: &str) {
-    // Snapshot the scratch directory and project root from the run-map before
-    // touching the session, so the persist step sees the final state.
-    let (scratch_dir, project_root) = {
+    // Snapshot the workdir and project root from the run-map before touching
+    // the session, so the persist step sees the final state.
+    let (workdir, project_root) = {
         let map = get_run_map().lock().unwrap();
         match map.get(id) {
             Some(handle) => (
-                Some(handle.scratch_dir.clone()),
+                handle
+                    .store
+                    .read_field("workdir")
+                    .and_then(|v| v.as_str().map(PathBuf::from)),
                 handle
                     .store
                     .read_field("project_root")
@@ -1205,13 +1203,13 @@ async fn stop_session_chat_gremlin(id: &str) {
             drop(s);
             // Only wait for the turn to drain when a live run-map entry
             // confirms the task is actually in flight.
-            if scratch_dir.is_some() {
+            if workdir.is_some() {
                 if let Some(done) = done {
                     done.notified().await;
                 }
             }
-            if let (Some(ref scratch_dir), Some(ref pr)) = (&scratch_dir, &project_root) {
-                persist_project_scratchpad(scratch_dir, Path::new(pr));
+            if let Some(ref pr) = project_root {
+                persist_project_scratchpad(Path::new(pr));
             }
             return;
         }
@@ -1956,10 +1954,6 @@ async fn handle_info(request: &Value, _state_root: &Path) -> Value {
         Err(resp) => return resp,
     };
     let mut map = view.common_json();
-    map.insert(
-        "scratch_dir".to_string(),
-        Value::String(view.scratch_dir.to_string_lossy().to_string()),
-    );
     map.insert(
         "log_file".to_string(),
         Value::String(view.state_dir.join("log").to_string_lossy().to_string()),
@@ -2846,17 +2840,16 @@ async fn handle_chat(
     gremlin.client = client;
     // Re-inject scratchpads persisted by prior turns of this persistent chat
     // gremlin so working memory survives conversation compaction. The current
-    // turn's stage writes `_scratchpad.md` in the scratch root; on commit it is
-    // versioned under `artifact://_scratchpad/{stage}.md` and read back here.
+    // turn's stage writes `_scratchpad.md` in the worktree root; on commit it
+    // is versioned under `artifact://_scratchpad/{stage}.md` and read back here.
     let scratchpad_accumulated = crate::executor::agent_runner::accumulate_scratchpads(
         gremlin.state.store_ref(),
         &[], // chat stages sort correctly lexically
     )
     .await;
-    let mut text = text.to_string();
-    // Inject XDG project-level scratchpad on the first turn when there are
-    // no accumulated scratchpads from prior turns. On subsequent turns the
-    // accumulated content subsumes the persistent memory.
+    let mut text = text.to_string(); // Inject XDG project-level scratchpad on the first turn when there are
+                                     // no accumulated scratchpads from prior turns. On subsequent turns the
+                                     // accumulated content subsumes the persistent memory.
     if scratchpad_accumulated.is_empty() {
         let project_sp = crate::config::project_scratchpad_path(&project_root);
         if let Ok(content) = std::fs::read_to_string(&project_sp) {
@@ -3608,8 +3601,8 @@ async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &Se
 /// existing XDG scratchpad is preserved. If the file exists its content is
 /// persisted unconditionally (including empty files, which represent an
 /// explicit clear by the model).
-fn persist_project_scratchpad(scratch_dir: &Path, project_root: &Path) {
-    let scratchpad_file = scratch_dir.join("_scratchpad.md");
+fn persist_project_scratchpad(project_root: &Path) {
+    let scratchpad_file = project_root.join("_scratchpad.md");
     let content = match std::fs::read_to_string(&scratchpad_file) {
         Ok(c) => c,
         Err(_) => return, // file doesn't exist — model never wrote, keep XDG
@@ -3639,21 +3632,19 @@ async fn cleanup_chat_gremlin(id: &str) {
         return;
     }
 
-    // Snapshot the scratch directory and project root before cancelling the
-    // turn and removing from the run-map, so the persist step sees the final
-    // _scratchpad.md state.
-    let (scratch_dir, project_root, cancel) = {
+    // Snapshot the project root before cancelling the turn and removing from
+    // the run-map, so the persist step sees the final _scratchpad.md state.
+    let (project_root, cancel) = {
         let map = get_run_map().lock().unwrap();
         match map.get(id) {
             Some(handle) => (
-                handle.scratch_dir.clone(),
                 handle
                     .store
                     .read_field("project_root")
                     .and_then(|v| v.as_str().map(String::from)),
                 Some(handle.cancel.clone()),
             ),
-            None => (PathBuf::new(), None, None),
+            None => (None, None),
         }
     };
 
@@ -3665,7 +3656,7 @@ async fn cleanup_chat_gremlin(id: &str) {
     // Persist the project-level scratchpad so working memory survives across
     // chat sessions.
     if let Some(ref pr) = project_root {
-        persist_project_scratchpad(&scratch_dir, Path::new(pr));
+        persist_project_scratchpad(Path::new(pr));
     }
 
     // Remove from RUN_MAP. If the id wasn't there (already stopped by
@@ -3708,8 +3699,6 @@ async fn register_chat_gremlin(session: &SessionHandle, mut gremlin: Gremlin) {
         started_at: state::now_stamp(),
     });
 
-    let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
-
     let handle = RunHandle {
         cancel: cancel_token,
         task: None,
@@ -3719,7 +3708,6 @@ async fn register_chat_gremlin(session: &SessionHandle, mut gremlin: Gremlin) {
         stage_stream_broadcast,
         interactive: interactive_handle,
         store,
-        scratch_dir,
     };
     get_run_map().lock().unwrap().insert(id.clone(), handle);
 
@@ -3740,7 +3728,7 @@ fn create_chat_gremlin(
     project_root: &Path,
     env: &HashMap<String, String>,
 ) -> Result<Gremlin, String> {
-    use crate::executor::gremlin::{RuntimeConfig, ScratchDir};
+    use crate::executor::gremlin::RuntimeConfig;
     use crate::executor::state::{BlobMode, StateData};
 
     let project_root = project_root.to_path_buf();
@@ -3800,10 +3788,6 @@ fn create_chat_gremlin(
     let client = Client::from_uri(default_model.clone())
         .map_err(|e| format!("invalid default model '{default_model}': {e}"))?;
 
-    let scratch_dir = ScratchDir::Temp(
-        tempfile::TempDir::new().map_err(|e| format!("failed to create temp scratch dir: {e}"))?,
-    );
-
     Ok(Gremlin {
         id: gremlin_id,
         definition_path: None,
@@ -3824,7 +3808,6 @@ fn create_chat_gremlin(
         runtime_config,
         cancel_token: None,
         interactive_session: None,
-        scratch_dir,
         clean_cmds: Vec::new(),
         enclosing_task_models: None,
         enclosing_model: None,
@@ -3832,11 +3815,6 @@ fn create_chat_gremlin(
         active_skills: None,
     })
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 /// Resolve state store: live run-map handle, or persisted under `config::state_root()`.
 pub(crate) fn resolve_store_for_id(
     id: &str,
@@ -3875,6 +3853,7 @@ fn definition_name_from_tree(tree: &Map<String, Value>) -> String {
 }
 
 /// Field-by-field view of a gremlin's state for `status`/`info` serialization.
+/// Field-by-field view of a gremlin's state for `status`/`info` serialization.
 struct StateView {
     id: String,
     status: String,
@@ -3890,7 +3869,6 @@ struct StateView {
     model: String,
     attempt: String,
     kind: String,
-    scratch_dir: PathBuf,
     bail_info: Value,
     token_usage: Option<Value>,
     total_cost_usd: Option<f64>,
@@ -3901,7 +3879,6 @@ impl StateView {
     fn from_live(
         id: &str,
         store: &Arc<dyn state::StateStore + Send + Sync>,
-        scratch_dir: PathBuf,
     ) -> Result<Self, Value> {
         let tree = store.state_tree();
         if tree.is_empty() {
@@ -3922,7 +3899,6 @@ impl StateView {
             model: str_field(&tree, "model"),
             attempt: str_field(&tree, "attempt"),
             kind: str_field(&tree, "kind"),
-            scratch_dir,
             bail_info: store
                 .stage_error()
                 .map(Value::Object)
@@ -3933,7 +3909,7 @@ impl StateView {
     }
 
     /// Extract fields from a persisted (non-live) gremlin.
-    fn from_persisted(gremlin: &Gremlin, state_dir: PathBuf, scratch_dir: PathBuf) -> Self {
+    fn from_persisted(gremlin: &Gremlin, state_dir: PathBuf) -> Self {
         Self {
             id: gremlin.id.as_str().to_string(),
             status: status_or_orphan(false, gremlin),
@@ -3953,7 +3929,6 @@ impl StateView {
             model: gremlin.state.read_str("model"),
             attempt: gremlin.state.read_str("attempt"),
             kind: gremlin.state.read_str("kind"),
-            scratch_dir,
             bail_info: gremlin
                 .state
                 .stage_error()
@@ -3991,20 +3966,16 @@ impl StateView {
         value.as_object().cloned().unwrap_or_default()
     }
 }
-
-/// Prefer a live run-map store, falling back to the persisted gremlin.
 fn state_view_for_id(id: &str) -> Result<StateView, Value> {
     let live = {
         let map = get_run_map().lock().unwrap();
-        map.get(id)
-            .map(|h| (h.store.clone(), h.scratch_dir.clone()))
+        map.get(id).map(|h| h.store.clone())
     };
-    if let Some((store, scratch_dir)) = live {
-        return StateView::from_live(id, &store, scratch_dir);
+    if let Some(store) = live {
+        return StateView::from_live(id, &store);
     }
     let (gremlin, state_dir) = open_persisted_gremlin(id)?;
-    let scratch_dir = config::scratch_root(Some(id));
-    Ok(StateView::from_persisted(&gremlin, state_dir, scratch_dir))
+    Ok(StateView::from_persisted(&gremlin, state_dir))
 }
 
 /// Set up log + interactive + stage-stream channels on a gremlin. Returns the
@@ -4151,7 +4122,6 @@ fn spawn_gremlin_runner(
 
     let aborted = Arc::new(AtomicBool::new(false));
     gremlin.cancel_token = Some(cancel_token.clone());
-    let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
     let id_owned = id.to_string();
     let state_tx_clone = state_tx.clone();
     let shutdown_tx_clone = shutdown_tx.clone();
@@ -4176,7 +4146,6 @@ fn spawn_gremlin_runner(
         stage_stream_broadcast,
         interactive: interactive_handle,
         store,
-        scratch_dir,
     };
     get_run_map().lock().unwrap().insert(id.to_string(), handle);
 
@@ -4330,7 +4299,6 @@ pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> Lau
     let aborted_for_task = aborted.clone();
 
     let id_clone = id.clone();
-    let scratch_dir = gremlin.scratch_dir.path().to_path_buf();
 
     // Spawn before inserting into run_map so the JoinHandle is available
     // from the moment the entry exists. A oneshot barrier prevents the
@@ -4364,7 +4332,6 @@ pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> Lau
         stage_stream_broadcast,
         interactive: interactive_handle,
         store: store.clone(),
-        scratch_dir,
     };
     // Insert into RUN_MAP *after* spawning so the JoinHandle is present
     // from the moment the entry exists.
@@ -5193,7 +5160,6 @@ model-profiles:
             stage_stream_broadcast,
             interactive,
             store: store.clone(),
-            scratch_dir: PathBuf::new(),
         };
         super::get_run_map()
             .lock()
@@ -5211,7 +5177,6 @@ model-profiles:
                 .map(|keys| { keys.iter().filter_map(Value::as_str).collect::<Vec<_>>() }),
             Some(vec!["artifact://live"])
         );
-
         let content_resp = handle_artifact(
             &serde_json::json!({"op": "artifact", "id": "gr-live", "artifact": "artifact://live"}),
         )

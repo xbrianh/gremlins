@@ -352,16 +352,13 @@ pub(crate) async fn run_agent_loop(
     let audit_log = raw_path.as_ref().map(|p| tools::audit_log_path(p));
     let max_turns = crate::config::max_agent_turns();
     // When the run requests allow-all, skip building the roots list entirely;
-    // otherwise assemble [worktree, artifact_dir, scratch] as before.
+    // otherwise assemble [worktree, artifact_dir].
     let sandbox = if ctx.params.allow_all {
         tools::SandboxMode::AllowAll
     } else {
         let mut allowed_roots = vec![worktree];
         if let Some(ref artifact_dir) = ctx.params.artifact_dir {
             allowed_roots.push(tools::canonicalize_or_ancestor(artifact_dir));
-        }
-        if let Some(scratch) = tools::scratch_root() {
-            allowed_roots.push(tools::canonicalize_or_ancestor(&scratch));
         }
         tools::SandboxMode::Roots(allowed_roots)
     };
@@ -1057,7 +1054,7 @@ async fn run_agent_loop_core(
         let turn_start = Instant::now();
 
         // Inject the persistent scratchpad on every turn of the main
-        // (non-nested) loop. The model writes `_scratchpad.md` in the scratch
+        // (non-nested) loop. The model writes `_scratchpad.md` in the worktree
         // root; re-reading it here keeps the working memory in front of the
         // model even after conversation compaction. Nested (Task) loops are
         // stateless helpers and are excluded.

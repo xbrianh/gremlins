@@ -34,7 +34,7 @@ semantics. Keep those seams intact.
 ### Gremlin lifecycle
 
 - `Gremlin::init` starts a fresh run (generates id, reserves state dir,
-  creates workdir + scratch, writes `state.json` and the hermetic
+  creates workdir, writes `state.json` and the hermetic
   `definition.yaml`).
 - `Gremlin::from` reconstructs a handle from a persisted state dir for
   status/cleanup/recovery.

@@ -21,7 +21,7 @@ use crate::executor::conversation;
 use crate::executor::exec_runner::{commit_exec, prepare_exec, run_shell, ExecError};
 use crate::executor::gremlin::Gremlin;
 #[cfg(test)]
-use crate::executor::gremlin::{GremlinConfig, ScratchDir, WorkDir};
+use crate::executor::gremlin::{GremlinConfig, WorkDir};
 use crate::executor::parallel::run_parallel;
 use crate::executor::send_log;
 use crate::executor::stage_stream::send_stage_boundary;
@@ -475,7 +475,7 @@ async fn run_agent(
 
     // The synthetic scratchpad bind writes into the checkout so
     // `local_state.commit()` can persist it. This does NOT restore
-    // `_scratchpad.md` in the scratch root — the stage always starts with
+    // `_scratchpad.md` in the worktree root — the stage always starts with
     // a clean slate (reset below). The checkout just reserves space for the
     // commit path.
     //
@@ -1517,7 +1517,6 @@ mod tests {
             runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot(),
             cancel_token: None,
             interactive_session: None,
-            scratch_dir: ScratchDir::Persistent(config::scratch_root(Some("gr-test"))),
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
             enclosing_model: None,

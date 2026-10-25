@@ -175,10 +175,6 @@ pub(crate) fn worktree_root(cwd: Option<&Path>) -> PathBuf {
     }
 }
 
-pub(crate) fn scratch_root() -> Option<PathBuf> {
-    crate::config::scratch_dir(None)
-}
-
 pub(crate) fn audit_log_path(raw_path: &Path) -> PathBuf {
     let stem = raw_path.file_stem().unwrap_or_default();
     let name = format!("{}.audit.jsonl", stem.to_string_lossy());
@@ -6559,7 +6555,7 @@ mod tests {
         let dir = tmp();
         let root = dir.join("does-not-exist-yet");
         let target = root.join("new.txt");
-        // A root that doesn't exist yet (e.g. a not-yet-created scratch dir)
+        // A root that doesn't exist yet (e.g. a not-yet-created worktree dir)
         // must not be dropped from containment; its partial-canonical path is still used.
         assert!(io_enforce(&target, std::slice::from_ref(&root)).is_none());
         // A target that escapes the non-existent root via `..` must be rejected.
@@ -6662,50 +6658,6 @@ mod tests {
         assert!(err.contains("outside sandbox"), "got: {err}");
     }
 
-    // Integration: multi-root containment with worktree + scratch.
-    // Regression guard for the executor wiring that sets GREMLINS_SCRATCH_DIR
-    // and assembles the sandbox roots = [worktree, scratch].
-    #[test]
-    fn multi_root_io_enforce_allows_scratch_denies_elsewhere() {
-        let worktree = tmp();
-        let scratch = tmp();
-        // Simulate a file the agent writes into the scratch dir.
-        let scratch_file = scratch.join("cached.dat");
-        std::fs::write(&scratch_file, "hello").unwrap();
-        // A file outside both roots.
-        let outside = tmp();
-        let outside_file = outside.join("secret.txt");
-        std::fs::write(&outside_file, "x").unwrap();
-
-        let roots = [worktree.clone(), scratch.clone()];
-
-        // Scratch file is allowed.
-        assert!(io_enforce(&scratch_file, &roots).is_none());
-        // Outside-both file is denied.
-        let err = io_enforce(&outside_file, &roots).unwrap();
-        assert!(err.contains("outside sandbox"), "got: {err}");
-        // Worktree file is still allowed (regression check).
-        let wt_file = worktree.join("main.rs");
-        std::fs::write(&wt_file, "fn main() {}").unwrap();
-        assert!(io_enforce(&wt_file, &roots).is_none());
-    }
-
-    #[test]
-    fn multi_root_enforce_allows_scratch_denies_elsewhere() {
-        let worktree = tmp();
-        let scratch = tmp();
-        let outside = tmp();
-
-        let roots = [worktree.clone(), scratch.clone()];
-
-        let scratch_file = scratch.join("build-cache.log");
-        assert!(enforce(&roots, scratch_file.to_str().unwrap(), None).is_none());
-
-        let outside_file = outside.join("bad.txt");
-        let err = enforce(&roots, outside_file.to_str().unwrap(), None).unwrap();
-        assert!(err.contains("outside sandbox"));
-    }
-
     #[test]
     fn within_worktree_relative_root_with_different_agent_cwd() {
         // Regression: when a sandbox root was assembled relative to the
@@ -6715,21 +6667,21 @@ mod tests {
         // This test simulates that: the root is pre-canonicalized (as the
         // assembly step now does), and the agent cwd is unrelated.
         let daemon_like = tmp();
-        let scratch = daemon_like.join("scratch");
-        std::fs::create_dir(&scratch).unwrap();
-        let scratch_file = scratch.join("data.txt");
-        std::fs::write(&scratch_file, "ok").unwrap();
+        let worktree = daemon_like.join("worktree");
+        std::fs::create_dir(&worktree).unwrap();
+        let worktree_file = worktree.join("data.txt");
+        std::fs::write(&worktree_file, "ok").unwrap();
 
         let agent_cwd = tmp();
         // The root is pre-canonicalized (absolute), as the assembly step
         // now guarantees.
-        let roots = [canonicalize_or_ancestor(&scratch)];
+        let roots = [canonicalize_or_ancestor(&worktree)];
 
-        // within_worktree must allow the scratch file even when agent cwd
+        // within_worktree must allow the worktree file even when agent cwd
         // is somewhere entirely different.
-        assert!(within_worktree(&scratch_file, &roots, Some(&agent_cwd)));
+        assert!(within_worktree(&worktree_file, &roots, Some(&agent_cwd)));
         // io_enforce must agree.
-        assert!(io_enforce(&scratch_file, &roots).is_none());
+        assert!(io_enforce(&worktree_file, &roots).is_none());
 
         // A file outside the root is still denied by both.
         let outside = agent_cwd.join("outside.txt");
@@ -6780,10 +6732,10 @@ mod tests {
     #[test]
     fn enforce_denial_appends_sorted_roots() {
         let worktree = tmp();
-        let scratch = tmp();
+        let artifact_dir = tmp();
         let outside = tmp().join("bad.txt");
         let err = enforce(
-            &[worktree.clone(), scratch.clone()],
+            &[worktree.clone(), artifact_dir.clone()],
             outside.to_str().unwrap(),
             None,
         )
@@ -6793,7 +6745,7 @@ mod tests {
             format!(
                 "Error: path outside sandbox: {}\n→ sandbox roots: {}",
                 outside.display(),
-                sorted_canon(&[worktree, scratch])
+                sorted_canon(&[worktree, artifact_dir])
             )
         );
     }
@@ -6809,23 +6761,6 @@ mod tests {
                 canon(&worktree)
             )
         );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn multi_root_bash_check_allows_scratch_path() {
-        let worktree = tmp();
-        let scratch = tmp();
-        let scratch_file = scratch.join("downloaded.tar.gz");
-        std::fs::write(&scratch_file, "binary").unwrap();
-
-        let roots = [worktree.clone(), scratch.clone()];
-
-        // A bash command referencing a file in scratch should pass.
-        assert!(bash_check(&roots, "cat downloaded.tar.gz", Some(&scratch)).is_none());
-        // A bare absolute path outside both should be denied.
-        let err = bash_check(&roots, "cat /etc/passwd", Some(&worktree)).unwrap();
-        assert!(err.contains("outside sandbox"), "got: {err}");
     }
 
     // --- Part 5: Output size cap tests ---

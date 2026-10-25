@@ -821,7 +821,6 @@ These are set by the launcher or executor and should not be set manually:
 |---|---|---|
 | `GREMLINS_GREMLIN_ID` | Launcher | The current gremlin's unique ID. Stages and state bookkeeping no-op without it. |
 | `GREMLIN_WORKDIR` | Executor | The gremlin's workspace directory. Always created by the harness before any stage runs. Referenced in the agent stage's system prompt preamble. |
-| `GREMLINS_SCRATCH_DIR` | Executor | The gremlin-wide scratch root. Read by `config::scratch_dir()` for tool scratch space. |
 | `GREMLINS_STATE_DIR` | Executor | The gremlin's state directory (contains `state.json`, artifacts, and the hermetic `definition.yaml` snapshot). |
 | `GREMLINS_BOOTSTRAP_CWD` | Launcher | The original cwd captured at launch time. |
 

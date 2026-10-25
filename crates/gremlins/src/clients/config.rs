@@ -14,7 +14,7 @@ use crate::config::StrictString;
 /// directory layout, and pragmatic guidance (e.g. delegation policy).
 /// Model-specific guidance will need to live here in the future; for now,
 /// some opinionated bits are included as a temporary compromise.
-pub(crate) fn agent_system_prompt(work_root: &Path, scratch_root: &Path) -> String {
+pub(crate) fn agent_system_prompt(work_root: &Path) -> String {
     format!(
         "\
 <important>\n\
@@ -39,11 +39,9 @@ most expensive pattern — avoid them. `Done` signals turn completion and must b
 ALWAYS use Landscape first when exploring unknown code — it maps structure without reading files.\nCall Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Work root:     {work}\n\
-Scratch root:  {scratch}\n\
-(use scratch for test cruft and temporary files)\n\
 </directories>\n\
 <scratchpad>\n\
-You have a persistent scratchpad at _scratchpad.md in the scratch root\n\
+You have a persistent scratchpad at _scratchpad.md in the worktree root\n\
 directory. Use the Write tool to update it with findings, decisions, and\n\
 context you want to preserve across turns — file paths, discovered\n\
 patterns, TODO items, architectural notes. Keep it concise.\n\
@@ -54,13 +52,12 @@ revised content with the Write tool.\n\
 </scratchpad>\
 ",
         work = work_root.display(),
-        scratch = scratch_root.display(),
     )
 }
 
 /// System prompt injected into every nested (Task) agent invocation. Omits any
 /// delegation guidance — the tool roster is all a child needs.
-pub(crate) fn task_system_prompt(work_root: &Path, scratch_root: &Path) -> String {
+pub(crate) fn task_system_prompt(work_root: &Path) -> String {
     format!(
         "\
 <discovery>\n\
@@ -82,19 +79,16 @@ most expensive pattern — avoid them. `Done` signals turn completion and must b
 ALWAYS use Landscape first when exploring unknown code — it maps structure without reading files.\nCall Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Work root:     {work}\n\
-Scratch root:  {scratch}\n\
-(use scratch for test cruft and temporary files)\n\
 </directories>\
 ",
         work = work_root.display(),
-        scratch = scratch_root.display(),
     )
 }
 /// System prompt injected into a forked (Fork) agent invocation. The fork
 /// inherits the parent's full conversation history, so this preamble is
 /// minimal: it lists only the non-Task tools and tells the child not to fork
 /// again.
-pub(crate) fn fork_system_prompt(work_root: &Path, scratch_root: &Path) -> String {
+pub(crate) fn fork_system_prompt(work_root: &Path) -> String {
     format!(
         "\
 <tools>\n\
@@ -112,12 +106,9 @@ Task.\n\
 Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Work root:     {work}\n\
-Scratch root:  {scratch}\n\
-(use scratch for test cruft and temporary files)\n\
 </directories>\
 ",
         work = work_root.display(),
-        scratch = scratch_root.display(),
     )
 }
 // ---------------------------------------------------------------------------
@@ -473,14 +464,13 @@ mod tests {
 
     #[test]
     fn test_agent_system_prompt_renders_directory_paths() {
-        let prompt = agent_system_prompt(Path::new("/tmp/gremlins"), Path::new("/tmp/scratch"));
+        let prompt = agent_system_prompt(Path::new("/tmp/gremlins"));
         assert!(prompt.contains("/tmp/gremlins"), "must contain work root");
-        assert!(prompt.contains("/tmp/scratch"), "must contain scratch root");
     }
 
     #[test]
     fn test_agent_system_prompt_includes_delegation_policy() {
-        let prompt = agent_system_prompt(Path::new("/work"), Path::new("/scratch"));
+        let prompt = agent_system_prompt(Path::new("/work"));
         assert!(
             prompt.contains("<tools>"),
             "agent prompt must inject delegation policy; got: {prompt}"
@@ -489,14 +479,13 @@ mod tests {
 
     #[test]
     fn test_task_system_prompt_renders_directory_paths() {
-        let prompt = task_system_prompt(Path::new("/tmp/gremlins"), Path::new("/tmp/scratch"));
+        let prompt = task_system_prompt(Path::new("/tmp/gremlins"));
         assert!(prompt.contains("/tmp/gremlins"), "must contain work root");
-        assert!(prompt.contains("/tmp/scratch"), "must contain scratch root");
     }
 
     #[test]
     fn test_task_system_prompt_omits_delegation_guidance() {
-        let prompt = task_system_prompt(Path::new("/work"), Path::new("/scratch"));
+        let prompt = task_system_prompt(Path::new("/work"));
         assert!(
             !prompt.contains("<important>") && !prompt.contains("<important>"),
             "child prompt must not inject delegation guidance; got: {prompt}"
@@ -505,7 +494,7 @@ mod tests {
 
     #[test]
     fn test_agent_system_prompt_includes_done() {
-        let prompt = agent_system_prompt(Path::new("/work"), Path::new("/scratch"));
+        let prompt = agent_system_prompt(Path::new("/work"));
         assert!(
             prompt.contains("Task, Done"),
             "agent prompt must include Done in tool roster; got: {prompt}"
@@ -518,7 +507,7 @@ mod tests {
 
     #[test]
     fn test_task_system_prompt_includes_done() {
-        let prompt = task_system_prompt(Path::new("/work"), Path::new("/scratch"));
+        let prompt = task_system_prompt(Path::new("/work"));
         assert!(
             prompt.contains("Task, Done"),
             "task prompt must include Done in tool roster; got: {prompt}"
@@ -531,7 +520,7 @@ mod tests {
 
     #[test]
     fn test_fork_system_prompt_lists_no_task_and_forbids_forking() {
-        let prompt = fork_system_prompt(Path::new("/work"), Path::new("/scratch"));
+        let prompt = fork_system_prompt(Path::new("/work"));
         assert!(
             prompt.contains("Done"),
             "fork prompt must include Done in tool roster; got: {prompt}"
@@ -549,12 +538,11 @@ mod tests {
             "fork prompt must not name a specific Task kind; got: {prompt}"
         );
         assert!(prompt.contains("/work"));
-        assert!(prompt.contains("/scratch"));
     }
 
     #[test]
     fn test_agent_system_prompt_includes_scratchpad() {
-        let prompt = agent_system_prompt(Path::new("/work"), Path::new("/scratch"));
+        let prompt = agent_system_prompt(Path::new("/work"));
         assert!(
             prompt.contains("<scratchpad>"),
             "agent prompt must describe the scratchpad; got: {prompt}"
@@ -567,7 +555,7 @@ mod tests {
 
     #[test]
     fn test_task_system_prompt_excludes_scratchpad() {
-        let prompt = task_system_prompt(Path::new("/work"), Path::new("/scratch"));
+        let prompt = task_system_prompt(Path::new("/work"));
         assert!(
             !prompt.contains("<scratchpad>"),
             "task prompt must not mention scratchpad; nested workers are stateless; got: {prompt}"
@@ -580,7 +568,7 @@ mod tests {
 
     #[test]
     fn test_fork_system_prompt_excludes_scratchpad() {
-        let prompt = fork_system_prompt(Path::new("/work"), Path::new("/scratch"));
+        let prompt = fork_system_prompt(Path::new("/work"));
         assert!(
             !prompt.contains("<scratchpad>"),
             "fork prompt must not mention scratchpad; nested workers are stateless; got: {prompt}"

@@ -282,7 +282,6 @@ These are set by the runtime and available in all commands:
 | `GREMLIN_WORKDIR` | Per-gremlin isolated worktree |
 | `GREMLINS_PROJECT_ROOT` | The project root (parent of `.gremlins/`) |
 | `GREMLINS_STATE_DIR` | Per-run state directory |
-| `GREMLINS_SCRATCH_DIR` | Shared scratch directory |
 | `GREMLIN_FORK_WORKDIR` | Isolated worktree for a `parallel` fork child |
 
 ## Model references
