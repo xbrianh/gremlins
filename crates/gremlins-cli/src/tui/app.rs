@@ -74,6 +74,10 @@ pub struct ActiveRun {
     pub turns: Option<usize>,
     /// Total cost in USD from the daemon's ls response.
     pub cost_usd: Option<f64>,
+    /// Per-turn prompt tokens from the most recently completed turn.
+    pub last_prompt_tokens: Option<u64>,
+    /// Per-turn cached input tokens from the most recently completed turn.
+    pub last_cached_input_tokens: Option<u64>,
 }
 
 impl ActiveRun {
@@ -90,6 +94,8 @@ impl ActiveRun {
             cache_creation_input_tokens: None,
             turns: None,
             cost_usd: None,
+            last_prompt_tokens: None,
+            last_cached_input_tokens: None,
         }
     }
 }
@@ -236,6 +242,14 @@ impl App {
             .get("cost_usd")
             .and_then(|v| v.as_f64())
             .or_else(|| existing.as_ref().and_then(|r| r.cost_usd));
+        let last_prompt_tokens = entry
+            .get("last_prompt_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| existing.as_ref().and_then(|r| r.last_prompt_tokens));
+        let last_cached_input_tokens = entry
+            .get("last_cached_input_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| existing.as_ref().and_then(|r| r.last_cached_input_tokens));
 
         self.active_runs.insert(
             id,
@@ -251,6 +265,8 @@ impl App {
                 cache_creation_input_tokens,
                 turns,
                 cost_usd,
+                last_prompt_tokens,
+                last_cached_input_tokens,
             },
         );
     }
@@ -282,6 +298,8 @@ impl App {
                     cache_creation_input_tokens: None,
                     turns: None,
                     cost_usd: None,
+                    last_prompt_tokens: None,
+                    last_cached_input_tokens: None,
                 });
             }
         }
@@ -337,6 +355,8 @@ impl App {
         cache_creation_input_tokens: Option<u64>,
         turns: usize,
         cost_usd: Option<f64>,
+        last_prompt_tokens: Option<u64>,
+        last_cached_input_tokens: Option<u64>,
     ) {
         use std::collections::hash_map::Entry;
         match self.active_runs.entry(id) {
@@ -349,6 +369,19 @@ impl App {
                 run.cache_creation_input_tokens = cache_creation_input_tokens;
                 run.turns = Some(turns);
                 run.cost_usd = cost_usd.or(run.cost_usd);
+                // Completed-turn updates replace both fields atomically
+                // so a turn with (prompt, None) doesn't combine with a
+                // stale cached value from the previous turn.
+                // Terminal-finalize / resync snapshots send None for
+                // both fields and fall through to the .or() path below.
+                if last_prompt_tokens.is_some() {
+                    run.last_prompt_tokens = last_prompt_tokens;
+                    run.last_cached_input_tokens = last_cached_input_tokens;
+                } else {
+                    run.last_prompt_tokens = last_prompt_tokens.or(run.last_prompt_tokens);
+                    run.last_cached_input_tokens =
+                        last_cached_input_tokens.or(run.last_cached_input_tokens);
+                }
             }
             Entry::Vacant(e) => {
                 e.insert(ActiveRun {
@@ -363,6 +396,8 @@ impl App {
                     cache_creation_input_tokens,
                     turns: Some(turns),
                     cost_usd,
+                    last_prompt_tokens,
+                    last_cached_input_tokens,
                 });
                 self.ensure_watch_selection();
             }
@@ -805,6 +840,148 @@ mod tests {
         app.active_runs.remove("f");
         app.ensure_watch_selection();
         assert_eq!(app.watch_selection.as_deref(), Some("r"));
+    }
+
+    #[test]
+    fn on_token_usage_preserves_last_turn_values_on_none() {
+        let mut app = App::new();
+        // Simulate first live turn event with real cache-hit data.
+        app.on_token_usage(
+            "g1".into(),
+            Some(10_000), // prompt_tokens (cumulative)
+            Some(5_000),  // completion_tokens
+            Some(1_000),  // reasoning_tokens
+            Some(2_000),  // cached_input_tokens (cumulative)
+            Some(500),    // cache_creation_input_tokens
+            2,            // turns
+            Some(0.15),   // cost_usd
+            Some(5_000),  // last_prompt_tokens (this turn)
+            Some(2_500),  // last_cached_input_tokens (50% cache rate)
+        );
+
+        // Simulate terminal-finalize TokenUsage event — fields are None.
+        app.on_token_usage(
+            "g1".into(),
+            Some(10_000),
+            Some(5_000),
+            Some(1_000),
+            Some(2_000),
+            Some(500),
+            2,
+            None, // cost_usd comes in as None
+            None, // last_prompt_tokens is None from terminal
+            None, // last_cached_input_tokens is None from terminal
+        );
+
+        let run = app.active_runs.get("g1").expect("run must exist");
+        // Cumulative fields are overwritten (last write wins).
+        assert_eq!(run.prompt_tokens, Some(10_000));
+        assert_eq!(run.cached_input_tokens, Some(2_000));
+        // cost_usd uses .or() — preserved from first call.
+        assert_eq!(run.cost_usd, Some(0.15));
+        // Last-turn fields must also preserve the earlier Some values.
+        assert_eq!(
+            run.last_prompt_tokens,
+            Some(5_000),
+            "last_prompt_tokens must not be wiped by a None event"
+        );
+        assert_eq!(
+            run.last_cached_input_tokens,
+            Some(2_500),
+            "last_cached_input_tokens must not be wiped by a None event"
+        );
+    }
+
+    /// After a turn with (5000 prompt, 2500 cached), a live turn reporting
+    /// (1000 prompt, None cached) must show `-` (or 0%), not 250%.
+    /// The two last-turn fields are replaced atomically — the stale cached
+    /// value from the prior turn is overwritten with None.
+    #[test]
+    fn on_token_usage_live_partial_usage_replaces_both_fields() {
+        let mut app = App::new();
+        // Turn 1: 5000 prompt, 2500 cached → 50% cache rate.
+        app.on_token_usage(
+            "g1".into(),
+            Some(10_000), // cumulative prompt
+            Some(5_000),  // cumulative completion
+            Some(1_000),  // cumulative reasoning
+            Some(2_000),  // cumulative cached
+            Some(500),    // cumulative cache_creation
+            1,            // turns
+            Some(0.10),
+            Some(5_000), // last_prompt_tokens
+            Some(2_500), // last_cached_input_tokens
+        );
+
+        // Turn 2: 1000 prompt, no cache hits. Both fields must be set
+        // atomically — prompt→Some(1000), cached→None.
+        app.on_token_usage(
+            "g1".into(),
+            Some(11_000), // cumulative prompt
+            Some(6_000),  // cumulative completion
+            Some(1_500),  // cumulative reasoning
+            Some(2_000),  // cumulative cached (unchanged)
+            Some(500),
+            2,
+            Some(0.15),
+            Some(1_000), // last_prompt_tokens — this turn
+            None,        // last_cached_input_tokens — no cache hits
+        );
+
+        let run = app.active_runs.get("g1").expect("run must exist");
+        assert_eq!(run.last_prompt_tokens, Some(1_000));
+        assert_eq!(
+            run.last_cached_input_tokens, None,
+            "cached must be None when the live turn reported no cache hits"
+        );
+    }
+
+    /// When a live turn completes but the provider reported no token usage
+    /// at all (turn_stats is None), both fields arrive as None.  This is
+    /// indistinguishable from a terminal-finalize event — both paths fall
+    /// through to the .or() branch and preserve existing values.
+    #[test]
+    fn on_token_usage_live_absent_usage_preserves_old_values() {
+        let mut app = App::new();
+        // Turn 1 with real data.
+        app.on_token_usage(
+            "g1".into(),
+            Some(5_000),
+            Some(2_000),
+            Some(500),
+            Some(1_000),
+            Some(200),
+            1,
+            Some(0.05),
+            Some(5_000),
+            Some(2_500),
+        );
+
+        // Turn 2 with no provider-reported usage (both None).
+        app.on_token_usage(
+            "g1".into(),
+            Some(5_000),
+            Some(2_000),
+            Some(500),
+            Some(1_000),
+            Some(200),
+            2,
+            Some(0.05),
+            None, // last_prompt_tokens — absent
+            None, // last_cached_input_tokens — absent
+        );
+
+        let run = app.active_runs.get("g1").expect("run must exist");
+        assert_eq!(
+            run.last_prompt_tokens,
+            Some(5_000),
+            "absent turn usage should preserve the prior turn's prompt tokens"
+        );
+        assert_eq!(
+            run.last_cached_input_tokens,
+            Some(2_500),
+            "absent turn usage should preserve the prior turn's cached tokens"
+        );
     }
 
     #[test]

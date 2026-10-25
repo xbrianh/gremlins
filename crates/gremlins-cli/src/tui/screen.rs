@@ -950,7 +950,7 @@ impl ColumnWidths {
             let ti = format_token_count(run.prompt_tokens);
             let to = format_token_count(run.completion_tokens);
             let tr = format_token_count(run.reasoning_tokens);
-            let tc = format_cache_pct(run.prompt_tokens, run.cached_input_tokens);
+            let tc = format_cache_pct(run.last_prompt_tokens, run.last_cached_input_tokens);
             let tn = format_token_count(run.cache_creation_input_tokens);
             let tu = run
                 .turns
@@ -1229,7 +1229,7 @@ impl RunsView {
         let tokens_in = format_token_count(run.prompt_tokens);
         let tokens_out = format_token_count(run.completion_tokens);
         let reasoning = format_token_count(run.reasoning_tokens);
-        let cache = format_cache_pct(run.prompt_tokens, run.cached_input_tokens);
+        let cache = format_cache_pct(run.last_prompt_tokens, run.last_cached_input_tokens);
         let tokens_new = format_token_count(run.cache_creation_input_tokens);
         let turns = run
             .turns
@@ -2745,6 +2745,8 @@ mod tests {
                 cache_creation_input_tokens: None,
                 turns: None,
                 cost_usd: None,
+                last_prompt_tokens: None,
+                last_cached_input_tokens: None,
             },
         );
 
@@ -2801,6 +2803,8 @@ mod tests {
                 cache_creation_input_tokens: None,
                 turns: None,
                 cost_usd: None,
+                last_prompt_tokens: None,
+                last_cached_input_tokens: None,
             },
         );
 
@@ -2868,6 +2872,8 @@ mod tests {
                 cache_creation_input_tokens: None,
                 turns: None,
                 cost_usd: None,
+                last_prompt_tokens: None,
+                last_cached_input_tokens: None,
             },
         );
 
@@ -2910,6 +2916,8 @@ mod tests {
                 cache_creation_input_tokens: None,
                 turns: None,
                 cost_usd: None,
+                last_prompt_tokens: None,
+                last_cached_input_tokens: None,
             },
         );
 
@@ -2968,6 +2976,8 @@ mod tests {
                 cache_creation_input_tokens: None,
                 turns: None,
                 cost_usd: None,
+                last_prompt_tokens: None,
+                last_cached_input_tokens: None,
             },
         );
 
@@ -2983,6 +2993,49 @@ mod tests {
         assert!(
             visible.contains(motif::glyph::DONE),
             "A finished run should render its own status glyph.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn watch_table_cache_column_uses_last_turn_values_not_cumulative() {
+        // Give the run cumulative totals that would compute a different
+        // cache percentage than the per-turn values.  If the CACHE column
+        // renders the per-turn percentage (75%), the fix is working.
+        let mut live = new_live(120, 8);
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        app.active_runs.insert(
+            "g1".to_string(),
+            ActiveRun {
+                status: "running".to_string(),
+                stage: "build".to_string(),
+                definition: "def".to_string(),
+                project: "gremlins".to_string(),
+                // Cumulative: 10k prompt, 2k cached → would give 20%
+                prompt_tokens: Some(10_000),
+                completion_tokens: Some(5_000),
+                reasoning_tokens: Some(500),
+                cached_input_tokens: Some(2_000),
+                cache_creation_input_tokens: Some(100),
+                turns: Some(3),
+                cost_usd: Some(0.42),
+                // Last-turn: 1k prompt, 750 cached → 75%
+                last_prompt_tokens: Some(1_000),
+                last_cached_input_tokens: Some(750),
+            },
+        );
+
+        app.screen = Screen::Runs;
+        live.show_runs();
+        live.compose(&app).unwrap();
+
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains("75%"),
+            "CACHE column must show last-turn 75%, not cumulative 20%.
+Buffer:
+{visible}"
         );
     }
 

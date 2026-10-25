@@ -33,6 +33,8 @@ pub struct TokenUsageEvent {
     pub id: String,
     pub usage: UsageStats,
     pub cost_usd: Option<f64>,
+    pub last_prompt_tokens: Option<u64>,
+    pub last_cached_input_tokens: Option<u64>,
 }
 
 /// Sink for [`TokenUsageEvent`]s fired at the end of every agent-loop turn.
@@ -1505,10 +1507,16 @@ async fn run_agent_loop_core(
         // ── Emit cumulative token usage via injected sink ─────
         if let Some(ref id) = gremlin_id {
             if let Some(ref sink) = token_usage_sink.0 {
+                let (last_prompt, last_cached) = turn_stats
+                    .as_ref()
+                    .map(|ts| (ts.prompt_tokens, ts.cached_input_tokens))
+                    .unwrap_or((None, None));
                 sink(TokenUsageEvent {
                     id: id.clone(),
                     usage: totals.clone(),
                     cost_usd: None,
+                    last_prompt_tokens: last_prompt,
+                    last_cached_input_tokens: last_cached,
                 });
             }
         }
