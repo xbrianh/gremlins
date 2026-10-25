@@ -615,10 +615,14 @@ async fn run_agent(
         } else {
             config::compaction_threshold_tokens()
         };
-        Some(conversation::CompactionOpts {
-            threshold_tokens: threshold,
-            target_tokens: threshold.saturating_mul(55) / 100,
-        })
+        if threshold == 0 {
+            None
+        } else {
+            Some(conversation::CompactionOpts {
+                threshold_tokens: threshold,
+                target_tokens: threshold.saturating_mul(55) / 100,
+            })
+        }
     };
     let prepopulated_messages = verbatim_history.clone();
 

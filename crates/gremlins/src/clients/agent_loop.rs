@@ -791,7 +791,9 @@ fn build_request_messages(
         None => history.to_vec(),
     };
 
-    if conversation::token_len(&working) + overhead_tokens <= opts.threshold_tokens as usize {
+    if conversation::token_len(&working).saturating_add(overhead_tokens)
+        <= opts.threshold_tokens as usize
+    {
         return working;
     }
 

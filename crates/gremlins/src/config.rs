@@ -218,7 +218,12 @@ struct ConfigFile {
     paths: Option<PathsSection>,
     #[serde(rename = "max-tool-output-bytes", default)]
     max_tool_output_bytes: Option<u64>,
+    #[serde(default)]
     compaction: Option<CompactionSection>,
+    /// Deprecated: now folded into `compaction.threshold-tokens-chat`.
+    /// Tolerated here so existing settings files continue to load.
+    #[serde(rename = "chat-compaction-threshold-bytes", default)]
+    _chat_compaction_threshold_bytes: Option<u64>,
     #[serde(rename = "max-prompt-bytes", default)]
     max_prompt_bytes: Option<u64>,
     backoff: Option<BackoffSection>,
