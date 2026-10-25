@@ -2986,6 +2986,7 @@ pub(crate) async fn invoke(
     // Cap output for tools that can produce unbounded results.
     // Task and Done are excluded: Task manages its own context, Done is tiny.
     // Edit and Write always return tiny results.
+    // WebSearch handles its own truncation in websearch_invoke_with_cap.
     let cap = crate::config::max_tool_output_bytes();
     if cap > 0
         && matches!(
@@ -2994,15 +2995,40 @@ pub(crate) async fn invoke(
         )
         && res.len() as u64 > cap
     {
-        return format!(
-            "Tool output exceeded the limit ({} bytes, cap is {}). Try a narrower approach:\n\
-- Bash: pipe through `head`, filter with `grep`, or target a specific file.\n\
-- Grep: lower `max_matches`, use a more specific `glob`, or narrow the `path`.\n\
-- Read: use `offset`/`limit` to paginate.\n\
-- Glob: restrict the `path`.",
-            res.len(),
-            cap
-        );
+        if name == "WebSearch" {
+            // WebSearch already truncates internally; if size exceeds cap due
+            // to edge cases, don't further modify.
+            return res;
+        }
+        let marker = match name {
+            "Read" => format!(
+                "\n[...truncated at {} bytes, use offset/limit to paginate...]",
+                cap
+            ),
+            "Bash" => format!("\n[...truncated at {} bytes...]", cap),
+            "Grep" => format!(
+                "\n[...truncated at {} bytes, lower max_matches or narrow path...]",
+                cap
+            ),
+            "Glob" => format!("\n[...truncated at {} bytes, restrict the path...]", cap),
+            "Landscape" => format!("\n[...truncated at {} bytes...]", cap),
+            _ => format!("\n[...truncated at {} bytes...]", cap),
+        };
+        let marker_len = marker.len() as u64;
+        let keep = if marker_len >= cap {
+            0
+        } else {
+            (cap - marker_len) as usize
+        };
+        if keep == 0 {
+            return marker;
+        }
+        let mut trunc = String::with_capacity(cap as usize);
+        for c in res.chars().take(keep) {
+            trunc.push(c);
+        }
+        trunc.push_str(&marker);
+        return trunc;
     }
     res
 }
@@ -6775,12 +6801,12 @@ mod tests {
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
         let result = invoke("tool-test-id", "Bash", &c, &args).await;
         assert!(
-            result.contains("Tool output exceeded the limit"),
-            "oversized Bash must be capped, got: {result}"
+            result.contains("[...truncated at 10 bytes...]"),
+            "oversized Bash must carry a truncation marker, got: {result}"
         );
         assert!(
-            !result.contains("xxxxxxxxxx"),
-            "output must not leak through cap message"
+            !result.contains("Tool output exceeded the limit"),
+            "oversized Bash must be truncated, not discarded, got: {result}"
         );
     }
 
@@ -6795,12 +6821,12 @@ mod tests {
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
         let result = invoke("tool-test-id", "Read", &c, &args).await;
         assert!(
-            result.contains("Tool output exceeded the limit"),
-            "oversized Read must be capped, got: {result}"
+            result.contains("[...truncated at 10 bytes, use offset/limit to paginate...]"),
+            "oversized Read must carry a truncation marker, got: {result}"
         );
         assert!(
-            !result.contains("xxx"),
-            "file content must not leak through cap message"
+            !result.contains("Tool output exceeded the limit"),
+            "oversized Read must be truncated, not discarded, got: {result}"
         );
     }
 
@@ -6820,12 +6846,37 @@ mod tests {
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
         let result = invoke("tool-test-id", "Landscape", &c, &args).await;
         assert!(
-            result.contains("Tool output exceeded the limit"),
-            "oversized Landscape must be capped, got: {result}"
+            result.contains("[...truncated at 10 bytes...]"),
+            "oversized Landscape must carry a truncation marker, got: {result}"
         );
         assert!(
-            !result.contains("very_long_function_name"),
-            "landscape content must not leak through cap message"
+            !result.contains("Tool output exceeded the limit"),
+            "oversized Landscape must be truncated, not discarded, got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_truncation_preserves_content_prefix() {
+        let _env = crate::test_support::EnvGuard::lock();
+        let dir = tmp();
+        let c = ctx(&dir);
+        // 200 bytes of output with a 64-byte cap: the leading bytes must
+        // survive and the whole result (content + marker) must fit the cap.
+        let args = serde_json::json!({"command": "i=0; while [ $i -lt 200 ]; do printf x; i=$((i+1)); done"}).to_string();
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "64");
+        let result = invoke("tool-test-id", "Bash", &c, &args).await;
+        assert!(
+            result.contains("[...truncated at 64 bytes...]"),
+            "truncated Bash must carry a marker, got: {result}"
+        );
+        assert!(
+            result.contains("xxxxxxxxxx"),
+            "truncated Bash must preserve a content prefix, got: {result}"
+        );
+        assert!(
+            (result.len() as u64) <= 64,
+            "truncated result must fit within the cap, got len {}: {result}",
+            result.len()
         );
     }
 
@@ -6842,8 +6893,8 @@ mod tests {
             "cap=0 must return actual output, got: {result}"
         );
         assert!(
-            !result.contains("Tool output exceeded the limit"),
-            "cap=0 must not trigger cap message"
+            !result.contains("[...truncated at"),
+            "cap=0 must not truncate output, got: {result}"
         );
     }
 
@@ -6897,8 +6948,8 @@ mod tests {
             "Task must not be capped, got: {result}"
         );
         assert!(
-            !result.contains("Tool output exceeded the limit"),
-            "Task must not trigger cap message"
+            !result.contains("[...truncated at"),
+            "Task must not truncate output, got: {result}"
         );
     }
 

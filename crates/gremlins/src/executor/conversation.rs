@@ -408,7 +408,7 @@ fn is_chat_turn_start(message: &Message) -> bool {
 
 fn is_synthetic_round_prompt(text: &str) -> bool {
     let text = text.trim_start();
-    text.starts_with("Actions taken this turn:")
+    text.starts_with("[turn ")
         || text.starts_with("Done was rejected because it was combined with other tool calls.")
         || text.starts_with("Done rejected:")
         || text.starts_with("The following expected output file(s) were not written:")
@@ -624,7 +624,7 @@ fn extract_facts(messages: &[Message]) -> Facts {
 
         if is_text_user_message(&messages[index]) {
             let text = user_text(&messages[index]);
-            if text.starts_with("Actions taken this turn:") {
+            if text.starts_with("[turn ") {
                 facts
                     .summaries
                     .push(head_bytes(text.trim(), TURN_SUMMARY_BYTES));
@@ -713,10 +713,7 @@ fn str_arg(args: &serde_json::Value, key: &str) -> Option<String> {
 }
 
 fn is_error_output(output: &str) -> bool {
-    output.starts_with("Error:")
-        || output.starts_with("[exit")
-        || output.starts_with("[timeout]")
-        || output.starts_with("Tool output exceeded the limit")
+    output.starts_with("Error:") || output.starts_with("[exit") || output.starts_with("[timeout]")
 }
 
 fn is_content_output(output: &str) -> bool {
@@ -1342,16 +1339,16 @@ mod tests {
             user_prompt("read a.txt and run cargo check"),
             assistant_with_tools(&[read_call]),
             tool_result("Read", "read_1", "hello from a.txt"),
-            user_prompt("Actions taken this turn:\n- Read a.txt\n"),
+            user_prompt("[turn 1]: Read a.txt"),
             assistant_with_tools(&[bash_call]),
             tool_result("Bash", "bash_1", "[exit 1]\ncargo failed"),
-            user_prompt("Actions taken this turn:\n- Bash cargo check (failed)\n"),
+            user_prompt("[turn 2]: Bash cargo check (failed)"),
             assistant_with_tools(&[done_1]),
             tool_result("Done", "done_1", "Done accepted."),
             user_prompt("now run cargo test"),
             assistant_with_tools(&[bash_2]),
             tool_result("Bash", "bash_2", "[exit 0]\nok"),
-            user_prompt("Actions taken this turn:\n- Bash cargo test\n"),
+            user_prompt("[turn 3]: Bash cargo test"),
             assistant_with_tools(&[done_2]),
             tool_result("Done", "done_2", "Done accepted."),
         ]
@@ -1780,7 +1777,7 @@ mod tests {
             )]),
             tool_result("Read", "read_1", "hello"),
             Message::user("[operator]: use the ledger below"),
-            user_prompt("Actions taken this turn:\n- Read a.txt\n"),
+            user_prompt("[turn 1]: Read a.txt"),
             assistant_with_tools(&[tool_call(
                 "done_1",
                 "Done",
@@ -1817,7 +1814,7 @@ mod tests {
                 &format!("output for batch {batch}\n{}", "x".repeat(2048)),
             ));
             history.push(user_prompt(&format!(
-                "Actions taken this turn:\n- Bash cargo check {batch}\n"
+                "[turn {batch}]: Bash cargo check {batch}"
             )));
         }
 
@@ -1848,7 +1845,7 @@ mod tests {
                 &format!("output for batch {batch}\n{}", "x".repeat(1024)),
             ));
             history.push(user_prompt(&format!(
-                "Actions taken this turn:\n- Bash cargo check {batch}\n"
+                "[turn {batch}]: Bash cargo check {batch}"
             )));
         }
         // Append a Done turn with the merged text+tool_result user message
@@ -1862,7 +1859,7 @@ mod tests {
         // Single user message with both text and tool_result, built by the
         // same helper the agent loop uses.
         history.push(done_user_message(
-            "Actions taken this turn:\n- Done completed the work\n",
+            "[turn 4]: Done completed the work",
             CallId::from_wire("done_1".to_string()),
             ToolName::new("Done".to_string()).unwrap(),
             "Done accepted.",
@@ -1953,7 +1950,7 @@ mod tests {
             serde_json::json!({"file_path": "a.txt"}),
         )]));
         history.push(tool_result("Read", "read_1", "small"));
-        history.push(user_prompt("Actions taken this turn:\n- Read a.txt\n"));
+        history.push(user_prompt("[turn 1]: Read a.txt"));
 
         let huge = "x".repeat(16_000);
         history.push(assistant_with_tools(&[tool_call(
@@ -2008,7 +2005,7 @@ mod tests {
                 &format!("output for batch {batch}\n{}", "x".repeat(1024)),
             ));
             history.push(user_prompt(&format!(
-                "Actions taken this turn:\n- Bash cargo check {batch}\n"
+                "[turn {batch}]: Bash cargo check {batch}"
             )));
         }
 
@@ -2042,7 +2039,7 @@ mod tests {
                 &format!("output for batch {batch}\n{}", "x".repeat(1024)),
             ));
             history.push(user_prompt(&format!(
-                "Actions taken this turn:\n- Bash cargo check {batch}\n"
+                "[turn {batch}]: Bash cargo check {batch}"
             )));
         }
 
@@ -2093,7 +2090,7 @@ mod tests {
                 &format!("output for batch {batch}\n{}", "x".repeat(1024)),
             ));
             history.push(user_prompt(&format!(
-                "Actions taken this turn:\n- Bash cargo check {batch}\n"
+                "[turn {batch}]: Bash cargo check {batch}"
             )));
         }
 
@@ -2121,7 +2118,7 @@ mod tests {
                 &format!("output for batch {batch}\n{}", "x".repeat(1024)),
             ));
             history.push(user_prompt(&format!(
-                "Actions taken this turn:\n- Bash cargo check {batch}\n"
+                "[turn {batch}]: Bash cargo check {batch}"
             )));
         }
 

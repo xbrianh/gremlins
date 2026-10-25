@@ -1,3 +1,5 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -918,6 +920,7 @@ async fn run_agent_loop_core(
     let mut exhausted_turn_retries: bool = false;
     let mut exhausted_timeout_retries: bool = false;
     let mut turn_scratchpad_injected: bool = false;
+    let mut last_scratchpad_hash: u64 = 0;
     let mut stream_error: Option<ProviderError> = None;
     let loop_start = Instant::now();
 
@@ -1076,12 +1079,18 @@ async fn run_agent_loop_core(
                     crate::executor::agent_runner::read_scratchpad_contained(scratchpad_path, root)
                 {
                     if !content.trim().is_empty() {
-                        let next_text = user_message_text(&next_prompt);
-                        let combined = format!(
-                            "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
-                        );
-                        next_prompt = Message::user(combined);
-                        turn_scratchpad_injected = true;
+                        let mut hasher = DefaultHasher::new();
+                        content.hash(&mut hasher);
+                        let current_hash = hasher.finish();
+                        if current_hash != last_scratchpad_hash {
+                            last_scratchpad_hash = current_hash;
+                            let next_text = user_message_text(&next_prompt);
+                            let combined = format!(
+                                "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
+                            );
+                            next_prompt = Message::user(combined);
+                            turn_scratchpad_injected = true;
+                        }
                     }
                 }
             }
@@ -1647,8 +1656,8 @@ async fn run_agent_loop_core(
                         // messages. Don't push to history here — the
                         // acceptance path will append next_prompt once.
                         let rejected_ledger = format!(
-                            "Actions taken this turn:\n- Done {} (rejected)\n\n{}",
-                            done_summary, reminder
+                            "[turn {}]: Done {} (rejected)\n\n{}",
+                            turn_num, done_summary, reminder
                         );
                         next_prompt = conversation::done_user_message(
                             &rejected_ledger,
@@ -1731,7 +1740,7 @@ async fn run_agent_loop_core(
                 // tool_use to be immediately followed by a matching tool_result
                 // block; merging the ledger text and the Done tool_result into
                 // one message satisfies that invariant.
-                let done_ledger = format!("Actions taken this turn:\n- Done {}\n", done_summary);
+                let done_ledger = format!("[turn {}]: Done {}", turn_num, done_summary);
                 messages.push(conversation::done_user_message(
                     &done_ledger,
                     done_tc.id.clone(),
@@ -2142,7 +2151,7 @@ async fn run_agent_loop_core(
         // assistant tool_calls message; the ledger becomes the next turn's prompt,
         // trailing the complete result block instead of splitting it.
         history.extend(result_msgs);
-        next_prompt = Message::user(ledger_message(&ledger));
+        next_prompt = Message::user(ledger_message(turn_num, &ledger));
         turn_scratchpad_injected = false;
         remaining_turns -= 1;
     }
@@ -2559,11 +2568,11 @@ fn ledger_line(name: &str, key: &str, output: &str) -> String {
     } else {
         ""
     };
-    format!("- {label}{note}")
+    format!("{label}{note}")
 }
 
-fn ledger_message(lines: &[String]) -> String {
-    format!("Actions taken this turn:\n{}\n", lines.join("\n"))
+fn ledger_message(turn_num: usize, lines: &[String]) -> String {
+    format!("[turn {}]: {}", turn_num, lines.join(", "))
 }
 
 fn truncate_ledger_value(v: &str) -> String {
@@ -2927,19 +2936,19 @@ mod tests {
 
     #[test]
     fn ledger_line_flags_denied_and_failed_calls() {
-        assert_eq!(ledger_line("Read", "/tmp/x", "content"), "- Read /tmp/x");
-        assert_eq!(ledger_line("Read", "", "content"), "- Read");
+        assert_eq!(ledger_line("Read", "/tmp/x", "content"), "Read /tmp/x");
+        assert_eq!(ledger_line("Read", "", "content"), "Read");
         assert_eq!(
             ledger_line("Write", "/tmp/x", "Error: unknown tool Write"),
-            "- Write /tmp/x (not run: unknown tool)"
+            "Write /tmp/x (not run: unknown tool)"
         );
         assert_eq!(
             ledger_line("Bash", "cargo test", "Error: timed out"),
-            "- Bash cargo test (failed)"
+            "Bash cargo test (failed)"
         );
         assert_eq!(
             ledger_line("Bash", "false", "[exit 1]\n"),
-            "- Bash false (failed)"
+            "Bash false (failed)"
         );
     }
 
@@ -3412,9 +3421,7 @@ mod tests {
                 &[],
                 &[],
             ));
-            history.push(Message::user(format!(
-                "Actions taken this turn:\n- round {index}\n"
-            )));
+            history.push(Message::user(format!("[turn {}]: round {index}", index)));
         }
         history
     }
@@ -3437,7 +3444,8 @@ mod tests {
                 format!("output for batch {index}\n{}", "x".repeat(output_len)),
             ));
             history.push(Message::user(format!(
-                "Actions taken this turn:\n- Bash cargo check {index}\n"
+                "[turn {}]: Bash cargo check {index}",
+                index
             )));
         }
         history
@@ -3468,9 +3476,7 @@ mod tests {
         // is under threshold.
         for round in 0..5 {
             history.push(assistant_tool_message("small", &[], &[]));
-            history.push(Message::user(format!(
-                "Actions taken this turn:\n- small {round}\n"
-            )));
+            history.push(Message::user(format!("[turn {}]: small {round}", round)));
             let request = build_request_messages(&history, &mut compacted, 0, Some(opts), 0, 0);
             assert!(compacted.is_some());
             assert_eq!(compacted.as_ref().unwrap().prefix, prefix_before);
@@ -3516,7 +3522,8 @@ mod tests {
                 format!("output for batch {index}\n{}", "x".repeat(2_000)),
             ));
             history.push(Message::user(format!(
-                "Actions taken this turn:\n- Bash cargo check {index}\n"
+                "[turn {}]: Bash cargo check {index}",
+                index
             )));
         }
 
@@ -5115,7 +5122,7 @@ mod tests {
         assert_eq!(reqs.len(), 2);
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
         let key = ledger_key_arg(&serde_json::json!({"file_path": f.to_str().unwrap()}));
-        let expected = Message::user(format!("Actions taken this turn:\n- Read {key}\n"));
+        let expected = Message::user(format!("[turn 1]: Read {key}"));
         assert!(key.contains("x.txt"), "ledger must name the file: {key}");
         assert_eq!(history.len(), 4, "unexpected history: {history:#?}");
         assert!(matches!(history[1], Message::Assistant { .. }));
@@ -5130,10 +5137,20 @@ mod tests {
 
     fn message_kind(m: &Message) -> &'static str {
         match m {
-            Message::User { content } if content.iter().any(|c| matches!(c, UserContent::Text(t) if t.text.starts_with("Actions taken this turn:"))) => "ledger",
-            Message::User { content } if content
-                .iter()
-                .any(|c| matches!(c, UserContent::ToolResult(_))) => "result",
+            Message::User { content }
+                if content
+                    .iter()
+                    .any(|c| matches!(c, UserContent::Text(t) if t.text.starts_with("[turn "))) =>
+            {
+                "ledger"
+            }
+            Message::User { content }
+                if content
+                    .iter()
+                    .any(|c| matches!(c, UserContent::ToolResult(_))) =>
+            {
+                "result"
+            }
             Message::Assistant { .. } => "assistant",
             _ => "other",
         }
@@ -5824,9 +5841,7 @@ mod tests {
         assert!(matches!(&history[2], Message::Assistant { .. }));
         assert!(matches!(&history[3], Message::User { content }
                 if content.iter().any(|c| matches!(c, UserContent::ToolResult(_)))));
-        assert!(
-            user_text_of(&history[4]).is_some_and(|t| t.starts_with("Actions taken this turn:"))
-        );
+        assert!(user_text_of(&history[4]).is_some_and(|t| t.starts_with("[turn ")));
 
         // The Fork prompt is the final user message in the child request.
         assert_eq!(user_text_of(&history[5]), Some("finish as fork"));
@@ -6873,8 +6888,8 @@ mod tests {
             .find_map(|m| match m {
                 Message::User { content } => content.iter().find_map(|c| match c {
                     UserContent::Text(t)
-                        if t.text.starts_with("Actions taken this turn:")
-                            && t.text.contains("- Done implemented the fix") =>
+                        if t.text.starts_with("[turn ")
+                            && t.text.contains("Done implemented the fix") =>
                     {
                         Some(t.text.clone())
                     }
@@ -6883,7 +6898,7 @@ mod tests {
                 _ => None,
             })
             .expect("Done ledger entry must be present in returned history");
-        assert!(ledger.contains("- Done implemented the fix"), "{ledger}");
+        assert!(ledger.contains("Done implemented the fix"), "{ledger}");
     }
 
     /// The Done completion path must never produce two consecutive `Message::User`
@@ -7000,8 +7015,12 @@ mod tests {
         // requires tool_result blocks to precede text blocks).
         let merged = messages.iter().find_map(|m| match m {
             Message::User { content } => {
-                let has_ledger = content.iter().any(|c| matches!(c, UserContent::Text(t) if t.text.starts_with("Actions taken this turn:")));
-                let has_tool_result = content.iter().any(|c| matches!(c, UserContent::ToolResult(_)));
+                let has_ledger = content
+                    .iter()
+                    .any(|c| matches!(c, UserContent::Text(t) if t.text.starts_with("[turn ")));
+                let has_tool_result = content
+                    .iter()
+                    .any(|c| matches!(c, UserContent::ToolResult(_)));
                 if has_ledger && has_tool_result {
                     Some(content.clone())
                 } else {
