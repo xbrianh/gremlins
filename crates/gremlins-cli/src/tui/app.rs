@@ -74,6 +74,10 @@ pub struct ActiveRun {
     pub turns: Option<usize>,
     /// Total cost in USD from the daemon's ls response.
     pub cost_usd: Option<f64>,
+    /// Per-turn prompt tokens from the most recently completed turn.
+    pub last_prompt_tokens: Option<u64>,
+    /// Per-turn cached input tokens from the most recently completed turn.
+    pub last_cached_input_tokens: Option<u64>,
 }
 
 impl ActiveRun {
@@ -90,6 +94,8 @@ impl ActiveRun {
             cache_creation_input_tokens: None,
             turns: None,
             cost_usd: None,
+            last_prompt_tokens: None,
+            last_cached_input_tokens: None,
         }
     }
 }
@@ -236,6 +242,18 @@ impl App {
             .get("cost_usd")
             .and_then(|v| v.as_f64())
             .or_else(|| existing.as_ref().and_then(|r| r.cost_usd));
+        let last_prompt_tokens = entry
+            .get("last_prompt_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| existing.as_ref().and_then(|r| r.last_prompt_tokens));
+        let last_cached_input_tokens = entry
+            .get("last_cached_input_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|r| r.last_cached_input_tokens)
+            });
 
         self.active_runs.insert(
             id,
@@ -251,6 +269,8 @@ impl App {
                 cache_creation_input_tokens,
                 turns,
                 cost_usd,
+                last_prompt_tokens,
+                last_cached_input_tokens,
             },
         );
     }
@@ -282,6 +302,8 @@ impl App {
                     cache_creation_input_tokens: None,
                     turns: None,
                     cost_usd: None,
+                    last_prompt_tokens: None,
+                    last_cached_input_tokens: None,
                 });
             }
         }
@@ -337,6 +359,8 @@ impl App {
         cache_creation_input_tokens: Option<u64>,
         turns: usize,
         cost_usd: Option<f64>,
+        last_prompt_tokens: Option<u64>,
+        last_cached_input_tokens: Option<u64>,
     ) {
         use std::collections::hash_map::Entry;
         match self.active_runs.entry(id) {
@@ -349,6 +373,8 @@ impl App {
                 run.cache_creation_input_tokens = cache_creation_input_tokens;
                 run.turns = Some(turns);
                 run.cost_usd = cost_usd.or(run.cost_usd);
+                run.last_prompt_tokens = last_prompt_tokens;
+                run.last_cached_input_tokens = last_cached_input_tokens;
             }
             Entry::Vacant(e) => {
                 e.insert(ActiveRun {
@@ -363,6 +389,8 @@ impl App {
                     cache_creation_input_tokens,
                     turns: Some(turns),
                     cost_usd,
+                    last_prompt_tokens,
+                    last_cached_input_tokens,
                 });
                 self.ensure_watch_selection();
             }

@@ -75,6 +75,8 @@ struct ResyncRun {
     cache_creation_input_tokens: Option<u64>,
     turns: Option<usize>,
     cost_usd: Option<f64>,
+    last_prompt_tokens: Option<u64>,
+    last_cached_input_tokens: Option<u64>,
 }
 
 /// Spawn a one-shot `ls` request that refreshes lifecycle status
@@ -122,6 +124,12 @@ fn fetch_run_statuses(
                                 .and_then(|v| v.as_u64())
                                 .map(|v| v as usize),
                             cost_usd: entry.get("cost_usd").and_then(|v| v.as_f64()),
+                            last_prompt_tokens: entry
+                                .get("last_prompt_tokens")
+                                .and_then(|v| v.as_u64()),
+                            last_cached_input_tokens: entry
+                                .get("last_cached_input_tokens")
+                                .and_then(|v| v.as_u64()),
                         });
                     }
                 }
@@ -2083,6 +2091,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         id,
                         usage,
                         cost_usd,
+                        last_prompt_tokens,
+                        last_cached_input_tokens,
                     } => {
                         app.on_token_usage(
                             id,
@@ -2093,6 +2103,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             usage.cache_creation_input_tokens,
                             usage.turns,
                             cost_usd,
+                            last_prompt_tokens,
+                            last_cached_input_tokens,
                         );
                     }
                 }
@@ -2264,6 +2276,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             r.cache_creation_input_tokens,
                             r.turns.unwrap_or(0),
                             r.cost_usd,
+                            r.last_prompt_tokens,
+                            r.last_cached_input_tokens,
                         );
                     }
                 }

@@ -950,7 +950,7 @@ impl ColumnWidths {
             let ti = format_token_count(run.prompt_tokens);
             let to = format_token_count(run.completion_tokens);
             let tr = format_token_count(run.reasoning_tokens);
-            let tc = format_cache_pct(run.prompt_tokens, run.cached_input_tokens);
+            let tc = format_cache_pct(run.last_prompt_tokens, run.last_cached_input_tokens);
             let tn = format_token_count(run.cache_creation_input_tokens);
             let tu = run
                 .turns
@@ -1229,7 +1229,7 @@ impl RunsView {
         let tokens_in = format_token_count(run.prompt_tokens);
         let tokens_out = format_token_count(run.completion_tokens);
         let reasoning = format_token_count(run.reasoning_tokens);
-        let cache = format_cache_pct(run.prompt_tokens, run.cached_input_tokens);
+        let cache = format_cache_pct(run.last_prompt_tokens, run.last_cached_input_tokens);
         let tokens_new = format_token_count(run.cache_creation_input_tokens);
         let turns = run
             .turns
@@ -2745,6 +2745,8 @@ mod tests {
                 cache_creation_input_tokens: None,
                 turns: None,
                 cost_usd: None,
+                last_prompt_tokens: None,
+                last_cached_input_tokens: None,
             },
         );
 
@@ -2801,6 +2803,8 @@ mod tests {
                 cache_creation_input_tokens: None,
                 turns: None,
                 cost_usd: None,
+                last_prompt_tokens: None,
+                last_cached_input_tokens: None,
             },
         );
 
@@ -2868,6 +2872,8 @@ mod tests {
                 cache_creation_input_tokens: None,
                 turns: None,
                 cost_usd: None,
+                last_prompt_tokens: None,
+                last_cached_input_tokens: None,
             },
         );
 
@@ -2910,6 +2916,8 @@ mod tests {
                 cache_creation_input_tokens: None,
                 turns: None,
                 cost_usd: None,
+                last_prompt_tokens: None,
+                last_cached_input_tokens: None,
             },
         );
 
@@ -2968,6 +2976,8 @@ mod tests {
                 cache_creation_input_tokens: None,
                 turns: None,
                 cost_usd: None,
+                last_prompt_tokens: None,
+                last_cached_input_tokens: None,
             },
         );
 

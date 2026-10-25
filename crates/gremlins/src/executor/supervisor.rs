@@ -222,6 +222,10 @@ pub enum DaemonEvent {
         usage: crate::clients::protocol::UsageStats,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_usd: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_prompt_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_cached_input_tokens: Option<u64>,
     },
     // Forward-looking variants — not wired up yet.
     #[serde(rename = "stage_transition")]

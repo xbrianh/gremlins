@@ -712,6 +712,8 @@ async fn run_agent(
                             id: gremlin_id.clone(),
                             usage,
                             cost_usd,
+                            last_prompt_tokens: event.last_prompt_tokens,
+                            last_cached_input_tokens: event.last_cached_input_tokens,
                         },
                     );
                 },
@@ -1285,6 +1287,8 @@ impl Gremlin {
                     id: self.id.to_string(),
                     usage,
                     cost_usd,
+                    last_prompt_tokens: None,
+                    last_cached_input_tokens: None,
                 },
             );
         }
