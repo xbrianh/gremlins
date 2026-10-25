@@ -409,6 +409,7 @@ fn is_chat_turn_start(message: &Message) -> bool {
 fn is_synthetic_round_prompt(text: &str) -> bool {
     let text = text.trim_start();
     text.starts_with("[turn ")
+        || text.starts_with("[seen]")
         || text.starts_with("Actions taken this turn:")
         || text.starts_with("Done was rejected because it was combined with other tool calls.")
         || text.starts_with("Done rejected:")
@@ -1745,6 +1746,8 @@ mod tests {
         assert!(is_synthetic_round_prompt(
             "[turn 3]: Read src/main.rs, Bash cargo build"
         ));
+        // Accumulated tool-history ledger.
+        assert!(is_synthetic_round_prompt("[seen]\nfile.rs R(2t)"));
         // Real user prompts are not synthetic.
         assert!(!is_synthetic_round_prompt(
             "Please read the main file and build the project."

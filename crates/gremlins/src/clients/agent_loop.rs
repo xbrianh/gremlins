@@ -2154,6 +2154,12 @@ async fn run_agent_loop_core(
 
         // Phase 3: emit results in order
         let mut result_msgs = Vec::new();
+        // Collect Write/Edit file paths for deferred invalidation.
+        // Phase 2 runs tools concurrently, so a Write may finish after
+        // a Read of the same file even when it appears first in request
+        // order.  We defer all invalidations until every observation is
+        // recorded, preventing stale content from leaking into [seen].
+        let mut mutation_paths: Vec<String> = Vec::new();
         for (job, output) in jobs.into_iter().zip(results) {
             let result_msg = format!("result: {}", trunc(&output, 200));
             send_log(log_tx, prefix, &result_msg);
@@ -2188,12 +2194,30 @@ async fn run_agent_loop_core(
             }
             if tools::result_status(&output) == "ok" {
                 tool_ledger.record(&job.name, &job.key, &output, &job.args, turn_num);
+                // Collect Write/Edit paths for deferred invalidation.
+                // See Comment 1: Phase 2 executes concurrently, so a
+                // Write that appears first in request order may finish
+                // after a Read of the same file.  Invalidating inline
+                // would let the later-recorded Read reintroduce stale
+                // content.  We batch invalidations after all observations.
+                if job.name == "Write" || job.name == "Edit" {
+                    let args_val: serde_json::Value =
+                        serde_json::from_str(&job.args).unwrap_or(serde_json::Value::Null);
+                    if let Some(fp) = args_val.get("file_path").and_then(|v| v.as_str()) {
+                        mutation_paths.push(fp.to_string());
+                    }
+                }
             }
             result_msgs.push(Message::tool_result(
                 CallId::from_wire(job.id.clone()),
                 ToolName::new(job.name.clone()).expect("tool name must not be empty"),
                 output,
             ));
+        }
+        // Apply deferred invalidations now that all observations
+        // for this turn are recorded.
+        for fp in &mutation_paths {
+            tool_ledger.invalidate_after_write(fp);
         }
         turns += tool_calls.len();
         // Every tool result lands in history so the results stay adjacent to the
@@ -2844,16 +2868,22 @@ struct LedgerGrepEntry {
     seq: usize,
 }
 
+#[derive(Clone)]
+struct LedgerWriteEntry {
+    age: usize,
+    seq: usize,
+}
+
 struct ToolLedger {
     /// Key: (file_path, offset, limit).  Offset and limit are zero when
     /// the model reads the whole file.
     reads: std::collections::HashMap<(String, u64, u64), LedgerReadEntry>,
     /// Key: (pattern, path).  Path is empty string when not specified.
     greps: std::collections::HashMap<(String, String), LedgerGrepEntry>,
-    /// Key: file_path, value: absolute turn age (seq).
-    writes: std::collections::HashMap<String, usize>,
-    /// Single landscape entry.
-    landscape: Option<usize>,
+    /// Key: file_path.
+    writes: std::collections::HashMap<String, LedgerWriteEntry>,
+    /// Single landscape entry: (age, seq).
+    landscape: Option<(usize, usize)>,
     /// Monotonic counter so we can sort entries by first-access order.
     seq: usize,
 }
@@ -2885,14 +2915,16 @@ impl ToolLedger {
         args.get(key).and_then(|v| v.as_str()).unwrap_or("")
     }
 
-    /// Record a tool execution.
-    fn record(&mut self, name: &str, key: &str, output: &str, args_json: &str, turn_num: usize) {
+    /// Record a tool execution.  Write/Edit do NOT invalidate here;
+    /// caller must call `invalidate_after_write` after all observations
+    /// for the turn are recorded (see Comment 1 — Phase 2 concurrency).
+    fn record(&mut self, name: &str, _key: &str, output: &str, args_json: &str, turn_num: usize) {
         let args: serde_json::Value =
             serde_json::from_str(args_json).unwrap_or(serde_json::Value::Null);
 
         match name {
             "Read" => {
-                let file_path = key.to_string();
+                let file_path = Self::parse_str(&args, "file_path").to_string();
                 let offset = Self::parse_u64(&args, "offset");
                 let limit = Self::parse_u64(&args, "limit");
                 let content_hash = Self::hash(output);
@@ -2925,7 +2957,7 @@ impl ToolLedger {
                 }
             }
             "Grep" => {
-                let pattern = key.to_string();
+                let pattern = Self::parse_str(&args, "pattern").to_string();
                 let path = Self::parse_str(&args, "path").to_string();
                 let content_hash = Self::hash(output);
                 let age = turn_num;
@@ -2957,33 +2989,38 @@ impl ToolLedger {
                 }
             }
             "Write" => {
-                let file_path = key.to_string();
+                let file_path = Self::parse_str(&args, "file_path").to_string();
                 let age = turn_num;
                 self.seq += 1;
-                self.writes.insert(file_path.clone(), age);
-                // Invalidate: remove Read entries for this file,
-                // all Grep entries, and the Landscape entry.
-                self.reads.retain(|(fp, _, _), _| fp != &file_path);
-                self.greps.clear();
-                self.landscape = None;
+                let seq = self.seq;
+                self.writes.insert(file_path, LedgerWriteEntry { age, seq });
+                // Invalidation deferred — caller applies after recording
+                // all observations for the turn.
             }
             "Edit" => {
-                // Invalidate reads for this file (content changed) but
-                // do not emit a W entry — Edit is not tracked per plan.
-                let file_path = key.to_string();
-                self.reads.retain(|(fp, _, _), _| fp != &file_path);
-                self.greps.clear();
-                self.landscape = None;
+                // Edit is not tracked per plan.  Invalidation is deferred;
+                // caller collects the file_path and applies after the batch.
             }
             "Landscape" => {
                 let age = turn_num;
                 self.seq += 1;
-                self.landscape = Some(age);
+                let seq = self.seq;
+                self.landscape = Some((age, seq));
             }
             _ => {
                 // Bash, Task, Done, Glob, WebSearch, Mischief — not tracked.
             }
         }
+    }
+
+    /// Apply write/edit invalidation for a file path.  Nukes Read entries
+    /// for that file, all Greps, and Landscape (they may be stale after a
+    /// write).  Called **after** all observations for a turn are recorded
+    /// so concurrent Read-then-Write batches don't reintroduce stale content.
+    fn invalidate_after_write(&mut self, file_path: &str) {
+        self.reads.retain(|(fp, _, _), _| fp != file_path);
+        self.greps.clear();
+        self.landscape = None;
     }
 
     /// Format the accumulated ledger as a compact index.
@@ -3009,11 +3046,11 @@ impl ToolLedger {
                 .or_default()
                 .push((entry, *offset, *limit));
         }
-        for (fp, &s) in &self.writes {
+        for (fp, entry) in &self.writes {
             file_seqs
                 .entry(fp.clone())
-                .and_modify(|e| *e = (*e).min(s))
-                .or_insert(s);
+                .and_modify(|s| *s = (*s).min(entry.seq))
+                .or_insert(entry.seq);
         }
 
         let mut keys: Vec<&String> = file_seqs.keys().collect();
@@ -3021,7 +3058,8 @@ impl ToolLedger {
 
         for fp in &keys {
             let has_write = self.writes.contains_key(*fp);
-            let write_age = self.writes.get(*fp).map(|&s| age_of(s));
+            let write_age = self.writes.get(*fp).map(|e| age_of(e.age));
+            let display_fp = truncate_ledger_value(fp);
 
             let mut full_count: usize = 0;
             let mut full_age: usize = usize::MAX;
@@ -3043,7 +3081,7 @@ impl ToolLedger {
 
             let mut line = String::new();
             if full_count > 0 {
-                line.push_str(&format!("{} R({}t", fp, full_age));
+                line.push_str(&format!("{} R({}t", display_fp, full_age));
                 if full_count > 1 {
                     line.push_str(&format!(",{}×", full_count));
                 }
@@ -3055,12 +3093,11 @@ impl ToolLedger {
                 }
                 line.push(')');
             } else if !partials.is_empty() {
+                // Only partial reads — no full-file read.  Emit a
+                // headline with the earliest age but omit the aggregate
+                // count (summing across different windows is misleading).
                 let min_age = partials.iter().map(|(_, _, a, _)| *a).min().unwrap();
-                let sum_count: usize = partials.iter().map(|(_, _, _, c)| *c).sum();
-                line.push_str(&format!("{} R({}t", fp, min_age));
-                if sum_count > 1 {
-                    line.push_str(&format!(",{}×", sum_count));
-                }
+                line.push_str(&format!("{} R({}t", display_fp, min_age));
                 for (offset, limit, age, count) in &partials {
                     line.push_str(&format!(".{}-{}:{}t", offset, limit, age));
                     if *count > 1 {
@@ -3072,7 +3109,7 @@ impl ToolLedger {
 
             if has_write {
                 if line.is_empty() {
-                    line.push_str(fp);
+                    line.push_str(&display_fp);
                     line.push(' ');
                 } else {
                     line.push(' ');
@@ -3088,7 +3125,8 @@ impl ToolLedger {
         // Grep entries.
         for ((pattern, _path), entry) in &self.greps {
             let age = age_of(entry.last_age);
-            let mut line = format!("\"{}\" G({}t", pattern, age);
+            let display_pattern = truncate_ledger_value(pattern);
+            let mut line = format!("\"{}\" G({}t", display_pattern, age);
             if entry.count > 1 {
                 line.push_str(&format!(",{}×", entry.count));
             }
@@ -3097,8 +3135,8 @@ impl ToolLedger {
         }
 
         // Landscape entry.
-        if let Some(stored) = self.landscape {
-            items.push((stored, format!("L({}t)", age_of(stored))));
+        if let Some((age, seq)) = self.landscape {
+            items.push((seq, format!("L({}t)", age_of(age))));
         }
 
         items.sort_by_key(|(se, _)| *se);
@@ -3451,6 +3489,8 @@ mod tests {
         let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
         tl.record("Read", &key, "content", &args, 0);
         tl.record("Write", &key, "written", &args, 0);
+        // Invalidation is deferred — caller must apply after the batch.
+        tl.invalidate_after_write("/tmp/x.rs");
         let out = tl.format(0);
         assert!(out.contains("W("), "should have write: {out}");
         assert!(!out.contains("R("), "read should be invalidated: {out}");
@@ -3465,6 +3505,7 @@ mod tests {
         let write_args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
         let write_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
         tl.record("Write", &write_key, "written", &write_args, 0);
+        tl.invalidate_after_write("/tmp/x.rs");
         let out = tl.format(0);
         assert!(!out.contains("G("), "greps should be invalidated: {out}");
         assert!(
@@ -3482,6 +3523,7 @@ mod tests {
         let write_args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
         let write_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
         tl.record("Write", &write_key, "written", &write_args, 0);
+        tl.invalidate_after_write("/tmp/x.rs");
         let out = tl.format(0);
         assert!(
             !out.contains("L("),
@@ -3524,6 +3566,101 @@ mod tests {
         assert!(out.contains("R(5t"), "age should be 5: {out}");
         let out2 = tl.format(1);
         assert!(out2.contains("R(1t"), "age should be 1: {out2}");
+    }
+
+    #[test]
+    fn tool_ledger_deferred_invalidation_guards_concurrent_ordering() {
+        // Simulate the Phase 2 concurrency issue: a Write and a Read
+        // of the same file appear in the same batch.  The Read completes
+        // first but appears second in request order.  Without deferred
+        // invalidation, recording Write then Read would let the stale
+        // Read survive.  With deferred invalidation, the Read is nuked
+        // after the whole batch.
+        let mut tl = ToolLedger::new();
+        let w_args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
+        let w_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
+        let r_args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
+        let r_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
+        // Record Write, then Read (simulating request order).
+        tl.record("Write", &w_key, "written", &w_args, 0);
+        tl.record("Read", &r_key, "stale-content", &r_args, 0);
+        // No invalidation yet — Read is still present.
+        let pre = tl.format(0);
+        assert!(
+            pre.contains("R("),
+            "Read present before invalidation: {pre}"
+        );
+        // Apply deferred invalidation.
+        tl.invalidate_after_write("/tmp/x.rs");
+        let post = tl.format(0);
+        assert!(
+            !post.contains("R("),
+            "Read nuked after deferred invalidation: {post}"
+        );
+        assert!(post.contains("W("), "Write entry survives: {post}");
+    }
+
+    #[test]
+    fn tool_ledger_partial_only_omits_aggregate_count() {
+        // When only partial reads exist (no full-file read), the
+        // headline omits the aggregate count to avoid misleading
+        // summing across different windows.
+        let mut tl = ToolLedger::new();
+        let a1 =
+            serde_json::json!({"file_path": "/tmp/z.rs", "offset": 0, "limit": 100}).to_string();
+        let a2 =
+            serde_json::json!({"file_path": "/tmp/z.rs", "offset": 200, "limit": 100}).to_string();
+        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/z.rs"}));
+        tl.record("Read", &key, "chunk1", &a1, 0);
+        tl.record("Read", &key, "chunk2", &a2, 0);
+        let out = tl.format(0);
+        assert!(out.contains("/tmp/z.rs R(0t"), "headline present: {out}");
+        assert!(
+            !out.contains("/tmp/z.rs R(0t,"),
+            "no aggregate count: {out}"
+        );
+        assert!(out.contains("0-100:0t"), "first partial: {out}");
+        assert!(out.contains("200-100:0t"), "second partial: {out}");
+    }
+
+    #[test]
+    fn tool_ledger_storage_keys_are_untruncated() {
+        // Distinct file paths that would collide under truncation
+        // must remain separate entries in storage.
+        let mut tl = ToolLedger::new();
+        // truncate_ledger_value keeps head-40 + "\u{2026}" + tail-39.
+        // Build two paths that share the same head and tail but
+        // differ in the middle, so display labels collide.
+        let head = "/tmp/HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH"; // 40 chars
+        let tail = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT.rs"; // 39 chars
+        let path_a = format!("{head}_aaaa_{tail}");
+        let path_b = format!("{head}_bbbb_{tail}");
+        let args_a = serde_json::json!({"file_path": &path_a}).to_string();
+        let args_b = serde_json::json!({"file_path": &path_b}).to_string();
+        let key_a = ledger_key_arg(&serde_json::json!({"file_path": &path_a}));
+        let key_b = ledger_key_arg(&serde_json::json!({"file_path": &path_b}));
+        // Both display keys are identical after truncation.
+        assert_eq!(key_a, key_b, "display keys collide by design");
+        tl.record("Read", &key_a, "ca", &args_a, 0);
+        tl.record("Read", &key_b, "cb", &args_b, 0);
+        // Two distinct entries in storage.
+        assert_eq!(tl.reads.len(), 2, "storage keys must not collide");
+    }
+
+    #[test]
+    fn tool_ledger_edit_invalidates_read_without_w_entry() {
+        // Edit nukes reads for the target file but does not add a W.
+        let mut tl = ToolLedger::new();
+        let r_args = serde_json::json!({"file_path": "/tmp/e.rs"}).to_string();
+        let r_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/e.rs"}));
+        tl.record("Read", &r_key, "before", &r_args, 0);
+        let e_args = serde_json::json!({"file_path": "/tmp/e.rs"}).to_string();
+        let e_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/e.rs"}));
+        tl.record("Edit", &e_key, "", &e_args, 0);
+        tl.invalidate_after_write("/tmp/e.rs");
+        let out = tl.format(0);
+        assert!(!out.contains("R("), "read nuked by Edit: {out}");
+        assert!(!out.contains("W("), "no W entry for Edit: {out}");
     }
 
     #[test]
