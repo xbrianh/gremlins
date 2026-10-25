@@ -202,6 +202,16 @@ pub trait GremlinDefinition: Send + Sync {
         self.name()
     }
 
+    /// The ordered list of stage names in this definition.
+    ///
+    /// Used by scratchpad accumulation to order injected memory in
+    /// pipeline execution order rather than lexical order. Returns an empty
+    /// slice when the definition cannot enumerate its stages statically
+    /// (chat gremlins, where chat-* stage names already sort correctly).
+    fn stage_names(&self) -> &[String] {
+        &[]
+    }
+
     /// The filesystem path the definition was loaded from.
     fn path(&self) -> &Path;
 
@@ -285,6 +295,10 @@ impl GremlinDefinition for Box<dyn GremlinDefinition> {
 
     fn first_stage_name(&self) -> &str {
         self.as_ref().first_stage_name()
+    }
+
+    fn stage_names(&self) -> &[String] {
+        self.as_ref().stage_names()
     }
 
     fn path(&self) -> &Path {

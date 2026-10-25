@@ -52,6 +52,8 @@ pub struct StaticDefinition {
     pub bootstrap: Bootstrap,
     /// The stage tree, in declaration order.
     pub(crate) stages: Vec<StageSpec>,
+    /// Stage names, in declaration order — cached for [`GremlinDefinition::stage_names`].
+    pub(crate) stage_names: Vec<String>,
     /// The optional `land` stage — always an exec stage named `land`.
     pub(crate) land: Option<StageSpec>,
     /// Commands to run during `gremlins clean`, before workspace/scratch removal.
@@ -80,12 +82,14 @@ impl StaticDefinition {
         expanded_yaml: Value,
         default_task_models: Option<IndexMap<String, String>>,
     ) -> Self {
+        let stage_names: Vec<String> = stages.iter().map(|s| s.name().to_string()).collect();
         StaticDefinition {
             name,
             path,
             default_model,
             bootstrap,
             stages,
+            stage_names,
             land,
             clean_cmds,
             expanded_yaml,
@@ -106,6 +110,7 @@ impl StaticDefinition {
             default_model: default_model_placeholder(),
             bootstrap: Bootstrap::default(),
             stages: Vec::new(),
+            stage_names: Vec::new(),
             land: None,
             clean_cmds: Vec::new(),
             expanded_yaml: Value::Null,
@@ -135,6 +140,7 @@ impl StaticDefinition {
             default_model: default_model_placeholder(),
             bootstrap: Bootstrap::default(),
             stages: Vec::new(),
+            stage_names: Vec::new(),
             land: None,
             clean_cmds,
             expanded_yaml: Value::Null,
@@ -156,8 +162,10 @@ impl StaticDefinition {
     /// parent. `land` is cleared so parallel children never duplicate the
     /// parent's land side effects.
     pub(crate) fn clone_with_stages(&self, stages: Vec<StageSpec>) -> Self {
+        let stage_names: Vec<String> = stages.iter().map(|s| s.name().to_string()).collect();
         StaticDefinition {
             stages,
+            stage_names,
             cursor: 0,
             land: None,
             clean_cmds: Vec::new(),
@@ -442,6 +450,10 @@ impl GremlinDefinition for StaticDefinition {
         self.stages.first().map(|s| s.name()).unwrap_or(&self.name)
     }
 
+    fn stage_names(&self) -> &[String] {
+        &self.stage_names
+    }
+
     fn path(&self) -> &Path {
         &self.path
     }
@@ -627,6 +639,7 @@ mod tests {
             default_model: model("openai/gpt-4"),
             bootstrap: Bootstrap::default(),
             stages: vec![],
+            stage_names: vec![],
             land: Some(parsed_exec("land")),
             clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
@@ -646,6 +659,7 @@ mod tests {
             default_model: model("openai/gpt-4"),
             bootstrap: Bootstrap::default(),
             stages: vec![],
+            stage_names: vec![],
             land: Some(parsed_exec("land")),
             clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
@@ -676,6 +690,7 @@ mod tests {
             default_model: model("openai/gpt-4"),
             bootstrap: Bootstrap::default(),
             stages: vec![],
+            stage_names: vec![],
             land: None,
             clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,
@@ -873,12 +888,14 @@ mod tests {
 
     /// Build a multi-stage StaticDefinition from StageSpec entries.
     fn definition_with(stages: Vec<StageSpec>) -> StaticDefinition {
+        let stage_names: Vec<String> = stages.iter().map(|s| s.name().to_string()).collect();
         StaticDefinition {
             name: "test-def".into(),
             path: "/tmp/test.yaml".into(),
             default_model: model("openai/gpt-4"),
             bootstrap: Bootstrap::default(),
             stages,
+            stage_names,
             land: None,
             clean_cmds: vec![],
             expanded_yaml: serde_yaml::Value::Null,

@@ -242,6 +242,8 @@ pub(crate) struct RunContext {
     pub(crate) prepopulated_messages: Option<Vec<Message>>,
     /// Chat-only soft compaction settings (mirrors `RunParams`).
     pub(crate) compaction_opts: Option<conversation::CompactionOpts>,
+    /// Path to the persistent stage scratchpad file for per-turn re-injection.
+    pub(crate) scratchpad_path: Option<PathBuf>,
 }
 
 impl RunContext {
@@ -264,6 +266,7 @@ impl RunContext {
             stream_events: params.stream_events.clone(),
             prepopulated_messages: params.prepopulated_messages.clone(),
             compaction_opts,
+            scratchpad_path: params.scratchpad_path.clone(),
             params,
         }
     }
@@ -444,6 +447,7 @@ pub(crate) async fn run_agent_loop(
         tool_output_rx,
         ctx.prepopulated_messages.clone(),
         ctx.compaction_opts,
+        ctx.scratchpad_path.clone(),
     )
     .await
 }
@@ -529,6 +533,7 @@ pub(crate) async fn run_agent_loop_nested(
         None,
         None,
         prepopulated_messages,
+        None,
         None,
     )
     .await;
@@ -837,6 +842,7 @@ async fn run_agent_loop_core(
     tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
     prepopulated_messages: Option<Vec<Message>>,
     compaction_opts: Option<conversation::CompactionOpts>,
+    scratchpad_path: Option<PathBuf>,
 ) -> Result<CompletedRun, ClientError> {
     // Destructure the interactive session into its components so we can
     // thread them independently through the loop.
@@ -864,6 +870,7 @@ async fn run_agent_loop_core(
     let mut timed_out = false;
     let mut exhausted_turn_retries: bool = false;
     let mut exhausted_timeout_retries: bool = false;
+    let mut turn_scratchpad_injected: bool = false;
     let mut stream_error: Option<ProviderError> = None;
     let loop_start = Instant::now();
 
@@ -1005,6 +1012,30 @@ async fn run_agent_loop_core(
         // Snapshot before request construction so TTFT includes connection /
         // queue latency, not just server-side time-to-first-token.
         let turn_start = Instant::now();
+
+        // Inject the persistent scratchpad on every turn of the main
+        // (non-nested) loop. The model writes `_scratchpad.md` in the scratch
+        // root; re-reading it here keeps the working memory in front of the
+        // model even after conversation compaction. Nested (Task) loops are
+        // stateless helpers and are excluded.
+        //
+        // A flag (`turn_scratchpad_injected`) prevents duplicate injection
+        // across retry continuations (provider errors, idle timeouts) that
+        // re-enter this turn iteration with an already-augmented prompt.
+        if !nested && !turn_scratchpad_injected {
+            if let Some(ref scratchpad_path) = scratchpad_path {
+                if let Ok(content) = std::fs::read_to_string(scratchpad_path) {
+                    if !content.trim().is_empty() {
+                        let next_text = user_message_text(&next_prompt);
+                        let combined = format!(
+                            "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
+                        );
+                        next_prompt = Message::user(combined);
+                        turn_scratchpad_injected = true;
+                    }
+                }
+            }
+        }
 
         let next_prompt_text = user_message_text(&next_prompt);
         let overhead = conversation::completion_request_overhead(
@@ -2056,6 +2087,7 @@ async fn run_agent_loop_core(
         // trailing the complete result block instead of splitting it.
         history.extend(result_msgs);
         next_prompt = Message::user(ledger_message(&ledger));
+        turn_scratchpad_injected = false;
         remaining_turns -= 1;
     }
 
@@ -3301,6 +3333,7 @@ mod tests {
                 discovered_skills: None,
                 active_skills: None,
                 token_usage_sink: TokenUsageSink(None),
+                scratchpad_path: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
@@ -3310,6 +3343,7 @@ mod tests {
             stream_events: None,
             prepopulated_messages: None,
             compaction_opts: None,
+            scratchpad_path: None,
         }
     }
 
@@ -6284,6 +6318,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -6398,6 +6433,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -6499,6 +6535,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -6586,6 +6623,7 @@ mod tests {
                 None,
                 TokenUsageSink(None),
                 Some(session),
+                None,
                 None,
                 None,
                 None,
@@ -6750,6 +6788,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -6831,6 +6870,7 @@ mod tests {
             &None,
             None,
             TokenUsageSink(None),
+            None,
             None,
             None,
             None,

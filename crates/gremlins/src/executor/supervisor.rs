@@ -1575,6 +1575,14 @@ async fn handle_resume(
             Err(e) => return error_response(&format!("gremlin {id}: {e}")),
         };
         let produced_all = definition.artifact_keys_produced();
+        // Stage names at or after the target — used below to also clean up
+        // synthetic scratchpad artifacts from discarded stages.
+        let stages_after_target: HashSet<String> = definition
+            .stages
+            .iter()
+            .skip_while(|s| s.name() != target)
+            .map(|s| s.name().to_string())
+            .collect();
         // Parallel groups register runtime-only keys — completion markers and
         // child-prefixed merged bindings — that `produced_all` cannot contain.
         // Any group at or after the target re-runs, so its bookkeeping must
@@ -1592,6 +1600,20 @@ async fn handle_resume(
             // are not skipped and its fresh merges are not blocked.
             if parallel_keys.is_rerun(&key) {
                 continue;
+            }
+            // Drop synthetic scratchpad artifacts from stages at or after
+            // the target. Scratchpad keys are formatted as
+            // `artifact://_scratchpad/{name}.md` or
+            // `artifact://_scratchpad/{name}-{loop_iter}.md`.
+            if let Some(rest) = key
+                .strip_prefix("artifact://_scratchpad/")
+                .or_else(|| key.strip_prefix("_scratchpad/"))
+            {
+                let rest = rest.strip_suffix(".md").unwrap_or(rest);
+                let name_part = rest.split('-').next().unwrap_or(rest);
+                if stages_after_target.contains(name_part) {
+                    continue;
+                }
             }
             preserve.insert(key);
         }
@@ -2764,6 +2786,22 @@ async fn handle_chat(
         }
     };
     gremlin.client = client;
+    // Re-inject scratchpads persisted by prior turns of this persistent chat
+    // gremlin so working memory survives conversation compaction. The current
+    // turn's stage writes `_scratchpad.md` in the scratch root; on commit it is
+    // versioned under `artifact://_scratchpad/{stage}.md` and read back here.
+    let scratchpad_accumulated = crate::executor::agent_runner::accumulate_scratchpads(
+        gremlin.state.store_ref(),
+        &[], // chat stages sort correctly lexically
+    )
+    .await;
+    let text = if scratchpad_accumulated.is_empty() {
+        text.to_string()
+    } else {
+        let injection =
+            crate::executor::agent_runner::format_scratchpad_injection(&scratchpad_accumulated);
+        format!("{injection}\n\n---\n\n{text}")
+    };
     // Queue this turn's prompt onto the ChatDefinition so that
     // next_stage() builds the agent stage on demand.
     gremlin
@@ -2771,7 +2809,7 @@ async fn handle_chat(
         .as_any_mut()
         .and_then(|a| a.downcast_mut::<ChatDefinition>())
         .expect("chat gremlin must carry a ChatDefinition")
-        .set_pending(text, &chat_model, &system_prompt);
+        .set_pending(&text, &chat_model, &system_prompt);
     // Keep the state.json `model` field in sync too.
     let state_patch = serde_json::json!({"model": chat_model.to_string()});
     gremlin.state.patch(&[], state_patch.as_object().unwrap());
@@ -5623,6 +5661,26 @@ model-profiles:
         assert_eq!(
             super::build_chat_system_prompt("   \n", ""),
             super::CHAT_SYSTEM_PROMPT
+        );
+    }
+
+    #[test]
+    fn chat_system_prompt_documents_scratchpad() {
+        let prompt = super::CHAT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains("## Scratchpad"),
+            "the chat prompt must describe the persistent scratchpad"
+        );
+        assert!(
+            prompt.contains("_scratchpad.md"),
+            "the chat prompt must name the scratchpad file"
+        );
+        // The scratchpad guidance must precede the trailing Guidelines section.
+        let scratchpad = prompt.find("## Scratchpad").unwrap();
+        let guidelines = prompt.find("## Guidelines").unwrap();
+        assert!(
+            scratchpad < guidelines,
+            "the scratchpad section must sit before `## Guidelines`"
         );
     }
 
