@@ -920,7 +920,7 @@ async fn run_agent_loop_core(
     let mut exhausted_turn_retries: bool = false;
     let mut exhausted_timeout_retries: bool = false;
     let mut turn_scratchpad_injected: bool = false;
-    let mut last_scratchpad_hash: u64 = 0;
+    let mut last_scratchpad_hash: Option<u64> = None;
     let mut stream_error: Option<ProviderError> = None;
     let loop_start = Instant::now();
 
@@ -1082,8 +1082,8 @@ async fn run_agent_loop_core(
                         let mut hasher = DefaultHasher::new();
                         content.hash(&mut hasher);
                         let current_hash = hasher.finish();
-                        if current_hash != last_scratchpad_hash {
-                            last_scratchpad_hash = current_hash;
+                        if last_scratchpad_hash != Some(current_hash) {
+                            last_scratchpad_hash = Some(current_hash);
                             let next_text = user_message_text(&next_prompt);
                             let combined = format!(
                                 "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
@@ -1091,6 +1091,10 @@ async fn run_agent_loop_core(
                             next_prompt = Message::user(combined);
                             turn_scratchpad_injected = true;
                         }
+                    } else {
+                        // Scratchpad was cleared — reset so a later rewrite
+                        // of the same content won't be skipped.
+                        last_scratchpad_hash = None;
                     }
                 }
             }

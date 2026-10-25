@@ -2995,11 +2995,6 @@ pub(crate) async fn invoke(
         )
         && res.len() as u64 > cap
     {
-        if name == "WebSearch" {
-            // WebSearch already truncates internally; if size exceeds cap due
-            // to edge cases, don't further modify.
-            return res;
-        }
         let marker = match name {
             "Read" => format!(
                 "\n[...truncated at {} bytes, use offset/limit to paginate...]",
@@ -3011,21 +3006,24 @@ pub(crate) async fn invoke(
                 cap
             ),
             "Glob" => format!("\n[...truncated at {} bytes, restrict the path...]", cap),
-            "Landscape" => format!("\n[...truncated at {} bytes...]", cap),
+            "Landscape" | "WebSearch" => format!("\n[...truncated at {} bytes...]", cap),
             _ => format!("\n[...truncated at {} bytes...]", cap),
         };
         let marker_len = marker.len() as u64;
-        let keep = if marker_len >= cap {
-            0
-        } else {
-            (cap - marker_len) as usize
-        };
+        let keep = cap.saturating_sub(marker_len) as usize;
         if keep == 0 {
-            return marker;
+            // Marker alone exceeds cap — return a char-boundary prefix.
+            return truncate_to_bytes(&marker, cap as usize);
         }
         let mut trunc = String::with_capacity(cap as usize);
-        for c in res.chars().take(keep) {
+        let mut used = 0usize;
+        for c in res.chars() {
+            let cl = c.len_utf8();
+            if used + cl > keep {
+                break;
+            }
             trunc.push(c);
+            used += cl;
         }
         trunc.push_str(&marker);
         return trunc;
@@ -3033,6 +3031,21 @@ pub(crate) async fn invoke(
     res
 }
 
+/// Return a prefix of `s` that fits within `max_bytes`, at a valid UTF-8
+/// character boundary.
+fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
+    let mut out = String::with_capacity(max_bytes);
+    let mut used = 0usize;
+    for c in s.chars() {
+        let cl = c.len_utf8();
+        if used + cl > max_bytes {
+            break;
+        }
+        out.push(c);
+        used += cl;
+    }
+    out
+}
 /// Invoke handler for the LoadSkill tool.
 fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String {
     let name = match args.get("name").and_then(|v| v.as_str()) {
@@ -6796,20 +6809,24 @@ mod tests {
         let _env = crate::test_support::EnvGuard::lock();
         let dir = tmp();
         let c = ctx(&dir);
-        // Generate output that is ~200 bytes — well over a 10-byte cap.
-        let args = serde_json::json!({"command": "i=0; while [ $i -lt 200 ]; do printf x; i=$((i+1)); done"}).to_string();
-        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
+        // Generate ~500 bytes of output — well over a 200-byte cap.
+        let args = serde_json::json!({"command": "i=0; while [ $i -lt 500 ]; do printf x; i=$((i+1)); done"}).to_string();
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "200");
         let result = invoke("tool-test-id", "Bash", &c, &args).await;
         assert!(
-            result.contains("[...truncated at 10 bytes...]"),
+            result.contains("[...truncated at 200 bytes...]"),
             "oversized Bash must carry a truncation marker, got: {result}"
+        );
+        assert!(
+            (result.len() as u64) <= 200,
+            "truncated result must fit within cap, got len {}: {result}",
+            result.len()
         );
         assert!(
             !result.contains("Tool output exceeded the limit"),
             "oversized Bash must be truncated, not discarded, got: {result}"
         );
     }
-
     #[tokio::test]
     async fn invoke_caps_oversized_read_result() {
         let _env = crate::test_support::EnvGuard::lock();
@@ -6818,11 +6835,16 @@ mod tests {
         let big = "x".repeat(500);
         std::fs::write(dir.join("big.txt"), &big).unwrap();
         let args = serde_json::json!({"file_path": "big.txt"}).to_string();
-        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "200");
         let result = invoke("tool-test-id", "Read", &c, &args).await;
         assert!(
-            result.contains("[...truncated at 10 bytes, use offset/limit to paginate...]"),
+            result.contains("[...truncated at 200 bytes, use offset/limit to paginate...]"),
             "oversized Read must carry a truncation marker, got: {result}"
+        );
+        assert!(
+            (result.len() as u64) <= 200,
+            "truncated result must fit within cap, got len {}: {result}",
+            result.len()
         );
         assert!(
             !result.contains("Tool output exceeded the limit"),
@@ -6836,25 +6858,29 @@ mod tests {
         let dir = tmp();
         let c = ctx(&dir);
         // Generate a Rust file with many long-named functions so the landscape
-        // output comfortably exceeds a 10-byte cap.
+        // output comfortably exceeds a 200-byte cap.
         let mut src = String::new();
         for i in 0..20 {
             src.push_str(&format!("fn very_long_function_name_{i:03}() {{}}\n"));
         }
         std::fs::write(dir.join("big.rs"), &src).unwrap();
         let args = serde_json::json!({"file_path": "big.rs"}).to_string();
-        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "200");
         let result = invoke("tool-test-id", "Landscape", &c, &args).await;
         assert!(
-            result.contains("[...truncated at 10 bytes...]"),
+            result.contains("[...truncated at 200 bytes...]"),
             "oversized Landscape must carry a truncation marker, got: {result}"
+        );
+        assert!(
+            (result.len() as u64) <= 200,
+            "truncated result must fit within cap, got len {}: {result}",
+            result.len()
         );
         assert!(
             !result.contains("Tool output exceeded the limit"),
             "oversized Landscape must be truncated, not discarded, got: {result}"
         );
     }
-
     #[tokio::test]
     async fn invoke_truncation_preserves_content_prefix() {
         let _env = crate::test_support::EnvGuard::lock();
@@ -6896,6 +6922,59 @@ mod tests {
             !result.contains("[...truncated at"),
             "cap=0 must not truncate output, got: {result}"
         );
+    }
+
+    #[tokio::test]
+    async fn invoke_truncation_respects_byte_boundary_with_multibyte_utf8() {
+        let _env = crate::test_support::EnvGuard::lock();
+        let dir = tmp();
+        let c = ctx(&dir);
+        // 200 '§' chars at 2 bytes each = 400 bytes. Cap at 100 bytes.
+        // Read marker is ~62 bytes, so keep ≈ 38 bytes = 19 '§' chars.
+        // Must not split a multi-byte char mid-codepoint.
+        let content = "§".repeat(200);
+        std::fs::write(dir.join("utf8.txt"), &content).unwrap();
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "100");
+        let args = serde_json::json!({"file_path": "utf8.txt"}).to_string();
+        let result = invoke("tool-test-id", "Read", &c, &args).await;
+        assert!(
+            (result.len() as u64) <= 100,
+            "truncated result must fit within the cap, got len {}: {result}",
+            result.len()
+        );
+        assert!(
+            result.contains("[...truncated at 100 bytes, use offset/limit to paginate...]"),
+            "multibyte truncation must carry a marker, got: {result}"
+        );
+        // Should contain some multi-byte content before truncation.
+        assert!(
+            result.contains('§'),
+            "truncated result must preserve multibyte prefix, got: {result}"
+        );
+        // Verify the result is valid UTF-8 by round-tripping.
+        let _valid = String::from_utf8(result.as_bytes().to_vec())
+            .expect("truncated output must be valid UTF-8");
+    }
+
+    #[tokio::test]
+    async fn invoke_cap_smaller_than_marker_stays_within_limit() {
+        let _env = crate::test_support::EnvGuard::lock();
+        let dir = tmp();
+        let c = ctx(&dir);
+        let big = "x".repeat(500);
+        std::fs::write(dir.join("big.txt"), &big).unwrap();
+        let args = serde_json::json!({"file_path": "big.txt"}).to_string();
+        // Cap is 5 bytes — every marker is longer than that.
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "5");
+        let result = invoke("tool-test-id", "Read", &c, &args).await;
+        assert!(
+            (result.len() as u64) <= 5,
+            "result must fit within cap when marker exceeds cap, got len {}: {result}",
+            result.len()
+        );
+        // Result should be valid UTF-8.
+        let _valid = String::from_utf8(result.as_bytes().to_vec())
+            .expect("marker-only output must be valid UTF-8");
     }
 
     #[tokio::test]
