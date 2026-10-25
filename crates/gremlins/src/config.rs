@@ -1402,10 +1402,13 @@ pub fn scratch_root(gremlin_id: Option<&str>) -> PathBuf {
 /// leakage and collisions.
 pub(crate) fn project_scratchpad_path(project_root: &Path) -> PathBuf {
     use sha2::Digest;
-    // Normalize deterministically: resolve (without symlink chasing) then
-    // lexically clean so the same project always hashes to the same key.
-    let normalized =
-        std::path::absolute(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    // Normalize deterministically: canonicalize to resolve symlinks and
+    // `..` so the same project always hashes to the same key, falling back
+    // to absolute (which resolves `..` but not symlinks) on failure.
+    let normalized = project_root
+        .canonicalize()
+        .or_else(|_| std::path::absolute(project_root))
+        .unwrap_or_else(|_| project_root.to_path_buf());
     let key = normalized.to_string_lossy();
     let mut hasher = sha2::Sha256::new();
     hasher.update(key.as_bytes());
