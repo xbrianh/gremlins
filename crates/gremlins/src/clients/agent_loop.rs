@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -244,6 +244,8 @@ pub(crate) struct RunContext {
     pub(crate) compaction_opts: Option<conversation::CompactionOpts>,
     /// Path to the persistent stage scratchpad file for per-turn re-injection.
     pub(crate) scratchpad_path: Option<PathBuf>,
+    /// The allowed root for containment-checked scratchpad reads.
+    pub(crate) scratchpad_root: Option<PathBuf>,
 }
 
 impl RunContext {
@@ -257,6 +259,7 @@ impl RunContext {
             format!("[{}] ", params.label)
         };
         let compaction_opts = params.compaction_opts;
+        let scratchpad_root = params.cwd.clone();
         Self {
             idle_timeout,
             prefix,
@@ -267,6 +270,7 @@ impl RunContext {
             prepopulated_messages: params.prepopulated_messages.clone(),
             compaction_opts,
             scratchpad_path: params.scratchpad_path.clone(),
+            scratchpad_root,
             params,
         }
     }
@@ -445,6 +449,7 @@ pub(crate) async fn run_agent_loop(
         ctx.prepopulated_messages.clone(),
         ctx.compaction_opts,
         ctx.scratchpad_path.clone(),
+        ctx.scratchpad_root.clone(),
     )
     .await
 }
@@ -530,6 +535,7 @@ pub(crate) async fn run_agent_loop_nested(
         None,
         None,
         prepopulated_messages,
+        None,
         None,
         None,
     )
@@ -883,6 +889,7 @@ async fn run_agent_loop_core(
     prepopulated_messages: Option<Vec<Message>>,
     compaction_opts: Option<conversation::CompactionOpts>,
     scratchpad_path: Option<PathBuf>,
+    scratchpad_root: Option<PathBuf>,
 ) -> Result<CompletedRun, ClientError> {
     // Destructure the interactive session into its components so we can
     // thread them independently through the loop.
@@ -1064,7 +1071,10 @@ async fn run_agent_loop_core(
         // re-enter this turn iteration with an already-augmented prompt.
         if !nested && !turn_scratchpad_injected {
             if let Some(ref scratchpad_path) = scratchpad_path {
-                if let Ok(content) = std::fs::read_to_string(scratchpad_path) {
+                let root = scratchpad_root.as_deref().unwrap_or_else(|| Path::new("."));
+                if let Ok(content) =
+                    crate::executor::agent_runner::read_scratchpad_contained(scratchpad_path, root)
+                {
                     if !content.trim().is_empty() {
                         let next_text = user_message_text(&next_prompt);
                         let combined = format!(
@@ -3390,6 +3400,7 @@ mod tests {
             prepopulated_messages: None,
             compaction_opts: None,
             scratchpad_path: None,
+            scratchpad_root: None,
         }
     }
 
@@ -6365,6 +6376,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -6480,6 +6492,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -6582,6 +6595,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -6669,6 +6683,7 @@ mod tests {
                 None,
                 TokenUsageSink(None),
                 Some(session),
+                None,
                 None,
                 None,
                 None,
@@ -6835,6 +6850,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -6916,6 +6932,7 @@ mod tests {
             &None,
             None,
             TokenUsageSink(None),
+            None,
             None,
             None,
             None,

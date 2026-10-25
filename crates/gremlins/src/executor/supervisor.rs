@@ -1166,7 +1166,9 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
         // Flush the scratchpad before calling handle_stop so working
         // memory is not lost.
         if let (Some(ref source), Some(ref pr)) = (&scratchpad_source, &project_root) {
-            persist_project_scratchpad(source, pr);
+            let scratchpad_file =
+                source.join(crate::executor::agent_runner::chat_scratchpad_filename(id));
+            persist_project_scratchpad(&scratchpad_file, pr);
         }
     }
     handle_stop(request, &watch::channel(false).0).await
@@ -1231,7 +1233,9 @@ async fn stop_session_chat_gremlin(id: &str) {
                 }
             }
             if let (Some(ref source), Some(ref pr)) = (&scratchpad_source, &project_root) {
-                persist_project_scratchpad(source, pr);
+                let scratchpad_file =
+                    source.join(crate::executor::agent_runner::chat_scratchpad_filename(id));
+                persist_project_scratchpad(&scratchpad_file, pr);
             }
             return;
         }
@@ -2875,7 +2879,10 @@ async fn handle_chat(
     // accumulated content subsumes the persistent memory.
     if scratchpad_accumulated.is_empty() {
         let project_sp = crate::config::project_scratchpad_path(&project_root);
-        if let Ok(content) = std::fs::read_to_string(&project_sp) {
+        if let Ok(content) = crate::executor::agent_runner::read_scratchpad_contained(
+            &project_sp,
+            &crate::config::state_root(),
+        ) {
             if !content.trim().is_empty() {
                 let injection =
                     crate::executor::agent_runner::format_scratchpad_injection(&content);
@@ -3616,19 +3623,19 @@ async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &Se
         .await;
 }
 
-/// Persist the chat gremlin's working `_scratchpad.md` to the project-level
+/// Persist the chat gremlin's working scratchpad file to the project-level
 /// scratchpad in XDG state so working memory survives across sessions.
 /// Best-effort: failures are silently ignored.
 ///
 /// If the working file does not exist the model never wrote to it, so the
-/// existing XDG scratchpad is preserved. If the file exists its content is
-/// persisted unconditionally (including empty files, which represent an
-/// explicit clear by the model).
-fn persist_project_scratchpad(scratchpad_source: &Path, project_root: &Path) {
-    let scratchpad_file = scratchpad_source.join("_scratchpad.md");
-    let content = match std::fs::read_to_string(&scratchpad_file) {
+/// existing XDG scratchpad is preserved.
+fn persist_project_scratchpad(scratchpad_file: &Path, project_root: &Path) {
+    let content = match crate::executor::agent_runner::read_scratchpad_contained(
+        scratchpad_file,
+        project_root,
+    ) {
         Ok(c) => c,
-        Err(_) => return, // file doesn't exist — model never wrote, keep XDG
+        Err(_) => return, // file doesn't exist or is invalid — keep XDG
     };
     let path = config::project_scratchpad_path(project_root);
     if let Some(parent) = path.parent() {
@@ -3690,7 +3697,9 @@ async fn cleanup_chat_gremlin(id: &str) {
     // Persist the project-level scratchpad so working memory survives across
     // chat sessions.
     if let (Some(ref source), Some(ref pr)) = (&scratchpad_source, &project_root) {
-        persist_project_scratchpad(source, pr);
+        let scratchpad_file =
+            source.join(crate::executor::agent_runner::chat_scratchpad_filename(id));
+        persist_project_scratchpad(&scratchpad_file, pr);
     }
 
     // Remove from RUN_MAP. If the id wasn't there (already stopped by

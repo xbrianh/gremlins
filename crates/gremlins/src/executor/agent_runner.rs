@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -266,23 +267,38 @@ pub async fn commit_agent(
     // checkout. A stage that never wrote a scratchpad leaves the file absent,
     // and the optional bind is simply skipped.
     if !prepared.scratchpad_path.is_empty() {
-        if let Ok(content) = tokio::fs::read_to_string(&prepared.scratchpad_path).await {
-            if !content.trim().is_empty() {
-                if let Some(parent) = Path::new(&prepared.scratchpad_persist_path).parent() {
-                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                        log::warn!(
-                            "scratchpad persist: failed to create parent dir {}: {e}",
-                            parent.display()
-                        );
-                    }
-                }
-                if let Err(e) = tokio::fs::write(&prepared.scratchpad_persist_path, &content).await
-                {
+        let root = if !prepared.cwd.is_empty() {
+            Path::new(&prepared.cwd)
+        } else {
+            // Fall back to the parent directory of the scratchpad file itself.
+            Path::new(&prepared.scratchpad_path)
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+        };
+        let content = match read_scratchpad_contained(Path::new(&prepared.scratchpad_path), root) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!(
+                    "scratchpad persist: failed to read {}: {e}",
+                    prepared.scratchpad_path
+                );
+                String::new()
+            }
+        };
+        if !content.trim().is_empty() {
+            if let Some(parent) = Path::new(&prepared.scratchpad_persist_path).parent() {
+                if let Err(e) = tokio::fs::create_dir_all(parent).await {
                     log::warn!(
-                        "scratchpad persist: failed to write {}: {e}",
-                        prepared.scratchpad_persist_path
+                        "scratchpad persist: failed to create parent dir {}: {e}",
+                        parent.display()
                     );
                 }
+            }
+            if let Err(e) = tokio::fs::write(&prepared.scratchpad_persist_path, &content).await {
+                log::warn!(
+                    "scratchpad persist: failed to write {}: {e}",
+                    prepared.scratchpad_persist_path
+                );
             }
         }
     }
@@ -380,6 +396,138 @@ pub(crate) fn format_scratchpad_injection(content: &str) -> String {
          \n\
          {content}"
     )
+}
+
+// ---------------------------------------------------------------------------
+// Scratchpad I/O helpers
+// ---------------------------------------------------------------------------
+
+/// Filename for a chat gremlin’s working scratchpad. Chat sessions share the
+/// project root as their cwd, so the default `_scratchpad.md` would be shared
+/// by every concurrent session. Including the gremlin id (validated safe
+/// path component) gives each chat session its own file.
+pub(crate) fn chat_scratchpad_filename(gremlin_id: &str) -> String {
+    format!("_scratchpad-{gremlin_id}.md")
+}
+
+#[cfg(unix)]
+fn open_scratchpad_read(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_scratchpad_read(path: &Path) -> std::io::Result<std::fs::File> {
+    reject_symlink(path)?;
+    std::fs::File::open(path)
+}
+
+#[cfg(unix)]
+fn create_scratchpad_reset(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_scratchpad_reset(path: &Path) -> std::io::Result<std::fs::File> {
+    reject_symlink(path)?;
+    // Remove any existing symlink before creating a regular file.
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let _ = std::fs::remove_file(path);
+        }
+        _ => {}
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+}
+
+/// Reject a symlink at `path` so callers never inadvertently follow one.
+fn reject_symlink(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("scratchpad path is a symlink: {}", path.display()),
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Read the scratchpad file at `path` with no-follow semantics (symlinks are
+/// rejected) and a root-containment check so a file that escapes the worktree
+/// via directory symlinks is also rejected.
+pub(crate) fn read_scratchpad_contained(path: &Path, root: &Path) -> std::io::Result<String> {
+    reject_symlink(path)?;
+    // Canonicalize both paths to resolve any parent-directory symlinks.
+    let canonical_path = path.canonicalize().map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("cannot resolve scratchpad path {}: {e}", path.display()),
+        )
+    })?;
+    let canonical_root = root.canonicalize().map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("cannot resolve scratchpad root {}: {e}", root.display()),
+        )
+    })?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "scratchpad path escapes allowed root: {} not under {}",
+                canonical_path.display(),
+                canonical_root.display()
+            ),
+        ));
+    }
+    let mut file = open_scratchpad_read(path)?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    Ok(content)
+}
+
+/// Reset (truncate) the scratchpad file at `path` without following symlinks.
+/// If a stale symlink is present it is removed first so the no-follow open
+/// can succeed on a fresh regular file.
+pub(crate) fn reset_scratchpad(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        // On unix the O_NOFOLLOW open is the real defense; remove a stale
+        // symlink first so create+truncate succeeds.
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                std::fs::remove_file(path)?;
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        drop(create_scratchpad_reset(path)?);
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        // On non-unix we rely on the reject_symlink + remove-if-symlink dance
+        // inside `create_scratchpad_reset`.
+        drop(create_scratchpad_reset(path)?);
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

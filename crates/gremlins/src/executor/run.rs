@@ -4,7 +4,7 @@
 //! [`run_stage`]. Parallel groups delegate to [`run_parallel`].
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
@@ -510,6 +510,25 @@ async fn run_agent(
     prepared.cwd = gremlin.cwd().to_string_lossy().into_owned();
     prepared.artifact_dir = artifact_dir.to_string_lossy().into_owned();
 
+    let is_chat = gremlin.state.read_str("kind") == "chat";
+
+    // Per-chat scratchpad filename: chat sessions share the project root as
+    // their cwd, so the default `_scratchpad.md` would be shared by every
+    // concurrent session. Including the gremlin id gives each session its
+    // own scratchpad file.
+    let scratchpad_name: std::borrow::Cow<'_, str> = if is_chat {
+        let name = crate::executor::agent_runner::chat_scratchpad_filename(gremlin.id.as_str());
+        if !prepared.scratchpad_path.is_empty() {
+            let parent = Path::new(&prepared.scratchpad_path)
+                .parent()
+                .unwrap_or_else(|| Path::new("."));
+            prepared.scratchpad_path = parent.join(&name).to_string_lossy().into_owned();
+        }
+        std::borrow::Cow::Owned(name)
+    } else {
+        std::borrow::Cow::Borrowed("_scratchpad.md")
+    };
+
     // Reset the scratchpad file at stage start so the model always begins with
     // a clean slate. Prior-stage working memory is injected below (headless) or
     // by the chat supervisor (chat gremlins). The model writes to this file
@@ -517,7 +536,11 @@ async fn run_agent(
     // URI. Resetting here prevents a previous stage's scratchpad from leaking
     // into this stage's commit.
     if !prepared.scratchpad_path.is_empty() {
-        let _ = std::fs::write(&prepared.scratchpad_path, "");
+        if let Err(e) =
+            crate::executor::agent_runner::reset_scratchpad(Path::new(&prepared.scratchpad_path))
+        {
+            log::warn!("scratchpad reset failed: {e}");
+        }
     }
 
     std::fs::create_dir_all(&artifact_dir)?;
@@ -529,7 +552,13 @@ async fn run_agent(
     } else {
         None
     };
-    let system_prompt = assemble_system_prompt(&prepared.system_prompt(), landscape.as_deref());
+    // When a chat gremlin starts, replace the generic `_scratchpad.md`
+    // mention in the system prompt with the concrete per-session filename.
+    let mut prompt = prepared.system_prompt();
+    if is_chat {
+        prompt = prompt.replace("_scratchpad.md", &scratchpad_name);
+    }
+    let system_prompt = assemble_system_prompt(&prompt, landscape.as_deref());
 
     let stage_env = gremlin.env.clone();
 
@@ -538,7 +567,6 @@ async fn run_agent(
         &task_models_by_kind,
     );
 
-    let is_chat = gremlin.state.read_str("kind") == "chat";
     let chat_turn: Option<usize> = chat_turn_from_stage_name(&agent.name);
 
     // Re-inject scratchpads persisted by prior stages so working memory (file
