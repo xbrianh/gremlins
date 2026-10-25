@@ -1953,33 +1953,17 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.width,
                             );
                         }
-                        KeyCode::Char('j') => {
-                            if app.screen == Screen::Runs {
-                                app.watch_move(1);
-                            } else if app.screen.is_chat() {
-                                app.insert_char('j');
-                                app.clear_completion();
-                                app.history_cursor = None;
-                                live_area.ensure_input_cursor_visible(
-                                    app.input_cursor,
-                                    &app.input,
-                                    app.width,
-                                );
-                            }
+                        KeyCode::Char('j')
+                            if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                                && app.screen == Screen::Runs =>
+                        {
+                            app.watch_move(1);
                         }
-                        KeyCode::Char('k') => {
-                            if app.screen == Screen::Runs {
-                                app.watch_move(-1);
-                            } else if app.screen.is_chat() {
-                                app.insert_char('k');
-                                app.clear_completion();
-                                app.history_cursor = None;
-                                live_area.ensure_input_cursor_visible(
-                                    app.input_cursor,
-                                    &app.input,
-                                    app.width,
-                                );
-                            }
+                        KeyCode::Char('k')
+                            if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                                && app.screen == Screen::Runs =>
+                        {
+                            app.watch_move(-1);
                         }
                         KeyCode::Char(ch) => {
                             if let Some(prompt) = live_area.debug_prompt_mut() {
