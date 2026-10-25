@@ -1144,20 +1144,50 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
 /// Remove a chat gremlin from whichever session owns it and cancel its turn.
 /// Called by control-socket `stop`.
 async fn stop_session_chat_gremlin(id: &str) {
-    // Persist the project-level scratchpad before removing from the session
-    // so that working memory survives across chat sessions.
-    persist_project_scratchpad(id);
+    // Snapshot the scratch directory and project root from the run-map before
+    // touching the session, so the persist step sees the final state.
+    let (scratch_dir, project_root) = {
+        let map = get_run_map().lock().unwrap();
+        match map.get(id) {
+            Some(handle) => (
+                Some(handle.scratch_dir.clone()),
+                handle
+                    .store
+                    .read_field("project_root")
+                    .and_then(|v| v.as_str().map(String::from)),
+            ),
+            None => (None, None),
+        }
+    };
 
+    // Cancel the in-flight turn and wait for it to finish so the model
+    // doesn't race with our snapshot of _scratchpad.md.
     let sessions: Vec<SessionHandle> = session_map().lock().unwrap().values().cloned().collect();
     for session in sessions {
         let mut s = session.lock().await;
         if s.chat_ids.remove(id) {
             s.chat_gremlins.remove(id);
-            if let Some(cur) = &s.current_turn {
+            let done = if let Some(cur) = &s.current_turn {
                 if cur.id == id {
                     cur.soft_cancel.store(false, Ordering::Relaxed);
                     cur.cancel.cancel();
+                    Some(Arc::clone(&cur.done))
+                } else {
+                    None
                 }
+            } else {
+                None
+            };
+            drop(s);
+            // Only wait for the turn to drain when a live run-map entry
+            // confirms the task is actually in flight.
+            if scratch_dir.is_some() {
+                if let Some(done) = done {
+                    done.notified().await;
+                }
+            }
+            if let (Some(ref scratch_dir), Some(ref pr)) = (&scratch_dir, &project_root) {
+                persist_project_scratchpad(scratch_dir, Path::new(pr));
             }
             return;
         }
@@ -2719,7 +2749,6 @@ async fn handle_chat(
     // 5. Get or create the session's chat gremlin (id was resolved in step 3
     //    after waiting for the in-flight turn).
 
-    let is_new_session = id.is_none();
     let id = match id {
         Some(id) => id,
         None => {
@@ -2801,18 +2830,6 @@ async fn handle_chat(
     )
     .await;
     let mut text = text.to_string();
-    // On the first turn of a new session, inject the project-level scratchpad
-    // from the XDG state directory so working memory survives across sessions.
-    if is_new_session {
-        let project_sp = config::project_scratchpad_path(&project_root);
-        if let Ok(content) = std::fs::read_to_string(&project_sp) {
-            if !content.trim().is_empty() {
-                text = format!(
-                    "## Project Scratchpad\n\nThe following is your persistent project scratchpad from previous sessions:\n\n{content}\n\n---\n\n{text}"
-                );
-            }
-        }
-    }
     // Inject turn-level accumulated scratchpads from prior turns of this session.
     if !scratchpad_accumulated.is_empty() {
         let injection =
@@ -3548,53 +3565,66 @@ async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &Se
         .await;
 }
 
-/// Shut down a chat gremlin: remove run-map entry, write terminal state,
-/// reap client, emit RunStopped.
 /// Persist the chat gremlin's working `_scratchpad.md` to the project-level
 /// scratchpad in XDG state so working memory survives across sessions.
-/// Best-effort: failures are silently ignored (the file may not exist).
-fn persist_project_scratchpad(id: &str) {
-    let map = get_run_map().lock().unwrap();
-    let Some(handle) = map.get(id) else {
-        return;
+/// Best-effort: failures are silently ignored.
+///
+/// If the working file does not exist the model never wrote to it, so the
+/// existing XDG scratchpad is preserved. If the file exists its content is
+/// persisted unconditionally (including empty files, which represent an
+/// explicit clear by the model).
+fn persist_project_scratchpad(scratch_dir: &Path, project_root: &Path) {
+    let scratchpad_file = scratch_dir.join("_scratchpad.md");
+    let content = match std::fs::read_to_string(&scratchpad_file) {
+        Ok(c) => c,
+        Err(_) => return, // file doesn't exist — model never wrote, keep XDG
     };
-    let scratchpad_file = handle.scratch_dir.join("_scratchpad.md");
-    let Ok(content) = std::fs::read_to_string(&scratchpad_file) else {
-        return;
-    };
-    if content.trim().is_empty() {
-        return;
-    }
-    let Some(project_root) = handle
-        .store
-        .read_field("project_root")
-        .and_then(|v| v.as_str().map(String::from))
-    else {
-        return;
-    };
-    let path = config::project_scratchpad_path(std::path::Path::new(&project_root));
+    let path = config::project_scratchpad_path(project_root);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&path, &content);
+    // Atomic write to avoid truncation-corruption on crash: write to a
+    // temporary sibling then rename over the destination.
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, &content).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
 }
 
+/// Shut down a chat gremlin: remove run-map entry, write terminal state,
+/// reap client, emit RunStopped.
 async fn cleanup_chat_gremlin(id: &str) {
     if validate_gremlin_id(id).is_err() {
         return;
     }
 
-    // Persist the project-level scratchpad before tearing down so that
-    // working memory survives across chat sessions.
-    persist_project_scratchpad(id);
-
-    // If the turn's run task is still in flight, cancel it.
-    let handle = {
+    // Snapshot the scratch directory and project root before cancelling the
+    // turn and removing from the run-map, so the persist step sees the final
+    // _scratchpad.md state.
+    let (scratch_dir, project_root, cancel) = {
         let map = get_run_map().lock().unwrap();
-        map.get(id).map(|handle| handle.cancel.clone())
+        match map.get(id) {
+            Some(handle) => (
+                handle.scratch_dir.clone(),
+                handle
+                    .store
+                    .read_field("project_root")
+                    .and_then(|v| v.as_str().map(String::from)),
+                Some(handle.cancel.clone()),
+            ),
+            None => (PathBuf::new(), None, None),
+        }
     };
-    if let Some(cancel) = handle {
+
+    // Cancel the in-flight turn so the model stops writing before we persist.
+    if let Some(cancel) = cancel {
         cancel.cancel();
+    }
+
+    // Persist the project-level scratchpad so working memory survives across
+    // chat sessions.
+    if let Some(ref pr) = project_root {
+        persist_project_scratchpad(&scratch_dir, Path::new(pr));
     }
 
     // Remove from RUN_MAP. If the id wasn't there (already stopped by
@@ -3732,6 +3762,17 @@ fn create_chat_gremlin(
     let scratch_dir = ScratchDir::Temp(
         tempfile::TempDir::new().map_err(|e| format!("failed to create temp scratch dir: {e}"))?,
     );
+
+    // Seed _scratchpad.md from the project-level XDG scratchpad so working
+    // memory survives across chat sessions. The agent loop re-injects this
+    // file on every turn; the model can update it with the Write tool.
+    let project_sp = crate::config::project_scratchpad_path(&project_root);
+    if let Ok(content) = std::fs::read_to_string(&project_sp) {
+        if !content.trim().is_empty() {
+            let seed_path = scratch_dir.path().join("_scratchpad.md");
+            let _ = std::fs::write(&seed_path, &content);
+        }
+    }
 
     Ok(Gremlin {
         id: gremlin_id,
