@@ -1396,6 +1396,20 @@ pub fn scratch_root(gremlin_id: Option<&str>) -> PathBuf {
     resolve_scratch_root(overrides.as_ref(), gremlin_id)
 }
 
+/// Path to the project-level persistent scratchpad file that survives chat
+/// sessions. Lives at `{state_root()}/scratchpads/{hash}.md` where hash is a
+/// deterministic digest of the canonical project root path, avoiding path
+/// leakage and collisions.
+pub fn project_scratchpad_path(project_root: &Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let canonical =
+        std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canonical.hash(&mut hasher);
+    let hash = format!("{:016x}", hasher.finish());
+    state_root().join("scratchpads").join(format!("{hash}.md"))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

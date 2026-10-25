@@ -1144,6 +1144,10 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
 /// Remove a chat gremlin from whichever session owns it and cancel its turn.
 /// Called by control-socket `stop`.
 async fn stop_session_chat_gremlin(id: &str) {
+    // Persist the project-level scratchpad before removing from the session
+    // so that working memory survives across chat sessions.
+    persist_project_scratchpad(id);
+
     let sessions: Vec<SessionHandle> = session_map().lock().unwrap().values().cloned().collect();
     for session in sessions {
         let mut s = session.lock().await;
@@ -2715,6 +2719,7 @@ async fn handle_chat(
     // 5. Get or create the session's chat gremlin (id was resolved in step 3
     //    after waiting for the in-flight turn).
 
+    let is_new_session = id.is_none();
     let id = match id {
         Some(id) => id,
         None => {
@@ -2795,13 +2800,25 @@ async fn handle_chat(
         &[], // chat stages sort correctly lexically
     )
     .await;
-    let text = if scratchpad_accumulated.is_empty() {
-        text.to_string()
-    } else {
+    let mut text = text.to_string();
+    // On the first turn of a new session, inject the project-level scratchpad
+    // from the XDG state directory so working memory survives across sessions.
+    if is_new_session {
+        let project_sp = config::project_scratchpad_path(&project_root);
+        if let Ok(content) = std::fs::read_to_string(&project_sp) {
+            if !content.trim().is_empty() {
+                text = format!(
+                    "## Project Scratchpad\n\nThe following is your persistent project scratchpad from previous sessions:\n\n{content}\n\n---\n\n{text}"
+                );
+            }
+        }
+    }
+    // Inject turn-level accumulated scratchpads from prior turns of this session.
+    if !scratchpad_accumulated.is_empty() {
         let injection =
             crate::executor::agent_runner::format_scratchpad_injection(&scratchpad_accumulated);
-        format!("{injection}\n\n---\n\n{text}")
-    };
+        text = format!("{injection}\n\n---\n\n{text}");
+    }
     // Queue this turn's prompt onto the ChatDefinition so that
     // next_stage() builds the agent stage on demand.
     gremlin
@@ -3533,10 +3550,43 @@ async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &Se
 
 /// Shut down a chat gremlin: remove run-map entry, write terminal state,
 /// reap client, emit RunStopped.
+/// Persist the chat gremlin's working `_scratchpad.md` to the project-level
+/// scratchpad in XDG state so working memory survives across sessions.
+/// Best-effort: failures are silently ignored (the file may not exist).
+fn persist_project_scratchpad(id: &str) {
+    let map = get_run_map().lock().unwrap();
+    let Some(handle) = map.get(id) else {
+        return;
+    };
+    let scratchpad_file = handle.scratch_dir.join("_scratchpad.md");
+    let Ok(content) = std::fs::read_to_string(&scratchpad_file) else {
+        return;
+    };
+    if content.trim().is_empty() {
+        return;
+    }
+    let Some(project_root) = handle
+        .store
+        .read_field("project_root")
+        .and_then(|v| v.as_str().map(String::from))
+    else {
+        return;
+    };
+    let path = config::project_scratchpad_path(std::path::Path::new(&project_root));
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, &content);
+}
+
 async fn cleanup_chat_gremlin(id: &str) {
     if validate_gremlin_id(id).is_err() {
         return;
     }
+
+    // Persist the project-level scratchpad before tearing down so that
+    // working memory survives across chat sessions.
+    persist_project_scratchpad(id);
 
     // If the turn's run task is still in flight, cancel it.
     let handle = {
