@@ -1931,8 +1931,6 @@ model-profiles:
         let (exact, prefix) = cfg.profile_model_by_stage();
         assert!(exact.is_empty());
         assert!(prefix.is_empty());
-        assert!(exact.is_empty());
-        assert!(prefix.is_empty());
     }
 
     #[test]
@@ -1948,6 +1946,8 @@ model-profiles:
     model: cmd/slow
     model-by-stage:
       plan: cmd/slow-plan
+  cold:
+    model: cmd/cold
 "#,
         ));
         let cfg = Config::load().unwrap();
@@ -1966,8 +1966,7 @@ model-profiles:
         assert!(cfg.model_by_stage_for_profile("nonesuch").is_none());
 
         // Profile without model-by-stage returns None.
-        // (The "slow" profile above has model-by-stage, so we can't test this
-        //  without a third profile — just verify it works for the non-existent case.)
+        assert!(cfg.model_by_stage_for_profile("cold").is_none());
     }
 
     #[test]

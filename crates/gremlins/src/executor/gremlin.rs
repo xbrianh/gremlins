@@ -1536,7 +1536,7 @@ mod tests {
     use super::*;
 
     use crate::executor::state::FileSystemStateStore;
-    use crate::test_support::{EnvGuard, GitSandbox};
+    use crate::test_support::{EnvGuard, GitSandbox, Sandbox};
 
     #[test]
     fn gremlin_is_send_sync() {
@@ -2787,5 +2787,72 @@ bootstrap:
         // clean() on an ephemeral gremlin is harmless — TempDir destructor
         // handles actual cleanup.
         gremlin.clean(true).await;
+    }
+
+    // --- RuntimeConfig::snapshot model-override merge ---
+
+    #[test]
+    fn snapshot_profile_model_override_merges_stage_models() {
+        let _sandbox = Sandbox::with_config(Some(
+            r#"default-model: "profile/deep"
+model-profiles:
+  deep:
+    model: cmd/deep
+    model-by-stage:
+      plan: cmd/deep-plan
+      review: cmd/deep-review
+  drag:
+    model: cmd/drag
+    model-by-stage:
+      plan: cmd/drag-plan
+      compile: cmd/drag-compile
+"#,
+        ));
+        config::init_global().unwrap();
+
+        // With a profile override, profile_stage maps get the override's
+        // entries merged on top of the default profile's entries.
+        let rc = RuntimeConfig::snapshot(Some("profile/drag"));
+        assert_eq!(
+            rc.profile_stage_models_exact.get("plan").unwrap(),
+            "cmd/drag-plan"
+        );
+        assert_eq!(
+            rc.profile_stage_models_exact.get("compile").unwrap(),
+            "cmd/drag-compile"
+        );
+        // "review" is in the global default profile ("deep") but not in "drag",
+        // so it should survive.
+        assert_eq!(
+            rc.profile_stage_models_exact.get("review").unwrap(),
+            "cmd/deep-review"
+        );
+
+        // With a concrete model string (not profile/...), profile_stage maps
+        // are unchanged — only the global default profile's entries exist.
+        let rc2 = RuntimeConfig::snapshot(Some("opernouter/anthropic/claude-sonnet-4"));
+        assert_eq!(
+            rc2.profile_stage_models_exact.get("plan").unwrap(),
+            "cmd/deep-plan"
+        );
+        assert_eq!(
+            rc2.profile_stage_models_exact.get("review").unwrap(),
+            "cmd/deep-review"
+        );
+        assert!(!rc2.profile_stage_models_exact.contains_key("compile"));
+
+        // With None, profile_stage maps just hold the global default profile.
+        let rc3 = RuntimeConfig::snapshot(None);
+        assert_eq!(
+            rc3.profile_stage_models_exact.get("plan").unwrap(),
+            "cmd/deep-plan"
+        );
+        assert_eq!(
+            rc3.profile_stage_models_exact.get("review").unwrap(),
+            "cmd/deep-review"
+        );
+        assert!(!rc3.profile_stage_models_exact.contains_key("compile"));
+
+        config::clear_global();
     }
 }
