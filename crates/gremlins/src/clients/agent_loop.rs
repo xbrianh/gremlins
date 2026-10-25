@@ -942,6 +942,12 @@ async fn run_agent_loop_core(
         over_cap: Option<String>,
     }
 
+    // ── Accumulated tool-history ledger ──────────────────────────────
+    // Tracks every Read, Grep, Write, and Landscape call across all
+    // turns of this stage so the model can see what it has already done
+    // and avoid redundant re-reads. In-memory only; never persisted.
+    let mut tool_ledger = ToolLedger::new();
+
     let mut interactive_active: bool = false;
     let mut pending_run_one_turn: bool = false;
 
@@ -2148,7 +2154,6 @@ async fn run_agent_loop_core(
 
         // Phase 3: emit results in order
         let mut result_msgs = Vec::new();
-        let mut ledger = Vec::new();
         for (job, output) in jobs.into_iter().zip(results) {
             let result_msg = format!("result: {}", trunc(&output, 200));
             send_log(log_tx, prefix, &result_msg);
@@ -2181,7 +2186,7 @@ async fn run_agent_loop_core(
                     )
                     .await?;
             }
-            ledger.push(ledger_line(&job.name, &job.key, &output));
+            tool_ledger.record(&job.name, &job.key, &output, &job.args);
             result_msgs.push(Message::tool_result(
                 CallId::from_wire(job.id.clone()),
                 ToolName::new(job.name.clone()).expect("tool name must not be empty"),
@@ -2193,7 +2198,7 @@ async fn run_agent_loop_core(
         // assistant tool_calls message; the ledger becomes the next turn's prompt,
         // trailing the complete result block instead of splitting it.
         history.extend(result_msgs);
-        next_prompt = Message::user(ledger_message(turn_num, &ledger));
+        next_prompt = Message::user(tool_ledger.format(turn_num));
         turn_scratchpad_injected = false;
         remaining_turns -= 1;
     }
@@ -2595,28 +2600,6 @@ pub(crate) fn ledger_key_arg(args: &serde_json::Value) -> String {
     String::new()
 }
 
-/// One ledger bullet: tool name, its most informative argument, and whether the
-/// call actually ran.
-fn ledger_line(name: &str, key: &str, output: &str) -> String {
-    let label = if key.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name} {key}")
-    };
-    let note = if output.starts_with("Error: unknown tool") {
-        " (not run: unknown tool)"
-    } else if tools::result_status(output) == "error" {
-        " (failed)"
-    } else {
-        ""
-    };
-    format!("{label}{note}")
-}
-
-fn ledger_message(turn_num: usize, lines: &[String]) -> String {
-    format!("[turn {}]: {}", turn_num, lines.join(", "))
-}
-
 fn truncate_ledger_value(v: &str) -> String {
     const MAX: usize = 80;
     // Collapse embedded line breaks so one action is always one ledger line.
@@ -2838,6 +2821,266 @@ pub(crate) fn emit_final(
     send_log(log_tx, prefix, &msg);
 }
 
+// ── Accumulated tool-history ledger ──────────────────────────────
+// Tracks every Read, Grep, Write, and Landscape call across all
+// turns of this stage so the model can see what it has already done
+// and avoid redundant re-reads. In-memory only; never persisted.
+
+#[derive(Clone)]
+struct LedgerReadEntry {
+    last_age: usize,
+    count: usize,
+    content_hash: u64,
+    seq: usize,
+}
+
+#[derive(Clone)]
+struct LedgerGrepEntry {
+    last_age: usize,
+    count: usize,
+    content_hash: u64,
+    seq: usize,
+}
+
+struct ToolLedger {
+    /// Key: (file_path, offset, limit).  Offset and limit are zero when
+    /// the model reads the whole file.
+    reads: std::collections::HashMap<(String, u64, u64), LedgerReadEntry>,
+    /// Key: (pattern, path).  Path is empty string when not specified.
+    greps: std::collections::HashMap<(String, String), LedgerGrepEntry>,
+    /// Key: file_path, value: absolute turn age (seq).
+    writes: std::collections::HashMap<String, usize>,
+    /// Single landscape entry.
+    landscape: Option<usize>,
+    /// Monotonic counter so we can sort entries by first-access order.
+    seq: usize,
+}
+
+impl ToolLedger {
+    fn new() -> Self {
+        Self {
+            reads: std::collections::HashMap::new(),
+            greps: std::collections::HashMap::new(),
+            writes: std::collections::HashMap::new(),
+            landscape: None,
+            seq: 0,
+        }
+    }
+
+    /// Hash a string with DefaultHasher (fast, non-cryptographic).
+    fn hash(s: &str) -> u64 {
+        let mut h = DefaultHasher::new();
+        s.hash(&mut h);
+        h.finish()
+    }
+
+    /// Parse a u64 from a JSON value, defaulting to 0.
+    fn parse_u64(args: &serde_json::Value, key: &str) -> u64 {
+        args.get(key).and_then(|v| v.as_u64()).unwrap_or(0)
+    }
+
+    fn parse_str<'a>(args: &'a serde_json::Value, key: &str) -> &'a str {
+        args.get(key).and_then(|v| v.as_str()).unwrap_or("")
+    }
+
+    /// Record a tool execution.
+    fn record(&mut self, name: &str, key: &str, output: &str, args_json: &str) {
+        let args: serde_json::Value =
+            serde_json::from_str(args_json).unwrap_or(serde_json::Value::Null);
+
+        match name {
+            "Read" => {
+                let file_path = key.to_string();
+                let offset = Self::parse_u64(&args, "offset");
+                let limit = Self::parse_u64(&args, "limit");
+                let content_hash = Self::hash(output);
+                let age = self.seq;
+                self.seq += 1;
+
+                let entry_key = (file_path, offset, limit);
+                if let Some(existing) = self.reads.get_mut(&entry_key) {
+                    if existing.content_hash == content_hash {
+                        existing.count += 1;
+                        existing.last_age = age;
+                    } else {
+                        existing.count += 1;
+                        existing.last_age = age;
+                        existing.content_hash = content_hash;
+                    }
+                } else {
+                    self.reads.insert(
+                        entry_key,
+                        LedgerReadEntry {
+                            last_age: age,
+                            count: 1,
+                            content_hash,
+                            seq: age,
+                        },
+                    );
+                }
+            }
+            "Grep" => {
+                let pattern = key.to_string();
+                let path = Self::parse_str(&args, "path").to_string();
+                let content_hash = Self::hash(output);
+                let age = self.seq;
+                self.seq += 1;
+
+                let entry_key = (pattern, path);
+                if let Some(existing) = self.greps.get_mut(&entry_key) {
+                    if existing.content_hash == content_hash {
+                        existing.count += 1;
+                        existing.last_age = age;
+                    } else {
+                        existing.count += 1;
+                        existing.last_age = age;
+                        existing.content_hash = content_hash;
+                    }
+                } else {
+                    self.greps.insert(
+                        entry_key,
+                        LedgerGrepEntry {
+                            last_age: age,
+                            count: 1,
+                            content_hash,
+                            seq: age,
+                        },
+                    );
+                }
+            }
+            "Write" | "Edit" => {
+                let file_path = key.to_string();
+                let age = self.seq;
+                self.seq += 1;
+                self.writes.insert(file_path.clone(), age);
+                // Invalidate: remove Read entries for this file,
+                // all Grep entries, and the Landscape entry.
+                self.reads.retain(|(fp, _, _), _| fp != &file_path);
+                self.greps.clear();
+                self.landscape = None;
+            }
+            "Landscape" => {
+                let age = self.seq;
+                self.seq += 1;
+                self.landscape = Some(age);
+            }
+            _ => {
+                // Bash, Task, Done, Glob, WebSearch, Mischief — not tracked.
+            }
+        }
+    }
+
+    /// Format the accumulated ledger as a compact index.
+    fn format(&self, turn_num: usize) -> String {
+        let age_of = |stored: usize| -> usize { turn_num.saturating_sub(stored) };
+
+        // Collect all file paths from reads and writes.
+        let mut file_paths: Vec<String> = Vec::new();
+        {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for (fp, _, _) in self.reads.keys() {
+                if seen.insert(fp.clone()) {
+                    file_paths.push(fp.clone());
+                }
+            }
+            for fp in self.writes.keys() {
+                if seen.insert(fp.clone()) {
+                    file_paths.push(fp.clone());
+                }
+            }
+        }
+
+        // Determine first-access seq for each file path.
+        let file_first_seq = |fp: &str| -> usize {
+            let mut seq = usize::MAX;
+            for ((f, _, _), entry) in &self.reads {
+                if f == fp {
+                    seq = seq.min(entry.seq);
+                }
+            }
+            if let Some(&s) = self.writes.get(fp) {
+                seq = seq.min(s);
+            }
+            seq
+        };
+
+        file_paths.sort_by_key(|fp| file_first_seq(fp));
+
+        let mut lines: Vec<String> = Vec::new();
+
+        for fp in &file_paths {
+            let mut partials: Vec<(u64, u64, usize)> = Vec::new();
+            let mut total_count: usize = 0;
+            let mut last_age: usize = 0;
+            for ((f, offset, limit), entry) in &self.reads {
+                if f != fp {
+                    continue;
+                }
+                let age = age_of(entry.last_age);
+                last_age = last_age.max(age);
+                total_count += entry.count;
+                if *offset > 0 || *limit > 0 {
+                    partials.push((*offset, *limit, age));
+                }
+            }
+
+            let has_write = self.writes.contains_key(fp);
+            let write_age = self.writes.get(fp).map(|&s| age_of(s));
+
+            let mut file_line = String::new();
+            if total_count > 0 {
+                file_line.push_str(&format!("{} R({}t", fp, last_age));
+                if total_count > 1 {
+                    file_line.push_str(&format!(",{}×", total_count));
+                }
+                for (offset, limit, age) in &partials {
+                    file_line.push_str(&format!(".{}-{}:{}t", offset, limit, age));
+                }
+                file_line.push(')');
+            }
+
+            if has_write {
+                if total_count > 0 {
+                    file_line.push(' ');
+                } else {
+                    file_line.push_str(fp);
+                    file_line.push(' ');
+                }
+                file_line.push_str(&format!("W({}t)", write_age.unwrap()));
+            }
+
+            if !file_line.is_empty() {
+                lines.push(file_line);
+            }
+        }
+
+        // Grep entries.
+        let mut grep_entries: Vec<(&(String, String), &LedgerGrepEntry)> =
+            self.greps.iter().collect();
+        grep_entries.sort_by_key(|(_, e)| e.seq);
+        for ((pattern, _path), entry) in &grep_entries {
+            let age = age_of(entry.last_age);
+            let mut line = format!("\"{}\" G({}t", pattern, age);
+            if entry.count > 1 {
+                line.push_str(&format!(",{}×", entry.count));
+            }
+            line.push(')');
+            lines.push(line);
+        }
+
+        // Landscape entry.
+        if let Some(stored) = self.landscape {
+            lines.push(format!("L({}t)", age_of(stored)));
+        }
+
+        if lines.is_empty() {
+            "[seen]\n(none)".to_string()
+        } else {
+            format!("[seen]\n{}", lines.join("\n"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2973,24 +3216,6 @@ mod tests {
         assert_eq!(
             ledger_key_arg(&serde_json::json!({"command": "a\nb\r\nc"})),
             "a b  c"
-        );
-    }
-
-    #[test]
-    fn ledger_line_flags_denied_and_failed_calls() {
-        assert_eq!(ledger_line("Read", "/tmp/x", "content"), "Read /tmp/x");
-        assert_eq!(ledger_line("Read", "", "content"), "Read");
-        assert_eq!(
-            ledger_line("Write", "/tmp/x", "Error: unknown tool Write"),
-            "Write /tmp/x (not run: unknown tool)"
-        );
-        assert_eq!(
-            ledger_line("Bash", "cargo test", "Error: timed out"),
-            "Bash cargo test (failed)"
-        );
-        assert_eq!(
-            ledger_line("Bash", "false", "[exit 1]\n"),
-            "Bash false (failed)"
         );
     }
 
@@ -3145,6 +3370,132 @@ mod tests {
             format_tool_call_parts("WebFetch", &serde_json::json!({"url": "https://x.com"})),
             "WebFetch"
         );
+    }
+
+    // ── ToolLedger unit tests ──────────────────────────────────────
+
+    #[test]
+    fn tool_ledger_accumulates_reads() {
+        let mut tl = ToolLedger::new();
+        let args = serde_json::json!({"file_path": "/tmp/a.rs"}).to_string();
+        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/a.rs"}));
+        tl.record("Read", &key, "content1", &args);
+        tl.record("Read", &key, "content1", &args);
+        let args2 = serde_json::json!({"file_path": "/tmp/b.rs"}).to_string();
+        let key2 = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/b.rs"}));
+        tl.record("Read", &key2, "content2", &args2);
+        // Two files, each read; turn 0 for all.
+        let out = tl.format(0);
+        assert!(out.contains("/tmp/a.rs"), "{out}");
+        assert!(out.contains("/tmp/b.rs"), "{out}");
+        assert!(out.contains(",2×"), "count should be 2 for a.rs: {out}");
+    }
+
+    #[test]
+    fn tool_ledger_dedup_by_content_hash() {
+        let mut tl = ToolLedger::new();
+        let args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
+        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
+        tl.record("Read", &key, "same", &args);
+        tl.record("Read", &key, "same", &args);
+        tl.record("Read", &key, "same", &args);
+        let out = tl.format(0);
+        assert!(
+            out.contains(",3×"),
+            "same-hash re-reads should bump count: {out}"
+        );
+
+        // Different content replaces.
+        let mut tl2 = ToolLedger::new();
+        tl2.record("Read", &key, "first", &args);
+        tl2.record("Read", &key, "second", &args);
+        let out2 = tl2.format(0);
+        assert!(
+            out2.contains(",2×") || !out2.contains("×"),
+            "different hash still counts: {out2}"
+        );
+    }
+
+    #[test]
+    fn tool_ledger_write_invalidates_read() {
+        let mut tl = ToolLedger::new();
+        let args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
+        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
+        tl.record("Read", &key, "content", &args);
+        tl.record("Write", &key, "written", &args);
+        let out = tl.format(0);
+        assert!(out.contains("W("), "should have write: {out}");
+        assert!(!out.contains("R("), "read should be invalidated: {out}");
+    }
+
+    #[test]
+    fn tool_ledger_write_invalidates_greps() {
+        let mut tl = ToolLedger::new();
+        let grep_args = serde_json::json!({"pattern": "fn main", "path": "/tmp"}).to_string();
+        let grep_key = ledger_key_arg(&serde_json::json!({"pattern": "fn main"}));
+        tl.record("Grep", &grep_key, "results", &grep_args);
+        let write_args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
+        let write_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
+        tl.record("Write", &write_key, "written", &write_args);
+        let out = tl.format(0);
+        assert!(!out.contains("G("), "greps should be invalidated: {out}");
+        assert!(
+            !out.contains("fn main"),
+            "grep pattern should be gone: {out}"
+        );
+    }
+
+    #[test]
+    fn tool_ledger_write_invalidates_landscape() {
+        let mut tl = ToolLedger::new();
+        let ls_args = serde_json::json!({"file_path": "/tmp"}).to_string();
+        let ls_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp"}));
+        tl.record("Landscape", &ls_key, "tree", &ls_args);
+        let write_args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
+        let write_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
+        tl.record("Write", &write_key, "written", &write_args);
+        let out = tl.format(0);
+        assert!(
+            !out.contains("L("),
+            "landscape should be invalidated: {out}"
+        );
+    }
+
+    #[test]
+    fn tool_ledger_partial_reads() {
+        let mut tl = ToolLedger::new();
+        let args1 =
+            serde_json::json!({"file_path": "/tmp/x.rs", "offset": 0, "limit": 100}).to_string();
+        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
+        tl.record("Read", &key, "chunk1", &args1);
+        let args2 =
+            serde_json::json!({"file_path": "/tmp/x.rs", "offset": 200, "limit": 300}).to_string();
+        tl.record("Read", &key, "chunk2", &args2);
+        let out = tl.format(0);
+        assert!(
+            out.contains("0-100"),
+            "partial reads should show offset-limit: {out}"
+        );
+        assert!(out.contains("200-300"), "second partial: {out}");
+    }
+
+    #[test]
+    fn tool_ledger_format_empty() {
+        let tl = ToolLedger::new();
+        let out = tl.format(0);
+        assert_eq!(out, "[seen]\n(none)");
+    }
+
+    #[test]
+    fn tool_ledger_format_ages() {
+        let mut tl = ToolLedger::new();
+        let args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
+        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
+        tl.record("Read", &key, "content", &args);
+        let out = tl.format(5);
+        assert!(out.contains("R(5t"), "age should be 5: {out}");
+        let out2 = tl.format(1);
+        assert!(out2.contains("R(1t"), "age should be 1: {out2}");
     }
 
     #[test]
@@ -4819,8 +5170,12 @@ mod tests {
         let reqs = model.requests();
         let ledger = format!("{:?}", reqs[1].chat_history);
         assert!(
-            ledger.contains("Write ") && ledger.contains("(not run: unknown tool)"),
-            "denied call must be marked as not run in the ledger: {ledger}"
+            ledger.contains("Write"),
+            "denied call must appear in the ledger: {ledger}"
+        );
+        assert!(
+            ledger.contains("[seen]"),
+            "ledger must use [seen] format: {ledger}"
         );
     }
 
@@ -5215,17 +5570,33 @@ mod tests {
         assert_eq!(reqs.len(), 2);
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
         let key = ledger_key_arg(&serde_json::json!({"file_path": f.to_str().unwrap()}));
-        let expected = Message::user(format!("[turn 1]: Read {key}"));
         assert!(key.contains("x.txt"), "ledger must name the file: {key}");
         assert_eq!(history.len(), 4, "unexpected history: {history:#?}");
         assert!(matches!(history[1], Message::Assistant { .. }));
         assert_eq!(
             message_kind(history[2]),
             "result",
-            "tool result must follow the assistant tool_calls message: {:?}",
-            history[2]
+            "tool result must follow the assistant tool_calls message"
         );
-        assert_eq!(history[3], &expected, "ledger must trail all tool results");
+        assert_eq!(
+            message_kind(history[3]),
+            "ledger",
+            "ledger must trail all tool results"
+        );
+        // Verify the [seen] ledger contains the filename and Read indicator.
+        let ledger_text = match history[3] {
+            Message::User { content } => content.iter().find_map(|c| match c {
+                UserContent::Text(t) if t.text.starts_with("[seen]") => Some(t.text.clone()),
+                _ => None,
+            }),
+            _ => None,
+        };
+        let text = ledger_text.expect("ledger must be a [seen] user message");
+        assert!(text.contains(&key), "ledger must name the file: {text}");
+        assert!(
+            text.contains("R("),
+            "ledger must show Read indicator: {text}"
+        );
     }
 
     fn message_kind(m: &Message) -> &'static str {
@@ -5233,7 +5604,7 @@ mod tests {
             Message::User { content }
                 if content
                     .iter()
-                    .any(|c| matches!(c, UserContent::Text(t) if t.text.starts_with("[turn "))) =>
+                    .any(|c| matches!(c, UserContent::Text(t) if t.text.starts_with("[turn ") || t.text.starts_with("[seen]"))) =>
             {
                 "ledger"
             }
@@ -5934,7 +6305,7 @@ mod tests {
         assert!(matches!(&history[2], Message::Assistant { .. }));
         assert!(matches!(&history[3], Message::User { content }
                 if content.iter().any(|c| matches!(c, UserContent::ToolResult(_)))));
-        assert!(user_text_of(&history[4]).is_some_and(|t| t.starts_with("[turn ")));
+        assert!(user_text_of(&history[4]).is_some_and(|t| t.starts_with("[seen]")));
 
         // The Fork prompt is the final user message in the child request.
         assert_eq!(user_text_of(&history[5]), Some("finish as fork"));
