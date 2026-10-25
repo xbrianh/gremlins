@@ -106,7 +106,7 @@ impl Facts {
                 if let Some(path) = str_arg(args, "file_path") {
                     if is_content_output(output) {
                         self.upsert_file_fact(path.clone(), head_bytes(output, FILE_EXCERPT_BYTES));
-                        if is_full_read(args) {
+                        if is_full_read(args, output) {
                             self.covered_file_keys.insert(path);
                         }
                     }
@@ -408,14 +408,14 @@ fn is_chat_turn_start(message: &Message) -> bool {
 
 fn is_synthetic_round_prompt(text: &str) -> bool {
     let text = text.trim_start();
-    text.starts_with("Actions taken this turn:")
+    text.starts_with("[turn ")
+        || text.starts_with("Actions taken this turn:")
         || text.starts_with("Done was rejected because it was combined with other tool calls.")
         || text.starts_with("Done rejected:")
         || text.starts_with("The following expected output file(s) were not written:")
         || text.starts_with("You produced text but no tool calls.")
         || text == "Continue."
 }
-
 fn is_text_user_message(message: &Message) -> bool {
     match message {
         Message::User { content } => {
@@ -624,7 +624,7 @@ fn extract_facts(messages: &[Message]) -> Facts {
 
         if is_text_user_message(&messages[index]) {
             let text = user_text(&messages[index]);
-            if text.starts_with("Actions taken this turn:") {
+            if text.starts_with("[turn ") {
                 facts
                     .summaries
                     .push(head_bytes(text.trim(), TURN_SUMMARY_BYTES));
@@ -718,19 +718,17 @@ fn is_error_output(output: &str) -> bool {
         || output.starts_with("[timeout]")
         || output.starts_with("Tool output exceeded the limit")
 }
-
 fn is_content_output(output: &str) -> bool {
     !is_error_output(output)
 }
 
-fn is_full_read(args: &serde_json::Value) -> bool {
+fn is_full_read(args: &serde_json::Value, output: &str) -> bool {
     let offset = args
         .get("offset")
         .and_then(|value| value.as_u64())
         .unwrap_or(0);
-    offset == 0 && args.get("limit").is_none()
+    offset == 0 && args.get("limit").is_none() && !output.contains("[...truncated at")
 }
-
 fn is_successful_mutation(output: &str) -> bool {
     output.trim() == "OK"
 }
@@ -862,7 +860,7 @@ fn record_window_call(keys: &mut WindowKeys, name: &str, args: &serde_json::Valu
     match name {
         "Read" => {
             if let Some(path) = str_arg(args, "file_path") {
-                if is_content_output(output) && is_full_read(args) {
+                if is_content_output(output) && is_full_read(args, output) {
                     keys.coverage.insert(path.clone(), FileCoverage::Full);
                     keys.file_keys.insert(path);
                 }
@@ -1342,16 +1340,16 @@ mod tests {
             user_prompt("read a.txt and run cargo check"),
             assistant_with_tools(&[read_call]),
             tool_result("Read", "read_1", "hello from a.txt"),
-            user_prompt("Actions taken this turn:\n- Read a.txt\n"),
+            user_prompt("[turn 1]: Read a.txt"),
             assistant_with_tools(&[bash_call]),
             tool_result("Bash", "bash_1", "[exit 1]\ncargo failed"),
-            user_prompt("Actions taken this turn:\n- Bash cargo check (failed)\n"),
+            user_prompt("[turn 2]: Bash cargo check (failed)"),
             assistant_with_tools(&[done_1]),
             tool_result("Done", "done_1", "Done accepted."),
             user_prompt("now run cargo test"),
             assistant_with_tools(&[bash_2]),
             tool_result("Bash", "bash_2", "[exit 0]\nok"),
-            user_prompt("Actions taken this turn:\n- Bash cargo test\n"),
+            user_prompt("[turn 3]: Bash cargo test"),
             assistant_with_tools(&[done_2]),
             tool_result("Done", "done_2", "Done accepted."),
         ]
@@ -1673,6 +1671,105 @@ mod tests {
     }
 
     #[test]
+    fn truncated_read_without_offset_limit_is_not_full_coverage() {
+        // A Read with no offset/limit that was truncated (because the file
+        // exceeded max_tool_output_bytes) must not be classified as full
+        // file coverage — the model never saw the tail of the file.
+        let truncated_output =
+            "first chunk of content\n[...truncated at 200 bytes, use offset/limit to paginate...]";
+        assert!(!is_full_read(
+            &serde_json::json!({"file_path": "big.txt"}),
+            truncated_output
+        ));
+
+        // Same call with non-truncated output (no marker) is still full coverage.
+        assert!(is_full_read(
+            &serde_json::json!({"file_path": "small.txt"}),
+            "entire contents"
+        ));
+    }
+
+    #[test]
+    fn truncated_read_with_default_args_is_not_authoritative_in_facts() {
+        let read_call = tool_call(
+            "read_trunc",
+            "Read",
+            serde_json::json!({"file_path": "big.txt"}),
+        );
+        let truncated_output =
+            "prefix\n[...truncated at 200 bytes, use offset/limit to paginate...]";
+
+        let mut facts = Facts::default();
+        facts.record_call("Read", &read_call.function.arguments, truncated_output);
+        assert!(
+            !facts.covered_file_keys.contains("big.txt"),
+            "truncated read must not be recorded as full coverage"
+        );
+        assert!(
+            facts.file_keys.contains("big.txt"),
+            "truncated read still provides an excerpt"
+        );
+    }
+
+    #[test]
+    fn truncated_read_is_not_authoritative_in_window_keys() {
+        let read_call = tool_call(
+            "read_trunc",
+            "Read",
+            serde_json::json!({"file_path": "big.txt"}),
+        );
+        let truncated_output =
+            "prefix\n[...truncated at 200 bytes, use offset/limit to paginate...]";
+
+        let history = vec![
+            user_prompt("read big.txt"),
+            assistant_with_tools(&[read_call]),
+            tool_result("Read", "read_trunc", truncated_output),
+        ];
+        let keys = window_keys_for_range(&history);
+        assert!(
+            !keys.file_keys.contains("big.txt"),
+            "truncated read must not be authoritative in window keys"
+        );
+    }
+
+    #[test]
+    fn is_synthetic_round_prompt_recognizes_legacy_ledger_format() {
+        assert!(is_synthetic_round_prompt(
+            "Actions taken this turn: Read src/main.rs, Bash cargo build"
+        ));
+        assert!(is_synthetic_round_prompt(
+            "Actions taken this turn: Done. done"
+        ));
+        // The new compact format is also recognized.
+        assert!(is_synthetic_round_prompt(
+            "[turn 3]: Read src/main.rs, Bash cargo build"
+        ));
+        // Real user prompts are not synthetic.
+        assert!(!is_synthetic_round_prompt(
+            "Please read the main file and build the project."
+        ));
+    }
+
+    #[test]
+    fn is_error_output_recognizes_legacy_tool_output_exceeded_prefix() {
+        assert!(is_error_output(
+            "Tool output exceeded the limit of 10000 bytes"
+        ));
+        assert!(is_error_output(
+            "Tool output exceeded the limit of 65536 bytes and was discarded"
+        ));
+        // Modern truncation markers are not errors — they carry content.
+        assert!(!is_error_output(
+            "file contents\n[...truncated at 200 bytes, use offset/limit to paginate...]"
+        ));
+        // Existing error prefixes still work.
+        assert!(is_error_output("Error: something went wrong"));
+        assert!(is_error_output("[exit 1]"));
+        assert!(is_error_output("[timeout]"));
+    }
+
+    #[test]
     fn render_memory_requires_manifest_and_keeps_newest_evidence() {
         let old_fact = FileFact {
             path: "old.txt".to_string(),
@@ -1780,7 +1877,7 @@ mod tests {
             )]),
             tool_result("Read", "read_1", "hello"),
             Message::user("[operator]: use the ledger below"),
-            user_prompt("Actions taken this turn:\n- Read a.txt\n"),
+            user_prompt("[turn 1]: Read a.txt"),
             assistant_with_tools(&[tool_call(
                 "done_1",
                 "Done",
@@ -1817,7 +1914,7 @@ mod tests {
                 &format!("output for batch {batch}\n{}", "x".repeat(2048)),
             ));
             history.push(user_prompt(&format!(
-                "Actions taken this turn:\n- Bash cargo check {batch}\n"
+                "[turn {batch}]: Bash cargo check {batch}"
             )));
         }
 
@@ -1848,7 +1945,7 @@ mod tests {
                 &format!("output for batch {batch}\n{}", "x".repeat(1024)),
             ));
             history.push(user_prompt(&format!(
-                "Actions taken this turn:\n- Bash cargo check {batch}\n"
+                "[turn {batch}]: Bash cargo check {batch}"
             )));
         }
         // Append a Done turn with the merged text+tool_result user message
@@ -1862,7 +1959,7 @@ mod tests {
         // Single user message with both text and tool_result, built by the
         // same helper the agent loop uses.
         history.push(done_user_message(
-            "Actions taken this turn:\n- Done completed the work\n",
+            "[turn 4]: Done completed the work",
             CallId::from_wire("done_1".to_string()),
             ToolName::new("Done".to_string()).unwrap(),
             "Done accepted.",
@@ -1953,7 +2050,7 @@ mod tests {
             serde_json::json!({"file_path": "a.txt"}),
         )]));
         history.push(tool_result("Read", "read_1", "small"));
-        history.push(user_prompt("Actions taken this turn:\n- Read a.txt\n"));
+        history.push(user_prompt("[turn 1]: Read a.txt"));
 
         let huge = "x".repeat(16_000);
         history.push(assistant_with_tools(&[tool_call(
@@ -2008,7 +2105,7 @@ mod tests {
                 &format!("output for batch {batch}\n{}", "x".repeat(1024)),
             ));
             history.push(user_prompt(&format!(
-                "Actions taken this turn:\n- Bash cargo check {batch}\n"
+                "[turn {batch}]: Bash cargo check {batch}"
             )));
         }
 
@@ -2042,7 +2139,7 @@ mod tests {
                 &format!("output for batch {batch}\n{}", "x".repeat(1024)),
             ));
             history.push(user_prompt(&format!(
-                "Actions taken this turn:\n- Bash cargo check {batch}\n"
+                "[turn {batch}]: Bash cargo check {batch}"
             )));
         }
 
@@ -2093,7 +2190,7 @@ mod tests {
                 &format!("output for batch {batch}\n{}", "x".repeat(1024)),
             ));
             history.push(user_prompt(&format!(
-                "Actions taken this turn:\n- Bash cargo check {batch}\n"
+                "[turn {batch}]: Bash cargo check {batch}"
             )));
         }
 
@@ -2121,7 +2218,7 @@ mod tests {
                 &format!("output for batch {batch}\n{}", "x".repeat(1024)),
             ));
             history.push(user_prompt(&format!(
-                "Actions taken this turn:\n- Bash cargo check {batch}\n"
+                "[turn {batch}]: Bash cargo check {batch}"
             )));
         }
 
