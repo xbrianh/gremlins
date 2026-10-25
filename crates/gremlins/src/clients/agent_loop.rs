@@ -803,22 +803,59 @@ fn build_request_messages(
         conversation::CutGranularity::Turn
     };
 
-    let target_bytes = opts
-        .target_tokens
-        .saturating_mul(conversation::BYTES_PER_TOKEN);
-    if let Some(fresh) =
-        conversation::compact_working(history, target_bytes, overhead_bytes, granularity)
-    {
-        let request = fresh.materialize(history);
-        *compacted = Some(fresh);
-        request
-    } else {
-        // The newest round alone exceeds the target (or the transcript has no
-        // valid cut). Return the input unchanged and let the hard
-        // `max-prompt-bytes` ceiling fail the request; cutting mid-round would
-        // orphan an assistant tool-use from its results.
-        working
+    // Convert only the remaining history-token allowance to bytes via the
+    // conservative 3:1 ratio, then add back the measured byte overhead so
+    // compact_working's internal budget subtraction correctly recovers the
+    // history budget.
+    let history_token_budget = opts.target_tokens.saturating_sub(overhead_tokens as u64);
+    let target_bytes = history_token_budget
+        .saturating_mul(conversation::BYTES_PER_TOKEN)
+        .saturating_add(overhead_bytes as u64);
+
+    // Try the byte budget. For token-dense histories the 3:1 estimate may
+    // be too generous, leaving the resulting view still over the token
+    // target. When that happens — or when the fitter bails because the
+    // serialized history already fits in the byte budget — shrink the
+    // budget and retry.
+    let mut byte_budget = target_bytes;
+    loop {
+        if let Some(fresh) =
+            conversation::compact_working(history, byte_budget, overhead_bytes, granularity)
+        {
+            let request = fresh.materialize(history);
+            let tokens = conversation::token_len(&request).saturating_add(overhead_tokens);
+            if tokens <= opts.target_tokens as usize {
+                *compacted = Some(fresh);
+                return request;
+            }
+            // Token count still over target — the 3:1 estimate was too
+            // generous for this dense content. Shrink budget proportionally.
+            byte_budget = byte_budget
+                .saturating_mul(opts.target_tokens)
+                .saturating_div(tokens as u64)
+                .min(byte_budget.saturating_sub(1));
+            if byte_budget == 0 {
+                break;
+            }
+        } else {
+            // compact_working returned None. If the full history already
+            // fits in the available byte budget it bailed early — shrink
+            // the budget to force a cut. Otherwise there is genuinely no
+            // room and we stop.
+            let available = byte_budget.saturating_sub(overhead_bytes as u64) as usize;
+            if conversation::serialized_len(history) <= available && available > 0 {
+                byte_budget = (available - 1).saturating_add(overhead_bytes) as u64;
+            } else {
+                break;
+            }
+        }
     }
+
+    // The newest round alone exceeds the target (or the transcript has no
+    // valid cut). Return the input unchanged and let the hard
+    // `max-prompt-bytes` ceiling fail the request; cutting mid-round would
+    // orphan an assistant tool-use from its results.
+    working
 }
 
 // ── agent loop ────────────────────────────────────────────────────────────
