@@ -249,11 +249,7 @@ impl App {
         let last_cached_input_tokens = entry
             .get("last_cached_input_tokens")
             .and_then(|v| v.as_u64())
-            .or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|r| r.last_cached_input_tokens)
-            });
+            .or_else(|| existing.as_ref().and_then(|r| r.last_cached_input_tokens));
 
         self.active_runs.insert(
             id,
