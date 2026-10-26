@@ -1328,7 +1328,7 @@ async fn handle_launch(
         .get("model")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
-    let gremlin_def = match crate::definition::StaticDefinition::from_yaml_file(
+    let gremlin_def = match crate::definition::StaticDefinition::from_json5_file(
         &definition_path,
         model_override,
         default_model.as_deref(),
@@ -1476,11 +1476,11 @@ async fn handle_stop(request: &Value, _shutdown_tx: &watch::Sender<bool>) -> Val
 // resume
 // ---------------------------------------------------------------------------
 
-/// Load the run's hermetic `definition.yaml` snapshot from the state store.
+/// Load the run's hermetic `definition.json` snapshot from the state store.
 fn load_definition_snapshot(gremlin: &Gremlin) -> Result<StaticDefinition, Value> {
     let mut blob = gremlin
         .state
-        .open_blob("definition.yaml", state::BlobMode::Read)
+        .open_blob("definition.json", state::BlobMode::Read)
         .map_err(|e| {
             error_response(&format!(
                 "gremlin {}: failed to read definition snapshot: {e}",
@@ -2328,7 +2328,7 @@ async fn handle_debug(
         let stage_name_for_def = stage_name.clone();
         let is_agent = tokio::task::spawn_blocking(move || {
             use std::io::Read;
-            let mut blob = match store_for_read.open("definition.yaml", state::BlobMode::Read) {
+            let mut blob = match store_for_read.open("definition.json", state::BlobMode::Read) {
                 Ok(b) => b,
                 Err(e) => return Err(format!("failed to read definition snapshot: {e}")),
             };
@@ -3824,7 +3824,7 @@ fn create_chat_gremlin(
     let state = StateData::new(gremlin_id.as_str(), &initial, /* ephemeral */ true)
         .map_err(|e| format!("failed to write state: {e}"))?;
 
-    // Chat definitions are never serialized — skip the definition.yaml blob.
+    // Chat definitions are never serialized — skip the definition.json blob.
 
     // Create empty log file via state blob.
     let _ = state
@@ -4963,17 +4963,19 @@ mod tests {
         std::fs::create_dir_all(&project_root).unwrap();
         std::fs::write(project_root.join("plan.md"), "plan").unwrap();
 
-        let definition_path = project_root.join(".gremlins").join("demo.yaml");
+        let definition_path = project_root.join(".gremlins").join("demo.json5");
         std::fs::create_dir_all(definition_path.parent().unwrap()).unwrap();
         std::fs::write(
             &definition_path,
-            r#"default_model: 'cmd/echo'
-bootstrap:
-  source:
-    plan:
-      type: filepath
-      optional: true
-stages: []
+            r#"{
+  default_model: "cmd/echo",
+  bootstrap: {
+    source: {
+      plan: { type: "filepath", optional: true },
+    },
+  },
+  stages: [],
+}
 "#,
         )
         .unwrap();

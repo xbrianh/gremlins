@@ -1,0 +1,20 @@
+{
+  stages: [
+    {
+      type: "github-discover-repo",
+    },
+    {
+      name: "github-request-copilot-review",
+      type: "exec",
+      interpolation: {
+        inputs: {
+          pr_number: 'content("artifact://pr-number.txt")',
+          repo: 'content("artifact://repo.txt")',
+        },
+      },
+      options: {
+        cmds: ['gh_request_reviewer "{pr_number}" "{repo}"'],
+      },
+    },
+  ],
+}

@@ -35,13 +35,13 @@ pub fn list_definitions(project_root: PathBuf) -> Vec<(String, PathBuf)> {
             continue;
         }
         if let Ok(entries) = std::fs::read_dir(&local_dir) {
-            let mut yamls: Vec<PathBuf> = entries
+            let mut json5s: Vec<PathBuf> = entries
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|ext| ext == "yaml"))
+                .filter(|p| p.extension().is_some_and(|ext| ext == "json5"))
                 .collect();
-            yamls.sort();
-            for p in yamls {
+            json5s.sort();
+            for p in json5s {
                 let stem = p.file_stem().and_then(|s| s.to_str()).map(String::from);
                 if let Some(stem) = stem {
                     if seen.insert(stem.clone()) {
@@ -72,13 +72,13 @@ pub fn resolve_definition_name_in(
 ) -> Result<PathBuf, DiscoveryError> {
     let overlay = crate::config::overlay_dir_preferring(explicit_overlay, &project_root);
     for d in project_definition_dirs_in(overlay.clone(), &project_root) {
-        let candidate = d.join(format!("{}.yaml", name));
+        let candidate = d.join(format!("{}.json5", name));
         if candidate.exists() {
             return Ok(candidate.canonicalize().unwrap_or(candidate));
         }
     }
 
-    // Stage-definition YAMLs live under .gremlins/stages/ and are resolved
+    // Stage-definition JSON5s live under .gremlins/stages/ and are resolved
     // by load_stage_def_from_dirs, not by gremlin-definition resolution.
     let stages_dir = overlay.join("stages");
 
@@ -89,7 +89,7 @@ pub fn resolve_definition_name_in(
                 let mut stems: Vec<String> = entries
                     .filter_map(|e| e.ok())
                     .map(|e| e.path())
-                    .filter(|p| p.extension().is_some_and(|ext| ext == "yaml"))
+                    .filter(|p| p.extension().is_some_and(|ext| ext == "json5"))
                     .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(String::from))
                     .collect();
                 stems.sort();
@@ -102,7 +102,7 @@ pub fn resolve_definition_name_in(
         let mut stems: Vec<String> = entries
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "yaml"))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "json5"))
             .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(String::from))
             .collect();
         stems.sort();
@@ -132,7 +132,7 @@ pub fn resolve_definition_path_in(
     base_dir: PathBuf,
 ) -> Result<PathBuf, DiscoveryError> {
     let candidate = PathBuf::from(name_or_path);
-    if candidate.extension().is_some_and(|ext| ext == "yaml") || candidate.components().count() > 1
+    if candidate.extension().is_some_and(|ext| ext == "json5") || candidate.components().count() > 1
     {
         let resolved = candidate
             .canonicalize()
@@ -146,15 +146,15 @@ pub fn resolve_definition_path_in(
     let overlay = crate::config::overlay_dir_preferring(explicit_overlay, &base_dir);
     let definition_dirs = project_definition_dirs_in(overlay.clone(), &base_dir);
     for d in &definition_dirs {
-        let project_scoped = d.join(format!("{}.yaml", name_or_path));
+        let project_scoped = d.join(format!("{}.json5", name_or_path));
         if project_scoped.exists() {
             return Ok(project_scoped.canonicalize().unwrap_or(project_scoped));
         }
     }
 
-    // Also search .gremlins/stages/ for stage-definition YAMLs.
+    // Also search .gremlins/stages/ for stage-definition JSON5s.
     let stages_dir = overlay.join("stages");
-    let candidate = stages_dir.join(format!("{}.yaml", name_or_path));
+    let candidate = stages_dir.join(format!("{}.json5", name_or_path));
     if candidate.exists() {
         return Ok(candidate.canonicalize().unwrap_or(candidate));
     }
@@ -201,8 +201,8 @@ mod tests {
     fn test_list_definitions_project_only() {
         let (_env, project) = setup_dirs();
         let overlay = project.path().join(".gremlins");
-        fs::write(overlay.join("foo.yaml"), "stages: []").unwrap();
-        fs::write(overlay.join("bar.yaml"), "stages: []").unwrap();
+        fs::write(overlay.join("foo.json5"), "stages: []").unwrap();
+        fs::write(overlay.join("bar.json5"), "stages: []").unwrap();
 
         let result = list_definitions(project.path().to_path_buf());
         assert_eq!(result.len(), 2);
@@ -215,7 +215,7 @@ mod tests {
         let (_env, project) = setup_dirs();
         let overlay = project.path().join(".gremlins");
         fs::create_dir_all(&overlay).unwrap();
-        fs::write(overlay.join("dup.yaml"), "stages: []").unwrap();
+        fs::write(overlay.join("dup.json5"), "stages: []").unwrap();
         let result = list_definitions(project.path().to_path_buf());
         assert_eq!(result.iter().filter(|(n, _)| n == "dup").count(), 1);
     }
@@ -225,7 +225,7 @@ mod tests {
         let (_env, project) = setup_dirs();
         let overlay = project.path().join(".gremlins");
         fs::create_dir_all(&overlay).unwrap();
-        fs::write(overlay.join("boss.yaml"), "stages: [a]").unwrap();
+        fs::write(overlay.join("boss.json5"), "stages: [a]").unwrap();
 
         let result = list_definitions(project.path().to_path_buf());
         assert_eq!(result.len(), 1);
@@ -240,10 +240,10 @@ mod tests {
         let (_env, project) = setup_dirs();
         let overlay = project.path().join(".gremlins");
         fs::create_dir_all(&overlay).unwrap();
-        fs::write(overlay.join("test.yaml"), "stages: []").unwrap();
+        fs::write(overlay.join("test.json5"), "stages: []").unwrap();
 
         let result = resolve_definition_name("test", project.path().to_path_buf()).unwrap();
-        assert!(result.ends_with("test.yaml"));
+        assert!(result.ends_with("test.json5"));
     }
 
     #[test]
@@ -256,16 +256,16 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_definition_path_yaml_extension() {
+    fn test_resolve_definition_path_json5_extension() {
         let (_env, project) = setup_dirs();
         let overlay = project.path().join(".gremlins");
         fs::create_dir_all(&overlay).unwrap();
-        let p = overlay.join("explicit.yaml");
+        let p = overlay.join("explicit.json5");
         fs::write(&p, "stages: []").unwrap();
 
         let result =
             resolve_definition_path(p.to_str().unwrap(), project.path().to_path_buf()).unwrap();
-        assert!(result.ends_with("explicit.yaml"));
+        assert!(result.ends_with("explicit.json5"));
     }
 
     #[test]
@@ -273,16 +273,16 @@ mod tests {
         let (_env, project) = setup_dirs();
         let overlay = project.path().join(".gremlins");
         fs::create_dir_all(&overlay).unwrap();
-        fs::write(overlay.join("bare.yaml"), "stages: []").unwrap();
+        fs::write(overlay.join("bare.json5"), "stages: []").unwrap();
 
         let result = resolve_definition_path("bare", project.path().to_path_buf()).unwrap();
-        assert!(result.ends_with("bare.yaml"));
+        assert!(result.ends_with("bare.json5"));
     }
 
     #[test]
     fn test_resolve_definition_path_missing() {
         let (_env, project) = setup_dirs();
-        let err = resolve_definition_path("nope.yaml", project.path().to_path_buf()).unwrap_err();
+        let err = resolve_definition_path("nope.json5", project.path().to_path_buf()).unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 
@@ -291,9 +291,9 @@ mod tests {
         let (_env, project) = setup_dirs();
         let stages = project.path().join(".gremlins").join("stages");
         fs::create_dir_all(&stages).unwrap();
-        fs::write(stages.join("foo.yaml"), "stages: []").unwrap();
+        fs::write(stages.join("foo.json5"), "stages: []").unwrap();
 
-        // Stage YAMLs under .gremlins/stages/ are resolved by
+        // Stage JSON5s under .gremlins/stages/ are resolved by
         // load_stage_def_from_dirs, not by gremlin-definition resolution.
         let err = resolve_definition_name("foo", project.path().to_path_buf()).unwrap_err();
         assert!(err.to_string().contains("foo"), "{err}");
@@ -305,11 +305,11 @@ mod tests {
         let project = TempDir::new().unwrap();
         let project_overlay = project.path().join(".gremlins");
         fs::create_dir_all(&project_overlay).unwrap();
-        fs::write(project_overlay.join("demo.yaml"), "stages: []").unwrap();
+        fs::write(project_overlay.join("demo.json5"), "stages: []").unwrap();
 
         let explicit = project.path().join("elsewhere");
         fs::create_dir_all(&explicit).unwrap();
-        fs::write(explicit.join("demo.yaml"), "stages: []").unwrap();
+        fs::write(explicit.join("demo.json5"), "stages: []").unwrap();
 
         // A running gremlin's export points at its own overlay; the caller
         // that names one explicitly must still be believed.
@@ -327,10 +327,10 @@ mod tests {
     fn test_list_definitions_excludes_stages() {
         let (_env, project) = setup_dirs();
         let overlay = project.path().join(".gremlins");
-        fs::write(overlay.join("definition.yaml"), "stages: []").unwrap();
+        fs::write(overlay.join("definition.json5"), "stages: []").unwrap();
         let stages = overlay.join("stages");
         fs::create_dir_all(&stages).unwrap();
-        fs::write(stages.join("foo.yaml"), "stages: []").unwrap();
+        fs::write(stages.join("foo.json5"), "stages: []").unwrap();
 
         let result = list_definitions(project.path().to_path_buf());
         let names: Vec<&str> = result.iter().map(|(n, _)| n.as_str()).collect();

@@ -1,9 +1,0 @@
-stages:
-  - name: github-push-to-pr-branch
-    type: exec
-    interpolation:
-      inputs:
-        branch: content("artifact://pr-branch.txt")
-    options:
-      cmds:
-        - 'git push origin HEAD:"{branch}"'

@@ -1,0 +1,22 @@
+{
+  stages: [
+    {
+      name: "github-discover-repo",
+      type: "sequence",
+      skip_if_exists: "artifact://repo.txt",
+      body: [
+        {
+          type: "exec",
+          interpolation: {
+            outputs: {
+              repo: "artifact://repo.txt",
+            },
+          },
+          options: {
+            cmds: ['gh_discover_repo > "{repo}"'],
+          },
+        },
+      ],
+    },
+  ],
+}

@@ -761,7 +761,7 @@ async fn classify_stage_stream(
     let stage_type = tokio::task::spawn_blocking(move || {
         use std::io::Read;
         let mut blob = store_for_read
-            .open("definition.yaml", state::BlobMode::Read)
+            .open("definition.json", state::BlobMode::Read)
             .ok()?;
         let mut bytes = Vec::new();
         blob.read_to_end(&mut bytes).ok()?;

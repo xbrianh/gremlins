@@ -4,16 +4,16 @@ use std::path::Path;
 use crate::schemas::error::SchemaError;
 
 pub(crate) fn read_prompts(
-    prompt_field: &serde_yaml::Value,
+    prompt_field: &serde_json::Value,
     prompt_dir: &Path,
     named_prompts: &HashMap<String, Vec<String>>,
 ) -> Result<Vec<String>, SchemaError> {
     let raw: Vec<String> = match prompt_field {
-        serde_yaml::Value::String(s) => vec![s.clone()],
-        serde_yaml::Value::Sequence(seq) => seq
+        serde_json::Value::String(s) => vec![s.clone()],
+        serde_json::Value::Array(seq) => seq
             .iter()
             .map(|v| match v {
-                serde_yaml::Value::String(s) => s.clone(),
+                serde_json::Value::String(s) => s.clone(),
                 other => format!("{other:?}"),
             })
             .collect(),
@@ -71,13 +71,13 @@ pub(crate) fn read_prompt_file(path: &std::path::PathBuf) -> Result<String, Sche
 }
 
 pub(crate) fn parse_named_prompts(
-    prompts_raw: Option<&serde_yaml::Value>,
+    prompts_raw: Option<&serde_json::Value>,
     prompt_dir: &Path,
 ) -> Result<HashMap<String, Vec<String>>, SchemaError> {
     let mut named: HashMap<String, Vec<String>> = HashMap::new();
-    if let Some(mapping) = prompts_raw.and_then(|v| v.as_mapping()) {
+    if let Some(mapping) = prompts_raw.and_then(|v| v.as_object()) {
         for (k, v) in mapping {
-            let name = k.as_str().unwrap_or("").to_string();
+            let name = k.clone();
             if name.is_empty() {
                 continue;
             }

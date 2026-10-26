@@ -54,42 +54,39 @@ impl InputSources {
         }
     }
 
-    pub fn from_yaml(raw: &serde_yaml::Mapping) -> Result<Self, SchemaError> {
+    pub fn from_json(
+        raw: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Self, SchemaError> {
         // Parse the reserved require_one_of key before per-source entries so
         // the reserved name cannot be mistaken for a source definition.
-        let raw_require_one_of: Vec<serde_yaml::Value> =
-            match raw.get(serde_yaml::Value::String("require_one_of".to_string())) {
-                Some(v) => v
-                    .as_sequence()
-                    .ok_or_else(|| {
-                        SchemaError::Generic(
-                            "bootstrap.source.require_one_of must be a list of lists".to_string(),
-                        )
-                    })?
-                    .clone(),
-                None => Vec::new(),
-            };
+        let raw_require_one_of: Vec<serde_json::Value> = match raw.get("require_one_of") {
+            Some(v) => v
+                .as_array()
+                .ok_or_else(|| {
+                    SchemaError::Generic(
+                        "bootstrap.source.require_one_of must be a list of lists".to_string(),
+                    )
+                })?
+                .clone(),
+            None => Vec::new(),
+        };
 
         let mut sources: HashMap<String, InputSource> = HashMap::new();
-        for (key_val, entry_val) in raw {
-            let key = key_val
-                .as_str()
-                .ok_or_else(|| SchemaError::Generic("source keys must be strings".to_string()))?;
-
+        for (key, entry_val) in raw {
             // Skip the reserved key — it is not a source definition.
             if key == "require_one_of" {
                 continue;
             }
 
             let entry_map = entry_val
-                .as_mapping()
+                .as_object()
                 .ok_or_else(|| SchemaError::InputSource {
                     name: key.to_string(),
                     msg: format!("expected a mapping, got {:?}", entry_val),
                 })?;
 
             let type_raw = entry_map
-                .get(serde_yaml::Value::String("type".to_string()))
+                .get("type")
                 .ok_or_else(|| SchemaError::InputSource {
                     name: key.to_string(),
                     msg: "missing required 'type' field".to_string(),
@@ -97,7 +94,7 @@ impl InputSources {
 
             let types: Vec<String> = if let Some(s) = type_raw.as_str() {
                 vec![s.to_string()]
-            } else if let Some(seq) = type_raw.as_sequence() {
+            } else if let Some(seq) = type_raw.as_array() {
                 if seq.is_empty() {
                     return Err(SchemaError::InputSource {
                         name: key.to_string(),
@@ -121,7 +118,7 @@ impl InputSources {
                 });
             };
 
-            let optional = match entry_map.get(serde_yaml::Value::String("optional".to_string())) {
+            let optional = match entry_map.get("optional") {
                 Some(v) => v.as_bool().ok_or_else(|| SchemaError::InputSource {
                     name: key.to_string(),
                     msg: "'optional' must be a boolean".to_string(),
@@ -138,7 +135,7 @@ impl InputSources {
         // Validate require_one_of groups against the parsed sources.
         let mut require_one_of: Vec<Vec<String>> = Vec::with_capacity(raw_require_one_of.len());
         for (group_idx, group_val) in raw_require_one_of.iter().enumerate() {
-            let group_seq = group_val.as_sequence().ok_or_else(|| {
+            let group_seq = group_val.as_array().ok_or_else(|| {
                 SchemaError::Generic(format!(
                     "bootstrap.source.require_one_of[{}] must be a list of source names",
                     group_idx
@@ -207,17 +204,17 @@ pub struct Bootstrap {
 }
 
 impl Bootstrap {
-    pub fn from_yaml(raw: Option<&serde_yaml::Value>) -> Result<Self, SchemaError> {
+    pub fn from_json(raw: Option<&serde_json::Value>) -> Result<Self, SchemaError> {
         match raw {
             None => Ok(Bootstrap::default()),
             Some(v) => {
-                let mapping = v.as_mapping().ok_or_else(|| {
+                let mapping = v.as_object().ok_or_else(|| {
                     SchemaError::Generic(
                         "'bootstrap' must be a mapping with optional source:/launch_cmds:/cmds:/cli_out:/env:".to_string(),
                     )
                 })?;
 
-                if mapping.contains_key(serde_yaml::Value::String("out".to_string())) {
+                if mapping.contains_key("out") {
                     return Err(SchemaError::Generic(
                         "'bootstrap.out' is not valid; use 'cli_out'".to_string(),
                     ));
@@ -225,7 +222,7 @@ impl Bootstrap {
 
                 let unknown: Vec<String> = mapping
                     .keys()
-                    .filter_map(|k| k.as_str().map(String::from))
+                    .map(|k| k.as_str().to_string())
                     .filter(|k| !BOOTSTRAP_KEYS.contains(&k.as_str()))
                     .collect();
                 if !unknown.is_empty() {
@@ -236,43 +233,39 @@ impl Bootstrap {
                 }
 
                 let source = mapping
-                    .get(serde_yaml::Value::String("source".to_string()))
+                    .get("source")
                     .map(|v| {
-                        let m = v.as_mapping().ok_or_else(|| {
+                        let m = v.as_object().ok_or_else(|| {
                             SchemaError::Generic("'bootstrap.source' must be a mapping".to_string())
                         })?;
-                        InputSources::from_yaml(m)
+                        InputSources::from_json(m)
                     })
                     .transpose()?;
 
                 let cli_out = mapping
-                    .get(serde_yaml::Value::String("cli_out".to_string()))
+                    .get("cli_out")
                     .map(|v| {
-                        let m = v.as_mapping().ok_or_else(|| {
+                        let m = v.as_object().ok_or_else(|| {
                             SchemaError::Generic(
                                 "'bootstrap.cli_out' must be a mapping".to_string(),
                             )
                         })?;
                         let mut out = HashMap::new();
                         for (k, v) in m {
-                            let ks = k.as_str().map(String::from).ok_or_else(|| {
-                                SchemaError::Generic(
-                                    "'bootstrap.cli_out' keys must be strings".to_string(),
-                                )
-                            })?;
+                            let ks = k.as_str();
                             let vs = v.as_str().ok_or_else(|| {
                                 SchemaError::Generic(format!(
                                     "'bootstrap.cli_out.{ks}' must be a string"
                                 ))
                             })?;
-                            out.insert(ks, vs.to_string());
+                            out.insert(ks.to_string(), vs.to_string());
                         }
                         Ok::<HashMap<String, String>, SchemaError>(out)
                     })
                     .transpose()?
                     .unwrap_or_default();
 
-                let env = match mapping.get(serde_yaml::Value::String("env".to_string())) {
+                let env = match mapping.get("env") {
                     Some(v) => {
                         let s = v.as_str().ok_or_else(|| {
                             SchemaError::Generic("'bootstrap.env' must be a string".to_string())
@@ -284,14 +277,8 @@ impl Bootstrap {
 
                 Ok(Bootstrap {
                     source,
-                    launch_cmds: string_list(
-                        mapping.get(serde_yaml::Value::String("launch_cmds".to_string())),
-                        "bootstrap.launch_cmds",
-                    )?,
-                    cmds: string_list(
-                        mapping.get(serde_yaml::Value::String("cmds".to_string())),
-                        "bootstrap.cmds",
-                    )?,
+                    launch_cmds: string_list(mapping.get("launch_cmds"), "bootstrap.launch_cmds")?,
+                    cmds: string_list(mapping.get("cmds"), "bootstrap.cmds")?,
                     cli_out,
                     env,
                 })
@@ -300,11 +287,11 @@ impl Bootstrap {
     }
 }
 
-fn string_list(raw: Option<&serde_yaml::Value>, label: &str) -> Result<Vec<String>, SchemaError> {
+fn string_list(raw: Option<&serde_json::Value>, label: &str) -> Result<Vec<String>, SchemaError> {
     match raw {
         None => Ok(Vec::new()),
         Some(v) => {
-            let seq = v.as_sequence().ok_or_else(|| {
+            let seq = v.as_array().ok_or_else(|| {
                 SchemaError::Generic(format!("{label:?} must be a list of strings"))
             })?;
             let mut result = Vec::new();
@@ -446,23 +433,17 @@ mod tests {
     }
 
     #[test]
-    fn test_input_sources_from_yaml() {
-        let mut raw = serde_yaml::Mapping::new();
-        let mut entry = serde_yaml::Mapping::new();
+    fn test_input_sources_from_json() {
+        let mut raw = serde_json::Map::new();
+        let mut entry = serde_json::Map::new();
         entry.insert(
-            serde_yaml::Value::String("type".to_string()),
-            serde_yaml::Value::String("filepath".to_string()),
+            "type".to_string(),
+            serde_json::Value::String("filepath".to_string()),
         );
-        entry.insert(
-            serde_yaml::Value::String("optional".to_string()),
-            serde_yaml::Value::Bool(true),
-        );
-        raw.insert(
-            serde_yaml::Value::String("my_input".to_string()),
-            serde_yaml::Value::Mapping(entry),
-        );
+        entry.insert("optional".to_string(), serde_json::Value::Bool(true));
+        raw.insert("my_input".to_string(), serde_json::Value::Object(entry));
 
-        let result = InputSources::from_yaml(&raw).unwrap();
+        let result = InputSources::from_json(&raw).unwrap();
         assert_eq!(result.all_sources(), vec!["my_input"]);
         assert!(result.required_sources().is_empty());
     }
@@ -475,8 +456,8 @@ mod tests {
     }
 
     #[test]
-    fn test_bootstrap_from_yaml_none() {
-        let bs = Bootstrap::from_yaml(None).unwrap();
+    fn test_bootstrap_from_json_none() {
+        let bs = Bootstrap::from_json(None).unwrap();
         assert!(bs.source.is_none());
     }
 
@@ -561,43 +542,43 @@ mod tests {
 
     #[test]
     fn require_one_of_empty_group_rejected_at_parse_time() {
-        let yaml = "require_one_of: [[]]\nkey:\n  type: string\n";
-        let raw: serde_yaml::Mapping = serde_yaml::from_str(yaml).unwrap();
-        let err = InputSources::from_yaml(&raw).unwrap_err();
+        let json = r#"{"require_one_of": [[]], "key": {"type": "string"}}"#;
+        let raw: serde_json::Map<String, serde_json::Value> = serde_json::from_str(json).unwrap();
+        let err = InputSources::from_json(&raw).unwrap_err();
         assert!(err.to_string().contains("must not be empty"));
     }
 
     #[test]
     fn require_one_of_undeclared_source_rejected_at_parse_time() {
-        let yaml = "require_one_of: [[nope]]\nkey:\n  type: string\n";
-        let raw: serde_yaml::Mapping = serde_yaml::from_str(yaml).unwrap();
-        let err = InputSources::from_yaml(&raw).unwrap_err();
+        let json = r#"{"require_one_of": [["nope"]], "key": {"type": "string"}}"#;
+        let raw: serde_json::Map<String, serde_json::Value> = serde_json::from_str(json).unwrap();
+        let err = InputSources::from_json(&raw).unwrap_err();
         assert!(err.to_string().contains("undeclared source"));
         assert!(err.to_string().contains("nope"));
     }
 
     #[test]
     fn require_one_of_malformed_not_list_of_lists() {
-        let yaml = "require_one_of: not-a-list\nkey:\n  type: string\n";
-        let raw: serde_yaml::Mapping = serde_yaml::from_str(yaml).unwrap();
-        let err = InputSources::from_yaml(&raw).unwrap_err();
+        let json = r#"{"require_one_of": "not-a-list", "key": {"type": "string"}}"#;
+        let raw: serde_json::Map<String, serde_json::Value> = serde_json::from_str(json).unwrap();
+        let err = InputSources::from_json(&raw).unwrap_err();
         assert!(err.to_string().contains("must be a list of lists"));
     }
 
     #[test]
     fn require_one_of_flat_list_not_list_of_lists() {
         // The common typo: a single flat list instead of a list of lists.
-        let yaml = "require_one_of: [instructions, plan]\nkey:\n  type: string\n";
-        let raw: serde_yaml::Mapping = serde_yaml::from_str(yaml).unwrap();
-        let err = InputSources::from_yaml(&raw).unwrap_err();
+        let json = r#"{"require_one_of": ["instructions", "plan"], "key": {"type": "string"}}"#;
+        let raw: serde_json::Map<String, serde_json::Value> = serde_json::from_str(json).unwrap();
+        let err = InputSources::from_json(&raw).unwrap_err();
         assert!(err.to_string().contains("must be a list of source names"));
     }
 
     #[test]
     fn require_one_of_not_list_of_strings() {
-        let yaml = "require_one_of: [[42]]\nkey:\n  type: string\n";
-        let raw: serde_yaml::Mapping = serde_yaml::from_str(yaml).unwrap();
-        let err = InputSources::from_yaml(&raw).unwrap_err();
+        let json = r#"{"require_one_of": [[42]], "key": {"type": "string"}}"#;
+        let raw: serde_json::Map<String, serde_json::Value> = serde_json::from_str(json).unwrap();
+        let err = InputSources::from_json(&raw).unwrap_err();
         assert!(err.to_string().contains("must be strings"));
     }
 
@@ -705,9 +686,9 @@ mod tests {
 
     #[test]
     fn require_one_of_reserved_key_not_treated_as_source() {
-        let yaml = "require_one_of: [[a]]\na:\n  type: string\n  optional: true\n";
-        let raw: serde_yaml::Mapping = serde_yaml::from_str(yaml).unwrap();
-        let result = InputSources::from_yaml(&raw).unwrap();
+        let json = r#"{"require_one_of": [["a"]], "a": {"type": "string", "optional": true}}"#;
+        let raw: serde_json::Map<String, serde_json::Value> = serde_json::from_str(json).unwrap();
+        let result = InputSources::from_json(&raw).unwrap();
         assert_eq!(result.all_sources(), vec!["a"]);
         assert_eq!(result.require_one_of, vec![vec!["a".to_string()]]);
     }

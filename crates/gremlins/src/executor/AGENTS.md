@@ -35,7 +35,7 @@ semantics. Keep those seams intact.
 
 - `Gremlin::init` starts a fresh run (generates id, reserves state dir,
   creates workdir, writes `state.json` and the hermetic
-  `definition.yaml`).
+  `definition.json`).
 - `Gremlin::from` reconstructs a handle from a persisted state dir for
   status/cleanup/recovery.
 - `Gremlin::fork` spins off a parallel child that inherits the parent's

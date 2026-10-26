@@ -169,7 +169,7 @@ pub(crate) fn with_sandbox<T>(config_json: Option<&str>, body: impl FnOnce(&Sand
 
 /// A throwaway git repository inside a throwaway sandbox root, wired together
 /// so that [`Gremlin::init`] and [`Gremlin::from`] see a real project with a
-/// `.gremlins/demo.yaml` definition.
+/// `.gremlins/demo.json5` definition.
 ///
 /// The constructor checks for `git` on `PATH` and runs `git init` + commit;
 /// when either fails the fixture is marked skipped and the test should return
@@ -183,21 +183,21 @@ pub(crate) struct GitSandbox {
 }
 
 impl GitSandbox {
-    /// A sandbox whose `.gremlins/demo.yaml` holds the default
+    /// A sandbox whose `.gremlins/demo.json5` holds the default
     /// `default_model: 'cmd/true'` + empty stages.
     pub(crate) fn new() -> Self {
-        Self::with_definition("default_model: 'cmd/true'\nstages: []\n")
+        Self::with_definition(r#"{ default_model: "cmd/true", stages: [] }"#)
     }
 
-    /// A sandbox whose `.gremlins/demo.yaml` holds `yaml`.
-    pub(crate) fn with_definition(yaml: &str) -> Self {
+    /// A sandbox whose `.gremlins/demo.json5` holds `json5`.
+    pub(crate) fn with_definition(json5: &str) -> Self {
         let mut env = EnvGuard::lock();
         let sandbox = tempfile::tempdir().unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", sandbox.path());
 
         let repo = tempfile::tempdir().unwrap();
-        let definition_path = repo.path().join(".gremlins").join("demo.yaml");
-        let skipped = !git_available() || !init_repo(repo.path(), yaml);
+        let definition_path = repo.path().join(".gremlins").join("demo.json5");
+        let skipped = !git_available() || !init_repo(repo.path(), json5);
 
         GitSandbox {
             _env: env,
@@ -214,7 +214,7 @@ impl GitSandbox {
         self.skipped
     }
 
-    /// The `.gremlins/demo.yaml` inside the repo.
+    /// The `.gremlins/demo.json5` inside the repo.
     pub(crate) fn definition_path(&self) -> &Path {
         &self.definition_path
     }
@@ -258,8 +258,8 @@ pub(crate) fn git(root: &Path, args: &[&str]) -> std::process::Output {
         .expect("failed to run git")
 }
 
-/// A repository with one commit and a `.gremlins/demo.yaml` holding `yaml`.
-fn init_repo(root: &Path, yaml: &str) -> bool {
+/// A repository with one commit and a `.gremlins/demo.json5` holding `json5`.
+fn init_repo(root: &Path, json5: &str) -> bool {
     if !git(root, &["init", "-q"]).status.success() {
         return false;
     }
@@ -267,7 +267,7 @@ fn init_repo(root: &Path, yaml: &str) -> bool {
     if std::fs::create_dir_all(&overlay).is_err() {
         return false;
     }
-    if std::fs::write(overlay.join("demo.yaml"), yaml).is_err() {
+    if std::fs::write(overlay.join("demo.json5"), json5).is_err() {
         return false;
     }
     if !git(root, &["add", "."]).status.success() {

@@ -13,19 +13,15 @@ pub(crate) trait DefinitionResolver {
     fn resolve(&self, name: &str, project_root: &std::path::Path) -> Result<PathBuf, SchemaError>;
 }
 
-pub(crate) fn load_yaml_file(path: &Path) -> Result<serde_yaml::Value, SchemaError> {
+pub(crate) fn load_json_file(path: &Path) -> Result<serde_json::Value, SchemaError> {
     let text = std::fs::read_to_string(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => SchemaError::DefinitionFileNotFound {
             path: path.display().to_string(),
         },
         _ => SchemaError::Generic(format!("could not read {}: {}", path.display(), e)),
     })?;
-    let parsed: serde_yaml::Value =
-        serde_yaml::from_str(&text).map_err(|e| SchemaError::YamlParse {
-            label: path.display().to_string(),
-            msg: e.to_string(),
-        })?;
-    if !parsed.is_mapping() {
+    let parsed: serde_json::Value = json5::from_str(&text)?;
+    if !parsed.is_object() {
         return Err(SchemaError::YamlNotMapping {
             label: path.display().to_string(),
             got: format!("{:?}", parsed),
@@ -35,18 +31,18 @@ pub(crate) fn load_yaml_file(path: &Path) -> Result<serde_yaml::Value, SchemaErr
 }
 
 pub(crate) fn resolve_prompt_dir(
-    value: Option<&serde_yaml::Value>,
-    yaml_dir: &std::path::Path,
+    value: Option<&serde_json::Value>,
+    def_dir: &std::path::Path,
 ) -> Result<PathBuf, SchemaError> {
     match value {
-        None => Ok(PathBuf::from(yaml_dir)),
+        None => Ok(PathBuf::from(def_dir)),
         Some(v) => {
             if let Some(s) = v.as_str() {
                 let p = PathBuf::from(s);
                 if p.is_absolute() {
                     Ok(p)
                 } else {
-                    Ok(yaml_dir.join(&p))
+                    Ok(def_dir.join(&p))
                 }
             } else {
                 Err(SchemaError::Generic(format!(
@@ -73,7 +69,7 @@ pub(crate) fn load_stage_def_from_dirs(
     name: &str,
     project_root: Option<&Path>,
     overlay_dir: Option<&Path>,
-) -> Result<Option<serde_yaml::Value>, SchemaError> {
+) -> Result<Option<serde_json::Value>, SchemaError> {
     let dirs: Vec<PathBuf> = if let (Some(pr), Some(od)) = (project_root, overlay_dir) {
         stage_definition_dirs_with_project(pr, od)
     } else if let Some(od) = overlay_dir {
@@ -82,9 +78,9 @@ pub(crate) fn load_stage_def_from_dirs(
         crate::config::stage_definition_dirs()
     };
     for d in &dirs {
-        let candidate = d.join(format!("{}.yaml", name));
+        let candidate = d.join(format!("{}.json5", name));
         if candidate.exists() {
-            return match load_yaml_file(&candidate) {
+            return match load_json_file(&candidate) {
                 Ok(recipe) => Ok(Some(recipe)),
                 Err(e) => Err(e),
             };
@@ -94,17 +90,17 @@ pub(crate) fn load_stage_def_from_dirs(
 }
 
 pub(crate) fn parse_stage_definitions(
-    raw: Option<&serde_yaml::Value>,
+    raw: Option<&serde_json::Value>,
     project_root: Option<&PathBuf>,
     overlay_dir: &Path,
-) -> Result<HashMap<String, serde_yaml::Value>, SchemaError> {
-    let mut defs: HashMap<String, serde_yaml::Value> = HashMap::new();
+) -> Result<HashMap<String, serde_json::Value>, SchemaError> {
+    let mut defs: HashMap<String, serde_json::Value> = HashMap::new();
     match raw {
         None => {}
-        Some(v) if v.is_mapping() => {
-            let mapping = v.as_mapping().unwrap();
+        Some(v) if v.is_object() => {
+            let mapping = v.as_object().unwrap();
             for (k, v) in mapping {
-                let name = k.as_str().unwrap_or("").to_string();
+                let name = k.as_str().to_string();
                 if name.is_empty() {
                     continue;
                 }
@@ -124,7 +120,7 @@ pub(crate) fn parse_stage_definitions(
                             });
                         }
                     }
-                } else if v.is_mapping() {
+                } else if v.is_object() {
                     defs.insert(name, v.clone());
                 } else {
                     return Err(SchemaError::StageDef {
@@ -145,26 +141,26 @@ pub(crate) fn parse_stage_definitions(
 }
 
 pub(crate) fn substitute_recipe(
-    node: &serde_yaml::Value,
-    ctx: &serde_yaml::Value,
-) -> Result<serde_yaml::Value, SchemaError> {
+    node: &serde_json::Value,
+    ctx: &serde_json::Value,
+) -> Result<serde_json::Value, SchemaError> {
     match node {
-        serde_yaml::Value::Mapping(m) => {
-            let mut out = serde_yaml::Mapping::new();
+        serde_json::Value::Object(m) => {
+            let mut out = serde_json::Map::new();
             for (k, v) in m {
                 out.insert(k.clone(), substitute_recipe(v, ctx)?);
             }
-            Ok(serde_yaml::Value::Mapping(out))
+            Ok(serde_json::Value::Object(out))
         }
-        serde_yaml::Value::Sequence(seq) => {
-            let mut out: Vec<serde_yaml::Value> = Vec::new();
+        serde_json::Value::Array(seq) => {
+            let mut out: Vec<serde_json::Value> = Vec::new();
             for item in seq {
-                if let serde_yaml::Value::String(s) = item {
+                if let serde_json::Value::String(s) = item {
                     if s.starts_with("{{") && s.ends_with("}}") && s.matches("{{").count() == 1 {
                         let key = s[2..s.len() - 2].trim();
                         match resolve_placeholder(key, ctx) {
                             Ok(resolved) => {
-                                if let serde_yaml::Value::Sequence(resolved_seq) = resolved {
+                                if let serde_json::Value::Array(resolved_seq) = resolved {
                                     out.extend(resolved_seq);
                                 } else {
                                     out.push(resolved);
@@ -179,9 +175,9 @@ pub(crate) fn substitute_recipe(
                 }
                 out.push(substitute_recipe(item, ctx)?);
             }
-            Ok(serde_yaml::Value::Sequence(out))
+            Ok(serde_json::Value::Array(out))
         }
-        serde_yaml::Value::String(s) => {
+        serde_json::Value::String(s) => {
             if s.starts_with("{{") && s.ends_with("}}") && s.matches("{{").count() == 1 {
                 let key = s[2..s.len() - 2].trim();
                 match resolve_placeholder(key, ctx) {
@@ -194,7 +190,7 @@ pub(crate) fn substitute_recipe(
                 let result = INLINE_RE.replace_all(s, |caps: &regex::Captures| {
                     let key = caps[1].trim();
                     match resolve_placeholder(key, ctx) {
-                        Ok(serde_yaml::Value::Sequence(seq)) => seq
+                        Ok(serde_json::Value::Array(seq)) => seq
                             .iter()
                             .filter_map(|v| v.as_str())
                             .collect::<Vec<_>>()
@@ -203,7 +199,7 @@ pub(crate) fn substitute_recipe(
                         Err(_) => caps[0].to_string(),
                     }
                 });
-                Ok(serde_yaml::Value::String(result.into_owned()))
+                Ok(serde_json::Value::String(result.into_owned()))
             } else {
                 Ok(node.clone())
             }
@@ -212,33 +208,33 @@ pub(crate) fn substitute_recipe(
     }
 }
 
-fn val_to_string(val: &serde_yaml::Value) -> String {
+fn val_to_string(val: &serde_json::Value) -> String {
     match val {
-        serde_yaml::Value::String(s) => s.clone(),
-        serde_yaml::Value::Number(n) => n.to_string(),
-        serde_yaml::Value::Bool(b) => b.to_string(),
-        serde_yaml::Value::Null => "null".to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => "null".to_string(),
         other => format!("{other:?}"),
     }
 }
 
 pub(crate) fn resolve_placeholder(
     key: &str,
-    ctx: &serde_yaml::Value,
-) -> Result<serde_yaml::Value, String> {
+    ctx: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let (dotted_key, has_default, default_val) = if let Some(idx) = key.find(" | default(") {
         let raw_default = &key[idx + " | default(".len()..];
         let raw_default = raw_default.strip_suffix(')').unwrap_or(raw_default);
         let default = parse_default(raw_default);
         (key[..idx].trim(), true, default)
     } else {
-        (key.trim(), false, serde_yaml::Value::Null)
+        (key.trim(), false, serde_json::Value::Null)
     };
 
     let parts: Vec<&str> = dotted_key.split('.').collect();
     let mut val = ctx;
     for part in &parts {
-        match val.as_mapping().and_then(|m| m.get(*part)) {
+        match val.as_object().and_then(|m| m.get(*part)) {
             Some(v) => val = v,
             None => {
                 if has_default {
@@ -252,35 +248,34 @@ pub(crate) fn resolve_placeholder(
     }
 
     match val {
-        serde_yaml::Value::Mapping(_)
-        | serde_yaml::Value::Sequence(_)
-        | serde_yaml::Value::Number(_)
-        | serde_yaml::Value::Bool(_)
-        | serde_yaml::Value::Null => Ok(val.clone()),
-        serde_yaml::Value::String(s) => Ok(serde_yaml::Value::String(s.clone())),
-        other => Ok(serde_yaml::Value::String(format!("{other:?}"))),
+        serde_json::Value::Object(_)
+        | serde_json::Value::Array(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Null => Ok(val.clone()),
+        serde_json::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
     }
 }
 
-pub(crate) fn parse_default(raw: &str) -> serde_yaml::Value {
+pub(crate) fn parse_default(raw: &str) -> serde_json::Value {
     let s = raw.trim();
     if s.len() >= 2 {
         let first = s.chars().next().unwrap();
         let last = s.chars().last().unwrap();
         if first == last && (first == '"' || first == '\'') {
-            return serde_yaml::Value::String(s[1..s.len() - 1].to_string());
+            return serde_json::Value::String(s[1..s.len() - 1].to_string());
         }
     }
     // Try integer first, then float, then fall back to string.
     if let Ok(n) = s.parse::<i64>() {
-        return serde_yaml::Value::Number(serde_yaml::Number::from(n));
+        return serde_json::Value::Number(serde_json::Number::from(n));
     }
     if let Ok(n) = s.parse::<f64>() {
-        if n.is_finite() {
-            return serde_yaml::Value::Number(serde_yaml::Number::from(n));
+        if let Some(num) = serde_json::Number::from_f64(n) {
+            return serde_json::Value::Number(num);
         }
     }
-    serde_yaml::Value::String(s.to_string())
+    serde_json::Value::String(s.to_string())
 }
 
 /// Check whether a key appears in the stage's text as `{KEY}` (not `${KEY}`).
@@ -315,7 +310,7 @@ pub(crate) fn parse_definition_file(
     yaml_path: &Path,
     project_root: &Path,
     overlay_dir: &Path,
-) -> Result<serde_yaml::Value, SchemaError> {
+) -> Result<serde_json::Value, SchemaError> {
     let resolver = BuiltinResolver;
     expand_definition(yaml_path, Some(project_root), overlay_dir, &resolver)
 }
@@ -326,7 +321,7 @@ pub(crate) fn expand_definition(
     project_root: Option<&Path>,
     overlay_dir: &Path,
     resolver: &dyn DefinitionResolver,
-) -> Result<serde_yaml::Value, SchemaError> {
+) -> Result<serde_json::Value, SchemaError> {
     let project_root = project_root.map(|p| p.to_path_buf()).unwrap_or_else(|| {
         let parent = yaml_path.parent().unwrap_or(yaml_path);
         if parent.file_name().is_some_and(|n| n == ".gremlins") {
@@ -350,7 +345,7 @@ fn _expand(
     overlay_dir: &Path,
     chain: &[PathBuf],
     resolver: &dyn DefinitionResolver,
-) -> Result<serde_yaml::Value, SchemaError> {
+) -> Result<serde_json::Value, SchemaError> {
     let resolved = yaml_path
         .canonicalize()
         .unwrap_or_else(|_| yaml_path.to_path_buf());
@@ -360,8 +355,8 @@ fn _expand(
         return Err(SchemaError::IncludeCycle(cycle_parts.join(" -> ")));
     }
 
-    let raw = load_yaml_file(yaml_path)?;
-    let raw_mapping = raw.as_mapping().unwrap();
+    let raw = load_json_file(yaml_path)?;
+    let raw_mapping = raw.as_object().unwrap();
 
     if raw_mapping
         .get("__gremlins_expanded__")
@@ -369,15 +364,15 @@ fn _expand(
         .unwrap_or(false)
     {
         let mut result = raw.clone();
-        if let Some(m) = result.as_mapping_mut() {
+        if let Some(m) = result.as_object_mut() {
             m.remove("__gremlins_expanded__");
         }
         return Ok(result);
     }
 
-    let yaml_dir = yaml_path.parent().unwrap_or(yaml_path);
+    let def_dir = yaml_path.parent().unwrap_or(yaml_path);
 
-    let prompt_dir = resolve_prompt_dir(raw_mapping.get("prompt_dir"), yaml_dir)?;
+    let prompt_dir = resolve_prompt_dir(raw_mapping.get("prompt_dir"), def_dir)?;
 
     let new_chain: Vec<PathBuf> = chain
         .iter()
@@ -394,15 +389,15 @@ fn _expand(
     )?;
 
     let stages_raw = raw_mapping.get("stages");
-    let stages_list: Vec<serde_yaml::Value> = match stages_raw {
-        None | Some(serde_yaml::Value::Null) => Vec::new(),
-        Some(v) if v.is_sequence() => v.as_sequence().cloned().unwrap_or_default(),
+    let stages_list: Vec<serde_json::Value> = match stages_raw {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(v) if v.is_array() => v.as_array().cloned().unwrap_or_default(),
         Some(_v) => {
             return Err(SchemaError::Generic("'stages' must be a list".to_string()));
         }
     };
 
-    let mut expanded_stages: Vec<serde_yaml::Value> = Vec::new();
+    let mut expanded_stages: Vec<serde_json::Value> = Vec::new();
     for entry in stages_list {
         let expanded = _expand_entry(
             &entry,
@@ -418,9 +413,9 @@ fn _expand(
         expanded_stages.extend(expanded);
     }
 
-    let mut result = serde_yaml::Mapping::new();
+    let mut result = serde_json::Map::new();
     for (k, v) in raw_mapping {
-        let key_str = k.as_str().unwrap_or("");
+        let key_str = k.as_str();
         if key_str == "stages"
             || key_str == "prompt_dir"
             || key_str == "prompts"
@@ -431,30 +426,30 @@ fn _expand(
         result.insert(k.clone(), v.clone());
     }
     result.insert(
-        serde_yaml::Value::String("stages".to_string()),
-        serde_yaml::Value::Sequence(expanded_stages),
+        "stages".to_string(),
+        serde_json::Value::Array(expanded_stages),
     );
     result.insert(
-        serde_yaml::Value::String("__gremlins_expanded__".to_string()),
-        serde_yaml::Value::Bool(true),
+        "__gremlins_expanded__".to_string(),
+        serde_json::Value::Bool(true),
     );
 
-    Ok(serde_yaml::Value::Mapping(result))
+    Ok(serde_json::Value::Object(result))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn _expand_entry(
-    entry: &serde_yaml::Value,
+    entry: &serde_json::Value,
     prompt_dir: &PathBuf,
     project_root: &PathBuf,
     overlay_dir: &Path,
     chain: &[PathBuf],
     named_prompts: &HashMap<String, Vec<String>>,
-    stage_defs: &HashMap<String, serde_yaml::Value>,
+    stage_defs: &HashMap<String, serde_json::Value>,
     seen_defs: &HashSet<String>,
     resolver: &dyn DefinitionResolver,
-) -> Result<Vec<serde_yaml::Value>, SchemaError> {
-    let mapping = match entry.as_mapping() {
+) -> Result<Vec<serde_json::Value>, SchemaError> {
+    let mapping = match entry.as_object() {
         Some(m) => m,
         None => return Ok(vec![entry.clone()]),
     };
@@ -473,7 +468,7 @@ fn _expand_entry(
         let included_path: PathBuf = resolver.resolve(name, project_root)?;
         let included = _expand(&included_path, project_root, overlay_dir, chain, resolver)?;
         let stages = match included.get("stages") {
-            Some(serde_yaml::Value::Sequence(s)) => s.clone(),
+            Some(serde_json::Value::Array(s)) => s.clone(),
             _ => Vec::new(),
         };
         return Ok(stages);
@@ -495,7 +490,7 @@ fn _expand_entry(
                 resolver,
             );
         }
-        // Try stage definition directories first (e.g. .gremlins/stages/plan.yaml).
+        // Try stage definition directories first (e.g. .gremlins/stages/plan.json5).
         // This must precede the gremlin-definition lookup so that stage recipes
         // receive call-site {{prompt}} and {{options}} substitution.
         if let Some(recipe) =
@@ -523,7 +518,7 @@ fn _expand_entry(
                     let included =
                         _expand(&included_path, project_root, overlay_dir, chain, resolver)?;
                     let stages = match included.get("stages") {
-                        Some(serde_yaml::Value::Sequence(s)) => s.clone(),
+                        Some(serde_json::Value::Array(s)) => s.clone(),
                         _ => Vec::new(),
                     };
                     return Ok(stages);
@@ -537,14 +532,14 @@ fn _expand_entry(
     }
 
     let mut entry = entry.clone();
-    let entry_map = entry.as_mapping_mut().unwrap();
+    let entry_map = entry.as_object_mut().unwrap();
 
     if entry_map.contains_key("prompt") {
         let prompt_val = entry_map.get("prompt").unwrap().clone();
         let texts = prompts::read_prompts(&prompt_val, prompt_dir, named_prompts)?;
         entry_map.insert(
-            serde_yaml::Value::String("prompt".to_string()),
-            serde_yaml::Value::Sequence(texts.into_iter().map(serde_yaml::Value::String).collect()),
+            "prompt".to_string(),
+            serde_json::Value::Array(texts.into_iter().map(serde_json::Value::String).collect()),
         );
     }
 
@@ -554,10 +549,10 @@ fn _expand_entry(
         .is_some_and(|t| t == "parallel");
 
     if let Some(body_val) = entry_map.get("body") {
-        if let Some(body_list) = body_val.as_sequence() {
-            let mut expanded_body: Vec<serde_yaml::Value> = Vec::new();
+        if let Some(body_list) = body_val.as_array() {
+            let mut expanded_body: Vec<serde_json::Value> = Vec::new();
             for body_entry in body_list {
-                let child_dict = body_entry.as_mapping();
+                let child_dict = body_entry.as_object();
                 let include_name = child_dict
                     .filter(|m| m.len() == 1)
                     .and_then(|m| m.get("include"))
@@ -586,26 +581,17 @@ fn _expand_entry(
                 } else {
                     let name =
                         include_name.unwrap_or_else(|| format!("sequence-{}", expanded_body.len()));
-                    let mut seq = serde_yaml::Mapping::new();
+                    let mut seq = serde_json::Map::new();
+                    seq.insert("name".to_string(), serde_json::Value::String(name));
                     seq.insert(
-                        serde_yaml::Value::String("name".to_string()),
-                        serde_yaml::Value::String(name),
+                        "type".to_string(),
+                        serde_json::Value::String("sequence".to_string()),
                     );
-                    seq.insert(
-                        serde_yaml::Value::String("type".to_string()),
-                        serde_yaml::Value::String("sequence".to_string()),
-                    );
-                    seq.insert(
-                        serde_yaml::Value::String("body".to_string()),
-                        serde_yaml::Value::Sequence(expanded),
-                    );
-                    expanded_body.push(serde_yaml::Value::Mapping(seq));
+                    seq.insert("body".to_string(), serde_json::Value::Array(expanded));
+                    expanded_body.push(serde_json::Value::Object(seq));
                 }
             }
-            entry_map.insert(
-                serde_yaml::Value::String("body".to_string()),
-                serde_yaml::Value::Sequence(expanded_body),
-            );
+            entry_map.insert("body".to_string(), serde_json::Value::Array(expanded_body));
         }
     }
 
@@ -616,7 +602,7 @@ fn _expand_entry(
 /// call site *before* expansion copies only `model`/`task-models` onto the
 /// expanded stage(s). Without this check those keys are silently dropped.
 fn reject_legacy_call_site_model_keys(
-    call_site_map: &serde_yaml::Mapping,
+    call_site_map: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), SchemaError> {
     for (legacy, replacement) in [("client", "model"), ("task-clients", "task-models")] {
         if call_site_map.contains_key(legacy) {
@@ -633,32 +619,27 @@ fn reject_legacy_call_site_model_keys(
 /// non-mapping `inputs`/`outputs` values — the same validation that
 /// `yaml_interpolation_nested` applies to primitive stages.
 fn validate_call_site_interpolation(
-    call_site_map: &serde_yaml::Mapping,
+    call_site_map: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), SchemaError> {
     let Some(interp_val) = call_site_map.get("interpolation").filter(|v| !v.is_null()) else {
         return Ok(());
     };
     let interp_map = interp_val
-        .as_mapping()
+        .as_object()
         .ok_or_else(|| SchemaError::Generic("'interpolation' must be a mapping".to_string()))?;
     for key in interp_map.keys() {
         match key.as_str() {
-            Some("inputs") | Some("outputs") => {}
-            Some(other) => {
+            "inputs" | "outputs" => {}
+            other => {
                 return Err(SchemaError::Generic(format!(
                     "unknown key {other:?} in 'interpolation'; expected 'inputs' or 'outputs'"
                 )));
-            }
-            None => {
-                return Err(SchemaError::Generic(
-                    "'interpolation' keys must be strings".to_string(),
-                ));
             }
         }
     }
     // Validate inputs values are mappings (not scalars)
     if let Some(inputs_val) = interp_map.get("inputs").filter(|v| !v.is_null()) {
-        if !inputs_val.is_mapping() {
+        if !inputs_val.is_object() {
             return Err(SchemaError::Generic(
                 "'interpolation.inputs' must be a mapping".to_string(),
             ));
@@ -666,7 +647,7 @@ fn validate_call_site_interpolation(
     }
     // Validate outputs values are mappings (not scalars)
     if let Some(outputs_val) = interp_map.get("outputs").filter(|v| !v.is_null()) {
-        if !outputs_val.is_mapping() {
+        if !outputs_val.is_object() {
             return Err(SchemaError::Generic(
                 "'interpolation.outputs' must be a mapping".to_string(),
             ));
@@ -677,9 +658,9 @@ fn validate_call_site_interpolation(
 
 #[allow(clippy::too_many_arguments)]
 fn _expand_stage_def(
-    call_site: &serde_yaml::Value,
+    call_site: &serde_json::Value,
     def_name: &str,
-    stage_defs: &HashMap<String, serde_yaml::Value>,
+    stage_defs: &HashMap<String, serde_json::Value>,
     prompt_dir: &PathBuf,
     project_root: &PathBuf,
     overlay_dir: &Path,
@@ -687,7 +668,7 @@ fn _expand_stage_def(
     named_prompts: &HashMap<String, Vec<String>>,
     seen_defs: &HashSet<String>,
     resolver: &dyn DefinitionResolver,
-) -> Result<Vec<serde_yaml::Value>, SchemaError> {
+) -> Result<Vec<serde_json::Value>, SchemaError> {
     if seen_defs.contains(def_name) {
         return Err(SchemaError::Generic(format!(
             "stage-definition cycle: {def_name:?}"
@@ -701,14 +682,14 @@ fn _expand_stage_def(
     let mut new_seen = seen_defs.clone();
     new_seen.insert(def_name.to_string());
 
-    let def_map = definition.as_mapping().ok_or_else(|| {
+    let def_map = definition.as_object().ok_or_else(|| {
         SchemaError::Generic(format!("stage-definition {def_name:?} is not a mapping"))
     })?;
 
-    let call_site_map = call_site.as_mapping().unwrap();
+    let call_site_map = call_site.as_object().unwrap();
     reject_legacy_call_site_model_keys(call_site_map)?;
 
-    if let Some(inner_list) = def_map.get("stages").and_then(|v| v.as_sequence()) {
+    if let Some(inner_list) = def_map.get("stages").and_then(|v| v.as_array()) {
         if inner_list.is_empty() {
             return Err(SchemaError::StageDef {
                 name: def_name.to_string(),
@@ -723,7 +704,7 @@ fn _expand_stage_def(
             });
         }
         // Also reject interpolation.outputs in recipe definitions
-        if let Some(interp) = def_map.get("interpolation").and_then(|v| v.as_mapping()) {
+        if let Some(interp) = def_map.get("interpolation").and_then(|v| v.as_object()) {
             if interp.contains_key("outputs") {
                 return Err(SchemaError::StageDef {
                     name: def_name.to_string(),
@@ -736,7 +717,7 @@ fn _expand_stage_def(
         let last_idx = inner_list.len() - 1;
         let required_opts: Vec<String> = def_map
             .get("required-options")
-            .and_then(|v| v.as_sequence())
+            .and_then(|v| v.as_array())
             .map(|seq| {
                 seq.iter()
                     .filter_map(|v| v.as_str().map(String::from))
@@ -744,22 +725,18 @@ fn _expand_stage_def(
             })
             .unwrap_or_default();
 
-        let cs_opts: HashMap<String, serde_yaml::Value> = call_site_map
+        let cs_opts: HashMap<String, serde_json::Value> = call_site_map
             .get("options")
-            .and_then(|v| v.as_mapping())
-            .map(|m| {
-                m.iter()
-                    .map(|(k, v)| (k.as_str().unwrap_or("").to_string(), v.clone()))
-                    .collect()
-            })
+            .and_then(|v| v.as_object())
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
 
         for opt in &required_opts {
             let val = cs_opts.get(opt);
             let is_empty = match val {
                 None => true,
-                Some(serde_yaml::Value::Sequence(s)) => s.is_empty(),
-                Some(serde_yaml::Value::Null) => true,
+                Some(serde_json::Value::Array(s)) => s.is_empty(),
+                Some(serde_json::Value::Null) => true,
                 _ => false,
             };
             if is_empty {
@@ -800,108 +777,91 @@ fn _expand_stage_def(
             });
         }
 
-        let mut ctx = serde_yaml::Mapping::new();
+        let mut ctx = serde_json::Map::new();
         if let Some(name) = call_site_map.get("name").and_then(|v| v.as_str()) {
             ctx.insert(
-                serde_yaml::Value::String("name".to_string()),
-                serde_yaml::Value::String(name.to_string()),
+                "name".to_string(),
+                serde_json::Value::String(name.to_string()),
             );
         }
         ctx.insert(
-            serde_yaml::Value::String("options".to_string()),
-            serde_yaml::Value::Mapping(
-                cs_opts
-                    .into_iter()
-                    .map(|(k, v)| (serde_yaml::Value::String(k), v))
-                    .collect(),
-            ),
+            "options".to_string(),
+            serde_json::Value::Object(cs_opts.into_iter().collect()),
         );
         ctx.insert(
-            serde_yaml::Value::String("prompt".to_string()),
-            serde_yaml::Value::Sequence(
+            "prompt".to_string(),
+            serde_json::Value::Array(
                 cs_prompts
                     .iter()
-                    .map(|s| serde_yaml::Value::String(s.clone()))
+                    .map(|s| serde_json::Value::String(s.clone()))
                     .collect(),
             ),
         );
 
-        let ctx_value = serde_yaml::Value::Mapping(ctx);
+        let ctx_value = serde_json::Value::Object(ctx);
 
         // Validate call-site interpolation shape before distributing to stages
         validate_call_site_interpolation(call_site_map)?;
 
-        let mut result: Vec<serde_yaml::Value> = Vec::new();
+        let mut result: Vec<serde_json::Value> = Vec::new();
         for (i, raw_inner) in inner_list.iter().enumerate() {
             let substituted = substitute_recipe(raw_inner, &ctx_value)?;
             let mut inner = substituted.clone();
-            if !inner.is_mapping() {
+            if !inner.is_object() {
                 return Err(SchemaError::StageDef {
                     name: def_name.to_string(),
                     msg: format!("inner stage {i} must be a mapping, got {:?}", inner),
                 });
             }
-            let inner_map = inner.as_mapping_mut().unwrap();
+            let inner_map = inner.as_object_mut().unwrap();
 
             if i == 0 {
                 if let Some(name) = call_site_map.get("name") {
-                    inner_map.insert(serde_yaml::Value::String("name".to_string()), name.clone());
+                    inner_map.insert("name".to_string(), name.clone());
                 } else if inner_map.contains_key("name") {
                     let existing_name = inner_map.remove("name").unwrap();
-                    inner_map.insert(
-                        serde_yaml::Value::String("_auto_name".to_string()),
-                        existing_name,
-                    );
+                    inner_map.insert("_auto_name".to_string(), existing_name);
                 }
                 if let Some(model) = call_site_map.get("model") {
-                    inner_map.insert(
-                        serde_yaml::Value::String("model".to_string()),
-                        model.clone(),
-                    );
+                    inner_map.insert("model".to_string(), model.clone());
                 }
                 if let Some(task_models) = call_site_map.get("task-models") {
-                    inner_map.insert(
-                        serde_yaml::Value::String("task-models".to_string()),
-                        task_models.clone(),
-                    );
+                    inner_map.insert("task-models".to_string(), task_models.clone());
                 }
                 // Merge call-site interpolation.inputs into inner stage's interpolation.inputs
                 if let Some(interpolation_val) = call_site_map.get("interpolation") {
-                    if let Some(m) = interpolation_val.as_mapping() {
-                        if let Some(cs_inputs) = m.get("inputs").and_then(|v| v.as_mapping()) {
+                    if let Some(m) = interpolation_val.as_object() {
+                        if let Some(cs_inputs) = m.get("inputs").and_then(|v| v.as_object()) {
                             let mut merged_interpolation = inner_map
                                 .get("interpolation")
-                                .and_then(|v| v.as_mapping())
+                                .and_then(|v| v.as_object())
                                 .and_then(|m| m.get("inputs"))
-                                .and_then(|v| v.as_mapping())
+                                .and_then(|v| v.as_object())
                                 .map(|im| {
                                     im.iter()
                                         .map(|(k, v)| (k.clone(), v.clone()))
-                                        .collect::<serde_yaml::Mapping>()
+                                        .collect::<serde_json::Map<String, serde_json::Value>>()
                                 })
                                 .unwrap_or_default();
                             for (k, v) in cs_inputs {
                                 merged_interpolation.insert(k.clone(), v.clone());
                             }
-                            let mut nested = serde_yaml::Mapping::new();
+                            let mut nested = serde_json::Map::new();
                             nested.insert(
-                                serde_yaml::Value::String("inputs".to_string()),
-                                serde_yaml::Value::Mapping(merged_interpolation),
+                                "inputs".to_string(),
+                                serde_json::Value::Object(merged_interpolation),
                             );
                             // Preserve existing outputs if any
                             if let Some(existing_outputs) = inner_map
                                 .get("interpolation")
-                                .and_then(|v| v.as_mapping())
+                                .and_then(|v| v.as_object())
                                 .and_then(|m| m.get("outputs").cloned())
                             {
-                                nested.insert(
-                                    serde_yaml::Value::String("outputs".to_string()),
-                                    existing_outputs,
-                                );
+                                nested.insert("outputs".to_string(), existing_outputs);
                             }
                             inner_map.insert(
-                                serde_yaml::Value::String("interpolation".to_string()),
-                                serde_yaml::Value::Mapping(nested),
+                                "interpolation".to_string(),
+                                serde_json::Value::Object(nested),
                             );
                         }
                     }
@@ -910,23 +870,23 @@ fn _expand_stage_def(
             if i == last_idx {
                 // Merge call-site interpolation.outputs into inner stage's interpolation.outputs
                 if let Some(interp_val) = call_site_map.get("interpolation") {
-                    if let Some(m) = interp_val.as_mapping() {
+                    if let Some(m) = interp_val.as_object() {
                         if let Some(outputs_val) = m.get("outputs") {
                             // New nested form: merge into interpolation.outputs
-                            let cs_out = outputs_val.as_mapping().ok_or_else(|| {
+                            let cs_out = outputs_val.as_object().ok_or_else(|| {
                                 SchemaError::Generic(
                                     "'interpolation.outputs' must be a mapping".to_string(),
                                 )
                             })?;
                             let existing_outputs = inner_map
                                 .get("interpolation")
-                                .and_then(|v| v.as_mapping())
+                                .and_then(|v| v.as_object())
                                 .and_then(|m| m.get("outputs"))
-                                .and_then(|v| v.as_mapping())
+                                .and_then(|v| v.as_object())
                                 .map(|m| {
                                     m.iter()
                                         .map(|(k, v)| (k.clone(), v.clone()))
-                                        .collect::<serde_yaml::Mapping>()
+                                        .collect::<serde_json::Map<String, serde_json::Value>>()
                                 })
                                 .unwrap_or_default();
 
@@ -936,26 +896,23 @@ fn _expand_stage_def(
                             }
 
                             // Build nested interpolation mapping
-                            let mut nested = serde_yaml::Mapping::new();
+                            let mut nested = serde_json::Map::new();
                             // Preserve existing inputs
                             if let Some(interp_mapping) =
-                                inner_map.get("interpolation").and_then(|v| v.as_mapping())
+                                inner_map.get("interpolation").and_then(|v| v.as_object())
                             {
                                 if let Some(existing_inputs) = interp_mapping.get("inputs").cloned()
                                 {
-                                    nested.insert(
-                                        serde_yaml::Value::String("inputs".to_string()),
-                                        existing_inputs,
-                                    );
+                                    nested.insert("inputs".to_string(), existing_inputs);
                                 }
                             }
                             nested.insert(
-                                serde_yaml::Value::String("outputs".to_string()),
-                                serde_yaml::Value::Mapping(merged_outputs),
+                                "outputs".to_string(),
+                                serde_json::Value::Object(merged_outputs),
                             );
                             inner_map.insert(
-                                serde_yaml::Value::String("interpolation".to_string()),
-                                serde_yaml::Value::Mapping(nested),
+                                "interpolation".to_string(),
+                                serde_json::Value::Object(nested),
                             );
                         }
                     }
@@ -987,7 +944,7 @@ fn _expand_stage_def(
         });
     }
     // Also reject interpolation.outputs in recipe definitions
-    if let Some(interp) = def_map.get("interpolation").and_then(|v| v.as_mapping()) {
+    if let Some(interp) = def_map.get("interpolation").and_then(|v| v.as_object()) {
         if interp.contains_key("outputs") {
             return Err(SchemaError::StageDef {
                 name: def_name.to_string(),
@@ -998,7 +955,7 @@ fn _expand_stage_def(
     }
 
     let mut merged = definition.clone();
-    let merged_map = merged.as_mapping_mut().unwrap();
+    let merged_map = merged.as_object_mut().unwrap();
 
     // Merge call-site keys: name, interpolation (inputs/outputs), model, and
     // task-models. `model:` / `task-models:` propagate to a
@@ -1008,59 +965,53 @@ fn _expand_stage_def(
         if let Some(v) = call_site_map.get(*key) {
             if *key == "interpolation" {
                 // Handle nested interpolation merge
-                if let Some(cs_map) = v.as_mapping() {
+                if let Some(cs_map) = v.as_object() {
                     // Merge into existing interpolation entry-by-entry.
                     let mut existing = merged_map
                         .get("interpolation")
-                        .and_then(|ev| ev.as_mapping())
+                        .and_then(|ev| ev.as_object())
                         .map(|m| {
                             m.iter()
                                 .map(|(k, v)| (k.clone(), v.clone()))
-                                .collect::<serde_yaml::Mapping>()
+                                .collect::<serde_json::Map<String, serde_json::Value>>()
                         })
                         .unwrap_or_default();
                     for (sub_k, sub_v) in cs_map {
-                        if let Some(cs_sub_map) = sub_v.as_mapping() {
+                        if let Some(cs_sub_map) = sub_v.as_object() {
                             // Merge call-site entries into existing sub-map
                             let mut merged_sub = existing
                                 .get(sub_k)
-                                .and_then(|v| v.as_mapping())
+                                .and_then(|v| v.as_object())
                                 .map(|m| {
                                     m.iter()
                                         .map(|(k, v)| (k.clone(), v.clone()))
-                                        .collect::<serde_yaml::Mapping>()
+                                        .collect::<serde_json::Map<String, serde_json::Value>>()
                                 })
                                 .unwrap_or_default();
                             for (entry_k, entry_v) in cs_sub_map {
                                 merged_sub.insert(entry_k.clone(), entry_v.clone());
                             }
-                            existing.insert(sub_k.clone(), serde_yaml::Value::Mapping(merged_sub));
+                            existing.insert(sub_k.clone(), serde_json::Value::Object(merged_sub));
                         } else {
                             existing.insert(sub_k.clone(), sub_v.clone());
                         }
                     }
                     merged_map.insert(
-                        serde_yaml::Value::String("interpolation".to_string()),
-                        serde_yaml::Value::Mapping(existing),
+                        "interpolation".to_string(),
+                        serde_json::Value::Object(existing),
                     );
                 } else {
                     // Non-mapping value — insert as-is so schema validation can reject it
-                    merged_map.insert(
-                        serde_yaml::Value::String("interpolation".to_string()),
-                        v.clone(),
-                    );
+                    merged_map.insert("interpolation".to_string(), v.clone());
                 }
             } else {
-                merged_map.insert(serde_yaml::Value::String(key.to_string()), v.clone());
+                merged_map.insert(key.to_string(), v.clone());
             }
         }
     }
     if !call_site_map.contains_key("name") && merged_map.contains_key("name") {
         let existing_name = merged_map.remove("name").unwrap();
-        merged_map.insert(
-            serde_yaml::Value::String("_auto_name".to_string()),
-            existing_name,
-        );
+        merged_map.insert("_auto_name".to_string(), existing_name);
     }
 
     _expand_entry(
@@ -1081,31 +1032,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_serde_yaml_preserves_loop_iter_in_quoted_string() {
-        // Regression: serde_yaml 0.9 (YAML 1.2) must preserve {loop_iter}
-        // inside double-quoted strings.
-        let yaml_str = r#"
-stages:
-  - name: verify
-    type: sequence
-    skip_if_exists: "artifact://{loop_iter}/done"
-    body:
-      - name: fix
-        type: sequence
-        skip_if_exists: "artifact://{loop_iter}/done"
-        body:
-          - name: fix
-            type: agent
+    fn test_serde_json_preserves_loop_iter_in_quoted_string() {
+        // Regression: serde_json must preserve {loop_iter} inside a string.
+        let json_str = r#"
+{
+  "stages": [
+    {
+      "name": "verify",
+      "type": "sequence",
+      "skip_if_exists": "artifact://{loop_iter}/done",
+      "body": [
+        {
+          "name": "fix",
+          "type": "sequence",
+          "skip_if_exists": "artifact://{loop_iter}/done",
+          "body": [
+            {
+              "name": "fix",
+              "type": "agent"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
 "#;
-        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
-        let stages = parsed["stages"].as_sequence().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        let stages = parsed["stages"].as_array().unwrap();
         let seq_stage = &stages[0];
         let sif = seq_stage["skip_if_exists"].as_str().unwrap();
         assert_eq!(
             sif, "artifact://{loop_iter}/done",
             "skip_if_exists should preserve {{loop_iter}}"
         );
-        let body = seq_stage["body"].as_sequence().unwrap();
+        let body = seq_stage["body"].as_array().unwrap();
         let fix_wrapper = &body[0];
         let skip = fix_wrapper["skip_if_exists"].as_str().unwrap();
         assert_eq!(
@@ -1116,14 +1077,14 @@ stages:
 
     #[test]
     fn test_verify_recipe_skip_if_exists_preserves_loop_iter() {
-        let recipe = load_yaml_file(std::path::Path::new(&format!(
-            "{}/../../.gremlins/stages/verify.yaml",
+        let recipe = load_json_file(std::path::Path::new(&format!(
+            "{}/../../.gremlins/stages/verify.json5",
             env!("CARGO_MANIFEST_DIR")
         )))
         .unwrap();
-        let stages = recipe["stages"].as_sequence().unwrap();
+        let stages = recipe["stages"].as_array().unwrap();
         let seq_stage = &stages[0];
-        let body = seq_stage["body"].as_sequence().unwrap();
+        let body = seq_stage["body"].as_array().unwrap();
         // The fix child is now wrapped in a sequence (agents can't carry
         // skip_if_exists directly), so body[1] is the sequence wrapper.
         let fix_wrapper = &body[1];
@@ -1136,38 +1097,38 @@ stages:
 
     #[test]
     fn test_substitute_recipe_simple() {
-        let mut ctx_map = serde_yaml::Mapping::new();
+        let mut ctx_map = serde_json::Map::new();
         ctx_map.insert(
-            serde_yaml::Value::String("options".to_string()),
-            serde_yaml::Value::Mapping({
-                let mut m = serde_yaml::Mapping::new();
+            "options".to_string(),
+            serde_json::Value::Object({
+                let mut m = serde_json::Map::new();
                 m.insert(
-                    serde_yaml::Value::String("key".to_string()),
-                    serde_yaml::Value::String("value".to_string()),
+                    "key".to_string(),
+                    serde_json::Value::String("value".to_string()),
                 );
                 m
             }),
         );
-        let ctx = serde_yaml::Value::Mapping(ctx_map);
+        let ctx = serde_json::Value::Object(ctx_map);
 
-        let input = serde_yaml::Value::String("{{options.key}}".to_string());
+        let input = serde_json::Value::String("{{options.key}}".to_string());
         let result = substitute_recipe(&input, &ctx).unwrap();
         assert_eq!(result.as_str().unwrap(), "value");
     }
 
     #[test]
     fn test_substitute_recipe_default() {
-        let ctx = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        let ctx = serde_json::Value::Object(serde_json::Map::new());
         let input =
-            serde_yaml::Value::String("{{options.missing | default(fallback)}}".to_string());
+            serde_json::Value::String("{{options.missing | default(fallback)}}".to_string());
         let result = substitute_recipe(&input, &ctx).unwrap();
         assert_eq!(result.as_str().unwrap(), "fallback");
     }
 
     #[test]
     fn test_substitute_recipe_missing_placeholder_errors() {
-        let ctx = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-        let input = serde_yaml::Value::String("{{options.missing}}".to_string());
+        let ctx = serde_json::Value::Object(serde_json::Map::new());
+        let input = serde_json::Value::String("{{options.missing}}".to_string());
         let err = substitute_recipe(&input, &ctx).unwrap_err();
         assert!(err.to_string().contains("not found in context"));
     }
@@ -1186,51 +1147,51 @@ stages:
 
     #[test]
     fn test_substitute_recipe_inline() {
-        let mut ctx_map = serde_yaml::Mapping::new();
+        let mut ctx_map = serde_json::Map::new();
         ctx_map.insert(
-            serde_yaml::Value::String("options".to_string()),
-            serde_yaml::Value::Mapping({
-                let mut m = serde_yaml::Mapping::new();
+            "options".to_string(),
+            serde_json::Value::Object({
+                let mut m = serde_json::Map::new();
                 m.insert(
-                    serde_yaml::Value::String("key".to_string()),
-                    serde_yaml::Value::String("value".to_string()),
+                    "key".to_string(),
+                    serde_json::Value::String("value".to_string()),
                 );
                 m
             }),
         );
-        let ctx = serde_yaml::Value::Mapping(ctx_map);
-        let input = serde_yaml::Value::String("foo {{options.key}} bar".to_string());
+        let ctx = serde_json::Value::Object(ctx_map);
+        let input = serde_json::Value::String("foo {{options.key}} bar".to_string());
         let result = substitute_recipe(&input, &ctx).unwrap();
         assert_eq!(result.as_str().unwrap(), "foo value bar");
     }
 
     #[test]
     fn test_substitute_recipe_list_join() {
-        let mut ctx_map = serde_yaml::Mapping::new();
+        let mut ctx_map = serde_json::Map::new();
         ctx_map.insert(
-            serde_yaml::Value::String("options".to_string()),
-            serde_yaml::Value::Mapping({
-                let mut m = serde_yaml::Mapping::new();
+            "options".to_string(),
+            serde_json::Value::Object({
+                let mut m = serde_json::Map::new();
                 m.insert(
-                    serde_yaml::Value::String("cmds".to_string()),
-                    serde_yaml::Value::Sequence(vec![
-                        serde_yaml::Value::String("cmd1".to_string()),
-                        serde_yaml::Value::String("cmd2".to_string()),
+                    "cmds".to_string(),
+                    serde_json::Value::Array(vec![
+                        serde_json::Value::String("cmd1".to_string()),
+                        serde_json::Value::String("cmd2".to_string()),
                     ]),
                 );
                 m
             }),
         );
-        let ctx = serde_yaml::Value::Mapping(ctx_map);
-        let input = serde_yaml::Value::String("run {{options.cmds}} please".to_string());
+        let ctx = serde_json::Value::Object(ctx_map);
+        let input = serde_json::Value::String("run {{options.cmds}} please".to_string());
         let result = substitute_recipe(&input, &ctx).unwrap();
         assert_eq!(result.as_str().unwrap(), "run cmd1 && cmd2 please");
     }
 
     #[test]
     fn test_substitute_recipe_unresolved_verbatim() {
-        let ctx = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-        let input = serde_yaml::Value::String("hello {{missing}} world".to_string());
+        let ctx = serde_json::Value::Object(serde_json::Map::new());
+        let input = serde_json::Value::String("hello {{missing}} world".to_string());
         let result = substitute_recipe(&input, &ctx).unwrap();
         assert_eq!(result.as_str().unwrap(), "hello {{missing}} world");
     }
@@ -1258,26 +1219,32 @@ stages:
         }
 
         // Definition: nested interpolation
-        let definition = serde_yaml::from_str::<serde_yaml::Value>(
+        let definition = serde_json::from_str::<serde_json::Value>(
             r#"
-type: agent
-prompt:
-  - |
-    use {foo} and {baz}
-interpolation:
-  inputs:
-    foo: content("artifact://foo.md")
+{
+  "type": "agent",
+  "prompt": ["use {foo} and {baz}\n"],
+  "interpolation": {
+    "inputs": {
+      "foo": "content(\"artifact://foo.md\")"
+    }
+  }
+}
 "#,
         )
         .unwrap();
 
         // Call site: new nested form
-        let call_site = serde_yaml::from_str::<serde_yaml::Value>(
+        let call_site = serde_json::from_str::<serde_json::Value>(
             r#"
-name: test
-interpolation:
-  inputs:
-    baz: content("artifact://baz.md")
+{
+  "name": "test",
+  "interpolation": {
+    "inputs": {
+      "baz": "content(\"artifact://baz.md\")"
+    }
+  }
+}
 "#,
         )
         .unwrap();
@@ -1313,7 +1280,7 @@ interpolation:
         let stage = &expanded[0];
         let interp = stage
             .get("interpolation")
-            .and_then(|v| v.as_mapping())
+            .and_then(|v| v.as_object())
             .expect("interpolation must be a mapping");
 
         // Must be the nested form
@@ -1324,7 +1291,7 @@ interpolation:
 
         let inputs = interp
             .get("inputs")
-            .and_then(|v| v.as_mapping())
+            .and_then(|v| v.as_object())
             .expect("inputs must be a mapping");
 
         // Both the definition's foo and the call-site's baz must be present
@@ -1364,10 +1331,11 @@ interpolation:
 
         for (legacy, replacement) in [("client", "model"), ("task-clients", "task-models")] {
             let definition =
-                serde_yaml::from_str::<serde_yaml::Value>("type: agent\nprompt: hi\n").unwrap();
+                serde_json::from_str::<serde_json::Value>(r#"{"type": "agent", "prompt": "hi"}"#)
+                    .unwrap();
 
-            let call_site = serde_yaml::from_str::<serde_yaml::Value>(&format!(
-                "name: test\n{legacy}: openai/gpt-4\n"
+            let call_site = serde_json::from_str::<serde_json::Value>(&format!(
+                r#"{{"name": "test", "{legacy}": "openai/gpt-4"}}"#
             ))
             .unwrap();
 

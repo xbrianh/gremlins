@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use indexmap::IndexMap;
-use serde_yaml::{Mapping, Value};
+use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::clients::client::ModelURI;
@@ -223,19 +223,19 @@ impl StageSpec {
     }
 
     /// Serialize this stage (and its children, recursively) to a
-    /// [`serde_yaml::Value`] matching the canonical expanded-YAML shape.
-    pub fn to_yaml(&self) -> Value {
+    /// [`serde_json::Value`] matching the canonical expanded-JSON shape.
+    pub fn to_json(&self) -> Value {
         match self {
             StageSpec::Agent {
                 stage,
                 model,
                 task_models,
-            } => agent_to_yaml(stage, model, task_models),
+            } => agent_to_json(stage, model, task_models),
             StageSpec::Exec {
                 stage,
                 model,
                 task_models,
-            } => exec_to_yaml(stage, model, task_models),
+            } => exec_to_json(stage, model, task_models),
             StageSpec::Sequence {
                 attrs,
                 max_iterations,
@@ -243,7 +243,7 @@ impl StageSpec {
                 model,
                 task_models,
                 body,
-            } => sequence_to_yaml(attrs, *max_iterations, *interval, model, task_models, body),
+            } => sequence_to_json(attrs, *max_iterations, *interval, model, task_models, body),
             StageSpec::Parallel {
                 attrs,
                 max_concurrent,
@@ -254,7 +254,7 @@ impl StageSpec {
                 body,
                 fork,
                 join,
-            } => parallel_to_yaml(
+            } => parallel_to_json(
                 attrs,
                 *max_concurrent,
                 *cancel_on_error,
@@ -299,102 +299,93 @@ impl StageSpec {
 }
 
 // ---------------------------------------------------------------------------
-// Serialization helpers — build serde_yaml::Value trees
+// Serialization helpers — build serde_json::Value trees
 // ---------------------------------------------------------------------------
 
-/// Omit keys whose value is an empty mapping, an empty sequence, a null, or
+/// Omit keys whose value is an empty object, an empty array, a null, or
 /// an empty string.
 fn is_empty_value(value: &Value) -> bool {
     match value {
         Value::Null => true,
         Value::String(s) => s.is_empty(),
-        Value::Sequence(seq) => seq.is_empty(),
-        Value::Mapping(map) => map.is_empty(),
+        Value::Array(seq) => seq.is_empty(),
+        Value::Object(map) => map.is_empty(),
         _ => false,
     }
 }
 
 /// Insert `key` → `value` into `mapping` unless `value` is empty.
-fn insert_if_nonempty(mapping: &mut Mapping, key: &str, value: Value) {
+fn insert_if_nonempty(mapping: &mut Map<String, Value>, key: &str, value: Value) {
     if !is_empty_value(&value) {
-        mapping.insert(Value::String(key.to_string()), value);
+        mapping.insert(key.to_string(), value);
     }
 }
 
 /// Insert `key` → `Value::String(value)` unless `value` is empty.
-fn insert_str_if_nonempty(mapping: &mut Mapping, key: &str, value: &str) {
+fn insert_str_if_nonempty(mapping: &mut Map<String, Value>, key: &str, value: &str) {
     if !value.is_empty() {
-        mapping.insert(
-            Value::String(key.to_string()),
-            Value::String(value.to_string()),
-        );
+        mapping.insert(key.to_string(), Value::String(value.to_string()));
     }
 }
 
-/// Serialize a `HashMap<String, String>` to a YAML mapping, omitting empty.
-fn string_map_to_yaml(map: &HashMap<String, String>) -> Value {
+/// Serialize a `HashMap<String, String>` to a JSON object, omitting empty.
+fn string_map_to_json(map: &HashMap<String, String>) -> Value {
     if map.is_empty() {
-        return Value::Mapping(Mapping::new());
+        return Value::Object(Map::new());
     }
-    let mut out = Mapping::with_capacity(map.len());
+    let mut out = Map::with_capacity(map.len());
     for (k, v) in map {
-        out.insert(Value::String(k.clone()), Value::String(v.clone()));
+        out.insert(k.clone(), Value::String(v.clone()));
     }
-    Value::Mapping(out)
+    Value::Object(out)
 }
 
-/// Convert `serde_json::Value` options to a YAML mapping, filtering out
+/// Convert `serde_json::Value` options to a JSON object, filtering out
 /// framework-substituted keys (`cwd`) that the runtime injects.
-fn options_to_yaml(options: &HashMap<String, serde_json::Value>) -> Value {
+fn options_to_json(options: &HashMap<String, serde_json::Value>) -> Value {
     // Filter out keys that the runtime injects at execution time — they're
     // not part of the user-visible definition. We intentionally do NOT filter
     // all FRAMEWORK_KEYS here: model is a valid user-facing option for agent
     // stages, and name is validated out by the builder.
     // Iterate directly to avoid an intermediate HashMap allocation.
-    let mut out = Mapping::new();
+    let mut out = Map::new();
     for (k, v) in options.iter().filter(|(k, _)| k.as_str() != "cwd") {
-        if let Ok(yaml_val) = serde_yaml::to_value(v) {
-            out.insert(Value::String(k.clone()), yaml_val);
+        if let Ok(json_val) = serde_json::to_value(v) {
+            out.insert(k.clone(), json_val);
         }
     }
-    Value::Mapping(out)
+    Value::Object(out)
 }
 
-fn model_to_yaml(model: &Option<ModelURI>) -> Option<Value> {
+fn model_to_json(model: &Option<ModelURI>) -> Option<Value> {
     model.as_ref().map(|c| Value::String(c.to_string()))
 }
 
-fn task_models_to_yaml(task_models: &Option<IndexMap<String, String>>) -> Value {
+fn task_models_to_json(task_models: &Option<IndexMap<String, String>>) -> Value {
     match task_models {
         Some(map) if !map.is_empty() => {
-            let mut out = Mapping::with_capacity(map.len());
+            let mut out = Map::with_capacity(map.len());
             for (k, v) in map {
-                out.insert(Value::String(k.clone()), Value::String(v.clone()));
+                out.insert(k.clone(), Value::String(v.clone()));
             }
-            Value::Mapping(out)
+            Value::Object(out)
         }
-        _ => Value::Mapping(Mapping::new()),
+        _ => Value::Object(Map::new()),
     }
 }
 
-fn insert_task_models(m: &mut Mapping, task_models: &Option<IndexMap<String, String>>) {
-    insert_if_nonempty(m, "task-models", task_models_to_yaml(task_models));
+fn insert_task_models(m: &mut Map<String, Value>, task_models: &Option<IndexMap<String, String>>) {
+    insert_if_nonempty(m, "task-models", task_models_to_json(task_models));
 }
 
-fn agent_to_yaml(
+fn agent_to_json(
     stage: &Agent,
     model: &Option<ModelURI>,
     task_models: &Option<IndexMap<String, String>>,
 ) -> Value {
-    let mut m = Mapping::new();
-    m.insert(
-        Value::String("name".to_string()),
-        Value::String(stage.name.clone()),
-    );
-    m.insert(
-        Value::String("type".to_string()),
-        Value::String("agent".to_string()),
-    );
+    let mut m = Map::new();
+    m.insert("name".to_string(), Value::String(stage.name.clone()));
+    m.insert("type".to_string(), Value::String("agent".to_string()));
     // prompt: omit if empty list (same as what the YAML path accepts)
     if !stage.prompts.is_empty() {
         let prompts: Vec<Value> = stage
@@ -402,74 +393,59 @@ fn agent_to_yaml(
             .iter()
             .map(|p| Value::String(p.clone()))
             .collect();
-        m.insert(
-            Value::String("prompt".to_string()),
-            Value::Sequence(prompts),
-        );
+        m.insert("prompt".to_string(), Value::Array(prompts));
     }
-    insert_if_nonempty(&mut m, "options", options_to_yaml(&stage.options));
-    // Serialize interpolation as {inputs:, outputs:} nested mapping
-    let interp_inputs = string_map_to_yaml(&stage.interpolation_map);
-    let interp_outputs = string_map_to_yaml(&stage.outputs_map);
+    insert_if_nonempty(&mut m, "options", options_to_json(&stage.options));
+    // Serialize interpolation as {inputs:, outputs:} nested object
+    let interp_inputs = string_map_to_json(&stage.interpolation_map);
+    let interp_outputs = string_map_to_json(&stage.outputs_map);
     if !is_empty_value(&interp_inputs) || !is_empty_value(&interp_outputs) {
-        let mut interp_map = Mapping::new();
+        let mut interp_map = Map::new();
         if !is_empty_value(&interp_inputs) {
-            interp_map.insert(Value::String("inputs".to_string()), interp_inputs);
+            interp_map.insert("inputs".to_string(), interp_inputs);
         }
         if !is_empty_value(&interp_outputs) {
-            interp_map.insert(Value::String("outputs".to_string()), interp_outputs);
+            interp_map.insert("outputs".to_string(), interp_outputs);
         }
-        m.insert(
-            Value::String("interpolation".to_string()),
-            Value::Mapping(interp_map),
-        );
+        m.insert("interpolation".to_string(), Value::Object(interp_map));
     }
-    if let Some(model_val) = model_to_yaml(model) {
-        m.insert(Value::String("model".to_string()), model_val);
+    if let Some(model_val) = model_to_json(model) {
+        m.insert("model".to_string(), model_val);
     }
     insert_task_models(&mut m, task_models);
-    Value::Mapping(m)
+    Value::Object(m)
 }
 
-fn exec_to_yaml(
+fn exec_to_json(
     stage: &Exec,
     model: &Option<ModelURI>,
     task_models: &Option<IndexMap<String, String>>,
 ) -> Value {
-    let mut m = Mapping::new();
-    m.insert(
-        Value::String("name".to_string()),
-        Value::String(stage.name.clone()),
-    );
-    m.insert(
-        Value::String("type".to_string()),
-        Value::String("exec".to_string()),
-    );
-    insert_if_nonempty(&mut m, "options", options_to_yaml(&stage.options));
-    // Serialize interpolation as {inputs:, outputs:} nested mapping
-    let interp_inputs = string_map_to_yaml(&stage.interpolation_map);
-    let interp_outputs = string_map_to_yaml(&stage.outputs_map);
+    let mut m = Map::new();
+    m.insert("name".to_string(), Value::String(stage.name.clone()));
+    m.insert("type".to_string(), Value::String("exec".to_string()));
+    insert_if_nonempty(&mut m, "options", options_to_json(&stage.options));
+    // Serialize interpolation as {inputs:, outputs:} nested object
+    let interp_inputs = string_map_to_json(&stage.interpolation_map);
+    let interp_outputs = string_map_to_json(&stage.outputs_map);
     if !is_empty_value(&interp_inputs) || !is_empty_value(&interp_outputs) {
-        let mut interp_map = Mapping::new();
+        let mut interp_map = Map::new();
         if !is_empty_value(&interp_inputs) {
-            interp_map.insert(Value::String("inputs".to_string()), interp_inputs);
+            interp_map.insert("inputs".to_string(), interp_inputs);
         }
         if !is_empty_value(&interp_outputs) {
-            interp_map.insert(Value::String("outputs".to_string()), interp_outputs);
+            interp_map.insert("outputs".to_string(), interp_outputs);
         }
-        m.insert(
-            Value::String("interpolation".to_string()),
-            Value::Mapping(interp_map),
-        );
+        m.insert("interpolation".to_string(), Value::Object(interp_map));
     }
-    if let Some(model_val) = model_to_yaml(model) {
-        m.insert(Value::String("model".to_string()), model_val);
+    if let Some(model_val) = model_to_json(model) {
+        m.insert("model".to_string(), model_val);
     }
     insert_task_models(&mut m, task_models);
-    Value::Mapping(m)
+    Value::Object(m)
 }
 
-fn sequence_to_yaml(
+fn sequence_to_json(
     attrs: &StageAttrs,
     max_iterations: u32,
     interval: Option<f64>,
@@ -477,39 +453,33 @@ fn sequence_to_yaml(
     task_models: &Option<IndexMap<String, String>>,
     body: &[StageSpec],
 ) -> Value {
-    let mut m = Mapping::new();
-    m.insert(
-        Value::String("name".to_string()),
-        Value::String(attrs.name.clone()),
-    );
-    m.insert(
-        Value::String("type".to_string()),
-        Value::String("sequence".to_string()),
-    );
+    let mut m = Map::new();
+    m.insert("name".to_string(), Value::String(attrs.name.clone()));
+    m.insert("type".to_string(), Value::String("sequence".to_string()));
     if max_iterations > 1 {
         m.insert(
-            Value::String("max-iterations".to_string()),
-            Value::Number((max_iterations as i64).into()),
+            "max-iterations".to_string(),
+            Value::Number(serde_json::Number::from(max_iterations)),
         );
     }
     if let Some(interval_secs) = interval {
         m.insert(
-            Value::String("interval".to_string()),
-            serde_yaml::to_value(interval_secs).unwrap_or(Value::Null),
+            "interval".to_string(),
+            serde_json::to_value(interval_secs).unwrap_or(Value::Null),
         );
     }
-    if let Some(model_val) = model_to_yaml(model) {
-        m.insert(Value::String("model".to_string()), model_val);
+    if let Some(model_val) = model_to_json(model) {
+        m.insert("model".to_string(), model_val);
     }
     insert_task_models(&mut m, task_models);
     insert_str_if_nonempty(&mut m, "skip_if_exists", &attrs.skip_if_exists);
-    let children: Vec<Value> = body.iter().map(StageSpec::to_yaml).collect();
-    m.insert(Value::String("body".to_string()), Value::Sequence(children));
-    Value::Mapping(m)
+    let children: Vec<Value> = body.iter().map(StageSpec::to_json).collect();
+    m.insert("body".to_string(), Value::Array(children));
+    Value::Object(m)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn parallel_to_yaml(
+fn parallel_to_json(
     attrs: &StageAttrs,
     max_concurrent: Option<u32>,
     cancel_on_error: bool,
@@ -520,35 +490,26 @@ fn parallel_to_yaml(
     fork: &Option<ForkSpec>,
     join: &Option<JoinSpec>,
 ) -> Value {
-    let mut m = Mapping::new();
-    m.insert(
-        Value::String("name".to_string()),
-        Value::String(attrs.name.clone()),
-    );
-    m.insert(
-        Value::String("type".to_string()),
-        Value::String("parallel".to_string()),
-    );
+    let mut m = Map::new();
+    m.insert("name".to_string(), Value::String(attrs.name.clone()));
+    m.insert("type".to_string(), Value::String("parallel".to_string()));
     if let Some(mc) = max_concurrent {
         m.insert(
-            Value::String("max_concurrent".to_string()),
-            Value::Number((mc as i64).into()),
+            "max_concurrent".to_string(),
+            Value::Number(serde_json::Number::from(mc)),
         );
     }
     if cancel_on_error {
-        m.insert(
-            Value::String("cancel_on_error".to_string()),
-            Value::Bool(true),
-        );
+        m.insert("cancel_on_error".to_string(), Value::Bool(true));
     }
     if error_policy != ErrorPolicy::Any {
         m.insert(
-            Value::String("error_policy".to_string()),
+            "error_policy".to_string(),
             Value::String(error_policy.as_str().to_string()),
         );
     }
-    if let Some(model_val) = model_to_yaml(model) {
-        m.insert(Value::String("model".to_string()), model_val);
+    if let Some(model_val) = model_to_json(model) {
+        m.insert("model".to_string(), model_val);
     }
     insert_task_models(&mut m, task_models);
     insert_str_if_nonempty(&mut m, "skip_if_exists", &attrs.skip_if_exists);
@@ -558,9 +519,9 @@ fn parallel_to_yaml(
             .iter()
             .map(|c| Value::String(c.clone()))
             .collect();
-        let mut fork_map = Mapping::new();
-        fork_map.insert(Value::String("cmds".to_string()), Value::Sequence(cmds));
-        m.insert(Value::String("fork".to_string()), Value::Mapping(fork_map));
+        let mut fork_map = Map::new();
+        fork_map.insert("cmds".to_string(), Value::Array(cmds));
+        m.insert("fork".to_string(), Value::Object(fork_map));
     }
     if let Some(ref join_spec) = join {
         let cmds: Vec<Value> = join_spec
@@ -568,13 +529,13 @@ fn parallel_to_yaml(
             .iter()
             .map(|c| Value::String(c.clone()))
             .collect();
-        let mut join_map = Mapping::new();
-        join_map.insert(Value::String("cmds".to_string()), Value::Sequence(cmds));
-        m.insert(Value::String("join".to_string()), Value::Mapping(join_map));
+        let mut join_map = Map::new();
+        join_map.insert("cmds".to_string(), Value::Array(cmds));
+        m.insert("join".to_string(), Value::Object(join_map));
     }
-    let children: Vec<Value> = body.iter().map(StageSpec::to_yaml).collect();
-    m.insert(Value::String("body".to_string()), Value::Sequence(children));
-    Value::Mapping(m)
+    let children: Vec<Value> = body.iter().map(StageSpec::to_json).collect();
+    m.insert("body".to_string(), Value::Array(children));
+    Value::Object(m)
 }
 
 // ---------------------------------------------------------------------------

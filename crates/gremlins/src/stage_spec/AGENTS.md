@@ -21,7 +21,7 @@ per-stage builder (`AgentBuilder`, `ExecBuilder`, `SequenceBuilder`,
 | `builders/exec.rs` | `ExecBuilder` — builder pattern for `BuilderStage::Exec`. Validates interpolation syntax, bind/interpolation key collisions, and unused keys. Unlike `AgentBuilder`, rejects **all** `FRAMEWORK_KEYS` in options (including `model`). |
 | `builders/composite.rs` | `SequenceBuilder`, `ParallelBuilder` — builder patterns for composite stages. Validates empty-body rejection, max-iterations, nested-parallel rejection, and child-name uniqueness/validity. |
 | `builders/definition.rs` | `DefinitionBuilder` — programmatic (non-YAML) builder for `StaticDefinition`. Also `BootstrapBuilder` and `LandBuilder`. |
-| `definition/static/yaml.rs` | YAML ingestion — `StaticDefinition::from_yaml_file` expands, then `stage_from_yaml` dispatches to the per-stage builders. |
+| `definition/static/yaml.rs` | YAML ingestion — `StaticDefinition::from_json5_file` expands, then `stage_from_yaml` dispatches to the per-stage builders. |
 
 ## Architecture
 
@@ -80,7 +80,7 @@ bare `parallel:` sugar.
 | You want to … | Look at |
 |---|---|
 | Add a new stage type | Recipe below; `builders/agent.rs` for leaf, `builders/composite.rs` for composite |
-| Understand parse flow | `definition/static/yaml.rs` — `StaticDefinition::from_yaml_file` → `stage_from_yaml` → per-type builder → `BuilderStage` |
+| Understand parse flow | `definition/static/yaml.rs` — `StaticDefinition::from_json5_file` → `stage_from_yaml` → per-type builder → `BuilderStage` |
 | Understand name-filling | `builders/definition.rs::fill_builder_names` → `definition/static/loader::fill_names` |
 | Change serialization shape | `node.rs` — `to_yaml` / `*_to_yaml` helpers |
 | Add a composite-only attribute | `composite.rs` (struct), `node.rs` (serialize), `builders/composite.rs` (builder) |
