@@ -75,7 +75,7 @@ static TOOL_SPECS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "Edit",
-        description: "Make one or more non-overlapping replacements in a file. Each edit replaces old_string with new_string (requires unique match), or replaces lines start_line through end_line (1-based, inclusive) with replacement text. Edits are validated against the original file content and must not overlap. When a substring appears multiple times, include 2-3 lines of surrounding context in old_string to make it unique. After a failed edit due to non-uniqueness, re-read only the failing region (with offset/limit), not the whole file. Prefer the line-range form (start_line/end_line/replacement) when you have line numbers from a recent Read. Line-range edits replace entire lines including their trailing newlines; when you replace a line that should remain separate from the next line, ensure replacement ends with \\n. All edits in the array target the same file, specified by the top-level `file_path` parameter — do not nest `file_path` inside individual edit objects. If both match-mode and range-mode fields are present in the same edit object, range mode takes precedence.",
+        description: "Make one or more non-overlapping replacements in a file. Each edit replaces old_string with new_string (requires unique match). Use start_line/end_line to scope the search to a line range when old_string appears multiple times. Edits are validated against the original file content and must not overlap. After a failed edit due to non-uniqueness, re-read only the failing region (with offset/limit), not the whole file. All edits in the array target the same file, specified by the top-level `file_path` parameter — do not nest `file_path` inside individual edit objects.",
         fields: &[
             FieldSpec { name: "file_path", description: "Path to the file to edit (relative or absolute)", ty: "string", required: true, validated: true },
             // `edits` has no top-level description; its nested item schema is
@@ -174,17 +174,9 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool
 
 /// Build a short summary of the fields present in a mixed-mode edit object,
 /// so the error message shows what the model actually sent.
-pub(crate) fn describe_edit_provided_fields(
-    obj: &serde_json::Map<String, serde_json::Value>,
-) -> String {
+fn describe_edit_provided_fields(obj: &serde_json::Map<String, serde_json::Value>) -> String {
     let mut parts: Vec<String> = Vec::new();
-    for key in &[
-        "start_line",
-        "end_line",
-        "replacement",
-        "old_string",
-        "new_string",
-    ] {
+    for key in &["start_line", "end_line", "old_string", "new_string"] {
         if let Some(v) = obj.get(*key) {
             let display = match v {
                 serde_json::Value::String(s) => {
@@ -303,36 +295,46 @@ pub(crate) fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option
                         ));
                     }
                 };
-                let has_old = obj.contains_key("old_string");
-                let has_start = obj.contains_key("start_line");
-                // If both modes are present, prefer range mode.
-                if !has_old && !has_start {
+                // 'replacement' (the old range-mode field) is removed — reject it
+                // explicitly even when old_string/new_string are also present,
+                // so legacy mixed-mode requests don't silently apply new_string.
+                if obj.contains_key("replacement") {
+                    let provided = describe_edit_provided_fields(obj);
                     return Some(format!(
-                        "Error: edit {} must have either 'old_string' (match mode) or 'start_line' (range mode)",
+                        "Error: edit {} has 'replacement' which is no longer supported — use 'new_string' instead{}",
+                        i + 1,
+                        provided
+                    ));
+                }
+                // 'old_string' is always required.
+                if !obj.contains_key("old_string") {
+                    return Some(format!(
+                        "Error: edit {} missing 'old_string' for Edit tool",
                         i + 1
                     ));
                 }
+                // With 'old_string' present, 'new_string' is also required.
+                if !obj.contains_key("new_string") {
+                    return Some(format!(
+                        "Error: edit {} missing 'new_string' for Edit tool",
+                        i + 1
+                    ));
+                } // 'start_line'/'end_line' are optional scope fields.
+                  // 'end_line' requires 'start_line'; 'start_line' alone is
+                  // valid (open-ended downward scope to EOF).
+                let has_start = obj.contains_key("start_line");
+                let has_end = obj.contains_key("end_line");
+                if has_end && !has_start {
+                    let provided = describe_edit_provided_fields(obj);
+                    return Some(format!(
+                        "Error: edit {} has 'end_line' without 'start_line' — provide both to scope the search{}",
+                        i + 1,
+                        provided
+                    ));
+                }
                 if has_start {
-                    // --- Range mode (may also include ignored match-mode fields) ---
-                    if !obj.contains_key("end_line") {
-                        let provided = describe_edit_provided_fields(obj);
-                        return Some(format!(
-                            "Error: edit {} missing 'end_line' for Edit tool (range mode){}",
-                            i + 1,
-                            provided
-                        ));
-                    }
-                    if !obj.contains_key("replacement") {
-                        let provided = describe_edit_provided_fields(obj);
-                        return Some(format!(
-                            "Error: edit {} missing 'replacement' for Edit tool (range mode){}",
-                            i + 1,
-                            provided
-                        ));
-                    }
-                    // Validate numeric constraints for range mode.
-                    let start_line = match obj.get("start_line").and_then(|v| v.as_u64()) {
-                        Some(n) if n > 0 => n,
+                    match obj.get("start_line").and_then(|v| v.as_u64()) {
+                        Some(n) if n > 0 => {}
                         Some(_) => {
                             return Some(format!(
                                 "Error: edit {} 'start_line' must be a positive integer for Edit tool",
@@ -345,9 +347,11 @@ pub(crate) fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option
                                 i + 1
                             ));
                         }
-                    };
-                    let end_line = match obj.get("end_line").and_then(|v| v.as_u64()) {
-                        Some(n) if n > 0 => n,
+                    }
+                }
+                if has_end {
+                    match obj.get("end_line").and_then(|v| v.as_u64()) {
+                        Some(n) if n > 0 => {}
                         Some(_) => {
                             return Some(format!(
                                 "Error: edit {} 'end_line' must be a positive integer for Edit tool",
@@ -360,21 +364,17 @@ pub(crate) fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option
                                 i + 1
                             ));
                         }
-                    };
+                    }
+                }
+                if has_start && has_end {
+                    let start_line = obj.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let end_line = obj.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0);
                     if start_line > end_line {
                         return Some(format!(
                             "Error: edit {} 'start_line' ({}) > 'end_line' ({}) for Edit tool",
                             i + 1,
                             start_line,
                             end_line
-                        ));
-                    }
-                } else {
-                    // --- Match mode ---
-                    if !obj.contains_key("new_string") {
-                        return Some(format!(
-                            "Error: edit {} missing 'new_string' for Edit tool (match mode)",
-                            i + 1
                         ));
                     }
                 }
@@ -399,7 +399,7 @@ fn tool_parameters(spec: &ToolSpec) -> serde_json::Value {
                     "properties": {
                         "old_string": {
                             "type": "string",
-                            "description": "Exact text to replace — must be unique in the file"
+                            "description": "Exact text to replace — must be unique in the file (or unique within start_line/end_line scope)"
                         },
                         "new_string": {
                             "type": "string",
@@ -407,20 +407,16 @@ fn tool_parameters(spec: &ToolSpec) -> serde_json::Value {
                         },
                         "start_line": {
                             "type": "integer",
-                            "description": "1-based start line number (inclusive, for range edits)"
+                            "description": "When old_string appears multiple times, scope the search to start at this 1-based line (inclusive)"
                         },
                         "end_line": {
                             "type": "integer",
-                            "description": "1-based end line number (inclusive, for range edits; clamped to EOF if beyond last line)"
-                        },
-                        "replacement": {
-                            "type": "string",
-                            "description": "Replacement text for line-range edits. Replaces the entire line span including trailing newlines; include a trailing \\n to keep the next line separate."
+                            "description": "When old_string appears multiple times, scope the search to end at this 1-based line (inclusive; clamps to EOF if beyond last line)"
                         }
                     },
-                    "additionalProperties": false
-                }
-            }),
+                    "additionalProperties": false,
+                    "required": ["old_string", "new_string"]
+                }            }),
             ("Task", "kind") => serde_json::json!({
                 "type": "string",
                 "enum": TaskKind::ALL
