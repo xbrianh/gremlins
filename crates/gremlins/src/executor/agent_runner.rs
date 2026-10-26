@@ -42,12 +42,9 @@ pub struct AgentPrepared {
     /// The model writes each artifact's `model_path`; on commit
     /// [`commit_agent`] persists it under the artifact URI. Best-effort — the
     /// stage may never write any of them.
-    pub implicit_artifacts: Vec<ImplicitArtifact>,
-}
-
-// ---------------------------------------------------------------------------
-// AgentError
-// ---------------------------------------------------------------------------
+    pub(crate) implicit_artifacts: Vec<ImplicitArtifact>,
+} // AgentError
+  // ---------------------------------------------------------------------------
 
 #[derive(Error, Debug)]
 pub enum AgentError {
@@ -229,16 +226,15 @@ pub async fn commit_agent(
     local_state: &dyn StateStore,
 ) -> Result<(), AgentError> {
     // Commit implicit artifacts (e.g. scratchpad). Each artifact reads its
-    // model-writable file, copies to the persist path if non-empty, and
-    // calls local_state.commit(). Absent/empty files are silently skipped.
+    // model-writable file (containment-checked) and copies it to the persist
+    // path if non-empty. Registration in the artifact store is handled by the
+    // bind loop below — the persist step only does file I/O.
+    // Failures are logged but never abort the stage; a scratchpad I/O problem
+    // must not prevent real outputs from being committed.
     for artifact in &prepared.implicit_artifacts {
-        artifact
-            .commit(local_state)
-            .await
-            .map_err(|e| AgentError::Generic {
-                name: prepared.name.clone(),
-                detail: e.to_string(),
-            })?;
+        if let Err(e) = artifact.persist().await {
+            log::warn!("implicit artifact '{}' persist failed: {e}", artifact.kind);
+        }
     }
     for (key, uri_str, optional) in &prepared.output_uris {
         let path = &prepared.output_paths[key];
@@ -921,25 +917,35 @@ mod tests {
         assert!(prepared.implicit_artifacts[0]
             .model_path
             .ends_with("_scratchpad.md"));
+        assert!(
+            prepared.implicit_artifacts[0].model_path.starts_with(&ad),
+            "model_path must be under artifact_dir"
+        );
         // No real outputs means no expected artifacts.
         assert!(prepared.expected_artifact_paths.is_empty());
     }
-
     #[tokio::test]
     async fn test_commit_agent_persists_scratchpad_content() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
         let store = make_state_store(ad.clone());
         let agent = agent_with_bind("out", "artifact://out.md");
-        let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
             .await
             .unwrap();
         std::fs::write(&prepared.output_paths["out"], "body").unwrap();
-        // Point the scratchpad at a real file and verify it is versioned under
-        // the artifact URI on commit.
-        let scratchpad = tmp.path().join("_scratchpad.md");
-        std::fs::write(&scratchpad, "remember: the answer is 42").unwrap();
-        prepared.implicit_artifacts[0].model_path = scratchpad;
+        // Write the scratchpad directly to its model-writable path (under the
+        // artifact dir, not the worktree root). The containment-checked reader
+        // in `persist()` verifies the file lives under the artifact dir.
+        assert!(
+            prepared.implicit_artifacts[0].model_path.starts_with(&ad),
+            "model_path must be under artifact_dir"
+        );
+        std::fs::write(
+            &prepared.implicit_artifacts[0].model_path,
+            "remember: the answer is 42",
+        )
+        .unwrap();
 
         commit_agent(&prepared, &store).await.unwrap();
 
@@ -950,6 +956,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(committed, "remember: the answer is 42");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_commit_agent_skips_symlinked_scratchpad() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ad = ensure_artifact_dir(&tmp);
+        let store = make_state_store(ad.clone());
+        let agent = agent_with_bind("out", "artifact://out.md");
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
+            .await
+            .unwrap();
+        std::fs::write(&prepared.output_paths["out"], "body").unwrap();
+        // Replace the model-writable scratchpad with a symlink pointing
+        // outside the artifact dir. The containment-checked reader must
+        // refuse to follow it, so no scratchpad artifact is persisted.
+        std::fs::write(&prepared.implicit_artifacts[0].model_path, "original").unwrap();
+        let target = tmp.path().join("secret");
+        std::fs::write(&target, "escaped-content").unwrap();
+        std::fs::remove_file(&prepared.implicit_artifacts[0].model_path).unwrap();
+        std::os::unix::fs::symlink(&target, &prepared.implicit_artifacts[0].model_path).unwrap();
+
+        commit_agent(&prepared, &store).await.unwrap();
+
+        assert!(store.is_registered("artifact://out.md").await);
+        assert!(!store.is_registered("artifact://_scratchpad/test.md").await);
     }
 
     #[tokio::test]
@@ -963,15 +995,13 @@ mod tests {
             .unwrap();
         std::fs::write(&prepared.output_paths["out"], "body").unwrap();
         // Point the scratchpad at a path that does not exist.
-        prepared.implicit_artifacts[0].model_path =
-            tmp.path().join("missing").join("_scratchpad.md");
+        prepared.implicit_artifacts[0].model_path = ad.join("missing").join("_scratchpad.md");
 
         commit_agent(&prepared, &store).await.unwrap();
 
         assert!(store.is_registered("artifact://out.md").await);
         assert!(!store.is_registered("artifact://_scratchpad/test.md").await);
     }
-
     #[tokio::test]
     async fn test_accumulate_scratchpads_ordered_and_skips_empty() {
         let tmp = tempfile::TempDir::new().unwrap();

@@ -514,6 +514,10 @@ async fn run_agent(
 
     let is_chat = gremlin.state.read_str("kind") == "chat";
 
+    // The checkout artifact directory must exist before the reset step — the
+    // implicit artifacts write directly into it.
+    std::fs::create_dir_all(&artifact_dir)?;
+
     // Reset implicit artifact files at stage start so the model always begins
     // with a clean slate. Prior-stage working memory is injected below
     // (headless) or by the chat supervisor (chat gremlins).
@@ -522,8 +526,6 @@ async fn run_agent(
             log::warn!("{} reset failed: {e}", artifact.kind);
         }
     }
-
-    std::fs::create_dir_all(&artifact_dir)?;
 
     // Landscape is recomputed before every agent stage so the next
     // agent sees fresh files after any exec stage mutations.
@@ -780,6 +782,16 @@ async fn run_agent(
                     .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
                 );
                 gremlin.state.accumulate_token_usage(&delta);
+            }
+            // Flush the live scratchpad into the main state store so a
+            // cancelled/failed chat turn does not drop in-flight working
+            // memory. The checkout is dropped without ever being joined on
+            // this path.
+            if is_chat {
+                for artifact in &prepared.implicit_artifacts {
+                    crate::executor::implicit::flush_live(artifact, gremlin.state.store_ref())
+                        .await;
+                }
             }
             return Err(client_run_err(error, &prepared.name));
         }

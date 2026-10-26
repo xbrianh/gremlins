@@ -6,6 +6,7 @@
 //! the machinery is generalized so additional kinds can be added without
 //! further special-casing.
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::artifacts::uri::Uri;
@@ -25,19 +26,21 @@ use crate::executor::state::StateStore;
 /// | Bind key          | `__gml_{kind}`                    |
 /// | Optional          | always true                       |
 #[derive(Debug)]
-pub struct ImplicitArtifact {
+pub(crate) struct ImplicitArtifact {
     /// The kind name, e.g. `"scratchpad"`.
-    pub kind: String,
+    pub(crate) kind: String,
     /// The synthetic artifact URI, e.g. `"artifact://_scratchpad/stage-a.md"`.
-    pub uri: String,
+    pub(crate) uri: String,
     /// Absolute path the model writes to (under the checkout artifact dir).
-    pub model_path: PathBuf,
-    /// Absolute path the harness commits to (under the checkout artifact dir).
-    pub persist_path: String,
+    pub(crate) model_path: PathBuf,
+    /// Absolute path the harness writes the persisted copy to (under the same
+    /// checkout artifact dir). Registration in the artifact store is handled
+    /// by the bind loop in [`commit_agent`](super::agent_runner::commit_agent).
+    pub(crate) persist_path: String,
     /// The synthetic bind key registered in `output_paths` / `output_uris`.
-    pub bind_key: String,
+    pub(crate) bind_key: String,
     /// Always `true` for implicit artifacts.
-    pub optional: bool,
+    pub(crate) optional: bool,
 }
 
 impl ImplicitArtifact {
@@ -47,7 +50,7 @@ impl ImplicitArtifact {
     /// no scratchpad file is ever written into the gremlin's working directory.
     /// The persist path is resolved from the synthetic URI via
     /// `local_state.path_for_uri()`.
-    pub async fn for_kind(
+    pub(crate) async fn for_kind(
         kind: &str,
         stage_name: &str,
         loop_iter: &str,
@@ -56,11 +59,13 @@ impl ImplicitArtifact {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Reject stage names that could escape the _kind directory.
         if stage_name.contains('/') || stage_name.contains('\\') || stage_name.contains("..") {
-            return Err(format!(
-                "stage name {stage_name:?} contains path separators or '..' — \
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "stage name {stage_name:?} contains path separators or '..' — \
                      cannot construct a safe implicit artifact URI"
-            )
-            .into());
+                ),
+            )));
         }
         let name = if loop_iter.is_empty() {
             format!("{stage_name}.md")
@@ -81,34 +86,29 @@ impl ImplicitArtifact {
         })
     }
 
-    /// Commit the artifact: read the model-writable file, copy to the persist
-    /// path if non-empty, then call `local_state.commit()`. Absent or empty
-    /// files are silently skipped.
-    pub async fn commit(
-        &self,
-        local_state: &dyn StateStore,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let content = match std::fs::read_to_string(&self.model_path) {
+    /// Persist the artifact: read the model-writable file with containment
+    /// checks (`O_NOFOLLOW` plus root-isolation), then copy it to the persist
+    /// path. Absent or empty files are silently skipped.
+    ///
+    /// Registration in the artifact store is the caller's responsibility —
+    /// the bind loop in [`commit_agent`](super::agent_runner::commit_agent)
+    /// calls `local_state.commit()` for every output URI (including implicit
+    /// ones) after the file has been copied.
+    pub(crate) async fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = self.model_path.parent().unwrap_or_else(|| Path::new("."));
+        let content = match super::agent_runner::read_scratchpad_contained(&self.model_path, root) {
             Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(Box::new(e)),
         };
         if content.trim().is_empty() {
             return Ok(());
         }
         if let Some(parent) = Path::new(&self.persist_path).parent() {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
-        std::fs::write(&self.persist_path, &content)?;
-        local_state.commit(&self.uri, &self.persist_path).await?;
+        tokio::fs::write(&self.persist_path, &content).await?;
         Ok(())
-    }
-
-    /// Returns `true` when `key` is an implicit artifact key of the given kind.
-    pub fn is_implicit_key(key: &str, kind: &str) -> bool {
-        let prefix = format!("artifact://_{kind}/");
-        let alt_prefix = format!("_{kind}/");
-        key.starts_with(&prefix) || key.starts_with(&alt_prefix)
     }
 
     /// Extract the stage name from an implicit artifact key of the given kind.
@@ -116,7 +116,7 @@ impl ImplicitArtifact {
     ///
     /// Keys are formatted as `artifact://_{kind}/{name}.md` or
     /// `artifact://_{kind}/{name}-{loop_iter}.md`.
-    pub fn stage_name_from_key<'a>(key: &'a str, kind: &str) -> Option<&'a str> {
+    pub(crate) fn stage_name_from_key<'a>(key: &'a str, kind: &str) -> Option<&'a str> {
         let prefix = format!("artifact://_{kind}/");
         let rest = key
             .strip_prefix(&prefix)
@@ -129,7 +129,7 @@ impl ImplicitArtifact {
 
     /// The `{scratchpad_path}` placeholder value — the absolute model-writable
     /// path rendered for substitution into the system prompt.
-    pub fn placeholder_path(&self) -> String {
+    pub(crate) fn placeholder_path(&self) -> String {
         self.model_path.to_string_lossy().into_owned()
     }
 }
@@ -179,4 +179,48 @@ pub(crate) async fn accumulate_implicit(
         }
     }
     accumulated.trim().to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Flush live artifact to main state store (error path)
+// ---------------------------------------------------------------------------
+
+/// Best-effort flush of a live model-writable artifact into `main_state`
+/// under its artifact URI.
+///
+/// Called from the agent error path (cancelled / failed turns), where the
+/// stage checkout is dropped without ever being joined to the main store.
+/// This ensures in-flight working memory is not lost before the supervisor
+/// runs session-end persistence.
+pub(crate) async fn flush_live(
+    artifact: &ImplicitArtifact,
+    main_state: &(dyn StateStore + Send + Sync),
+) {
+    let root = match artifact.model_path.parent() {
+        Some(p) => p,
+        None => return,
+    };
+    let content = match super::agent_runner::read_scratchpad_contained(&artifact.model_path, root) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if content.trim().is_empty() {
+        return;
+    }
+    let uri = match Uri::parse(&artifact.uri) {
+        Ok(uri) => uri,
+        Err(_) => return,
+    };
+    let persist = match main_state.path_for_uri(&uri).await {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if let Some(parent) = Path::new(&persist).parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    if let Err(e) = tokio::fs::write(&persist, &content).await {
+        log::warn!("flush_live: failed to write {}: {e}", persist);
+        return;
+    }
+    let _ = main_state.commit(&artifact.uri, &persist).await;
 }

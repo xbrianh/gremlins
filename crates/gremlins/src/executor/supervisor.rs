@@ -1163,8 +1163,10 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
             }
         }
         drop(s);
-        // Flush the scratchpad before calling handle_stop so working
-        // memory is not lost.
+        // Persist accumulated scratchpad artifacts to the XDG project
+        // scratchpad before calling handle_stop so working memory from
+        // committed turns survives. When a turn was in-flight, its error
+        // path already flushed the live scratchpad into the store.
         if let (Some(store), Some(ref pr)) = (&store, &project_root) {
             let accumulated =
                 crate::executor::agent_runner::accumulate_scratchpads(store.as_ref(), &[]).await;
@@ -1173,7 +1175,6 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
     }
     handle_stop(request, &watch::channel(false).0).await
 }
-
 /// Remove a chat gremlin from whichever session owns it and cancel its turn.
 /// Called by control-socket `stop`.
 async fn stop_session_chat_gremlin(id: &str) {
@@ -1195,9 +1196,9 @@ async fn stop_session_chat_gremlin(id: &str) {
     };
 
     // Cancel the in-flight turn and wait for it to finish so the model
-    // doesn't race with our snapshot of _scratchpad.md. Keep the removed
-    // Gremlin alive until after the persist so its TempDir (if any) is not
-    // dropped before we read _scratchpad.md.
+    // doesn't race with our accumulation of committed scratchpad artifacts.
+    // Keep the removed Gremlin alive until after the persist so its state
+    // store is not dropped before we read.
     let sessions: Vec<SessionHandle> = session_map().lock().unwrap().values().cloned().collect();
     for session in sessions {
         let mut s = session.lock().await;
@@ -2856,9 +2857,9 @@ async fn handle_chat(
     };
     gremlin.client = client;
     // Re-inject scratchpads persisted by prior turns of this persistent chat
-    // gremlin so working memory survives conversation compaction. The current
-    // turn's stage writes `_scratchpad.md` in the worktree root; on commit it
-    // is versioned under `artifact://_scratchpad/{stage}.md` and read back here.
+    // gremlin so working memory survives conversation compaction. Each turn
+    // commits its scratchpad under `artifact://_scratchpad/{stage}.md`; the
+    // accumulated content is read back here.
     let scratchpad_accumulated = crate::executor::agent_runner::accumulate_scratchpads(
         gremlin.state.store_ref(),
         &[], // chat stages sort correctly lexically
