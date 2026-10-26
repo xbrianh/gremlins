@@ -174,9 +174,7 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool
 
 /// Build a short summary of the fields present in a mixed-mode edit object,
 /// so the error message shows what the model actually sent.
- fn describe_edit_provided_fields(
-    obj: &serde_json::Map<String, serde_json::Value>,
-) -> String {
+fn describe_edit_provided_fields(obj: &serde_json::Map<String, serde_json::Value>) -> String {
     let mut parts: Vec<String> = Vec::new();
     for key in &["start_line", "end_line", "old_string", "new_string"] {
         if let Some(v) = obj.get(*key) {
