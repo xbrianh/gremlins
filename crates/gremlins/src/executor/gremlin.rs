@@ -1526,7 +1526,11 @@ pub(crate) fn resolve_env(
             "GREMLINS_SOURCE_{}",
             key.to_ascii_uppercase()
                 .chars()
-                .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+                .map(|c| if c.is_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                })
                 .collect::<String>()
         );
         base.insert(var_name, value.clone());

@@ -512,7 +512,8 @@ fn strip_attributes(src: &str) -> String {
                 i += 1;
             }
             continue;
-        }        out.push(chars[i]);
+        }
+        out.push(chars[i]);
         i += 1;
     }
 
@@ -748,7 +749,8 @@ fn file_rel_to_module(rel: &Path, target_name: &str, is_bin: bool) -> Option<Str
 /// parent module.  For example, when `lib.rs` contains
 /// `#[cfg(test)] mod tests;`, the file `src/tests.rs` is only compiled in
 /// test configuration and should be excluded from token counting and scoring.
-pub(crate) fn is_module_file_cfg_test_gated(file: &Path, pkg: &RustPackage) -> bool {    let src_dir = pkg.dir.join("src");
+pub(crate) fn is_module_file_cfg_test_gated(file: &Path, pkg: &RustPackage) -> bool {
+    let src_dir = pkg.dir.join("src");
     let rel = match file.strip_prefix(&src_dir) {
         Ok(r) => r,
         Err(_) => return false,
@@ -763,7 +765,11 @@ pub(crate) fn is_module_file_cfg_test_gated(file: &Path, pkg: &RustPackage) -> b
     // Determine the module name (the ident after `mod` in the parent).
     let module_name: String = if rel_str.ends_with("/mod.rs") {
         // src/foo/mod.rs → the module is "foo"
-        match rel.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
+        match rel
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+        {
             Some(n) => n.to_string(),
             None => return false,
         }
@@ -1170,7 +1176,8 @@ mod tests {
                 ("crate".to_string(), "crate::util".to_string()),
                 ("crate::prelude".to_string(), "crate::util".to_string()),
             ]
-        );    }
+        );
+    }
 
     #[test]
     fn reexport_only_facade_no_importers_keeps_outgoing_edges() {
