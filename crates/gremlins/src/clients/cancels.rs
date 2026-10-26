@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use super::agent_loop::CancelToken;
-use super::backend::ClientError;
+use super::cancel::CancelToken;
+use super::error::ClientError;
 
 /// A thread-safe map of in-flight cancel tokens, keyed by gremlin ID and
 /// then by a monotonically-increasing per-backend attempt counter.

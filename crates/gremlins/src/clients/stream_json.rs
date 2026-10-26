@@ -51,7 +51,7 @@ pub(crate) fn emit_event(
     evt: &Value,
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) {
-    use crate::clients::log_util::trunc;
+    use super::format::trunc;
 
     let evt_type = evt.get("type").and_then(|v| v.as_str()).unwrap_or("");
 

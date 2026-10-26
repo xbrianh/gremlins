@@ -1,47 +1,19 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::process::Stdio;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
 
-use regex::Regex;
-use rig_core::completion::ToolDefinition;
-use tokio::process::Command;
-
-use super::agent_loop::format_tool_call_parts;
 use super::interactive::StreamEventSender;
+use super::shell_parse::{
+    shell_tokenize, split_commands, strip_heredocs, strip_subshells, ShellToken, SubCommandSep,
+};
 use super::task_kind::TaskKind;
-use crate::landscape::{LandscapeError, LandscapeExplorer};
-use crate::skills::LoadedSkill;
-
-const GREP_MAX_LINES: usize = 2000;
-const BASH_TIMEOUT_SECS: u64 = 120;
-const WEBSEARCH_TIMEOUT_SECS: u64 = 30;
-/// Maximum number of concurrent tool calls the harness will execute from a
-/// single model message. General tools (Read, Write, Grep, Glob, etc.) queue
-/// when this limit is exceeded — only Task calls are subject to a hard
-/// rejection cap (`TASK_MAX_PER_TURN`).
-pub(crate) const MAX_CONCURRENT_TOOLS: usize = 8;
-/// Cap on Task calls spawned from a single model message. Without this, one
-/// response could fan out unbounded child loops and overflow the context.
-pub(crate) const TASK_MAX_PER_TURN: usize = 8;
-const SKIP_DIRS: &[&str] = &["__pycache__", "node_modules", "target"];
-/// Tools that stay available even when a tool filter is set. `task_fn`
-/// re-applies both the tool filter and the sandbox mode to every nested agent,
-/// so bypassing the filter here cannot escape containment.
-const ALWAYS_AVAILABLE: &[&str] = &["Task", "Done"];
-
-fn always_available(name: &str) -> bool {
-    ALWAYS_AVAILABLE.contains(&name)
-}
-
-/// Mischief is a chat-only tool that bypasses tool filters in chat sessions.
-/// Headless gremlins must get it from their native block (which never lists
-/// it), so this helper keeps it out of headless loops.
-fn chat_only_always_available(name: &str, chat: bool) -> bool {
-    chat && name == "Mischief"
-}
+pub(crate) use super::tool_specs::{
+    always_available, chat_only_always_available, tool_definitions, validate_tool_args,
+    MAX_CONCURRENT_TOOLS, TASK_MAX_PER_TURN,
+};
+// Re-export result_status so agent_loop's `tools::result_status` calls keep working.
+pub(crate) use super::compaction::result_status;
 
 /// First `max_chars` characters of a string, with \n escaped to `\\n`.
 pub(crate) fn preview_str(s: &str, max_chars: usize) -> String {
@@ -135,13 +107,13 @@ pub(crate) struct AgentLoopRuntime {
     /// The LoadSkill tool pushes names here; the supervisor reads them
     /// at the next turn boundary.
     pub(crate) active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
-    /// Discovered skills, set when skills are available (chat-only).
-    /// This is `Some` only for top-level chat sessions; headless gremlins
-    /// and nested tasks see `None`. It doubles as the canonical chat
-    /// predicate for tool gates (Mischief bypass, LoadSkill inclusion).
-    pub(crate) discovered_skills: Option<Arc<Vec<LoadedSkill>>>,
+    /// Whether skills are available (chat-only). Doubles as the canonical
+    /// chat predicate for tool gates (Mischief bypass, LoadSkill inclusion).
+    pub(crate) skills_available: bool,
+    /// Discovered skills for this session. Session-bound so concurrent chat
+    /// sessions resolve their own project's skills instead of a shared slot.
+    pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
 }
-
 impl AgentLoopRuntime {
     /// Send one completed live-output line for the tool call identified by
     /// `id` to the optional display channel. Tool results returned to the
@@ -426,626 +398,6 @@ fn check_ln_symlink(cmd: &str) -> Option<String> {
     None
 }
 
-/// A single token produced by [`shell_tokenize`].
-struct ShellToken {
-    /// The raw verbatim text as it appeared in the command string,
-    /// including any surrounding quotes and escape characters.
-    raw: String,
-    /// The resolved text with quotes stripped and escapes processed,
-    /// as a POSIX shell would interpret it.
-    value: String,
-}
-
-/// Shell-aware tokenizer: splits a command string into argument tokens
-/// as a POSIX shell would, handling backslash escaping, single quotes,
-/// and double quotes. Escapes are resolved and quotes are stripped.
-///
-/// This is not a full shell parser — it does not handle `$()` expansion,
-/// `;`/`&&`/`||` command separators, or IFS splitting. It is designed for
-/// the sandbox path checker which only needs to isolate individual path
-/// arguments from the command string.
-fn shell_tokenize(s: &str) -> Vec<ShellToken> {
-    let mut tokens = Vec::new();
-    let mut value = String::new();
-    let mut raw = String::new();
-    let mut chars = s.chars();
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\'' => {
-                raw.push(ch);
-                loop {
-                    match chars.next() {
-                        Some('\'') => {
-                            raw.push('\'');
-                            break;
-                        }
-                        Some(c) => {
-                            raw.push(c);
-                            value.push(c);
-                        }
-                        None => break,
-                    }
-                }
-            }
-            '"' => {
-                raw.push(ch);
-                // Double-quoted: only \\, \", \$, \`, and \<newline>
-                // are escape sequences; everything else is literal.
-                loop {
-                    match chars.next() {
-                        None => break,
-                        Some('"') => {
-                            raw.push('"');
-                            break;
-                        }
-                        Some('\\') => {
-                            raw.push('\\');
-                            match chars.next() {
-                                Some(c @ ('$' | '`' | '"' | '\\')) => {
-                                    raw.push(c);
-                                    value.push(c);
-                                }
-                                Some('\n') => {
-                                    // Backslash-newline: skip both (line continuation).
-                                    raw.push('\n');
-                                }
-                                Some(c) => {
-                                    raw.push(c);
-                                    value.push('\\');
-                                    value.push(c);
-                                }
-                                None => {}
-                            }
-                        }
-                        Some(c) => {
-                            raw.push(c);
-                            value.push(c);
-                        }
-                    }
-                }
-            }
-            '\\' => {
-                raw.push(ch);
-                if let Some(c) = chars.next() {
-                    raw.push(c);
-                    value.push(c);
-                }
-            }
-            c if c.is_whitespace() => {
-                if !value.is_empty() {
-                    tokens.push(ShellToken {
-                        raw: std::mem::take(&mut raw),
-                        value: std::mem::take(&mut value),
-                    });
-                }
-            }
-            c => {
-                raw.push(c);
-                value.push(c);
-            }
-        }
-    }
-    if !value.is_empty() {
-        tokens.push(ShellToken { raw, value });
-    }
-    tokens
-}
-
-/// Separator between sub-commands: `;`, `&&`, or `||`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SubCommandSep {
-    /// `;` — unconditional sequencing.
-    Semi,
-    /// `&&` — AND list: next command runs only if the previous succeeded.
-    AndAnd,
-    /// `||` — OR list: next command runs only if the previous failed.
-    OrOr,
-}
-
-/// Split a shell command string into sub-commands at `;`, `&&`, and `||`
-/// boundaries, respecting quotes and backslash escapes so that a quoted
-/// path containing those characters is not split.
-///
-/// Returns `(separator, command)` pairs. The first sub-command always has
-/// `None` separator; every subsequent sub-command carries the separator
-/// that preceded it.
-fn split_commands(s: &str) -> Vec<(Option<SubCommandSep>, String)> {
-    let mut parts: Vec<(Option<SubCommandSep>, String)> = Vec::new();
-    let mut current = String::new();
-    let mut chars = s.chars();
-    let mut next_sep: Option<SubCommandSep> = None;
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\'' => {
-                current.push(ch);
-                loop {
-                    match chars.next() {
-                        Some('\'') => {
-                            current.push('\'');
-                            break;
-                        }
-                        Some(c) => current.push(c),
-                        None => break,
-                    }
-                }
-            }
-            '"' => {
-                current.push(ch);
-                loop {
-                    match chars.next() {
-                        None => break,
-                        Some('"') => {
-                            current.push('"');
-                            break;
-                        }
-                        Some('\\') => {
-                            current.push('\\');
-                            if let Some(c) = chars.next() {
-                                current.push(c);
-                            }
-                        }
-                        Some(c) => current.push(c),
-                    }
-                }
-            }
-            '\\' => {
-                current.push(ch);
-                if let Some(c) = chars.next() {
-                    current.push(c);
-                }
-            }
-            ';' => {
-                let trimmed = current.trim().to_string();
-                if !trimmed.is_empty() {
-                    parts.push((next_sep, trimmed));
-                }
-                next_sep = Some(SubCommandSep::Semi);
-                current.clear();
-            }
-            '&' if chars.clone().next() == Some('&') => {
-                chars.next();
-                let trimmed = current.trim().to_string();
-                if !trimmed.is_empty() {
-                    parts.push((next_sep, trimmed));
-                }
-                next_sep = Some(SubCommandSep::AndAnd);
-                current.clear();
-            }
-            '|' if chars.clone().next() == Some('|') => {
-                chars.next();
-                let trimmed = current.trim().to_string();
-                if !trimmed.is_empty() {
-                    parts.push((next_sep, trimmed));
-                }
-                next_sep = Some(SubCommandSep::OrOr);
-                current.clear();
-            }
-            c => current.push(c),
-        }
-    }
-    let trimmed = current.trim().to_string();
-    if !trimmed.is_empty() {
-        parts.push((next_sep, trimmed));
-    }
-    parts
-}
-
-/// A heredoc redirection whose body has not yet been consumed.
-#[derive(Debug, Default)]
-struct Heredoc {
-    delimiter: String,
-    strip_tabs: bool,
-}
-
-/// Shell metacharacters that terminate a bare heredoc delimiter word.
-fn is_delimiter_boundary(c: char) -> bool {
-    c.is_whitespace() || matches!(c, ';' | '&' | '|' | '<' | '>' | '(' | ')')
-}
-
-/// A stateful scanner that copies a bash command while removing heredoc
-/// redirections and their bodies. Keeping the scanner as a type — rather than
-/// one long free function — makes the shell-state transitions (quoting,
-/// comment, expansion, heredoc, body) independently testable.
-struct HeredocStripper<'a> {
-    chars: std::iter::Peekable<std::str::Chars<'a>>,
-    result: String,
-    pending: Vec<Heredoc>,
-    /// Whether the next `#` would start a comment (i.e. we are at a word start).
-    word_start: bool,
-}
-
-impl<'a> HeredocStripper<'a> {
-    fn new(s: &'a str) -> Self {
-        Self {
-            chars: s.chars().peekable(),
-            result: String::with_capacity(s.len()),
-            pending: Vec::new(),
-            word_start: true,
-        }
-    }
-
-    fn strip(mut self) -> String {
-        while let Some(ch) = self.chars.next() {
-            self.step(ch);
-        }
-        self.result
-    }
-
-    fn step(&mut self, ch: char) {
-        match ch {
-            '\'' => {
-                self.result.push(ch);
-                self.copy_quoted_body('\'');
-                self.word_start = false;
-            }
-            '"' => {
-                self.result.push(ch);
-                self.copy_quoted_body('"');
-                self.word_start = false;
-            }
-            '\\' => {
-                // Backslash escapes the next character, so `\<<` is not a
-                // heredoc operator.
-                self.copy_escaped(ch);
-                self.word_start = false;
-            }
-            '#' if self.word_start => {
-                self.copy_comment();
-                self.word_start = true;
-            }
-            '$' => self.copy_dollar(),
-            '(' => {
-                if self.chars.peek().copied() == Some('(') {
-                    // `((` arithmetic command: `<<` inside is a shift, not a
-                    // heredoc.
-                    self.result.push(ch);
-                    self.copy_balanced('(', ')');
-                    self.word_start = false;
-                } else {
-                    self.result.push(ch);
-                    self.word_start = true;
-                }
-            }
-            '<' => self.copy_less_than(),
-            '\n' => {
-                self.result.push(ch);
-                if !self.pending.is_empty() {
-                    self.skip_heredoc_bodies();
-                }
-                self.word_start = true;
-            }
-            c if c.is_whitespace() => {
-                self.result.push(c);
-                self.word_start = true;
-            }
-            c => {
-                self.result.push(c);
-                self.word_start = matches!(c, ';' | '&' | '|' | ')' | '>');
-            }
-        }
-    }
-
-    fn copy_escaped(&mut self, ch: char) {
-        self.result.push(ch);
-        if let Some(escaped) = self.chars.next() {
-            self.result.push(escaped);
-        }
-    }
-
-    /// Copy the remainder of a quoted span whose opening quote has already
-    /// been written. Backslashes are literal in single quotes; in double
-    /// quotes they escape the following character.
-    fn copy_quoted_body(&mut self, quote: char) {
-        loop {
-            match self.chars.next() {
-                None => break,
-                Some(c) if c == quote => {
-                    self.result.push(c);
-                    break;
-                }
-                Some('\\') if quote == '"' => {
-                    self.result.push('\\');
-                    if let Some(escaped) = self.chars.next() {
-                        self.result.push(escaped);
-                    }
-                }
-                Some(c) => self.result.push(c),
-            }
-        }
-    }
-
-    /// Copy a balanced `open`..`close` region verbatim (no heredoc detection
-    /// inside), skipping quoted spans so nested delimiters are not miscounted.
-    /// A backslash escapes the following character, so an escaped `close` is
-    /// copied without changing the nesting depth.
-    fn copy_balanced(&mut self, open: char, close: char) {
-        let mut depth = 1u32;
-        while depth > 0 {
-            match self.chars.next() {
-                None => break,
-                Some(c) if c == '\'' => {
-                    self.result.push(c);
-                    self.copy_quoted_body('\'');
-                }
-                Some(c) if c == '"' => {
-                    self.result.push(c);
-                    self.copy_quoted_body('"');
-                }
-                Some('\\') => self.copy_escaped('\\'),
-                Some(c) if c == open => {
-                    depth += 1;
-                    self.result.push(c);
-                }
-                Some(c) if c == close => {
-                    depth -= 1;
-                    self.result.push(c);
-                }
-                Some(c) => self.result.push(c),
-            }
-        }
-    }
-
-    fn copy_comment(&mut self) {
-        self.result.push('#');
-        for c in self.chars.by_ref() {
-            self.result.push(c);
-            if c == '\n' {
-                break;
-            }
-        }
-    }
-
-    fn copy_dollar(&mut self) {
-        let mut probe = self.chars.clone();
-        match probe.next() {
-            // `$(` subshell and `$((` arithmetic: copy verbatim so a `<<`
-            // inside (e.g. a bitwise shift) is not a heredoc.
-            Some('(') => {
-                self.result.push('$');
-                self.result.push('(');
-                self.chars = probe;
-                self.copy_balanced('(', ')');
-                self.word_start = false;
-            }
-            // `${...}` parameter expansion: `<<` inside is not a heredoc.
-            Some('{') => {
-                self.result.push('$');
-                self.result.push('{');
-                self.chars = probe;
-                self.copy_balanced('{', '}');
-                self.word_start = false;
-            }
-            _ => {
-                self.result.push('$');
-                self.word_start = false;
-            }
-        }
-    }
-
-    fn copy_less_than(&mut self) {
-        if self.chars.peek().copied() != Some('<') {
-            self.result.push('<');
-            self.word_start = true;
-            return;
-        }
-
-        // `<<<` is a here-string, not a heredoc: emit all three `<` and keep
-        // scanning.
-        let mut probe = self.chars.clone();
-        probe.next(); // past the second `<`
-        if probe.peek().copied() == Some('<') {
-            self.result.push_str("<<<");
-            self.chars = probe;
-            self.chars.next(); // past the third `<`
-            self.word_start = true;
-            return;
-        }
-
-        // Heredoc: consume the second `<` and an optional `-` (which strips
-        // leading tabs from the terminator line).
-        self.chars.next();
-        let mut heredoc = Heredoc::default();
-        if self.chars.peek().copied() == Some('-') {
-            self.chars.next();
-            heredoc.strip_tabs = true;
-        }
-        while self.chars.peek().is_some_and(|&c| c == ' ' || c == '\t') {
-            self.chars.next();
-        }
-        heredoc.delimiter = self.read_delimiter_word();
-        self.result.push('\x01');
-        self.pending.push(heredoc);
-        self.word_start = false;
-    }
-
-    /// Read a heredoc delimiter word, applying bash quote removal so that
-    /// `$'EOF'`, `EOF'x'`, `"EOF"`, `\EOF`, and bare `EOF` all resolve to
-    /// the delimiter bash will actually compare against the terminator line.
-    fn read_delimiter_word(&mut self) -> String {
-        let mut value = String::new();
-        loop {
-            match self.chars.peek().copied() {
-                None => break,
-                Some(c) if is_delimiter_boundary(c) => break,
-                Some('\'') => {
-                    self.chars.next();
-                    loop {
-                        match self.chars.next() {
-                            None => break,
-                            Some('\'') => break,
-                            Some(c) => value.push(c),
-                        }
-                    }
-                }
-                Some('"') => {
-                    self.chars.next();
-                    loop {
-                        match self.chars.next() {
-                            None => break,
-                            Some('"') => break,
-                            Some('\\') => match self.chars.next() {
-                                Some(c @ ('$' | '`' | '"' | '\\')) => value.push(c),
-                                Some(c) => {
-                                    value.push('\\');
-                                    value.push(c);
-                                }
-                                None => {}
-                            },
-                            Some(c) => value.push(c),
-                        }
-                    }
-                }
-                Some('$') => {
-                    let mut probe = self.chars.clone();
-                    probe.next(); // `$`
-                    if probe.peek().copied() == Some('\'') {
-                        // ANSI-C quoting `$'...'`.
-                        self.chars = probe;
-                        self.chars.next(); // opening `'`
-                        loop {
-                            match self.chars.next() {
-                                None => break,
-                                Some('\'') => break,
-                                Some('\\') => match self.chars.next() {
-                                    Some('n') => value.push('\n'),
-                                    Some('t') => value.push('\t'),
-                                    Some('r') => value.push('\r'),
-                                    Some('\\') => value.push('\\'),
-                                    Some('\'') => value.push('\''),
-                                    Some('"') => value.push('"'),
-                                    Some(c) => value.push(c),
-                                    None => {}
-                                },
-                                Some(c) => value.push(c),
-                            }
-                        }
-                    } else {
-                        self.chars.next();
-                        value.push('$');
-                    }
-                }
-                Some('\\') => {
-                    self.chars.next();
-                    if let Some(c) = self.chars.next() {
-                        value.push(c);
-                    }
-                }
-                Some(_) => value.push(self.chars.next().unwrap()),
-            }
-        }
-        value
-    }
-
-    /// Drop body lines for each pending heredoc, in order, up to and
-    /// including the terminator line. Emits a single newline so a following
-    /// command is not glued onto the heredoc's header line.
-    fn skip_heredoc_bodies(&mut self) {
-        for heredoc in self.pending.drain(..) {
-            loop {
-                let mut line = String::new();
-                loop {
-                    match self.chars.next() {
-                        None => return, // no terminator: drop to end of input
-                        Some('\n') => break,
-                        Some(c) => line.push(c),
-                    }
-                }
-                if line.ends_with('\r') {
-                    line.pop();
-                }
-                let candidate = if heredoc.strip_tabs {
-                    line.trim_start_matches('\t')
-                } else {
-                    line.as_str()
-                };
-                if candidate == heredoc.delimiter {
-                    break;
-                }
-            }
-        }
-        self.result.push('\n');
-    }
-}
-
-/// Strip heredoc redirections and their bodies from a command string.
-///
-/// A heredoc body is file *content*, not a path argument the agent is passing
-/// to the shell, so `bash_check` must never tokenize it. Each `<<`/`<<-`
-/// redirection plus its body is replaced with the same inert `\x01` sentinel
-/// used by [`strip_subshells`], while the rest of the redirection's first line
-/// (such as `> /tmp/out` in `cat <<EOF > /tmp/out`) passes through unchanged.
-fn strip_heredocs(s: &str) -> String {
-    HeredocStripper::new(s).strip()
-}
-
-/// Strip `$(...)` and backtick command substitutions from a command string.
-/// Paths inside subshells are runtime-expanded by the shell, not literal
-/// arguments from the agent, so they must not be checked by `bash_check`.
-fn strip_subshells(s: &str) -> String {
-    /// Skip a quoted region: returns when the matching close-quote is found.
-    fn skip_quoted(chars: &mut std::str::Chars, quote: char) {
-        loop {
-            match chars.next() {
-                None => break,
-                Some(c) if c == quote => break,
-                Some('\\') => {
-                    chars.next();
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '$' => {
-                // Peek ahead for `$(` — if found, skip the entire subshell.
-                let mut peek = chars.clone();
-                if peek.next() == Some('(') {
-                    chars = peek;
-                    let mut depth = 1u32;
-                    while depth > 0 {
-                        match chars.next() {
-                            None => break,
-                            Some(c) if c == '\'' || c == '"' => skip_quoted(&mut chars, c),
-                            Some('(') => depth += 1,
-                            Some(')') => depth -= 1,
-                            Some('\\') => {
-                                chars.next();
-                            }
-                            _ => {}
-                        }
-                    }
-                    result.push('\x01'); // sentinel — never a valid path component
-                    continue;
-                }
-                result.push(ch);
-            }
-            '`' => {
-                // Consume until matching backtick, skipping quoted regions.
-                loop {
-                    match chars.next() {
-                        None => break,
-                        Some('`') => break,
-                        Some(c) if c == '\'' || c == '"' => skip_quoted(&mut chars, c),
-                        Some('\\') => {
-                            chars.next();
-                        }
-                        _ => {}
-                    }
-                }
-                result.push('\x01');
-            }
-            _ => result.push(ch),
-        }
-    }
-    result
-}
-
 /// Pre-flight static analysis for Bash commands. Rejects commands that
 /// reference paths outside the sandbox roots.
 ///
@@ -1061,6 +413,46 @@ fn strip_subshells(s: &str) -> String {
 /// variable/substitution target are not tracked. The real containment
 /// boundary is `io_enforce`; this check provides early, clear denials for
 /// obviously stray path arguments.
+/// Validate every path-looking token against `canonical_roots` under
+/// `sim_cwd`. Returns the first denial message, or `None` when all pass.
+fn check_path_tokens(
+    tokens: &[ShellToken],
+    sim_cwd: &Path,
+    canonical_roots: &[PathBuf],
+    roots: &[PathBuf],
+) -> Option<String> {
+    for tok in tokens {
+        if tok.value.is_empty() {
+            continue;
+        }
+        let looks_like_path = tok.value.starts_with('/')
+            || tok.value.starts_with('~')
+            || tok.value.starts_with("..")
+            || tok.value.contains('/');
+        if !looks_like_path {
+            continue;
+        }
+        let expanded = if tok.value.starts_with('~') {
+            expand_user(&tok.value)
+        } else {
+            tok.value.clone()
+        };
+        let p = resolve(&expanded, Some(sim_cwd));
+        // Lexical-leaf, not canonical: a final-component symlink whose node is
+        // in-worktree (e.g. `.venv/bin/python`) is allowed. See
+        // within_worktree_lexical for the rationale and the anti-regression note.
+        if !within_worktree_lexical(&p, canonical_roots) {
+            return Some(format!(
+                "Error: path outside sandbox (from {}): {}{}",
+                tok.raw,
+                tok.value,
+                roots_suffix(roots, Some(sim_cwd))
+            ));
+        }
+    }
+    None
+}
+
 pub(crate) fn bash_check(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Option<String> {
     let cmd = cmd.trim();
     if cmd.is_empty() {
@@ -1104,34 +496,8 @@ pub(crate) fn bash_check(roots: &[PathBuf], cmd: &str, cwd: Option<&Path>) -> Op
         // its operand (and any redirection on the same line) resolves from the
         // pre-`cd` directory. Resolving it against the updated directory would
         // falsely deny `cd ..` from a child of the sandbox root.
-        for tok in &tokens {
-            if tok.value.is_empty() {
-                continue;
-            }
-            let looks_like_path = tok.value.starts_with('/')
-                || tok.value.starts_with('~')
-                || tok.value.starts_with("..")
-                || tok.value.contains('/');
-            if !looks_like_path {
-                continue;
-            }
-            let expanded = if tok.value.starts_with('~') {
-                expand_user(&tok.value)
-            } else {
-                tok.value.clone()
-            };
-            let p = resolve(&expanded, Some(&sim_cwd));
-            // Lexical-leaf, not canonical: a final-component symlink whose node is
-            // in-worktree (e.g. `.venv/bin/python`) is allowed. See
-            // within_worktree_lexical for the rationale and the anti-regression note.
-            if !within_worktree_lexical(&p, &canonical_roots) {
-                return Some(format!(
-                    "Error: path outside sandbox (from {}): {}{}",
-                    tok.raw,
-                    tok.value,
-                    roots_suffix(roots, Some(&sim_cwd))
-                ));
-            }
+        if let Some(err) = check_path_tokens(&tokens, &sim_cwd, &canonical_roots, roots) {
+            return Some(err);
         }
 
         // Check for a `cd` command — update sim_cwd for subsequent sub-commands.
@@ -1265,14 +631,6 @@ fn audit_write(log: &Path, line: &str) {
         });
 }
 
-pub(crate) fn result_status(res: &str) -> &'static str {
-    if res.starts_with("Error:") || res.starts_with("[exit") || res.starts_with("[timeout]") {
-        "error"
-    } else {
-        "ok"
-    }
-}
-
 fn check_tool(name: &str, ctx: &AgentLoopRuntime, args: &serde_json::Value) -> Option<String> {
     // AllowAll disables every containment check — no path is ever denied.
     let roots = ctx.sandbox.roots()?;
@@ -1309,1559 +667,56 @@ fn check_tool(name: &str, ctx: &AgentLoopRuntime, args: &serde_json::Value) -> O
     }
 }
 
-async fn blocking_string(f: impl FnOnce() -> String + Send + 'static) -> String {
+pub(crate) async fn blocking_string(f: impl FnOnce() -> String + Send + 'static) -> String {
     match tokio::task::spawn_blocking(f).await {
         Ok(s) => s,
         Err(e) => format!("Error: {e}"),
     }
 }
 
-fn parse_args(args_json: &str) -> Result<serde_json::Value, String> {
+pub(crate) fn parse_args(args_json: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(args_json).map_err(|e| format!("Error: invalid arguments: {e}"))
 }
 
-fn req_str<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
+pub(crate) fn req_str<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
     args.get(key)
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("Error: missing '{key}'"))
 }
 
-pub(crate) async fn read_invoke(ctx: &AgentLoopRuntime, args_json: &str) -> String {
-    let cwd = ctx.cwd.clone();
-    let roots = ctx.sandbox.roots().map(|r| r.to_vec());
-    let args_json = args_json.to_string();
-    blocking_string(move || read_sync(cwd.as_deref(), roots.as_deref(), &args_json)).await
+// === Tool handler registry =============================================================
+
+/// Opaque handler dispatched by `invoke`. Implementations live in `crate::toolbox`.
+#[async_trait::async_trait]
+pub(crate) trait ToolHandler: Send + Sync {
+    async fn invoke(&self, id: &str, ctx: &AgentLoopRuntime, args_json: &str) -> String;
 }
 
-fn read_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
-    let args = match parse_args(args_json) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let file_path = match req_str(&args, "file_path") {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let path = resolve(file_path, cwd);
-    if let Some(roots) = roots {
-        if let Some(err) = io_enforce(&path, roots) {
-            return err;
-        }
-    }
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) => return format!("Error: {e}"),
-    };
-    if content.is_empty() {
-        return String::new();
-    }
-    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
-    let mut lines: Vec<&str> = content.split_inclusive('\n').collect();
-    if offset > 0 {
-        lines = lines.into_iter().skip(offset).collect();
-    }
-    if let Some(limit) = limit {
-        lines.truncate(limit);
-    }
-    let mut numbered = String::new();
-    for (idx, line) in lines.iter().enumerate() {
-        // `offset` is a 0-indexed skip count, so the file line number is
-        // offset + window index + 1 — never the window-relative index.
-        numbered.push_str(&format!("{}|{line}", offset + idx + 1));
-    }
-    numbered
+#[allow(dead_code)]
+pub(crate) struct ToolRegistry {
+    handlers: HashMap<&'static str, Arc<dyn ToolHandler>>,
 }
 
-pub(crate) async fn landscape_invoke(ctx: &AgentLoopRuntime, args_json: &str) -> String {
-    let cwd = ctx.cwd.clone();
-    let roots = ctx.sandbox.roots().map(|r| r.to_vec());
-    let args_json = args_json.to_string();
-    blocking_string(move || landscape_sync(cwd.as_deref(), roots.as_deref(), &args_json)).await
-}
-
-fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
-    let args = match parse_args(args_json) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let file_path = match req_str(&args, "file_path") {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let path = resolve(file_path, cwd);
-    if let Some(roots) = roots {
-        if let Some(err) = io_enforce(&path, roots) {
-            return err;
-        }
-    }
-
-    let depth: Option<usize> = if args.get("depth").is_some() {
-        let n = match args.get("depth").and_then(|v| v.as_u64()) {
-            Some(n) => n as usize,
-            None => return "Error: 'depth' must be a non-negative integer".to_string(),
-        };
-        Some(n)
-    } else {
-        None
-    };
-
-    let token_budget: Option<usize> =
-        if let Some(v) = args.get("token_budget").filter(|v| !v.is_null()) {
-            match v.as_u64() {
-                Some(n) => Some(n as usize),
-                None => {
-                    return "Error: 'token_budget' must be a non-negative integer".to_string();
-                }
-            }
-        } else {
-            // Model omitted token_budget — fall back to config / env var.
-            crate::config::max_landscape_tool_tokens().map(|n| n as usize)
-        };
-
-    // Reject a symlink root so the directory walk does not follow it.
-    let meta = match path.symlink_metadata() {
-        Ok(m) => m,
-        Err(e) => return format!("Error: {e}"),
-    };
-    if meta.is_symlink() {
-        return format!(
-            "Error: Landscape does not follow symlinks: {}",
-            path.display()
-        );
-    }
-
-    if meta.is_dir() {
-        let depth_limit = depth.unwrap_or(usize::MAX);
-        let build = match LandscapeExplorer.build_with_failures(&path, depth_limit) {
-            Ok(b) => b,
-            Err(LandscapeError::Read(e)) => return format!("Error: {e}"),
-            // `build_with_failures` does not return Utf8, BudgetExceeded,
-            // or Tokenizer; these arms exist only for exhaustive matching.
-            Err(LandscapeError::Utf8(e)) => return format!("Error: file is not valid UTF-8: {e}"),
-            Err(LandscapeError::BudgetExceeded) => {
-                return String::from("Error: budget exceeded");
-            }
-            Err(LandscapeError::Tokenizer(e)) => {
-                return format!("Error: tokenizer error: {e}");
-            }
-        };
-
-        match crate::landscape::format_landscape_block_tool(&build, &path, token_budget) {
-            Ok(block) => {
-                if block.block.is_empty() {
-                    if build.outlines.is_empty() && build.failures.is_empty() {
-                        "(empty directory)".to_string()
-                    } else {
-                        "(no outline items)".to_string()
-                    }
-                } else {
-                    block.block
-                }
-            }
-            Err(LandscapeError::BudgetExceeded) => String::from("Error: budget exceeded"),
-            Err(LandscapeError::Tokenizer(e)) => {
-                format!("Error: tokenizer error: {e}")
-            }
-            Err(LandscapeError::Read(e)) => format!("Error: {e}"),
-            Err(LandscapeError::Utf8(e)) => format!("Error: file is not valid UTF-8: {e}"),
-        }
-    } else {
-        match LandscapeExplorer.outline_file(&path, false) {
-            Ok(items) => render_landscape(&items, &path),
-            Err(LandscapeError::Utf8(e)) => format!("Error: file is not valid UTF-8: {e}"),
-            Err(LandscapeError::Read(e)) => format!("Error: {e}"),
-            // `outline_file` never returns BudgetExceeded or Tokenizer either;
-            // these arms exist only for exhaustive matching.
-            Err(LandscapeError::BudgetExceeded) => String::from("Error: budget exceeded"),
-            Err(LandscapeError::Tokenizer(e)) => format!("Error: tokenizer init failed: {e}"),
-        }
+impl std::fmt::Debug for ToolRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolRegistry")
+            .field("handlers", &self.handlers.keys())
+            .finish()
     }
 }
 
-fn render_landscape(items: &[crate::landscape::OutlineItem], path: &Path) -> String {
-    if items.is_empty() {
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .unwrap_or_default();
-        if crate::landscape::heuristic::recognizes(&ext) {
-            return "(no outline items)".to_string();
-        }
-        return path.display().to_string();
-    }
-    crate::landscape::format_outline_items(items)
-}
-
-pub(crate) async fn edit_invoke(ctx: &AgentLoopRuntime, args_json: &str) -> String {
-    let cwd = ctx.cwd.clone();
-    let roots = ctx.sandbox.roots().map(|r| r.to_vec());
-    let args_json = args_json.to_string();
-    blocking_string(move || edit_sync(cwd.as_deref(), roots.as_deref(), &args_json)).await
-}
-
-fn edit_not_found_diagnostic(
-    content: &str,
-    file_path: &str,
-    old_str: &str,
-    edit_num: usize,
-) -> String {
-    let first_line = old_str.lines().next().unwrap_or("").trim();
-    let needle: &str = if first_line.is_empty() {
-        return format!(
-            "Error: old_string not found in {file_path} (edit {edit_num}) — first line is empty or whitespace-only"
-        );
-    } else if first_line.chars().count() > 80 {
-        let byte_idx = first_line
-            .char_indices()
-            .nth(80)
-            .map(|(i, _)| i)
-            .unwrap_or(first_line.len());
-        &first_line[..byte_idx]
-    } else {
-        first_line
-    };
-    let hint = if let Some(pos) = content.find(needle) {
-        let line_no = content[..pos].lines().count() + 1;
-        let context_start = content[..pos].rfind('\n').map_or(0, |n| n + 1);
-        let context_end = content[pos..].find('\n').map_or(content.len(), |n| pos + n);
-        let cap_byte = content[context_start..]
-            .char_indices()
-            .nth(200)
-            .map(|(i, _)| context_start + i)
-            .unwrap_or(content.len());
-        let context_end = context_end.min(cap_byte);
-        let context = &content[context_start..context_end];
-        format!(" — did you mean to match near line {line_no}? Found:\n{context}")
-    } else {
-        String::new()
-    };
-    format!(
-        "Error: old_string not found in {file_path} (edit {edit_num}) — first line: {needle:?}{hint}"
-    )
-}
-
-enum EditOp {
-    Match {
-        old_str: String,
-        new_str: String,
-    },
-    Range {
-        start: usize,
-        end: usize,
-        replacement: String,
-    },
-}
-
-fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
-    let args = match parse_args(args_json) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let file_path = match req_str(&args, "file_path") {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let edits_arr = match args.get("edits").and_then(|v| v.as_array()) {
-        Some(a) => a,
-        None => return "Error: missing 'edits'".into(),
-    };
-    if edits_arr.is_empty() {
-        return "Error: no edits provided".into();
-    }
-
-    let path = resolve(file_path, cwd);
-    if let Some(roots) = roots {
-        if let Some(err) = io_enforce(&path, roots) {
-            return err;
-        }
-    }
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) => return format!("Error: {e}"),
-    };
-
-    // Collect parsed edits with validation.
-    let mut edits: Vec<EditOp> = Vec::with_capacity(edits_arr.len());
-    for (i, e) in edits_arr.iter().enumerate() {
-        let obj = match e.as_object() {
-            Some(o) => o,
-            None => return format!("Error: edit {} is not an object in {file_path}", i + 1),
-        };
-        let has_start = obj.contains_key("start_line");
-        // If both modes are present, prefer range mode.
-        if has_start {
-            // --- Range edit (may also include ignored match-mode fields) ---
-            if !obj.contains_key("end_line") {
-                let provided = describe_edit_provided_fields(obj);
-                return format!(
-                    "Error: edit {} missing 'end_line' for Edit tool (range mode){} in {file_path}",
-                    i + 1,
-                    provided
-                );
-            }
-            if !obj.contains_key("replacement") {
-                let provided = describe_edit_provided_fields(obj);
-                return format!(
-                    "Error: edit {} missing 'replacement' for Edit tool (range mode){} in {file_path}",
-                    i + 1, provided
-                );
-            }
-            let start_line = match obj.get("start_line").and_then(|v| v.as_u64()) {
-                Some(n) if n > 0 => n as usize,
-                Some(_) => {
-                    return format!(
-                        "Error: edit {} 'start_line' must be a positive integer in {file_path}",
-                        i + 1
-                    )
-                }
-                None => {
-                    return format!(
-                        "Error: edit {} 'start_line' must be an integer in {file_path}",
-                        i + 1
-                    )
-                }
-            };
-            let end_line = match obj.get("end_line").and_then(|v| v.as_u64()) {
-                Some(n) if n > 0 => n as usize,
-                Some(_) => {
-                    return format!(
-                        "Error: edit {} 'end_line' must be a positive integer in {file_path}",
-                        i + 1
-                    )
-                }
-                None => {
-                    return format!(
-                        "Error: edit {} 'end_line' must be an integer in {file_path}",
-                        i + 1
-                    )
-                }
-            };
-            if start_line > end_line {
-                return format!(
-                    "Error: edit {} 'start_line' ({start_line}) > 'end_line' ({end_line}) in {file_path}",
-                    i + 1
-                );
-            }
-            let replacement = match obj.get("replacement").and_then(|v| v.as_str()) {
-                Some(s) => s.to_string(),
-                None => {
-                    return format!("Error: edit {} missing 'replacement' in {file_path}", i + 1)
-                }
-            };
-            edits.push(EditOp::Range {
-                start: start_line,
-                end: end_line,
-                replacement,
-            });
-        } else {
-            // --- Match edit ---
-            let old_str = match obj.get("old_string").and_then(|v| v.as_str()) {
-                Some(s) => s.to_string(),
-                None => {
-                    return format!("Error: edit {} missing 'old_string' in {file_path}", i + 1)
-                }
-            };
-            let new_str = match obj.get("new_string").and_then(|v| v.as_str()) {
-                Some(s) => s.to_string(),
-                None => {
-                    return format!("Error: edit {} missing 'new_string' in {file_path}", i + 1)
-                }
-            };
-            edits.push(EditOp::Match { old_str, new_str });
-        }
-    }
-
-    // Validate match edits against original content.
-    for (i, edit) in edits.iter().enumerate() {
-        if let EditOp::Match { old_str, .. } = edit {
-            if old_str.is_empty() {
-                return format!("Error: old_string is empty in {file_path} (edit {})", i + 1);
-            }
-            if !content.contains(old_str.as_str()) {
-                return edit_not_found_diagnostic(&content, file_path, old_str, i + 1);
-            }
-            if content.matches(old_str.as_str()).count() > 1 {
-                return format!(
-                    "Error: old_string is not unique in {file_path} (edit {})",
-                    i + 1
-                );
-            }
-        }
-    }
-
-    // Compute byte ranges.
-    let line_offsets: Vec<usize> = {
-        let mut offs = vec![0usize];
-        for (idx, _) in content.char_indices().filter(|(_, c)| *c == '\n') {
-            offs.push(idx + 1);
-        }
-        offs
-    };
-    let eof = content.len();
-    let line_count = line_offsets
-        .len()
-        .saturating_sub(if content.ends_with('\n') { 1 } else { 0 });
-
-    // Validate range edits against file line count.
-    for (i, edit) in edits.iter().enumerate() {
-        if let EditOp::Range { start, .. } = edit {
-            if *start > line_count {
-                return format!(
-                    "Error: edit {} 'start_line' ({}) exceeds file line count ({}) in {file_path}",
-                    i + 1,
-                    start,
-                    line_count
-                );
-            }
-        }
-    }
-
-    let ranges: Vec<(usize, usize)> = edits
-        .iter()
-        .map(|edit| match edit {
-            EditOp::Match { old_str, .. } => {
-                let pos = content.find(old_str.as_str()).unwrap();
-                (pos, pos + old_str.len())
-            }
-            EditOp::Range { start, end, .. } => {
-                let start_byte = line_offsets[*start - 1];
-                let end_byte = if *end < line_offsets.len() {
-                    line_offsets[*end]
-                } else {
-                    // end_line beyond last line — clamp to EOF (replace through end of file)
-                    eof
-                };
-                (start_byte, end_byte)
-            }
-        })
-        .collect();
-
-    // Validate non-overlapping.
-    for i in 0..ranges.len() {
-        for j in (i + 1)..ranges.len() {
-            if ranges[i].0 < ranges[j].1 && ranges[j].0 < ranges[i].1 {
-                return format!(
-                    "Error: edits {} and {} overlap in {file_path}",
-                    i + 1,
-                    j + 1
-                );
-            }
-        }
-    }
-
-    // Apply in reverse byte-order.
-    let mut indexed: Vec<(usize, usize, &str)> = edits
-        .iter()
-        .zip(ranges.iter())
-        .map(|(edit, &(start, end))| {
-            let replacement: &str = match edit {
-                EditOp::Match { new_str, .. } => new_str,
-                EditOp::Range { replacement, .. } => replacement,
-            };
-            (start, end, replacement)
-        })
-        .collect();
-    indexed.sort_by_key(|a| std::cmp::Reverse(a.0));
-
-    let mut updated = content;
-    for (start, end, replacement) in &indexed {
-        updated.replace_range(*start..*end, replacement);
-    }
-
-    if let Err(e) = std::fs::write(&path, updated) {
-        return format!("Error: {e}");
-    }
-    "OK".into()
-}
-
-/// Kills the command's process group when the tool future is dropped or the
-/// timeout elapses. `tokio::process::Child::kill_on_drop` only reaches the
-/// direct `bash` process; a process group guard is what stops descendants
-/// spawned by the shell (`sleep 3600 & wait`).
-#[cfg(unix)]
-struct ProcessGroupGuard {
-    pgid: Option<u32>,
-}
-
-#[cfg(unix)]
-impl ProcessGroupGuard {
-    fn new(pgid: Option<u32>) -> Self {
-        Self { pgid }
-    }
-
-    fn disarm(&mut self) {
-        self.pgid = None;
-    }
-
-    fn kill(&mut self) {
-        if let Some(pgid) = self.pgid {
-            unsafe {
-                libc::killpg(pgid as i32, libc::SIGKILL);
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for ProcessGroupGuard {
-    fn drop(&mut self) {
-        if let Some(pgid) = self.pgid {
-            unsafe {
-                libc::killpg(pgid as i32, libc::SIGKILL);
-            }
-        }
-    }
-}
-
-/// Cursor state for [`emit_live_lines`]: `scan` marks the start of the line
-/// currently being assembled and `searched` how far into the buffer the
-/// previous call already looked for newlines.
-struct LineScanner {
-    scan: usize,
-    searched: usize,
-}
-
-impl LineScanner {
-    fn new() -> Self {
+impl ToolRegistry {
+    pub(crate) fn new(handlers: Vec<(&'static str, Arc<dyn ToolHandler>)>) -> Self {
         Self {
-            scan: 0,
-            searched: 0,
+            handlers: handlers.into_iter().collect(),
         }
     }
 }
 
-async fn emit_live_lines(
-    id: &str,
-    name: &str,
-    call: &str,
-    ctx: &AgentLoopRuntime,
-    bytes: &[u8],
-    scanner: &mut LineScanner,
-    flush: bool,
-) {
-    // `scanner.scan` marks the start of the line currently being assembled;
-    // `scanner.searched` is how far into `bytes` the previous call already
-    // looked for newlines. Each call only searches the region appended since
-    // the last call, so a long newline-free run costs O(new bytes) instead of
-    // re-scanning the whole accumulated buffer on every 8 KiB read (the old
-    // `bytes[scan..]` scan was O(n²) on newline-free output).
-    //
-    // Completed lines are coalesced into a single chunk so a busy command
-    // that emits hundreds of lines per read costs one channel event rather
-    // than one event per line — per-line chunks would crowd the terminal
-    // `ToolResult`/`TurnComplete`/`Done` control events out of the bounded
-    // chat channel. Downstream line-buffered widgets split on `\n` anyway.
-    let mut merged = String::new();
-    let mut cursor = scanner.searched;
-    while cursor < bytes.len() {
-        let pos = match bytes[cursor..].iter().position(|&b| b == b'\n') {
-            Some(pos) => pos,
-            None => break,
-        };
-        let end = cursor + pos;
-        merged.push_str(&String::from_utf8_lossy(&bytes[scanner.scan..end]));
-        merged.push('\n');
-        cursor = end + 1;
-        scanner.scan = cursor;
-    }
-    scanner.searched = bytes.len();
-    if flush && scanner.scan < bytes.len() {
-        merged.push_str(&String::from_utf8_lossy(&bytes[scanner.scan..]));
-        merged.push('\n');
-        scanner.scan = bytes.len();
-    }
-    if !merged.is_empty() {
-        ctx.emit_output(id, name, call, &merged).await;
-    }
-}
+static GLOBAL_TOOL_REGISTRY: OnceLock<ToolRegistry> = OnceLock::new();
 
-pub(crate) async fn bash_invoke(ctx: &AgentLoopRuntime, args_json: &str, id: &str) -> String {
-    let args = match parse_args(args_json) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let command = match req_str(&args, "command") {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let call = format_tool_call_parts("Bash", &args);
-    let timeout_secs = args
-        .get("timeout")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(BASH_TIMEOUT_SECS)
-        .clamp(1, 3600);
-    let mut cmd = Command::new("bash");
-    cmd.arg("-c").arg(command);
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd.kill_on_drop(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // Start `bash` in its own process group. `kill_on_drop` only kills
-        // the direct `bash` child; making it a group leader lets the timeout
-        // path (and the dropped-tool-future path, via `kill_on_drop` plus
-        // the timeout killpg below) stop every descendant too.
-        cmd.as_std_mut().process_group(0);
-    }
-    if let Some(cwd) = &ctx.cwd {
-        cmd.current_dir(cwd);
-    } else {
-        cmd.current_dir(project_root());
-    }
-    if let Some(base) = &ctx.base_env {
-        let mut env = base.clone();
-        if let Some(extra) = &ctx.extra_env {
-            env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
-        }
-        cmd.env_clear().envs(env);
-    } else if let Some(extra) = &ctx.extra_env {
-        let mut env: HashMap<String, String> = std::env::vars().collect();
-        env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
-        cmd.env_clear().envs(env);
-    }
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => return format!("Error: {e}"),
-    };
-    // Own the process group for the tool call. When the surrounding
-    // `join_all` future is dropped on Esc, this guard is dropped too and
-    // kills the whole group — not just the direct `bash` child.
-    #[cfg(unix)]
-    let mut process_group_guard = ProcessGroupGuard::new(child.id());
-
-    // Take the pipes explicitly so the read loop can process stdout and
-    // stderr concurrently and emit completed lines to the live pane while
-    // keeping the exact same raw stdout-then-stderr result string.
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    let mut out_buf = [0u8; 8192];
-    let mut err_buf = [0u8; 8192];
-    let read_all = async {
-        use tokio::io::AsyncReadExt;
-        let mut stdout_done = stdout.is_none();
-        let mut stderr_done = stderr.is_none();
-        let mut read_error: Option<std::io::Error> = None;
-        let mut out_scanner = LineScanner::new();
-        let mut err_scanner = LineScanner::new();
-        loop {
-            if read_error.is_some() || (stdout_done && stderr_done) {
-                break;
-            }
-            tokio::select! {
-                r = async {
-                    stdout.as_mut().unwrap().read(&mut out_buf).await
-                }, if !stdout_done => {
-                    match r {
-                        Ok(0) => {
-                            stdout_done = true;
-                            stdout = None;
-                        }
-                        Ok(n) => {
-                            out.extend_from_slice(&out_buf[..n]);
-                            emit_live_lines(id, "Bash", &call, ctx, &out, &mut out_scanner, false)
-                                .await;
-                        }
-                        Err(e) => {
-                            stdout = None;
-                            read_error = Some(e);
-                        }
-                    }
-                }
-                r = async {
-                    stderr.as_mut().unwrap().read(&mut err_buf).await
-                }, if !stderr_done => {
-                    match r {
-                        Ok(0) => {
-                            stderr_done = true;
-                            stderr = None;
-                        }
-                        Ok(n) => {
-                            err.extend_from_slice(&err_buf[..n]);
-                            emit_live_lines(id, "Bash", &call, ctx, &err, &mut err_scanner, false)
-                                .await;
-                        }
-                        Err(e) => {
-                            stderr = None;
-                            read_error = Some(e);
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(e) = read_error {
-            return Err(e);
-        }
-        emit_live_lines(id, "Bash", &call, ctx, &out, &mut out_scanner, true).await;
-        emit_live_lines(id, "Bash", &call, ctx, &err, &mut err_scanner, true).await;
-        Ok(())
-    };
-
-    let run = async {
-        read_all.await?;
-        child.wait().await
-    };
-    match tokio::time::timeout(Duration::from_secs(timeout_secs), run).await {
-        Err(_) => {
-            // `process_group_guard` fires as this function returns; the
-            // direct child is also covered by `kill_on_drop` when the
-            // timed-out future was dropped.
-            "[timeout]".into()
-        }
-        Ok(Err(e)) => {
-            #[cfg(unix)]
-            process_group_guard.disarm();
-            format!("Error: {e}")
-        }
-        Ok(Ok(status)) => {
-            #[cfg(unix)]
-            process_group_guard.disarm();
-            let mut text = String::from_utf8_lossy(&out).into_owned();
-            text.push_str(&String::from_utf8_lossy(&err));
-            if status.success() {
-                text
-            } else {
-                format!("[exit {}]\n{text}", status.code().unwrap_or(1))
-            }
-        }
-    }
-}
-
-pub(crate) async fn websearch_invoke(ctx: &AgentLoopRuntime, args_json: &str, id: &str) -> String {
-    let cap = crate::config::max_tool_output_bytes();
-    websearch_invoke_with_cap(ctx, args_json, cap, id).await
-}
-
-async fn websearch_invoke_with_cap(
-    ctx: &AgentLoopRuntime,
-    args_json: &str,
-    cap: u64,
-    id: &str,
-) -> String {
-    let args = match parse_args(args_json) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let url = match req_str(&args, "url") {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let call = format_tool_call_parts("WebSearch", &args);
-    let timeout_secs = args
-        .get("timeout")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(WEBSEARCH_TIMEOUT_SECS)
-        .clamp(1, 3600);
-
-    // The truncated result must fit inside `cap`. Reserve room for the marker
-    // up front, so the outer `invoke` cap sees `len <= cap` and keeps the
-    // capped page body instead of replacing it with the generic limit error.
-    let marker = if cap > 0 {
-        let marker = format!("[truncated at {cap} bytes]\n");
-        if marker.len() as u64 <= cap {
-            marker
-        } else {
-            String::new()
-        }
-    } else {
-        String::new()
-    };
-    let data_limit = if cap > 0 {
-        cap.checked_sub(marker.len() as u64).map(|n| n as usize)
-    } else {
-        None
-    };
-
-    // Cap the download size so a huge response cannot exhaust memory before
-    // `invoke` applies `max_tool_output_bytes`. `--max-filesize` makes curl
-    // abort the transfer once the cap is exceeded; we also stop reading at the
-    // cap and kill the process group as a belt-and-suspenders measure.
-    let max_filesize = if cap > 0 { cap } else { 64 * 1024 * 1024 };
-    let mut cmd = Command::new("curl");
-    // `-q` disables `.curlrc` so a local config cannot rewrite the request.
-    // `-sS` silences the progress meter but still surfaces errors on stderr.
-    // `--proto`/`--proto-redir` restrict both the initial transfer and any
-    // `-L` redirects to HTTP(S), blocking `file://` and other schemes.
-    cmd.arg("-qsSL")
-        .arg("--proto")
-        .arg("=http,https")
-        .arg("--proto-redir")
-        .arg("=http,https")
-        .arg("--max-filesize")
-        .arg(max_filesize.to_string())
-        .arg("--max-time")
-        .arg(timeout_secs.to_string())
-        .arg("--")
-        .arg(url);
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd.kill_on_drop(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.as_std_mut().process_group(0);
-    }
-    if let Some(cwd) = &ctx.cwd {
-        cmd.current_dir(cwd);
-    }
-    if let Some(base) = &ctx.base_env {
-        let mut env = base.clone();
-        if let Some(extra) = &ctx.extra_env {
-            env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
-        }
-        cmd.env_clear().envs(env);
-    } else if let Some(extra) = &ctx.extra_env {
-        let mut env: HashMap<String, String> = std::env::vars().collect();
-        env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
-        cmd.env_clear().envs(env);
-    }
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => return format!("Error: {e}"),
-    };
-    // `curl` is a group leader; its pgid matches its pid on POSIX. Capture
-    // the pid *before* taking stdout/stderr because `tokio::process::Child::
-    // id()` returns `None` once the handles have been reaped.
-    #[cfg(unix)]
-    let child_pid = child.id();
-    #[cfg(unix)]
-    let mut process_group_guard = ProcessGroupGuard::new(child_pid);
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    let mut out_buf = [0u8; 8192];
-    let mut err_buf = [0u8; 8192];
-    let read_all = async {
-        use tokio::io::AsyncReadExt;
-        let mut capped = false;
-        let mut stdout_done = stdout.is_none();
-        let mut stderr_done = stderr.is_none();
-        let out_limit = data_limit;
-        let err_limit = data_limit;
-        let mut out_scanner = LineScanner::new();
-        let mut err_scanner = LineScanner::new();
-        loop {
-            if capped || (stdout_done && stderr_done) {
-                break;
-            }
-            tokio::select! {
-                r = async {
-                    stdout.as_mut().unwrap().read(&mut out_buf).await
-                }, if !stdout_done => {
-                    match r {
-                        Ok(0) | Err(_) => stdout_done = true,
-                        Ok(n) => {
-                            let remaining = out_limit.map_or(n, |limit| limit.saturating_sub(out.len()));
-                            if remaining == 0 {
-                                capped = true;
-                                break;
-                            }
-                            let take = n.min(remaining);
-                            out.extend_from_slice(&out_buf[..take]);
-                            emit_live_lines(id, "WebSearch", &call, ctx, &out, &mut out_scanner, false)
-                                .await;
-                            if take < n {
-                                capped = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                r = async {
-                    stderr.as_mut().unwrap().read(&mut err_buf).await
-                }, if !stderr_done => {
-                    match r {
-                        Ok(0) | Err(_) => stderr_done = true,
-                        Ok(n) => {
-                            // curl keeps emitting diagnostics after it trips
-                            // `--max-filesize` ("Exceeded the maximum allowed"),
-                            // so stderr may fill first and the combined output
-                            // can legitimately be empty when stdout never got
-                            // a chance to deliver body bytes. Prefer body bytes
-                            // when they exist; otherwise fall back to stderr.
-                            let body_room = out_limit.map_or(n, |limit| limit.saturating_sub(out.len()));
-                            let err_room = err_limit.map_or(n, |limit| limit.saturating_sub(err.len()));
-                            if body_room > 0 {
-                                let take = n.min(err_room);
-                                err.extend_from_slice(&err_buf[..take]);
-                                emit_live_lines(id, "WebSearch", &call, ctx, &err, &mut err_scanner, false)
-                                    .await;
-                            } else if err_room == 0 {
-                                stderr_done = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        emit_live_lines(id, "WebSearch", &call, ctx, &out, &mut out_scanner, true).await;
-        emit_live_lines(id, "WebSearch", &call, ctx, &err, &mut err_scanner, true).await;
-        capped
-    };
-    let capped = match tokio::time::timeout(Duration::from_secs(timeout_secs), read_all).await {
-        Err(_) => {
-            // `process_group_guard` fires as this function returns.
-            return "[timeout]".into();
-        }
-        Ok(capped) => capped,
-    };
-    if capped {
-        // Stop the transfer now that we have enough bytes.
-        #[cfg(unix)]
-        process_group_guard.kill();
-        let _ = child.kill().await;
-    }
-    let status = match child.wait().await {
-        Ok(s) => s,
-        Err(e) => {
-            #[cfg(unix)]
-            process_group_guard.disarm();
-            return format!("Error: {e}");
-        }
-    };
-    #[cfg(unix)]
-    process_group_guard.disarm();
-    let mut combined = out;
-    combined.extend_from_slice(&err);
-    if let Some(limit) = data_limit {
-        combined.truncate(limit);
-    }
-    let text = String::from_utf8_lossy(&combined).trim().to_string();
-    if capped {
-        format!("{marker}{text}")
-    } else if status.success() {
-        text
-    } else {
-        let code = status.code().unwrap_or_else(|| {
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::ExitStatusExt;
-                if let Some(signal) = status.signal() {
-                    return 128 + signal;
-                }
-            }
-            #[allow(unreachable_code)]
-            1
-        });
-        format!("[exit {code}]\n{text}")
-    }
-}
-
-pub(crate) async fn write_invoke(ctx: &AgentLoopRuntime, args_json: &str) -> String {
-    let cwd = ctx.cwd.clone();
-    let roots = ctx.sandbox.roots().map(|r| r.to_vec());
-    let args_json = args_json.to_string();
-    blocking_string(move || write_sync(cwd.as_deref(), roots.as_deref(), &args_json)).await
-}
-
-fn write_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
-    let args = match parse_args(args_json) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let file_path = match req_str(&args, "file_path") {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let content = match req_str(&args, "content") {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let path = resolve(file_path, cwd);
-    if let Some(roots) = roots {
-        if let Some(err) = io_enforce(&path, roots) {
-            return err;
-        }
-    }
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return format!("Error: {e}");
-        }
-    }
-    match std::fs::write(&path, content) {
-        Ok(()) => "OK".into(),
-        Err(e) => format!("Error: {e}"),
-    }
-}
-
-fn is_binary_prefix(path: &Path) -> bool {
-    match std::fs::File::open(path) {
-        Ok(mut f) => {
-            use std::io::Read;
-            let mut buf = [0u8; 8192];
-            match f.read(&mut buf) {
-                Ok(n) => buf[..n].contains(&0),
-                Err(_) => true,
-            }
-        }
-        Err(_) => true,
-    }
-}
-
-fn fnmatch_name(name: &str, pat: &str) -> bool {
-    glob::Pattern::new(pat)
-        .map(|p| p.matches(name))
-        .unwrap_or(false)
-}
-
-#[derive(Clone, Copy)]
-struct GrepOptions {
-    max_matches: usize,
-    context_before: usize,
-    context_after: usize,
-}
-
-/// Accumulates match/context output across the files visited by one grep
-/// invocation. Keeping the mutable scan state together avoids threading four
-/// separate `&mut` references through the recursive walk.
-struct GrepCollector {
-    matches: Vec<String>,
-    match_count: usize,
-    blocked: bool,
-    truncated: bool,
-}
-
-/// Shared per-file matcher. Both the single-file and directory-walk grep
-/// paths call this so match formatting, context expansion, and truncation
-/// semantics cannot drift between the two.
-fn append_file_matches(
-    path: &Path,
-    content: &str,
-    pattern: &Regex,
-    options: &GrepOptions,
-    out: &mut GrepCollector,
-) {
-    // Zero context keeps the exact legacy format: one `path:line:content`
-    // entry per match and no block separators.
-    if options.context_before == 0 && options.context_after == 0 {
-        for (idx, line) in content.lines().enumerate() {
-            if pattern.is_match(line) {
-                if out.match_count >= options.max_matches {
-                    out.truncated = true;
-                    return;
-                }
-                out.matches
-                    .push(format!("{}:{}:{line}", path.display(), idx + 1));
-                out.match_count += 1;
-            }
-        }
-        return;
-    }
-
-    let lines: Vec<&str> = content.lines().collect();
-    let last_line = lines.len();
-
-    let mut match_lines = Vec::new();
-    let mut first_excluded: Option<usize> = None;
-    for (idx, line) in lines.iter().enumerate() {
-        if pattern.is_match(line) {
-            if out.match_count >= options.max_matches {
-                out.truncated = true;
-                first_excluded = Some(idx + 1);
-                break;
-            }
-            match_lines.push(idx + 1);
-            out.match_count += 1;
-        }
-    }
-    if match_lines.is_empty() {
-        return;
-    }
-
-    // Expand each match into a 1-based inclusive [start, end] window and
-    // merge windows that touch or overlap. A match past `max_matches` that
-    // would otherwise fall inside an admitted window is never emitted:
-    // truncation caps the window before that line, so it is not mislabeled
-    // as context.
-    let mut windows: Vec<(usize, usize)> = Vec::new();
-    for &line_no in &match_lines {
-        let start = line_no.saturating_sub(options.context_before).max(1);
-        let mut end = line_no.saturating_add(options.context_after).min(last_line);
-        if let Some(excluded) = first_excluded {
-            end = end.min(excluded - 1);
-        }
-        match windows.last_mut() {
-            Some((_, last_end)) if start <= last_end.saturating_add(1) => {
-                *last_end = (*last_end).max(end);
-            }
-            _ => windows.push((start, end)),
-        }
-    }
-
-    // Emit each merged window as one context block. Context lines use `-`
-    // where match lines use `:`; non-contiguous blocks are separated by `--`.
-    // Since windows are capped to exclude any match past `max_matches`, every
-    // emitted line that matches the pattern is a genuine admitted match.
-    for (block_idx, &(start, end)) in windows.iter().enumerate() {
-        if out.blocked || block_idx > 0 {
-            out.matches.push("--".to_string());
-        }
-        out.blocked = true;
-        for line_no in start..=end {
-            let line = lines[line_no - 1];
-            let separator = if pattern.is_match(line) { ':' } else { '-' };
-            out.matches.push(format!(
-                "{}{}{}{}{}",
-                path.display(),
-                separator,
-                line_no,
-                separator,
-                line
-            ));
-        }
-    }
-}
-
-fn scan_file(
-    path: &Path,
-    roots: Option<&[PathBuf]>,
-    pattern: &Regex,
-    options: &GrepOptions,
-    out: &mut GrepCollector,
-) {
-    // Skip files that resolve outside any allowed root (e.g. via a symlink).
-    // `None` roots means containment is disabled (AllowAll).
-    if let Some(roots) = roots {
-        if io_enforce(path, roots).is_some() {
-            return;
-        }
-    }
-    if is_binary_prefix(path) {
-        return;
-    }
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    append_file_matches(path, &content, pattern, options, out);
-}
-
-fn walk_grep(
-    dir: &Path,
-    roots: Option<&[PathBuf]>,
-    pattern: &Regex,
-    glob_filter: Option<&str>,
-    options: &GrepOptions,
-    out: &mut GrepCollector,
-) {
-    let mut entries: Vec<_> = match std::fs::read_dir(dir) {
-        Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
-        Err(_) => return,
-    };
-    entries.sort_by_key(|e| e.file_name());
-    let mut dirs = Vec::new();
-    let mut files = Vec::new();
-    for e in entries {
-        let name = e.file_name();
-        let name_str = name.to_string_lossy();
-        let ft = match e.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
-        };
-        if ft.is_dir() {
-            if name_str.starts_with('.') || SKIP_DIRS.contains(&name_str.as_ref()) {
-                continue;
-            }
-            dirs.push(e.path());
-        } else if ft.is_file() || ft.is_symlink() {
-            files.push((e.path(), name_str.into_owned()));
-        }
-    }
-    for (path, name) in files {
-        if out.truncated {
-            return;
-        }
-        if let Some(g) = glob_filter {
-            if !fnmatch_name(&name, g) {
-                continue;
-            }
-        }
-        scan_file(&path, roots, pattern, options, out);
-    }
-    for d in dirs {
-        if out.truncated {
-            return;
-        }
-        // Skip directory symlinks that resolve outside any allowed root.
-        if let Some(roots) = roots {
-            if io_enforce(&d, roots).is_some() {
-                continue;
-            }
-        }
-        walk_grep(&d, roots, pattern, glob_filter, options, out);
-    }
-}
-
-pub(crate) async fn grep_invoke(ctx: &AgentLoopRuntime, args_json: &str) -> String {
-    let cwd = ctx.cwd.clone();
-    let roots = ctx.sandbox.roots().map(|r| r.to_vec());
-    let args_json = args_json.to_string();
-    blocking_string(move || grep_sync(cwd.as_deref(), roots.as_deref(), &args_json)).await
-}
-
-fn grep_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
-    let args = match parse_args(args_json) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let pat = match req_str(&args, "pattern") {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let pattern = match Regex::new(pat) {
-        Ok(r) => r,
-        Err(e) => return format!("Error: invalid regex: {e}"),
-    };
-    let search_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-    let base = resolve(search_path, cwd);
-    if !base.exists() {
-        return format!("Error: path does not exist: {}", base.display());
-    }
-    let glob_filter = args
-        .get("glob")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
-    let options = GrepOptions {
-        max_matches: args
-            .get("max_matches")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as usize)
-            .unwrap_or(GREP_MAX_LINES),
-        context_before: args
-            .get("context_before")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize,
-        context_after: args
-            .get("context_after")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize,
-    };
-    let mut out = GrepCollector {
-        matches: Vec::new(),
-        match_count: 0,
-        blocked: false,
-        truncated: false,
-    };
-    if base.is_file() {
-        let name = base.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if let Some(roots) = roots {
-            if let Some(err) = io_enforce(&base, roots) {
-                return err;
-            }
-        }
-        if glob_filter.is_none_or(|g| fnmatch_name(name, g)) {
-            if is_binary_prefix(&base) {
-                return "(no matches)".into();
-            }
-            let content = match std::fs::read_to_string(&base) {
-                Ok(content) => content,
-                Err(e) => return format!("Error: {e}"),
-            };
-            append_file_matches(&base, &content, &pattern, &options, &mut out);
-        }
-    } else {
-        walk_grep(&base, roots, &pattern, glob_filter, &options, &mut out);
-    }
-    if out.matches.is_empty() {
-        return "(no matches)".into();
-    }
-    let mut result = out.matches.join("\n");
-    if out.truncated {
-        result.push_str(&format!("\n[truncated at {} matches]", options.max_matches));
-    }
-    result
-}
-
-pub(crate) async fn glob_invoke(ctx: &AgentLoopRuntime, args_json: &str) -> String {
-    let cwd = ctx.cwd.clone();
-    let roots = ctx.sandbox.roots().map(|r| r.to_vec());
-    let args_json = args_json.to_string();
-    blocking_string(move || glob_sync(cwd.as_deref(), roots.as_deref(), &args_json)).await
-}
-
-fn glob_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
-    let args = match parse_args(args_json) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let pattern = match req_str(&args, "pattern") {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let search_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-    let base = resolve(search_path, cwd);
-    let full = base.join(pattern);
-    let pattern_str = full.to_string_lossy();
-    let mut matches: Vec<String> = match glob::glob(&pattern_str) {
-        Ok(paths) => paths
-            .filter_map(|p| p.ok())
-            // Drop matches that resolve outside any allowed root (e.g. via a symlink).
-            // `None` roots means containment is disabled (AllowAll).
-            .filter(|p| roots.is_none_or(|roots| io_enforce(p, roots).is_none()))
-            .map(|p| p.display().to_string())
-            .collect(),
-        Err(e) => return format!("Error: {e}"),
-    };
-    matches.sort();
-    if matches.is_empty() {
-        "(no matches)".into()
-    } else {
-        matches.join("\n")
-    }
-}
-
-/// Used by `validate_tool_args` to produce rich error messages when
-/// the model sends malformed tool-call arguments. The boolean marks whether
-/// the parameter is required; optional parameters are type-checked only when
-/// present.
-fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool)>> {
-    match name {
-        "Read" => Some(vec![("file_path", "string", true)]),
-        "Landscape" => Some(vec![
-            ("file_path", "string", true),
-            ("depth", "integer", false),
-            ("token_budget", "integer", false),
-        ]),
-        "Edit" => Some(vec![
-            ("file_path", "string", true),
-            ("edits", "array", true),
-        ]),
-        "Bash" => Some(vec![("command", "string", true)]),
-        "Write" => Some(vec![
-            ("file_path", "string", true),
-            ("content", "string", true),
-        ]),
-        "Grep" => Some(vec![
-            ("pattern", "string", true),
-            ("context_before", "integer", false),
-            ("context_after", "integer", false),
-        ]),
-        "Glob" => Some(vec![("pattern", "string", true)]),
-        "Task" => Some(vec![("kind", "string", true), ("prompt", "string", true)]),
-        "Done" => Some(vec![("summary", "string", true)]),
-        "WebSearch" => Some(vec![("url", "string", true), ("timeout", "integer", false)]),
-        "Mischief" => Some(vec![]),
-        "LoadSkill" => Some(vec![("name", "string", true)]),
-        _ => None,
-    }
-}
-
-/// Build a short summary of the fields present in a mixed-mode edit object,
-/// so the error message shows what the model actually sent.
-fn describe_edit_provided_fields(obj: &serde_json::Map<String, serde_json::Value>) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    for key in &[
-        "start_line",
-        "end_line",
-        "replacement",
-        "old_string",
-        "new_string",
-    ] {
-        if let Some(v) = obj.get(*key) {
-            let display = match v {
-                serde_json::Value::String(s) => {
-                    if s.len() > 40 {
-                        format!("{}<{} chars>", key, s.len())
-                    } else {
-                        format!("{key}={s:?}")
-                    }
-                }
-                other => format!("{key}={other}"),
-            };
-            parts.push(display);
-        }
-    }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!(" (provided: {})", parts.join(", "))
-    }
-}
-
-/// Check that all required tool arguments are present and have the correct types.
-/// Returns an error message string on failure, or `None` if valid.
-fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
-    let schema = tool_param_schema(name)?;
-    for (field, expected_type, required) in &schema {
-        match args.get(field) {
-            None if *required => {
-                let expected: Vec<String> = schema
-                    .iter()
-                    .map(|(f, t, required)| {
-                        if *required {
-                            format!("{f}: {t}")
-                        } else {
-                            format!("{f}: {t} (optional)")
-                        }
-                    })
-                    .collect();
-                let found: Vec<String> = args
-                    .as_object()
-                    .map(|o| o.keys().map(|k| format!("{k}: …")).collect())
-                    .unwrap_or_default();
-                let found_str = if found.is_empty() {
-                    "<not an object>".into()
-                } else {
-                    format!("{{{}}}", found.join(", "))
-                };
-                let mut msg = format!(
-                    "Error: missing '{field}' for {name} tool. \
-                     Expected: {{{}}}. Got: {found_str}",
-                    expected.join(", ")
-                );
-                // If file_path is missing for Edit and any edit item has a
-                // file_path key, the model likely nested it — give a targeted hint.
-                if name == "Edit" && *field == "file_path" {
-                    if let Some(edits) = args.get("edits").and_then(|v| v.as_array()) {
-                        let misplaced = edits.iter().any(|e| {
-                            e.as_object()
-                                .map(|o| o.contains_key("file_path"))
-                                .unwrap_or(false)
-                        });
-                        if misplaced {
-                            msg.push_str(
-                                " (Note: file_path belongs at the top level, not inside individual edits — all edits target the same file)",
-                            );
-                        }
-                    }
-                }
-                return Some(msg);
-            }
-            None => continue,
-            Some(val) => {
-                let ok = match *expected_type {
-                    "string" => val.is_string(),
-                    "array" => val.is_array(),
-                    "integer" => val.is_number(),
-                    "object" => val.is_object(),
-                    _ => true,
-                };
-                if !ok {
-                    let actual = if val.is_string() {
-                        "string"
-                    } else if val.is_array() {
-                        "array"
-                    } else if val.is_number() {
-                        "number"
-                    } else if val.is_object() {
-                        "object"
-                    } else if val.is_null() {
-                        "null"
-                    } else if val.is_boolean() {
-                        "bool"
-                    } else {
-                        "?"
-                    };
-                    return Some(format!(
-                        "Error: '{field}' for {name} must be {expected_type}, got {actual}"
-                    ));
-                }
-            }
-        }
-    }
-    // Nested constraints for tools with structured array items.
-    if name == "Edit" {
-        if let Some(edits) = args.get("edits").and_then(|v| v.as_array()) {
-            if edits.is_empty() {
-                return Some("Error: 'edits' array must not be empty for Edit tool".into());
-            }
-            for (i, edit) in edits.iter().enumerate() {
-                let obj = match edit.as_object() {
-                    Some(o) => o,
-                    None => {
-                        return Some(format!(
-                            "Error: edit {} in 'edits' must be an object for Edit tool",
-                            i + 1
-                        ));
-                    }
-                };
-                let has_old = obj.contains_key("old_string");
-                let has_start = obj.contains_key("start_line");
-                // If both modes are present, prefer range mode.
-                if !has_old && !has_start {
-                    return Some(format!(
-                        "Error: edit {} must have either 'old_string' (match mode) or 'start_line' (range mode)",
-                        i + 1
-                    ));
-                }
-                if has_start {
-                    // --- Range mode (may also include ignored match-mode fields) ---
-                    if !obj.contains_key("end_line") {
-                        let provided = describe_edit_provided_fields(obj);
-                        return Some(format!(
-                            "Error: edit {} missing 'end_line' for Edit tool (range mode){}",
-                            i + 1,
-                            provided
-                        ));
-                    }
-                    if !obj.contains_key("replacement") {
-                        let provided = describe_edit_provided_fields(obj);
-                        return Some(format!(
-                            "Error: edit {} missing 'replacement' for Edit tool (range mode){}",
-                            i + 1,
-                            provided
-                        ));
-                    }
-                    // Validate numeric constraints for range mode.
-                    let start_line = match obj.get("start_line").and_then(|v| v.as_u64()) {
-                        Some(n) if n > 0 => n,
-                        Some(_) => {
-                            return Some(format!(
-                                "Error: edit {} 'start_line' must be a positive integer for Edit tool",
-                                i + 1
-                            ));
-                        }
-                        None => {
-                            return Some(format!(
-                                "Error: edit {} 'start_line' must be an integer for Edit tool",
-                                i + 1
-                            ));
-                        }
-                    };
-                    let end_line = match obj.get("end_line").and_then(|v| v.as_u64()) {
-                        Some(n) if n > 0 => n,
-                        Some(_) => {
-                            return Some(format!(
-                                "Error: edit {} 'end_line' must be a positive integer for Edit tool",
-                                i + 1
-                            ));
-                        }
-                        None => {
-                            return Some(format!(
-                                "Error: edit {} 'end_line' must be an integer for Edit tool",
-                                i + 1
-                            ));
-                        }
-                    };
-                    if start_line > end_line {
-                        return Some(format!(
-                            "Error: edit {} 'start_line' ({}) > 'end_line' ({}) for Edit tool",
-                            i + 1,
-                            start_line,
-                            end_line
-                        ));
-                    }
-                } else {
-                    // --- Match mode ---
-                    if !obj.contains_key("new_string") {
-                        return Some(format!(
-                            "Error: edit {} missing 'new_string' for Edit tool (match mode)",
-                            i + 1
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    None
+fn global_registry() -> &'static ToolRegistry {
+    GLOBAL_TOOL_REGISTRY.get_or_init(crate::toolbox::default_registry)
 }
 
 pub(crate) async fn invoke(
@@ -2874,9 +729,7 @@ pub(crate) async fn invoke(
         // Mischief is chat-only; allow it through the gate only when the
         // session is chat. LoadSkill keeps its old bypass: the handler returns
         // an error when skills aren't configured.
-        // discovered_skills is `Some` only in chat sessions — it is the
-        // canonical chat predicate shared with tool_definitions.
-        let chat = ctx.discovered_skills.is_some();
+        let chat = ctx.skills_available;
         if !always_available(name)
             && name != "LoadSkill"
             && !chat_only_always_available(name, chat)
@@ -2923,14 +776,6 @@ pub(crate) async fn invoke(
         return err;
     }
     let res = match name {
-        "Read" => read_invoke(ctx, args_json).await,
-        "Edit" => edit_invoke(ctx, args_json).await,
-        "Bash" => bash_invoke(ctx, args_json, id).await,
-        "Write" => write_invoke(ctx, args_json).await,
-        "Grep" => grep_invoke(ctx, args_json).await,
-        "Glob" => glob_invoke(ctx, args_json).await,
-        "Landscape" => landscape_invoke(ctx, args_json).await,
-        "WebSearch" => websearch_invoke(ctx, args_json, id).await,
         "Task" => {
             if let Some(f) = &ctx.task_fn {
                 let kind_str = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
@@ -2973,8 +818,13 @@ pub(crate) async fn invoke(
             format!("Done. {summary}")
         }
         "Mischief" => include_str!("mischief_dsl.md").to_string(),
-        "LoadSkill" => load_skill_invoke(ctx, &args),
-        other => format!("Error: unknown tool {other}"),
+        _ => {
+            let registry = global_registry();
+            match registry.handlers.get(name) {
+                Some(handler) => handler.invoke(id, ctx, args_json).await,
+                None => return format!("Error: unknown tool {name}"),
+            }
+        }
     };
     audit(
         ctx.audit_log.as_deref(),
@@ -3046,355 +896,25 @@ fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
     }
     out
 }
-/// Invoke handler for the LoadSkill tool.
-fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String {
-    let name = match args.get("name").and_then(|v| v.as_str()) {
-        Some(n) => n,
-        None => return "Error: missing 'name' for LoadSkill tool".to_string(),
-    };
-
-    let (discovered, active) = match (&ctx.discovered_skills, &ctx.active_skills) {
-        (Some(d), Some(a)) => (d, a),
-        _ => return "Error: LoadSkill is only available in chat sessions".to_string(),
-    };
-
-    // Look up the skill by name.
-    let loaded = match crate::skills::find_skill(discovered, name, true) {
-        Some(l) => l,
-        None => return format!("Error: skill {name:?} not found"),
-    };
-
-    // Reject skills that disable model invocation. Discovery retains them
-    // and `render_index` only hides them, so a model that learns the name
-    // from a file or user message could otherwise load and activate an
-    // operator-only skill. `user-invocable: false` is still allowed — the
-    // model self-selects skills.
-    if loaded.skill.disable_model_invocation {
-        return format!("Error: skill {name:?} is not available for model invocation");
-    }
-
-    // Single critical section: check containment AND push so two
-    // concurrent LoadSkill calls for the same name cannot both pass
-    // the check and both push.
-    let mut active_guard = match active.lock() {
-        Ok(g) => g,
-        Err(e) => return format!("Error: internal lock error: {e}"),
-    };
-    if active_guard.contains(&name.to_string()) {
-        return format!("Skill {name:?} is already active.");
-    }
-    active_guard.push(name.to_string());
-    drop(active_guard);
-
-    // Return a body-free acknowledgement. The skill body is injected as a
-    // trusted system-prompt amendment at the next turn boundary, not written
-    // into the transcript. Putting the body here would leak it into archived
-    // records and cross-turn history, where later turns would replay it
-    // alongside the trusted amendment (doubling the body in context).
-    let n_files = loaded.files.len();
-    let mut result = format!("Skill {name:?} loaded successfully.");
-    if n_files > 0 {
-        result.push_str(&format!(" {n_files} bundled file(s) available."));
-    }
-    result.push_str(&format!(
-        "\n\n**Skill directory:** `{}`\n",
-        loaded.skill.dir.display()
-    ));
-    result
-}
-
-pub(crate) fn tool_definitions(filter: Option<&[String]>, is_chat: bool) -> Vec<ToolDefinition> {
-    let mut all = vec![
-        ToolDefinition {
-            name: "Read".into(),
-            description: "Read the contents of a file. Paths outside the sandbox are rejected. Use offset/limit to paginate large files — continue reading with offset until you have the whole file. Each returned line is prefixed with its true 1-based line number in the source file followed by a `|` separator (e.g. `12|content`); `offset` is a 0-indexed line skip count, so line numbers stay aligned with `Grep` results even when paging.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path to the file to read (relative or absolute)"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of lines to read"
-                    },
-                    "offset": {
-                        "type": "integer",
-                        "description": "Number of lines to skip from the start of the file (0-indexed, default 0)"
-                    }
-                },
-                "required": ["file_path"],
-                "additionalProperties": false
-            }),
-        },
-        ToolDefinition {
-            name: "Landscape".into(),
-            description: "This is your primary discovery tool — use it FIRST whenever you need to understand codebase layout, find where functions/types/tests live, or explore an unfamiliar directory. Show the structural outline of a file or directory. For a file, returns space-separated `line|kind|name` items on a single line. Kinds include fn, struct, impl, trait, enum, mod, class, method, heading, and key. Test functions inside `#[cfg(test)]` modules are shown individually. Unknown file extensions yield the file path. For a directory, returns a tree-formatted outline using the same `line|kind|name` item format as the landscape block: directory headers end with `/` and file headers end with `:` followed by space-separated items. The `depth` argument limits how many nested directory levels to descend (default: all levels). The optional `token_budget` argument applies skeletonization and depth back-off when the tree is too large, just like the system prompt landscape block. Paths outside the sandbox are rejected.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path to the file or directory to outline (relative or absolute)"
-                    },
-                    "depth": {
-                        "type": "integer",
-                        "description": "For directories, how many nested directory levels to descend (default: all levels)"
-                    },
-                    "token_budget": {
-                        "type": "integer",
-                        "description": "Optional token budget for directory outlines. When set, the tree is trimmed with skeletonization and depth back-off to fit the budget."
-                    }
-                },
-                "required": ["file_path"],
-                "additionalProperties": false
-            }),
-        },
-        ToolDefinition {
-            name: "Edit".into(),
-            description: "Make one or more non-overlapping replacements in a file. Each edit replaces old_string with new_string (requires unique match), or replaces lines start_line through end_line (1-based, inclusive) with replacement text. Edits are validated against the original file content and must not overlap. When a substring appears multiple times, include 2-3 lines of surrounding context in old_string to make it unique. After a failed edit due to non-uniqueness, re-read only the failing region (with offset/limit), not the whole file. Prefer the line-range form (start_line/end_line/replacement) when you have line numbers from a recent Read. Line-range edits replace entire lines including their trailing newlines; when you replace a line that should remain separate from the next line, ensure replacement ends with \\n. All edits in the array target the same file, specified by the top-level `file_path` parameter — do not nest `file_path` inside individual edit objects. If both match-mode and range-mode fields are present in the same edit object, range mode takes precedence.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path to the file to edit (relative or absolute)"
-                    },
-                    "edits": {
-                        "type": "array",
-                        "minItems": 1,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "old_string": {
-                                    "type": "string",
-                                    "description": "Exact text to replace — must be unique in the file"
-                                },
-                                "new_string": {
-                                    "type": "string",
-                                    "description": "Replacement text"
-                                },
-                                "start_line": {
-                                    "type": "integer",
-                                    "description": "1-based start line number (inclusive, for range edits)"
-                                },
-                                "end_line": {
-                                    "type": "integer",
-                                    "description": "1-based end line number (inclusive, for range edits; clamped to EOF if beyond last line)"
-                                },
-                                "replacement": {
-                                    "type": "string",
-                                    "description": "Replacement text for line-range edits. Replaces the entire line span including trailing newlines; include a trailing \\n to keep the next line separate."
-                                }
-                            },
-                            "additionalProperties": false
-                        }
-                    }
-                },
-                "required": ["file_path", "edits"],
-                "additionalProperties": false
-            }),
-        },
-        ToolDefinition {
-            name: "Bash".into(),
-            description: "Execute a shell command via `bash -c`. Returns combined stdout and stderr. Exit codes are reported as `[exit N]`; commands exceeding the timeout return `[timeout]`. Runs in the gremlin's working directory with no stdin. Path arguments are checked against the sandbox before execution — escapes return an error without running the command. Default timeout is 120 seconds.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "Shell command to execute (run via bash -c)"
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "Timeout in seconds (optional, default 120)"
-                    }
-                },
-                "required": ["command"],
-                "additionalProperties": false
-            }),
-        },
-        ToolDefinition {
-            name: "Write".into(),
-            description: "Write content to a file, creating it if necessary. Overwrites the file if it already exists. Parent directories are created as needed.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path to the file to write (relative or absolute)"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Content to write to the file"
-                    }
-                },
-                "required": ["file_path", "content"],
-                "additionalProperties": false
-            }),
-        },
-        ToolDefinition {
-            name: "Grep".into(),
-            description: "Search file contents using a Rust regex pattern. Returns matches in `path:line_number:line_content` format. When `context_before`/`context_after` are nonzero, each match expands to include up to that many surrounding lines; context lines use a `-` separator instead of `:` (e.g. `path-12-context`), touching/overlapping windows merge into one block, and non-contiguous blocks are separated by a single `--` line. `max_matches` counts matches, not emitted lines. Binaries and dot-directories are skipped, as are common build dirs (node_modules, target, __pycache__). Results are truncated at max_matches (default 2000). The regex engine does NOT support lookahead or lookbehind.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "Regex pattern to search for (Rust regex syntax — no lookahead/lookbehind)"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Directory or file to search (default: current directory)"
-                    },
-                    "glob": {
-                        "type": "string",
-                        "description": "Glob filter for file names (e.g. `*.rs`)"
-                    },
-                    "max_matches": {
-                        "type": "integer",
-                        "description": "Maximum number of matches to return (optional, default 2000)"
-                    },
-                    "context_before": {
-                        "type": "integer",
-                        "description": "Number of context lines to include before each match (optional, default 0)"
-                    },
-                    "context_after": {
-                        "type": "integer",
-                        "description": "Number of context lines to include after each match (optional, default 0)"
-                    }
-                },
-                "required": ["pattern"],
-                "additionalProperties": false
-            }),
-        },
-        ToolDefinition {
-            name: "Glob".into(),
-            description: "Find files matching a glob pattern. Supports `**` for recursive matching. Returns sorted paths, one per line.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "Glob pattern (e.g. `**/*.rs`, `src/**/mod.rs`)"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Base directory to search in (default: current directory)"
-                    }
-                },
-                "required": ["pattern"],
-                "additionalProperties": false
-            }),
-        },
-        ToolDefinition {
-            name: "WebSearch".into(),
-            description: "Fetch a web page and extract its text via `curl -sL`. Returns the body text capped at a byte limit. Use this to look up documentation, check package versions, or read external references. Default timeout is 30 seconds.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "The URL to fetch (e.g. https://example.com/page)"
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "Timeout in seconds (optional, default 30)"
-                    }
-                },
-                "required": ["url"],
-                "additionalProperties": false
-            }),
-        },
-        ToolDefinition {
-            name: "Mischief".into(),
-            description: "Return the gremlins YAML DSL reference. Call with no arguments to get a complete reference for definition files, stage types, artifact URIs, interpolation, bootstrap, land, and stage definitions.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": false
-            }),
-        },
-    ];
-    // Task is always available, even when a tool filter is set.
-    all.push(ToolDefinition {
-        name: "Done".into(),
-        description: "Signal that your work is complete — call Done(summary) alongside your final \
-message to finish. The summary parameter briefly describes what you accomplished."
-            .into(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "summary": {
-                    "type": "string",
-                    "description": "Brief summary of what was accomplished"
-                }
-            },
-            "required": ["summary"],
-            "additionalProperties": false
-        }),
-    });
-    all.push(ToolDefinition {
-        name: "Task".into(),
-        description: format!("Delegate a self-contained task to a worker. Non-Fork kinds start with a clean conversation context; the Fork kind inherits the parent conversation history. Multiple Task calls in the same message run concurrently, up to {TASK_MAX_PER_TURN} per message (the harness supports up to {MAX_CONCURRENT_TOOLS} total concurrent tool calls). Returns the worker's final text output."),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "kind": {
-                    "type": "string",
-                    "enum": TaskKind::ALL
-                        .iter()
-                        .map(|kind| serde_json::Value::String(kind.as_str().to_string()))
-                        .collect::<Vec<_>>(),
-                    "description": "The kind of task to delegate."
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "Full task briefing for the worker. Non-Fork kinds start with a clean conversation context and see nothing from your conversation — include all relevant file contents, diffs, plans, and instructions the worker needs directly in this field. The Fork kind inherits the parent conversation history before this prompt."
-                }
-            },
-            "required": ["kind", "prompt"],
-            "additionalProperties": false
-        }),
-    });
-    if is_chat {
-        all.push(ToolDefinition {
-            name: "LoadSkill".into(),
-            description: "Load a chat skill by name. Use this when a task matches a skill's description from the available skills index. Returns the skill body and a listing of its bundled files. The skill is then active for the rest of the session.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Name of the skill to load"
-                    }
-                },
-                "required": ["name"],
-                "additionalProperties": false
-            }),
-        });
-    }
-    match filter {
-        Some(names) => all
-            .into_iter()
-            .filter(|t| {
-                always_available(&t.name)
-                    || (is_chat && t.name == "LoadSkill")
-                    || chat_only_always_available(&t.name, is_chat)
-                    || names.iter().any(|n| n == &t.name)
-            })
-            .collect(),
-        None => all,
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::landscape::LandscapeExplorer;
     use crate::test_support::EnvGuard;
+    use crate::toolbox::{
+        bash::bash_invoke,
+        edit::{edit_invoke, edit_sync},
+        glob::glob_invoke,
+        grep::grep_invoke,
+        landscape::{landscape_invoke, landscape_sync},
+        read::read_invoke,
+        skills::load_skill_invoke,
+        websearch::{websearch_invoke, websearch_invoke_with_cap},
+        write::write_invoke,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -3462,6 +982,7 @@ mod tests {
                 tool_output: None,
             },
             active_skills: None,
+            skills_available: false,
             discovered_skills: None,
         }
     }
@@ -4049,6 +1570,7 @@ mod tests {
                 tool_output: None,
             },
             active_skills: None,
+            skills_available: false,
             discovered_skills: None,
         };
         let args = serde_json::json!({"command": "pwd; ls"}).to_string();
@@ -4088,6 +1610,7 @@ mod tests {
                 tool_output: None,
             },
             active_skills: None,
+            skills_available: false,
             discovered_skills: None,
         };
         let expected = canonicalize_or_ancestor(&dir);
@@ -4125,6 +1648,7 @@ mod tests {
                 tool_output: None,
             },
             active_skills: None,
+            skills_available: false,
             discovered_skills: None,
         };
         let expected = canonicalize_or_ancestor(&project);
@@ -4568,6 +2092,7 @@ mod tests {
                 tool_output: None,
             },
             active_skills: None,
+            skills_available: false,
             discovered_skills: None,
         };
         let out = invoke("tool-test-id", "Mischief", &c, "{}").await;
@@ -4598,7 +2123,8 @@ mod tests {
                 tool_output: None,
             },
             active_skills: Some(Arc::new(std::sync::Mutex::new(vec![]))),
-            discovered_skills: Some(Arc::new(vec![])),
+            skills_available: true,
+            discovered_skills: None,
         };
         let out = invoke("tool-test-id", "Mischief", &c, "{}").await;
         assert!(
@@ -4663,9 +2189,11 @@ mod tests {
 
     #[test]
     fn load_skill_unknown_name() {
+        let _lock = EnvGuard::lock();
         let mut c = ctx(&tmp());
-        c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
         c.discovered_skills = Some(Arc::new(vec![]));
+        c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
+        c.skills_available = true;
         let result = load_skill_invoke(&c, &serde_json::json!({"name": "nonexistent"}));
         assert!(
             result.starts_with("Error: skill \"nonexistent\" not found"),
@@ -4675,6 +2203,7 @@ mod tests {
 
     #[test]
     fn load_skill_rejects_disable_model_invocation() {
+        let _lock = EnvGuard::lock();
         let mut c = ctx(&tmp());
         c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
         let skill = crate::skills::Skill {
@@ -4691,6 +2220,7 @@ mod tests {
             files: vec![],
         };
         c.discovered_skills = Some(Arc::new(vec![loaded]));
+        c.skills_available = true;
         let result = load_skill_invoke(&c, &serde_json::json!({"name": "secret-ops"}));
         assert!(
             result.starts_with("Error: skill \"secret-ops\" is not available for model invocation"),
@@ -4703,6 +2233,7 @@ mod tests {
         // A successful LoadSkill must return a body-free acknowledgement.
         // The skill body is injected as a trusted system-prompt amendment at
         // the next turn boundary, not written into the transcript.
+        let _lock = EnvGuard::lock();
         let mut c = ctx(&tmp());
         c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
         let skill = crate::skills::Skill {
@@ -4717,6 +2248,7 @@ mod tests {
             files: vec![],
         };
         c.discovered_skills = Some(Arc::new(vec![loaded]));
+        c.skills_available = true;
         let result = load_skill_invoke(&c, &serde_json::json!({"name": "pdf"}));
         assert!(
             result.starts_with("Skill \"pdf\" loaded successfully."),
@@ -5494,6 +3026,7 @@ mod tests {
                 tool_output: None,
             },
             active_skills: None,
+            skills_available: false,
             discovered_skills: None,
         };
         let write_args =
@@ -6413,6 +3946,7 @@ mod tests {
                 tool_output: None,
             },
             active_skills: None,
+            skills_available: false,
             discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
@@ -6445,6 +3979,7 @@ mod tests {
                 tool_output: None,
             },
             active_skills: None,
+            skills_available: false,
             discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
@@ -6475,6 +4010,7 @@ mod tests {
                 tool_output: None,
             },
             active_skills: None,
+            skills_available: false,
             discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": ""}).to_string();
@@ -6512,6 +4048,7 @@ mod tests {
                 tool_output: None,
             },
             active_skills: None,
+            skills_available: false,
             discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Bogus", "prompt": "go"}).to_string();
@@ -6544,6 +4081,7 @@ mod tests {
                 tool_output: None,
             },
             active_skills: None,
+            skills_available: false,
             discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
@@ -7017,6 +4555,7 @@ mod tests {
                 tool_output: None,
             },
             active_skills: None,
+            skills_available: false,
             discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
@@ -7051,6 +4590,7 @@ mod tests {
                 tool_output: None,
             },
             active_skills: None,
+            skills_available: false,
             discovered_skills: None,
         }
     }

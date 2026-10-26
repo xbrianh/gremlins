@@ -7,8 +7,9 @@ use rig_core::http_client::DynHttpClient;
 use rig_core::providers::openai::wire::Dialect;
 use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 
-use super::agent_loop::{run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext};
+use super::agent_loop::{run_agent_loop, LoopOpts, RunContext};
 use super::backend::{ClientError, RunParams};
+use super::cancel::{CancelToken, ErrorClassifier};
 use super::cancels::CancelsMap;
 use super::interactive::InteractiveSession;
 use super::model::GremlinsModel;

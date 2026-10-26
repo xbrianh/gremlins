@@ -97,7 +97,7 @@ macro_rules! declare_openai_backend {
                 $crate::clients::protocol::CompletedRun,
                 $crate::clients::backend::ClientError,
             > {
-                let classify: Option<$crate::clients::agent_loop::ErrorClassifier> = $classifier;
+                let classify: Option<$crate::clients::cancel::ErrorClassifier> = $classifier;
                 $crate::clients::openai_protocol::run_openai_compat(
                     &self.state,
                     params,
@@ -168,3 +168,41 @@ backends! {
     anthropic: "anthropic" => anthropic::AnthropicBackend::build,
     azure_openai: "azure-openai" => azure_openai::AzureOpenAiBackend::build,
 }
+
+/// Generate the boilerplate [`Backend`] methods that delegate to a
+/// [`crate::clients::native::NativeRunState`] field.
+///
+/// The `anthropic`, `azure-openai`, and `copilot` backends all store their
+/// shared run state in a [`NativeRunState`](crate::clients::native::NativeRunState)
+/// and expose the same four one-line methods — `last_run_params`, `reap_all`,
+/// `total_cost_usd`, and `resolved_params`.  They differ only in the field
+/// path to that state, so the macro takes the path as a dotted identifier
+/// chain (`state` for the former two, `state.native` for copilot) and emits
+/// the four methods verbatim inside a `Backend` impl.
+///
+/// The `self` in the generated bodies refers to the enclosing method's
+/// receiver; the path argument is passed separately precisely so it is free
+/// of the `self` keyword (which cannot cross a macro boundary as an argument).
+macro_rules! delegate_native_run_state {
+    ($($field:ident).+) => {
+        fn last_run_params(
+            &self,
+        ) -> Result<$crate::clients::backend::RunParams, $crate::clients::backend::ClientError>
+        {
+            self.$($field).+.last_run_params()
+        }
+
+        fn reap_all(&self, gremlin_id: &str) {
+            self.$($field).+.reap(gremlin_id)
+        }
+
+        fn total_cost_usd(&self) -> Option<f64> {
+            None
+        }
+
+        fn resolved_params(&self) -> Option<$crate::clients::params::ResolvedParams> {
+            Some(self.$($field).+.resolved.clone())
+        }
+    };
+}
+pub(crate) use delegate_native_run_state;

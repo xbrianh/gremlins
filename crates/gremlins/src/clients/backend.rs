@@ -6,15 +6,14 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use rig_core::completion::Message;
 
-use super::agent_loop::CancelToken;
+use super::cancel::CancelToken;
+pub(crate) use super::compaction::{CompactionOpts, Compactor};
 use super::interactive::{InteractiveSession, StreamEventSender};
 use super::model::GremlinsModel;
 use super::params::ResolvedParams;
 use super::protocol::CompletedRun;
-use super::task::TaskModelSelector;
-use crate::executor::conversation::CompactionOpts;
+use super::task_models::TaskModelSelector;
 
-#[derive(Debug)]
 pub struct RunParams {
     pub prompt: String,
     pub label: String,
@@ -63,13 +62,18 @@ pub struct RunParams {
     /// (and the first-request/read-time pass inside the agent loop); `None`
     /// keeps the loop's byte-accounting behavior unchanged.
     pub(crate) compaction_opts: Option<CompactionOpts>,
-    /// Skills discovered at turn start. `None` outside chat.
-    pub discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
+    /// Whether skills are available for this chat session.
+    pub(crate) skills_available: bool,
+    /// Discovered skills for this session. Session-bound so concurrent chat
+    /// sessions resolve their own project's skills instead of a shared slot.
+    pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
     /// Shared mutable reference to active skill names.
     pub active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    /// Compaction algorithm (set alongside compaction_opts).
+    pub(crate) compactor: Option<Arc<dyn Compactor>>,
     /// Sink for per-turn token-usage events emitted by the agent loop.
     /// The executor layer wires this to the daemon event broadcast.
-    pub token_usage_sink: crate::clients::agent_loop::TokenUsageSink,
+    pub token_usage_sink: crate::clients::token_usage::TokenUsageSink,
     /// Path to the persistent stage scratchpad file (`_scratchpad.md`).
     /// When `Some`, the agent loop reads and re-injects scratchpad content
     /// on each turn. `None` disables the per-turn injection.
@@ -101,62 +105,26 @@ impl Clone for RunParams {
             stream_events: self.stream_events.clone(),
             prepopulated_messages: self.prepopulated_messages.clone(),
             compaction_opts: self.compaction_opts,
+            skills_available: self.skills_available,
             discovered_skills: self.discovered_skills.clone(),
             active_skills: self.active_skills.clone(),
+            compactor: self.compactor.clone(),
             token_usage_sink: self.token_usage_sink.clone(),
             scratchpad_path: self.scratchpad_path.clone(),
         }
     }
 }
 
-#[derive(Debug)]
-pub enum ClientError {
-    Timeout {
-        message: String,
-    },
-    ApiServerError {
-        message: String,
-    },
-    RetryExhausted {
-        message: String,
-    },
-    Runtime {
-        message: String,
-    },
-    Cancelled {
-        message: String,
-        /// The agent loop's accumulated message history at the moment of
-        /// cancellation, when available. Chat soft-interrupt recovery uses
-        /// this to reconstruct the partial turn before re-running.
-        messages: Option<Vec<Message>>,
-    },
-    Bail {
-        reason: String,
-    },
-    PromptTooLarge {
-        limit: u64,
-        actual: u64,
-    },
-}
-
-impl std::fmt::Display for ClientError {
+impl std::fmt::Debug for RunParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ClientError::Timeout { message } => write!(f, "{message}"),
-            ClientError::ApiServerError { message } => write!(f, "{message}"),
-            ClientError::RetryExhausted { message } => write!(f, "{message}"),
-            ClientError::Runtime { message } => write!(f, "{message}"),
-            ClientError::Cancelled { message, .. } => write!(f, "{message}"),
-            ClientError::Bail { reason } => write!(f, "{reason}"),
-            ClientError::PromptTooLarge { limit, actual } => write!(
-                f,
-                "prompt size {actual} bytes exceeds configured limit of {limit} bytes"
-            ),
-        }
+        f.debug_struct("RunParams")
+            .field("label", &self.label)
+            .field("model", &self.model)
+            .finish_non_exhaustive()
     }
 }
 
-impl std::error::Error for ClientError {}
+pub use crate::clients::error::ClientError;
 
 #[async_trait]
 pub trait Backend: Send + Sync {
@@ -168,49 +136,60 @@ pub trait Backend: Send + Sync {
 
     /// Build a [`GremlinsModel`] from a `provider/model` spec, or `None` when
     /// the spec names a different provider or the model cannot be built.
-    ///
-    /// Called by the provider-agnostic selector factory when a `task-models`
-    /// override matches a task kind that is actually running.
-    fn make_model(&self, spec: &str) -> Option<GremlinsModel>;
-
-    /// The request options this backend resolved for the spec it was built
-    /// from (`temperature`, `max_tokens`, and the passthrough `extra` object).
-    ///
-    /// The provider-agnostic selector pairs this with [`Backend::make_model`]
-    /// so a cross-provider `task-models` override carries the target backend's
-    /// own defaults instead of the parent's. Backends with no request options
-    /// (the command backend) return `None`.
-    fn resolved_params(&self) -> Option<ResolvedParams> {
+    fn model_for(&self, _model: &str, _resolved: Option<&ResolvedParams>) -> Option<GremlinsModel> {
         None
     }
 
-    /// Return the [`RunParams`] from the most recent [`Backend::run`] call.
-    ///
-    /// Every backend that stores a `last_ctx` implements this by reading it
-    /// under lock.  The default [`Backend::resume`] delegates to this.
-    fn last_run_params(&self) -> Result<RunParams, ClientError>;
+    fn name(&self) -> &'static str {
+        "unknown"
+    }
 
-    /// Resume the last run by re-constructing its parameters and re-running.
-    ///
-    /// The default implementation calls `self.run(self.last_run_params()?, None).await`.
-    /// Backends with a custom resumption path (e.g. the command backend) may
-    /// override this.
+    /// List all models this backend can serve (unfiltered).
+    fn models(&self) -> IndexMap<String, GremlinsModel> {
+        IndexMap::new()
+    }
+
+    /// Return the last `RunParams` that were used, for resume support.
+    fn last_run_params(&self) -> Result<RunParams, ClientError> {
+        Err(ClientError::Runtime {
+            message: "resume not supported".into(),
+        })
+    }
+
+    /// Resume a paused or timed-out run.
     async fn resume(&self) -> Result<CompletedRun, ClientError> {
         self.run(self.last_run_params()?, None).await
     }
 
-    fn reap_all(&self, gremlin_id: &str);
+    /// Reap all child processes for a given gremlin ID.
+    fn reap_all(&self, _gremlin_id: &str) {}
 
-    fn total_cost_usd(&self) -> Option<f64>;
+    /// Build a model from a provider-raw spec string.
+    fn make_model(&self, _spec: &str) -> Option<GremlinsModel> {
+        None
+    }
 
-    /// Resolve the raw `provider/model?k=v,...` param map into typed request
-    /// fields plus the `additional_params` passthrough object.
-    ///
-    /// This is the single place extra-param meaning is decided: a key either
-    /// sets a typed field (overriding this backend's default for that key) or
-    /// passes through unchanged.  A malformed typed value is a build-time
-    /// error, never a silent fallback.
-    fn resolve_params(raw: &IndexMap<String, String>) -> Result<ResolvedParams, String>
+    /// Total cost in USD for this session, if tracked.
+    fn total_cost_usd(&self) -> Option<f64> {
+        None
+    }
+
+    fn resolve_params(_raw: &IndexMap<String, String>) -> Result<ResolvedParams, String>
     where
-        Self: Sized;
+        Self: Sized,
+    {
+        Ok(ResolvedParams::default())
+    }
+
+    fn resolved_params(&self) -> Option<ResolvedParams> {
+        None
+    }
+}
+
+impl std::fmt::Debug for dyn Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Backend")
+            .field("name", &self.name())
+            .finish()
+    }
 }

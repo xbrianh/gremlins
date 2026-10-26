@@ -13,7 +13,7 @@ use rig_core::providers::copilot::{Copilot, CopilotConfig, CopilotIntent};
 use rig_core::wasm_compat::WasmBoxedFuture;
 use serde::Deserialize;
 
-use crate::clients::agent_loop::CancelToken;
+use crate::clients::cancel::CancelToken;
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::cancels::CancelsMap;
 use crate::clients::interactive::InteractiveSession;
@@ -576,21 +576,7 @@ impl Backend for CopilotBackend {
             .await
     }
 
-    fn last_run_params(&self) -> Result<RunParams, ClientError> {
-        self.state.native.last_run_params()
-    }
-
-    fn reap_all(&self, gremlin_id: &str) {
-        self.state.native.reap(gremlin_id);
-    }
-
-    fn total_cost_usd(&self) -> Option<f64> {
-        None
-    }
-
-    fn resolved_params(&self) -> Option<ResolvedParams> {
-        Some(self.state.native.resolved.clone())
-    }
+    super::delegate_native_run_state!(state.native);
 
     fn resolve_params(raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
         // Validate the typed flags strictly (so a malformed value errors at
@@ -624,7 +610,7 @@ impl Backend for CopilotBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::agent_loop::CancelToken;
+    use crate::clients::cancel::CancelToken;
     use super::*;
     use crate::test_support::EnvGuard;
     use std::io::{Read, Write};
@@ -789,7 +775,7 @@ mod tests {
             OsStr::new(MISSING_GH),
             || Ok(unreachable_exchanger()),
         );
-        let err = result.err().expect("should be an error");
+        let err = result.expect_err("should be an error");
         assert!(err.contains("no credentials for provider"), "got: {err}");
     }
 

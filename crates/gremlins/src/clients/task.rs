@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -8,115 +7,9 @@ use super::model::GremlinsModel;
 use super::task_kind::TaskKind;
 use super::tools::{self, AgentLoopRuntime};
 
-/// Build a [`TaskModelSelector`] from the raw `task-models` config map and a
-/// provider-agnostic model factory.
-///
-/// Returns `None` when the map is empty (the common case). Resolution is
-/// deliberately lazy: `factory` is only invoked for a matching task kind, so a
-/// configured entry whose kind never runs does not force that provider's
-/// backend or credentials to resolve.
-pub(crate) fn build_task_selector(
-    factory: TaskModelFactory,
-    by_kind: &HashMap<TaskKind, String>,
-) -> Option<TaskModelSelector> {
-    let by_kind = by_kind.clone();
-    TaskModelSelector::new(by_kind, factory)
-}
+pub(crate) use super::task_models::*;
 
 const MAX_DEPTH: u32 = 3;
-
-/// A model selected for a Task invocation, paired with the request options
-/// resolved by the backend that built it.
-///
-/// `temperature`, `max_tokens`, and `extra` are the target provider's resolved
-/// values — never the parent's — so a cross-provider override does not leak an
-/// Anthropic `cache_control`/128 000-token default onto an OpenAI model.
-#[derive(Clone, Debug)]
-pub(crate) struct TaskModel {
-    pub(crate) model: GremlinsModel,
-    pub(crate) temperature: Option<f64>,
-    pub(crate) max_tokens: Option<u64>,
-    pub(crate) extra: Option<serde_json::Value>,
-}
-
-/// Builds the model named by a matching `task-models` entry, for use by one
-/// Task invocation. Returns `Err` with a reason when the entry cannot be
-/// resolved (for example, its backend cannot be built because a credential is
-/// missing).
-pub(crate) type TaskModelFactory = Arc<dyn Fn(&str) -> Result<TaskModel, String> + Send + Sync>;
-
-/// Lookup map for `task-models`, keyed by the exact [`TaskKind`] spelling.
-/// Shared behind an `Arc` so a Task fan-out clones one pointer per invocation
-/// rather than the whole map.
-#[derive(Debug)]
-struct TaskModelOverrides {
-    by_kind: HashMap<TaskKind, String>,
-}
-
-impl TaskModelOverrides {
-    /// The spec configured for `kind`, if any. Lookup is an exact key match.
-    fn spec_for(&self, kind: TaskKind) -> Option<&str> {
-        self.by_kind.get(&kind).map(|s| s.as_str())
-    }
-}
-
-/// Everything a Task invocation needs to pick a model from `task-models`: the
-/// lookup maps and a factory that builds the model a matching entry names.
-///
-/// `None` at a call site means no `task-models` is configured, so every task
-/// keeps the parent's model. Cloning a selector is O(1) — both halves sit behind
-/// an `Arc` — which matters because a Task fan-out clones one per invocation.
-#[derive(Clone)]
-pub struct TaskModelSelector {
-    overrides: Arc<TaskModelOverrides>,
-    factory: TaskModelFactory,
-}
-
-impl std::fmt::Debug for TaskModelSelector {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TaskModelSelector")
-            .field("overrides", &self.overrides)
-            .finish_non_exhaustive()
-    }
-}
-
-impl TaskModelSelector {
-    /// Assemble a selector from parsed config. Returns `None` when the map is
-    /// empty — the common case, where nothing ever needs building.
-    pub(crate) fn new(
-        by_kind: HashMap<TaskKind, String>,
-        factory: TaskModelFactory,
-    ) -> Option<Self> {
-        if by_kind.is_empty() {
-            return None;
-        }
-        Some(Self {
-            overrides: Arc::new(TaskModelOverrides { by_kind }),
-            factory,
-        })
-    }
-
-    /// The [`TaskModel`] for a Task of `kind`, or a clone of `default` when no
-    /// entry matches.
-    ///
-    /// Returns `(model, spec_string)` where `spec_string` is the matched
-    /// `task-models` entry (for logging), or `None` when no entry matched. A
-    /// matched entry that fails to build is an `Err` — it must surface as a
-    /// task result, not silently fall back to `default`.
-    fn model_for(
-        &self,
-        kind: TaskKind,
-        default: &TaskModel,
-    ) -> Result<(TaskModel, Option<String>), String> {
-        match self.overrides.spec_for(kind) {
-            Some(spec) => match (self.factory)(spec) {
-                Ok(m) => Ok((m, Some(spec.to_string()))),
-                Err(reason) => Err(reason),
-            },
-            None => Ok((default.clone(), None)),
-        }
-    }
-}
 
 /// Per-process monotonic source of task id segments. A clock-derived value
 /// cannot separate siblings spawned microseconds apart, and duplicate segments
@@ -170,7 +63,7 @@ pub(crate) fn make_task_runner(
     model: GremlinsModel,
     task_model_selector: Option<TaskModelSelector>,
     tool_filter: Option<Vec<String>>,
-    cancel: Arc<super::agent_loop::CancelToken>,
+    cancel: Arc<super::cancel::CancelToken>,
     ctx: AgentLoopRuntime,
     prefix: String,
     parent_model_name: String,
@@ -207,7 +100,7 @@ fn make_task_runner_at_depth(
     model: GremlinsModel,
     task_model_selector: Option<TaskModelSelector>,
     tool_filter: Option<Vec<String>>,
-    cancel: Arc<super::agent_loop::CancelToken>,
+    cancel: Arc<super::cancel::CancelToken>,
     ctx: AgentLoopRuntime,
     prefix: String,
     _parent_model_name: String,
@@ -304,9 +197,13 @@ fn make_task_runner_at_depth(
 
                 let work_root = tools::worktree_root(task_cwd.as_deref());
                 let system_prompt = if kind == TaskKind::Fork {
-                    Some(crate::clients::config::fork_system_prompt(&work_root))
+                    Some(crate::clients::system_prompts::fork_system_prompt(
+                        &work_root,
+                    ))
                 } else {
-                    Some(crate::clients::config::task_system_prompt(&work_root))
+                    Some(crate::clients::system_prompts::task_system_prompt(
+                        &work_root,
+                    ))
                 };
 
                 let prepopulated_messages = if kind == TaskKind::Fork {
@@ -363,7 +260,7 @@ mod tests {
     use rig_core::driver::DynModel;
     use rig_core::operation::Completion;
 
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     fn gm(model: DynModel<Completion>) -> GremlinsModel {
         GremlinsModel::new(model, crate::config::DEFAULT_MAX_PROMPT_BYTES)
@@ -565,6 +462,7 @@ mod tests {
                 tool_output: None,
             },
             active_skills: None,
+            skills_available: false,
             discovered_skills: None,
         }
     }
@@ -579,7 +477,7 @@ mod tests {
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
 
-        let cancel = super::super::agent_loop::CancelToken::new();
+        let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
             gm(model.clone().erase()),
             None,
@@ -623,7 +521,7 @@ mod tests {
             rig_core::test_utils::MockStreamEvent::text("should not run"),
         ]]);
         let model = GremlinsModel::new(inner.clone().erase(), 16);
-        let cancel = super::super::agent_loop::CancelToken::new();
+        let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
             model,
             None,
@@ -686,7 +584,7 @@ mod tests {
         )
         .expect("a configured task-models map yields a selector");
 
-        let cancel = super::super::agent_loop::CancelToken::new();
+        let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
             gm(child.clone().erase()),
             Some(selector),
@@ -787,7 +685,7 @@ mod tests {
         )
         .expect("configured");
 
-        let cancel = super::super::agent_loop::CancelToken::new();
+        let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
             gm(parent.clone().erase()),
             Some(selector),
@@ -848,7 +746,7 @@ mod tests {
         )
         .expect("configured");
 
-        let cancel = super::super::agent_loop::CancelToken::new();
+        let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
             gm(parent.clone().erase()),
             Some(selector),
@@ -885,7 +783,7 @@ mod tests {
     async fn make_task_runner_rejects_at_max_depth() {
         let ctx = depth_test_ctx();
         let model = rig_core::test_utils::MockCompletionModel::from_turns([]).erase();
-        let cancel = super::super::agent_loop::CancelToken::new();
+        let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner_at_depth(
             gm(model),
             None,
@@ -927,7 +825,7 @@ mod tests {
             ],
         ])
         .erase();
-        let cancel = super::super::agent_loop::CancelToken::new();
+        let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
             gm(model),
             None,
@@ -971,7 +869,7 @@ mod tests {
             vec![MockStreamEvent::error("http://429: slow down")],
             vec![MockStreamEvent::error("http://429: slow down")],
         ]);
-        let cancel = super::super::agent_loop::CancelToken::new();
+        let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
             gm(model.clone().erase()),
             None,
@@ -1030,7 +928,7 @@ mod tests {
             PendingTransport,
         )
         .erase();
-        let cancel = super::super::agent_loop::CancelToken::new();
+        let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
             gm(model),
             None,
@@ -1135,7 +1033,7 @@ mod tests {
                 gm(rig_core::test_utils::MockCompletionModel::from_stream_turns(turns).erase()),
                 None,
                 None,
-                super::super::super::agent_loop::CancelToken::new(),
+                crate::clients::cancel::CancelToken::new(),
                 depth_test_ctx(),
                 TEST_BASE.to_string(),
                 "model".into(),

@@ -5,12 +5,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
 use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
-use crate::clients::backend::{ClientError, RunParams};
+use crate::clients::backend::{ClientError, CompactionOpts, Compactor, RunParams};
 use crate::clients::client::{Client, ModelURI};
 use crate::clients::task_kind::TaskKind;
 use crate::config;
@@ -646,13 +647,18 @@ async fn run_agent(
         if threshold == 0 {
             None
         } else {
-            Some(conversation::CompactionOpts {
+            Some(CompactionOpts {
                 threshold_tokens: threshold,
                 target_tokens: threshold.saturating_mul(55) / 100,
             })
         }
     };
     let prepopulated_messages = verbatim_history.clone();
+
+    // The concrete compaction algorithm that pairs with `compaction_opts`:
+    // the agent loop runs it mid-loop when compaction is enabled.
+    let compactor: Option<Arc<dyn Compactor>> = compaction_opts
+        .map(|_| Arc::new(conversation::ConversationCompactor) as Arc<dyn Compactor>);
 
     // ── Live usage tracker for failure persistence ─────
     let live_usage = std::sync::Arc::new(std::sync::Mutex::new(
@@ -692,6 +698,8 @@ async fn run_agent(
         stream_events: gremlin.runtime_config.stream_events.clone(),
         prepopulated_messages,
         compaction_opts,
+        compactor,
+        skills_available: gremlin.discovered_skills.is_some(),
         discovered_skills: gremlin.discovered_skills.clone(),
         active_skills: gremlin.active_skills.clone(),
         token_usage_sink: {
@@ -701,8 +709,8 @@ async fn run_agent(
                 gremlin.state.read_field("token_usage").as_ref(),
             );
             let live_usage_sink = live_usage.clone();
-            crate::clients::agent_loop::TokenUsageSink(Some(std::sync::Arc::new(
-                move |event: crate::clients::agent_loop::TokenUsageEvent| {
+            crate::clients::token_usage::TokenUsageSink(Some(std::sync::Arc::new(
+                move |event: crate::clients::token_usage::TokenUsageEvent| {
                     let usage =
                         crate::executor::supervisor::add_usage_stats(&baseline_usage, &event.usage);
                     let cost_usd = client_for_cost.total_cost_usd();
@@ -1598,7 +1606,7 @@ mod tests {
                 content: "you are a chat assistant".to_string(),
             },
             Message::user("hello".to_string()),
-            crate::clients::agent_loop::assistant_tool_message("hi there", &[], &[]),
+            crate::clients::format::assistant_tool_message("hi there", &[], &[]),
             Message::tool_result(
                 CallId::from_wire("call_1".to_string()),
                 ToolName::new("Read".to_string()).unwrap(),
