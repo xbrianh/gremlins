@@ -1524,7 +1524,10 @@ pub(crate) fn resolve_env(
     for (key, value) in stage_inputs {
         let var_name = format!(
             "GREMLINS_SOURCE_{}",
-            key.to_ascii_uppercase().replace('-', "_")
+            key.to_ascii_uppercase()
+                .chars()
+                .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+                .collect::<String>()
         );
         base.insert(var_name, value.clone());
     }

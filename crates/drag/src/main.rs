@@ -437,13 +437,19 @@ async fn run() -> Result<(), String> {
         let files = lang::package_files(pkg)
             .map_err(|e| format!("failed to enumerate files for {}: {e}", pkg.name()))?;
         for file in files {
+            // Skip files that are gated behind #[cfg(test)] in their parent
+            // module (e.g. `#[cfg(test)] mod tests;` → src/tests.rs).
+            if let lang::PackageInfo::Rust(rpkg) = pkg {
+                if lang::rust::is_module_file_cfg_test_gated(&file, rpkg) {
+                    continue;
+                }
+            }
             if let Some((module, _)) = lang::file_to_module(&file, &packages) {
                 let n = count_tokens(bpe, &file)?;
                 token_counts.insert(module, n);
             }
         }
     }
-
     // 6. Compute transitive dependency footprints and assemble per-module
     //    metrics.  A module's footprint includes its own token count, so
     //    every scored module needs one — even when it falls outside the

@@ -281,31 +281,16 @@ fn filter_reexport_only_edges(edges: &mut Vec<(String, String)>, pkg: &RustPacka
     }
 
     // Strategy:
-    // 1. Remove all edges where the destination is a facade (splice replaces them).
-    // 2. Keep outgoing edges from facades only when the facade has no importers
-    //    (so its footprint isn't artificially collapsed).
-    // 3. Append splice edges.
+    // 1. Keep ALL original edges (don't drop importer→facade edges — the
+    //    facade's own tokens and transitive deps still count toward the
+    //    importer's footprint).
+    // 2. Append splice edges so that re-exports through facades are
+    //    not hidden.  Duplicates are deduped below.
     let mut kept: Vec<(String, String)> = Vec::with_capacity(edges.len() + splice.len());
     for (src, dst) in edges.drain(..) {
-        let src_is_facade = is_facade(&src);
-        let dst_is_facade = is_facade(&dst);
-
-        // Drop edges where importer→facade (splice replaces these).
-        if !src_is_facade && dst_is_facade {
-            continue;
-        }
-        // Keep edge if source is a facade with no importers (preserve its footprint).
-        if src_is_facade && importers.get(&src).is_none_or(|v| v.is_empty()) {
-            kept.push((src, dst));
-            continue;
-        }
-        // Keep edge if source is not a facade.
-        if !src_is_facade {
-            kept.push((src, dst));
-        }
+        kept.push((src, dst));
     }
     kept.extend(splice);
-
     // Deduplicate (splice may produce edges that already existed).
     kept.sort();
     kept.dedup();
@@ -465,11 +450,31 @@ fn strip_attributes(src: &str) -> String {
         if chars[i] == '#' && i + 1 < chars.len() && chars[i + 1] == '[' {
             i += 2;
             let mut depth = 1u32;
+            let mut in_str = false;
+            let mut in_ch = false;
+            let mut esc = false;
             while i < chars.len() && depth > 0 {
-                match chars[i] {
-                    '[' => depth += 1,
-                    ']' => depth -= 1,
-                    _ => {}
+                let c = chars[i];
+                if esc {
+                    esc = false;
+                    i += 1;
+                    continue;
+                }
+                if c == '\\' && (in_str || in_ch) {
+                    esc = true;
+                    i += 1;
+                    continue;
+                }
+                if c == '"' && !in_ch {
+                    in_str = !in_str;
+                } else if c == '\'' && !in_str {
+                    in_ch = !in_ch;
+                } else if !in_str && !in_ch {
+                    match c {
+                        '[' => depth += 1,
+                        ']' => depth -= 1,
+                        _ => {}
+                    }
                 }
                 i += 1;
             }
@@ -478,17 +483,36 @@ fn strip_attributes(src: &str) -> String {
         if chars[i] == '#' && i + 2 < chars.len() && chars[i + 1] == '!' && chars[i + 2] == '[' {
             i += 3;
             let mut depth = 1u32;
+            let mut in_str = false;
+            let mut in_ch = false;
+            let mut esc = false;
             while i < chars.len() && depth > 0 {
-                match chars[i] {
-                    '[' => depth += 1,
-                    ']' => depth -= 1,
-                    _ => {}
+                let c = chars[i];
+                if esc {
+                    esc = false;
+                    i += 1;
+                    continue;
+                }
+                if c == '\\' && (in_str || in_ch) {
+                    esc = true;
+                    i += 1;
+                    continue;
+                }
+                if c == '"' && !in_ch {
+                    in_str = !in_str;
+                } else if c == '\'' && !in_str {
+                    in_ch = !in_ch;
+                } else if !in_str && !in_ch {
+                    match c {
+                        '[' => depth += 1,
+                        ']' => depth -= 1,
+                        _ => {}
+                    }
                 }
                 i += 1;
             }
             continue;
-        }
-        out.push(chars[i]);
+        }        out.push(chars[i]);
         i += 1;
     }
 
@@ -607,8 +631,30 @@ fn skip_to_stmt_end(s: &str) -> Option<&str> {
     let mut depth_paren = 0u32;
     let mut depth_bracket = 0u32;
     let mut depth_brace = 0u32;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escape = false;
 
     for (i, ch) in s.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' && (in_string || in_char) {
+            escape = true;
+            continue;
+        }
+        if ch == '"' && !in_char {
+            in_string = !in_string;
+            continue;
+        }
+        if ch == '\'' && !in_string {
+            in_char = !in_char;
+            continue;
+        }
+        if in_string || in_char {
+            continue;
+        }
         match ch {
             '(' => depth_paren += 1,
             ')' => {
@@ -632,7 +678,6 @@ fn skip_to_stmt_end(s: &str) -> Option<&str> {
     }
     None
 }
-
 /// Strip `keyword` from the front of `s`, requiring a word boundary after it.
 fn strip_keyword<'a>(s: &'a str, keyword: &str) -> Option<&'a str> {
     let rest = s.strip_prefix(keyword)?;
@@ -695,6 +740,130 @@ fn file_rel_to_module(rel: &Path, target_name: &str, is_bin: bool) -> Option<Str
     Some(format!("{crate_name}::{module_path}"))
 }
 
+// ---------------------------------------------------------------------------
+// cfg(test)-gated module detection
+// ---------------------------------------------------------------------------
+
+/// Check whether a module source file is gated behind `#[cfg(test)]` in its
+/// parent module.  For example, when `lib.rs` contains
+/// `#[cfg(test)] mod tests;`, the file `src/tests.rs` is only compiled in
+/// test configuration and should be excluded from token counting and scoring.
+pub(crate) fn is_module_file_cfg_test_gated(file: &Path, pkg: &RustPackage) -> bool {    let src_dir = pkg.dir.join("src");
+    let rel = match file.strip_prefix(&src_dir) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let rel_str = rel.to_string_lossy();
+
+    // Crate root files cannot be cfg-test-gated.
+    if rel_str == "lib.rs" || rel_str == "main.rs" {
+        return false;
+    }
+
+    // Determine the module name (the ident after `mod` in the parent).
+    let module_name: String = if rel_str.ends_with("/mod.rs") {
+        // src/foo/mod.rs → the module is "foo"
+        match rel.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => return false,
+        }
+    } else {
+        // src/foo.rs or src/foo/bar.rs → stem is the module name
+        match rel.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => return false,
+        }
+    };
+
+    // Find the parent module file that contains `mod <name>;`.
+    let parent_file = parent_module_file(rel, &src_dir, pkg.is_bin);
+    let parent_src = match std::fs::read_to_string(&parent_file) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    has_cfg_test_mod_decl(&parent_src, &module_name)
+}
+
+/// Given a file path relative to `src/`, return the absolute path to the
+/// parent module's source file (the one that declares `mod <name>;`).
+fn parent_module_file(rel: &Path, src_dir: &Path, is_bin: bool) -> PathBuf {
+    let rel_str = rel.to_string_lossy();
+
+    if rel_str.ends_with("/mod.rs") {
+        // src/foo/mod.rs → module is foo.
+        // Parent could be lib.rs, main.rs, or foo's parent.
+        match rel.parent() {
+            Some(parent_dir) if !parent_dir.as_os_str().is_empty() => {
+                // src/a/foo/mod.rs → parent module is a
+                let parent_str = parent_dir.to_string_lossy();
+                let candidate_rs = src_dir.join(format!("{parent_str}.rs"));
+                if candidate_rs.exists() {
+                    candidate_rs
+                } else {
+                    src_dir.join(parent_dir).join("mod.rs")
+                }
+            }
+            _ => {
+                // Top-level: src/foo/mod.rs → parent is lib.rs or main.rs
+                if is_bin {
+                    src_dir.join("main.rs")
+                } else {
+                    src_dir.join("lib.rs")
+                }
+            }
+        }
+    } else {
+        // Regular file: src/foo.rs or src/a/b.rs
+        match rel.parent() {
+            Some(parent_dir) if !parent_dir.as_os_str().is_empty() => {
+                let parent_str = parent_dir.to_string_lossy();
+                let candidate_rs = src_dir.join(format!("{parent_str}.rs"));
+                if candidate_rs.exists() {
+                    candidate_rs
+                } else {
+                    src_dir.join(parent_dir).join("mod.rs")
+                }
+            }
+            _ => {
+                // Top-level: src/foo.rs → parent is lib.rs or main.rs
+                if is_bin {
+                    src_dir.join("main.rs")
+                } else {
+                    src_dir.join("lib.rs")
+                }
+            }
+        }
+    }
+}
+
+/// Check whether `parent_src` contains `#[cfg(… test …)] mod <module_name>;`.
+fn has_cfg_test_mod_decl(parent_src: &str, module_name: &str) -> bool {
+    let no_comments = strip_all_comments(parent_src);
+    let mod_decl = format!("mod {module_name};");
+
+    let mut search_from = 0usize;
+    while let Some(pos) = no_comments[search_from..].find(&mod_decl) {
+        let abs_pos = search_from + pos;
+        let preceding = no_comments[..abs_pos].trim_end();
+
+        if preceding.ends_with(']') {
+            // Look backwards for the matching `#[cfg(`.
+            if let Some(attr_start) = preceding.rfind("#[cfg(") {
+                let attr_body = &preceding[attr_start + 6..];
+                // Drop the trailing `]` (we already know it ends with `]`).
+                let attr_body = attr_body.strip_suffix(']').unwrap_or(attr_body);
+                if attr_body.contains("test") {
+                    return true;
+                }
+            }
+        }
+
+        search_from = abs_pos + mod_decl.len();
+    }
+
+    false
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -991,17 +1160,17 @@ mod tests {
 
         filter_reexport_only_edges(&mut edges, &pkg);
 
-        // crate (lib.rs) is itself an importer-less facade, so its own
-        // outgoing edge to prelude is preserved for footprint purposes; the
-        // splice additionally rewires crate directly to util.
+        // With the new strategy, ALL original edges are kept (including
+        // crate::prelude → crate::util) and the splice additionally adds
+        // crate → crate::util so re-exports through facades aren't hidden.
         assert_eq!(
             edges,
             vec![
                 ("crate".to_string(), "crate::prelude".to_string()),
                 ("crate".to_string(), "crate::util".to_string()),
+                ("crate::prelude".to_string(), "crate::util".to_string()),
             ]
-        );
-    }
+        );    }
 
     #[test]
     fn reexport_only_facade_no_importers_keeps_outgoing_edges() {

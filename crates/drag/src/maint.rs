@@ -487,7 +487,6 @@ pub(crate) async fn score_package_maintainability(
     }
 
     // Collect task results, grouped by (pkg_key, dim_name).
-    // On task failure, inject a neutral 2 so the median still works.
     let mut estimates_map: HashMap<(String, String), Vec<u8>> = HashMap::new();
     for handle in handles {
         match handle.await {
@@ -497,12 +496,8 @@ pub(crate) async fn score_package_maintainability(
                     .or_default()
                     .push(score);
             }
-            Ok((pkg_key, dim_name, Err(e))) => {
+            Ok((_pkg_key, _dim_name, Err(e))) => {
                 eprintln!("  WARNING: {e}");
-                estimates_map
-                    .entry((pkg_key, dim_name))
-                    .or_default()
-                    .push(2);
             }
             Err(e) => {
                 eprintln!("  WARNING: join error: {e}");
@@ -862,14 +857,18 @@ fn load_maint_cache(path: &Path) -> Result<HashMap<String, MaintCacheEntry>, Str
         if line.is_empty() {
             continue;
         }
-        let entry: MaintCacheEntry = serde_json::from_str(line).map_err(|e| {
-            format!(
-                "{}:{}: invalid maint cache entry: {e}",
-                path.display(),
-                line_no + 1
-            )
-        })?;
-        map.insert(entry.key.clone(), entry);
+        match serde_json::from_str::<MaintCacheEntry>(line) {
+            Ok(entry) => {
+                map.insert(entry.key.clone(), entry);
+            }
+            Err(e) => {
+                eprintln!(
+                    "  WARNING: {}:{}: skipping invalid maint cache entry: {e}",
+                    path.display(),
+                    line_no + 1
+                );
+            }
+        }
     }
     Ok(map)
 }
