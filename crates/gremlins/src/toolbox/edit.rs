@@ -285,12 +285,13 @@ fn apply_edits(
             }
         }
 
-        let mut positions = search_window
-            .match_indices(old_str.as_str())
-            .map(|(pos, _)| pos + window_offset);
-
-        let first = match positions.next() {
-            Some(pos) => pos,
+        // Use find + offset-1 check instead of match_indices so we
+        // detect overlapping occurrences.  match_indices skips by match
+        // length, so for `old_str: "foo\nfoo"` in `"foo\nfoo\nfoo\n"`
+        // it reports a single match even though the string appears at
+        // both offset 0 and offset 4 (the two occurrences overlap).
+        let first = match search_window.find(old_str.as_str()) {
+            Some(pos) => pos + window_offset,
             None => {
                 return Err(edit_not_found_diagnostic(
                     content,
@@ -302,7 +303,9 @@ fn apply_edits(
                 ))
             }
         };
-        if positions.next().is_some() {
+        // Check for a second occurrence starting just one byte past the
+        // first match, so overlapping duplicates are detected.
+        if let Some(_second) = search_window[first - window_offset + 1..].find(old_str.as_str()) {
             return Err(format!(
                 "Error: old_string is not unique in {file_path} (edit {})",
                 i + 1
@@ -718,5 +721,24 @@ mod tests {
         let offs = offsets(content);
         let out = apply_edits(content, &edits, "f.txt", &offs).unwrap();
         assert_eq!(out, "aONEbTWOc");
+    }
+
+    #[test]
+    fn apply_scope_overlapping_matches_detected() {
+        // Regression: match_indices skips by match length, so it can miss
+        // overlapping occurrences.  `old_str: "foo\nfoo"` appears at both
+        // byte 0 and byte 4 in "foo\nfoo\nfoo\n".  Within scope lines
+        // 1-3 both occurrences are present; the uniqueness check must find
+        // the second one even though it overlaps the first.
+        let content = "foo\nfoo\nfoo\n";
+        let edits = vec![EditOp {
+            old_str: "foo\nfoo".into(),
+            new_str: "BAR\nBAZ".into(),
+            scope_start: Some(1),
+            scope_end: Some(3),
+        }];
+        let offs = offsets(content);
+        let err = apply_edits(content, &edits, "f.txt", &offs).unwrap_err();
+        assert!(err.contains("not unique"), "got: {err}");
     }
 }

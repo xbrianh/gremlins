@@ -2417,16 +2417,34 @@ mod tests {
 
     #[test]
     fn validate_tool_args_edit_scope_without_old_string_error() {
-        // The old line-range form is gone: a lone start_line/end_line (even with
-        // replacement) is rejected because old_string is always required.
+        // The old line-range form is gone: the `replacement` field is
+        // rejected outright even when old_string is missing.
         let err = validate_tool_args(
             "Edit",
             &serde_json::json!({"file_path": "x", "edits": [{"start_line": 1, "end_line": 2, "replacement": "b"}]}),
         )
         .unwrap();
-        assert!(err.contains("missing 'old_string'"), "got: {err}");
+        assert!(
+            err.contains("'replacement' which is no longer supported"),
+            "got: {err}"
+        );
     }
-
+    #[test]
+    fn validate_tool_args_edit_replacement_field_rejected() {
+        // The old `replacement` field is removed.  Even when
+        // old_string/new_string are also present, the legacy field must
+        // be explicitly rejected so mixed-mode requests don't silently
+        // apply new_string.
+        let err = validate_tool_args(
+            "Edit",
+            &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "new_string": "b", "replacement": "c"}]}),
+        )
+        .unwrap();
+        assert!(
+            err.contains("'replacement' which is no longer supported"),
+            "got: {err}"
+        );
+    }
     #[test]
     fn validate_tool_args_edit_start_after_end_error() {
         let err = validate_tool_args(

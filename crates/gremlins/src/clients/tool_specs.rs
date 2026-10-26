@@ -295,6 +295,17 @@ pub(crate) fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option
                         ));
                     }
                 };
+                // 'replacement' (the old range-mode field) is removed — reject it
+                // explicitly even when old_string/new_string are also present,
+                // so legacy mixed-mode requests don't silently apply new_string.
+                if obj.contains_key("replacement") {
+                    let provided = describe_edit_provided_fields(obj);
+                    return Some(format!(
+                        "Error: edit {} has 'replacement' which is no longer supported — use 'new_string' instead{}",
+                        i + 1,
+                        provided
+                    ));
+                }
                 // 'old_string' is always required.
                 if !obj.contains_key("old_string") {
                     return Some(format!(
@@ -308,10 +319,9 @@ pub(crate) fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option
                         "Error: edit {} missing 'new_string' for Edit tool",
                         i + 1
                     ));
-                }
-                // 'start_line'/'end_line' are optional scope fields.
-                // 'end_line' requires 'start_line'; 'start_line' alone is
-                // valid (open-ended downward scope to EOF).
+                } // 'start_line'/'end_line' are optional scope fields.
+                  // 'end_line' requires 'start_line'; 'start_line' alone is
+                  // valid (open-ended downward scope to EOF).
                 let has_start = obj.contains_key("start_line");
                 let has_end = obj.contains_key("end_line");
                 if has_end && !has_start {
@@ -404,9 +414,9 @@ fn tool_parameters(spec: &ToolSpec) -> serde_json::Value {
                             "description": "When old_string appears multiple times, scope the search to end at this 1-based line (inclusive; clamps to EOF if beyond last line)"
                         }
                     },
-                    "additionalProperties": false
-                }
-            }),
+                    "additionalProperties": false,
+                    "required": ["old_string", "new_string"]
+                }            }),
             ("Task", "kind") => serde_json::json!({
                 "type": "string",
                 "enum": TaskKind::ALL
