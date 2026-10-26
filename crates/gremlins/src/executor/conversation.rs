@@ -8,60 +8,13 @@
 //! summaries) and an "already explored" manifest.
 
 use indexmap::{IndexMap, IndexSet};
-use rig_core::completion::message::{
-    AssistantContent, CallId, Text, ToolCall, ToolName, ToolResultContent, UserContent,
+use rig_core::completion::message::{AssistantContent, ToolCall, ToolResultContent, UserContent};
+use rig_core::completion::Message;
+
+use crate::clients::compaction::{
+    result_status, serialized_len, serialized_message_len, CompactedWorking, Compactor,
+    CutGranularity,
 };
-use rig_core::completion::{CompletionRequest, Message, ToolDefinition};
-use rig_core::message::ToolResult as ToolResultMsg;
-
-use crate::clients::tools;
-use std::sync::OnceLock;
-
-/// Compaction tuning. `threshold_tokens` is the soft token trigger; when a
-/// request view exceeds it the loop compacts toward `target_tokens` so one
-/// pass buys many rounds before the next one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CompactionOpts {
-    pub(crate) threshold_tokens: u64,
-    pub(crate) target_tokens: u64,
-}
-
-/// Conservative bytes-per-token conversion used to hand the token target to
-/// the byte-based fitting path. Dense-content assumption: fitting to this
-/// byte budget under-shoots the token target.
-pub(crate) const BYTES_PER_TOKEN: u64 = 3;
-
-/// Where a compaction pass is allowed to cut.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CutGranularity {
-    /// Cut only at the start of a completed chat turn (read-time default).
-    Turn,
-    /// Cut at round starts inside the current turn, plus chat-turn starts
-    /// before it. The current turn's operator prompt and any `[operator]:`
-    /// injections are not cut; they are carried verbatim ahead of the window.
-    Round { current_turn_start: usize },
-}
-
-/// A compacted working view split into a stable leading prefix and the verbatim
-/// tail that starts at `cut` in the source history.
-#[derive(Clone, Debug)]
-pub(crate) struct CompactedWorking {
-    pub(crate) prefix: Vec<Message>,
-    pub(crate) cut: usize,
-}
-
-impl CompactedWorking {
-    /// Rebuild the full working view for the current source history.
-    pub(crate) fn materialize(&self, history: &[Message]) -> Vec<Message> {
-        if self.cut > history.len() {
-            return history.to_vec();
-        }
-        let mut working = self.prefix.clone();
-        working.extend_from_slice(&history[self.cut..]);
-        working
-    }
-}
-
 /// Maximum bytes kept from a `Read` result for a file fact.
 const FILE_EXCERPT_BYTES: usize = 2048;
 /// Maximum bytes kept from a command/pattern result tail.
@@ -124,7 +77,7 @@ impl Facts {
                     let key = format!("Bash: {command}");
                     self.upsert_result_fact(
                         key,
-                        tools::result_status(output).to_string(),
+                        result_status(output).to_string(),
                         bash_result_tail(output, RESULT_TAIL_BYTES),
                     );
                 }
@@ -133,7 +86,7 @@ impl Facts {
                 if let Some(key) = search_result_key(name, args) {
                     self.upsert_result_fact(
                         key,
-                        tools::result_status(output).to_string(),
+                        result_status(output).to_string(),
                         tail_bytes(output, RESULT_TAIL_BYTES),
                     );
                 }
@@ -213,7 +166,7 @@ impl Facts {
 /// into `history` rather than a fully materialized vector. This lets the agent
 /// loop cache the prefix and keep it byte-stable between passes while the
 /// verbatim tail keeps growing.
-pub(crate) fn compact_working(
+fn compact_working(
     history: &[Message],
     budget_bytes: u64,
     request_overhead_bytes: usize,
@@ -659,40 +612,6 @@ fn tool_result_text(message: &Message) -> Option<String> {
     saw_result.then_some(text)
 }
 
-/// Build a single [`Message::User`] that merges a Done action ledger with
-/// the matching tool_result. This avoids consecutive `User` messages in
-/// the persisted history, which Anthropic (and other providers) reject
-/// because they violate the required user/assistant alternation and the
-/// rule that every `tool_use` must be immediately followed by a matching
-/// `tool_result` block.
-///
-/// The [`UserContent::ToolResult`] comes first because Anthropic requires
-/// every `tool_result` block to precede any text blocks in the responding
-/// user message.
-pub(crate) fn done_user_message(
-    ledger: &str,
-    call_id: CallId,
-    tool_name: ToolName,
-    result_text: &str,
-) -> Message {
-    Message::User {
-        content: vec![
-            UserContent::ToolResult(ToolResultMsg {
-                call: call_id,
-                name: tool_name,
-                content: vec![ToolResultContent::Text(Text {
-                    text: result_text.to_string(),
-                    additional_params: None,
-                })],
-            }),
-            UserContent::Text(Text {
-                text: ledger.to_string(),
-                additional_params: None,
-            }),
-        ],
-    }
-}
-
 fn user_text(message: &Message) -> String {
     match message {
         Message::User { content } => content
@@ -1092,84 +1011,6 @@ fn assistant_text(text: &str) -> Message {
 // Byte helpers
 // ---------------------------------------------------------------------------
 
-/// Estimate the serialized size of every request field except the chat
-/// history.
-///
-/// The agent loop's hard prompt ceiling measures the normalized
-/// [`CompletionRequest`], not the bare transcript. This helper builds that
-/// same request with an empty message list and subtracts the one-byte
-/// difference between an empty and a non-empty `chat_history` array;
-/// [`compact`] then adds the serialized history length back, so the soft
-/// trigger tracks the real normalized request size instead of summing raw
-/// prompt bytes.
-pub(crate) fn completion_request_overhead(
-    prompt: &str,
-    system_prompt: Option<&str>,
-    tools: &[ToolDefinition],
-) -> usize {
-    let mut request = CompletionRequest::new(Message::user(prompt.to_string()))
-        .messages(Vec::<Message>::new())
-        .tools(tools.to_vec());
-    if let Some(system_prompt) = system_prompt {
-        request = request.preamble(system_prompt.to_string());
-    }
-
-    serde_json::to_vec(&request)
-        .map(|json| json.len().saturating_sub(1))
-        .unwrap_or(0)
-}
-
-/// Token-counting counterpart to [`completion_request_overhead`], used only by
-/// the soft compaction trigger.
-pub(crate) fn completion_request_overhead_tokens(
-    prompt: &str,
-    system_prompt: Option<&str>,
-    tools: &[ToolDefinition],
-) -> usize {
-    let mut request = CompletionRequest::new(Message::user(prompt.to_string()))
-        .messages(Vec::<Message>::new())
-        .tools(tools.to_vec());
-    if let Some(system_prompt) = system_prompt {
-        request = request.preamble(system_prompt.to_string());
-    }
-
-    let json = serde_json::to_string(&request).unwrap_or_default();
-    token_count(&json).saturating_sub(token_count("[]"))
-}
-
-/// Local token estimate for a serialized message array.
-pub(crate) fn token_len(messages: &[Message]) -> usize {
-    let Ok(json) = serde_json::to_string(messages) else {
-        return usize::MAX;
-    };
-    token_count(&json)
-}
-
-pub(crate) fn serialized_len(messages: &[Message]) -> usize {
-    serde_json::to_string(messages)
-        .map(|json| json.len())
-        .unwrap_or(usize::MAX)
-}
-
-fn serialized_message_len(message: &Message) -> usize {
-    serde_json::to_string(message)
-        .map(|json| json.len())
-        .unwrap_or(usize::MAX)
-}
-
-/// Tokenize `text` with the same `o200k_base` encoder used for landscape
-/// budgets.
-fn token_count(text: &str) -> usize {
-    static BPE: OnceLock<Result<tiktoken_rs::CoreBPE, String>> = OnceLock::new();
-    let Ok(bpe) = BPE
-        .get_or_init(|| tiktoken_rs::o200k_base().map_err(|e| e.to_string()))
-        .as_ref()
-    else {
-        return usize::MAX;
-    };
-    bpe.encode_with_special_tokens(text).len()
-}
-
 /// Keep the first `max` bytes of `text`, cutting on a UTF-8 char boundary.
 fn head_bytes(text: &str, max: usize) -> String {
     if text.len() <= max {
@@ -1222,10 +1063,37 @@ fn bash_result_tail(text: &str, max: usize) -> String {
     preserved
 }
 
+// ---------------------------------------------------------------------------
+// Compactor implementation
+// ---------------------------------------------------------------------------
+
+// `CompactedWorking`, `Compactor`, and `CutGranularity` are already imported
+// from `crate::clients::compaction` at the top of this module.
+
+/// The concrete compaction algorithm wired via the [`Compactor`] trait.
+pub(crate) struct ConversationCompactor;
+
+impl Compactor for ConversationCompactor {
+    fn compact_working(
+        &self,
+        history: &[Message],
+        budget_bytes: u64,
+        request_overhead_bytes: usize,
+        granularity: CutGranularity,
+    ) -> Option<CompactedWorking> {
+        compact_working(history, budget_bytes, request_overhead_bytes, granularity)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clients::compaction::{
+        completion_request_overhead, completion_request_overhead_tokens, done_user_message,
+        token_len,
+    };
     use rig_core::completion::message::{CallId, ToolFunction, ToolName};
+    use rig_core::completion::CompletionRequest;
 
     fn assemble_working(memory: String, window: &[Message]) -> Vec<Message> {
         let mut working = Vec::with_capacity(2 + window.len());

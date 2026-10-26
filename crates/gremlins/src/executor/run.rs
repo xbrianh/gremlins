@@ -5,12 +5,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
 use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
-use crate::clients::backend::{ClientError, RunParams};
+use crate::clients::backend::{ClientError, CompactionOpts, Compactor, RunParams};
 use crate::clients::client::{Client, ModelURI};
 use crate::clients::task_kind::TaskKind;
 use crate::config;
@@ -646,13 +647,24 @@ async fn run_agent(
         if threshold == 0 {
             None
         } else {
-            Some(conversation::CompactionOpts {
+            Some(CompactionOpts {
                 threshold_tokens: threshold,
                 target_tokens: threshold.saturating_mul(55) / 100,
             })
         }
     };
     let prepopulated_messages = verbatim_history.clone();
+
+    // The concrete compaction algorithm that pairs with `compaction_opts`:
+    // the agent loop runs it mid-loop when compaction is enabled.
+    let compactor: Option<Arc<dyn Compactor>> = compaction_opts
+        .map(|_| Arc::new(conversation::ConversationCompactor) as Arc<dyn Compactor>);
+
+    // Publish the discovered skills to the process-global registry so the
+    // LoadSkill tool can resolve them while the agent loop runs.
+    if let Some(ref skills) = gremlin.discovered_skills {
+        crate::toolbox::skills_registry::set_skills(Arc::clone(skills));
+    }
 
     // ── Live usage tracker for failure persistence ─────
     let live_usage = std::sync::Arc::new(std::sync::Mutex::new(
@@ -692,7 +704,8 @@ async fn run_agent(
         stream_events: gremlin.runtime_config.stream_events.clone(),
         prepopulated_messages,
         compaction_opts,
-        discovered_skills: gremlin.discovered_skills.clone(),
+        compactor,
+        skills_available: gremlin.discovered_skills.is_some(),
         active_skills: gremlin.active_skills.clone(),
         token_usage_sink: {
             let gremlin_id = gremlin.id.to_string();
@@ -701,8 +714,8 @@ async fn run_agent(
                 gremlin.state.read_field("token_usage").as_ref(),
             );
             let live_usage_sink = live_usage.clone();
-            crate::clients::agent_loop::TokenUsageSink(Some(std::sync::Arc::new(
-                move |event: crate::clients::agent_loop::TokenUsageEvent| {
+            crate::clients::token_usage::TokenUsageSink(Some(std::sync::Arc::new(
+                move |event: crate::clients::token_usage::TokenUsageEvent| {
                     let usage =
                         crate::executor::supervisor::add_usage_stats(&baseline_usage, &event.usage);
                     let cost_usd = client_for_cost.total_cost_usd();
@@ -1124,6 +1137,16 @@ impl Gremlin {
     /// Drive every stage to the end, returning the exit code.
     /// `resume_from` names a stage to resume from (None = fresh start).
     pub async fn run(&mut self, resume_from: Option<&str>) -> Result<i32, RunError> {
+        // Ensure tool registry initialized exactly once across the process
+        // lifetime; must happen before the first agent loop invokes a tool.
+        static INIT_REGISTRY: std::sync::Once = std::sync::Once::new();
+        INIT_REGISTRY.call_once(|| {
+            crate::clients::tools::set_global_tool_registry(crate::toolbox::default_registry());
+            crate::toolbox::landscape::set_landscape_explorer(std::sync::Arc::new(
+                crate::landscape::LandscapeExplorer,
+            ));
+        });
+
         self.init_runtime(resume_from).await?;
 
         let bootstrap = self.definition.bootstrap();
@@ -1598,7 +1621,7 @@ mod tests {
                 content: "you are a chat assistant".to_string(),
             },
             Message::user("hello".to_string()),
-            crate::clients::agent_loop::assistant_tool_message("hi there", &[], &[]),
+            crate::clients::format::assistant_tool_message("hi there", &[], &[]),
             Message::tool_result(
                 CallId::from_wire("call_1".to_string()),
                 ToolName::new("Read".to_string()).unwrap(),

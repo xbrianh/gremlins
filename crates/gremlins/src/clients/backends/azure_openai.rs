@@ -7,7 +7,7 @@ use rig_core::http_client::DynHttpClient;
 use rig_core::providers::openai::{OpenAI, OpenAIConfig, Route};
 use rig_core::providers::openai::wire::AZURE;
 
-use crate::clients::agent_loop::CancelToken;
+use crate::clients::cancel::CancelToken;
 use crate::clients::azure_openai_responses_http::AzureResponsesHttpClient;
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::cancels::CancelsMap;
@@ -241,13 +241,7 @@ impl Backend for AzureOpenAiBackend {
             .await
     }
 
-    fn last_run_params(&self) -> Result<RunParams, ClientError> {
-        self.state.last_run_params()
-    }
-
-    fn reap_all(&self, gremlin_id: &str) {
-        self.state.reap(gremlin_id);
-    }
+    super::delegate_native_run_state!(state);
 
     fn make_model(&self, spec: &str) -> Option<GremlinsModel> {
         let (provider, model) = openai_protocol::provider_and_model(spec)?;
@@ -292,14 +286,6 @@ impl Backend for AzureOpenAiBackend {
         }
     }
 
-    fn total_cost_usd(&self) -> Option<f64> {
-        None
-    }
-
-    fn resolved_params(&self) -> Option<ResolvedParams> {
-        Some(self.state.resolved.clone())
-    }
-
     fn resolve_params(raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
         openai_protocol::resolve_openai_protocol("azure-openai", raw)
     }
@@ -309,7 +295,7 @@ impl Backend for AzureOpenAiBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::agent_loop::CancelToken;
+    use crate::clients::cancel::CancelToken;
     use super::*;
     use crate::test_support::EnvGuard;
 
@@ -353,7 +339,7 @@ mod tests {
             &HashMap::new(),
             &indexmap::IndexMap::new(),
         );
-        let err = result.err().expect("should be an error");
+        let err = result.expect_err("should be an error");
         assert!(
             err.contains("GREMLINS_AZURE_OPENAI_ENDPOINT"),
             "got: {err}"
@@ -371,7 +357,7 @@ mod tests {
             &HashMap::new(),
             &indexmap::IndexMap::new(),
         );
-        let err = result.err().expect("should be an error");
+        let err = result.expect_err("should be an error");
         assert!(
             err.contains("deployment name"),
             "got: {err}"
@@ -388,7 +374,7 @@ mod tests {
             &HashMap::new(),
             &indexmap::IndexMap::new(),
         );
-        let err = result.err().expect("should be an error");
+        let err = result.expect_err("should be an error");
         assert!(
             err.contains("no credentials for provider \"azure-openai\""),
             "got: {err}"
@@ -674,7 +660,7 @@ mod tests {
             &HashMap::new(),
             &indexmap::IndexMap::new(),
         );
-        let err = result.err().expect("should be an error");
+        let err = result.expect_err("should be an error");
         assert!(
             err.contains("unknown auth value"),
             "got: {err}"

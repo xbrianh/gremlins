@@ -16,7 +16,7 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 
-use crate::clients::agent_loop::CancelToken;
+use crate::clients::cancel::CancelToken;
 use crate::clients::client::{Client, ModelURI};
 use crate::clients::interactive::{
     InteractiveChannels, InteractiveCommand, InteractiveEvent, InteractiveHandle, StreamEventSender,

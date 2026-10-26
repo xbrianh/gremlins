@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
+use crate::toolbox::landscape_fn::LandscapeExplorerFn;
+
 pub const FN: &str = "fn";
 pub const STRUCT: &str = "struct";
 pub const IMPL: &str = "impl";
@@ -209,6 +211,56 @@ impl LandscapeExplorer {
             outlines: results,
             failures,
         })
+    }
+}
+
+// ── LandscapeExplorerFn adapter (for toolbox) ─────────────────────────────
+
+impl LandscapeExplorerFn for LandscapeExplorer {
+    fn explore_directory(
+        &self,
+        path: &Path,
+        depth_limit: usize,
+        token_budget: Option<usize>,
+    ) -> Result<String, String> {
+        let build = self
+            .build_with_failures(path, depth_limit)
+            .map_err(|e| format!("Error: {e}"))?;
+
+        if build.outlines.is_empty() && build.failures.is_empty() {
+            return Ok(String::new());
+        }
+
+        match format_landscape_block_tool(&build, path, token_budget) {
+            Ok(block) => Ok(block.block),
+            Err(LandscapeError::BudgetExceeded) => Err("Error: budget exceeded".into()),
+            Err(LandscapeError::Tokenizer(e)) => Err(format!("Error: tokenizer error: {e}")),
+            Err(LandscapeError::Read(e)) => Err(format!("Error: {e}")),
+            Err(LandscapeError::Utf8(e)) => Err(format!("Error: file is not valid UTF-8: {e}")),
+        }
+    }
+
+    fn explore_file(&self, path: &Path) -> Result<String, String> {
+        match self.outline_file(path, false) {
+            Ok(items) => {
+                if items.is_empty() {
+                    let ext = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.to_ascii_lowercase())
+                        .unwrap_or_default();
+                    if heuristic::recognizes(&ext) {
+                        return Ok("(no outline items)".into());
+                    }
+                    return Ok(path.display().to_string());
+                }
+                Ok(format_outline_items(&items))
+            }
+            Err(LandscapeError::Utf8(e)) => Err(format!("Error: file is not valid UTF-8: {e}")),
+            Err(LandscapeError::Read(e)) => Err(format!("Error: {e}")),
+            Err(LandscapeError::BudgetExceeded) => Err("Error: budget exceeded".into()),
+            Err(LandscapeError::Tokenizer(e)) => Err(format!("Error: tokenizer init failed: {e}")),
+        }
     }
 }
 

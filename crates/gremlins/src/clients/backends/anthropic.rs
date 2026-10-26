@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use rig_core::http_client::DynHttpClient;
 use rig_core::providers::anthropic::{Anthropic, AnthropicConfig};
 
-use crate::clients::agent_loop::CancelToken;
+use crate::clients::cancel::CancelToken;
 use crate::clients::anthropic_bearer_http::BearerHttpClient;
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::cancels::CancelsMap;
@@ -248,21 +248,7 @@ impl Backend for AnthropicBackend {
             .await
     }
 
-    fn last_run_params(&self) -> Result<RunParams, ClientError> {
-        self.state.last_run_params()
-    }
-
-    fn reap_all(&self, gremlin_id: &str) {
-        self.state.reap(gremlin_id)
-    }
-
-    fn total_cost_usd(&self) -> Option<f64> {
-        None
-    }
-
-    fn resolved_params(&self) -> Option<ResolvedParams> {
-        Some(self.state.resolved.clone())
-    }
+    super::delegate_native_run_state!(state);
 
     fn resolve_params(raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
         let mut additional = serde_json::Map::new();
@@ -335,7 +321,7 @@ impl AnthropicBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::agent_loop::CancelToken;
+    use crate::clients::cancel::CancelToken;
     use super::*;
     use crate::test_support::EnvGuard;
 
@@ -367,7 +353,7 @@ mod tests {
             &HashMap::new(),
             &indexmap::IndexMap::new(),
         );
-        let err = result.err().expect("should be an error");
+        let err = result.expect_err("should be an error");
         assert!(
             err.contains("no credentials for provider"),
             "got: {err}"
@@ -498,7 +484,7 @@ mod tests {
             &HashMap::new(),
             &indexmap::IndexMap::new(),
         );
-        let err = result.err().expect("should be an error");
+        let err = result.expect_err("should be an error");
         assert!(
             err.contains("unknown auth value"),
             "got: {err}"
@@ -615,8 +601,7 @@ mod tests {
             &HashMap::new(),
             &extra,
         )
-        .err()
-        .expect("malformed max_tokens must error");
+        .expect_err("malformed max_tokens must error");
         assert!(err.contains("max_tokens"), "{err}");
     }
 

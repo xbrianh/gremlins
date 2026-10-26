@@ -35,7 +35,7 @@ use indexmap::IndexMap;
 use serde_json::{Map, Value};
 
 use crate::artifacts::uri::Uri;
-use crate::clients::agent_loop::CancelToken;
+use crate::clients::cancel::CancelToken;
 use crate::clients::client::{Client, ModelURI};
 use crate::clients::interactive::{InteractiveHandle, InteractiveSession, StreamEventSender};
 use crate::config;

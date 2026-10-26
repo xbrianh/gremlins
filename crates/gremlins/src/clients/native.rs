@@ -8,10 +8,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::clients::agent_loop::{
-    default_classify, run_agent_loop, CancelToken, ErrorClassifier, LoopOpts, RunContext,
-};
+use crate::clients::agent_loop::{run_agent_loop, LoopOpts, RunContext};
 use crate::clients::backend::{ClientError, RunParams};
+use crate::clients::cancel::{default_classify, CancelToken, ErrorClassifier};
 use crate::clients::cancels::CancelsMap;
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::model::GremlinsModel;

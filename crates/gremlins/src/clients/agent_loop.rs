@@ -2,7 +2,6 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,45 +11,353 @@ use rig_core::completion::message::{
 };
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
 use rig_core::error::ProviderError;
-use rig_core::streaming::{Item, StreamEvent};
-use tokio::sync::{mpsc, Notify, Semaphore};
+use rig_core::operation::Completion;
+use rig_core::streaming::{Item, StreamEvent, Streamed};
+use tokio::sync::{mpsc, Semaphore};
 
-use crate::executor::conversation;
-
-use super::backend::{ClientError, RunParams};
+use super::backend::RunParams;
+use super::compaction;
+use super::compaction::CompactionOpts;
 use super::interactive::{
     InteractiveCommand, InteractiveEvent, InteractiveSession, PauseToken, StreamEventSender,
 };
-use super::log_util::trunc;
+
+use super::cancel::{default_classify, is_retryable, CancelToken, ErrorClassifier};
+use super::error::ClientError;
+use super::format::{
+    apply_chunk, assistant_tool_message, enrich_log_line, format_tool_call, format_tool_call_parts,
+    ledger_key_arg, trunc, truncate_ledger_value,
+};
 use super::model::{GremlinsModel, GremlinsModelError};
 use super::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
+use super::token_usage::{TokenUsageEvent, TokenUsageSink};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 
-/// Payload emitted by the agent loop after each turn for live token/cost
-/// tracking. The executor layer wires a sink that maps this into a
-/// [`DaemonEvent::TokenUsage`](crate::executor::supervisor::DaemonEvent).
-#[derive(Debug, Clone)]
-pub struct TokenUsageEvent {
-    #[allow(dead_code)]
-    pub id: String,
-    pub usage: UsageStats,
-    pub cost_usd: Option<f64>,
-    pub last_prompt_tokens: Option<u64>,
-    pub last_cached_input_tokens: Option<u64>,
+// ── Architecture ────────────────────────────────────────────────────────────
+// agent_loop.rs orchestrates a single agent turn-sequence:
+//
+//   LoopState::run_agent_loop_core           // main while-loop
+//     ├─ LoopState::stream_turn              // one model completion turn
+//     │   ├─ prepare_stream_request           // build messages, inject scratchpad
+//     │   ├─ launch_model_stream              // error-handling + retry
+//     │   ├─ consume_stream_events            // the async event loop
+//     │   └─ finish_stream_turn               // post-stream classification
+//     └─ LoopState::execute_tools            // batch tool execution
+//         ├─ collect_tool_jobs                // validate + build ToolJob list
+//         ├─ dispatch_tool_jobs               // concurrent execute with cancel
+//         └─ emit_tool_results                // ledger, history, mutation flush
+//
+// Supporting types: ToolJob, StreamAccumulator, ToolLedger, StreamTurnOutcome,
+// LoopOpts, InteractiveSession, TurnFlow, etc.
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Deduplication tracker for tool observations across turns.
+///
+/// The agent loop records every Read/Grep/Write/Edit/Landscape observation so
+/// the next turn's compact `[seen]` index can avoid re-reading unchanged
+/// content and can invalidate stale observations after writes.
+#[derive(Clone)]
+struct LedgerReadEntry {
+    last_age: usize,
+    count: usize,
+    content_hash: u64,
+    seq: usize,
 }
 
-/// Sink for [`TokenUsageEvent`]s fired at the end of every agent-loop turn.
-///
-/// The executor layer wires this to the daemon event broadcast so the TUI
-/// can update token/cost columns live without polling.
 #[derive(Clone)]
-pub struct TokenUsageSink(pub Option<std::sync::Arc<dyn Fn(TokenUsageEvent) + Send + Sync>>);
+struct LedgerGrepEntry {
+    last_age: usize,
+    count: usize,
+    content_hash: u64,
+    seq: usize,
+}
 
-impl std::fmt::Debug for TokenUsageSink {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("TokenUsageSink")
-            .field(&self.0.is_some())
-            .finish()
+#[derive(Clone)]
+struct LedgerWriteEntry {
+    age: usize,
+    seq: usize,
+}
+
+pub(crate) struct ToolLedger {
+    /// Key: (file_path, offset, limit).  Offset and limit are zero when
+    /// the model reads the whole file.
+    reads: std::collections::HashMap<(String, u64, u64), LedgerReadEntry>,
+    /// Key: (pattern, path).  Path is empty string when not specified.
+    greps: std::collections::HashMap<(String, String), LedgerGrepEntry>,
+    /// Key: file_path.
+    writes: std::collections::HashMap<String, LedgerWriteEntry>,
+    /// Single landscape entry: (age, seq).
+    landscape: Option<(usize, usize)>,
+    /// Monotonic counter so we can sort entries by first-access order.
+    seq: usize,
+}
+
+impl ToolLedger {
+    pub(crate) fn new() -> Self {
+        Self {
+            reads: std::collections::HashMap::new(),
+            greps: std::collections::HashMap::new(),
+            writes: std::collections::HashMap::new(),
+            landscape: None,
+            seq: 0,
+        }
+    }
+
+    /// Hash a string with DefaultHasher (fast, non-cryptographic).
+    fn hash(s: &str) -> u64 {
+        let mut h = DefaultHasher::new();
+        s.hash(&mut h);
+        h.finish()
+    }
+
+    /// Parse a u64 from a JSON value, defaulting to 0.
+    fn parse_u64(args: &serde_json::Value, key: &str) -> u64 {
+        args.get(key).and_then(|v| v.as_u64()).unwrap_or(0)
+    }
+
+    fn parse_str<'a>(args: &'a serde_json::Value, key: &str) -> &'a str {
+        args.get(key).and_then(|v| v.as_str()).unwrap_or("")
+    }
+
+    /// Record a tool execution.  Write/Edit do NOT invalidate here;
+    /// caller must call `invalidate_after_write` after all observations
+    /// for the turn are recorded (see Comment 1 — Phase 2 concurrency).
+    pub(crate) fn record(
+        &mut self,
+        name: &str,
+        _key: &str,
+        output: &str,
+        args_json: &str,
+        turn_num: usize,
+    ) {
+        let args: serde_json::Value =
+            serde_json::from_str(args_json).unwrap_or(serde_json::Value::Null);
+
+        match name {
+            "Read" => {
+                let file_path = Self::parse_str(&args, "file_path").to_string();
+                let offset = Self::parse_u64(&args, "offset");
+                let limit = Self::parse_u64(&args, "limit");
+                let content_hash = Self::hash(output);
+                let age = turn_num;
+                self.seq += 1;
+                let seq = self.seq;
+
+                let entry_key = (file_path, offset, limit);
+                if let Some(existing) = self.reads.get_mut(&entry_key) {
+                    if existing.content_hash == content_hash {
+                        existing.count += 1;
+                        existing.last_age = age;
+                    } else {
+                        // Content changed — replace the entry.
+                        existing.count = 1;
+                        existing.last_age = age;
+                        existing.content_hash = content_hash;
+                        existing.seq = seq;
+                    }
+                } else {
+                    self.reads.insert(
+                        entry_key,
+                        LedgerReadEntry {
+                            last_age: age,
+                            count: 1,
+                            content_hash,
+                            seq,
+                        },
+                    );
+                }
+            }
+            "Grep" => {
+                let pattern = Self::parse_str(&args, "pattern").to_string();
+                let path = Self::parse_str(&args, "path").to_string();
+                let content_hash = Self::hash(output);
+                let age = turn_num;
+                self.seq += 1;
+                let seq = self.seq;
+
+                let entry_key = (pattern, path);
+                if let Some(existing) = self.greps.get_mut(&entry_key) {
+                    if existing.content_hash == content_hash {
+                        existing.count += 1;
+                        existing.last_age = age;
+                    } else {
+                        // Content changed — replace the entry.
+                        existing.count = 1;
+                        existing.last_age = age;
+                        existing.content_hash = content_hash;
+                        existing.seq = seq;
+                    }
+                } else {
+                    self.greps.insert(
+                        entry_key,
+                        LedgerGrepEntry {
+                            last_age: age,
+                            count: 1,
+                            content_hash,
+                            seq,
+                        },
+                    );
+                }
+            }
+            "Write" => {
+                let file_path = Self::parse_str(&args, "file_path").to_string();
+                let age = turn_num;
+                self.seq += 1;
+                let seq = self.seq;
+                self.writes.insert(file_path, LedgerWriteEntry { age, seq });
+                // Invalidation deferred — caller applies after recording
+                // all observations for the turn.
+            }
+            "Edit" => {
+                // Edit is not tracked per plan.  Invalidation is deferred;
+                // caller collects the file_path and applies after the batch.
+            }
+            "Landscape" => {
+                let age = turn_num;
+                self.seq += 1;
+                let seq = self.seq;
+                self.landscape = Some((age, seq));
+            }
+            _ => {
+                // Bash, Task, Done, Glob, WebSearch, Mischief — not tracked.
+            }
+        }
+    }
+
+    /// Apply write/edit invalidation for a file path.  Nukes Read entries
+    /// for that file, all Greps, and Landscape (they may be stale after a
+    /// write).  Called **after** all observations for a turn are recorded
+    /// so concurrent Read-then-Write batches don't reintroduce stale content.
+    pub(crate) fn invalidate_after_write(&mut self, file_path: &str) {
+        self.reads.retain(|(fp, _, _), _| fp != file_path);
+        self.greps.clear();
+        self.landscape = None;
+    }
+
+    /// Format the accumulated ledger as a compact index.
+    pub(crate) fn format(&self, turn_num: usize) -> String {
+        let age_of = |stored: usize| -> usize { turn_num.saturating_sub(stored) };
+
+        // Build items: (first_seq, display_line) for interleaved output.
+        let mut items: Vec<(usize, String)> = Vec::new();
+
+        // Group reads and writes by file path with first-access seq.
+        let mut file_seqs: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut file_entries: std::collections::HashMap<String, Vec<(&LedgerReadEntry, u64, u64)>> =
+            std::collections::HashMap::new();
+
+        for ((fp, offset, limit), entry) in &self.reads {
+            file_seqs
+                .entry(fp.clone())
+                .and_modify(|s| *s = (*s).min(entry.seq))
+                .or_insert(entry.seq);
+            file_entries
+                .entry(fp.clone())
+                .or_default()
+                .push((entry, *offset, *limit));
+        }
+        for (fp, entry) in &self.writes {
+            file_seqs
+                .entry(fp.clone())
+                .and_modify(|s| *s = (*s).min(entry.seq))
+                .or_insert(entry.seq);
+        }
+
+        let mut keys: Vec<&String> = file_seqs.keys().collect();
+        keys.sort_by_key(|fp| file_seqs[*fp]);
+
+        for fp in &keys {
+            let has_write = self.writes.contains_key(*fp);
+            let write_age = self.writes.get(*fp).map(|e| age_of(e.age));
+            let display_fp = truncate_ledger_value(fp);
+
+            let mut full_count: usize = 0;
+            let mut full_age: usize = usize::MAX;
+            let mut partials: Vec<(u64, u64, usize, usize)> = Vec::new();
+
+            if let Some(entries) = file_entries.get(*fp) {
+                let mut sorted: Vec<_> = entries.iter().collect();
+                sorted.sort_by_key(|(e, _, _)| e.seq);
+                for (entry, offset, limit) in sorted {
+                    let age = age_of(entry.last_age);
+                    if *offset == 0 && *limit == 0 {
+                        full_count += entry.count;
+                        full_age = full_age.min(age);
+                    } else {
+                        partials.push((*offset, *limit, age, entry.count));
+                    }
+                }
+            }
+
+            let mut line = String::new();
+            if full_count > 0 {
+                line.push_str(&format!("{} R({}t", display_fp, full_age));
+                if full_count > 1 {
+                    line.push_str(&format!(",{}×", full_count));
+                }
+                for (offset, limit, age, count) in &partials {
+                    line.push_str(&format!(".{}-{}:{}t", offset, limit, age));
+                    if *count > 1 {
+                        line.push_str(&format!(",{}×", count));
+                    }
+                }
+                line.push(')');
+            } else if !partials.is_empty() {
+                // Only partial reads — no full-file read.  Emit a
+                // headline with the earliest age but omit the aggregate
+                // count (summing across different windows is misleading).
+                let min_age = partials.iter().map(|(_, _, a, _)| *a).min().unwrap();
+                line.push_str(&format!("{} R({}t", display_fp, min_age));
+                for (offset, limit, age, count) in &partials {
+                    line.push_str(&format!(".{}-{}:{}t", offset, limit, age));
+                    if *count > 1 {
+                        line.push_str(&format!(",{}×", count));
+                    }
+                }
+                line.push(')');
+            }
+
+            if has_write {
+                if line.is_empty() {
+                    line.push_str(&display_fp);
+                    line.push(' ');
+                } else {
+                    line.push(' ');
+                }
+                line.push_str(&format!("W({}t)", write_age.unwrap()));
+            }
+
+            if !line.is_empty() {
+                items.push((file_seqs[*fp], line));
+            }
+        }
+
+        // Grep entries.
+        for ((pattern, _path), entry) in &self.greps {
+            let age = age_of(entry.last_age);
+            let display_pattern = truncate_ledger_value(pattern);
+            let mut line = format!("\"{}\" G({}t", display_pattern, age);
+            if entry.count > 1 {
+                line.push_str(&format!(",{}×", entry.count));
+            }
+            line.push(')');
+            items.push((entry.seq, line));
+        }
+
+        // Landscape entry.
+        if let Some((age, seq)) = self.landscape {
+            items.push((seq, format!("L({}t)", age_of(age))));
+        }
+
+        items.sort_by_key(|(se, _)| *se);
+        let lines: Vec<String> = items.into_iter().map(|(_, l)| l).collect();
+
+        if lines.is_empty() {
+            "[seen]\n(none)".to_string()
+        } else {
+            format!("[seen]\n{}", lines.join("\n"))
+        }
     }
 }
 
@@ -153,39 +460,6 @@ fn task_kind_is_fork(args: &serde_json::Value) -> bool {
         == Some(super::task_kind::TaskKind::Fork)
 }
 
-pub(crate) type ErrorClassifier = fn(ProviderError) -> ClientError;
-
-pub(crate) fn default_classify(err: ProviderError) -> ClientError {
-    if let Some(status) = err.provider_response_status() {
-        let code = status.as_u16();
-        // Only retry 5xx and 429.
-        if (500..600).contains(&code) || code == 429 {
-            return ClientError::ApiServerError {
-                message: err.to_string(),
-            };
-        }
-        return ClientError::Runtime {
-            message: err.to_string(),
-        };
-    }
-    // No HTTP status — mid-stream SSE error (e.g. X.AI response.failed).
-    // Retry it; log at WARNING so we can spot provider patterns later.
-    log::info!("retrying provider error (no HTTP status): {}", err);
-    ClientError::ApiServerError {
-        message: err.to_string(),
-    }
-}
-
-/// Classify a provider error and report whether it is retryable at the turn
-/// boundary (429 / 5xx / no-HTTP-status mid-stream drops). Reuses the same
-/// `default_classify` (or the caller-supplied classifier) used for the
-/// terminal error path, so the retry decision stays consistent with what the
-/// backend would otherwise surface.
-fn is_retryable(err: &ProviderError, opts: &LoopOpts<'_>) -> bool {
-    let classify = opts.classify_error.unwrap_or(default_classify);
-    matches!(classify(err.clone()), ClientError::ApiServerError { .. })
-}
-
 /// Sleep for the turn-level backoff, aborting early when the cancel token is
 /// set. Returns `true` if cancellation was observed (the caller must abandon
 /// the retry and unwind), `false` if the full backoff elapsed.
@@ -193,43 +467,6 @@ async fn retry_backoff(cancel: &CancelToken, wait: f64) -> bool {
     tokio::select! {
         _ = tokio::time::sleep(Duration::from_secs_f64(wait)) => false,
         _ = cancel.cancelled() => true,
-    }
-}
-
-#[derive(Debug)]
-pub struct CancelToken {
-    flag: AtomicBool,
-    notify: Notify,
-}
-
-impl CancelToken {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            flag: AtomicBool::new(false),
-            notify: Notify::new(),
-        })
-    }
-
-    pub fn cancel(&self) {
-        self.flag.store(true, Ordering::Relaxed);
-        // Cancellation is broadcast: an active chat turn has both
-        // `run_chat_turn` and the tool-phase select arm waiting on this
-        // token. `notify_waiters()` wakes every waiter so the outer
-        // `finish()` path is never left asleep while the inner waiter
-        // unwinds the turn.
-        self.notify.notify_waiters();
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.flag.load(Ordering::Relaxed)
-    }
-
-    pub async fn cancelled(&self) {
-        let notified = self.notify.notified();
-        if self.flag.load(Ordering::Relaxed) {
-            return;
-        }
-        notified.await;
     }
 }
 
@@ -245,7 +482,7 @@ pub(crate) struct RunContext {
     /// Pre-populated message history carried into the loop's internal history.
     pub(crate) prepopulated_messages: Option<Vec<Message>>,
     /// Chat-only soft compaction settings (mirrors `RunParams`).
-    pub(crate) compaction_opts: Option<conversation::CompactionOpts>,
+    pub(crate) compaction_opts: Option<CompactionOpts>,
     /// Path to the persistent stage scratchpad file for per-turn re-injection.
     pub(crate) scratchpad_path: Option<PathBuf>,
     /// The allowed root for containment-checked scratchpad reads.
@@ -286,6 +523,1674 @@ pub(crate) struct LoopOpts<'a> {
     pub(crate) classify_error: Option<ErrorClassifier>,
     pub(crate) temperature: Option<f64>,
     pub(crate) max_tokens: Option<u64>,
+}
+
+/// A single tool invocation queued for concurrent execution within a turn.
+struct ToolJob {
+    id: String,
+    name: String,
+    args: String,
+    call: String,
+    key: String,
+    over_cap: Option<String>,
+}
+
+/// Outcome of one concurrent tool batch dispatched by
+/// [`LoopState::dispatch_tool_jobs`].
+enum ToolDispatchOutcome {
+    /// Every tool finished; outputs are aligned with the job list order.
+    Completed(Vec<String>),
+    /// The operator entered debug mid-batch: the batch was abandoned, the
+    /// turn's history was unwound, and the caller should re-execute the turn.
+    ReexecuteTurn,
+}
+
+/// Mutable state threaded through one agent-loop run.
+struct LoopState {
+    system_prompt: Option<String>,
+    original_system_prompt: Option<String>,
+    live_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
+    history: Vec<Message>,
+    next_prompt: Message,
+    current_turn_start: usize,
+    compacted: Option<compaction::CompactedWorking>,
+    turns: usize,
+    turn_num: usize,
+    turn_retries: usize,
+    timeout_retries: usize,
+    final_text: String,
+    timed_out: bool,
+    exhausted_turn_retries: bool,
+    exhausted_timeout_retries: bool,
+    turn_scratchpad_injected: bool,
+    last_scratchpad_hash: Option<u64>,
+    stream_error: Option<ProviderError>,
+    total_prompt_tokens: Option<u64>,
+    total_completion_tokens: Option<u64>,
+    total_cached_tokens: Option<u64>,
+    total_cache_creation_tokens: Option<u64>,
+    total_reasoning_tokens: Option<u64>,
+    tool_ledger: ToolLedger,
+    interactive_active: bool,
+    pending_run_one_turn: bool,
+    cmd_rx: Option<mpsc::Receiver<InteractiveCommand>>,
+    evt_tx: Option<tokio::sync::broadcast::Sender<InteractiveEvent>>,
+    pause: Option<Arc<PauseToken>>,
+    remaining_turns: usize,
+    reminder_budget: usize,
+    completion_nudge_budget: usize,
+}
+
+/// Accumulated state from one model completion stream.
+struct StreamAccumulator {
+    text: String,
+    reasoning: String,
+    reasoning_items: Vec<Sealed<Reasoning>>,
+    tool_calls: Vec<ToolCall>,
+    ended: bool,
+    turn_usage: Option<Usage>,
+    paused_mid_stream: bool,
+    retry_turn: bool,
+    retry_timeout_turn: bool,
+    first_token: Option<Instant>,
+    last_token: Option<Instant>,
+}
+
+/// Result of streaming one turn's request: the accumulated assistant content
+/// plus the timestamps needed for metric emission by the caller.
+struct StreamTurnOutput {
+    text: String,
+    reasoning: String,
+    reasoning_items: Vec<Sealed<Reasoning>>,
+    tool_calls: Vec<ToolCall>,
+    turn_usage: Option<Usage>,
+    first_token: Option<Instant>,
+    last_token: Option<Instant>,
+    ended: bool,
+}
+
+/// Control-flow signal returned by [`LoopState::stream_turn`].
+enum StreamTurnOutcome {
+    /// A turn's stream completed — caller processes the accumulated output.
+    Output(Box<StreamTurnOutput>),
+    /// Caller should re-execute the turn (retry / pause / idle timeout).
+    Continue,
+    /// Caller should stop the loop (terminal stream error).
+    Break,
+}
+
+/// Decision from the interactive turn-boundary gate: either re-enter the
+/// interactive loop, or proceed to execute a normal turn.
+enum InteractiveBoundary {
+    ContinueLoop,
+    RunTurn,
+}
+
+/// Result of inspecting the assistant's tool calls for a Done signal.
+enum DoneDecision {
+    /// No Done call present — proceed to execute the remaining tools.
+    NotDone,
+    /// Done was rejected (mixed or missing artifacts) — re-run the turn.
+    RetryNeeded,
+    /// Done was accepted — the run is complete.
+    Accepted(Box<CompletedRun>),
+}
+
+/// Result of handling a turn that produced no tool calls.
+enum EmptyTurnAction {
+    ContinueLoop,
+    ReturnRun(Box<CompletedRun>),
+}
+
+impl LoopState {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        system_prompt: Option<String>,
+        prompt: &str,
+        prepopulated_messages: Option<Vec<Message>>,
+        reminder_budget: usize,
+        completion_nudge_budget: usize,
+        interactive: Option<InteractiveSession>,
+        tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
+        max_turns: usize,
+        prefix: &str,
+    ) -> Self {
+        // Destructure the interactive session into its components so we can
+        // thread them independently through the loop.
+        let (cmd_rx, evt_tx, pause) = interactive
+            .map(|s| {
+                log::debug!("agent_loop: interactive session set up (label={prefix})");
+                (Some(s.cmd_rx), Some(s.evt_tx), Some(s.pause))
+            })
+            .unwrap_or((None, None, None));
+
+        let original_system_prompt = system_prompt.clone();
+        // `history` is the verbatim source of truth for the whole loop. The
+        // compacted request view is rebuilt around it but never replaces it.
+        let history: Vec<Message> = prepopulated_messages.unwrap_or_default();
+        let current_turn_start = history.len();
+
+        Self {
+            system_prompt,
+            original_system_prompt,
+            live_output_rx: tool_output_rx,
+            history,
+            next_prompt: Message::user(prompt.to_string()),
+            current_turn_start,
+            compacted: None,
+            turns: 0,
+            turn_num: 0,
+            turn_retries: 0,
+            timeout_retries: 0,
+            final_text: String::new(),
+            timed_out: false,
+            exhausted_turn_retries: false,
+            exhausted_timeout_retries: false,
+            turn_scratchpad_injected: false,
+            last_scratchpad_hash: None,
+            stream_error: None,
+            total_prompt_tokens: None,
+            total_completion_tokens: None,
+            total_cached_tokens: None,
+            total_cache_creation_tokens: None,
+            total_reasoning_tokens: None,
+            tool_ledger: ToolLedger::new(),
+            interactive_active: false,
+            pending_run_one_turn: false,
+            cmd_rx,
+            evt_tx,
+            pause,
+            remaining_turns: max_turns,
+            reminder_budget,
+            completion_nudge_budget,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_turn(
+        &mut self,
+        model: &GremlinsModel,
+        tool_ctx: &AgentLoopRuntime,
+        tool_defs: &[ToolDefinition],
+        cancel: &CancelToken,
+        opts: &LoopOpts<'_>,
+        prefix: &str,
+        idle_timeout: f64,
+        nested: bool,
+        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+        compaction_opts: Option<CompactionOpts>,
+        compactor: Option<Arc<dyn compaction::Compactor>>,
+        scratchpad_path: Option<&Path>,
+        scratchpad_root: Option<&Path>,
+        turn_retry_backoff: &[f64],
+        timeout_retry_backoff: &[f64],
+    ) -> Result<StreamTurnOutcome, ClientError> {
+        // Phase 1: assemble the request (messages, scratchpad, gen params).
+        let builder = self.prepare_stream_request(
+            tool_defs,
+            opts,
+            compaction_opts,
+            compactor,
+            scratchpad_path,
+            scratchpad_root,
+            nested,
+        );
+
+        // Phase 2: launch the model stream, handling pre-stream errors and
+        // retry inline (each path returns early).
+        let response = match model.stream(builder) {
+            Ok(s) => s,
+            Err(GremlinsModelError::TooLarge { limit, actual }) => {
+                log::info!(
+                    "agent_loop: prompt too large on turn {}: {} bytes exceeds configured limit of {} bytes", self.turn_num, actual, limit
+                );
+                send_log(
+                    log_tx,
+                    prefix,
+                    &format!(
+                        "error: prompt size {actual} bytes exceeds configured limit of {limit} bytes"
+                    ),
+                );
+                return Err(ClientError::PromptTooLarge { limit, actual });
+            }
+            Err(GremlinsModelError::Provider(e)) => {
+                let e = *e;
+                // Retryable (429/5xx) error before streaming began — back off
+                // and re-execute this same turn with history intact.
+                if self.turn_retries < turn_retry_backoff.len()
+                    && is_retryable(&e, opts.classify_error)
+                {
+                    let wait = turn_retry_backoff[self.turn_retries];
+                    self.turn_retries += 1;
+                    log::info!(
+                        "agent_loop: retryable stream error on turn {} (attempt {}), backing off {wait}s: {e}", self.turn_num, self.turn_retries
+                    );
+                    send_log(
+                        log_tx,
+                        prefix,
+                        &format!("retry: transient error, backing off {wait}s"),
+                    );
+                    if retry_backoff(cancel, wait).await {
+                        log::info!(
+                            "agent_loop: cancelled during retry backoff (label={})",
+                            prefix
+                        );
+                        send_log(log_tx, prefix, "exit: cancelled during retry backoff");
+                        return Err(cancelled_error("cancelled", &self.history));
+                    }
+                    // Preserve the pending one-turn state only when
+                    // already interactive — otherwise an unconditional
+                    // set would force RunOneTurn after normal resumption.
+                    if self.interactive_active {
+                        self.pending_run_one_turn = true;
+                    }
+                    return Ok(StreamTurnOutcome::Continue);
+                }
+                let retryable = is_retryable(&e, opts.classify_error);
+                if retryable {
+                    self.exhausted_turn_retries = true;
+                }
+                self.stream_error = Some(e);
+                return Ok(StreamTurnOutcome::Break);
+            }
+        };
+
+        // Phase 3: drive the async event loop, accumulating assistant content.
+        let acc = self
+            .consume_stream_events(
+                response,
+                model,
+                tool_ctx,
+                cancel,
+                opts,
+                prefix,
+                idle_timeout,
+                nested,
+                log_tx,
+                timeout_retry_backoff,
+                turn_retry_backoff,
+            )
+            .await?;
+
+        // Phase 4: classify the completed stream into a control-flow outcome.
+        self.finish_stream_turn(acc, tool_ctx, cancel, nested).await
+    }
+
+    /// Build the [`CompletionRequest`] for one model turn: assemble the request
+    /// messages, re-inject the scratchpad when compaction dropped a prior
+    /// injection, and apply the caller's generation parameters.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_stream_request(
+        &mut self,
+        tool_defs: &[ToolDefinition],
+        opts: &LoopOpts<'_>,
+        compaction_opts: Option<CompactionOpts>,
+        compactor: Option<Arc<dyn compaction::Compactor>>,
+        scratchpad_path: Option<&Path>,
+        scratchpad_root: Option<&Path>,
+        nested: bool,
+    ) -> CompletionRequest {
+        let next_prompt_text = user_message_text(&self.next_prompt);
+        let overhead_bytes = compaction::completion_request_overhead(
+            &next_prompt_text,
+            self.system_prompt.as_deref(),
+            tool_defs,
+        );
+        let overhead_tokens = compaction::completion_request_overhead_tokens(
+            &next_prompt_text,
+            self.system_prompt.as_deref(),
+            tool_defs,
+        );
+        let request_messages = build_request_messages(
+            &self.history,
+            &mut self.compacted,
+            self.current_turn_start,
+            compaction_opts,
+            compactor.clone(),
+            overhead_tokens,
+            overhead_bytes,
+        );
+
+        // If the scratchpad wasn't injected this turn (hash unchanged)
+        // but compaction dropped the prior injection from history, force
+        // re-injection so the model doesn't lose its working memory.
+        if !nested && !self.turn_scratchpad_injected {
+            if let Some(sp) = scratchpad_path {
+                let root = scratchpad_root.unwrap_or_else(|| Path::new("."));
+                if let Ok(content) =
+                    crate::executor::agent_runner::read_scratchpad_contained(sp, root)
+                {
+                    if !content.trim().is_empty() {
+                        let in_request = request_messages
+                            .iter()
+                            .any(|msg| user_message_text(msg).contains("## Scratchpad"))
+                            || user_message_text(&self.next_prompt).contains("## Scratchpad");
+                        if !in_request {
+                            let mut hasher = DefaultHasher::new();
+                            content.hash(&mut hasher);
+                            self.last_scratchpad_hash = Some(hasher.finish());
+                            let next_text = user_message_text(&self.next_prompt);
+                            let combined = format!(
+                                "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
+                            );
+                            self.next_prompt = Message::user(combined);
+                            self.turn_scratchpad_injected = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut builder = CompletionRequest::new(self.next_prompt.clone())
+            .messages(request_messages)
+            .tools(tool_defs.to_vec());
+        if let Some(ref sys) = self.system_prompt {
+            builder = builder.preamble(sys.clone());
+        }
+        if let Some(params) = opts.extra.clone() {
+            builder = builder.additional_params(params);
+        }
+        if let Some(t) = opts.temperature {
+            builder = builder.temperature(t);
+        }
+        if let Some(mt) = opts.max_tokens {
+            builder = builder.max_tokens(mt);
+        }
+        builder
+    }
+
+    /// Drive the model stream to completion: forward live deltas, accumulate
+    /// assistant content, and handle cancellation, operator pause, idle
+    /// timeout, and mid-stream retry from within the event loop.
+    #[allow(clippy::too_many_arguments)]
+    async fn consume_stream_events(
+        &mut self,
+        mut response: Streamed<Completion>,
+        model: &GremlinsModel,
+        tool_ctx: &AgentLoopRuntime,
+        cancel: &CancelToken,
+        opts: &LoopOpts<'_>,
+        prefix: &str,
+        idle_timeout: f64,
+        nested: bool,
+        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+        timeout_retry_backoff: &[f64],
+        turn_retry_backoff: &[f64],
+    ) -> Result<StreamAccumulator, ClientError> {
+        let mut first_token: Option<Instant> = None;
+        let mut last_token: Option<Instant> = None;
+
+        let mut text = String::new();
+        let mut reasoning = String::new();
+        let mut reasoning_items: Vec<Sealed<Reasoning>> = Vec::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut ended = false;
+        let mut turn_usage: Option<Usage> = None;
+        let mut paused_mid_stream = false;
+        let mut retry_turn = false;
+        let mut retry_timeout_turn = false;
+
+        // Build a cancellation snapshot that includes the pending
+        // `next_prompt` and (as streaming progresses) accumulated
+        // assistant content.  Plain `history` omits both because they
+        // are only committed after a successful turn.
+        let mut stream_snapshot: Vec<Message> = {
+            let mut s = self.history.clone();
+            s.push(self.next_prompt.clone());
+            s
+        };
+
+        loop {
+            let item = tokio::select! {
+                _ = cancel.cancelled() => {
+                    log::info!("agent_loop: cancelled mid-stream (label={})", prefix);
+                    send_log(log_tx, prefix, "exit: cancelled mid-stream");
+                    drop(response);
+                    return Err(cancelled_error("cancelled", &stream_snapshot));
+                }
+                _ = maybe_pause(&self.pause) => {
+                    // Operator triggered debug — cancel the stream and enter
+                    // interactive mode. The turn will be re-executed after
+                    // the debug session ends.
+                    log::info!("agent_loop: paused mid-stream (label={})", prefix);
+                    send_log(log_tx, prefix, "pause: entering interactive mode (mid-stream)");
+                    drop(response);
+                    paused_mid_stream = true;
+                    if let Some(ref p) = self.pause {
+                        p.reset();
+                    }
+                    log::debug!("agent_loop: entering interactive mode mid-stream (label={})", prefix);
+
+                    // Amend system prompt with operator note (same as turn-boundary path).
+                    let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
+                    let amended_system = match &self.system_prompt {
+                        Some(sp) => format!("{sp}{debug_note}"),
+                        None => debug_note.trim_start().to_string(),
+                    };
+                    self.system_prompt = Some(amended_system);
+
+                    // Enter interactive mode inline.
+                    if self.cmd_rx.is_some() && self.evt_tx.is_some() && self.pause.is_some() {
+                        let mut session = InteractiveSession {
+                            cmd_rx: self.cmd_rx.take().unwrap(),
+                            evt_tx: self.evt_tx.take().unwrap(),
+                            pause: self.pause.clone().unwrap(),
+                        };
+                        match interactive_loop(
+                            model,
+                            &mut self.history,
+                            &mut self.next_prompt,
+                            &mut session,
+                            self.turn_num,
+                        )
+                        .await
+                        {
+                            Ok(InteractiveLoopResult::Resumed) => {
+                                self.system_prompt = self.original_system_prompt.clone();
+                                self.cmd_rx = Some(session.cmd_rx);
+                                self.evt_tx = Some(session.evt_tx);
+                                self.interactive_active = false;
+                                // Re-build the request from the original next_prompt
+                                // (still available — the builder clones it).
+                                break; // exit the stream loop, re-enter the turn loop
+                            }
+                            Ok(InteractiveLoopResult::RunOneTurn) => {
+                                self.cmd_rx = Some(session.cmd_rx);
+                                self.evt_tx = Some(session.evt_tx);
+                                self.pending_run_one_turn = true;
+                                break; // exit the stream loop, execute one turn
+                            }
+                            Err(e) => {
+                                log::info!("agent_loop: exit (operator bailed, label={})", prefix);
+                                send_log(log_tx, prefix, "exit: operator bailed");
+                                return Err(e);
+                            }
+                        }
+                    }
+                    // No interactive session — shouldn't happen, but continue.
+                    break;
+                }
+                timed = tokio::time::timeout(
+                    Duration::from_secs_f64(idle_timeout),
+                    futures::StreamExt::next(&mut response),
+                ) => timed,
+            };
+            match item {
+                Err(_) => {
+                    if self.timeout_retries < timeout_retry_backoff.len() {
+                        let wait = timeout_retry_backoff[self.timeout_retries];
+                        self.timeout_retries += 1;
+                        log::info!(
+                            "agent_loop: idle timeout on turn {} (attempt {}), backing off {wait}s",
+                            self.turn_num,
+                            self.timeout_retries
+                        );
+                        send_log(
+                            log_tx,
+                            prefix,
+                            &format!("retry: idle timeout, backing off {wait}s"),
+                        );
+                        drop(response);
+                        retry_timeout_turn = true;
+                        if retry_backoff(cancel, wait).await {
+                            log::info!(
+                                "agent_loop: cancelled during timeout backoff (label={})",
+                                prefix
+                            );
+                            send_log(log_tx, prefix, "exit: cancelled during timeout backoff");
+                            return Err(cancelled_error("cancelled", &self.history));
+                        }
+                        break;
+                    }
+                    self.exhausted_timeout_retries = true;
+                    self.timed_out = true;
+                    drop(response);
+                    break;
+                }
+                Ok(None) => {
+                    ended = true;
+                    turn_usage = Some(response.partial().usage);
+                    break;
+                }
+                Ok(Some(Err(e))) => {
+                    // Retryable (429/5xx) error delivered mid-stream — back off
+                    // and re-execute this same turn with history intact.
+                    if self.turn_retries < turn_retry_backoff.len()
+                        && is_retryable(&e, opts.classify_error)
+                    {
+                        let wait = turn_retry_backoff[self.turn_retries];
+                        self.turn_retries += 1;
+                        log::info!(
+                            "agent_loop: retryable mid-stream error on turn {} (attempt {}), backing off {wait}s: {e}", self.turn_num, self.turn_retries
+                        );
+                        send_log(
+                            log_tx,
+                            prefix,
+                            &format!("retry: transient error, backing off {wait}s"),
+                        );
+                        drop(response);
+                        retry_turn = true;
+                        if retry_backoff(cancel, wait).await {
+                            log::info!(
+                                "agent_loop: cancelled during retry backoff (label={})",
+                                prefix
+                            );
+                            send_log(log_tx, prefix, "exit: cancelled during retry backoff");
+                            return Err(cancelled_error("cancelled", &self.history));
+                        }
+                        break;
+                    }
+                    let retryable = is_retryable(&e, opts.classify_error);
+                    if retryable {
+                        self.exhausted_turn_retries = true;
+                    }
+                    self.stream_error = Some(e);
+                    break;
+                }
+                Ok(Some(Ok(chunk))) => {
+                    let now = Instant::now();
+                    if first_token.is_none() {
+                        first_token = Some(now);
+                    }
+                    last_token = Some(now);
+                    // Emit stream deltas via tool_ctx.telemetry.stream_events channel.
+                    // Nested loops must not emit text/reasoning deltas on the
+                    // parent's stream — their output arrives as tool results.
+                    if !nested && tool_ctx.telemetry.wants_stream_events() {
+                        match &chunk {
+                            Item::Event(StreamEvent::Text { ref text, .. }) => {
+                                tool_ctx
+                                    .telemetry
+                                    .send_stream_event(
+                                        InteractiveEvent::StreamChunk { text: text.clone() },
+                                        cancel,
+                                        &stream_snapshot,
+                                    )
+                                    .await?;
+                            }
+                            Item::Event(StreamEvent::Reasoning { ref text, .. }) => {
+                                tool_ctx
+                                    .telemetry
+                                    .send_stream_event(
+                                        InteractiveEvent::ReasoningChunk { text: text.clone() },
+                                        cancel,
+                                        &stream_snapshot,
+                                    )
+                                    .await?;
+                            }
+                            Item::Event(StreamEvent::End {
+                                content: AssistantContent::ToolCall(tc),
+                                ..
+                            }) => {
+                                // Emit tool calls as reasoning so they
+                                // appear in the live thought stream.
+                                tool_ctx
+                                    .telemetry
+                                    .send_stream_event(
+                                        InteractiveEvent::ReasoningChunk {
+                                            text: format_tool_call(tc),
+                                        },
+                                        cancel,
+                                        &stream_snapshot,
+                                    )
+                                    .await?;
+                            }
+                            _ => {}
+                        }
+                    }
+                    apply_chunk(
+                        chunk,
+                        &mut text,
+                        &mut reasoning,
+                        &mut reasoning_items,
+                        &mut tool_calls,
+                    );
+                    // Keep the cancellation snapshot current with whatever
+                    // the model has produced so far so the supervisor can
+                    // reconstruct the full partial turn.
+                    while stream_snapshot
+                        .last()
+                        .is_some_and(|m| matches!(m, Message::Assistant { .. }))
+                    {
+                        stream_snapshot.pop();
+                    }
+                    if !text.is_empty() || !reasoning_items.is_empty() || !tool_calls.is_empty() {
+                        stream_snapshot.push(assistant_tool_message(
+                            &text,
+                            &reasoning_items,
+                            &tool_calls,
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(StreamAccumulator {
+            text,
+            reasoning,
+            reasoning_items,
+            tool_calls,
+            ended,
+            turn_usage,
+            paused_mid_stream,
+            retry_turn,
+            retry_timeout_turn,
+            first_token,
+            last_token,
+        })
+    }
+
+    /// Classify a completed stream into a [`StreamTurnOutcome`], applying the
+    /// pause/retry continuations and otherwise packaging the turn output.
+    async fn finish_stream_turn(
+        &mut self,
+        acc: StreamAccumulator,
+        tool_ctx: &AgentLoopRuntime,
+        cancel: &CancelToken,
+        nested: bool,
+    ) -> Result<StreamTurnOutcome, ClientError> {
+        if acc.paused_mid_stream {
+            // Stream was interrupted by pause — skip post-stream processing.
+            // The turn loop will re-enter at the top and either continue
+            // (if Resumed) or execute one turn (if RunOneTurn).
+            return Ok(StreamTurnOutcome::Continue);
+        }
+
+        if acc.retry_turn {
+            // Stream was interrupted by a retryable error — re-execute this
+            // same turn. History and next_prompt are untouched (the builder
+            // cloned both), so the retry picks up exactly where it left off.
+            // Preserve the pending one-turn state only when already
+            // interactive — otherwise an unconditional set would force
+            // RunOneTurn after normal resumption.
+            if self.interactive_active {
+                self.pending_run_one_turn = true;
+            }
+
+            // Send StreamReset so consumers discard partial text /
+            // reasoning from the failed attempt. Nested loops skip this —
+            // only the parent stream should be reset.
+            if !nested {
+                tool_ctx
+                    .telemetry
+                    .send_stream_event(InteractiveEvent::StreamReset, cancel, &self.history)
+                    .await?;
+            }
+            return Ok(StreamTurnOutcome::Continue);
+        }
+
+        if acc.retry_timeout_turn {
+            // Stream was interrupted by an idle timeout — re-execute this
+            // same turn with history intact.
+            return Ok(StreamTurnOutcome::Continue);
+        }
+
+        Ok(StreamTurnOutcome::Output(Box::new(StreamTurnOutput {
+            text: acc.text,
+            reasoning: acc.reasoning,
+            reasoning_items: acc.reasoning_items,
+            tool_calls: acc.tool_calls,
+            turn_usage: acc.turn_usage,
+            first_token: acc.first_token,
+            last_token: acc.last_token,
+            ended: acc.ended,
+        })))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_tools(
+        &mut self,
+        tool_calls: &[ToolCall],
+        tool_ctx: &AgentLoopRuntime,
+        model: &GremlinsModel,
+        prefix: &str,
+        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+        _token_usage_sink: &TokenUsageSink,
+        cancel: &CancelToken,
+        _gremlin_id: Option<&str>,
+        raw: &mut Option<std::fs::File>,
+        captured: &mut Option<Vec<serde_json::Value>>,
+        nested: bool,
+    ) -> Result<(), ClientError> {
+        // A Fork child inherits the conversation that led up to this turn,
+        // including the user message being answered. The assistant tool-call
+        // message the caller just appended to `history` is intentionally
+        // *not* part of the snapshot: carrying it without its still-unknown
+        // tool results would leave an unmatched assistant tool-use in the
+        // child's transcript.
+        let fork_parent_history = tool_calls
+            .iter()
+            .any(|tc| tc.function.name == "Task" && task_kind_is_fork(&tc.function.arguments))
+            .then(|| self.history[..self.history.len() - 1].to_vec());
+
+        // Phase 1: collect + validate tool calls into owned jobs.
+        let jobs = self.collect_tool_jobs(tool_calls, prefix, log_tx, nested, raw, captured);
+
+        // Phase 2: concurrent execution (cancel/pause aware).
+        let results = match self
+            .dispatch_tool_jobs(
+                &jobs,
+                tool_ctx,
+                model,
+                prefix,
+                log_tx,
+                cancel,
+                fork_parent_history,
+            )
+            .await?
+        {
+            ToolDispatchOutcome::Completed(results) => results,
+            // Operator entered debug mid-batch; the turn is re-executed.
+            ToolDispatchOutcome::ReexecuteTurn => return Ok(()),
+        };
+
+        // Phase 3: emit results, update ledger + history.
+        self.emit_tool_results(
+            jobs, results, tool_ctx, prefix, log_tx, nested, raw, captured, cancel,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    /// Validate the turn's tool calls and build the owned [`ToolJob`] list.
+    /// Emits per-call tool-start events (unless nested) and enforces the
+    /// per-message Task cap by marking over-cap jobs for rejection.
+    fn collect_tool_jobs(
+        &mut self,
+        tool_calls: &[ToolCall],
+        prefix: &str,
+        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+        nested: bool,
+        raw: &mut Option<std::fs::File>,
+        captured: &mut Option<Vec<serde_json::Value>>,
+    ) -> Vec<ToolJob> {
+        let mut jobs: Vec<ToolJob> = Vec::new();
+        let mut task_count: usize = 0;
+        for tc in tool_calls {
+            let args_json =
+                serde_json::to_string(&tc.function.arguments).unwrap_or_else(|_| "{}".into());
+            let tool_msg = format!(
+                "tool: {} {}",
+                tc.function.name,
+                trunc(
+                    &enrich_log_line(&tc.function.name, &tc.function.arguments),
+                    200
+                )
+            );
+            send_log(log_tx, prefix, &tool_msg);
+            if !nested {
+                let id_str = tc.id.to_string();
+                let tool_evt =
+                    tool_use_event(&id_str, tc.function.name.as_str(), &tc.function.arguments);
+                write_raw(raw, &tool_evt);
+                if let Some(evts) = captured.as_mut() {
+                    evts.push(tool_evt);
+                }
+            }
+            jobs.push(ToolJob {
+                id: tc.id.to_string(),
+                name: tc.function.name.to_string(),
+                args: args_json,
+                call: format_tool_call_parts(&tc.function.name, &tc.function.arguments),
+                key: ledger_key_arg(&tc.function.arguments),
+                over_cap: if tc.function.name == "Task" && {
+                    task_count += 1;
+                    task_count > tools::TASK_MAX_PER_TURN
+                } {
+                    Some(format!(
+                        "Error: at most {} Task calls per message",
+                        tools::TASK_MAX_PER_TURN
+                    ))
+                } else {
+                    None
+                },
+            });
+        }
+        jobs
+    }
+
+    /// Execute a batch of tool jobs concurrently, capped by a semaphore so
+    /// excess calls queue rather than being rejected (preserving result
+    /// order). A `tokio::select!` races the batch against cancel and the
+    /// operator pause token so a long batch stays interruptible.
+    ///
+    /// The Task-specific cap (`TASK_MAX_PER_TURN`) is *not* re-checked here:
+    /// it is a hard rejection applied in [`Self::collect_tool_jobs`] because
+    /// each Task spawns a child loop.
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_tool_jobs(
+        &mut self,
+        jobs: &[ToolJob],
+        tool_ctx: &AgentLoopRuntime,
+        model: &GremlinsModel,
+        prefix: &str,
+        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+        cancel: &CancelToken,
+        fork_parent_history: Option<Vec<Message>>,
+    ) -> Result<ToolDispatchOutcome, ClientError> {
+        let mut ctx = tool_ctx.clone();
+        ctx.parent_history = fork_parent_history;
+        // Forward live tool output only for the duration of this batch. The
+        // receiver is borrowed by the select below, so later batches never
+        // hear stale chunks and Esc/clear cannot resurrect old output.
+        // Capacity is reserved on the chat stream *before* a tool line is
+        // dequeued, so the select dropping this branch at batch completion
+        // can release an unused permit but can never drop an in-flight line.
+        let forward_live_output = async {
+            if let (Some(se), Some(rx)) = (
+                &tool_ctx.telemetry.stream_events,
+                self.live_output_rx.as_mut(),
+            ) {
+                if se.wants_events() {
+                    loop {
+                        let permit = tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => break,
+                            permit = se.reserve() => permit,
+                        };
+                        let Some(line) = rx.recv().await else {
+                            break;
+                        };
+                        permit.send(InteractiveEvent::ToolOutputChunk {
+                            id: line.id,
+                            name: line.name,
+                            call: line.call,
+                            text: line.text,
+                        });
+                    }
+                } else {
+                    // Drain the channel so the sender doesn't block when
+                    // the broadcast subscriber has disconnected.
+                    while rx.recv().await.is_some() {}
+                }
+            }
+            // Park forever so this branch never resolves the select; the
+            // sender intentionally outlives an individual tool batch.
+            std::future::pending::<()>().await;
+        };
+        let sem = Arc::new(Semaphore::new(tools::MAX_CONCURRENT_TOOLS));
+        let exec_fut = join_all(jobs.iter().map(|j| {
+            let ctx = &ctx;
+            let sem = sem.clone();
+            async move {
+                if let Some(msg) = &j.over_cap {
+                    msg.clone()
+                } else {
+                    let _permit = sem.acquire_owned().await;
+                    tools::invoke(&j.id, &j.name, ctx, &j.args).await
+                }
+            }
+        }));
+
+        let results = tokio::select! {
+            results = exec_fut => results,
+            _ = forward_live_output => unreachable!("live-output forwarder parks forever"),
+            _ = cancel.cancelled() => {
+                // Esc / cancel_chat during a tool batch: drop the join_all
+                // future (cancelling pending tool futures) and unwind the
+                // turn immediately. This is what lets run_chat_turn::finish
+                // re-insert the chat gremlin without waiting for every tool
+                // to complete.
+                log::info!("agent_loop: cancelled mid-tool (label={})", prefix);
+                send_log(log_tx, prefix, "exit: cancelled mid-tool");
+                discard_tool_output(&mut self.live_output_rx);
+                return Err(cancelled_error("cancelled", &self.history));
+            }
+            _ = maybe_pause(&self.pause) => {
+                // Operator triggered debug mid-tool — drop the join_all future
+                // (cancels pending tool futures). Completed tool side effects
+                // (files written, bash commands run) are not unwound.
+                log::info!("agent_loop: paused mid-tool (label={})", prefix);
+                send_log(log_tx, prefix, "pause: entering interactive mode (mid-tool)");
+                discard_tool_output(&mut self.live_output_rx);
+                if let Some(ref p) = self.pause {
+                    p.reset();
+                }
+                log::debug!("agent_loop: entering interactive mode mid-tool (label={})", prefix);
+
+                // Pop the two messages pushed by the caller (next_prompt +
+                // assistant_tool_message) so the turn can be re-executed
+                // cleanly without duplicate history entries.
+                self.history.pop(); // assistant_tool_message
+                self.history.pop(); // next_prompt
+
+                // Amend system prompt with operator note.
+                let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
+                let amended_system = match &self.system_prompt {
+                    Some(sp) => format!("{sp}{debug_note}"),
+                    None => debug_note.trim_start().to_string(),
+                };
+                self.system_prompt = Some(amended_system);
+
+                // Enter interactive mode.
+                if self.cmd_rx.is_some() && self.evt_tx.is_some() && self.pause.is_some() {
+                    let mut session = InteractiveSession {
+                        cmd_rx: self.cmd_rx.take().unwrap(),
+                        evt_tx: self.evt_tx.take().unwrap(),
+                        pause: self.pause.clone().unwrap(),
+                    };
+                    match interactive_loop(
+                        model,
+                        &mut self.history,
+                        &mut self.next_prompt,
+                        &mut session,
+                        self.turn_num,
+                    )
+                    .await
+                    {
+                        Ok(InteractiveLoopResult::Resumed) => {
+                            self.system_prompt = self.original_system_prompt.clone();
+                            self.cmd_rx = Some(session.cmd_rx);
+                            self.evt_tx = Some(session.evt_tx);
+                            self.interactive_active = false;
+                            return Ok(ToolDispatchOutcome::ReexecuteTurn);
+                        }
+                        Ok(InteractiveLoopResult::RunOneTurn) => {
+                            self.cmd_rx = Some(session.cmd_rx);
+                            self.evt_tx = Some(session.evt_tx);
+                            self.pending_run_one_turn = true;
+                            return Ok(ToolDispatchOutcome::ReexecuteTurn);
+                        }
+                        Err(e) => {
+                            log::info!("agent_loop: exit (operator bailed, label={})", prefix);
+                            send_log(log_tx, prefix, "exit: operator bailed");
+                            return Err(e);
+                        }
+                    }
+                }
+                return Ok(ToolDispatchOutcome::ReexecuteTurn);
+            }
+        };
+
+        Ok(ToolDispatchOutcome::Completed(results))
+    }
+
+    /// Emit tool results in request order: drain trailing live output,
+    /// publish ToolResult events, record ledger observations, apply deferred
+    /// write invalidations, extend history, and roll the prompt forward.
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_tool_results(
+        &mut self,
+        jobs: Vec<ToolJob>,
+        results: Vec<String>,
+        tool_ctx: &AgentLoopRuntime,
+        prefix: &str,
+        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+        nested: bool,
+        raw: &mut Option<std::fs::File>,
+        captured: &mut Option<Vec<serde_json::Value>>,
+        cancel: &CancelToken,
+    ) -> Result<(), ClientError> {
+        // Tools send their final chunks just before returning. The select
+        // above stops at the first completed future, so drain anything still
+        // sitting in the receiver before emitting ToolResult events.
+        if let Some(rx) = self.live_output_rx.as_mut() {
+            while let Ok(line) = rx.try_recv() {
+                tool_ctx
+                    .telemetry
+                    .send_stream_event(
+                        InteractiveEvent::ToolOutputChunk {
+                            id: line.id,
+                            name: line.name,
+                            call: line.call,
+                            text: line.text,
+                        },
+                        cancel,
+                        &self.history,
+                    )
+                    .await?;
+            }
+        }
+
+        // Jobs and results are 1:1 and in request order; `job_count` stands in
+        // for `tool_calls.len()` when bumping the turn counter below.
+        let job_count = jobs.len();
+        let mut result_msgs = Vec::new();
+        // Collect Write/Edit file paths for deferred invalidation.
+        // Phase 2 runs tools concurrently, so a Write may finish after
+        // a Read of the same file even when it appears first in request
+        // order.  We defer all invalidations until every observation is
+        // recorded, preventing stale content from leaking into [seen].
+        let mut mutation_paths: Vec<String> = Vec::new();
+        for (job, output) in jobs.into_iter().zip(results) {
+            let result_msg = format!("result: {}", trunc(&output, 200));
+            send_log(log_tx, prefix, &result_msg);
+            if !nested {
+                let result_evt = tool_result_event(&job.id, &output);
+                write_raw(raw, &result_evt);
+                if let Some(evts) = captured.as_mut() {
+                    evts.push(result_evt);
+                }
+            }
+            // Emit tool result via stream_events when there is a listener.
+            if tool_ctx.telemetry.wants_stream_events() {
+                // For Read, truncate to a reasonable preview.
+                let display = if job.name == "Read" {
+                    trunc(&output, 500)
+                } else {
+                    trunc(&output, 200)
+                };
+                tool_ctx
+                    .telemetry
+                    .send_stream_event(
+                        InteractiveEvent::ToolResult {
+                            id: format!("{}{}", tool_ctx.id_prefix, job.id),
+                            name: job.name.clone(),
+                            call: job.call.clone(),
+                            output: display,
+                        },
+                        cancel,
+                        &self.history,
+                    )
+                    .await?;
+            }
+            if tools::result_status(&output) == "ok" {
+                self.tool_ledger
+                    .record(&job.name, &job.key, &output, &job.args, self.turn_num);
+                // Collect Write/Edit paths for deferred invalidation.
+                // Phase 2 executes concurrently, so a Write that appears
+                // first in request order may finish after a Read of the
+                // same file.  Invalidating inline would let the later-
+                // recorded Read reintroduce stale content.  We batch
+                // invalidations after all observations.
+                if job.name == "Write" || job.name == "Edit" {
+                    let args_val: serde_json::Value =
+                        serde_json::from_str(&job.args).unwrap_or(serde_json::Value::Null);
+                    if let Some(fp) = args_val.get("file_path").and_then(|v| v.as_str()) {
+                        mutation_paths.push(fp.to_string());
+                    }
+                }
+            }
+            result_msgs.push(Message::tool_result(
+                CallId::from_wire(job.id.clone()),
+                ToolName::new(job.name.clone()).expect("tool name must not be empty"),
+                output,
+            ));
+        }
+        // Apply deferred invalidations now that all observations
+        // for this turn are recorded.
+        for fp in &mutation_paths {
+            self.tool_ledger.invalidate_after_write(fp);
+        }
+        self.turns += job_count;
+        // Every tool result lands in history so the results stay adjacent to the
+        // assistant tool_calls message; the ledger becomes the next turn's prompt,
+        // trailing the complete result block instead of splitting it.
+        self.history.extend(result_msgs);
+        self.next_prompt = Message::user(self.tool_ledger.format(self.turn_num));
+        self.turn_scratchpad_injected = false;
+        self.remaining_turns -= 1;
+        Ok(())
+    }
+
+    /// Interactive turn boundary. Two modes: no active session (check the
+    /// pause token) or an active session re-entered after RunOneTurn.
+    async fn await_interactive_turn(
+        &mut self,
+        model: &GremlinsModel,
+        prefix: &str,
+        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> Result<InteractiveBoundary, ClientError> {
+        if self.cmd_rx.is_some() && self.evt_tx.is_some() && self.pause.is_some() {
+            if self.pending_run_one_turn {
+                // Came back from a mid-stream or mid-tool pause with
+                // RunOneTurn. Execute one turn, then re-enter interactive.
+                self.pending_run_one_turn = false;
+                self.interactive_active = true;
+                // Fall through to execute one turn.
+            } else if self.interactive_active {
+                // Re-enter interactive_loop after a RunOneTurn/Inject.
+                let mut session = InteractiveSession {
+                    cmd_rx: self.cmd_rx.take().unwrap(),
+                    evt_tx: self.evt_tx.take().unwrap(),
+                    pause: self.pause.clone().unwrap(),
+                };
+                match interactive_loop(
+                    model,
+                    &mut self.history,
+                    &mut self.next_prompt,
+                    &mut session,
+                    self.turn_num,
+                )
+                .await
+                {
+                    Ok(InteractiveLoopResult::Resumed) => {
+                        self.interactive_active = false;
+                        self.system_prompt = self.original_system_prompt.clone();
+                        self.cmd_rx = Some(session.cmd_rx);
+                        self.evt_tx = Some(session.evt_tx);
+                        return Ok(InteractiveBoundary::ContinueLoop);
+                    }
+                    Ok(InteractiveLoopResult::RunOneTurn) => {
+                        self.cmd_rx = Some(session.cmd_rx);
+                        self.evt_tx = Some(session.evt_tx);
+                        // Fall through to execute one turn.
+                    }
+                    Err(e) => {
+                        log::info!("agent_loop: exit (operator bailed, label={})", prefix);
+                        send_log(log_tx, prefix, "exit: operator bailed");
+                        return Err(e);
+                    }
+                }
+            } else if self.pause.as_ref().is_some_and(|p| p.is_paused()) {
+                // Pause token was triggered — enter interactive mode.
+                log::info!(
+                    "agent_loop: pause token detected at turn boundary (label={})",
+                    prefix
+                );
+                send_log(
+                    log_tx,
+                    prefix,
+                    "pause: entering interactive mode (turn boundary)",
+                );
+                if let Some(ref p) = self.pause {
+                    p.reset();
+                }
+
+                // Amend system prompt with operator note.
+                let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
+                let amended_system = match &self.system_prompt {
+                    Some(sp) => format!("{sp}{debug_note}"),
+                    None => debug_note.trim_start().to_string(),
+                };
+                self.system_prompt = Some(amended_system);
+
+                let mut session = InteractiveSession {
+                    cmd_rx: self.cmd_rx.take().unwrap(),
+                    evt_tx: self.evt_tx.take().unwrap(),
+                    pause: self.pause.clone().unwrap(),
+                };
+                match interactive_loop(
+                    model,
+                    &mut self.history,
+                    &mut self.next_prompt,
+                    &mut session,
+                    self.turn_num,
+                )
+                .await
+                {
+                    Ok(InteractiveLoopResult::Resumed) => {
+                        self.system_prompt = self.original_system_prompt.clone();
+                        self.cmd_rx = Some(session.cmd_rx);
+                        self.evt_tx = Some(session.evt_tx);
+                        return Ok(InteractiveBoundary::ContinueLoop);
+                    }
+                    Ok(InteractiveLoopResult::RunOneTurn) => {
+                        self.interactive_active = true;
+                        self.cmd_rx = Some(session.cmd_rx);
+                        self.evt_tx = Some(session.evt_tx);
+                        // Fall through to execute one turn.
+                    }
+                    Err(e) => {
+                        log::info!("agent_loop: exit (operator bailed, label={})", prefix);
+                        send_log(log_tx, prefix, "exit: operator bailed");
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Ok(InteractiveBoundary::RunTurn)
+    }
+
+    /// Inject the persistent scratchpad into the next user prompt when its
+    /// content hash changed since the last turn. No-op for nested (Task)
+    /// loops, which are stateless helpers.
+    fn inject_scratchpad(
+        &mut self,
+        scratchpad_path: Option<&Path>,
+        scratchpad_root: Option<&Path>,
+        nested: bool,
+    ) {
+        if !nested && !self.turn_scratchpad_injected {
+            if let Some(scratchpad_path) = scratchpad_path {
+                let root = scratchpad_root.unwrap_or_else(|| Path::new("."));
+                if let Ok(content) =
+                    crate::executor::agent_runner::read_scratchpad_contained(scratchpad_path, root)
+                {
+                    if !content.trim().is_empty() {
+                        let mut hasher = DefaultHasher::new();
+                        content.hash(&mut hasher);
+                        let current_hash = hasher.finish();
+                        if self.last_scratchpad_hash != Some(current_hash) {
+                            self.last_scratchpad_hash = Some(current_hash);
+                            let next_text = user_message_text(&self.next_prompt);
+                            let combined = format!(
+                                "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
+                            );
+                            self.next_prompt = Message::user(combined);
+                            self.turn_scratchpad_injected = true;
+                        }
+                    } else {
+                        // Scratchpad was cleared — reset so a later rewrite
+                        // of the same content won't be skipped.
+                        self.last_scratchpad_hash = None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fold this turn's provider usage into the running totals and return the
+    /// cumulative [`UsageStats`]. Absent fields stay `None`; a reported zero
+    /// is preserved as `Some(0)`.
+    fn fold_turn_usage(&mut self, turn_usage: Option<&Usage>) -> UsageStats {
+        if let Some(u) = turn_usage {
+            self.total_prompt_tokens = add_opt(self.total_prompt_tokens, u.input_tokens);
+            self.total_completion_tokens = add_opt(self.total_completion_tokens, u.output_tokens);
+            self.total_cached_tokens = add_opt(self.total_cached_tokens, u.cached_input_tokens);
+            self.total_cache_creation_tokens = add_opt(
+                self.total_cache_creation_tokens,
+                u.cache_creation_input_tokens,
+            );
+            self.total_reasoning_tokens = add_opt(self.total_reasoning_tokens, u.reasoning_tokens);
+        }
+        usage_stats(
+            self.turn_num + 1,
+            self.total_prompt_tokens,
+            self.total_completion_tokens,
+            self.total_cached_tokens,
+            self.total_cache_creation_tokens,
+            self.total_reasoning_tokens,
+        )
+    }
+
+    /// Emit TurnComplete plus the raw/captured transcript entries and turn
+    /// metrics for a completed turn.
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_turn_artifacts(
+        &mut self,
+        tool_ctx: &AgentLoopRuntime,
+        cancel: &CancelToken,
+        nested: bool,
+        text: &str,
+        reasoning: &str,
+        tool_calls: &[ToolCall],
+        turn_stats: Option<TurnStats>,
+        totals: &UsageStats,
+        first_token: Option<Instant>,
+        last_token: Option<Instant>,
+        turn_start: Instant,
+        turn_usage: Option<&Usage>,
+        raw: &mut Option<std::fs::File>,
+        captured: &mut Option<Vec<serde_json::Value>>,
+        prefix: &str,
+        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> Result<(), ClientError> {
+        // Emit TurnComplete via tool_ctx.telemetry.stream_events, before
+        // text/tool_calls are consumed by the rest of the turn processing.
+        // Nested loops skip this — their child turn numbers restart at 0 and
+        // can collide with the parent's.
+        if !nested && tool_ctx.telemetry.wants_stream_events() {
+            log::debug!(
+                "agent_loop: broadcasting TurnComplete (turn={})",
+                self.turn_num
+            );
+            tool_ctx
+                .telemetry
+                .send_stream_event(
+                    InteractiveEvent::TurnComplete {
+                        turn: self.turn_num,
+                        text: text.to_string(),
+                        tool_calls: tool_calls.iter().map(format_tool_call).collect(),
+                        stats: turn_stats.clone(),
+                        totals: Some(totals.clone()),
+                    },
+                    cancel,
+                    &self.history,
+                )
+                .await?;
+        }
+
+        if !reasoning.is_empty() {
+            let msg = format!("think: {}", trunc(reasoning, 200));
+            send_log(log_tx, prefix, &msg);
+        }
+        if !text.is_empty() {
+            let msg = format!("text: {}", trunc(text, 200));
+            send_log(log_tx, prefix, &msg);
+        }
+        if !nested {
+            if !text.is_empty() {
+                write_raw(raw, &assistant_text_event(text));
+                if let Some(evts) = captured.as_mut() {
+                    evts.push(assistant_text_event(text));
+                }
+                self.final_text = text.to_string();
+            }
+        } else {
+            self.final_text = text.to_string();
+        }
+
+        emit_turn_metrics(
+            prefix,
+            self.turn_num,
+            first_token,
+            last_token,
+            turn_start,
+            reasoning,
+            text,
+            tool_calls,
+            turn_usage,
+            log_tx,
+        );
+        Ok(())
+    }
+
+    /// Inspect the assistant's tool calls for a Done signal and act on it.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_done_decision(
+        &mut self,
+        tool_ctx: &AgentLoopRuntime,
+        cancel: &CancelToken,
+        nested: bool,
+        text: &str,
+        reasoning_items: &[Sealed<Reasoning>],
+        tool_calls: &[ToolCall],
+        expected_artifact_paths: &[PathBuf],
+        captured: &mut Option<Vec<serde_json::Value>>,
+        loop_start: Instant,
+        prefix: &str,
+        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> Result<DoneDecision, ClientError> {
+        // Solo Done is the only valid completion signal. Mixed Done + other
+        // tool calls is incoherent and rejected wholesale so the model retries
+        // cleanly.
+        let has_non_done = tool_calls.iter().any(|tc| tc.function.name != "Done");
+        let done_call = tool_calls.iter().find(|tc| tc.function.name == "Done");
+
+        match (done_call, has_non_done) {
+            (Some(_done_tc), true) => {
+                // Mixed — produce a tool_result for every call so providers
+                // see a valid round of history.
+                self.history.push(self.next_prompt.clone());
+                self.history
+                    .push(assistant_tool_message(text, reasoning_items, tool_calls));
+                for tc in tool_calls {
+                    let body = if tc.function.name == "Done" {
+                        "Error: Done must be called alone — do not combine Done with \
+                         other tool calls in the same message. Re-issue your tool \
+                         calls without Done, then call Done by itself when finished."
+                    } else {
+                        "Skipped: this call was rejected because Done was combined \
+                         with other tool calls in the same message. Re-issue without \
+                         Done."
+                    };
+                    self.history.push(Message::tool_result(
+                        tc.id.clone(),
+                        tc.function.name.clone(),
+                        body,
+                    ));
+                }
+                self.next_prompt = Message::user(
+                    "Done was rejected because it was combined with other tool calls. \
+                     Try again — this time either use tools, or call Done. Never both.",
+                );
+                return Ok(DoneDecision::RetryNeeded);
+            }
+            (Some(done_tc), false) => {
+                // Solo Done — validate expected artifacts before accepting.
+                let done_summary = done_tc
+                    .function
+                    .arguments
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                send_log(
+                    log_tx,
+                    prefix,
+                    &format!("tool: Done {}", trunc(&done_summary, 200)),
+                );
+                if !nested && !expected_artifact_paths.is_empty() {
+                    let missing = missing_artifacts(expected_artifact_paths);
+                    if !missing.is_empty() && self.reminder_budget > 0 {
+                        self.reminder_budget -= 1;
+                        let reminder = format!(
+                            "Done rejected: {}\nWrite each file using the Write \
+                             tool, then call Done.",
+                            artifact_reminder(&missing),
+                        );
+                        self.history.push(self.next_prompt.clone());
+                        self.history.push(assistant_tool_message(
+                            text,
+                            reasoning_items,
+                            std::slice::from_ref(done_tc),
+                        ));
+                        let rejected_ledger = format!(
+                            "[turn {}]: Done {} (rejected)\n\n{}",
+                            self.turn_num, done_summary, reminder
+                        );
+                        self.next_prompt = compaction::done_user_message(
+                            &rejected_ledger,
+                            done_tc.id.clone(),
+                            done_tc.function.name.clone(),
+                            &reminder,
+                        );
+                        return Ok(DoneDecision::RetryNeeded);
+                    }
+                }
+
+                // Accept completion.
+                let result_text = if text.trim().is_empty() && !done_summary.is_empty() {
+                    done_summary.clone()
+                } else {
+                    text.to_string()
+                };
+                let usage = usage_stats(
+                    self.turn_num,
+                    self.total_prompt_tokens,
+                    self.total_completion_tokens,
+                    self.total_cached_tokens,
+                    self.total_cache_creation_tokens,
+                    self.total_reasoning_tokens,
+                );
+                if !nested {
+                    emit_final(prefix, self.turns, "", log_tx);
+                    emit_summary(
+                        prefix,
+                        self.turn_num,
+                        loop_start,
+                        self.total_prompt_tokens,
+                        self.total_completion_tokens,
+                        self.total_cached_tokens,
+                        self.total_cache_creation_tokens,
+                        self.total_reasoning_tokens,
+                        log_tx,
+                    );
+                }
+                // Emit Done via stream_events. Nested loops skip this — only
+                // the parent's Done signals completion.
+                if !nested && tool_ctx.telemetry.wants_stream_events() {
+                    log::debug!("agent_loop: broadcasting Done (turn={})", self.turn_num);
+                    tool_ctx
+                        .telemetry
+                        .send_stream_event(
+                            InteractiveEvent::Done {
+                                text: result_text.clone(),
+                                summary: done_summary.clone(),
+                                usage: Some(usage.clone()),
+                            },
+                            cancel,
+                            &self.history,
+                        )
+                        .await?;
+                }
+                // Capture the full message history (prior turns + this final
+                // user prompt + assistant message) so the chat gremlin can
+                // persist complete model context between stages.
+                let mut messages = self.history.clone();
+                messages.push(self.next_prompt.clone());
+                messages.push(assistant_tool_message(
+                    text,
+                    reasoning_items,
+                    std::slice::from_ref(done_tc),
+                ));
+                let done_ledger = format!("[turn {}]: Done {}", self.turn_num, done_summary);
+                messages.push(compaction::done_user_message(
+                    &done_ledger,
+                    done_tc.id.clone(),
+                    done_tc.function.name.clone(),
+                    "Done accepted.",
+                ));
+                return Ok(DoneDecision::Accepted(Box::new(completed_run(
+                    Some(result_text),
+                    Some(done_summary),
+                    captured,
+                    usage,
+                    Some(messages),
+                ))));
+            }
+            _ => {}
+        }
+        Ok(DoneDecision::NotDone)
+    }
+
+    /// Handle a turn that produced no tool calls: continue (interactive / or
+    /// nudged / reminded) or return the exhausted run.
+    #[allow(clippy::too_many_arguments)]
+    fn handle_empty_turn(
+        &mut self,
+        nested: bool,
+        text: &str,
+        reasoning: &str,
+        reasoning_items: &[Sealed<Reasoning>],
+        expected_artifact_paths: &[PathBuf],
+        loop_start: Instant,
+        raw: &mut Option<std::fs::File>,
+        captured: &mut Option<Vec<serde_json::Value>>,
+        prefix: &str,
+        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> EmptyTurnAction {
+        // In interactive mode, empty turns are expected — the operator is
+        // driving the conversation. Don't nudge or remind.
+        if self.interactive_active {
+            return EmptyTurnAction::ContinueLoop;
+        }
+
+        // Reasoning-only turn — the model is thinking. Just loop, preserving
+        // the structured reasoning items for the next request.
+        if text.is_empty() && !reasoning.is_empty() {
+            log::debug!("reasoning-only turn: turn={} — continuing", self.turn_num);
+            self.history.push(self.next_prompt.clone());
+            self.history
+                .push(assistant_tool_message("", reasoning_items, &[]));
+            self.next_prompt = Message::user("Continue.");
+            return EmptyTurnAction::ContinueLoop;
+        }
+
+        log::warn!(
+            "empty turn: turn={} text_empty={} reasoning_empty={} budget={}",
+            self.turn_num,
+            text.is_empty(),
+            reasoning.is_empty(),
+            self.completion_nudge_budget,
+        );
+
+        // Missing-artifact reminder (only when the model produced text).
+        if !nested && self.reminder_budget > 0 && !text.is_empty() {
+            let missing = missing_artifacts(expected_artifact_paths);
+            if !missing.is_empty() {
+                self.reminder_budget -= 1;
+                log::info!(
+                    "reminder: {} missing artifact(s) — nudging agent (remaining_budget={})",
+                    missing.len(),
+                    self.reminder_budget,
+                );
+                self.history.push(self.next_prompt.clone());
+                self.history
+                    .push(assistant_tool_message(text, reasoning_items, &[]));
+                let reminder = artifact_reminder(&missing);
+                write_raw(
+                    raw,
+                    &serde_json::json!({"type": "reminder", "message": reminder}),
+                );
+                if let Some(evts) = captured.as_mut() {
+                    evts.push(serde_json::json!({"type": "reminder", "message": reminder}));
+                }
+                self.next_prompt = Message::user(reminder);
+                return EmptyTurnAction::ContinueLoop;
+            }
+        }
+
+        // Completion nudge — prompt the model to call Done.
+        if !text.is_empty() && self.completion_nudge_budget > 0 {
+            self.completion_nudge_budget -= 1;
+            log::info!(
+                "empty turn — nudging agent (remaining_budget={})",
+                self.completion_nudge_budget,
+            );
+            let nudge_msg = "You produced text but no tool calls. If your work is complete, \
+                 call the Done tool. If you still need to make changes, use the \
+                 appropriate tool now.";
+            write_raw(
+                raw,
+                &serde_json::json!({"type": "reminder", "message": nudge_msg}),
+            );
+            if let Some(evts) = captured.as_mut() {
+                evts.push(serde_json::json!({"type": "reminder", "message": nudge_msg}));
+            }
+            self.history.push(self.next_prompt.clone());
+            self.history
+                .push(assistant_tool_message(text, reasoning_items, &[]));
+            self.next_prompt = Message::user(nudge_msg.to_string());
+            return EmptyTurnAction::ContinueLoop;
+        }
+
+        // Exhausted — give up.
+        log::warn!(
+            "empty-turn exhausted: turn={} text_empty={} reasoning_empty={} budget={}",
+            self.turn_num,
+            text.is_empty(),
+            reasoning.is_empty(),
+            self.completion_nudge_budget,
+        );
+        let usage = usage_stats(
+            self.turn_num,
+            self.total_prompt_tokens,
+            self.total_completion_tokens,
+            self.total_cached_tokens,
+            self.total_cache_creation_tokens,
+            self.total_reasoning_tokens,
+        );
+        if !nested {
+            emit_final(prefix, self.turns, " (exhausted)", log_tx);
+            emit_summary(
+                prefix,
+                self.turn_num,
+                loop_start,
+                self.total_prompt_tokens,
+                self.total_completion_tokens,
+                self.total_cached_tokens,
+                self.total_cache_creation_tokens,
+                self.total_reasoning_tokens,
+                log_tx,
+            );
+        }
+        let mut messages = self.history.clone();
+        messages.push(self.next_prompt.clone());
+        messages.push(assistant_tool_message(text, reasoning_items, &[]));
+        EmptyTurnAction::ReturnRun(Box::new(completed_run(
+            Some(self.final_text.clone()),
+            None,
+            captured,
+            usage,
+            Some(messages),
+        )))
+    }
+
+    /// Append the user prompt and assistant tool-call message for this turn to
+    /// the loop history.
+    fn commit_turn_to_history(
+        &mut self,
+        text: &str,
+        reasoning_items: &[Sealed<Reasoning>],
+        tool_calls: &[ToolCall],
+    ) {
+        self.history.push(self.next_prompt.clone());
+        self.history
+            .push(assistant_tool_message(text, reasoning_items, tool_calls));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -404,10 +2309,9 @@ pub(crate) async fn run_agent_loop(
         id_prefix: String::new(),
         telemetry,
         active_skills: ctx.params.active_skills.clone(),
-        discovered_skills: ctx.params.discovered_skills.clone(),
+        skills_available: ctx.params.skills_available,
     };
-    let tool_defs =
-        tools::tool_definitions(opts.tool_filter, ctx.params.discovered_skills.is_some());
+    let tool_defs = tools::tool_definitions(opts.tool_filter, ctx.params.skills_available);
 
     // Wire up the Task runner before entering the turn loop.
     let runner = super::task::make_task_runner(
@@ -452,6 +2356,7 @@ pub(crate) async fn run_agent_loop(
         tool_output_rx,
         ctx.prepopulated_messages.clone(),
         ctx.compaction_opts,
+        ctx.params.compactor.clone(),
         ctx.scratchpad_path.clone(),
         ctx.scratchpad_root.clone(),
     )
@@ -497,7 +2402,7 @@ pub(crate) async fn run_agent_loop_nested(
     let mut raw: Option<std::fs::File> = None;
     let mut captured: Option<Vec<serde_json::Value>> = None;
     let mut nested_tool_ctx = tool_ctx.clone();
-    nested_tool_ctx.discovered_skills = None;
+    nested_tool_ctx.skills_available = false;
     nested_tool_ctx.active_skills = None;
     // Nested loops keep the parent's stream (so their `ToolResult` events reach
     // the parent TUI) and inherit the parent's tool-output sender rather than
@@ -539,6 +2444,7 @@ pub(crate) async fn run_agent_loop_nested(
         None,
         None,
         prepopulated_messages,
+        None,
         None,
         None,
         None,
@@ -775,15 +2681,17 @@ fn user_message_text(message: &Message) -> String {
 /// materialized view exceeds the soft token threshold.
 fn build_request_messages(
     history: &[Message],
-    compacted: &mut Option<conversation::CompactedWorking>,
+    compacted: &mut Option<compaction::CompactedWorking>,
     current_turn_start: usize,
-    opts: Option<conversation::CompactionOpts>,
+    opts: Option<CompactionOpts>,
+    compactor: Option<Arc<dyn compaction::Compactor>>,
     overhead_tokens: usize,
     overhead_bytes: usize,
 ) -> Vec<Message> {
     let Some(opts) = opts else {
         return history.to_vec();
     };
+    let compactor = compactor.expect("compactor must be provided when compaction is enabled");
 
     if let Some(cached) = compacted.as_ref() {
         if cached.cut > history.len() {
@@ -798,16 +2706,16 @@ fn build_request_messages(
         None => history.to_vec(),
     };
 
-    if conversation::token_len(&working).saturating_add(overhead_tokens)
+    if compaction::token_len(&working).saturating_add(overhead_tokens)
         <= opts.threshold_tokens as usize
     {
         return working;
     }
 
     let granularity = if history.len() > current_turn_start {
-        conversation::CutGranularity::Round { current_turn_start }
+        compaction::CutGranularity::Round { current_turn_start }
     } else {
-        conversation::CutGranularity::Turn
+        compaction::CutGranularity::Turn
     };
 
     // Convert only the remaining history-token allowance to bytes via the
@@ -816,7 +2724,7 @@ fn build_request_messages(
     // history budget.
     let history_token_budget = opts.target_tokens.saturating_sub(overhead_tokens as u64);
     let target_bytes = history_token_budget
-        .saturating_mul(conversation::BYTES_PER_TOKEN)
+        .saturating_mul(compaction::BYTES_PER_TOKEN)
         .saturating_add(overhead_bytes as u64);
 
     // Try the byte budget. For token-dense histories the 3:1 estimate may
@@ -827,10 +2735,10 @@ fn build_request_messages(
     let mut byte_budget = target_bytes;
     loop {
         if let Some(fresh) =
-            conversation::compact_working(history, byte_budget, overhead_bytes, granularity)
+            compactor.compact_working(history, byte_budget, overhead_bytes, granularity)
         {
             let request = fresh.materialize(history);
-            let tokens = conversation::token_len(&request).saturating_add(overhead_tokens);
+            let tokens = compaction::token_len(&request).saturating_add(overhead_tokens);
             if tokens <= opts.target_tokens as usize {
                 *compacted = Some(fresh);
                 return request;
@@ -850,7 +2758,7 @@ fn build_request_messages(
             // the budget to force a cut. Otherwise there is genuinely no
             // room and we stop.
             let available = byte_budget.saturating_sub(overhead_bytes as u64) as usize;
-            if conversation::serialized_len(history) <= available && available > 0 {
+            if compaction::serialized_len(history) <= available && available > 0 {
                 byte_budget = (available - 1).saturating_add(overhead_bytes) as u64;
             } else {
                 break;
@@ -883,188 +2791,43 @@ async fn run_agent_loop_core(
     captured: &mut Option<Vec<serde_json::Value>>,
     nested: bool,
     expected_artifact_paths: &[PathBuf],
-    mut reminder_budget: usize,
-    mut completion_nudge_budget: usize,
+    reminder_budget: usize,
+    completion_nudge_budget: usize,
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     gremlin_id: Option<String>,
     token_usage_sink: TokenUsageSink,
     interactive: Option<InteractiveSession>,
     tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
     prepopulated_messages: Option<Vec<Message>>,
-    compaction_opts: Option<conversation::CompactionOpts>,
+    compaction_opts: Option<CompactionOpts>,
+    compactor: Option<Arc<dyn compaction::Compactor>>,
     scratchpad_path: Option<PathBuf>,
     scratchpad_root: Option<PathBuf>,
 ) -> Result<CompletedRun, ClientError> {
-    // Destructure the interactive session into its components so we can
-    // thread them independently through the loop.
-    let (mut cmd_rx, mut evt_tx, pause) = interactive
-        .map(|s| {
-            log::debug!("agent_loop: interactive session set up (label={prefix})");
-            (Some(s.cmd_rx), Some(s.evt_tx), Some(s.pause))
-        })
-        .unwrap_or((None, None, None));
-
-    let original_system_prompt = system_prompt.clone();
-    let mut system_prompt = system_prompt;
-    let mut live_output_rx = tool_output_rx;
-    let mut history: Vec<Message> = prepopulated_messages.unwrap_or_default();
-    let mut next_prompt = Message::user(prompt.to_string());
-    // `history` is the verbatim source of truth for the whole loop. The
-    // compacted request view is rebuilt around it but never replaces it.
-    let current_turn_start = history.len();
-    let mut compacted: Option<conversation::CompactedWorking> = None;
-    let mut turns: usize = 0;
-    let mut turn_num: usize = 0;
-    let mut turn_retries: usize = 0;
-    let mut timeout_retries: usize = 0;
-    let mut final_text = String::new();
-    let mut timed_out = false;
-    let mut exhausted_turn_retries: bool = false;
-    let mut exhausted_timeout_retries: bool = false;
-    let mut turn_scratchpad_injected: bool = false;
-    let mut last_scratchpad_hash: Option<u64> = None;
-    let mut stream_error: Option<ProviderError> = None;
+    let mut state = LoopState::new(
+        system_prompt,
+        prompt,
+        prepopulated_messages,
+        reminder_budget,
+        completion_nudge_budget,
+        interactive,
+        tool_output_rx,
+        max_turns,
+        prefix,
+    );
     let loop_start = Instant::now();
-
-    // Accumulated token totals (summed across turns)
-    let mut total_prompt_tokens: Option<u64> = None;
-    let mut total_completion_tokens: Option<u64> = None;
-    let mut total_cached_tokens: Option<u64> = None;
-    let mut total_cache_creation_tokens: Option<u64> = None;
-    let mut total_reasoning_tokens: Option<u64> = None;
-
-    struct Job {
-        id: String,
-        name: String,
-        args: String,
-        call: String,
-        key: String,
-        over_cap: Option<String>,
-    }
-
-    // ── Accumulated tool-history ledger ──────────────────────────────
-    // Tracks every Read, Grep, Write, and Landscape call across all
-    // turns of this stage so the model can see what it has already done
-    // and avoid redundant re-reads. In-memory only; never persisted.
-    let mut tool_ledger = ToolLedger::new();
-
-    let mut interactive_active: bool = false;
-    let mut pending_run_one_turn: bool = false;
-
     let turn_retry_backoff = crate::config::turn_retry_backoff();
     let timeout_retry_backoff = crate::config::timeout_retry_backoff();
-
-    let mut remaining_turns = max_turns;
-    while remaining_turns > 0 {
+    while state.remaining_turns > 0 {
         if cancel.is_cancelled() {
             log::info!("agent_loop: cancelled before turn (label={})", prefix);
             send_log(log_tx, prefix, "exit: cancelled before turn");
-            return Err(cancelled_error("cancelled", &history));
+            return Err(cancelled_error("cancelled", &state.history));
         }
 
-        // ── interactive turn boundary ──────────────────────────────────
-        //
-        // Two modes:
-        // 1. No active interactive session — check pause token.
-        // 2. Active interactive session (re-entering after RunOneTurn) —
-        //    enter interactive_loop immediately.
-        if cmd_rx.is_some() && evt_tx.is_some() && pause.is_some() {
-            if pending_run_one_turn {
-                // Came back from a mid-stream or mid-tool pause with
-                // RunOneTurn. Execute one turn, then re-enter interactive.
-                pending_run_one_turn = false;
-                interactive_active = true;
-                // Fall through to execute one turn.
-            } else if interactive_active {
-                // Re-enter interactive_loop after a RunOneTurn/Inject.
-                let mut session = InteractiveSession {
-                    cmd_rx: cmd_rx.take().unwrap(),
-                    evt_tx: evt_tx.take().unwrap(),
-                    pause: pause.clone().unwrap(),
-                };
-                match interactive_loop(
-                    model,
-                    &mut history,
-                    &mut next_prompt,
-                    &mut session,
-                    turn_num,
-                )
-                .await
-                {
-                    Ok(InteractiveLoopResult::Resumed) => {
-                        interactive_active = false;
-                        system_prompt = original_system_prompt.clone();
-                        cmd_rx = Some(session.cmd_rx);
-                        evt_tx = Some(session.evt_tx);
-                        continue;
-                    }
-                    Ok(InteractiveLoopResult::RunOneTurn) => {
-                        cmd_rx = Some(session.cmd_rx);
-                        evt_tx = Some(session.evt_tx);
-                        // Fall through to execute one turn.
-                    }
-                    Err(e) => {
-                        log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                        send_log(log_tx, prefix, "exit: operator bailed");
-                        return Err(e);
-                    }
-                }
-            } else if pause.as_ref().is_some_and(|p| p.is_paused()) {
-                // Pause token was triggered — enter interactive mode.
-                log::info!(
-                    "agent_loop: pause token detected at turn boundary (label={})",
-                    prefix
-                );
-                send_log(
-                    log_tx,
-                    prefix,
-                    "pause: entering interactive mode (turn boundary)",
-                );
-                if let Some(ref p) = pause {
-                    p.reset();
-                }
-
-                // Amend system prompt with operator note.
-                let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
-                let amended_system = match &system_prompt {
-                    Some(sp) => format!("{sp}{debug_note}"),
-                    None => debug_note.trim_start().to_string(),
-                };
-                system_prompt = Some(amended_system);
-
-                let mut session = InteractiveSession {
-                    cmd_rx: cmd_rx.take().unwrap(),
-                    evt_tx: evt_tx.take().unwrap(),
-                    pause: pause.clone().unwrap(),
-                };
-                match interactive_loop(
-                    model,
-                    &mut history,
-                    &mut next_prompt,
-                    &mut session,
-                    turn_num,
-                )
-                .await
-                {
-                    Ok(InteractiveLoopResult::Resumed) => {
-                        system_prompt = original_system_prompt.clone();
-                        cmd_rx = Some(session.cmd_rx);
-                        evt_tx = Some(session.evt_tx);
-                        continue;
-                    }
-                    Ok(InteractiveLoopResult::RunOneTurn) => {
-                        interactive_active = true;
-                        cmd_rx = Some(session.cmd_rx);
-                        evt_tx = Some(session.evt_tx);
-                        // Fall through to execute one turn.
-                    }
-                    Err(e) => {
-                        log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                        send_log(log_tx, prefix, "exit: operator bailed");
-                        return Err(e);
-                    }
-                }
-            }
+        match state.await_interactive_turn(model, prefix, log_tx).await? {
+            InteractiveBoundary::ContinueLoop => continue,
+            InteractiveBoundary::RunTurn => {}
         }
 
         // Snapshot before request construction so TTFT includes connection /
@@ -1072,486 +2835,73 @@ async fn run_agent_loop_core(
         let turn_start = Instant::now();
 
         // Inject the persistent scratchpad on every turn of the main
-        // (non-nested) loop. The model writes `_scratchpad.md` in the worktree
-        // root; re-reading it here keeps the working memory in front of the
-        // model even after conversation compaction. Nested (Task) loops are
-        // stateless helpers and are excluded.
-        //
-        // A flag (`turn_scratchpad_injected`) prevents duplicate injection
-        // across retry continuations (provider errors, idle timeouts) that
-        // re-enter this turn iteration with an already-augmented prompt.
-        if !nested && !turn_scratchpad_injected {
-            if let Some(ref scratchpad_path) = scratchpad_path {
-                let root = scratchpad_root.as_deref().unwrap_or_else(|| Path::new("."));
-                if let Ok(content) =
-                    crate::executor::agent_runner::read_scratchpad_contained(scratchpad_path, root)
-                {
-                    if !content.trim().is_empty() {
-                        let mut hasher = DefaultHasher::new();
-                        content.hash(&mut hasher);
-                        let current_hash = hasher.finish();
-                        if last_scratchpad_hash != Some(current_hash) {
-                            last_scratchpad_hash = Some(current_hash);
-                            let next_text = user_message_text(&next_prompt);
-                            let combined = format!(
-                                "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
-                            );
-                            next_prompt = Message::user(combined);
-                            turn_scratchpad_injected = true;
-                        }
-                    } else {
-                        // Scratchpad was cleared — reset so a later rewrite
-                        // of the same content won't be skipped.
-                        last_scratchpad_hash = None;
-                    }
-                }
-            }
-        }
-
-        let next_prompt_text = user_message_text(&next_prompt);
-        let overhead_bytes = conversation::completion_request_overhead(
-            &next_prompt_text,
-            system_prompt.as_deref(),
-            tool_defs,
-        );
-        let overhead_tokens = conversation::completion_request_overhead_tokens(
-            &next_prompt_text,
-            system_prompt.as_deref(),
-            tool_defs,
-        );
-        let request_messages = build_request_messages(
-            &history,
-            &mut compacted,
-            current_turn_start,
-            compaction_opts,
-            overhead_tokens,
-            overhead_bytes,
+        // (non-nested) loop. See [`LoopState::inject_scratchpad`].
+        state.inject_scratchpad(
+            scratchpad_path.as_deref(),
+            scratchpad_root.as_deref(),
+            nested,
         );
 
-        // If the scratchpad wasn't injected this turn (hash unchanged)
-        // but compaction dropped the prior injection from history, force
-        // re-injection so the model doesn't lose its working memory.
-        if !nested && !turn_scratchpad_injected {
-            if let Some(ref sp) = scratchpad_path {
-                let root = scratchpad_root.as_deref().unwrap_or_else(|| Path::new("."));
-                if let Ok(content) =
-                    crate::executor::agent_runner::read_scratchpad_contained(sp, root)
-                {
-                    if !content.trim().is_empty() {
-                        let in_request = request_messages
-                            .iter()
-                            .any(|msg| user_message_text(msg).contains("## Scratchpad"))
-                            || user_message_text(&next_prompt).contains("## Scratchpad");
-                        if !in_request {
-                            let mut hasher = DefaultHasher::new();
-                            content.hash(&mut hasher);
-                            last_scratchpad_hash = Some(hasher.finish());
-                            let next_text = user_message_text(&next_prompt);
-                            let combined = format!(
-                                "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
-                            );
-                            next_prompt = Message::user(combined);
-                            turn_scratchpad_injected = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut builder = CompletionRequest::new(next_prompt.clone())
-            .messages(request_messages)
-            .tools(tool_defs.to_vec());
-        if let Some(ref sys) = system_prompt {
-            builder = builder.preamble(sys.clone());
-        }
-        if let Some(params) = opts.extra.clone() {
-            builder = builder.additional_params(params);
-        }
-        if let Some(t) = opts.temperature {
-            builder = builder.temperature(t);
-        }
-        if let Some(mt) = opts.max_tokens {
-            builder = builder.max_tokens(mt);
-        }
-
-        let mut response = match model.stream(builder) {
-            Ok(s) => s,
-            Err(GremlinsModelError::TooLarge { limit, actual }) => {
-                log::info!(
-                    "agent_loop: prompt too large on turn {turn_num}: {actual} bytes exceeds configured limit of {limit} bytes"
-                );
-                send_log(
-                    log_tx,
-                    prefix,
-                    &format!(
-                        "error: prompt size {actual} bytes exceeds configured limit of {limit} bytes"
-                    ),
-                );
-                return Err(ClientError::PromptTooLarge { limit, actual });
-            }
-            Err(GremlinsModelError::Provider(e)) => {
-                let e = *e;
-                // Retryable (429/5xx) error before streaming began — back off
-                // and re-execute this same turn with history intact.
-                if turn_retries < turn_retry_backoff.len() && is_retryable(&e, opts) {
-                    let wait = turn_retry_backoff[turn_retries];
-                    turn_retries += 1;
-                    log::info!(
-                        "agent_loop: retryable stream error on turn {turn_num} (attempt {turn_retries}), backing off {wait}s: {e}"
-                    );
-                    send_log(
-                        log_tx,
-                        prefix,
-                        &format!("retry: transient error, backing off {wait}s"),
-                    );
-                    if retry_backoff(cancel, wait).await {
-                        log::info!(
-                            "agent_loop: cancelled during retry backoff (label={})",
-                            prefix
-                        );
-                        send_log(log_tx, prefix, "exit: cancelled during retry backoff");
-                        return Err(cancelled_error("cancelled", &history));
-                    }
-                    // Preserve the pending one-turn state only when
-                    // already interactive — otherwise an unconditional
-                    // set would force RunOneTurn after normal resumption.
-                    if interactive_active {
-                        pending_run_one_turn = true;
-                    }
-                    continue;
-                }
-                let retryable = is_retryable(&e, opts);
-                if retryable {
-                    exhausted_turn_retries = true;
-                }
-                stream_error = Some(e);
-                break;
-            }
+        let outcome = state
+            .stream_turn(
+                model,
+                tool_ctx,
+                tool_defs,
+                cancel,
+                opts,
+                prefix,
+                idle_timeout,
+                nested,
+                log_tx,
+                compaction_opts,
+                compactor.clone(),
+                scratchpad_path.as_deref(),
+                scratchpad_root.as_deref(),
+                &turn_retry_backoff,
+                &timeout_retry_backoff,
+            )
+            .await?;
+        let out = match outcome {
+            StreamTurnOutcome::Continue => continue,
+            StreamTurnOutcome::Break => break,
+            StreamTurnOutcome::Output(out) => *out,
         };
+        let StreamTurnOutput {
+            text,
+            reasoning,
+            reasoning_items,
+            tool_calls,
+            turn_usage,
+            first_token,
+            last_token,
+            ended,
+        } = out;
 
-        let mut first_token: Option<Instant> = None;
-        let mut last_token: Option<Instant> = None;
-
-        let mut text = String::new();
-        let mut reasoning = String::new();
-        let mut reasoning_items: Vec<Sealed<Reasoning>> = Vec::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-        let mut ended = false;
-        let mut turn_usage: Option<Usage> = None;
-        let mut paused_mid_stream = false;
-        let mut retry_turn = false;
-        let mut retry_timeout_turn = false;
-
-        // Build a cancellation snapshot that includes the pending
-        // `next_prompt` and (as streaming progresses) accumulated
-        // assistant content.  Plain `history` omits both because they
-        // are only committed after a successful turn.
-        let mut stream_snapshot: Vec<Message> = {
-            let mut s = history.clone();
-            s.push(next_prompt.clone());
-            s
-        };
-
-        loop {
-            let item = tokio::select! {
-                _ = cancel.cancelled() => {
-                    log::info!("agent_loop: cancelled mid-stream (label={})", prefix);
-                    send_log(log_tx, prefix, "exit: cancelled mid-stream");
-                    drop(response);
-                    return Err(cancelled_error("cancelled", &stream_snapshot));
-                }
-                _ = maybe_pause(&pause) => {
-                    // Operator triggered debug — cancel the stream and enter
-                    // interactive mode. The turn will be re-executed after
-                    // the debug session ends.
-                    log::info!("agent_loop: paused mid-stream (label={})", prefix);
-                    send_log(log_tx, prefix, "pause: entering interactive mode (mid-stream)");
-                    drop(response);
-                    paused_mid_stream = true;
-                    if let Some(ref p) = pause {
-                        p.reset();
-                    }
-                    log::debug!("agent_loop: entering interactive mode mid-stream (label={})", prefix);
-
-                    // Amend system prompt with operator note (same as turn-boundary path).
-                    let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
-                    let amended_system = match &system_prompt {
-                        Some(sp) => format!("{sp}{debug_note}"),
-                        None => debug_note.trim_start().to_string(),
-                    };
-                    system_prompt = Some(amended_system);
-
-                    // Enter interactive mode inline.
-                    if cmd_rx.is_some() && evt_tx.is_some() && pause.is_some() {
-                        let mut session = InteractiveSession {
-                            cmd_rx: cmd_rx.take().unwrap(),
-                            evt_tx: evt_tx.take().unwrap(),
-                            pause: pause.clone().unwrap(),
-                        };
-                        match interactive_loop(
-                            model,
-                            &mut history,
-                            &mut next_prompt,
-                            &mut session,
-                            turn_num,
-                        )
-                        .await
-                        {
-                            Ok(InteractiveLoopResult::Resumed) => {
-                                system_prompt = original_system_prompt.clone();
-                                cmd_rx = Some(session.cmd_rx);
-                                evt_tx = Some(session.evt_tx);
-                                interactive_active = false;
-                                // Re-build the request from the original next_prompt
-                                // (still available — the builder clones it).
-                                break; // exit the stream loop, re-enter the turn loop
-                            }
-                            Ok(InteractiveLoopResult::RunOneTurn) => {
-                                cmd_rx = Some(session.cmd_rx);
-                                evt_tx = Some(session.evt_tx);
-                                pending_run_one_turn = true;
-                                break; // exit the stream loop, execute one turn
-                            }
-                            Err(e) => {
-                                log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                                send_log(log_tx, prefix, "exit: operator bailed");
-                                return Err(e);
-                            }
-                        }
-                    }
-                    // No interactive session — shouldn't happen, but continue.
-                    break;
-                }
-                timed = tokio::time::timeout(
-                    Duration::from_secs_f64(idle_timeout),
-                    futures::StreamExt::next(&mut response),
-                ) => timed,
-            };
-            match item {
-                Err(_) => {
-                    if timeout_retries < timeout_retry_backoff.len() {
-                        let wait = timeout_retry_backoff[timeout_retries];
-                        timeout_retries += 1;
-                        log::info!(
-                            "agent_loop: idle timeout on turn {turn_num} (attempt {timeout_retries}), backing off {wait}s"
-                        );
-                        send_log(
-                            log_tx,
-                            prefix,
-                            &format!("retry: idle timeout, backing off {wait}s"),
-                        );
-                        drop(response);
-                        retry_timeout_turn = true;
-                        if retry_backoff(cancel, wait).await {
-                            log::info!(
-                                "agent_loop: cancelled during timeout backoff (label={})",
-                                prefix
-                            );
-                            send_log(log_tx, prefix, "exit: cancelled during timeout backoff");
-                            return Err(cancelled_error("cancelled", &history));
-                        }
-                        break;
-                    }
-                    exhausted_timeout_retries = true;
-                    timed_out = true;
-                    drop(response);
-                    break;
-                }
-                Ok(None) => {
-                    ended = true;
-                    turn_usage = Some(response.partial().usage);
-                    break;
-                }
-                Ok(Some(Err(e))) => {
-                    // Retryable (429/5xx) error delivered mid-stream — back off
-                    // and re-execute this same turn with history intact.
-                    if turn_retries < turn_retry_backoff.len() && is_retryable(&e, opts) {
-                        let wait = turn_retry_backoff[turn_retries];
-                        turn_retries += 1;
-                        log::info!(
-                            "agent_loop: retryable mid-stream error on turn {turn_num} (attempt {turn_retries}), backing off {wait}s: {e}"
-                        );
-                        send_log(
-                            log_tx,
-                            prefix,
-                            &format!("retry: transient error, backing off {wait}s"),
-                        );
-                        drop(response);
-                        retry_turn = true;
-                        if retry_backoff(cancel, wait).await {
-                            log::info!(
-                                "agent_loop: cancelled during retry backoff (label={})",
-                                prefix
-                            );
-                            send_log(log_tx, prefix, "exit: cancelled during retry backoff");
-                            return Err(cancelled_error("cancelled", &history));
-                        }
-                        break;
-                    }
-                    let retryable = is_retryable(&e, opts);
-                    if retryable {
-                        exhausted_turn_retries = true;
-                    }
-                    stream_error = Some(e);
-                    break;
-                }
-                Ok(Some(Ok(chunk))) => {
-                    let now = Instant::now();
-                    if first_token.is_none() {
-                        first_token = Some(now);
-                    }
-                    last_token = Some(now);
-                    // Emit stream deltas via tool_ctx.telemetry.stream_events channel.
-                    // Nested loops must not emit text/reasoning deltas on the
-                    // parent's stream — their output arrives as tool results.
-                    if !nested && tool_ctx.telemetry.wants_stream_events() {
-                        match &chunk {
-                            Item::Event(StreamEvent::Text { ref text, .. }) => {
-                                tool_ctx
-                                    .telemetry
-                                    .send_stream_event(
-                                        InteractiveEvent::StreamChunk { text: text.clone() },
-                                        cancel,
-                                        &stream_snapshot,
-                                    )
-                                    .await?;
-                            }
-                            Item::Event(StreamEvent::Reasoning { ref text, .. }) => {
-                                tool_ctx
-                                    .telemetry
-                                    .send_stream_event(
-                                        InteractiveEvent::ReasoningChunk { text: text.clone() },
-                                        cancel,
-                                        &stream_snapshot,
-                                    )
-                                    .await?;
-                            }
-                            Item::Event(StreamEvent::End {
-                                content: AssistantContent::ToolCall(tc),
-                                ..
-                            }) => {
-                                // Emit tool calls as reasoning so they
-                                // appear in the live thought stream.
-                                tool_ctx
-                                    .telemetry
-                                    .send_stream_event(
-                                        InteractiveEvent::ReasoningChunk {
-                                            text: format_tool_call(tc),
-                                        },
-                                        cancel,
-                                        &stream_snapshot,
-                                    )
-                                    .await?;
-                            }
-                            _ => {}
-                        }
-                    }
-                    apply_chunk(
-                        chunk,
-                        &mut text,
-                        &mut reasoning,
-                        &mut reasoning_items,
-                        &mut tool_calls,
-                    );
-                    // Keep the cancellation snapshot current with whatever
-                    // the model has produced so far so the supervisor can
-                    // reconstruct the full partial turn.
-                    while stream_snapshot
-                        .last()
-                        .is_some_and(|m| matches!(m, Message::Assistant { .. }))
-                    {
-                        stream_snapshot.pop();
-                    }
-                    if !text.is_empty() || !reasoning_items.is_empty() || !tool_calls.is_empty() {
-                        stream_snapshot.push(assistant_tool_message(
-                            &text,
-                            &reasoning_items,
-                            &tool_calls,
-                        ));
-                    }
-                }
-            }
-        }
-
-        if paused_mid_stream {
-            // Stream was interrupted by pause — skip post-stream processing.
-            // The turn loop will re-enter at the top and either continue
-            // (if Resumed) or execute one turn (if RunOneTurn).
-            continue;
-        }
-
-        if retry_turn {
-            // Stream was interrupted by a retryable error — re-execute this
-            // same turn. History and next_prompt are untouched (the builder
-            // cloned both), so the retry picks up exactly where it left off.
-            // Preserve the pending one-turn state only when already
-            // interactive — otherwise an unconditional set would force
-            // RunOneTurn after normal resumption.
-            if interactive_active {
-                pending_run_one_turn = true;
-            }
-
-            // Send StreamReset so consumers discard partial text /
-            // reasoning from the failed attempt. Nested loops skip this —
-            // only the parent stream should be reset.
-            if !nested {
-                tool_ctx
-                    .telemetry
-                    .send_stream_event(InteractiveEvent::StreamReset, cancel, &history)
-                    .await?;
-            }
-            continue;
-        }
-
-        if retry_timeout_turn {
-            // Stream was interrupted by an idle timeout — re-execute this
-            // same turn with history intact.
-            continue;
-        }
-
-        if timed_out || stream_error.is_some() {
+        if state.timed_out || state.stream_error.is_some() {
             log::debug!(
-                "stream ended: timed_out={timed_out} stream_error={stream_error:?} turn={turn_num}",
+                "stream ended: timed_out={} stream_error={:?} turn={}",
+                state.timed_out,
+                state.stream_error,
+                state.turn_num,
             );
             break;
         }
         if !ended && tool_calls.is_empty() && text.is_empty() {
-            log::debug!("stream ended: not-ended empty-turn turn={turn_num}",);
+            log::debug!("stream ended: not-ended empty-turn turn={}", state.turn_num);
             break;
         }
 
         log::debug!(
-            "turn complete: turn={turn_num} text_len={} reasoning_len={} tool_calls={} ended={ended}",
+            "turn complete: turn={} text_len={} reasoning_len={} tool_calls={} ended={}",
+            state.turn_num,
             text.len(),
             reasoning.len(),
             tool_calls.len(),
+            ended,
         );
 
-        // Fold this turn's provider usage into the running totals before
-        // building TurnComplete so the per-prompt totals include the
-        // just-completed turn. Keep `turn_stats` None when the provider
-        // reported no usage (or the turn completed without a usage block).
-        // Absent fields stay `None` and are skipped during accumulation; a
-        // reported zero is preserved as `Some(0)`.
-        let turn_stats = turn_stats(turn_num, turn_usage.as_ref());
-        if let Some(ref u) = turn_usage {
-            // Sum two present values, but keep the single `Some` value when
-            // either side is absent. Both sides `None` keeps the total absent.
-            total_prompt_tokens = add_opt(total_prompt_tokens, u.input_tokens);
-            total_completion_tokens = add_opt(total_completion_tokens, u.output_tokens);
-            total_cached_tokens = add_opt(total_cached_tokens, u.cached_input_tokens);
-            total_cache_creation_tokens =
-                add_opt(total_cache_creation_tokens, u.cache_creation_input_tokens);
-            total_reasoning_tokens = add_opt(total_reasoning_tokens, u.reasoning_tokens);
-        }
-        let totals = usage_stats(
-            turn_num + 1,
-            total_prompt_tokens,
-            total_completion_tokens,
-            total_cached_tokens,
-            total_cache_creation_tokens,
-            total_reasoning_tokens,
-        );
+        let turn_stats = turn_stats(state.turn_num, turn_usage.as_ref());
+        let totals = state.fold_turn_usage(turn_usage.as_ref());
 
         // ── Emit cumulative token usage via injected sink ─────
         if let Some(ref id) = gremlin_id {
@@ -1570,240 +2920,52 @@ async fn run_agent_loop_core(
             }
         }
 
-        emit_turn_stats(prefix, turn_num, turn_stats.as_ref(), &totals, log_tx);
+        emit_turn_stats(prefix, state.turn_num, turn_stats.as_ref(), &totals, log_tx);
 
-        // Emit TurnComplete via tool_ctx.telemetry.stream_events, before text/tool_calls
-        // are consumed by the rest of the turn processing. Nested loops skip
-        // this — their child turn numbers restart at 0 and can collide with
-        // the parent's.
-        if !nested && tool_ctx.telemetry.wants_stream_events() {
-            log::debug!("agent_loop: broadcasting TurnComplete (turn={turn_num})");
-            tool_ctx
-                .telemetry
-                .send_stream_event(
-                    InteractiveEvent::TurnComplete {
-                        turn: turn_num,
-                        text: text.clone(),
-                        tool_calls: tool_calls.iter().map(format_tool_call).collect(),
-                        stats: turn_stats.clone(),
-                        totals: Some(totals),
-                    },
-                    cancel,
-                    &history,
-                )
-                .await?;
-        }
+        state
+            .emit_turn_artifacts(
+                tool_ctx,
+                cancel,
+                nested,
+                &text,
+                &reasoning,
+                &tool_calls,
+                turn_stats,
+                &totals,
+                first_token,
+                last_token,
+                turn_start,
+                turn_usage.as_ref(),
+                raw,
+                captured,
+                prefix,
+                log_tx,
+            )
+            .await?;
 
-        if !reasoning.is_empty() {
-            let msg = format!("think: {}", trunc(&reasoning, 200));
-            send_log(log_tx, prefix, &msg);
-        }
-        if !text.is_empty() {
-            let msg = format!("text: {}", trunc(&text, 200));
-            send_log(log_tx, prefix, &msg);
-        }
-        if !nested {
-            if !text.is_empty() {
-                write_raw(raw, &assistant_text_event(&text));
-                if let Some(evts) = captured.as_mut() {
-                    evts.push(assistant_text_event(&text));
-                }
-                final_text = text.clone();
-            }
-        } else {
-            final_text = text.clone();
-        }
+        state.turn_num += 1;
+        state.turn_retries = 0;
+        state.timeout_retries = 0;
 
-        emit_turn_metrics(
-            prefix,
-            turn_num,
-            first_token,
-            last_token,
-            turn_start,
-            &reasoning,
-            &text,
-            &tool_calls,
-            turn_usage.as_ref(),
-            log_tx,
-        );
-
-        turn_num += 1;
-        turn_retries = 0;
-        timeout_retries = 0;
-
-        // ---- completion decision ----
-        // Solo Done is the only valid completion signal. Mixed Done + other
-        // tool calls is incoherent and rejected wholesale so the model retries
-        // cleanly.
-        let has_non_done = tool_calls.iter().any(|tc| tc.function.name != "Done");
-        let done_call = tool_calls.iter().find(|tc| tc.function.name == "Done");
-
-        match (done_call, has_non_done) {
-            (Some(_done_tc), true) => {
-                // Mixed — produce a tool_result for every call so providers
-                // see a valid round of history.
-                history.push(next_prompt);
-                history.push(assistant_tool_message(&text, &reasoning_items, &tool_calls));
-                for tc in &tool_calls {
-                    let body = if tc.function.name == "Done" {
-                        "Error: Done must be called alone — do not combine Done with \
-                         other tool calls in the same message. Re-issue your tool \
-                         calls without Done, then call Done by itself when finished."
-                    } else {
-                        "Skipped: this call was rejected because Done was combined \
-                         with other tool calls in the same message. Re-issue without \
-                         Done."
-                    };
-                    history.push(Message::tool_result(
-                        tc.id.clone(),
-                        tc.function.name.clone(),
-                        body,
-                    ));
-                }
-                next_prompt = Message::user(
-                    "Done was rejected because it was combined with other tool calls. \
-                     Try again — this time either use tools, or call Done. Never both.",
-                );
-                continue;
-            }
-            (Some(done_tc), false) => {
-                // Solo Done — validate expected artifacts before accepting.
-                // Extract the summary up front so it can be logged and recorded
-                // in the action ledger whether the call is accepted or rejected
-                // below (Done never reaches the normal tool-execution path).
-                let done_summary = done_tc
-                    .function
-                    .arguments
-                    .get("summary")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                send_log(
-                    log_tx,
-                    prefix,
-                    &format!("tool: Done {}", trunc(&done_summary, 200)),
-                );
-                if !nested && !expected_artifact_paths.is_empty() {
-                    let missing = missing_artifacts(expected_artifact_paths);
-                    if !missing.is_empty() && reminder_budget > 0 {
-                        reminder_budget -= 1;
-                        let reminder = format!(
-                            "Done rejected: {}\nWrite each file using the Write \
-                             tool, then call Done.",
-                            artifact_reminder(&missing),
-                        );
-                        history.push(next_prompt);
-                        history.push(assistant_tool_message(
-                            &text,
-                            &reasoning_items,
-                            std::slice::from_ref(done_tc),
-                        ));
-                        // Build a single merged user message with both the
-                        // rejection ledger and the Done tool_result so the
-                        // persisted history never produces consecutive User
-                        // messages. Don't push to history here — the
-                        // acceptance path will append next_prompt once.
-                        let rejected_ledger = format!(
-                            "[turn {}]: Done {} (rejected)\n\n{}",
-                            turn_num, done_summary, reminder
-                        );
-                        next_prompt = conversation::done_user_message(
-                            &rejected_ledger,
-                            done_tc.id.clone(),
-                            done_tc.function.name.clone(),
-                            &reminder,
-                        );
-                        continue;
-                    }
-                    // Budget exhausted (or no missing artifacts) — accept
-                    // anyway. Python verify_produced catches missing files.
-                    // Fall through to the normal Done acceptance path below;
-                    // do not push into history here to avoid duplicating
-                    // messages in the persisted artifact.
-                }
-
-                // Accept completion.
-                let result_text = if text.trim().is_empty() && !done_summary.is_empty() {
-                    done_summary.clone()
-                } else {
-                    text.clone()
-                };
-                let usage = usage_stats(
-                    turn_num,
-                    total_prompt_tokens,
-                    total_completion_tokens,
-                    total_cached_tokens,
-                    total_cache_creation_tokens,
-                    total_reasoning_tokens,
-                );
-                if !nested {
-                    emit_final(prefix, turns, "", log_tx);
-                    emit_summary(
-                        prefix,
-                        turn_num,
-                        loop_start,
-                        total_prompt_tokens,
-                        total_completion_tokens,
-                        total_cached_tokens,
-                        total_cache_creation_tokens,
-                        total_reasoning_tokens,
-                        log_tx,
-                    );
-                }
-                // Emit Done via stream_events. Nested loops skip this —
-                // only the parent's Done signals completion.
-                if !nested && tool_ctx.telemetry.wants_stream_events() {
-                    log::debug!("agent_loop: broadcasting Done (turn={turn_num})");
-                    tool_ctx
-                        .telemetry
-                        .send_stream_event(
-                            InteractiveEvent::Done {
-                                text: result_text.clone(),
-                                summary: done_summary.clone(),
-                                usage: Some(usage.clone()),
-                            },
-                            cancel,
-                            &history,
-                        )
-                        .await?;
-                }
-                // Capture the full message history (prior turns + this final
-                // user prompt + assistant message) so the chat gremlin can
-                // persist complete model context between stages.
-                //
-                // Push a tool_result for Done so the next turn's history
-                // starts from a valid round — OpenAI and Anthropic require
-                // every assistant tool-use message be paired with a matching
-                // tool-result message.
-                let mut messages = history.clone();
-                messages.push(next_prompt.clone());
-                messages.push(assistant_tool_message(
-                    &text,
-                    &reasoning_items,
-                    std::slice::from_ref(done_tc),
-                ));
-                // Prepend the action ledger and Done tool_result in a single
-                // User message so the persisted history never produces two
-                // consecutive User messages. Anthropic requires every assistant
-                // tool_use to be immediately followed by a matching tool_result
-                // block; merging the ledger text and the Done tool_result into
-                // one message satisfies that invariant.
-                let done_ledger = format!("[turn {}]: Done {}", turn_num, done_summary);
-                messages.push(conversation::done_user_message(
-                    &done_ledger,
-                    done_tc.id.clone(),
-                    done_tc.function.name.clone(),
-                    "Done accepted.",
-                ));
-                return Ok(completed_run(
-                    Some(result_text),
-                    Some(done_summary),
-                    captured,
-                    usage,
-                    Some(messages),
-                ));
-            }
-            _ => {}
+        match state
+            .handle_done_decision(
+                tool_ctx,
+                cancel,
+                nested,
+                &text,
+                &reasoning_items,
+                &tool_calls,
+                expected_artifact_paths,
+                captured,
+                loop_start,
+                prefix,
+                log_tx,
+            )
+            .await?
+        {
+            DoneDecision::Accepted(run) => return Ok(*run),
+            DoneDecision::RetryNeeded => continue,
+            DoneDecision::NotDone => {}
         }
 
         // Done handled — filter it out before execution.
@@ -1813,448 +2975,68 @@ async fn run_agent_loop_core(
             .collect();
 
         if tool_calls.is_empty() {
-            // In interactive mode, empty turns are expected — the operator is
-            // driving the conversation. Don't nudge or remind.
-            if interactive_active {
-                continue;
-            }
-
-            // Reasoning-only turn — the model is thinking. Just loop.
-            // Record an assistant message carrying the structured reasoning
-            // items so the next request preserves them (and the provider's
-            // ordering invariant) rather than emitting two consecutive user
-            // messages with the reasoning dropped.
-            if text.is_empty() && !reasoning.is_empty() {
-                log::debug!("reasoning-only turn: turn={turn_num} — continuing",);
-                history.push(next_prompt);
-                history.push(assistant_tool_message("", &reasoning_items, &[]));
-                next_prompt = Message::user("Continue.");
-                continue;
-            }
-
-            log::warn!(
-                "empty turn: turn={turn_num} text_empty={} reasoning_empty={} budget={completion_nudge_budget}",
-                text.is_empty(),
-                reasoning.is_empty(),
-            );
-
-            // Missing-artifact reminder (only when the model produced text).
-            if !nested && reminder_budget > 0 && !text.is_empty() {
-                let missing = missing_artifacts(expected_artifact_paths);
-                if !missing.is_empty() {
-                    reminder_budget -= 1;
-                    log::info!(
-                        "reminder: {} missing artifact(s) — nudging agent (remaining_budget={})",
-                        missing.len(),
-                        reminder_budget,
-                    );
-                    history.push(next_prompt);
-                    history.push(assistant_tool_message(&text, &reasoning_items, &[]));
-                    let reminder = artifact_reminder(&missing);
-                    write_raw(
-                        raw,
-                        &serde_json::json!({"type": "reminder", "message": reminder}),
-                    );
-                    if let Some(evts) = captured.as_mut() {
-                        evts.push(serde_json::json!({"type": "reminder", "message": reminder}));
-                    }
-                    next_prompt = Message::user(reminder);
-                    continue;
-                }
-            }
-
-            // Completion nudge — prompt the model to call Done.
-            if !text.is_empty() && completion_nudge_budget > 0 {
-                completion_nudge_budget -= 1;
-                log::info!(
-                    "empty turn — nudging agent (remaining_budget={})",
-                    completion_nudge_budget,
-                );
-                // Record the nudge in raw and captured streams so the
-                // transcript accurately reflects the interaction.
-                let nudge_msg = "You produced text but no tool calls. If your work is complete, \
-                     call the Done tool. If you still need to make changes, use the \
-                     appropriate tool now.";
-                write_raw(
-                    raw,
-                    &serde_json::json!({"type": "reminder", "message": nudge_msg}),
-                );
-                if let Some(evts) = captured.as_mut() {
-                    evts.push(serde_json::json!({"type": "reminder", "message": nudge_msg}));
-                }
-                history.push(next_prompt);
-                history.push(assistant_tool_message(&text, &reasoning_items, &[]));
-                next_prompt = Message::user(nudge_msg.to_string());
-                continue;
-            }
-            // Exhausted — give up.
-            log::warn!(
-                "empty-turn exhausted: turn={turn_num} text_empty={} reasoning_empty={} budget={completion_nudge_budget}",
-                text.is_empty(),
-                reasoning.is_empty(),
-            );
-            let usage = usage_stats(
-                turn_num,
-                total_prompt_tokens,
-                total_completion_tokens,
-                total_cached_tokens,
-                total_cache_creation_tokens,
-                total_reasoning_tokens,
-            );
-            if !nested {
-                emit_final(prefix, turns, " (exhausted)", log_tx);
-                emit_summary(
-                    prefix,
-                    turn_num,
-                    loop_start,
-                    total_prompt_tokens,
-                    total_completion_tokens,
-                    total_cached_tokens,
-                    total_cache_creation_tokens,
-                    total_reasoning_tokens,
-                    log_tx,
-                );
-            }
-            // Capture the full message history (prior turns + this final
-            // user prompt + assistant text) so the chat gremlin persists
-            // complete model context even on the exhausted path.
-            let mut messages = history.clone();
-            messages.push(next_prompt.clone());
-            messages.push(assistant_tool_message(&text, &reasoning_items, &[]));
-            return Ok(completed_run(
-                Some(final_text),
-                None,
+            match state.handle_empty_turn(
+                nested,
+                &text,
+                &reasoning,
+                &reasoning_items,
+                expected_artifact_paths,
+                loop_start,
+                raw,
                 captured,
-                usage,
-                Some(messages),
-            ));
-        }
-
-        let fork_batch = tool_calls
-            .iter()
-            .any(|tc| tc.function.name == "Task" && task_kind_is_fork(&tc.function.arguments));
-        // A Fork child inherits the conversation that led up to this turn,
-        // including the user message being answered. The current assistant
-        // tool-call message is intentionally *not* part of the snapshot:
-        // including it without its still-unknown tool results would leave an
-        // unmatched assistant tool-use in the child's transcript.
-        let fork_parent_history = fork_batch.then(|| {
-            let mut snapshot = history.clone();
-            snapshot.push(next_prompt.clone());
-            snapshot
-        });
-
-        history.push(next_prompt.clone());
-        history.push(assistant_tool_message(&text, &reasoning_items, &tool_calls));
-
-        // Phase 1: emit tool-start events, collect owned data for concurrent execution
-        let mut jobs: Vec<Job> = Vec::new();
-        let mut task_count: usize = 0;
-        for tc in &tool_calls {
-            let args_json =
-                serde_json::to_string(&tc.function.arguments).unwrap_or_else(|_| "{}".into());
-            let tool_msg = format!(
-                "tool: {} {}",
-                tc.function.name,
-                trunc(
-                    &enrich_log_line(&tc.function.name, &tc.function.arguments),
-                    200
-                )
-            );
-            send_log(log_tx, prefix, &tool_msg);
-            if !nested {
-                let id_str = tc.id.to_string();
-                let tool_evt =
-                    tool_use_event(&id_str, tc.function.name.as_str(), &tc.function.arguments);
-                write_raw(raw, &tool_evt);
-                if let Some(evts) = captured.as_mut() {
-                    evts.push(tool_evt);
-                }
-            }
-            jobs.push(Job {
-                id: tc.id.to_string(),
-                name: tc.function.name.to_string(),
-                args: args_json,
-                call: format_tool_call_parts(&tc.function.name, &tc.function.arguments),
-                key: ledger_key_arg(&tc.function.arguments),
-                over_cap: if tc.function.name == "Task" && {
-                    task_count += 1;
-                    task_count > tools::TASK_MAX_PER_TURN
-                } {
-                    Some(format!(
-                        "Error: at most {} Task calls per message",
-                        tools::TASK_MAX_PER_TURN
-                    ))
-                } else {
-                    None
-                },
-            });
-        }
-
-        // Phase 2: concurrent execution with backpressure. A semaphore caps
-        // in-flight tools at MAX_CONCURRENT_TOOLS; excess calls queue rather
-        // than being rejected, preserving result order. The Task-specific cap
-        // (TASK_MAX_PER_TURN) remains a hard rejection in Phase 1 because
-        // each Task spawns a child loop.
-        // Wrapped in a tokio::select! with maybe_pause so the operator can
-        // interrupt a long-running tool batch.
-        let mut ctx = tool_ctx.clone();
-        ctx.parent_history = fork_parent_history;
-        // Forward live tool output only for the duration of this batch. The
-        // receiver is borrowed by the select below, so later batches never
-        // hear stale chunks and Esc/clear cannot resurrect old output.
-        // Capacity is reserved on the chat stream *before* a tool line is
-        // dequeued, so the select dropping this branch at batch completion
-        // can release an unused permit but can never drop an in-flight line.
-        let forward_live_output = async {
-            if let (Some(se), Some(rx)) =
-                (&tool_ctx.telemetry.stream_events, live_output_rx.as_mut())
-            {
-                if se.wants_events() {
-                    loop {
-                        let permit = tokio::select! {
-                            biased;
-                            _ = cancel.cancelled() => break,
-                            permit = se.reserve() => permit,
-                        };
-                        let Some(line) = rx.recv().await else {
-                            break;
-                        };
-                        permit.send(InteractiveEvent::ToolOutputChunk {
-                            id: line.id,
-                            name: line.name,
-                            call: line.call,
-                            text: line.text,
-                        });
-                    }
-                } else {
-                    // Drain the channel so the sender doesn't block when
-                    // the broadcast subscriber has disconnected.
-                    while rx.recv().await.is_some() {}
-                }
-            }
-            // Park forever so this branch never resolves the select; the
-            // sender intentionally outlives an individual tool batch.
-            std::future::pending::<()>().await;
-        };
-        let sem = Arc::new(Semaphore::new(tools::MAX_CONCURRENT_TOOLS));
-        let exec_fut = join_all(jobs.iter().map(|j| {
-            let ctx = &ctx;
-            let sem = sem.clone();
-            async move {
-                if let Some(msg) = &j.over_cap {
-                    msg.clone()
-                } else {
-                    let _permit = sem.acquire_owned().await;
-                    tools::invoke(&j.id, &j.name, ctx, &j.args).await
-                }
-            }
-        }));
-
-        let results = tokio::select! {
-            results = exec_fut => results,
-            _ = forward_live_output => unreachable!("live-output forwarder parks forever"),
-            _ = cancel.cancelled() => {
-                // Esc / cancel_chat during a tool batch: drop the join_all
-                // future (cancelling pending tool futures) and unwind the
-                // turn immediately. This is what lets run_chat_turn::finish
-                // re-insert the chat gremlin without waiting for every tool
-                // to complete.
-                log::info!("agent_loop: cancelled mid-tool (label={})", prefix);
-                send_log(log_tx, prefix, "exit: cancelled mid-tool");
-                discard_tool_output(&mut live_output_rx);
-                return Err(cancelled_error("cancelled", &history));
-            }
-            _ = maybe_pause(&pause) => {
-                // Operator triggered debug mid-tool — drop the join_all future
-                // (cancels pending tool futures). Completed tool side effects
-                // (files written, bash commands run) are not unwound.
-                log::info!("agent_loop: paused mid-tool (label={})", prefix);
-                send_log(log_tx, prefix, "pause: entering interactive mode (mid-tool)");
-                discard_tool_output(&mut live_output_rx);
-                if let Some(ref p) = pause {
-                    p.reset();
-                }
-                log::debug!("agent_loop: entering interactive mode mid-tool (label={})", prefix);
-
-                // Pop the two messages pushed at lines 1005-1006
-                // (next_prompt + assistant_tool_message) so the turn can be
-                // re-executed cleanly without duplicate history entries.
-                history.pop(); // assistant_tool_message
-                history.pop(); // next_prompt
-
-                // Amend system prompt with operator note.
-                let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
-                let amended_system = match &system_prompt {
-                    Some(sp) => format!("{sp}{debug_note}"),
-                    None => debug_note.trim_start().to_string(),
-                };
-                system_prompt = Some(amended_system);
-
-                // Enter interactive mode.
-                if cmd_rx.is_some() && evt_tx.is_some() && pause.is_some() {
-                    let mut session = InteractiveSession {
-                        cmd_rx: cmd_rx.take().unwrap(),
-                        evt_tx: evt_tx.take().unwrap(),
-                        pause: pause.clone().unwrap(),
-                    };
-                    match interactive_loop(
-                        model,
-                        &mut history,
-                        &mut next_prompt,
-                        &mut session,
-                        turn_num,
-                    )
-                    .await
-                    {
-                        Ok(InteractiveLoopResult::Resumed) => {
-                            system_prompt = original_system_prompt.clone();
-                            cmd_rx = Some(session.cmd_rx);
-                            evt_tx = Some(session.evt_tx);
-                            interactive_active = false;
-                            continue; // re-execute the turn from scratch
-                        }
-                        Ok(InteractiveLoopResult::RunOneTurn) => {
-                            cmd_rx = Some(session.cmd_rx);
-                            evt_tx = Some(session.evt_tx);
-                            pending_run_one_turn = true;
-                            continue; // re-execute the turn from scratch
-                        }
-                        Err(e) => {
-                            log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                            send_log(log_tx, prefix, "exit: operator bailed");
-                            return Err(e);
-                        }
-                    }
-                }
-                continue;
-            }
-        };
-
-        // Tools send their final chunks just before returning. The select
-        // above stops at the first completed future, so drain anything still
-        // sitting in the receiver before emitting ToolResult events.
-        if let Some(rx) = live_output_rx.as_mut() {
-            while let Ok(line) = rx.try_recv() {
-                tool_ctx
-                    .telemetry
-                    .send_stream_event(
-                        InteractiveEvent::ToolOutputChunk {
-                            id: line.id,
-                            name: line.name,
-                            call: line.call,
-                            text: line.text,
-                        },
-                        cancel,
-                        &history,
-                    )
-                    .await?;
+                prefix,
+                log_tx,
+            ) {
+                EmptyTurnAction::ContinueLoop => continue,
+                EmptyTurnAction::ReturnRun(run) => return Ok(*run),
             }
         }
 
-        // Phase 3: emit results in order
-        let mut result_msgs = Vec::new();
-        // Collect Write/Edit file paths for deferred invalidation.
-        // Phase 2 runs tools concurrently, so a Write may finish after
-        // a Read of the same file even when it appears first in request
-        // order.  We defer all invalidations until every observation is
-        // recorded, preventing stale content from leaking into [seen].
-        let mut mutation_paths: Vec<String> = Vec::new();
-        for (job, output) in jobs.into_iter().zip(results) {
-            let result_msg = format!("result: {}", trunc(&output, 200));
-            send_log(log_tx, prefix, &result_msg);
-            if !nested {
-                let result_evt = tool_result_event(&job.id, &output);
-                write_raw(raw, &result_evt);
-                if let Some(evts) = captured.as_mut() {
-                    evts.push(result_evt);
-                }
-            }
-            // Emit tool result via stream_events when there is a listener.
-            if tool_ctx.telemetry.wants_stream_events() {
-                // For Read, truncate to a reasonable preview.
-                let display = if job.name == "Read" {
-                    trunc(&output, 500)
-                } else {
-                    trunc(&output, 200)
-                };
-                tool_ctx
-                    .telemetry
-                    .send_stream_event(
-                        InteractiveEvent::ToolResult {
-                            id: format!("{}{}", tool_ctx.id_prefix, job.id),
-                            name: job.name.clone(),
-                            call: job.call.clone(),
-                            output: display,
-                        },
-                        cancel,
-                        &history,
-                    )
-                    .await?;
-            }
-            if tools::result_status(&output) == "ok" {
-                tool_ledger.record(&job.name, &job.key, &output, &job.args, turn_num);
-                // Collect Write/Edit paths for deferred invalidation.
-                // See Comment 1: Phase 2 executes concurrently, so a
-                // Write that appears first in request order may finish
-                // after a Read of the same file.  Invalidating inline
-                // would let the later-recorded Read reintroduce stale
-                // content.  We batch invalidations after all observations.
-                if job.name == "Write" || job.name == "Edit" {
-                    let args_val: serde_json::Value =
-                        serde_json::from_str(&job.args).unwrap_or(serde_json::Value::Null);
-                    if let Some(fp) = args_val.get("file_path").and_then(|v| v.as_str()) {
-                        mutation_paths.push(fp.to_string());
-                    }
-                }
-            }
-            result_msgs.push(Message::tool_result(
-                CallId::from_wire(job.id.clone()),
-                ToolName::new(job.name.clone()).expect("tool name must not be empty"),
-                output,
-            ));
-        }
-        // Apply deferred invalidations now that all observations
-        // for this turn are recorded.
-        for fp in &mutation_paths {
-            tool_ledger.invalidate_after_write(fp);
-        }
-        turns += tool_calls.len();
-        // Every tool result lands in history so the results stay adjacent to the
-        // assistant tool_calls message; the ledger becomes the next turn's prompt,
-        // trailing the complete result block instead of splitting it.
-        history.extend(result_msgs);
-        next_prompt = Message::user(tool_ledger.format(turn_num));
-        turn_scratchpad_injected = false;
-        remaining_turns -= 1;
+        state.commit_turn_to_history(&text, &reasoning_items, &tool_calls);
+
+        state
+            .execute_tools(
+                &tool_calls,
+                tool_ctx,
+                model,
+                prefix,
+                log_tx,
+                &token_usage_sink,
+                cancel,
+                gremlin_id.as_deref(),
+                raw,
+                captured,
+                nested,
+            )
+            .await?;
     }
 
     if !nested {
-        let suffix = if timed_out {
+        let suffix = if state.timed_out {
             " (timeout)"
-        } else if stream_error.is_some() {
+        } else if state.stream_error.is_some() {
             " (stream-error)"
         } else {
             ""
         };
-        emit_final(prefix, turns, suffix, log_tx);
+        emit_final(prefix, state.turns, suffix, log_tx);
         emit_summary(
             prefix,
-            turn_num,
+            state.turn_num,
             loop_start,
-            total_prompt_tokens,
-            total_completion_tokens,
-            total_cached_tokens,
-            total_cache_creation_tokens,
-            total_reasoning_tokens,
+            state.total_prompt_tokens,
+            state.total_completion_tokens,
+            state.total_cached_tokens,
+            state.total_cache_creation_tokens,
+            state.total_reasoning_tokens,
             log_tx,
         );
     }
 
-    if timed_out {
+    if state.timed_out {
         log::info!("agent_loop: exit (stream idle timeout, label={})", prefix);
         send_log(log_tx, prefix, "exit: stream idle timeout");
-        if exhausted_timeout_retries {
+        if state.exhausted_timeout_retries {
             log::error!(
                 "agent_loop: exhausted turn-level timeout retries, giving up (label={})",
                 prefix
@@ -2268,10 +3050,10 @@ async fn run_agent_loop_core(
             message: "stream idle timeout".into(),
         });
     }
-    if let Some(err) = stream_error {
+    if let Some(err) = state.stream_error {
         log::info!("agent_loop: exit (stream error, label={})", prefix);
         send_log(log_tx, prefix, "exit: stream error");
-        if exhausted_turn_retries {
+        if state.exhausted_turn_retries {
             log::error!(
                 "agent_loop: exhausted turn-level retries ({} attempts), giving up (label={}): {err}",
                 turn_retry_backoff.len() + 1,
@@ -2297,349 +3079,6 @@ async fn run_agent_loop_core(
     Err(ClientError::Runtime {
         message: format!("exceeded max turns ({max_turns})"),
     })
-}
-
-pub(crate) fn apply_chunk(
-    chunk: Item<StreamEvent>,
-    text: &mut String,
-    reasoning: &mut String,
-    reasoning_items: &mut Vec<Sealed<Reasoning>>,
-    tool_calls: &mut Vec<ToolCall>,
-) {
-    match chunk {
-        Item::Event(StreamEvent::End { content, .. }) => match content {
-            AssistantContent::Text(t) => text.push_str(&t.text),
-            AssistantContent::ToolCall(tc) => tool_calls.push(tc),
-            AssistantContent::Reasoning(sealed) => reasoning_items.push(sealed),
-            _ => {}
-        },
-        Item::Event(StreamEvent::Reasoning { text: r, .. }) => reasoning.push_str(&r),
-        _ => {}
-    }
-}
-
-/// Format a tool call for human display — name plus the key argument.
-pub(crate) fn format_tool_call(tc: &ToolCall) -> String {
-    format_tool_call_parts(&tc.function.name, &tc.function.arguments)
-}
-
-/// Format a tool call from its already-parsed name and arguments.
-///
-/// This is the single formatting routine shared by the FIFO tool-event path
-/// and the live-output forwarder so both always render the same string.
-pub(crate) fn format_tool_call_parts(name: &str, args: &serde_json::Value) -> String {
-    // Extract the primary argument for common tools.
-    let detail: Option<String> = match name {
-        "Bash" => args
-            .get("command")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("command={s:?}")),
-        "Read" => args
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("file_path={s:?}")),
-        "Write" => args
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("file_path={s:?}")),
-        "Edit" => args
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("file_path={s:?}")),
-        "Glob" => args
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("pattern={s:?}")),
-        "Grep" => args
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("pattern={s:?}")),
-        "WebSearch" => args
-            .get("url")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("url={s:?}")),
-        "Landscape" => {
-            let depth = args
-                .get("depth")
-                .and_then(|v| v.as_u64())
-                .map(|d| format!("depth={d}"));
-            let path = args
-                .get("file_path")
-                .and_then(|v| v.as_str())
-                .map(|s| format!("file_path={s:?}"));
-            match (path, depth) {
-                (Some(p), Some(d)) => Some(format!("{p}, {d}")),
-                (Some(p), None) => Some(p),
-                _ => None,
-            }
-        }
-        "Done" => args
-            .get("summary")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("summary={:?}", trunc(s, 120))),
-        "Task" => args
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("kind={s:?}")),
-        _ => None,
-    };
-
-    // Collect secondary parameters for Read and Grep.
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(d) = detail {
-        parts.push(d);
-    }
-    if name == "Read" || name == "Grep" {
-        parts.extend(tool_secondary_args_with(name, args, Some(TITLE_VALUE_CAP)));
-    }
-
-    if parts.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name}({})", parts.join(", "))
-    }
-}
-
-pub(crate) fn assistant_tool_message(
-    text: &str,
-    reasoning_items: &[Sealed<Reasoning>],
-    tool_calls: &[ToolCall],
-) -> Message {
-    // Reasoning items are emitted before text and tool calls deliberately.
-    // This mirrors rig's own canonical ordering (`ordered_assistant_content` /
-    // `canonical_streamed_choice`), which regroups a streamed choice as
-    // reasoning -> text -> tool calls, preserving order *within* each group.
-    // The OpenAI Responses encoder (`input_items`) additionally resorts
-    // reasoning items ahead of all other items regardless of their stored
-    // positions, so a reasoning item's ordinal relative to a later text or
-    // tool-call item never affects the wire. The invariants that actually
-    // matter are (a) the structured reasoning item survives with its provider
-    // id and issuer intact — so `open_for`/`openai_reasoning_from_core` re-serialize
-    // it instead of dropping it — and (b) it precedes the `function_call` that
-    // references it so the latter is not orphaned.
-    let mut contents = Vec::new();
-    contents.extend(
-        reasoning_items
-            .iter()
-            .cloned()
-            .map(AssistantContent::Reasoning),
-    );
-    if !text.is_empty() {
-        contents.push(AssistantContent::text(text.to_string()));
-    }
-    for tc in tool_calls {
-        contents.push(AssistantContent::ToolCall(tc.clone()));
-    }
-    if contents.is_empty() {
-        contents.push(AssistantContent::text(String::new()));
-    }
-    Message::Assistant {
-        id: None,
-        content: contents,
-    }
-}
-
-pub(crate) fn key_arg(args: &serde_json::Value) -> String {
-    if let Some(obj) = args.as_object() {
-        for k in ["file_path", "command", "pattern", "summary", "url", "kind"] {
-            if let Some(v) = obj.get(k).and_then(|v| v.as_str()) {
-                if !v.is_empty() {
-                    return v.to_string();
-                }
-            }
-        }
-    }
-    String::new()
-}
-
-/// Upper bound for long string values in TUI tool-call titles.
-///
-/// Log lines apply their own 200-char budget in `enrich_log_line`, so this cap
-/// is a display-only concern for the comparatively narrow tool-slot titles.
-const TITLE_VALUE_CAP: usize = 120;
-
-/// Collect non-empty secondary parameters for a tool invocation, without
-/// display truncation.
-///
-/// Returns ordered `key=value` strings for parameters beyond the primary
-/// argument that help operators understand the tool invocation at a glance.
-/// Absent, zero, or empty values are omitted. Callers that need a display cap
-/// (such as TUI titles) should use [`tool_secondary_args_with`] instead.
-fn tool_secondary_args(name: &str, args: &serde_json::Value) -> Vec<String> {
-    tool_secondary_args_with(name, args, None)
-}
-
-/// Collect non-empty secondary parameters for a tool invocation.
-///
-/// When `string_value_cap` is `Some(n)`, string values longer than `n`
-/// characters are truncated with [`trunc`] before being debug-quoted. This is
-/// used for compact TUI titles; logging passes `None` and applies its own
-/// whole-line budget afterward.
-fn tool_secondary_args_with(
-    name: &str,
-    args: &serde_json::Value,
-    string_value_cap: Option<usize>,
-) -> Vec<String> {
-    let mut extras = Vec::new();
-
-    let string_arg = |value: &str| match string_value_cap {
-        Some(cap) => format!("{:?}", trunc(value, cap)),
-        None => format!("{value:?}"),
-    };
-
-    match name {
-        "Read" => {
-            if let Some(v) = args
-                .get("offset")
-                .and_then(|v| v.as_u64())
-                .filter(|v| *v > 0)
-            {
-                extras.push(format!("offset={v}"));
-            }
-            if let Some(v) = args
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .filter(|v| *v > 0)
-            {
-                extras.push(format!("limit={v}"));
-            }
-        }
-        "Bash" | "WebSearch" => {
-            if let Some(v) = args
-                .get("timeout")
-                .and_then(|v| v.as_u64())
-                .filter(|v| *v > 0)
-            {
-                extras.push(format!("timeout={v}"));
-            }
-        }
-        "Grep" => {
-            if let Some(v) = args
-                .get("max_matches")
-                .and_then(|v| v.as_u64())
-                .filter(|v| *v > 0)
-            {
-                extras.push(format!("max_matches={v}"));
-            }
-            if let Some(v) = args
-                .get("glob")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                extras.push(format!("glob={}", string_arg(v)));
-            }
-            if let Some(v) = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                extras.push(format!("path={}", string_arg(v)));
-            }
-            if let Some(v) = args
-                .get("context_before")
-                .and_then(|v| v.as_u64())
-                .filter(|v| *v > 0)
-            {
-                extras.push(format!("context_before={v}"));
-            }
-            if let Some(v) = args
-                .get("context_after")
-                .and_then(|v| v.as_u64())
-                .filter(|v| *v > 0)
-            {
-                extras.push(format!("context_after={v}"));
-            }
-        }
-        "Glob" => {
-            if let Some(v) = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                extras.push(format!("path={}", string_arg(v)));
-            }
-        }
-        _ => {}
-    }
-
-    extras
-}
-
-/// Enrich the log line with secondary arguments beyond what `key_arg` returns.
-///
-/// `key_arg` picks a single primary key; this function appends any additional
-/// parameters that help operators understand the tool invocation at a glance.
-fn enrich_log_line(name: &str, args: &serde_json::Value) -> String {
-    let primary = key_arg(args);
-    let extras = tool_secondary_args(name, args);
-
-    if extras.is_empty() {
-        return primary;
-    }
-
-    let suffix = extras.join(" ");
-
-    // The rendered line is `"{primary:?} {suffix}"`. Debug-quoting adds a `"`
-    // at each end (2 chars) and `trunc()` appends `...` (3 chars) whenever it
-    // cuts, so the primary must be budgeted against the suffix length plus
-    // both of those markers — otherwise the outer `trunc(..., 200)` masks the
-    // secondary arguments this helper exists to surface.
-    const CAP: usize = 200;
-    const SPACE: usize = 1;
-    const QUOTE_OVERHEAD: usize = 2; // opening and closing " from :?
-    const TRUNC_MARKER: usize = 3; // "..." appended by trunc() when it cuts
-
-    let suffix_len = suffix.len();
-
-    if suffix_len + SPACE + QUOTE_OVERHEAD >= CAP {
-        // The suffix alone fills the budget — render it behind a quoted "..."
-        // placeholder and truncate so the whole line still fits within CAP.
-        let max_suffix = CAP.saturating_sub(QUOTE_OVERHEAD + TRUNC_MARKER + SPACE + TRUNC_MARKER);
-        let suffix = trunc(&suffix, max_suffix);
-        return format!("\"...\" {}", suffix);
-    }
-
-    let max_primary = CAP - suffix_len - SPACE - QUOTE_OVERHEAD - TRUNC_MARKER;
-    let primary = trunc(&primary, max_primary);
-    format!("{primary:?} {suffix}")
-}
-
-/// Compact label for a tool call in the per-turn action ledger.
-pub(crate) fn ledger_key_arg(args: &serde_json::Value) -> String {
-    if let Some(obj) = args.as_object() {
-        for k in [
-            "file_path",
-            "command",
-            "pattern",
-            "summary",
-            "path",
-            "kind",
-            "url",
-        ] {
-            if let Some(v) = obj.get(k).and_then(|v| v.as_str()) {
-                if !v.is_empty() {
-                    return truncate_ledger_value(v);
-                }
-            }
-        }
-    }
-    String::new()
-}
-
-fn truncate_ledger_value(v: &str) -> String {
-    const MAX: usize = 80;
-    // Collapse embedded line breaks so one action is always one ledger line.
-    let v: String = v
-        .chars()
-        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-        .collect();
-    let chars: Vec<char> = v.chars().collect();
-    if chars.len() <= MAX {
-        return v;
-    }
-    let head: String = chars[..40].iter().collect();
-    let tail: String = chars[chars.len() - 39..].iter().collect();
-    format!("{head}…{tail}")
 }
 
 pub(crate) fn assistant_text_event(text: &str) -> serde_json::Value {
@@ -2847,318 +3286,17 @@ pub(crate) fn emit_final(
     send_log(log_tx, prefix, &msg);
 }
 
-// ── Accumulated tool-history ledger ──────────────────────────────
-// Tracks every Read, Grep, Write, and Landscape call across all
-// turns of this stage so the model can see what it has already done
-// and avoid redundant re-reads. In-memory only; never persisted.
-
-#[derive(Clone)]
-struct LedgerReadEntry {
-    last_age: usize,
-    count: usize,
-    content_hash: u64,
-    seq: usize,
-}
-
-#[derive(Clone)]
-struct LedgerGrepEntry {
-    last_age: usize,
-    count: usize,
-    content_hash: u64,
-    seq: usize,
-}
-
-#[derive(Clone)]
-struct LedgerWriteEntry {
-    age: usize,
-    seq: usize,
-}
-
-struct ToolLedger {
-    /// Key: (file_path, offset, limit).  Offset and limit are zero when
-    /// the model reads the whole file.
-    reads: std::collections::HashMap<(String, u64, u64), LedgerReadEntry>,
-    /// Key: (pattern, path).  Path is empty string when not specified.
-    greps: std::collections::HashMap<(String, String), LedgerGrepEntry>,
-    /// Key: file_path.
-    writes: std::collections::HashMap<String, LedgerWriteEntry>,
-    /// Single landscape entry: (age, seq).
-    landscape: Option<(usize, usize)>,
-    /// Monotonic counter so we can sort entries by first-access order.
-    seq: usize,
-}
-
-impl ToolLedger {
-    fn new() -> Self {
-        Self {
-            reads: std::collections::HashMap::new(),
-            greps: std::collections::HashMap::new(),
-            writes: std::collections::HashMap::new(),
-            landscape: None,
-            seq: 0,
-        }
-    }
-
-    /// Hash a string with DefaultHasher (fast, non-cryptographic).
-    fn hash(s: &str) -> u64 {
-        let mut h = DefaultHasher::new();
-        s.hash(&mut h);
-        h.finish()
-    }
-
-    /// Parse a u64 from a JSON value, defaulting to 0.
-    fn parse_u64(args: &serde_json::Value, key: &str) -> u64 {
-        args.get(key).and_then(|v| v.as_u64()).unwrap_or(0)
-    }
-
-    fn parse_str<'a>(args: &'a serde_json::Value, key: &str) -> &'a str {
-        args.get(key).and_then(|v| v.as_str()).unwrap_or("")
-    }
-
-    /// Record a tool execution.  Write/Edit do NOT invalidate here;
-    /// caller must call `invalidate_after_write` after all observations
-    /// for the turn are recorded (see Comment 1 — Phase 2 concurrency).
-    fn record(&mut self, name: &str, _key: &str, output: &str, args_json: &str, turn_num: usize) {
-        let args: serde_json::Value =
-            serde_json::from_str(args_json).unwrap_or(serde_json::Value::Null);
-
-        match name {
-            "Read" => {
-                let file_path = Self::parse_str(&args, "file_path").to_string();
-                let offset = Self::parse_u64(&args, "offset");
-                let limit = Self::parse_u64(&args, "limit");
-                let content_hash = Self::hash(output);
-                let age = turn_num;
-                self.seq += 1;
-                let seq = self.seq;
-
-                let entry_key = (file_path, offset, limit);
-                if let Some(existing) = self.reads.get_mut(&entry_key) {
-                    if existing.content_hash == content_hash {
-                        existing.count += 1;
-                        existing.last_age = age;
-                    } else {
-                        // Content changed — replace the entry.
-                        existing.count = 1;
-                        existing.last_age = age;
-                        existing.content_hash = content_hash;
-                        existing.seq = seq;
-                    }
-                } else {
-                    self.reads.insert(
-                        entry_key,
-                        LedgerReadEntry {
-                            last_age: age,
-                            count: 1,
-                            content_hash,
-                            seq,
-                        },
-                    );
-                }
-            }
-            "Grep" => {
-                let pattern = Self::parse_str(&args, "pattern").to_string();
-                let path = Self::parse_str(&args, "path").to_string();
-                let content_hash = Self::hash(output);
-                let age = turn_num;
-                self.seq += 1;
-                let seq = self.seq;
-
-                let entry_key = (pattern, path);
-                if let Some(existing) = self.greps.get_mut(&entry_key) {
-                    if existing.content_hash == content_hash {
-                        existing.count += 1;
-                        existing.last_age = age;
-                    } else {
-                        // Content changed — replace the entry.
-                        existing.count = 1;
-                        existing.last_age = age;
-                        existing.content_hash = content_hash;
-                        existing.seq = seq;
-                    }
-                } else {
-                    self.greps.insert(
-                        entry_key,
-                        LedgerGrepEntry {
-                            last_age: age,
-                            count: 1,
-                            content_hash,
-                            seq,
-                        },
-                    );
-                }
-            }
-            "Write" => {
-                let file_path = Self::parse_str(&args, "file_path").to_string();
-                let age = turn_num;
-                self.seq += 1;
-                let seq = self.seq;
-                self.writes.insert(file_path, LedgerWriteEntry { age, seq });
-                // Invalidation deferred — caller applies after recording
-                // all observations for the turn.
-            }
-            "Edit" => {
-                // Edit is not tracked per plan.  Invalidation is deferred;
-                // caller collects the file_path and applies after the batch.
-            }
-            "Landscape" => {
-                let age = turn_num;
-                self.seq += 1;
-                let seq = self.seq;
-                self.landscape = Some((age, seq));
-            }
-            _ => {
-                // Bash, Task, Done, Glob, WebSearch, Mischief — not tracked.
-            }
-        }
-    }
-
-    /// Apply write/edit invalidation for a file path.  Nukes Read entries
-    /// for that file, all Greps, and Landscape (they may be stale after a
-    /// write).  Called **after** all observations for a turn are recorded
-    /// so concurrent Read-then-Write batches don't reintroduce stale content.
-    fn invalidate_after_write(&mut self, file_path: &str) {
-        self.reads.retain(|(fp, _, _), _| fp != file_path);
-        self.greps.clear();
-        self.landscape = None;
-    }
-
-    /// Format the accumulated ledger as a compact index.
-    fn format(&self, turn_num: usize) -> String {
-        let age_of = |stored: usize| -> usize { turn_num.saturating_sub(stored) };
-
-        // Build items: (first_seq, display_line) for interleaved output.
-        let mut items: Vec<(usize, String)> = Vec::new();
-
-        // Group reads and writes by file path with first-access seq.
-        let mut file_seqs: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        let mut file_entries: std::collections::HashMap<String, Vec<(&LedgerReadEntry, u64, u64)>> =
-            std::collections::HashMap::new();
-
-        for ((fp, offset, limit), entry) in &self.reads {
-            file_seqs
-                .entry(fp.clone())
-                .and_modify(|s| *s = (*s).min(entry.seq))
-                .or_insert(entry.seq);
-            file_entries
-                .entry(fp.clone())
-                .or_default()
-                .push((entry, *offset, *limit));
-        }
-        for (fp, entry) in &self.writes {
-            file_seqs
-                .entry(fp.clone())
-                .and_modify(|s| *s = (*s).min(entry.seq))
-                .or_insert(entry.seq);
-        }
-
-        let mut keys: Vec<&String> = file_seqs.keys().collect();
-        keys.sort_by_key(|fp| file_seqs[*fp]);
-
-        for fp in &keys {
-            let has_write = self.writes.contains_key(*fp);
-            let write_age = self.writes.get(*fp).map(|e| age_of(e.age));
-            let display_fp = truncate_ledger_value(fp);
-
-            let mut full_count: usize = 0;
-            let mut full_age: usize = usize::MAX;
-            let mut partials: Vec<(u64, u64, usize, usize)> = Vec::new();
-
-            if let Some(entries) = file_entries.get(*fp) {
-                let mut sorted: Vec<_> = entries.iter().collect();
-                sorted.sort_by_key(|(e, _, _)| e.seq);
-                for (entry, offset, limit) in sorted {
-                    let age = age_of(entry.last_age);
-                    if *offset == 0 && *limit == 0 {
-                        full_count += entry.count;
-                        full_age = full_age.min(age);
-                    } else {
-                        partials.push((*offset, *limit, age, entry.count));
-                    }
-                }
-            }
-
-            let mut line = String::new();
-            if full_count > 0 {
-                line.push_str(&format!("{} R({}t", display_fp, full_age));
-                if full_count > 1 {
-                    line.push_str(&format!(",{}×", full_count));
-                }
-                for (offset, limit, age, count) in &partials {
-                    line.push_str(&format!(".{}-{}:{}t", offset, limit, age));
-                    if *count > 1 {
-                        line.push_str(&format!(",{}×", count));
-                    }
-                }
-                line.push(')');
-            } else if !partials.is_empty() {
-                // Only partial reads — no full-file read.  Emit a
-                // headline with the earliest age but omit the aggregate
-                // count (summing across different windows is misleading).
-                let min_age = partials.iter().map(|(_, _, a, _)| *a).min().unwrap();
-                line.push_str(&format!("{} R({}t", display_fp, min_age));
-                for (offset, limit, age, count) in &partials {
-                    line.push_str(&format!(".{}-{}:{}t", offset, limit, age));
-                    if *count > 1 {
-                        line.push_str(&format!(",{}×", count));
-                    }
-                }
-                line.push(')');
-            }
-
-            if has_write {
-                if line.is_empty() {
-                    line.push_str(&display_fp);
-                    line.push(' ');
-                } else {
-                    line.push(' ');
-                }
-                line.push_str(&format!("W({}t)", write_age.unwrap()));
-            }
-
-            if !line.is_empty() {
-                items.push((file_seqs[*fp], line));
-            }
-        }
-
-        // Grep entries.
-        for ((pattern, _path), entry) in &self.greps {
-            let age = age_of(entry.last_age);
-            let display_pattern = truncate_ledger_value(pattern);
-            let mut line = format!("\"{}\" G({}t", display_pattern, age);
-            if entry.count > 1 {
-                line.push_str(&format!(",{}×", entry.count));
-            }
-            line.push(')');
-            items.push((entry.seq, line));
-        }
-
-        // Landscape entry.
-        if let Some((age, seq)) = self.landscape {
-            items.push((seq, format!("L({}t)", age_of(age))));
-        }
-
-        items.sort_by_key(|(se, _)| *se);
-        let lines: Vec<String> = items.into_iter().map(|(_, l)| l).collect();
-
-        if lines.is_empty() {
-            "[seen]\n(none)".to_string()
-        } else {
-            format!("[seen]\n{}", lines.join("\n"))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clients::format::{key_arg, ledger_key_arg};
     use crate::clients::interactive::InteractiveChannels;
     use http::StatusCode;
     use rig_core::driver::DynModel;
     use rig_core::message::{Issuer, Reasoning, ReasoningContent, ToolFunction, UserContent};
     use rig_core::operation::Completion;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::broadcast::error::RecvError;
 
     fn gm(model: DynModel<Completion>) -> GremlinsModel {
@@ -3953,7 +4091,8 @@ mod tests {
                 stream_events: None,
                 prepopulated_messages: None,
                 compaction_opts: None,
-                discovered_skills: None,
+                skills_available: false,
+                compactor: None,
                 active_skills: None,
                 token_usage_sink: TokenUsageSink(None),
                 scratchpad_path: None,
@@ -4012,19 +4151,21 @@ mod tests {
     #[test]
     fn build_request_messages_compacts_mid_turn_with_sticky_prefix() {
         let mut history = padded_history(6, 3_000);
-        let full_len = conversation::token_len(&history);
-        let opts = conversation::CompactionOpts {
+        let full_len = compaction::token_len(&history);
+        let opts = CompactionOpts {
             threshold_tokens: full_len as u64 - 1,
             target_tokens: full_len as u64 / 2,
         };
 
         let mut compacted = None;
-        let first = build_request_messages(&history, &mut compacted, 0, Some(opts), 0, 0);
+        let compactor: Arc<dyn crate::clients::compaction::Compactor> =
+            Arc::new(crate::executor::conversation::ConversationCompactor);
+        let first = build_request_messages(&history, &mut compacted, 0, Some(opts), Some(compactor.clone()), 0, 0);
         assert!(
             compacted.is_some(),
             "an over-threshold multi-round turn must compact"
         );
-        assert!(conversation::token_len(&first) < full_len);
+        assert!(compaction::token_len(&first) < full_len);
 
         let prefix_before = compacted.as_ref().unwrap().prefix.clone();
         let cut_before = compacted.as_ref().unwrap().cut;
@@ -4035,7 +4176,8 @@ mod tests {
         for round in 0..5 {
             history.push(assistant_tool_message("small", &[], &[]));
             history.push(Message::user(format!("[turn {}]: small {round}", round)));
-            let request = build_request_messages(&history, &mut compacted, 0, Some(opts), 0, 0);
+            let request =
+                build_request_messages(&history, &mut compacted, 0, Some(opts), Some(compactor.clone()), 0, 0);
             assert!(compacted.is_some());
             assert_eq!(compacted.as_ref().unwrap().prefix, prefix_before);
             assert_eq!(compacted.as_ref().unwrap().cut, cut_before);
@@ -4048,16 +4190,18 @@ mod tests {
     #[test]
     fn build_request_messages_runs_two_passes_and_keeps_earlier_facts() {
         let mut history = bash_history(6, 2_000);
-        let full_len = conversation::token_len(&history);
-        let opts = conversation::CompactionOpts {
+        let full_len = compaction::token_len(&history);
+        let opts = CompactionOpts {
             threshold_tokens: full_len as u64 - 1,
             target_tokens: full_len as u64 / 2,
         };
 
         let mut compacted = None;
-        let first = build_request_messages(&history, &mut compacted, 0, Some(opts), 0, 0);
+        let compactor: Arc<dyn crate::clients::compaction::Compactor> =
+            Arc::new(crate::executor::conversation::ConversationCompactor);
+        let first = build_request_messages(&history, &mut compacted, 0, Some(opts), Some(compactor.clone()), 0, 0);
         assert!(compacted.is_some(), "first pass must compact");
-        assert!(conversation::token_len(&first) < full_len);
+        assert!(compaction::token_len(&first) < full_len);
         let first_cut = compacted.as_ref().unwrap().cut;
         let first_prefix = compacted.as_ref().unwrap().prefix.clone();
         assert!(user_message_text(&first_prefix[0]).contains("Bash: cargo check 0"));
@@ -4085,7 +4229,7 @@ mod tests {
             )));
         }
 
-        let second = build_request_messages(&history, &mut compacted, 0, Some(opts), 0, 0);
+        let second = build_request_messages(&history, &mut compacted, 0, Some(opts), Some(compactor.clone()), 0, 0);
         let fresh = compacted
             .as_ref()
             .expect("a second compaction pass must be cached");
@@ -4093,7 +4237,7 @@ mod tests {
             fresh.cut != first_cut || fresh.prefix != first_prefix,
             "the second over-threshold pass must choose a new sticky prefix"
         );
-        assert!(conversation::token_len(&second) < conversation::token_len(&history));
+        assert!(compaction::token_len(&second) < compaction::token_len(&history));
 
         let memory = user_message_text(&fresh.prefix[0]);
         assert!(
@@ -4110,7 +4254,7 @@ mod tests {
     fn build_request_messages_uses_verbatim_history_without_opts() {
         let history = padded_history(3, 1_000);
         let mut compacted = None;
-        let request = build_request_messages(&history, &mut compacted, 0, None, 0, 0);
+        let request = build_request_messages(&history, &mut compacted, 0, None, None, 0, 0);
         assert_eq!(request, history);
         assert!(compacted.is_none());
     }
@@ -4118,14 +4262,16 @@ mod tests {
     #[test]
     fn build_request_messages_resets_cached_cut_after_history_pop() {
         let mut history = padded_history(6, 3_000);
-        let full_len = conversation::token_len(&history);
-        let opts = conversation::CompactionOpts {
+        let full_len = compaction::token_len(&history);
+        let opts = CompactionOpts {
             threshold_tokens: full_len as u64 - 1,
             target_tokens: full_len as u64 / 2,
         };
 
         let mut compacted = None;
-        let _ = build_request_messages(&history, &mut compacted, 0, Some(opts), 0, 0);
+        let compactor: Arc<dyn crate::clients::compaction::Compactor> =
+            Arc::new(crate::executor::conversation::ConversationCompactor);
+        let _ = build_request_messages(&history, &mut compacted, 0, Some(opts), Some(compactor.clone()), 0, 0);
         assert!(compacted.is_some());
 
         // Simulate a mid-tool pause re-run popping messages back below the cut.
@@ -4134,7 +4280,7 @@ mod tests {
         }
         history.pop();
 
-        let request = build_request_messages(&history, &mut compacted, 0, Some(opts), 0, 0);
+        let request = build_request_messages(&history, &mut compacted, 0, Some(opts), Some(compactor.clone()), 0, 0);
         assert!(
             compacted.is_none() || compacted.as_ref().is_some_and(|c| c.cut <= history.len()),
             "a stale cached cut must not survive a history pop"
@@ -4171,13 +4317,15 @@ mod tests {
         ];
 
         // Aggressive compaction: force compaction on tiny histories.
-        let opts = conversation::CompactionOpts {
+        let opts = CompactionOpts {
             threshold_tokens: 10,
             target_tokens: 10,
         };
 
         let mut compacted = None;
-        let request = build_request_messages(&history, &mut compacted, 0, Some(opts), 0, 0);
+        let compactor: Arc<dyn crate::clients::compaction::Compactor> =
+            Arc::new(crate::executor::conversation::ConversationCompactor);
+        let request = build_request_messages(&history, &mut compacted, 0, Some(opts), Some(compactor), 0, 0);
 
         let has_scratchpad = request
             .iter()
@@ -6955,7 +7103,7 @@ mod tests {
                 tool_output: None,
             },
             active_skills: None,
-            discovered_skills: None,
+            skills_available: false,
         }
     }
 
@@ -7016,6 +7164,7 @@ mod tests {
                 None,
                 TokenUsageSink(None),
                 Some(session),
+                None,
                 None,
                 None,
                 None,
@@ -7137,6 +7286,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -7240,6 +7390,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -7327,6 +7478,7 @@ mod tests {
                 None,
                 TokenUsageSink(None),
                 Some(session),
+                None,
                 None,
                 None,
                 None,
@@ -7495,6 +7647,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -7576,6 +7729,7 @@ mod tests {
             &None,
             None,
             TokenUsageSink(None),
+            None,
             None,
             None,
             None,
