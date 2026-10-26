@@ -1,0 +1,39 @@
+{
+  "required-prompt": true,
+  stages: [
+    {
+      name: "plan",
+      type: "sequence",
+      skip_if_exists: "artifact://plan.md",
+      body: [
+        {
+          type: "agent",
+          prompt: ["{{prompt}}"],
+          interpolation: {
+            inputs: {
+              instructions: "artifact://instructions.md?",
+            },
+            outputs: {
+              plan: "artifact://plan.md",
+            },
+          },
+          options: {
+            idle_timeout: 600,
+          },
+        },
+      ],
+    },
+    {
+      name: "set-description",
+      type: "exec",
+      interpolation: {
+        outputs: {
+          "description?": "artifact://description.txt",
+        },
+      },
+      options: {
+        cmds: ['head -1 "{plan}" | sed \'s/^#\\+ *//\' > "{description}"'],
+      },
+    },
+  ],
+}

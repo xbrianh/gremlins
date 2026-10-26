@@ -4602,7 +4602,7 @@ mod tests {
         };
         let out = invoke("tool-test-id", "Mischief", &c, "{}").await;
         assert!(
-            out.starts_with("# Gremlins YAML DSL Reference"),
+            out.starts_with("# Gremlins JSON5 DSL Reference"),
             "chat Mischief must succeed, got: {out}"
         );
     }

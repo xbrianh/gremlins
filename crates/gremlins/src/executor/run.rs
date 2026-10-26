@@ -1534,7 +1534,7 @@ mod tests {
                 stages,
                 land,
                 vec![],
-                serde_yaml::Value::Null,
+                serde_json::Value::Null,
                 None,
             )),
             definition_path: None,
@@ -2557,19 +2557,13 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn create_then_run_end_to_end() {
         let fx = GitSandbox::with_definition(
-            "default_model: 'cmd/true'\n\
-             stages:\n\
-             \x20 - name: solo\n\
-             \x20   type: exec\n\
-             \x20   options:\n\
-             \x20     cmds: [\"true\"]\n\
-             \x20 - name: seq\n\
-             \x20   type: sequence\n\
-             \x20   body:\n\
-             \x20     - name: inner\n\
-             \x20       type: exec\n\
-             \x20       options:\n\
-             \x20         cmds: [\"true\"]\n",
+            r#"{
+                default_model: "cmd/true",
+                stages: [
+                    { name: "solo", type: "exec", options: { cmds: ["true"] } },
+                    { name: "seq", type: "sequence", body: [ { name: "inner", type: "exec", options: { cmds: ["true"] } } ] },
+                ],
+            }"#,
         );
         if fx.is_skipped() {
             eprintln!("git unavailable; skipping create_then_run_end_to_end");
@@ -2577,7 +2571,7 @@ mod tests {
         }
 
         let definition =
-            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+            StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
         let mut gremlin = Gremlin::init(
             "gr-e2e",
             fx.definition_path(),

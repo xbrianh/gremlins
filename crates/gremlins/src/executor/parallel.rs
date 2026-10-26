@@ -687,7 +687,7 @@ mod tests {
             vec![],
             None,
             vec![],
-            serde_yaml::Value::Null,
+            serde_json::Value::Null,
             None,
         );
         def.convert_stage(stages[0].clone())
@@ -723,7 +723,7 @@ mod tests {
                 stages.clone(),
                 None,
                 vec![],
-                serde_yaml::Value::Null,
+                serde_json::Value::Null,
                 None,
             )),
             workdir: None,

@@ -1392,12 +1392,12 @@ impl StateStore for FileSystemStateStore {
         // Carry the hermetic definition snapshot into the new attempt so
         // `init_runtime`, `land`, and teardown can keep reading it through
         // the store even when the original source file has since moved.
-        if self.exists("definition.yaml") {
-            let mut src = self.open("definition.yaml", BlobMode::Read)?;
+        if self.exists("definition.json") {
+            let mut src = self.open("definition.json", BlobMode::Read)?;
             let mut bytes = Vec::new();
             use std::io::Read;
             src.read_to_end(&mut bytes)?;
-            let mut dst = child_store.open("definition.yaml", BlobMode::Write)?;
+            let mut dst = child_store.open("definition.json", BlobMode::Write)?;
             use std::io::Write;
             dst.write_all(&bytes)?;
         }

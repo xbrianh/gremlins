@@ -1,0 +1,38 @@
+{
+  // Status file is only written when Copilot posts a non-PENDING review.
+  // The loop polls until that happens (or max_iterations exhausted).
+  // Only use in definition positions where HEAD does not move between poll iterations.
+  stages: [
+    {
+      type: "github-discover-repo",
+    },
+    {
+      name: "github-wait-copilot",
+      type: "sequence",
+      "max-iterations": "{{options.max_iterations | default(20)}}",
+      interval: "{{options.interval | default(60)}}",
+      skip_if_exists: "artifact://{loop_iter}/status",
+      body: [
+        {
+          name: "poll",
+          type: "exec",
+          interpolation: {
+            inputs: {
+              pr_number: 'content("artifact://pr-number.txt")',
+              repo: 'content("artifact://repo.txt")',
+            },
+            outputs: {
+              "status?": "artifact://{loop_iter}/status",
+            },
+          },
+          options: {
+            timeout: 30,
+            cmds: [
+              'output=$(gh_wait_copilot "{pr_number}" "{repo}"); if [ -n "$output" ]; then printf "%s\\n" "$output" > "{status}"; fi',
+            ],
+          },
+        },
+      ],
+    },
+  ],
+}

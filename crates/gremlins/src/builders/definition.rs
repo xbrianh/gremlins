@@ -534,13 +534,13 @@ impl DefinitionBuilder {
             self.stages,
             self.land,
             self.clean_cmds,
-            serde_yaml::Value::Null,
+            serde_json::Value::Null,
             self.default_task_models,
         );
 
-        // Populate expanded_yaml from the typed tree.
-        let expanded_yaml = definition.to_expanded_yaml();
-        definition.expanded_yaml = expanded_yaml;
+        // Populate expanded_json from the typed tree.
+        let expanded_json = definition.to_expanded_json();
+        definition.expanded_json = expanded_json;
 
         Ok(definition)
     }
@@ -598,7 +598,7 @@ mod tests {
     use crate::builders::artifacts::{content, output};
     use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
     use crate::builders::exec::ExecBuilder;
-    use serde_yaml::Value;
+    use serde_json::Value;
 
     fn model(spec: &str) -> ModelURI {
         ModelURI::parse(spec).unwrap()
@@ -735,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn builder_populates_expanded_yaml() {
+    fn builder_populates_expanded_json() {
         let def = DefinitionBuilder::new("demo", model("xai/grok-4"))
             .stage(
                 AgentBuilder::new("plan")
@@ -754,25 +754,21 @@ mod tests {
             .build()
             .unwrap();
 
-        // expanded_yaml must be populated, not Null.
+        // expanded_json must be populated, not Null.
         assert!(
-            !def.expanded_yaml.is_null(),
-            "expanded_yaml must be populated by the builder"
+            !def.expanded_json.is_null(),
+            "expanded_json must be populated by the builder"
         );
 
-        // It must be a mapping with the sentinel.
-        let mapping = def.expanded_yaml.as_mapping().unwrap();
+        // It must be an object with the sentinel.
+        let mapping = def.expanded_json.as_object().unwrap();
         assert_eq!(
-            mapping.get(Value::String("__gremlins_expanded__".to_string())),
+            mapping.get("__gremlins_expanded__"),
             Some(&Value::Bool(true))
         );
 
         // It must contain the stages.
-        let stages = mapping
-            .get(Value::String("stages".to_string()))
-            .unwrap()
-            .as_sequence()
-            .unwrap();
+        let stages = mapping.get("stages").unwrap().as_array().unwrap();
         assert_eq!(stages.len(), 2);
     }
 

@@ -1,0 +1,81 @@
+{
+  stages: [
+    {
+      name: "resolve-pr-base",
+      type: "exec",
+      interpolation: {
+        inputs: {
+          prev_branch_path: "artifact://pr-branch.txt?",
+          base_ref: 'content("artifact://base_ref")?',
+        },
+        outputs: {
+          base_ref_to_open_pr: "artifact://pr-base-ref.txt",
+        },
+      },
+      options: {
+        cmds: [
+          'prev_branch=""\nif [ -n "{prev_branch_path}" ] && [ -f "{prev_branch_path}" ]; then prev_branch=$(cat "{prev_branch_path}"); fi\nbase_ref="{base_ref}"\nif [ -z "$base_ref" ]; then\n  base_ref=$(git -C "$GREMLINS_PROJECT_ROOT" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed \'s|^refs/remotes/origin/||\')\n  [ -z "$base_ref" ] && base_ref="main"\nfi\nprintf \'%s\' "${prev_branch:-$base_ref}" > "{base_ref_to_open_pr}"\n',
+        ],
+      },
+    },
+    {
+      name: "diff-summary",
+      type: "exec",
+      interpolation: {
+        inputs: {
+          base_ref_to_open_pr: 'content("artifact://pr-base-ref.txt")',
+        },
+        outputs: {
+          diff_summary: "artifact://diff-summary.txt",
+        },
+      },
+      options: {
+        cmds: ['git_diff_summary "{base_ref_to_open_pr}" > "{diff_summary}"'],
+      },
+    },
+    {
+      name: "compose-pr",
+      type: "sequence",
+      skip_if_exists: "artifact://pr-title.txt",
+      body: [
+        {
+          type: "agent",
+          interpolation: {
+            inputs: {
+              base_ref_to_open_pr: 'content("artifact://pr-base-ref.txt")',
+              plan_issue_number: 'content("artifact://plan-issue-number.txt")',
+              plan: 'content("artifact://plan.md")?',
+              diff_summary: 'content("artifact://diff-summary.txt")',
+            },
+            outputs: {
+              pr_title: "artifact://pr-title.txt",
+              pr_body: "artifact://pr-body.md",
+            },
+          },
+          prompt: ["github_open_pull_request.md"],
+        },
+      ],
+    },
+    {
+      name: "push-and-open",
+      type: "exec",
+      interpolation: {
+        inputs: {
+          base_ref_to_open_pr: 'content("artifact://pr-base-ref.txt")',
+          pr_title: 'content("artifact://pr-title.txt")',
+          pr_body_file: "artifact://pr-body.md",
+        },
+        outputs: {
+          pr_number: "artifact://pr-number.txt",
+          pr_url: "artifact://pr-url.txt",
+          pr_branch: "artifact://pr-branch.txt",
+        },
+      },
+      options: {
+        cmds: [
+          'gh_create_pr "{base_ref_to_open_pr}" "{pr_title}" "{pr_body_file}" "{pr_number}" "{pr_url}" "{pr_branch}"',
+        ],
+      },
+    },
+  ],
+}

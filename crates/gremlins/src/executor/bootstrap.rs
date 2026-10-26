@@ -677,7 +677,7 @@ mod tests {
                 Vec::new(),
                 None,
                 vec![],
-                serde_yaml::Value::Null,
+                serde_json::Value::Null,
                 None,
             )),
             workdir: Some(WorkDir::Persistent(worktree)),

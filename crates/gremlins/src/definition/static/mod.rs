@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
-use serde_yaml::{Mapping, Value};
+use serde_json::{Map, Value};
 
 use std::collections::HashSet;
 
@@ -58,9 +58,9 @@ pub struct StaticDefinition {
     pub(crate) land: Option<StageSpec>,
     /// Commands to run during `gremlins clean`, before workspace removal.
     pub(crate) clean_cmds: Vec<String>,
-    /// The fully expanded YAML tree, kept for round-tripping via
-    /// [`to_expanded_yaml`](StaticDefinition::to_expanded_yaml).
-    pub(crate) expanded_yaml: Value,
+    /// The fully expanded JSON tree, kept for round-tripping via
+    /// [`to_expanded_json`](StaticDefinition::to_expanded_json).
+    pub(crate) expanded_json: Value,
     /// Global `default-task-models` from settings.yaml, resolved through
     /// profiles at load time. Included in serialized output so child
     /// processes do not depend on the current config.
@@ -79,7 +79,7 @@ impl StaticDefinition {
         stages: Vec<StageSpec>,
         land: Option<StageSpec>,
         clean_cmds: Vec<String>,
-        expanded_yaml: Value,
+        expanded_json: Value,
         default_task_models: Option<IndexMap<String, String>>,
     ) -> Self {
         let stage_names: Vec<String> = stages.iter().map(|s| s.name().to_string()).collect();
@@ -92,7 +92,7 @@ impl StaticDefinition {
             stage_names,
             land,
             clean_cmds,
-            expanded_yaml,
+            expanded_json,
             default_task_models,
             cursor: 0,
         }
@@ -113,7 +113,7 @@ impl StaticDefinition {
             stage_names: Vec::new(),
             land: None,
             clean_cmds: Vec::new(),
-            expanded_yaml: Value::Null,
+            expanded_json: Value::Null,
             default_task_models: None,
             cursor: 0,
         }
@@ -143,7 +143,7 @@ impl StaticDefinition {
             stage_names: Vec::new(),
             land: None,
             clean_cmds,
-            expanded_yaml: Value::Null,
+            expanded_json: Value::Null,
             default_task_models: None,
             cursor: 0,
         }
@@ -208,29 +208,23 @@ impl StaticDefinition {
         Ok(keys)
     }
 
-    /// Serialize this definition to a [`serde_yaml::Value`] matching the
-    /// canonical expanded-YAML shape.
+    /// Serialize this definition to a [`serde_json::Value`] matching the
+    /// canonical expanded-JSON shape.
     ///
     /// The output always includes `__gremlins_expanded__: true` so
-    /// [`StaticDefinition::from_yaml_file`] recognizes it.
-    pub(crate) fn to_expanded_yaml(&self) -> Value {
-        let mut root = Mapping::new();
+    /// [`StaticDefinition::from_json5_file`] recognizes it.
+    pub(crate) fn to_expanded_json(&self) -> Value {
+        let mut root = Map::new();
 
         // Sentinel — always emitted.
-        root.insert(
-            Value::String("__gremlins_expanded__".to_string()),
-            Value::Bool(true),
-        );
+        root.insert("__gremlins_expanded__".to_string(), Value::Bool(true));
 
         // name — always present, so round-trips preserve definition identity.
-        root.insert(
-            Value::String("name".to_string()),
-            Value::String(self.name.clone()),
-        );
+        root.insert("name".to_string(), Value::String(self.name.clone()));
 
         // default_model — always present.
         root.insert(
-            Value::String("default_model".to_string()),
+            "default_model".to_string(),
             Value::String(self.default_model.to_string()),
         );
 
@@ -238,50 +232,38 @@ impl StaticDefinition {
         // do not depend on the current settings.yaml.
         if let Some(ref dtc) = self.default_task_models {
             if !dtc.is_empty() {
-                let mut dtc_map = Mapping::new();
+                let mut dtc_map = Map::new();
                 for (key, value) in dtc {
-                    dtc_map.insert(Value::String(key.clone()), Value::String(value.clone()));
+                    dtc_map.insert(key.clone(), Value::String(value.clone()));
                 }
-                root.insert(
-                    Value::String("default_task_models".to_string()),
-                    Value::Mapping(dtc_map),
-                );
+                root.insert("default_task_models".to_string(), Value::Object(dtc_map));
             }
         }
 
         // bootstrap — omit entirely if all fields are default/empty.
-        let bootstrap_yaml = bootstrap_to_yaml(&self.bootstrap);
-        if !is_empty_mapping(&bootstrap_yaml) {
-            root.insert(Value::String("bootstrap".to_string()), bootstrap_yaml);
+        let bootstrap_json = bootstrap_to_json(&self.bootstrap);
+        if !is_empty_object(&bootstrap_json) {
+            root.insert("bootstrap".to_string(), bootstrap_json);
         }
 
         // land — omit if None.
         if let Some(ref land) = self.land {
-            let mut land_val = land.to_yaml();
+            let mut land_val = land.to_json();
             // Ensure name and type are forced to "land"/"exec" for round-trip
             // safety, matching what the builder does on parse.
-            if let Value::Mapping(ref mut land_map) = land_val {
-                land_map.insert(
-                    Value::String("name".to_string()),
-                    Value::String("land".to_string()),
-                );
-                land_map.insert(
-                    Value::String("type".to_string()),
-                    Value::String("exec".to_string()),
-                );
+            if let Value::Object(ref mut land_map) = land_val {
+                land_map.insert("name".to_string(), Value::String("land".to_string()));
+                land_map.insert("type".to_string(), Value::String("exec".to_string()));
                 // Move cmds from options into land_cmds
-                if let Some(Value::Mapping(opts)) = land_map.remove("options") {
+                if let Some(Value::Object(opts)) = land_map.remove("options") {
                     if let Some(cmds_val) = opts.get("cmds") {
-                        land_map.insert(Value::String("land_cmds".to_string()), cmds_val.clone());
+                        land_map.insert("land_cmds".to_string(), cmds_val.clone());
                     }
                     // Re-insert remaining options (like timeout) without cmds
                     let mut remaining = opts.clone();
                     remaining.remove("cmds");
                     if !remaining.is_empty() {
-                        land_map.insert(
-                            Value::String("options".to_string()),
-                            Value::Mapping(remaining),
-                        );
+                        land_map.insert("options".to_string(), Value::Object(remaining));
                     }
                 }
                 // Serialize clean_cmds
@@ -291,33 +273,27 @@ impl StaticDefinition {
                         .iter()
                         .map(|c| Value::String(c.clone()))
                         .collect();
-                    land_map.insert(
-                        Value::String("clean_cmds".to_string()),
-                        Value::Sequence(clean),
-                    );
+                    land_map.insert("clean_cmds".to_string(), Value::Array(clean));
                 }
             }
-            root.insert(Value::String("land".to_string()), land_val);
+            root.insert("land".to_string(), land_val);
         } else if !self.clean_cmds.is_empty() {
-            // Emit a clean-only land mapping when clean_cmds exist without a land stage.
-            let mut land_map = Mapping::new();
+            // Emit a clean-only land object when clean_cmds exist without a land stage.
+            let mut land_map = Map::new();
             let clean: Vec<Value> = self
                 .clean_cmds
                 .iter()
                 .map(|c| Value::String(c.clone()))
                 .collect();
-            land_map.insert(
-                Value::String("clean_cmds".to_string()),
-                Value::Sequence(clean),
-            );
-            root.insert(Value::String("land".to_string()), Value::Mapping(land_map));
+            land_map.insert("clean_cmds".to_string(), Value::Array(clean));
+            root.insert("land".to_string(), Value::Object(land_map));
         }
 
         // stages
-        let stages: Vec<Value> = self.stages.iter().map(StageSpec::to_yaml).collect();
-        root.insert(Value::String("stages".to_string()), Value::Sequence(stages));
+        let stages: Vec<Value> = self.stages.iter().map(StageSpec::to_json).collect();
+        root.insert("stages".to_string(), Value::Array(stages));
 
-        Value::Mapping(root)
+        Value::Object(root)
     }
 
     /// Deserialize a definition from bytes, returning an owned
@@ -476,8 +452,8 @@ impl GremlinDefinition for StaticDefinition {
     }
 
     fn serialize(&self) -> Result<Vec<u8>, DefinitionError> {
-        let yaml = self.to_expanded_yaml();
-        serde_yaml::to_string(&yaml)
+        let json = self.to_expanded_json();
+        serde_json::to_string(&json)
             .map(|s| s.into_bytes())
             .map_err(|e| DefinitionError::Message(format!("failed to serialize definition: {e}")))
     }
@@ -492,26 +468,26 @@ impl GremlinDefinition for StaticDefinition {
 }
 
 // ---------------------------------------------------------------------------
-// Serialization helpers for to_expanded_yaml()
+// Serialization helpers for to_expanded_json()
 // ---------------------------------------------------------------------------
 
-fn is_empty_mapping(value: &Value) -> bool {
+fn is_empty_object(value: &Value) -> bool {
     match value {
-        Value::Mapping(m) => m.is_empty(),
+        Value::Object(m) => m.is_empty(),
         _ => false,
     }
 }
 
-fn bootstrap_to_yaml(bootstrap: &Bootstrap) -> Value {
-    let mut m = Mapping::new();
+fn bootstrap_to_json(bootstrap: &Bootstrap) -> Value {
+    let mut m = Map::new();
 
     if let Some(ref source) = bootstrap.source {
-        let mut src_map = Mapping::with_capacity(source.sources.len() + 1);
+        let mut src_map = Map::new();
         for (name, input_src) in &source.sources {
-            let mut entry = Mapping::new();
+            let mut entry = Map::new();
             if input_src.types.len() == 1 {
                 entry.insert(
-                    Value::String("type".to_string()),
+                    "type".to_string(),
                     Value::String(input_src.types[0].clone()),
                 );
             } else {
@@ -520,27 +496,22 @@ fn bootstrap_to_yaml(bootstrap: &Bootstrap) -> Value {
                     .iter()
                     .map(|t| Value::String(t.clone()))
                     .collect();
-                entry.insert(Value::String("type".to_string()), Value::Sequence(types));
+                entry.insert("type".to_string(), Value::Array(types));
             }
             if input_src.optional {
-                entry.insert(Value::String("optional".to_string()), Value::Bool(true));
+                entry.insert("optional".to_string(), Value::Bool(true));
             }
-            src_map.insert(Value::String(name.clone()), Value::Mapping(entry));
+            src_map.insert(name.clone(), Value::Object(entry));
         }
         if !source.require_one_of.is_empty() {
             let groups: Vec<Value> = source
                 .require_one_of
                 .iter()
-                .map(|group| {
-                    Value::Sequence(group.iter().map(|n| Value::String(n.clone())).collect())
-                })
+                .map(|group| Value::Array(group.iter().map(|n| Value::String(n.clone())).collect()))
                 .collect();
-            src_map.insert(
-                Value::String("require_one_of".to_string()),
-                Value::Sequence(groups),
-            );
+            src_map.insert("require_one_of".to_string(), Value::Array(groups));
         }
-        m.insert(Value::String("source".to_string()), Value::Mapping(src_map));
+        m.insert("source".to_string(), Value::Object(src_map));
     }
 
     if !bootstrap.launch_cmds.is_empty() {
@@ -549,10 +520,7 @@ fn bootstrap_to_yaml(bootstrap: &Bootstrap) -> Value {
             .iter()
             .map(|c| Value::String(c.clone()))
             .collect();
-        m.insert(
-            Value::String("launch_cmds".to_string()),
-            Value::Sequence(cmds),
-        );
+        m.insert("launch_cmds".to_string(), Value::Array(cmds));
     }
 
     if !bootstrap.cmds.is_empty() {
@@ -561,25 +529,22 @@ fn bootstrap_to_yaml(bootstrap: &Bootstrap) -> Value {
             .iter()
             .map(|c| Value::String(c.clone()))
             .collect();
-        m.insert(Value::String("cmds".to_string()), Value::Sequence(cmds));
+        m.insert("cmds".to_string(), Value::Array(cmds));
     }
 
     if !bootstrap.cli_out.is_empty() {
-        let mut cli = Mapping::with_capacity(bootstrap.cli_out.len());
+        let mut cli = Map::new();
         for (k, v) in &bootstrap.cli_out {
-            cli.insert(Value::String(k.clone()), Value::String(v.clone()));
+            cli.insert(k.clone(), Value::String(v.clone()));
         }
-        m.insert(Value::String("cli_out".to_string()), Value::Mapping(cli));
+        m.insert("cli_out".to_string(), Value::Object(cli));
     }
 
     if !bootstrap.env.is_empty() {
-        m.insert(
-            Value::String("env".to_string()),
-            Value::String(bootstrap.env.clone()),
-        );
+        m.insert("env".to_string(), Value::String(bootstrap.env.clone()));
     }
 
-    Value::Mapping(m)
+    Value::Object(m)
 }
 
 // ---------------------------------------------------------------------------
@@ -642,7 +607,7 @@ mod tests {
             stage_names: vec![],
             land: Some(parsed_exec("land")),
             clean_cmds: vec![],
-            expanded_yaml: serde_yaml::Value::Null,
+            expanded_json: serde_json::Value::Null,
             default_task_models: None,
             cursor: 0,
         };
@@ -662,7 +627,7 @@ mod tests {
             stage_names: vec![],
             land: Some(parsed_exec("land")),
             clean_cmds: vec![],
-            expanded_yaml: serde_yaml::Value::Null,
+            expanded_json: serde_json::Value::Null,
             default_task_models: None,
             cursor: 0,
         };
@@ -693,7 +658,7 @@ mod tests {
             stage_names: vec![],
             land: None,
             clean_cmds: vec![],
-            expanded_yaml: serde_yaml::Value::Null,
+            expanded_json: serde_json::Value::Null,
             default_task_models: None,
             cursor: 0,
         };
@@ -898,7 +863,7 @@ mod tests {
             stage_names,
             land: None,
             clean_cmds: vec![],
-            expanded_yaml: serde_yaml::Value::Null,
+            expanded_json: serde_json::Value::Null,
             default_task_models: None,
             cursor: 0,
         }
@@ -1263,7 +1228,7 @@ mod tests {
     // ---- DefinitionError tests ----
 
     #[test]
-    fn bootstrap_to_yaml_preserves_require_one_of_group() {
+    fn bootstrap_to_json_preserves_require_one_of_group() {
         let mut sources = std::collections::HashMap::new();
         sources.insert(
             "instructions".to_string(),
@@ -1281,20 +1246,18 @@ mod tests {
             ..Bootstrap::default()
         };
 
-        let yaml = bootstrap_to_yaml(&bootstrap);
-        let mapping = yaml
-            .as_mapping()
-            .expect("bootstrap_to_yaml returns a mapping");
-        let source = mapping
-            .get(serde_yaml::Value::String("source".to_string()))
-            .expect("source key present");
-        let src_mapping = source.as_mapping().expect("source is a mapping");
-        let roo = src_mapping
-            .get(serde_yaml::Value::String("require_one_of".to_string()))
+        let json = bootstrap_to_json(&bootstrap);
+        let object = json
+            .as_object()
+            .expect("bootstrap_to_json returns an object");
+        let source = object.get("source").expect("source key present");
+        let src_object = source.as_object().expect("source is an object");
+        let roo = src_object
+            .get("require_one_of")
             .expect("require_one_of key present in serialized source");
-        let roo_seq = roo.as_sequence().expect("require_one_of is a sequence");
-        assert_eq!(roo_seq.len(), 1);
-        let group = roo_seq[0].as_sequence().expect("group is a sequence");
+        let roo_arr = roo.as_array().expect("require_one_of is an array");
+        assert_eq!(roo_arr.len(), 1);
+        let group = roo_arr[0].as_array().expect("group is an array");
         assert_eq!(group.len(), 2);
         assert_eq!(group[0].as_str().unwrap(), "instructions");
         assert_eq!(group[1].as_str().unwrap(), "plan");

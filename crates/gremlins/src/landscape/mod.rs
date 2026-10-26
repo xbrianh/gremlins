@@ -1348,7 +1348,7 @@ mod tests {
         if sandbox.is_skipped() {
             return;
         }
-        // GitSandbox creates and tracks .gremlins/demo.yaml.
+        // GitSandbox creates and tracks .gremlins/demo.json5.
         // Add another file inside .gremlins/ to verify it's also visible.
         std::fs::write(
             sandbox.repo_path().join(".gremlins/extra.yaml"),
@@ -1388,8 +1388,8 @@ mod tests {
         let all = LandscapeExplorer.build(sandbox.repo_path(), 10).unwrap();
         let paths: Vec<&Path> = all.iter().map(|f| f.path.as_path()).collect();
         assert!(
-            paths.contains(&sandbox.repo_path().join(".gremlins/demo.yaml").as_path()),
-            ".gremlins/demo.yaml must be visible when tracked in git"
+            paths.contains(&sandbox.repo_path().join(".gremlins/demo.json5").as_path()),
+            ".gremlins/demo.json5 must be visible when tracked in git"
         );
         assert!(
             paths.contains(&sandbox.repo_path().join(".gremlins/extra.yaml").as_path()),

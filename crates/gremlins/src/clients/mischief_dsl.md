@@ -1,25 +1,64 @@
-# Gremlins YAML DSL Reference
+# Gremlins JSON5 DSL Reference
 
 ## File conventions
 
 | Convention | Example |
 |---|---|
-| Definition file | `.gremlins/<name>.yaml` (e.g. `.gremlins/gh.yaml`) |
-| Stage definition | `.gremlins/stages/<name>.yaml` (e.g. `.gremlins/stages/plan.yaml`) |
+| Definition file | `.gremlins/<name>.json5` (e.g. `.gremlins/gh.json5`) |
+| Stage definition | `.gremlins/stages/<name>.json5` (e.g. `.gremlins/stages/plan.json5`) |
+
+## JSON5 syntax notes
+
+Definition files are written in JSON5, a superset of JSON. Its data model is
+identical to JSON (objects, arrays, strings, numbers, booleans, and `null` —
+there are no custom types); JSON5 only relaxes the *syntax*:
+
+```json5
+{
+  // Unquoted keys (when they are valid identifiers):
+  key: "value",
+
+  // Single-quoted strings:
+  greeting: 'hello',
+
+  // Trailing commas:
+  list: [1, 2, 3,],
+
+  /* Block comments
+     work too. */
+  block: true,
+
+  // Multiline strings use a backslash continuation:
+  message: 'first line \
+second line',
+}
+```
+
+Keys that are not valid identifiers (for example those containing hyphens, such
+as `task-models` or `required-prompt`) must still be quoted.
 
 ## Top-level keys
 
-```yaml
-stages:             # ordered sequence of stage mappings (required for execution)
-prompt_dir:         # relative directory for prompt file resolution (string)
-default_model:      # model reference: "provider/model", "profile/name", or concrete URI
-default_task_models: # per-task-kind models: { Scout: provider/model, Implement: provider/model }
-bootstrap:          # initialisation: source, launch_cmds, env, cli_out
-land:               # final squash stage: interpolation, land_cmds, clean_cmds
-stage-definitions:  # named recipes: either an inline stage mapping or a string naming a file under stages/
+```json5
+{
+  // ordered sequence of stage mappings (required for execution)
+  stages: [],
+  // relative directory for prompt file resolution (string)
+  prompt_dir: "",
+  // model reference: "provider/model", "profile/name", or concrete URI
+  default_model: "",
+  // per-task-kind models: { Scout: "provider/model", Implement: "provider/model" }
+  default_task_models: {},
+  // initialisation: source, launch_cmds, env, cli_out
+  bootstrap: {},
+  // final squash stage: interpolation, land_cmds, clean_cmds
+  land: {},
+  // named recipes: either an inline stage mapping or a string naming a file under stages/
+  "stage-definitions": {},
+}
 ```
 
-- `name` (optional) — defaults to the YAML file stem.
+- `name` (optional) — defaults to the JSON5 file stem.
 
 ## Stage types
 
@@ -29,86 +68,104 @@ Every stage has a `type` field. The four built-in types:
 
 An LLM-agent stage with a chat loop.
 
-```yaml
-name: my-agent              # string (optional — auto-named if missing)
-type: agent
-prompt:                     # string or list of strings (one or more prompt file .md names relative to prompt_dir)
-model: provider/model       # per-stage model override (optional)
-task-models:                # per-task-kind models for this stage (optional)
-  Scout: provider/model
-  Implement: provider/model
-interpolation:
-  inputs:
-    var_name: content("artifact://path")   # read artifact content into {var_name}
-    other: "artifact://path"               # bare URI: resolve to file path
-  outputs:
-    out_name: "artifact://path"            # bind artifact path (required)
-    out_opt?: "artifact://path"            # ? suffix = optional artifact
-options:
-  …                          # arbitrary key/value pairs passed through
-# Turn limits, idle timeout, and event capture are controlled via
-# environment variables (GREMLINS_AGENT_MAX_TURNS, GREMLINS_STREAM_IDLE_TIMEOUT)
-# and are not stage options.
+```json5
+{
+  name: "my-agent",            // string (optional — auto-named if missing)
+  type: "agent",
+  prompt: ["my-prompt.md"],    // string or list of strings (one or more prompt file .md names relative to prompt_dir)
+  model: "provider/model",     // per-stage model override (optional)
+  "task-models": {             // per-task-kind models for this stage (optional)
+    Scout: "provider/model",
+    Implement: "provider/model",
+  },
+  interpolation: {
+    inputs: {
+      var_name: 'content("artifact://path")', // read artifact content into {var_name}
+      other: "artifact://path",               // bare URI: resolve to file path
+    },
+    outputs: {
+      out_name: "artifact://path",            // bind artifact path (required)
+      "out_opt?": "artifact://path",          // ? suffix = optional artifact
+    },
+  },
+  options: {
+    // arbitrary key/value pairs passed through
+  },
+  // Turn limits, idle timeout, and event capture are controlled via
+  // environment variables (GREMLINS_AGENT_MAX_TURNS, GREMLINS_STREAM_IDLE_TIMEOUT)
+  // and are not stage options.
+}
 ```
 
 ### `exec`
 
 A shell-command stage (no LLM).
 
-```yaml
-name: my-exec
-type: exec
-interpolation:               # same shape as agent
-  inputs: { … }
-  outputs: { … }
-options:
-  cmds:                      # required: list of bash -c command strings
-    - echo "{my_var}"
-  timeout: 300               # seconds (optional)
-  …                          # arbitrary key/value pairs passed through
+```json5
+{
+  name: "my-exec",
+  type: "exec",
+  interpolation: {             // same shape as agent
+    inputs: {},
+    outputs: {},
+  },
+  options: {
+    cmds: [                    // required: list of bash -c command strings
+      'echo "{my_var}"',
+    ],
+    timeout: 300,              // seconds (optional)
+    // arbitrary key/value pairs passed through
+  },
+}
 ```
 
 ### `sequence`
 
 Runs child stages in order. Can loop.
 
-```yaml
-name: my-sequence
-type: sequence
-body:                        # ordered list of child stage mappings
-  - type: agent
-    prompt: [stuff.md]
-  - type: exec
-    options: { cmds: [echo done] }
-max-iterations: 3            # loop count (default 1)
-skip_if_exists: "artifact://path"   # skip entire sequence if artifact exists
-interval: 5.0                # seconds between iterations (optional)
-model: provider/model        # propagated to children (optional)
-task-models: { … }           # propagated to children (optional)
+```json5
+{
+  name: "my-sequence",
+  type: "sequence",
+  body: [                      // ordered list of child stage mappings
+    { type: "agent", prompt: ["stuff.md"] },
+    { type: "exec", options: { cmds: ["echo done"] } },
+  ],
+  "max-iterations": 3,         // loop count (default 1)
+  skip_if_exists: "artifact://path", // skip entire sequence if artifact exists
+  interval: 5.0,               // seconds between iterations (optional)
+  model: "provider/model",     // propagated to children (optional)
+  "task-models": {},           // propagated to children (optional)
+}
 ```
 
 ### `parallel`
 
 Runs child stages concurrently.
 
-```yaml
-name: my-parallel
-type: parallel
-body:                        # list of child stage mappings
-  - type: agent
-    prompt: [review.md]
-  - type: agent
-    prompt: [review.md]
-max_concurrent: 4            # max concurrent children (optional)
-cancel_on_error: true        # stop all on first failure (default false)
-error_policy: any            # "any" (default): fail if any child fails; "all": fail only if all fail
-fork:
-  cmds:                      # per-child: run before each child is launched
-    - git worktree add --detach "$GREMLIN_FORK_WORKDIR" HEAD
-join:
-  cmds:                      # per-child: run after each child finishes
-    # Substitution map is empty for join commands.
-    - echo "all done"
+```json5
+{
+  name: "my-parallel",
+  type: "parallel",
+  body: [                      // list of child stage mappings
+    { type: "agent", prompt: ["review.md"] },
+    { type: "agent", prompt: ["review.md"] },
+  ],
+  max_concurrent: 4,           // max concurrent children (optional)
+  cancel_on_error: true,       // stop all on first failure (default false)
+  error_policy: "any",         // "any" (default): fail if any child fails; "all": fail only if all fail
+  fork: {
+    cmds: [                    // per-child: run before each child is launched
+      'git worktree add --detach "$GREMLIN_FORK_WORKDIR" HEAD',
+    ],
+  },
+  join: {
+    cmds: [                    // per-child: run after each child finishes
+      // Substitution map is empty for join commands.
+      'echo "all done"',
+    ],
+  },
+}
 ```
 
 ## Stage definition references
@@ -118,39 +175,51 @@ A stage can reference a named definition instead of inlining its config.
 The **call site** provides a definition name via `type` and supplies concrete
 `prompt` and `options` values:
 
-```yaml
-# In a definition file (e.g. .gremlins/gh.yaml):
-stages:
-  - name: plan
-    type: plan                        # references stages/plan.yaml
-    prompt: [style_guide.md, plan.md] # concrete prompts
+```json5
+// In a definition file (e.g. .gremlins/gh.json5):
+{
+  stages: [
+    {
+      name: "plan",
+      type: "plan",                          // references stages/plan.json5
+      prompt: ["style_guide.md", "plan.md"], // concrete prompts
+    },
+  ],
+}
 ```
 
-The **definition body** (e.g. `.gremlins/stages/plan.yaml`) uses templates to
+The **definition body** (e.g. `.gremlins/stages/plan.json5`) uses templates to
 inject the caller's values:
 
-```yaml
-# In .gremlins/stages/plan.yaml:
-required-prompt: true
-stages:
-  - type: agent
-    prompt:
-      - "{{prompt}}"                  # expands to caller's prompt list
-    options:
-      timeout: "{{options.timeout | default(600)}}"
+```json5
+// In .gremlins/stages/plan.json5:
+{
+  "required-prompt": true,
+  stages: [
+    {
+      type: "agent",
+      prompt: [
+        "{{prompt}}",                  // expands to caller's prompt list
+      ],
+      options: {
+        timeout: '{{options.timeout | default(600)}}',
+      },
+    },
+  ],
+}
 ```
 
-- `required-prompt: true` in a definition file marks that the caller must supply `prompt`.
-- `required-options: [key1, key2]` marks required option keys.
+- `"required-prompt": true` in a definition file marks that the caller must supply `prompt`.
+- `"required-options": [key1, key2]` marks required option keys.
 - `{{prompt}}` expands to the caller's prompt value (string or list).
 - `{{options.<key>}}` expands to an option from the caller.
 - `{{options.<key> | default(<val>)}}` supplies a default if the caller doesn't provide the key.
 
 ### Stage definition lookup
 
-- `type: my-def` with no sub-keys other than `prompt`/`options`:
+- `type: "my-def"` with no sub-keys other than `prompt`/`options`:
   looks for `my-def` in the parent definition's `stage-definitions` map,
-  then in `.gremlins/stages/my-def.yaml`.
+  then in `.gremlins/stages/my-def.json5`.
 - If the value in `stage-definitions` is a string rather than an inline mapping,
   it names the file under `stages/`.
 - If the value is an inline mapping, it's used directly as the definition.
@@ -167,12 +236,15 @@ stages:
 
 ### `inputs`
 
-```yaml
-inputs:
-  my_content: content("artifact://plan.md")      # reads file content → {my_content}
-  my_path: "artifact://plan.md"                   # bare URI → file path → {my_path}
-  my_optional: "artifact://plan.md?"              # optional bare URI
-  my_opt_content: content("artifact://plan.md")?  # optional content
+```json5
+{
+  inputs: {
+    my_content: 'content("artifact://plan.md")',      // reads file content → {my_content}
+    my_path: "artifact://plan.md",                    // bare URI → file path → {my_path}
+    my_optional: "artifact://plan.md?",               // optional bare URI
+    my_opt_content: 'content("artifact://plan.md")?', // optional content
+  },
+}
 ```
 
 - `content()` wraps an artifact URI to inline the artifact's contents rather than its path.
@@ -181,10 +253,13 @@ inputs:
 
 ### `outputs`
 
-```yaml
-outputs:
-  required_artifact: "artifact://out.md"       # required — fails if not written
-  optional_artifact?: "artifact://out.md"      # ? suffix — optional, no error if missing
+```json5
+{
+  outputs: {
+    required_artifact: "artifact://out.md",    // required — fails if not written
+    "optional_artifact?": "artifact://out.md", // ? suffix — optional, no error if missing
+  },
+}
 ```
 
 - The `?` in the key name marks the artifact as optional.
@@ -204,31 +279,39 @@ placeholders are not available in join hooks.
 
 ## Bootstrap
 
-```yaml
-bootstrap:
-  source:
-    require_one_of: [[instructions, plan]]     # at least one of each group must be non-empty
-    instructions:
-      type: [filepath, string]                  # accepts either
-      optional: true
-    plan:
-      type: filepath
-      optional: true
-    base_ref:
-      type: string
-      optional: true
-  launch_cmds:                                  # shell commands run at bootstrap (file setup)
-    - gremlins:bind_artifact("artifact://plan.md", plan)
-    - gremlins:bind_artifact("artifact://instructions.md", instructions)
-    - gremlins:bind_artifact("artifact://base_ref", base_ref)
-    - 'BASE_REF={base_ref} && SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "${BASE_REF:-HEAD}") && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && echo "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"'
-  env: |                                        # shell script sourced into environment
-    export CARGO_INCREMENTAL=0
-  cli_out:                                       # artifact registrations at bootstrap time
-    base_sha: "artifact://base_sha"
+```json5
+{
+  bootstrap: {
+    source: {
+      require_one_of: [["instructions", "plan"]], // at least one of each group must be non-empty
+      instructions: {
+        type: ["filepath", "string"],             // accepts either
+        optional: true,
+      },
+      plan: {
+        type: "filepath",
+        optional: true,
+      },
+      base_ref: {
+        type: "string",
+        optional: true,
+      },
+    },
+    launch_cmds: [                                // shell commands run at bootstrap (file setup)
+      'gremlins:bind_artifact("artifact://plan.md", plan)',
+      'gremlins:bind_artifact("artifact://instructions.md", instructions)',
+      'gremlins:bind_artifact("artifact://base_ref", base_ref)',
+      'BASE_REF={base_ref} && SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "${BASE_REF:-HEAD}") && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && echo "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"',
+    ],
+    env: 'export CARGO_INCREMENTAL=0',            // shell script sourced into environment
+    cli_out: {                                    // artifact registrations at bootstrap time
+      base_sha: "artifact://base_sha",
+    },
+  },
+}
 ```
 
-- `source` declares input parameters. `type` can be `string`, `filepath`, or a list of both.
+- `source` declares input parameters. `type` can be `"string"`, `"filepath"`, or a list of both.
 - `require_one_of` groups: each inner list names sources; at least one per group must be provided.
 - `launch_cmds` run after source values are available. `gremlins:bind_artifact(uri, key)` binds
   a source value to an artifact for downstream stages.
@@ -239,24 +322,31 @@ bootstrap:
 
 ## Land
 
-```yaml
-land:
-  interpolation:
-    inputs:
-      message: artifact://commit_message.txt
-  land_cmds:                                     # commands to execute (e.g. merge worktree, push)
-    - WORKTREE_HEAD=$(git -C "$GREMLIN_WORKDIR" rev-parse HEAD)
-    - git merge --squash "$WORKTREE_HEAD"
-    - 'git diff --cached --quiet || git commit -F "{message}"'
-  clean_cmds:                                    # cleanup commands (run on both success and failure)
-    - git worktree remove --force "$GREMLIN_WORKDIR" || true
-    - git worktree prune
+```json5
+{
+  land: {
+    interpolation: {
+      inputs: {
+        message: "artifact://commit_message.txt",
+      },
+    },
+    land_cmds: [                                // commands to execute (e.g. merge worktree, push)
+      'WORKTREE_HEAD=$(git -C "$GREMLIN_WORKDIR" rev-parse HEAD)',
+      'git merge --squash "$WORKTREE_HEAD"',
+      'git diff --cached --quiet || git commit -F "{message}"',
+    ],
+    clean_cmds: [                               // cleanup commands (run on both success and failure)
+      'git worktree remove --force "$GREMLIN_WORKDIR" || true',
+      "git worktree prune",
+    ],
+  },
+}
 ```
 
 - `land` is a final exec stage that runs **explicitly** via `gremlins land <id>`, not
   automatically after pipeline execution.
 - `land.inputs` uses bare artifact URIs (not `content()`): `git commit -F` expects
-  a file path, not inline text. See `.gremlins/local.yaml` for a working example.
+  a file path, not inline text. See `.gremlins/local.json5` for a working example.
 - `clean_cmds` run separately during `Gremlin::clean` (triggered by `gremlins rm`
   or `gremlins clean`), not automatically after `land_cmds`.
 
@@ -266,8 +356,10 @@ Available on `sequence` stages only (and definition references that expand to
 sequences). Agent and exec stages do not read it, and `run_parallel` discards
 it. Wrap non-sequence stages in a guarded sequence when a skip guard is needed.
 
-```yaml
-skip_if_exists: "artifact://plan.md"
+```json5
+{
+  skip_if_exists: "artifact://plan.md",
+}
 ```
 
 - If the artifact already exists at stage start, the entire stage is skipped.

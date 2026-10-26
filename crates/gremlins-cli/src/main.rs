@@ -1467,7 +1467,7 @@ async fn land(id: &str) -> Result<(), String> {
     // Load the hermetic definition through the store blob.
     let definition = {
         let mut blob = store
-            .open("definition.yaml", BlobMode::Read)
+            .open("definition.json", BlobMode::Read)
             .map_err(|e| format!("gremlin {id}: definition snapshot not found: {e}"))?;
         use std::io::Read;
         let mut bytes = Vec::new();
@@ -1566,7 +1566,7 @@ async fn land(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Print a bundled (self-contained) YAML for the given definition to stdout.
+/// Print a bundled (self-contained) JSON for the given definition to stdout.
 async fn bundle(definition: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
     let project_root = config::project_root();
@@ -1576,10 +1576,10 @@ async fn bundle(definition: &str) -> Result<(), String> {
     let bundled = gremlins::definition::bundle_definition(&definition_path)
         .map_err(|e| format!("failed to bundle: {e}"))?;
 
-    let yaml_str =
-        serde_yaml::to_string(&bundled).map_err(|e| format!("failed to serialize: {e}"))?;
+    let json_str =
+        serde_json::to_string(&bundled).map_err(|e| format!("failed to serialize: {e}"))?;
 
-    print!("{yaml_str}");
+    print!("{json_str}");
     Ok(())
 }
 // ---------------------------------------------------------------------------
@@ -1717,7 +1717,7 @@ async fn launch(
     let default_model = config::global_config()
         .ok()
         .and_then(|c| c.default_model().map(String::from));
-    let gremlin_def = StaticDefinition::from_yaml_file(
+    let gremlin_def = StaticDefinition::from_json5_file(
         &definition_path,
         model_override,
         default_model.as_deref(),

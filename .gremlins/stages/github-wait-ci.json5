@@ -1,0 +1,115 @@
+{
+  // Wait for CI on a PR. If CI fails, hand the failure log to the agent for a
+  // fix, push, and loop.  The fix stage is safe when there are no failures (the
+  // prompt should emit a no-op), and push-fix guards against pushing an
+  // already-pushed HEAD.
+  "required-prompt": true,
+  stages: [
+    {
+      name: "github-wait-ci",
+      type: "sequence",
+      "max-iterations": 3,
+      skip_if_exists: "artifact://{loop_iter}/done",
+      body: [
+        {
+          name: "ci-wait",
+          type: "exec",
+          interpolation: {
+            inputs: {
+              pr_url: 'content("artifact://pr-url.txt")',
+              fix_head: 'content("artifact://fix-head")?',
+            },
+            outputs: {
+              "status?": "artifact://{loop_iter}/status",
+              "done?": "artifact://{loop_iter}/done",
+            },
+          },
+          options: {
+            timeout: 1470,
+            startup_grace_secs: 60,
+            poll_interval: 30,
+            cmds: [
+              'ci_wait "{pr_url}" "{fix_head}" "{done}" "{status}" {startup_grace_secs} {poll_interval}',
+            ],
+          },
+        },
+        {
+          name: "ci-failure-log",
+          type: "sequence",
+          skip_if_exists: "artifact://{loop_iter}/done",
+          body: [
+            {
+              type: "exec",
+              interpolation: {
+                inputs: {
+                  pr_url: 'content("artifact://pr-url.txt")',
+                },
+                outputs: {
+                  "ci_log?": "artifact://{loop_iter}/ci_failure.txt",
+                },
+              },
+              options: {
+                timeout: 120,
+                cmds: ['ci_failure_log "{pr_url}" "{ci_log}"'],
+              },
+            },
+          ],
+        },
+        {
+          name: "fix",
+          type: "sequence",
+          skip_if_exists: "artifact://{loop_iter}/done",
+          body: [
+            {
+              type: "agent",
+              prompt: ["{{prompt}}"],
+              interpolation: {
+                inputs: {
+                  failure_output: 'content("artifact://{loop_iter}/ci_failure.txt")?',
+                },
+              },
+            },
+          ],
+        },
+        {
+          name: "push-fix",
+          type: "sequence",
+          skip_if_exists: "artifact://{loop_iter}/done",
+          body: [
+            {
+              type: "exec",
+              interpolation: {
+                inputs: {
+                  pr_branch: 'content("artifact://pr-branch.txt")',
+                },
+              },
+              options: {
+                cmds: ['ci_push_fix "{pr_branch}"'],
+              },
+            },
+          ],
+        },
+        {
+          name: "capture-head",
+          type: "sequence",
+          skip_if_exists: "artifact://fix-head",
+          body: [
+            {
+              type: "exec",
+              interpolation: {
+                outputs: {
+                  fix_head: "artifact://fix-head",
+                },
+              },
+              options: {
+                cmds: [
+                  'set -o pipefail\ngit rev-parse HEAD | tr -d \'\\n\' | tee "{fix_head}"',
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    },
+  ],
+}

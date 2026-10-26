@@ -766,16 +766,16 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let overlay = tmp.path().join(".gremlins");
         std::fs::create_dir_all(overlay.join("stages")).unwrap();
-        std::fs::write(overlay.join("a.yaml"), "stages: []\n").unwrap();
-        std::fs::write(overlay.join("b.yaml"), "stages: []\n").unwrap();
-        std::fs::write(overlay.join("stages/c.yaml"), "stages: []\n").unwrap();
+        std::fs::write(overlay.join("a.json5"), "{ stages: [] }\n").unwrap();
+        std::fs::write(overlay.join("b.json5"), "{ stages: [] }\n").unwrap();
+        std::fs::write(overlay.join("stages/c.json5"), "{ stages: [] }\n").unwrap();
 
         let cwd = tmp.path().to_string_lossy().into_owned();
         let ctx = build_chat_context(&cwd);
 
         assert!(ctx.contains("Gremlin definitions:\na\nb"), "ctx: {ctx}");
-        assert!(!ctx.contains(".yaml"), "ctx: {ctx}");
-        assert!(!ctx.contains("c.yaml"), "ctx: {ctx}");
+        assert!(!ctx.contains(".json5"), "ctx: {ctx}");
+        assert!(!ctx.contains("c.json5"), "ctx: {ctx}");
         assert!(!ctx.contains("stages/"), "ctx: {ctx}");
         assert!(!ctx.contains("Gremlin definitions:\na\nb\nc"), "ctx: {ctx}");
     }
@@ -801,7 +801,7 @@ mod tests {
         let sandbox = tempfile::TempDir::new().unwrap();
         let project = tempfile::TempDir::new().unwrap();
         let custom = tempfile::TempDir::new().unwrap();
-        std::fs::write(custom.path().join("custom.yaml"), "stages: []\n").unwrap();
+        std::fs::write(custom.path().join("custom.json5"), "{ stages: [] }\n").unwrap();
 
         let config_dir = sandbox.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
@@ -813,7 +813,7 @@ mod tests {
         let ctx = build_chat_context(&cwd);
 
         assert!(ctx.contains("Gremlin definitions:\ncustom"), "ctx: {ctx}");
-        assert!(!ctx.contains("custom.yaml"), "ctx: {ctx}");
+        assert!(!ctx.contains("custom.json5"), "ctx: {ctx}");
     }
 
     #[test]

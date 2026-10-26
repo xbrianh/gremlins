@@ -311,7 +311,7 @@ pub struct Gremlin {
 
 impl Gremlin {
     /// Start a fresh run: generate an id, reserve the state directory, create
-    /// a workspace directory, write `state.json` and a hermetic `definition.yaml`,
+    /// a workspace directory, write `state.json` and a hermetic `definition.json`,
     /// and return a handle ready for [`Gremlin::run`].
     ///
     /// This is the single library-owned creation path — the CLI calls it and
@@ -454,7 +454,7 @@ impl Gremlin {
             }
         };
 
-        // Write the hermetic definition.yaml snapshot now, before we
+        // Write the hermetic definition.json snapshot now, before we
         // return the handle, so the spawned child always sees the
         // definition as it was at launch time — no TOCTTOU window.
         {
@@ -462,7 +462,7 @@ impl Gremlin {
                 .serialize()
                 .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
             let mut blob = state
-                .open_blob("definition.yaml", state::BlobMode::Write)
+                .open_blob("definition.json", state::BlobMode::Write)
                 .map_err(|e| {
                     RunError::Message(format!("failed to write hermetic definition: {e}"))
                 })?;
@@ -561,7 +561,7 @@ impl Gremlin {
             (!workdir.is_empty()).then(|| WorkDir::Persistent(PathBuf::from(&workdir)));
 
         // `definition_path` records the *source* path the run was launched
-        // from (or the kind-resolved path): the hermetic `definition.yaml`
+        // from (or the kind-resolved path): the hermetic `definition.json`
         // snapshot is loaded through the store by `init_runtime`, not read by
         // filesystem path here. Prefer the exact recorded source path, and
         // only resolve by kind when no path was recorded, so a same-named
@@ -659,13 +659,13 @@ impl Gremlin {
             )));
         };
 
-        let mut definition = if self.state.exists("definition.yaml") {
+        let mut definition = if self.state.exists("definition.json") {
             // Read the hermetic snapshot through the store's name-validated
             // blob path, then parse the already-expanded bytes directly.
             let bytes = {
                 let mut blob = self
                     .state
-                    .open_blob("definition.yaml", state::BlobMode::Read)
+                    .open_blob("definition.json", state::BlobMode::Read)
                     .map_err(|error| RunError::Message(error.to_string()))?;
                 let mut bytes = Vec::new();
                 use std::io::Read;
@@ -680,7 +680,7 @@ impl Gremlin {
             )
             .map_err(|error| RunError::Message(error.to_string()))?
         } else {
-            StaticDefinition::from_yaml_file(
+            StaticDefinition::from_json5_file(
                 &definition_path,
                 self.model_override.as_deref(),
                 self.runtime_config.default_model.as_deref(),
@@ -693,15 +693,15 @@ impl Gremlin {
         // hermetic snapshot blob.
         definition.path = definition_path.clone();
 
-        // Write the hermetic definition.yaml snapshot so every entry point
+        // Write the hermetic definition.json snapshot so every entry point
         // that calls run() gets one — resume, fork, and fresh launch alike.
-        if !self.state.exists("definition.yaml") {
+        if !self.state.exists("definition.json") {
             let yaml_bytes = definition
                 .serialize()
                 .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
             let mut blob = self
                 .state
-                .open_blob("definition.yaml", state::BlobMode::Write)
+                .open_blob("definition.json", state::BlobMode::Write)
                 .map_err(|e| RunError::Message(format!("failed to snapshot definition: {e}")))?;
             blob.write_all(&yaml_bytes)
                 .map_err(|e| RunError::Message(format!("failed to snapshot definition: {e}")))?;
@@ -767,7 +767,7 @@ impl Gremlin {
         Ok(())
     }
 
-    /// Load only the clean commands from the run's hermetic `definition.yaml`
+    /// Load only the clean commands from the run's hermetic `definition.json`
     /// snapshot, so teardown can run them without a full runtime init.
     ///
     /// This is the teardown-only counterpart to [`Gremlin::init_runtime`]: it
@@ -785,7 +785,7 @@ impl Gremlin {
     /// keeps the handle's previous (stub) definition and decides whether to
     /// continue teardown without clean commands.
     pub fn attach_clean_cmds(&mut self) -> Result<(), RunError> {
-        if !self.state.exists("definition.yaml") {
+        if !self.state.exists("definition.json") {
             return Err(RunError::Message(format!(
                 "gremlin {}: definition snapshot not found",
                 self.id
@@ -795,7 +795,7 @@ impl Gremlin {
         let bytes = {
             let mut blob = self
                 .state
-                .open_blob("definition.yaml", state::BlobMode::Read)
+                .open_blob("definition.json", state::BlobMode::Read)
                 .map_err(|error| RunError::Message(error.to_string()))?;
             let mut bytes = Vec::new();
             use std::io::Read;
@@ -822,7 +822,7 @@ impl Gremlin {
     /// Fork a child gremlin: copy artifacts, create a workspace, and seed a
     /// fresh `state.json` carrying the child's identity.
     ///
-    /// `child_definition_path` is the branch's hermetic `definition.yaml`; pass
+    /// `child_definition_path` is the branch's hermetic `definition.json`; pass
     /// `None` to inherit the parent's persisted `definition_path`.
     ///
     /// When `effective_model` is `Some`, the child's provider is mutated via
@@ -1597,11 +1597,26 @@ mod tests {
         let path = std::env::var("PATH").unwrap_or_default();
         for dir in std::env::split_paths(&path) {
             let candidate = dir.join("env");
-            if candidate.is_file() {
-                return candidate.to_string_lossy().into_owned();
+            if let Ok(meta) = std::fs::metadata(&candidate) {
+                if meta.is_file() && executable(&meta) {
+                    return candidate.to_string_lossy().into_owned();
+                }
             }
         }
         "env".to_string()
+    }
+
+    /// True when at least one execute bit is set — the OS will try.
+    #[cfg(unix)]
+    fn executable(meta: &std::fs::Metadata) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+
+    /// On non-Unix `is_file()` is the best proxy we have.
+    #[cfg(not(unix))]
+    fn executable(_meta: &std::fs::Metadata) -> bool {
+        true
     }
 
     #[test]
@@ -1715,7 +1730,7 @@ mod tests {
         }
 
         let definition =
-            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+            StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
         let mut gremlin = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1741,7 +1756,7 @@ mod tests {
         assert!(raw["definition_path"]
             .as_str()
             .unwrap()
-            .ends_with("demo.yaml"));
+            .ends_with("demo.json5"));
         // Construction is cheap: the model label is blank until the run
         // loads the definition, and nothing has been parsed yet.
         assert_eq!(raw["model"], "");
@@ -1775,7 +1790,7 @@ mod tests {
         }
 
         let definition =
-            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+            StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
         let mut launched = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1815,7 +1830,7 @@ mod tests {
         }
 
         let definition =
-            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+            StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
         let created = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1856,7 +1871,7 @@ mod tests {
         }
 
         let definition =
-            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+            StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
         let launched = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1887,7 +1902,7 @@ mod tests {
         }
 
         let definition =
-            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+            StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
         let parent = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1905,7 +1920,8 @@ mod tests {
             .await
             .unwrap();
 
-        let child_def = StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+        let child_def =
+            StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
         let child_provider: Box<dyn GremlinDefinition> = Box::new(child_def);
         let child = parent
             .fork("gr-child", "", "", "", None, child_provider, None)
@@ -1963,7 +1979,7 @@ mod tests {
         }
 
         let definition =
-            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+            StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
         let parent = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -1978,14 +1994,14 @@ mod tests {
         // back to whatever the parent state carries (usually the parent's
         // own parent, or nothing at all), never to the parent's own id.
         let child_def_a =
-            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+            StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
         let child_provider_a: Box<dyn GremlinDefinition> = Box::new(child_def_a);
         parent
             .fork("gr-a", "", "", "", None, child_provider_a, None)
             .await
             .unwrap();
         let child_def_b =
-            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+            StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
         let child_provider_b: Box<dyn GremlinDefinition> = Box::new(child_def_b);
         parent
             .fork(
@@ -2021,8 +2037,8 @@ mod tests {
         let overlay = project.path().join(config::overlay_dirname());
         std::fs::create_dir_all(&overlay).unwrap();
         std::fs::write(
-            overlay.join("demo.yaml"),
-            "default_model: 'cmd/true'\nstages: []\n",
+            overlay.join("demo.json5"),
+            r#"{ default_model: "cmd/true", stages: [] }"#,
         )
         .unwrap();
 
@@ -2032,7 +2048,7 @@ mod tests {
         let found = resolve_definition_in_project("demo", project.path());
         let missing = resolve_definition_in_project("nope", project.path());
 
-        assert!(found.is_some_and(|path| path.ends_with("demo.yaml")));
+        assert!(found.is_some_and(|path| path.ends_with("demo.json5")));
         assert!(missing.is_none());
     }
 
@@ -2183,28 +2199,11 @@ mod tests {
 
     /// A minimal expanded definition YAML that an executor test can write
     /// directly into a state directory.
-    const HERMETIC_DEFINITION: &str = r#"
-__gremlins_expanded__: true
-default_model: 'cmd/true'
-stages:
-  - name: run
-    type: exec
-    options:
-      cmds:
-        - "echo hello"
-"#;
+    const HERMETIC_DEFINITION: &str = r#"{"__gremlins_expanded__": true, "default_model": "cmd/true", "stages": [{"name": "run", "type": "exec", "options": {"cmds": ["echo hello"]}}]}"#;
 
     /// Same definition without the sentinel — the direct-load path must
     /// tolerate its absence.
-    const HERMETIC_DEFINITION_NO_SENTINEL: &str = r#"
-default_model: 'cmd/true'
-stages:
-  - name: run
-    type: exec
-    options:
-      cmds:
-        - "echo hello"
-"#;
+    const HERMETIC_DEFINITION_NO_SENTINEL: &str = r#"{"default_model": "cmd/true", "stages": [{"name": "run", "type": "exec", "options": {"cmds": ["echo hello"]}}]}"#;
 
     fn write_hermetic_state(sandbox: &Path, id: &str, definition_body: &str) -> (PathBuf, PathBuf) {
         let state_dir = sandbox.join("state").join(format!("{id}-0001"));
@@ -2213,7 +2212,7 @@ stages:
         let project_root = sandbox.join("project");
         std::fs::create_dir_all(&project_root).unwrap();
 
-        let definition_path = state_dir.join("definition.yaml");
+        let definition_path = state_dir.join("definition.json");
         std::fs::write(&definition_path, definition_body).unwrap();
 
         let state_json = serde_json::json!({
@@ -2249,7 +2248,7 @@ stages:
 
         let (state_dir, project_root) =
             write_hermetic_state(sandbox.path(), "gr-hermetic", HERMETIC_DEFINITION);
-        assert!(state_dir.join("definition.yaml").is_file());
+        assert!(state_dir.join("definition.json").is_file());
 
         let mut gremlin = Gremlin::from("gr-hermetic").unwrap();
         assert_eq!(gremlin.project_root, project_root);
@@ -2284,7 +2283,7 @@ stages:
             "gr-hermetic-nosent",
             HERMETIC_DEFINITION_NO_SENTINEL,
         );
-        assert!(state_dir.join("definition.yaml").is_file());
+        assert!(state_dir.join("definition.json").is_file());
 
         let mut gremlin = Gremlin::from("gr-hermetic-nosent").unwrap();
 
@@ -2311,7 +2310,7 @@ stages:
             return;
         }
 
-        // Manually create a state directory without a definition.yaml so
+        // Manually create a state directory without a definition.json so
         // `from` falls back to resolving by kind.
         let state_dir = fx.join("state").join("gr-noherm-0001");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -2374,21 +2373,12 @@ stages:
         let marker = sandbox.path().join("clean-ran");
 
         // Write a hermetic definition with clean_cmds.
-        let definition_yaml = format!(
-            r#"
-__gremlins_expanded__: true
-default_model: 'cmd/true'
-stages: []
-land:
-  land_cmds:
-    - "echo land"
-  clean_cmds:
-    - "touch {marker_path}"
-"#,
+        let definition_json = format!(
+            r#"{{"__gremlins_expanded__": true, "default_model": "cmd/true", "stages": [], "land": {{"land_cmds": ["echo land"], "clean_cmds": ["touch {marker_path}"]}}}}"#,
             marker_path = marker.display(),
         );
-        let definition_path = state_dir.join("definition.yaml");
-        std::fs::write(&definition_path, &definition_yaml).unwrap();
+        let definition_path = state_dir.join("definition.json");
+        std::fs::write(&definition_path, &definition_json).unwrap();
 
         let state_json = serde_json::json!({
             "id": id,
@@ -2450,33 +2440,19 @@ land:
 
         // The source definition no longer exists at the recorded path; only the
         // hermetic snapshot in the state directory is available.
-        let source_definition = project_root.join("since-deleted.yaml");
+        let source_definition = project_root.join("since-deleted.json5");
         let marker = sandbox.path().join("clean-ran");
         let bootstrap_ran = sandbox.path().join("bootstrap-ran");
 
         // Deliberately no `default_model`: attach_clean_cmds only needs the
         // clean commands, so expanded parsing must not require settings.yaml or
         // a profile-bearing model spec.
-        let definition_yaml = format!(
-            r#"
-__gremlins_expanded__: true
-stages:
-  - name: run
-    type: exec
-    options:
-      cmds:
-        - "echo hello"
-land:
-  clean_cmds:
-    - "touch {marker_path}"
-bootstrap:
-  env: |
-    touch {bootstrap_path}
-"#,
+        let definition_json = format!(
+            r#"{{"__gremlins_expanded__": true, "stages": [{{"name": "run", "type": "exec", "options": {{"cmds": ["echo hello"]}}}}], "land": {{"clean_cmds": ["touch {marker_path}"]}}, "bootstrap": {{"env": "touch {bootstrap_path}\n"}}}}"#,
             marker_path = marker.display(),
             bootstrap_path = bootstrap_ran.display(),
         );
-        std::fs::write(state_dir.join("definition.yaml"), &definition_yaml).unwrap();
+        std::fs::write(state_dir.join("definition.json"), &definition_json).unwrap();
 
         std::fs::write(
             state_dir.join("state.json"),
@@ -2597,7 +2573,7 @@ bootstrap:
         std::fs::create_dir_all(&workdir).unwrap();
         std::fs::create_dir_all(&project_root).unwrap();
 
-        std::fs::write(state_dir.join("definition.yaml"), b"\xff\xfe").unwrap();
+        std::fs::write(state_dir.join("definition.json"), b"\xff\xfe").unwrap();
 
         std::fs::write(
             state_dir.join("state.json"),
@@ -2622,7 +2598,7 @@ bootstrap:
         assert!(
             error
                 .to_string()
-                .contains("failed to parse definition YAML"),
+                .contains("failed to parse definition JSON"),
             "error should name the parse failure: {error}"
         );
         assert!(gremlin.definition.is_stub());
@@ -2670,7 +2646,7 @@ bootstrap:
         }
 
         let definition =
-            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+            StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
         let cfg = GremlinConfig { ephemeral: true };
         let gremlin = Gremlin::init(
             "gr-test",
@@ -2715,7 +2691,7 @@ bootstrap:
         }
 
         let definition =
-            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+            StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
         let cfg = GremlinConfig { ephemeral: true };
         let parent = Gremlin::init(
             "gr-test",
@@ -2727,7 +2703,8 @@ bootstrap:
         )
         .unwrap();
 
-        let child_def = StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+        let child_def =
+            StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
         let child_provider: Box<dyn GremlinDefinition> = Box::new(child_def);
         let child = parent
             .fork("gr-child", "", "", "", None, child_provider, None)
@@ -2772,7 +2749,7 @@ bootstrap:
         }
 
         let definition =
-            StaticDefinition::from_yaml_file(fx.definition_path(), None, None).unwrap();
+            StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
         let cfg = GremlinConfig { ephemeral: true };
         let gremlin = Gremlin::init(
             "gr-test",

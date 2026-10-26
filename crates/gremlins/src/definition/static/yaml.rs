@@ -1,25 +1,26 @@
-//! YAML ingestion for StaticDefinition.
+//! JSON5 ingestion for StaticDefinition.
 //!
-//! All YAML-reading logic lives here: the public [`StaticDefinition::from_yaml_file`]
-//! constructor, the private `from_expanded_value` dispatcher, per-stage YAML→builder
-//! conversion helpers, and the small helper functions that extract fields from a YAML
-//! mapping.
+//! All JSON5-reading logic lives here: the public [`StaticDefinition::from_json5_file`]
+//! constructor, the private `from_expanded_value` dispatcher, per-stage JSON→builder
+//! conversion helpers, and the small helper functions that extract fields from a JSON
+//! object.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
-use serde_yaml::{Mapping, Value};
+use serde_json::{Map, Value};
 
 use crate::builders::agent::AgentBuilder;
 use crate::builders::artifacts::{InterpolationValue, OutputTarget};
 use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
 use crate::builders::definition::{fill_builder_names, DefinitionBuilder, LandBuilder};
 use crate::builders::exec::ExecBuilder;
-use crate::clients::client::{validate_task_model_spec, ModelURI};
+use crate::clients::client::validate_task_model_spec;
 use crate::clients::task_kind::TaskKind;
 use crate::config;
 use crate::definition::r#static::expand;
+use crate::model_uri::ModelURI;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
 use crate::stage_spec::node::StageSpec;
@@ -33,13 +34,13 @@ use super::StaticDefinition;
 
 /// The message emitted when no layer supplied a default model.
 const MISSING_DEFAULT_MODEL: &str = "gremlin definition is missing 'default_model' — set a \
-     'default_model' in the definition YAML, pass --model on the command line, or set \
+     'default_model' in the JSON5 definition, pass --model on the command line, or set \
      'default-model' in settings.yaml";
 
 /// Legacy model-selection keys carried over from the `client` grammar.
 ///
 /// These were renamed in #1928/#1931 with **no** backward-compatibility
-/// aliases. A YAML file that still uses them is rejected rather than silently
+/// aliases. A JSON5 file that still uses them is rejected rather than silently
 /// ignoring the model selection and falling back to a default (or losing a
 /// stage override).
 const LEGACY_DEFAULT_MODEL_KEYS: [(&str, &str); 2] = [
@@ -54,10 +55,10 @@ const LEGACY_STAGE_MODEL_KEYS: [(&str, &str); 2] =
 // ---------------------------------------------------------------------------
 
 impl StaticDefinition {
-    /// Load a definition from a YAML file, expanding includes, stage-definitions,
+    /// Load a definition from a JSON5 file, expanding includes, stage-definitions,
     /// and prompts. `model_override` is the CLI `--model` value; consulted only
-    /// when the YAML declares none.
-    pub fn from_yaml_file(
+    /// when the JSON5 declares none.
+    pub fn from_json5_file(
         path: &Path,
         model_override: Option<&str>,
         config_default_model: Option<&str>,
@@ -84,7 +85,7 @@ impl StaticDefinition {
         )
     }
 
-    /// Parse already-expanded YAML bytes directly — no file I/O, no
+    /// Parse already-expanded JSON bytes directly — no file I/O, no
     /// project-root walk.
     ///
     /// Strips the `__gremlins_expanded__` sentinel if present, but tolerates
@@ -94,41 +95,41 @@ impl StaticDefinition {
         model_override: Option<&str>,
         config_default_model: Option<&str>,
     ) -> Result<Self, SchemaError> {
-        let expanded = parse_expanded_yaml(data)?;
+        let expanded = parse_expanded_json(data)?;
         from_expanded_value(
             expanded,
-            Path::new("definition.yaml"),
+            Path::new("definition.json5"),
             model_override,
             config_default_model,
             None,
         )
     }
-
-    /// Read an already-expanded YAML file — no expansion, no project-root
-    /// walk. Strips the `__gremlins_expanded__` sentinel before dispatching.
-    pub fn from_expanded_yaml_file(
-        path: &Path,
-        model_override: Option<&str>,
-        config_default_model: Option<&str>,
-    ) -> Result<Self, SchemaError> {
-        let data = std::fs::read(path)
-            .map_err(|e| SchemaError::Generic(format!("failed to read {}: {e}", path.display())))?;
-        let expanded = parse_expanded_yaml(&data)?;
-        from_expanded_value(expanded, path, model_override, config_default_model, None)
-    }
 }
 
 // ---------------------------------------------------------------------------
-// Private: parse_expanded_yaml
+// Private: parse_expanded_json
 // ---------------------------------------------------------------------------
 
-/// Parse YAML bytes and strip the `__gremlins_expanded__` sentinel.
-fn parse_expanded_yaml(data: &[u8]) -> Result<Value, SchemaError> {
-    let mut expanded: Value = serde_yaml::from_slice(data)
-        .map_err(|e| SchemaError::Generic(format!("failed to parse definition YAML: {e}")))?;
-    if let Some(mapping) = expanded.as_mapping_mut() {
-        let sentinel = Value::from("__gremlins_expanded__");
-        mapping.remove(&sentinel);
+/// Parse already-expanded JSON bytes and strip the `__gremlins_expanded__` sentinel.
+///
+/// The hermetic snapshot is written as plain JSON, but its readers honor the
+/// JSON5-on-read contract: comments, unquoted keys, single-quoted strings, and
+/// trailing commas are all accepted here. The same non-representable numeric
+/// literal validation used by the file reader is applied.
+fn parse_expanded_json(data: &[u8]) -> Result<Value, SchemaError> {
+    let label = Path::new("definition.json");
+    let text = std::str::from_utf8(data).map_err(|e| {
+        SchemaError::Generic(format!(
+            "failed to parse definition JSON: invalid UTF-8: {e}"
+        ))
+    })?;
+    expand::reject_json5_numeric_literals(text, label)?;
+    let mut expanded: Value = json5::from_str(text).map_err(|e| SchemaError::YamlParse {
+        label: label.display().to_string(),
+        msg: e.to_string(),
+    })?;
+    if let Some(object) = expanded.as_object_mut() {
+        object.remove("__gremlins_expanded__");
     }
     Ok(expanded)
 }
@@ -137,7 +138,7 @@ fn parse_expanded_yaml(data: &[u8]) -> Result<Value, SchemaError> {
 // Private: from_expanded_value
 // ---------------------------------------------------------------------------
 
-/// Shared extraction: turn an already-expanded YAML [`Value`] into a
+/// Shared extraction: turn an already-expanded JSON [`Value`] into a
 /// [`StaticDefinition`] via the builder path.
 fn from_expanded_value(
     expanded: Value,
@@ -147,7 +148,7 @@ fn from_expanded_value(
     settings: Option<&config::Config>,
 ) -> Result<StaticDefinition, SchemaError> {
     let root = expanded
-        .as_mapping()
+        .as_object()
         .ok_or_else(|| SchemaError::YamlNotMapping {
             label: path.display().to_string(),
             got: format!("{expanded:?}"),
@@ -162,15 +163,15 @@ fn from_expanded_value(
         .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(String::from))
         .unwrap_or_default();
 
-    let raw_yaml_default_model = default_model_from_yaml(root)?;
-    base_ref_from_yaml(root)?;
+    let raw_json_default_model = default_model_from_json(root)?;
+    base_ref_from_json(root)?;
 
-    let raw_stages = stages_from_yaml(root)?;
+    let raw_stages = stages_from_json(root)?;
 
     // Capture profile names from raw default-model sources before
     // resolution. These determine which profile's `task-models`
     // stages inherit when they don't supply their own model.
-    let yaml_default_profile: Option<String> = raw_yaml_default_model
+    let json_default_profile: Option<String> = raw_json_default_model
         .as_ref()
         .and_then(|raw| config::profile_name(raw).map(|s| s.to_string()));
     let override_default_profile: Option<String> =
@@ -180,15 +181,15 @@ fn from_expanded_value(
 
     // Bake every stage and default model with the current settings profile
     // (source-definition path only). Expanded definitions from
-    // `from_expanded_bytes` / `from_expanded_yaml_file` pass `None` here:
+    // `from_expanded_bytes` passes `None` here:
     // their values are already concrete `provider/model[?k=v]` strings, so
     // no profile resolution is needed and a missing/malformed settings.yaml
     // must not block resuming from a baked definition.
-    let yaml_default_model = match settings {
-        Some(settings) => raw_yaml_default_model
+    let json_default_model = match settings {
+        Some(settings) => raw_json_default_model
             .map(|c| resolve_model(&c, settings).map_err(SchemaError::Generic))
             .transpose()?,
-        None => raw_yaml_default_model,
+        None => raw_json_default_model,
     };
     let config_default_model = match settings {
         Some(settings) => config_default_model
@@ -205,9 +206,9 @@ fn from_expanded_value(
 
     // Determine which profile (if any) contributes the effective default
     // model.  This mirrors resolve_default_model's precedence:
-    // YAML > CLI override > settings.yaml.
-    let effective_profile: Option<&str> = if yaml_default_model.is_some() {
-        yaml_default_profile.as_deref()
+    // JSON > CLI override > settings.yaml.
+    let effective_profile: Option<&str> = if json_default_model.is_some() {
+        json_default_profile.as_deref()
     } else if default_model_override
         .as_ref()
         .is_some_and(|s| !s.is_empty())
@@ -217,45 +218,45 @@ fn from_expanded_value(
         config_default_profile.as_deref()
     };
 
-    // Parse stages through the per-type YAML→builder dispatch.
+    // Parse stages through the per-type JSON→builder dispatch.
     let mut stages: Vec<StageSpec> = Vec::new();
     for raw in &raw_stages {
         let mapping = raw
-            .as_mapping()
+            .as_object()
             .ok_or_else(|| SchemaError::Generic("each stage must be a mapping".to_string()))?;
-        stages.push(stage_from_yaml(mapping, settings, effective_profile)?);
+        stages.push(stage_from_json(mapping, settings, effective_profile)?);
     }
 
     // Bootstrap.
     let bootstrap = match root.get("bootstrap") {
         None | Some(Value::Null) => Bootstrap::default(),
-        Some(value) => Bootstrap::from_yaml(Some(value))?,
+        Some(value) => Bootstrap::from_json(Some(value))?,
     };
 
     // Land.
     let (land, clean_cmds) = if let Some(land_val) = root.get("land").filter(|v| !v.is_null()) {
         let land_mapping = land_val
-            .as_mapping()
+            .as_object()
             .ok_or_else(|| SchemaError::Generic("'land' must be a mapping".to_string()))?;
-        let (land_stage, clean) = land_from_yaml_builder(land_mapping, settings)?;
+        let (land_stage, clean) = land_from_json_builder(land_mapping, settings)?;
         (Some(land_stage), clean)
     } else {
         (None, Vec::new())
     };
 
     let default_model = resolve_default_model(
-        yaml_default_model,
+        json_default_model,
         default_model_override.as_deref(),
         config_default_model.as_deref(),
     )?;
 
     // Read or resolve default_task_models.
-    // If the YAML already contains a `default_task_models` key (from a
+    // If the JSON already contains a `default_task_models` key (from a
     // previously expanded definition), use it directly — values are
     // already resolved.  Otherwise resolve the global
     // `default-task-models` through profiles so the expanded output
     // includes only concrete `provider/model[?k=v]` strings.
-    let default_task_models = yaml_default_task_models(root, settings)?;
+    let default_task_models = json_default_task_models(root, settings)?;
 
     let builder = DefinitionBuilder {
         name,
@@ -272,12 +273,12 @@ fn from_expanded_value(
 }
 
 // ---------------------------------------------------------------------------
-// Per-stage YAML → builder conversion
+// Per-stage JSON → builder conversion
 // ---------------------------------------------------------------------------
 
 /// Dispatch a single stage mapping to the appropriate per-type builder.
-fn stage_from_yaml(
-    mapping: &Mapping,
+fn stage_from_json(
+    mapping: &Map<String, Value>,
     settings: Option<&config::Config>,
     effective_profile: Option<&str>,
 ) -> Result<StageSpec, SchemaError> {
@@ -296,18 +297,18 @@ fn stage_from_yaml(
     reject_legacy_stage_model_keys(mapping, &name)?;
 
     match stage_type {
-        "agent" => agent_from_yaml(mapping, &name, settings, effective_profile),
-        "exec" => exec_from_yaml(mapping, &name, settings, effective_profile),
-        "sequence" => sequence_from_yaml(mapping, &name, settings, effective_profile),
-        "parallel" => parallel_from_yaml(mapping, &name, settings, effective_profile),
+        "agent" => agent_from_json(mapping, &name, settings, effective_profile),
+        "exec" => exec_from_json(mapping, &name, settings, effective_profile),
+        "sequence" => sequence_from_json(mapping, &name, settings, effective_profile),
+        "parallel" => parallel_from_json(mapping, &name, settings, effective_profile),
         other => Err(SchemaError::Generic(format!(
             "stage {name:?}: unknown type {other:?}"
         ))),
     }
 }
 
-/// Read a YAML string key, returning `None` when absent or null.
-fn yaml_str(mapping: &Mapping, key: &str) -> Option<String> {
+/// Read a JSON string key, returning `None` when absent or null.
+fn json_str(mapping: &Map<String, Value>, key: &str) -> Option<String> {
     mapping
         .get(key)
         .filter(|v| !v.is_null())
@@ -316,7 +317,7 @@ fn yaml_str(mapping: &Mapping, key: &str) -> Option<String> {
 }
 
 /// Reject legacy top-level model-selection keys on a definition mapping.
-fn reject_legacy_default_model_keys(root: &Mapping) -> Result<(), SchemaError> {
+fn reject_legacy_default_model_keys(root: &Map<String, Value>) -> Result<(), SchemaError> {
     for (legacy, replacement) in LEGACY_DEFAULT_MODEL_KEYS {
         if root.contains_key(legacy) {
             return Err(SchemaError::Generic(format!(
@@ -328,7 +329,10 @@ fn reject_legacy_default_model_keys(root: &Mapping) -> Result<(), SchemaError> {
 }
 
 /// Reject legacy stage-level model-selection keys on a stage mapping.
-fn reject_legacy_stage_model_keys(mapping: &Mapping, label: &str) -> Result<(), SchemaError> {
+fn reject_legacy_stage_model_keys(
+    mapping: &Map<String, Value>,
+    label: &str,
+) -> Result<(), SchemaError> {
     for (legacy, replacement) in LEGACY_STAGE_MODEL_KEYS {
         if mapping.contains_key(legacy) {
             return Err(SchemaError::Generic(format!(
@@ -346,8 +350,8 @@ fn reject_legacy_stage_model_keys(mapping: &Mapping, label: &str) -> Result<(), 
 /// Rejects legacy flat `interpolation:` (keys other than `inputs`/`outputs`),
 /// non-mapping values, and the deprecated top-level `bind:` key.
 #[allow(clippy::type_complexity)]
-fn yaml_interpolation_nested(
-    mapping: &Mapping,
+fn json_interpolation_nested(
+    mapping: &Map<String, Value>,
 ) -> Result<(HashMap<String, String>, HashMap<String, String>), SchemaError> {
     // Reject legacy top-level `bind:` key
     if mapping.contains_key("bind") {
@@ -358,44 +362,40 @@ fn yaml_interpolation_nested(
     }
     if let Some(interp_val) = mapping.get("interpolation").filter(|v| !v.is_null()) {
         let interp_map = interp_val
-            .as_mapping()
+            .as_object()
             .ok_or_else(|| SchemaError::Generic("'interpolation' must be a mapping".to_string()))?;
         // Reject unknown or non-string sub-keys — only "inputs" and "outputs" are valid
         for key in interp_map.keys() {
             match key.as_str() {
-                Some("inputs") | Some("outputs") => {}
-                Some(other) => {
+                "inputs" | "outputs" => {}
+                other => {
                     return Err(SchemaError::Generic(format!(
                         "unknown key {other:?} in 'interpolation'; expected 'inputs' or 'outputs'"
                     )));
                 }
-                None => {
-                    return Err(SchemaError::Generic(
-                        "'interpolation' keys must be strings".to_string(),
-                    ));
-                }
             }
         }
-        let inputs = yaml_string_map(interp_map, "inputs")?;
-        let outputs = yaml_string_map(interp_map, "outputs")?;
+        let inputs = json_string_map(interp_map, "inputs")?;
+        let outputs = json_string_map(interp_map, "outputs")?;
         return Ok((inputs, outputs));
     }
     Ok((HashMap::new(), HashMap::new()))
 }
 
-/// Read a YAML string→string mapping, returning an empty map when absent.
-fn yaml_string_map(mapping: &Mapping, key: &str) -> Result<HashMap<String, String>, SchemaError> {
+/// Read a JSON string→string mapping, returning an empty map when absent.
+fn json_string_map(
+    mapping: &Map<String, Value>,
+    key: &str,
+) -> Result<HashMap<String, String>, SchemaError> {
     let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
         return Ok(HashMap::new());
     };
     let map = raw
-        .as_mapping()
+        .as_object()
         .ok_or_else(|| SchemaError::Generic(format!("'{key}' must be a mapping")))?;
     let mut result = HashMap::new();
     for (k, v) in map {
-        let ks = k
-            .as_str()
-            .ok_or_else(|| SchemaError::Generic(format!("'{key}' keys must be strings")))?;
+        let ks = k.as_str();
         let vs = v
             .as_str()
             .ok_or_else(|| SchemaError::Generic(format!("'{key}' values must be strings")))?;
@@ -404,22 +404,20 @@ fn yaml_string_map(mapping: &Mapping, key: &str) -> Result<HashMap<String, Strin
     Ok(result)
 }
 
-/// Read a YAML string→string mapping, preserving declaration order.
-fn yaml_string_map_ordered(
-    mapping: &Mapping,
+/// Read a JSON string→string mapping, preserving declaration order.
+fn json_string_map_ordered(
+    mapping: &Map<String, Value>,
     key: &str,
 ) -> Result<Option<IndexMap<String, String>>, SchemaError> {
     let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
         return Ok(None);
     };
     let map = raw
-        .as_mapping()
+        .as_object()
         .ok_or_else(|| SchemaError::Generic("'task-models' must be a mapping".to_string()))?;
     let mut result = IndexMap::new();
     for (k, v) in map {
-        let ks = k.as_str().ok_or_else(|| {
-            SchemaError::Generic("'task-models' keys must be strings".to_string())
-        })?;
+        let ks = k.as_str();
         let vs = v.as_str().ok_or_else(|| {
             SchemaError::Generic("'task-models' values must be strings".to_string())
         })?;
@@ -443,13 +441,13 @@ fn yaml_string_map_ordered(
     Ok(Some(result))
 }
 
-/// Read a YAML sequence of strings.
-fn yaml_string_list(mapping: &Mapping, key: &str) -> Result<Vec<String>, SchemaError> {
+/// Read a JSON sequence of strings.
+fn json_string_list(mapping: &Map<String, Value>, key: &str) -> Result<Vec<String>, SchemaError> {
     let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
         return Ok(Vec::new());
     };
     let seq = raw
-        .as_sequence()
+        .as_array()
         .ok_or_else(|| SchemaError::Generic(format!("'{key}' must be a sequence")))?;
     let mut result = Vec::new();
     for (i, v) in seq.iter().enumerate() {
@@ -462,18 +460,18 @@ fn yaml_string_list(mapping: &Mapping, key: &str) -> Result<Vec<String>, SchemaE
 }
 
 /// Read `options` as a `HashMap<String, serde_json::Value>`.
-fn yaml_options(mapping: &Mapping) -> Result<HashMap<String, serde_json::Value>, SchemaError> {
+fn json_options(
+    mapping: &Map<String, Value>,
+) -> Result<HashMap<String, serde_json::Value>, SchemaError> {
     let Some(raw) = mapping.get("options").filter(|v| !v.is_null()) else {
         return Ok(HashMap::new());
     };
     let opts = raw
-        .as_mapping()
+        .as_object()
         .ok_or_else(|| SchemaError::Generic("'options' must be a mapping".to_string()))?;
     let mut result = HashMap::new();
     for (k, v) in opts {
-        let ks = k
-            .as_str()
-            .ok_or_else(|| SchemaError::Generic("'options' keys must be strings".to_string()))?;
+        let ks = k.as_str();
         let jv = serde_json::to_value(v).map_err(|e| {
             SchemaError::Generic(format!("'options' value for '{ks}' is not valid: {e}"))
         })?;
@@ -483,18 +481,18 @@ fn yaml_options(mapping: &Mapping) -> Result<HashMap<String, serde_json::Value>,
 }
 
 /// Read `skip_if_exists` — empty string when absent.
-fn yaml_skip_if_exists(mapping: &Mapping) -> String {
-    yaml_str(mapping, "skip_if_exists").unwrap_or_default()
+fn json_skip_if_exists(mapping: &Map<String, Value>) -> String {
+    json_str(mapping, "skip_if_exists").unwrap_or_default()
 }
 
 /// Read `model` — None when absent. Values are resolved through profiles
 /// when settings are supplied; otherwise they are assumed to already be
 /// concrete `provider/model[?k=v]` strings.
-fn yaml_model(
-    mapping: &Mapping,
+fn json_model(
+    mapping: &Map<String, Value>,
     settings: Option<&config::Config>,
 ) -> Result<Option<ModelURI>, SchemaError> {
-    let Some(raw) = yaml_str(mapping, "model") else {
+    let Some(raw) = json_str(mapping, "model") else {
         return Ok(None);
     };
     let resolved = match settings {
@@ -530,17 +528,17 @@ fn validate_task_model_entry(key: &str, value: &str) -> Result<(), SchemaError> 
 /// the definition default-model, CLI --model, or settings.yaml
 /// default-model selected a profile), that profile's `task_models` also
 /// serve as the base layer.
-fn yaml_task_models(
-    mapping: &Mapping,
+fn json_task_models(
+    mapping: &Map<String, Value>,
     settings: Option<&config::Config>,
     effective_profile: Option<&str>,
 ) -> Result<Option<IndexMap<String, String>>, SchemaError> {
-    let stage = yaml_string_map_ordered(mapping, "task-models")?;
+    let stage = json_string_map_ordered(mapping, "task-models")?;
 
     // Resolve which profile (if any) contributes task-models as a base.
     // Priority: the stage's own `model: profile/<name>` wins; otherwise the
     // effective default-profile from the definition.
-    let profile_name: Option<String> = yaml_str(mapping, "model")
+    let profile_name: Option<String> = json_str(mapping, "model")
         .and_then(|raw| config::profile_name(&raw).map(|name| name.to_string()))
         .or_else(|| effective_profile.map(|s| s.to_string()));
 
@@ -589,18 +587,18 @@ fn resolve_model(raw: &str, settings: &config::Config) -> Result<String, String>
     config::resolve_model_reference(raw, settings)
 }
 
-/// Build an [`AgentBuilder`] from a YAML stage mapping.
-fn agent_from_yaml(
-    mapping: &Mapping,
+/// Build an [`AgentBuilder`] from a JSON stage mapping.
+fn agent_from_json(
+    mapping: &Map<String, Value>,
     name: &str,
     settings: Option<&config::Config>,
     effective_profile: Option<&str>,
 ) -> Result<StageSpec, SchemaError> {
-    let prompts = yaml_string_list(mapping, "prompt")?;
-    let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
-    let options = yaml_options(mapping)?;
-    let model = yaml_model(mapping, settings)?;
-    let task_models = yaml_task_models(mapping, settings, effective_profile)?;
+    let prompts = json_string_list(mapping, "prompt")?;
+    let (interpolation_map, bind_map) = json_interpolation_nested(mapping)?;
+    let options = json_options(mapping)?;
+    let model = json_model(mapping, settings)?;
+    let task_models = json_task_models(mapping, settings, effective_profile)?;
 
     let mut builder = AgentBuilder::new(name);
     for p in prompts {
@@ -625,17 +623,17 @@ fn agent_from_yaml(
     builder.build()
 }
 
-/// Build an [`ExecBuilder`] from a YAML stage mapping.
-fn exec_from_yaml(
-    mapping: &Mapping,
+/// Build an [`ExecBuilder`] from a JSON stage mapping.
+fn exec_from_json(
+    mapping: &Map<String, Value>,
     name: &str,
     settings: Option<&config::Config>,
     effective_profile: Option<&str>,
 ) -> Result<StageSpec, SchemaError> {
-    let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
-    let options = yaml_options(mapping)?;
-    let model = yaml_model(mapping, settings)?;
-    let task_models = yaml_task_models(mapping, settings, effective_profile)?;
+    let (interpolation_map, bind_map) = json_interpolation_nested(mapping)?;
+    let options = json_options(mapping)?;
+    let model = json_model(mapping, settings)?;
+    let task_models = json_task_models(mapping, settings, effective_profile)?;
 
     let mut builder = ExecBuilder::new(name);
     for (k, v) in interpolation_map {
@@ -657,9 +655,9 @@ fn exec_from_yaml(
     builder.build()
 }
 
-/// Build a [`SequenceBuilder`] from a YAML stage mapping.
-fn sequence_from_yaml(
-    mapping: &Mapping,
+/// Build a [`SequenceBuilder`] from a JSON stage mapping.
+fn sequence_from_json(
+    mapping: &Map<String, Value>,
     name: &str,
     settings: Option<&config::Config>,
     effective_profile: Option<&str>,
@@ -676,15 +674,15 @@ fn sequence_from_yaml(
             }
         }
     };
-    let skip_if_exists = yaml_skip_if_exists(mapping);
-    let model = yaml_model(mapping, settings)?;
-    let task_models = yaml_task_models(mapping, settings, effective_profile)?;
+    let skip_if_exists = json_skip_if_exists(mapping);
+    let model = json_model(mapping, settings)?;
+    let task_models = json_task_models(mapping, settings, effective_profile)?;
 
-    // Interval from top-level key.  Only accepts numbers (YAML integers
+    // Interval from top-level key.  Only accepts numbers (JSON integers
     // coerce to f64 via as_f64).  Reject non-numeric values with a
     // SchemaError.
     let interval = match mapping.get("interval") {
-        None | Some(serde_yaml::Value::Null) => None,
+        None | Some(Value::Null) => None,
         Some(v) => match v.as_f64() {
             Some(f) => Some(f),
             None => {
@@ -695,7 +693,7 @@ fn sequence_from_yaml(
         },
     };
 
-    let body = yaml_children(mapping, "body", settings, effective_profile)?;
+    let body = json_children(mapping, "body", settings, effective_profile)?;
 
     let mut builder = SequenceBuilder::new(name)
         .max_iterations(max_iterations)
@@ -716,9 +714,9 @@ fn sequence_from_yaml(
     builder.build()
 }
 
-/// Build a [`ParallelBuilder`] from a YAML stage mapping.
-fn parallel_from_yaml(
-    mapping: &Mapping,
+/// Build a [`ParallelBuilder`] from a JSON stage mapping.
+fn parallel_from_json(
+    mapping: &Map<String, Value>,
     name: &str,
     settings: Option<&config::Config>,
     effective_profile: Option<&str>,
@@ -758,15 +756,15 @@ fn parallel_from_yaml(
             })?
         }
     };
-    let skip_if_exists = yaml_skip_if_exists(mapping);
-    let model = yaml_model(mapping, settings)?;
-    let task_models = yaml_task_models(mapping, settings, effective_profile)?;
+    let skip_if_exists = json_skip_if_exists(mapping);
+    let model = json_model(mapping, settings)?;
+    let task_models = json_task_models(mapping, settings, effective_profile)?;
 
-    let body = yaml_children(mapping, "body", settings, effective_profile)?;
+    let body = json_children(mapping, "body", settings, effective_profile)?;
 
     // Parse fork and join specs
-    let fork = yaml_fork_join(mapping, "fork")?;
-    let join = yaml_fork_join(mapping, "join")?;
+    let fork = json_fork_join(mapping, "fork")?;
+    let join = json_fork_join(mapping, "join")?;
 
     let mut builder = ParallelBuilder::new(name)
         .stages(body)
@@ -796,21 +794,24 @@ fn parallel_from_yaml(
 
 /// Parse a `fork` or `join` key from a parallel stage mapping.
 /// Each is a mapping with a `cmds:` sequence of strings.
-fn yaml_fork_join(mapping: &Mapping, key: &str) -> Result<Option<Vec<String>>, SchemaError> {
+fn json_fork_join(
+    mapping: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<Vec<String>>, SchemaError> {
     let Some(raw) = mapping.get(key).filter(|v| !v.is_null()) else {
         return Ok(None);
     };
     let fmap = raw
-        .as_mapping()
+        .as_object()
         .ok_or_else(|| SchemaError::Generic(format!("'{key}' must be a mapping")))?;
-    let cmds = yaml_string_list(fmap, "cmds")?;
+    let cmds = json_string_list(fmap, "cmds")?;
     Ok(Some(cmds))
 }
 
 /// Parse children from a composite's `key` ("body") through
 /// the same per-type dispatch.
-fn yaml_children(
-    mapping: &Mapping,
+fn json_children(
+    mapping: &Map<String, Value>,
     key: &str,
     settings: Option<&config::Config>,
     effective_profile: Option<&str>,
@@ -819,29 +820,29 @@ fn yaml_children(
         return Ok(Vec::new());
     };
     let seq = raw
-        .as_sequence()
+        .as_array()
         .ok_or_else(|| SchemaError::Generic(format!("'{key}' must be a sequence")))?;
     let mut children = Vec::new();
     for entry in seq {
-        let child_map = entry.as_mapping().ok_or_else(|| {
+        let child_map = entry.as_object().ok_or_else(|| {
             SchemaError::Generic("each child stage must be a mapping".to_string())
         })?;
-        children.push(stage_from_yaml(child_map, settings, effective_profile)?);
+        children.push(stage_from_json(child_map, settings, effective_profile)?);
     }
     fill_builder_names(&mut children);
     Ok(children)
 }
 
-/// Build the land stage from its YAML mapping, forcing name=land and
+/// Build the land stage from its JSON mapping, forcing name=land and
 /// type=exec through [`LandBuilder`]. Returns the land stage and clean_cmds.
-fn land_from_yaml_builder(
-    mapping: &Mapping,
+fn land_from_json_builder(
+    mapping: &Map<String, Value>,
     settings: Option<&config::Config>,
 ) -> Result<(StageSpec, Vec<String>), SchemaError> {
     reject_legacy_stage_model_keys(mapping, "land")?;
 
-    let (interpolation_map, bind_map) = yaml_interpolation_nested(mapping)?;
-    let options = yaml_options(mapping)?;
+    let (interpolation_map, bind_map) = json_interpolation_nested(mapping)?;
+    let options = json_options(mapping)?;
     // Reject legacy options.cmds — land_cmds / clean_cmds are the only
     // supported command keys in the land mapping.
     if options.contains_key("cmds") {
@@ -850,10 +851,10 @@ fn land_from_yaml_builder(
                 .to_string(),
         ));
     }
-    let model = yaml_model(mapping, settings)?;
+    let model = json_model(mapping, settings)?;
 
-    let land_cmds = yaml_string_list(mapping, "land_cmds")?;
-    let clean_cmds = yaml_string_list(mapping, "clean_cmds")?;
+    let land_cmds = json_string_list(mapping, "land_cmds")?;
+    let clean_cmds = json_string_list(mapping, "clean_cmds")?;
 
     let mut builder = LandBuilder::new();
     for (k, v) in interpolation_map {
@@ -903,7 +904,7 @@ fn project_root_for(path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn default_model_from_yaml(root: &Mapping) -> Result<Option<String>, SchemaError> {
+fn default_model_from_json(root: &Map<String, Value>) -> Result<Option<String>, SchemaError> {
     let Some(value) = root.get("default_model").filter(|value| !value.is_null()) else {
         return Ok(None);
     };
@@ -918,7 +919,7 @@ fn default_model_from_yaml(root: &Mapping) -> Result<Option<String>, SchemaError
     Ok(Some(model.to_string()))
 }
 
-fn base_ref_from_yaml(root: &Mapping) -> Result<(), SchemaError> {
+fn base_ref_from_json(root: &Map<String, Value>) -> Result<(), SchemaError> {
     if root.contains_key("base_ref") {
         return Err(SchemaError::Generic(
             "top-level 'base_ref:' is no longer supported. Use bootstrap.source to declare a base_ref input and set up the worktree in launch_cmds with: git worktree add --detach \"$GREMLIN_WORKDIR\" \"$SHA\"".to_string(),
@@ -927,38 +928,36 @@ fn base_ref_from_yaml(root: &Mapping) -> Result<(), SchemaError> {
     Ok(())
 }
 
-fn stages_from_yaml(root: &Mapping) -> Result<Vec<Value>, SchemaError> {
+fn stages_from_json(root: &Map<String, Value>) -> Result<Vec<Value>, SchemaError> {
     match root.get("stages") {
         None | Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::Sequence(stages)) => Ok(stages.clone()),
+        Some(Value::Array(stages)) => Ok(stages.clone()),
         Some(_) => Err(SchemaError::Generic("'stages' must be a list".to_string())),
     }
 }
 
-/// Read `default_task_models` from the already-expanded YAML, or resolve
+/// Read `default_task_models` from the already-expanded JSON, or resolve
 /// the global `default-task-models` through profiles.
 ///
-/// When the YAML already carries a `default_task_models` key (round-tripped
+/// When the JSON already carries a `default_task_models` key (round-tripped
 /// from a previous expansion), values are treated as already-resolved
 /// `provider/model[?k=v]` strings and returned as-is.  Otherwise the global
 /// `default-task-models` map is read from settings.yaml and every value is
 /// resolved through the profile table so the expanded output only contains
 /// concrete model specs.
-fn yaml_default_task_models(
-    root: &Mapping,
+fn json_default_task_models(
+    root: &Map<String, Value>,
     settings: Option<&config::Config>,
 ) -> Result<Option<IndexMap<String, String>>, SchemaError> {
-    // If the expanded YAML already carries default_task_models, use them
+    // If the expanded JSON already carries default_task_models, use them
     // directly — they were resolved during a previous expansion.
     if let Some(raw) = root.get("default_task_models").filter(|v| !v.is_null()) {
-        let map = raw.as_mapping().ok_or_else(|| {
+        let map = raw.as_object().ok_or_else(|| {
             SchemaError::Generic("'default_task_models' must be a mapping".to_string())
         })?;
         let mut result = IndexMap::new();
         for (k, v) in map {
-            let key = k.as_str().ok_or_else(|| {
-                SchemaError::Generic("'default_task_models' keys must be strings".to_string())
-            })?;
+            let key = k.as_str();
             let value = v.as_str().ok_or_else(|| {
                 SchemaError::Generic("'default_task_models' values must be strings".to_string())
             })?;
@@ -1017,11 +1016,11 @@ fn yaml_default_task_models(
 }
 
 fn resolve_default_model(
-    yaml_default: Option<String>,
+    json_default: Option<String>,
     override_model: Option<&str>,
     config_default_model: Option<&str>,
 ) -> Result<ModelURI, SchemaError> {
-    let raw = if let Some(model) = yaml_default {
+    let raw = if let Some(model) = json_default {
         model
     } else if let Some(model) = override_model
         .map(str::trim)
@@ -1061,7 +1060,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Profile-reference YAML-loader regression tests
+    // Profile-reference JSON5-loader regression tests
     // ------------------------------------------------------------------
 
     const PROFILE_SETTINGS: &str = r#"
@@ -1074,59 +1073,74 @@ model-profiles:
 "#;
 
     const DEFINITION_WITH_DEFAULT_PROFILE: &str = r#"
-default_model: profile/demo
-stages:
-  - name: plan
-    type: agent
-    prompt:
-      - "hello\n"
-    task-models:
-      Implement: openai/stage-implement
+{
+  default_model: "profile/demo",
+  stages: [
+    {
+      name: "plan",
+      type: "agent",
+      prompt: ["hello\n"],
+      "task-models": {
+        Implement: "openai/stage-implement",
+      },
+    },
+  ],
+}
 "#;
 
     const DEFINITION_WITHOUT_DEFAULT: &str = r#"
-stages:
-  - name: plan
-    type: agent
-    prompt:
-      - "hello\n"
-    task-models:
-      Implement: openai/stage-implement
+{
+  stages: [
+    {
+      name: "plan",
+      type: "agent",
+      prompt: ["hello\n"],
+      "task-models": {
+        Implement: "openai/stage-implement",
+      },
+    },
+  ],
+}
 "#;
 
     const DEFINITION_WITH_STAGE_PROFILE: &str = r#"
-default_model: cmd/default
-stages:
-  - name: plan
-    type: agent
-    prompt:
-      - "hello\n"
-    model: profile/demo
-    task-models:
-      Implement: openai/stage-implement
+{
+  default_model: "cmd/default",
+  stages: [
+    {
+      name: "plan",
+      type: "agent",
+      prompt: ["hello\n"],
+      model: "profile/demo",
+      "task-models": {
+        Implement: "openai/stage-implement",
+      },
+    },
+  ],
+}
 "#;
 
-    fn write_definition(sandbox: &Sandbox, yaml: &str) -> PathBuf {
+    fn write_definition(sandbox: &Sandbox, json5: &str) -> PathBuf {
         let overlay = sandbox.path().join("project").join(".gremlins");
         fs::create_dir_all(&overlay).unwrap();
-        let definition_path = overlay.join("demo.yaml");
-        fs::write(&definition_path, yaml).unwrap();
+        let definition_path = overlay.join("demo.json5");
+        fs::write(&definition_path, json5).unwrap();
         definition_path
     }
 
     fn load_with_profile_settings(
-        definition_yaml: &str,
+        definition_json5: &str,
         model_override: Option<&str>,
         config_default_model: Option<&str>,
     ) -> (Sandbox, StaticDefinition) {
         let sandbox = Sandbox::with_config(Some(PROFILE_SETTINGS));
-        let definition_path = write_definition(&sandbox, definition_yaml);
-        let def = StaticDefinition::from_yaml_file(
+        let definition_path = write_definition(&sandbox, definition_json5);
+        let def = StaticDefinition::from_json5_file(
             &definition_path,
             model_override,
             config_default_model,
         )
-        .expect("profile reference must resolve through the YAML loader");
+        .expect("profile reference must resolve through the JSON5 loader");
         (sandbox, def)
     }
 
@@ -1158,24 +1172,24 @@ stages:
             None => assert!(stage.model().is_none()),
         }
 
-        let yaml = def.to_expanded_yaml();
-        let yaml_str = serde_yaml::to_string(&yaml).unwrap();
+        let json = def.to_expanded_json();
+        let json_str = serde_json::to_string(&json).unwrap();
         assert!(
-            !yaml_str.contains("profile/"),
-            "baked definition must not keep a profile reference: {yaml_str}"
+            !json_str.contains("profile/"),
+            "baked definition must not keep a profile reference: {json_str}"
         );
         assert!(
-            yaml_str.contains(default_model),
-            "baked definition must carry the concrete default model: {yaml_str}"
+            json_str.contains(default_model),
+            "baked definition must carry the concrete default model: {json_str}"
         );
         assert!(
-            yaml_str.contains("openai/scout") && yaml_str.contains("openai/stage-implement"),
-            "baked definition must carry resolved profile task-models: {yaml_str}"
+            json_str.contains("openai/scout") && json_str.contains("openai/stage-implement"),
+            "baked definition must carry resolved profile task-models: {json_str}"
         );
 
         let bytes = def
             .serialize()
-            .expect("serialized definition must be valid YAML");
+            .expect("serialized definition must be valid JSON");
         let reloaded = StaticDefinition::from_expanded_bytes(&bytes, None, None)
             .expect("baked definition must reload without settings");
         assert_eq!(reloaded.default_model().to_string(), default_model);
@@ -1199,19 +1213,19 @@ stages:
     }
 
     // ------------------------------------------------------------------
-    // to_yaml / from_yaml round-trip symmetry
+    // to_json / from_json round-trip symmetry
     // ------------------------------------------------------------------
 
-    /// Helper: serialize a StageSpec to a YAML Mapping and parse it back
-    /// through stage_from_yaml, asserting the two are equal.
+    /// Helper: serialize a StageSpec to a JSON object and parse it back
+    /// through stage_from_json, asserting the two are equal.
     fn assert_round_trip(stage: &StageSpec) {
         let settings = config::Config::default();
-        let yaml_val = stage.to_yaml();
-        let mapping = yaml_val
-            .as_mapping()
-            .expect("to_yaml must produce a mapping");
-        let round_tripped = stage_from_yaml(mapping, Some(&settings), None)
-            .expect("stage_from_yaml must accept to_yaml output");
+        let json_val = stage.to_json();
+        let mapping = json_val
+            .as_object()
+            .expect("to_json must produce an object");
+        let round_tripped = stage_from_json(mapping, Some(&settings), None)
+            .expect("stage_from_json must accept to_json output");
         assert_eq!(
             stage,
             &round_tripped,
@@ -1222,7 +1236,7 @@ stages:
     }
 
     #[test]
-    fn agent_to_yaml_round_trip() {
+    fn agent_to_json_round_trip() {
         let stage = AgentBuilder::new("plan")
             .prompt("write the plan using {input} to {plan}")
             .interpolate(
@@ -1240,40 +1254,40 @@ stages:
     }
 
     #[test]
-    fn agent_to_yaml_round_trip_minimal() {
+    fn agent_to_json_round_trip_minimal() {
         let stage = AgentBuilder::new("min").prompt("hi").build().unwrap();
         assert_round_trip(&stage);
     }
 
     #[test]
-    fn agent_landscape_not_in_yaml_and_defaults_true_on_reparse() {
+    fn agent_landscape_not_in_json_and_defaults_true_on_reparse() {
         // Build with landscape: false, verify the field does NOT appear in
-        // serialized YAML, and that a re-parsed stage always gets landscape: true.
+        // serialized JSON, and that a re-parsed stage always gets landscape: true.
         let stage = AgentBuilder::new("plan")
             .prompt("hi")
             .landscape(false)
             .build()
             .unwrap();
 
-        let yaml_val = stage.to_yaml();
-        let yaml_str = serde_yaml::to_string(&yaml_val).unwrap();
+        let json_val = stage.to_json();
+        let json_str = serde_json::to_string(&json_val).unwrap();
         assert!(
-            !yaml_str.contains("landscape"),
-            "landscape field must not appear in YAML: {yaml_str}"
+            !json_str.contains("landscape"),
+            "landscape field must not appear in JSON: {json_str}"
         );
 
-        // Re-parse through stage_from_yaml — landscape must default to true.
-        let mapping = yaml_val
-            .as_mapping()
-            .expect("to_yaml must produce a mapping");
+        // Re-parse through stage_from_json — landscape must default to true.
+        let mapping = json_val
+            .as_object()
+            .expect("to_json must produce an object");
         let settings = config::Config::default();
-        let round_tripped = stage_from_yaml(mapping, Some(&settings), None)
-            .expect("stage_from_yaml must accept to_yaml output");
+        let round_tripped = stage_from_json(mapping, Some(&settings), None)
+            .expect("stage_from_json must accept to_json output");
         match round_tripped {
             StageSpec::Agent { stage, .. } => {
                 assert!(
                     stage.landscape,
-                    "landscape must default to true when parsed from YAML"
+                    "landscape must default to true when parsed from JSON"
                 );
             }
             other => panic!("expected Agent, got {other:?}"),
@@ -1281,7 +1295,7 @@ stages:
     }
 
     #[test]
-    fn exec_to_yaml_round_trip() {
+    fn exec_to_json_round_trip() {
         let stage = ExecBuilder::new("run")
             .cmd("echo {input} > {out}")
             .interpolate(
@@ -1299,13 +1313,13 @@ stages:
     }
 
     #[test]
-    fn exec_to_yaml_round_trip_minimal() {
+    fn exec_to_json_round_trip_minimal() {
         let stage = ExecBuilder::new("cmd").cmd("true").build().unwrap();
         assert_round_trip(&stage);
     }
 
     #[test]
-    fn sequence_to_yaml_round_trip() {
+    fn sequence_to_json_round_trip() {
         let stage = SequenceBuilder::new("workflow")
             .stage(ExecBuilder::new("step-a").cmd("echo a").build().unwrap())
             .stage(ExecBuilder::new("step-b").cmd("echo b").build().unwrap())
@@ -1320,52 +1334,30 @@ stages:
 
     #[test]
     fn sequence_interval_from_string_is_rejected() {
-        // String-valued interval must be rejected — only YAML numbers accepted.
-        use serde_yaml::Mapping;
-        let mut m = Mapping::new();
-        m.insert(
-            serde_yaml::Value::String("name".into()),
-            serde_yaml::Value::String("poll".into()),
-        );
-        m.insert(
-            serde_yaml::Value::String("type".into()),
-            serde_yaml::Value::String("sequence".into()),
-        );
-        m.insert(
-            serde_yaml::Value::String("max-iterations".into()),
-            serde_yaml::Value::Number(serde_yaml::Number::from(20)),
-        );
-        m.insert(
-            serde_yaml::Value::String("interval".into()),
-            serde_yaml::Value::String("60".into()),
-        );
+        // String-valued interval must be rejected — only JSON numbers accepted.
+        let mut m = Map::new();
+        m.insert("name".to_string(), Value::String("poll".into()));
+        m.insert("type".to_string(), Value::String("sequence".into()));
+        m.insert("max-iterations".to_string(), Value::Number(20.into()));
+        m.insert("interval".to_string(), Value::String("60".into()));
         // body: one minimal exec child
-        let mut child = Mapping::new();
+        let mut child = Map::new();
+        child.insert("name".to_string(), Value::String("poll".into()));
+        child.insert("type".to_string(), Value::String("exec".into()));
         child.insert(
-            serde_yaml::Value::String("name".into()),
-            serde_yaml::Value::String("poll".into()),
-        );
-        child.insert(
-            serde_yaml::Value::String("type".into()),
-            serde_yaml::Value::String("exec".into()),
-        );
-        child.insert(
-            serde_yaml::Value::String("options".into()),
-            serde_yaml::Value::Mapping({
-                let mut opts = Mapping::new();
+            "options".to_string(),
+            Value::Object({
+                let mut opts = Map::new();
                 opts.insert(
-                    serde_yaml::Value::String("cmds".into()),
-                    serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("true".into())]),
+                    "cmds".to_string(),
+                    Value::Array(vec![Value::String("true".into())]),
                 );
                 opts
             }),
         );
-        m.insert(
-            serde_yaml::Value::String("body".into()),
-            serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(child)]),
-        );
+        m.insert("body".to_string(), Value::Array(vec![Value::Object(child)]));
         // String interval must produce a SchemaError.
-        let err = stage_from_yaml(&m, Some(&config::Config::default()), None).unwrap_err();
+        let err = stage_from_json(&m, Some(&config::Config::default()), None).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("interval"),
@@ -1374,68 +1366,67 @@ stages:
     }
 
     #[test]
+    fn from_expanded_bytes_accepts_json5_syntax() {
+        // JSON5-on-read: comments, unquoted keys, single quotes, and trailing
+        // commas must all survive the expanded-byte path.
+        let json5 = r#"{
+            // resume snapshot
+            __gremlins_expanded__: true,
+            name: 'resume-me',
+            default_model: "openai/gpt-4",
+            stages: [],
+        }"#;
+        let def = StaticDefinition::from_expanded_bytes(json5.as_bytes(), None, None).unwrap();
+        assert_eq!(def.default_model(), &model("openai/gpt-4"));
+    }
+
+    #[test]
+    fn from_expanded_bytes_rejects_non_representable_numeric_literals() {
+        let bad = "{ __gremlins_expanded__: true, default_model: 'openai/gpt-4', stages: [NaN] }";
+        let err = StaticDefinition::from_expanded_bytes(bad.as_bytes(), None, None)
+            .expect_err("unrepresentable numeric literals must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("not supported"), "{msg}");
+    }
+
+    #[test]
     fn from_expanded_bytes_does_not_load_settings() {
         // Expanded definitions are already concrete and must deserialize even
         // when settings.yaml is malformed / unavailable.
         let _sandbox = crate::test_support::Sandbox::with_config(Some("default-model: [\n"));
 
-        let yaml = "__gremlins_expanded__: true\n\
-                     name: resume-me\n\
-                     default_model: openai/gpt-4\n\
-                     stages: []\n";
-        let def = StaticDefinition::from_expanded_bytes(yaml.as_bytes(), None, None).unwrap();
+        let json = r#"{"__gremlins_expanded__": true, "name": "resume-me", "default_model": "openai/gpt-4", "stages": []}"#;
+        let def = StaticDefinition::from_expanded_bytes(json.as_bytes(), None, None).unwrap();
         assert_eq!(def.default_model(), &model("openai/gpt-4"));
     }
 
     #[test]
     fn sequence_interval_from_number() {
-        // YAML float interval must be accepted.
-        use serde_yaml::Mapping;
-        let mut m = Mapping::new();
-        m.insert(
-            serde_yaml::Value::String("name".into()),
-            serde_yaml::Value::String("poll".into()),
-        );
-        m.insert(
-            serde_yaml::Value::String("type".into()),
-            serde_yaml::Value::String("sequence".into()),
-        );
-        m.insert(
-            serde_yaml::Value::String("max-iterations".into()),
-            serde_yaml::Value::Number(serde_yaml::Number::from(20)),
-        );
-        m.insert(
-            serde_yaml::Value::String("interval".into()),
-            serde_yaml::Value::Number(serde_yaml::Number::from(60)),
-        );
-        let mut child = Mapping::new();
+        // JSON float interval must be accepted.
+        let mut m = Map::new();
+        m.insert("name".to_string(), Value::String("poll".into()));
+        m.insert("type".to_string(), Value::String("sequence".into()));
+        m.insert("max-iterations".to_string(), Value::Number(20.into()));
+        m.insert("interval".to_string(), Value::Number(60.into()));
+        let mut child = Map::new();
+        child.insert("name".to_string(), Value::String("poll".into()));
+        child.insert("type".to_string(), Value::String("exec".into()));
         child.insert(
-            serde_yaml::Value::String("name".into()),
-            serde_yaml::Value::String("poll".into()),
-        );
-        child.insert(
-            serde_yaml::Value::String("type".into()),
-            serde_yaml::Value::String("exec".into()),
-        );
-        child.insert(
-            serde_yaml::Value::String("options".into()),
-            serde_yaml::Value::Mapping({
-                let mut opts = Mapping::new();
+            "options".to_string(),
+            Value::Object({
+                let mut opts = Map::new();
                 opts.insert(
-                    serde_yaml::Value::String("cmds".into()),
-                    serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("true".into())]),
+                    "cmds".to_string(),
+                    Value::Array(vec![Value::String("true".into())]),
                 );
                 opts
             }),
         );
-        m.insert(
-            serde_yaml::Value::String("body".into()),
-            serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(child)]),
-        );
-        let stage = stage_from_yaml(&m, Some(&config::Config::default()), None)
+        m.insert("body".to_string(), Value::Array(vec![Value::Object(child)]));
+        let stage = stage_from_json(&m, Some(&config::Config::default()), None)
             .expect("numeric interval should parse");
-        let yaml = stage.to_yaml();
-        let mapping = yaml.as_mapping().unwrap();
+        let json = stage.to_json();
+        let mapping = json.as_object().unwrap();
         let interval = mapping.get("interval").and_then(|v| v.as_f64());
         assert_eq!(
             interval,
@@ -1445,7 +1436,7 @@ stages:
     }
 
     #[test]
-    fn sequence_to_yaml_round_trip_minimal() {
+    fn sequence_to_json_round_trip_minimal() {
         let stage = SequenceBuilder::new("seq")
             .stage(ExecBuilder::new("x").cmd("true").build().unwrap())
             .build()
@@ -1454,7 +1445,7 @@ stages:
     }
 
     #[test]
-    fn parallel_to_yaml_round_trip() {
+    fn parallel_to_json_round_trip() {
         let stage = ParallelBuilder::new("reviews")
             .stage(
                 AgentBuilder::new("review-a")
@@ -1479,7 +1470,7 @@ stages:
     }
 
     #[test]
-    fn parallel_to_yaml_round_trip_minimal() {
+    fn parallel_to_json_round_trip_minimal() {
         let stage = ParallelBuilder::new("par")
             .stage(ExecBuilder::new("a").cmd("true").build().unwrap())
             .stage(ExecBuilder::new("b").cmd("true").build().unwrap())
@@ -1490,35 +1481,21 @@ stages:
 
     #[test]
     fn task_models_unknown_key_is_a_schema_error() {
-        use serde_yaml::Mapping;
-
         // A minimal agent stage carrying a `task-models` map with a
         // non-`TaskKind` key must be rejected at load time.
         for bad_key in ["", "scout", "Scout*"] {
-            let mut m = Mapping::new();
+            let mut m = Map::new();
+            m.insert("name".to_string(), Value::String("plan".into()));
+            m.insert("type".to_string(), Value::String("agent".into()));
             m.insert(
-                serde_yaml::Value::String("name".into()),
-                serde_yaml::Value::String("plan".into()),
+                "prompt".to_string(),
+                Value::Array(vec![Value::String("hi".into())]),
             );
-            m.insert(
-                serde_yaml::Value::String("type".into()),
-                serde_yaml::Value::String("agent".into()),
-            );
-            m.insert(
-                serde_yaml::Value::String("prompt".into()),
-                serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("hi".into())]),
-            );
-            let mut tc = Mapping::new();
-            tc.insert(
-                serde_yaml::Value::String(bad_key.into()),
-                serde_yaml::Value::String("openai/mini".into()),
-            );
-            m.insert(
-                serde_yaml::Value::String("task-models".into()),
-                serde_yaml::Value::Mapping(tc),
-            );
+            let mut tc = Map::new();
+            tc.insert(bad_key.to_string(), Value::String("openai/mini".into()));
+            m.insert("task-models".to_string(), Value::Object(tc));
 
-            let err = stage_from_yaml(&m, Some(&config::Config::default()), None)
+            let err = stage_from_json(&m, Some(&config::Config::default()), None)
                 .expect_err("an unknown task-models key must be rejected");
             let msg = err.to_string();
             assert!(
@@ -1533,7 +1510,7 @@ stages:
     }
 
     #[test]
-    fn from_yaml_file_rejects_legacy_top_level_model_keys() {
+    fn from_json5_file_rejects_legacy_top_level_model_keys() {
         let sandbox = crate::test_support::Sandbox::new();
         let project = sandbox.path().join("project");
         let overlay = project.join(".gremlins");
@@ -1543,14 +1520,14 @@ stages:
             ("default_client", "default_model"),
             ("default_task_clients", "default_task_models"),
         ] {
-            let definition_path = overlay.join(format!("legacy-{legacy}.yaml"));
+            let definition_path = overlay.join(format!("legacy-{legacy}.json5"));
             fs::write(
                 &definition_path,
-                format!("{legacy}: openai/gpt-4\nstages: []\n"),
+                format!("{{ {legacy}: \"openai/gpt-4\", stages: [] }}"),
             )
             .unwrap();
 
-            let err = StaticDefinition::from_yaml_file(&definition_path, None, None)
+            let err = StaticDefinition::from_json5_file(&definition_path, None, None)
                 .expect_err("legacy top-level model keys must be rejected");
             let msg = err.to_string();
             assert!(
@@ -1561,27 +1538,27 @@ stages:
     }
 
     #[test]
-    fn from_yaml_file_rejects_legacy_stage_model_keys() {
+    fn from_json5_file_rejects_legacy_stage_model_keys() {
         let sandbox = crate::test_support::Sandbox::new();
         let project = sandbox.path().join("project");
         let overlay = project.join(".gremlins");
         fs::create_dir_all(&overlay).unwrap();
 
         for (legacy, replacement) in [("client", "model"), ("task-clients", "task-models")] {
-            let definition_path = overlay.join(format!("legacy-stage-{legacy}.yaml"));
+            let definition_path = overlay.join(format!("legacy-stage-{legacy}.json5"));
             let value = match legacy {
-                "client" => "openai/gpt-4",
-                _ => "{Scout: openai/gpt-4}",
+                "client" => "\"openai/gpt-4\"",
+                _ => "{ Scout: \"openai/gpt-4\" }",
             };
             fs::write(
                 &definition_path,
                 format!(
-                    "default_model: openai/gpt-4\nstages:\n  - name: plan\n    type: agent\n    {legacy}: {value}\n"
+                    "{{ default_model: \"openai/gpt-4\", stages: [ {{ name: \"plan\", type: \"agent\", \"{legacy}\": {value} }} ] }}"
                 ),
             )
             .unwrap();
 
-            let err = StaticDefinition::from_yaml_file(&definition_path, None, None)
+            let err = StaticDefinition::from_json5_file(&definition_path, None, None)
                 .expect_err("legacy stage model keys must be rejected");
             let msg = err.to_string();
             assert!(
@@ -1595,25 +1572,25 @@ stages:
     fn from_expanded_bytes_rejects_legacy_model_keys() {
         let _sandbox = crate::test_support::Sandbox::new();
 
-        for (kind, yaml) in [
+        for (kind, json) in [
             (
                 "default_client",
-                "__gremlins_expanded__: true\nname: old\ndefault_client: openai/gpt-4\nstages: []\n",
+                r#"{"__gremlins_expanded__": true, "name": "old", "default_client": "openai/gpt-4", "stages": []}"#,
             ),
             (
                 "default_task_clients",
-                "__gremlins_expanded__: true\nname: old\ndefault_model: openai/gpt-4\ndefault_task_clients:\n  Scout: openai/gpt-4\nstages: []\n",
+                r#"{"__gremlins_expanded__": true, "name": "old", "default_model": "openai/gpt-4", "default_task_clients": {"Scout": "openai/gpt-4"}, "stages": []}"#,
             ),
             (
                 "stage-client",
-                "__gremlins_expanded__: true\nname: old\ndefault_model: openai/gpt-4\nstages:\n  - name: plan\n    type: agent\n    client: openai/gpt-4\n",
+                r#"{"__gremlins_expanded__": true, "name": "old", "default_model": "openai/gpt-4", "stages": [{"name": "plan", "type": "agent", "client": "openai/gpt-4"}]}"#,
             ),
             (
                 "stage-task-clients",
-                "__gremlins_expanded__: true\nname: old\ndefault_model: openai/gpt-4\nstages:\n  - name: plan\n    type: agent\n    task-clients:\n      Scout: openai/gpt-4\n",
+                r#"{"__gremlins_expanded__": true, "name": "old", "default_model": "openai/gpt-4", "stages": [{"name": "plan", "type": "agent", "task-clients": {"Scout": "openai/gpt-4"}}]}"#,
             ),
         ] {
-            let err = StaticDefinition::from_expanded_bytes(yaml.as_bytes(), None, None)
+            let err = StaticDefinition::from_expanded_bytes(json.as_bytes(), None, None)
                 .expect_err("expanded definitions with legacy keys must be rejected");
             let msg = err.to_string();
             assert!(
@@ -1624,17 +1601,14 @@ stages:
     }
 
     #[test]
-    fn yaml_task_models_rejects_invalid_specs_without_settings() {
+    fn json_task_models_rejects_invalid_specs_without_settings() {
         for spec in ["no-slash", "fake/model", "cmd/true"] {
-            let mut mapping = Mapping::new();
-            let mut task_models = Mapping::new();
-            task_models.insert(Value::String("Scout".into()), Value::String(spec.into()));
-            mapping.insert(
-                Value::String("task-models".into()),
-                Value::Mapping(task_models),
-            );
+            let mut mapping = Map::new();
+            let mut task_models = Map::new();
+            task_models.insert("Scout".to_string(), Value::String(spec.into()));
+            mapping.insert("task-models".to_string(), Value::Object(task_models));
 
-            let err = yaml_task_models(&mapping, None, None)
+            let err = json_task_models(&mapping, None, None)
                 .expect_err("an invalid task-models spec must fail at definition load");
             let msg = err.to_string();
             assert!(
@@ -1649,17 +1623,17 @@ stages:
     }
 
     #[test]
-    fn yaml_default_task_models_rejects_invalid_concrete_specs() {
+    fn json_default_task_models_rejects_invalid_concrete_specs() {
         for spec in ["no-slash", "fake/model", "cmd/true"] {
-            let mut root = Mapping::new();
-            let mut task_models = Mapping::new();
-            task_models.insert(Value::String("Scout".into()), Value::String(spec.into()));
+            let mut root = Map::new();
+            let mut task_models = Map::new();
+            task_models.insert("Scout".to_string(), Value::String(spec.into()));
             root.insert(
-                Value::String("default_task_models".into()),
-                Value::Mapping(task_models),
+                "default_task_models".to_string(),
+                Value::Object(task_models),
             );
 
-            let err = yaml_default_task_models(&root, None)
+            let err = json_default_task_models(&root, None)
                 .expect_err("an invalid default_task_models spec must fail at definition load");
             let msg = err.to_string();
             assert!(
@@ -1679,9 +1653,9 @@ stages:
             let settings = format!("default-task-models:\n  Scout: {spec}\n");
             let sandbox = Sandbox::with_config(Some(&settings));
             let definition_path =
-                write_definition(&sandbox, "default_model: 'cmd/true'\nstages: []\n");
+                write_definition(&sandbox, r#"{ default_model: "cmd/true", stages: [] }"#);
 
-            let err = StaticDefinition::from_yaml_file(&definition_path, None, None)
+            let err = StaticDefinition::from_json5_file(&definition_path, None, None)
                 .expect_err("an invalid settings default-task-models spec must fail the load");
             let msg = err.to_string();
             assert!(
@@ -1696,34 +1670,34 @@ stages:
     }
 
     #[test]
-    fn yaml_loader_resolves_definition_default_profile_task_models() {
+    fn json_loader_resolves_definition_default_profile_task_models() {
         let (_sandbox, def) =
             load_with_profile_settings(DEFINITION_WITH_DEFAULT_PROFILE, None, None);
         assert_profile_definition_round_trips(&def, "cmd/echo", None);
     }
 
     #[test]
-    fn yaml_loader_resolves_cli_model_override_profile_task_models() {
+    fn json_loader_resolves_cli_model_override_profile_task_models() {
         let (_sandbox, def) =
             load_with_profile_settings(DEFINITION_WITHOUT_DEFAULT, Some("profile/demo"), None);
         assert_profile_definition_round_trips(&def, "cmd/echo", None);
     }
 
     #[test]
-    fn yaml_loader_resolves_settings_default_profile_task_models() {
+    fn json_loader_resolves_settings_default_profile_task_models() {
         let (_sandbox, def) =
             load_with_profile_settings(DEFINITION_WITHOUT_DEFAULT, None, Some("profile/demo"));
         assert_profile_definition_round_trips(&def, "cmd/echo", None);
     }
 
     #[test]
-    fn yaml_loader_resolves_per_stage_profile_task_models() {
+    fn json_loader_resolves_per_stage_profile_task_models() {
         let (_sandbox, def) = load_with_profile_settings(DEFINITION_WITH_STAGE_PROFILE, None, None);
         assert_profile_definition_round_trips(&def, "cmd/default", Some("cmd/echo"));
     }
 
     #[test]
-    fn yaml_loader_rejects_invalid_profile_task_model_hidden_by_stage_override() {
+    fn json_loader_rejects_invalid_profile_task_model_hidden_by_stage_override() {
         let settings = r#"
 model-profiles:
   demo:
@@ -1732,20 +1706,25 @@ model-profiles:
       Scout: cmd/true
 "#;
         let definition = r#"
-default_model: profile/demo
-stages:
-  - name: plan
-    type: agent
-    prompt:
-      - "hello\n"
-    task-models:
-      Scout: openai/scout
+{
+  default_model: "profile/demo",
+  stages: [
+    {
+      name: "plan",
+      type: "agent",
+      prompt: ["hello\n"],
+      "task-models": {
+        Scout: "openai/scout",
+      },
+    },
+  ],
+}
 "#;
 
         let sandbox = Sandbox::with_config(Some(settings));
         let definition_path = write_definition(&sandbox, definition);
 
-        let err = StaticDefinition::from_yaml_file(&definition_path, None, None).expect_err(
+        let err = StaticDefinition::from_json5_file(&definition_path, None, None).expect_err(
             "an invalid profile task-model overridden by a stage entry must still be rejected",
         );
         let msg = err.to_string();

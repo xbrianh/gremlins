@@ -50,10 +50,10 @@ pub enum SchemaError {
     #[error("gremlin definition file not found: {path}")]
     DefinitionFileNotFound { path: String },
 
-    #[error("YAML parse error in {label}: {msg}")]
+    #[error("JSON parse error in {label}: {msg}")]
     YamlParse { label: String, msg: String },
 
-    #[error("expected a YAML mapping in {label}, got {got}")]
+    #[error("expected a JSON mapping in {label}, got {got}")]
     YamlNotMapping { label: String, got: String },
 }
 
@@ -63,10 +63,19 @@ impl From<std::io::Error> for SchemaError {
     }
 }
 
-impl From<serde_yaml::Error> for SchemaError {
-    fn from(e: serde_yaml::Error) -> Self {
+impl From<serde_json::Error> for SchemaError {
+    fn from(e: serde_json::Error) -> Self {
         SchemaError::YamlParse {
-            label: "yaml".to_string(),
+            label: "json".to_string(),
+            msg: e.to_string(),
+        }
+    }
+}
+
+impl From<json5::Error> for SchemaError {
+    fn from(e: json5::Error) -> Self {
+        SchemaError::YamlParse {
+            label: "json".to_string(),
             msg: e.to_string(),
         }
     }
