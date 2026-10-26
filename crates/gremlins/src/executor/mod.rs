@@ -95,6 +95,7 @@ pub mod bootstrap;
 pub mod conversation;
 pub mod exec_runner;
 pub mod gremlin;
+pub mod implicit;
 pub mod parallel;
 pub mod run;
 pub mod socket;

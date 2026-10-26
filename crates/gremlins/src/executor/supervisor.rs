@@ -1136,28 +1136,18 @@ async fn handle_create_session(
 /// turn, then runs normal stop cleanup.
 async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value {
     if let Some(id) = request.get("id").and_then(|v| v.as_str()) {
-        // Snapshot both the scratchpad source directory and the project
-        // root from the run-map before touching the session so we can
-        // persist _scratchpad.md.
-        let (scratchpad_source, project_root) = {
+        // Snapshot the state store handle and the project root from the
+        // run-map before touching the session so we can persist the
+        // accumulated scratchpad artifacts.
+        let (store, project_root) = {
             let map = get_run_map().lock().unwrap();
             match map.get(id) {
                 Some(handle) => {
-                    let store = &*handle.store;
-                    let src = store
-                        .read_field("workdir")
-                        .and_then(|v| v.as_str().map(PathBuf::from))
-                        .filter(|p| !p.as_os_str().is_empty())
-                        .or_else(|| {
-                            store
-                                .read_field("project_root")
-                                .and_then(|v| v.as_str().map(PathBuf::from))
-                                .filter(|p| !p.as_os_str().is_empty())
-                        });
+                    let store = handle.store.clone();
                     let pr = store
                         .read_field("project_root")
                         .and_then(|v| v.as_str().map(PathBuf::from));
-                    (src, pr)
+                    (Some(store), pr)
                 }
                 None => (None, None),
             }
@@ -1175,10 +1165,10 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
         drop(s);
         // Flush the scratchpad before calling handle_stop so working
         // memory is not lost.
-        if let (Some(ref source), Some(ref pr)) = (&scratchpad_source, &project_root) {
-            let scratchpad_file =
-                source.join(crate::executor::agent_runner::chat_scratchpad_filename(id));
-            persist_project_scratchpad(&scratchpad_file, pr);
+        if let (Some(store), Some(ref pr)) = (&store, &project_root) {
+            let accumulated =
+                crate::executor::agent_runner::accumulate_scratchpads(store.as_ref(), &[]).await;
+            persist_project_scratchpad(&accumulated, pr);
         }
     }
     handle_stop(request, &watch::channel(false).0).await
@@ -1187,28 +1177,18 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
 /// Remove a chat gremlin from whichever session owns it and cancel its turn.
 /// Called by control-socket `stop`.
 async fn stop_session_chat_gremlin(id: &str) {
-    // Snapshot the scratchpad source directory, project root, and
-    // liveness from the run-map before touching the session, so the
-    // persist step sees the final state.
-    let (live, scratchpad_source, project_root) = {
+    // Snapshot the state store handle, project root, and liveness from the
+    // run-map before touching the session, so the persist step reads the
+    // final accumulated scratchpad artifacts.
+    let (live, store, project_root) = {
         let map = get_run_map().lock().unwrap();
         match map.get(id) {
             Some(handle) => {
-                let store = &*handle.store;
-                let src = store
-                    .read_field("workdir")
-                    .and_then(|v| v.as_str().map(PathBuf::from))
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .or_else(|| {
-                        store
-                            .read_field("project_root")
-                            .and_then(|v| v.as_str().map(PathBuf::from))
-                            .filter(|p| !p.as_os_str().is_empty())
-                    });
+                let store = handle.store.clone();
                 let pr = store
                     .read_field("project_root")
                     .and_then(|v| v.as_str().map(PathBuf::from));
-                (true, src, pr)
+                (true, Some(store), pr)
             }
             None => (false, None, None),
         }
@@ -1242,10 +1222,11 @@ async fn stop_session_chat_gremlin(id: &str) {
                     let _ = done.wait_for(|v| *v).await;
                 }
             }
-            if let (Some(ref source), Some(ref pr)) = (&scratchpad_source, &project_root) {
-                let scratchpad_file =
-                    source.join(crate::executor::agent_runner::chat_scratchpad_filename(id));
-                persist_project_scratchpad(&scratchpad_file, pr);
+            if let (Some(store), Some(ref pr)) = (&store, &project_root) {
+                let accumulated =
+                    crate::executor::agent_runner::accumulate_scratchpads(store.as_ref(), &[])
+                        .await;
+                persist_project_scratchpad(&accumulated, pr);
             }
             return;
         }
@@ -3656,20 +3637,13 @@ async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &Se
         .await;
 }
 
-/// Persist the chat gremlin's working scratchpad file to the project-level
-/// scratchpad in XDG state so working memory survives across sessions.
-/// Best-effort: failures are silently ignored.
+/// Persist accumulated scratchpad content to the XDG project scratchpad.
 ///
-/// If the working file does not exist the model never wrote to it, so the
-/// existing XDG scratchpad is preserved.
-fn persist_project_scratchpad(scratchpad_file: &Path, project_root: &Path) {
-    let content = match crate::executor::agent_runner::read_scratchpad_contained(
-        scratchpad_file,
-        project_root,
-    ) {
-        Ok(c) => c,
-        Err(_) => return, // file doesn't exist or is invalid — keep XDG
-    };
+/// Best-effort: failures are silently ignored. Empty content is skipped.
+fn persist_project_scratchpad(content: &str, project_root: &Path) {
+    if content.trim().is_empty() {
+        return;
+    }
     let path = config::project_scratchpad_path(project_root);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -3683,7 +3657,7 @@ fn persist_project_scratchpad(scratchpad_file: &Path, project_root: &Path) {
         .unwrap_or_default()
         .as_nanos();
     let tmp = path.with_extension(format!("tmp.{nanos}"));
-    if std::fs::write(&tmp, &content).is_ok() {
+    if std::fs::write(&tmp, content).is_ok() {
         let _ = std::fs::rename(&tmp, &path);
     }
 }
@@ -3695,28 +3669,18 @@ async fn cleanup_chat_gremlin(id: &str) {
         return;
     }
 
-    // Snapshot the scratchpad source directory and project root before
-    // cancelling the turn and removing from the run-map, so the persist
-    // step sees the final _scratchpad.md state.
-    let (scratchpad_source, project_root, cancel) = {
+    // Snapshot the state store handle and project root before cancelling the
+    // turn and removing from the run-map, so the persist step reads the final
+    // accumulated scratchpad artifacts.
+    let (store, project_root, cancel) = {
         let map = get_run_map().lock().unwrap();
         match map.get(id) {
             Some(handle) => {
-                let store = &*handle.store;
-                let src = store
-                    .read_field("workdir")
-                    .and_then(|v| v.as_str().map(PathBuf::from))
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .or_else(|| {
-                        store
-                            .read_field("project_root")
-                            .and_then(|v| v.as_str().map(PathBuf::from))
-                            .filter(|p| !p.as_os_str().is_empty())
-                    });
+                let store = handle.store.clone();
                 let pr = store
                     .read_field("project_root")
                     .and_then(|v| v.as_str().map(PathBuf::from));
-                (src, pr, Some(handle.cancel.clone()))
+                (Some(store), pr, Some(handle.cancel.clone()))
             }
             None => (None, None, None),
         }
@@ -3728,11 +3692,11 @@ async fn cleanup_chat_gremlin(id: &str) {
     }
 
     // Persist the project-level scratchpad so working memory survives across
-    // chat sessions.
-    if let (Some(ref source), Some(ref pr)) = (&scratchpad_source, &project_root) {
-        let scratchpad_file =
-            source.join(crate::executor::agent_runner::chat_scratchpad_filename(id));
-        persist_project_scratchpad(&scratchpad_file, pr);
+    // chat sessions, reading the committed scratchpad artifacts from the store.
+    if let (Some(store), Some(ref pr)) = (&store, &project_root) {
+        let accumulated =
+            crate::executor::agent_runner::accumulate_scratchpads(store.as_ref(), &[]).await;
+        persist_project_scratchpad(&accumulated, pr);
     }
 
     // Remove from RUN_MAP. If the id wasn't there (already stopped by
@@ -5911,8 +5875,8 @@ model-profiles:
             "the chat prompt must describe the persistent scratchpad"
         );
         assert!(
-            prompt.contains("_scratchpad.md"),
-            "the chat prompt must name the scratchpad file"
+            prompt.contains("{scratchpad_path}"),
+            "the chat prompt must name the scratchpad placeholder"
         );
         // The scratchpad guidance must precede the trailing Guidelines section.
         let scratchpad = prompt.find("## Scratchpad").unwrap();

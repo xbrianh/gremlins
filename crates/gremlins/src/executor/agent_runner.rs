@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use thiserror::Error;
 
 use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::definition::Agent;
+use crate::executor::implicit::{accumulate_implicit, ImplicitArtifact};
 use crate::executor::state::StateStore;
 use crate::executor::vars;
 
@@ -37,12 +38,11 @@ pub struct AgentPrepared {
     /// A stage-supplied system prompt override. When present, this replaces
     /// the harness default in [`AgentPrepared::system_prompt`].
     pub system_prompt: Option<String>,
-    /// The scratchpad file the model writes to: `_scratchpad.md` in the worktree
-    /// root. Best-effort — the stage may never write it.
-    pub scratchpad_path: String,
-    /// Where the stage's scratchpad is persisted on commit: the checkout path
-    /// bound to `artifact://_scratchpad/{stage}.md`.
-    pub scratchpad_persist_path: String,
+    /// Harness-managed implicit artifacts (currently just the scratchpad).
+    /// The model writes each artifact's `model_path`; on commit
+    /// [`commit_agent`] persists it under the artifact URI. Best-effort — the
+    /// stage may never write any of them.
+    pub implicit_artifacts: Vec<ImplicitArtifact>,
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +82,7 @@ pub async fn prepare_agent(
     local_state: &dyn StateStore,
     loop_iter: &str,
     framework_subs: &HashMap<String, String>,
+    artifact_dir: &Path,
 ) -> Result<AgentPrepared, AgentError> {
     let name = &agent.name;
     let str_opts = vars::string_options(&agent.options);
@@ -162,56 +163,24 @@ pub async fn prepare_agent(
 
     let expected_artifact_paths: Vec<String> = output_paths.values().cloned().collect();
 
-    // Synthetic scratchpad binding. The stage's persistent scratchpad lives at
-    // `_scratchpad.md` in the worktree root; this binding versions it under
-    // `artifact://_scratchpad/{stage}.md` so a later stage (or the same chat
-    // gremlin on a later turn) can re-inject the accumulated working memory.
-    // It is best-effort: the stage may never write a scratchpad, so the bind
-    // is optional and deliberately excluded from `expected_artifact_paths`
-    // above so it never triggers a missing-artifact reminder.
-    //
-    // The worktree always exists, so the synthetic bind is always created.
-    let scratchpad_path: String;
-    let scratchpad_persist_path: String;
-    {
-        // Reject stage names that could escape the `_scratchpad` directory.
-        if name.contains('/') || name.contains('\\') || name.contains("..") {
-            return Err(AgentError::Generic {
-                name: name.clone(),
-                detail: format!(
-                    "stage name {name:?} contains path separators or '..' — \
-                     cannot construct a safe scratchpad artifact URI"
-                ),
-            });
-        }
-        let scratchpad_uri_str = if loop_iter.is_empty() {
-            format!("artifact://_scratchpad/{name}.md")
-        } else {
-            format!("artifact://_scratchpad/{name}-{loop_iter}.md")
-        };
-        let scratchpad_uri = Uri::parse(&scratchpad_uri_str).map_err(|e| AgentError::Generic {
-            name: name.clone(),
-            detail: e.to_string(),
-        })?;
-        let persist = local_state
-            .path_for_uri(&scratchpad_uri)
+    // Synthetic scratchpad binding via ImplicitArtifact. The model writes to
+    // {artifact_dir}/_scratchpad.md (not the worktree), and the harness commits
+    // it under artifact://_scratchpad/{stage}.md. The bind is optional and
+    // excluded from expected_artifact_paths so it never triggers a
+    // missing-artifact reminder.
+    let scratchpad =
+        ImplicitArtifact::for_kind("scratchpad", name, loop_iter, artifact_dir, local_state)
             .await
             .map_err(|e| AgentError::Generic {
                 name: name.clone(),
                 detail: e.to_string(),
             })?;
-        let work_root = framework_subs
-            .get("cwd")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/"));
-        scratchpad_path = work_root
-            .join("_scratchpad.md")
-            .to_string_lossy()
-            .into_owned();
-        scratchpad_persist_path = persist;
-        output_paths.insert("__gml_scratch".to_string(), scratchpad_persist_path.clone());
-        output_uris.push(("__gml_scratch".to_string(), scratchpad_uri_str, true));
-    }
+    output_paths.insert(scratchpad.bind_key.clone(), scratchpad.persist_path.clone());
+    output_uris.push((
+        scratchpad.bind_key.clone(),
+        scratchpad.uri.clone(),
+        scratchpad.optional,
+    ));
 
     // Read the hidden sandbox opt-out. It is honored only when the
     // gremlin's kind is "chat" (set programmatically by the chat builder,
@@ -244,8 +213,7 @@ pub async fn prepare_agent(
         artifact_dir: String::new(),
         allow_all,
         system_prompt,
-        scratchpad_path,
-        scratchpad_persist_path,
+        implicit_artifacts: vec![scratchpad],
     })
 }
 
@@ -260,47 +228,17 @@ pub async fn commit_agent(
     prepared: &AgentPrepared,
     local_state: &dyn StateStore,
 ) -> Result<(), AgentError> {
-    // Persist the stage scratchpad (best-effort) before the bind loop so the
-    // synthetic `_stage_scratchpad` bind commits it alongside the stage's real
-    // outputs. The model writes `_scratchpad.md` in the worktree root; the
-    // harness versions it under an artifact URI by copying it into the
-    // checkout. A stage that never wrote a scratchpad leaves the file absent,
-    // and the optional bind is simply skipped.
-    if !prepared.scratchpad_path.is_empty() {
-        let root = if !prepared.cwd.is_empty() {
-            Path::new(&prepared.cwd)
-        } else {
-            // Fall back to the parent directory of the scratchpad file itself.
-            Path::new(&prepared.scratchpad_path)
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-        };
-        let content = match read_scratchpad_contained(Path::new(&prepared.scratchpad_path), root) {
-            Ok(c) => c,
-            Err(e) => {
-                log::warn!(
-                    "scratchpad persist: failed to read {}: {e}",
-                    prepared.scratchpad_path
-                );
-                String::new()
-            }
-        };
-        if !content.trim().is_empty() {
-            if let Some(parent) = Path::new(&prepared.scratchpad_persist_path).parent() {
-                if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                    log::warn!(
-                        "scratchpad persist: failed to create parent dir {}: {e}",
-                        parent.display()
-                    );
-                }
-            }
-            if let Err(e) = tokio::fs::write(&prepared.scratchpad_persist_path, &content).await {
-                log::warn!(
-                    "scratchpad persist: failed to write {}: {e}",
-                    prepared.scratchpad_persist_path
-                );
-            }
-        }
+    // Commit implicit artifacts (e.g. scratchpad). Each artifact reads its
+    // model-writable file, copies to the persist path if non-empty, and
+    // calls local_state.commit(). Absent/empty files are silently skipped.
+    for artifact in &prepared.implicit_artifacts {
+        artifact
+            .commit(local_state)
+            .await
+            .map_err(|e| AgentError::Generic {
+                name: prepared.name.clone(),
+                detail: e.to_string(),
+            })?;
     }
     for (key, uri_str, optional) in &prepared.output_uris {
         let path = &prepared.output_paths[key];
@@ -335,56 +273,7 @@ pub(crate) async fn accumulate_scratchpads(
     store: &(dyn StateStore + Send + Sync),
     stage_order: &[String],
 ) -> String {
-    let mut keys: Vec<String> = store
-        .keys()
-        .await
-        .into_iter()
-        .filter(|k| k.starts_with("artifact://_scratchpad/") || k.starts_with("_scratchpad/"))
-        .collect();
-    // Sort by stage order: earlier stages come first. Keys whose stage name
-    // doesn't appear in `stage_order` are sorted after the known entries.
-    keys.sort_by(|a, b| {
-        let a_idx = stage_order
-            .iter()
-            .position(|name| scratchpad_key_contains_stage(a, name));
-        let b_idx = stage_order
-            .iter()
-            .position(|name| scratchpad_key_contains_stage(b, name));
-        match (a_idx, b_idx) {
-            (Some(ai), Some(bi)) => ai.cmp(&bi),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.cmp(b),
-        }
-    });
-    let mut accumulated = String::new();
-    for key in &keys {
-        if let Ok(content) = store.content(key, None).await {
-            if !content.trim().is_empty() {
-                accumulated.push_str(content.trim_end());
-                accumulated.push_str("\n\n");
-            }
-        }
-    }
-    accumulated.trim().to_string()
-}
-
-/// Returns true if `key` looks like a scratchpad artifact for `stage_name`.
-fn scratchpad_key_contains_stage(key: &str, stage_name: &str) -> bool {
-    // Keys are formatted as:
-    //   artifact://_scratchpad/{name}.md
-    //   artifact://_scratchpad/{name}-{loop_iter}.md
-    let rest = key
-        .strip_prefix("artifact://_scratchpad/")
-        .or_else(|| key.strip_prefix("_scratchpad/"));
-    let Some(rest) = rest else {
-        return false;
-    };
-    let rest = rest.strip_suffix(".md").unwrap_or(rest);
-    // The stage name is everything before the first `-` (which separates
-    // the name from loop_iter), or the entire remainder if no `-`.
-    let name_part = rest.split('-').next().unwrap_or(rest);
-    name_part == stage_name
+    accumulate_implicit("scratchpad", store, stage_order).await
 }
 
 /// Format accumulated scratchpad content for injection into a user prompt.
@@ -401,14 +290,6 @@ pub(crate) fn format_scratchpad_injection(content: &str) -> String {
 // ---------------------------------------------------------------------------
 // Scratchpad I/O helpers
 // ---------------------------------------------------------------------------
-
-/// Filename for a chat gremlin’s working scratchpad. Chat sessions share the
-/// project root as their cwd, so the default `_scratchpad.md` would be shared
-/// by every concurrent session. Including the gremlin id (validated safe
-/// path component) gives each chat session its own file.
-pub(crate) fn chat_scratchpad_filename(gremlin_id: &str) -> String {
-    format!("_scratchpad-{gremlin_id}.md")
-}
 
 #[cfg(unix)]
 fn open_scratchpad_read(path: &Path) -> std::io::Result<std::fs::File> {
@@ -595,7 +476,7 @@ mod tests {
     async fn test_prepare_basic_prompt_substitution() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         register_file(&store, "world", "world-value").await;
         let agent = Agent {
             name: "test".to_string(),
@@ -609,7 +490,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
         assert!(prepared.prompt.contains("world-value"));
@@ -619,7 +500,7 @@ mod tests {
     async fn test_prepare_framework_subs_win() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         register_file(&store, "interp-src", "from-interp").await;
         let agent = Agent {
             name: "test".to_string(),
@@ -633,7 +514,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::from([("name".to_string(), "from-fw".to_string())]);
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
         assert!(prepared.prompt.contains("from-fw"));
@@ -658,7 +539,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
         // output_paths should contain the registered path, not "interp-val"
@@ -674,7 +555,7 @@ mod tests {
     async fn test_prepare_missing_interpolation_key_errors() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{missing}".to_string()],
@@ -684,7 +565,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let err = prepare_agent(&agent, &store, &store, "", &fw)
+        let err = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap_err();
         assert!(matches!(err, AgentError::Resolve { .. }));
@@ -694,7 +575,7 @@ mod tests {
     async fn test_prepare_loop_iter_in_bind_uri() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{out}".to_string()],
@@ -707,7 +588,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "my-agent~3", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "my-agent~3", &fw, &ad)
             .await
             .unwrap();
         assert_eq!(prepared.output_uris[0].1, "artifact://my-agent~3/out.txt");
@@ -737,7 +618,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "my-agent~2", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "my-agent~2", &fw, &ad)
             .await
             .unwrap();
         assert!(prepared.prompt.contains("Plan: # Plan"));
@@ -747,7 +628,7 @@ mod tests {
     async fn test_prepare_optional_bind_key() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{result}".to_string()],
@@ -757,7 +638,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
         assert_eq!(prepared.output_uris[0].0, "result");
@@ -768,7 +649,7 @@ mod tests {
     async fn test_prepare_model_substituted() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         register_file(&store, "openai", "openai").await;
         let agent = Agent {
             name: "test".to_string(),
@@ -785,7 +666,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
         assert_eq!(prepared.model, Some("openai/{variant}".to_string()));
@@ -795,7 +676,7 @@ mod tests {
     async fn test_prepare_model_none_when_absent() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -805,7 +686,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
         assert!(prepared.model.is_none());
@@ -815,7 +696,7 @@ mod tests {
     async fn test_prepare_workspace_preamble_absent() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -825,7 +706,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let mut prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
         prepared.cwd = String::new();
@@ -839,7 +720,7 @@ mod tests {
     async fn test_prepare_workspace_preamble_present() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -849,7 +730,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let mut prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
         prepared.cwd = "/work".to_string();
@@ -863,7 +744,7 @@ mod tests {
     async fn test_prepare_name_substitution_in_bind_key() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{my-agent}".to_string()],
@@ -876,7 +757,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::from([("name".to_string(), "my-agent".to_string())]);
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
         assert_eq!(prepared.output_uris[0].0, "my-agent");
@@ -887,7 +768,7 @@ mod tests {
     async fn test_prepare_prompts_joined() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec![
@@ -901,7 +782,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
         assert_eq!(prepared.prompt, "Line 1\n\nLine 2\n\nLine 3");
@@ -911,7 +792,7 @@ mod tests {
     async fn test_prepare_hyphen_normalization_in_prompt() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         register_file(&store, "value", "value").await;
         let agent = Agent {
             name: "test".to_string(),
@@ -925,7 +806,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
         assert!(prepared.prompt.contains("value"));
@@ -935,7 +816,7 @@ mod tests {
     async fn test_prepare_options_string_filtering() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         let mut opts: HashMap<String, serde_json::Value> = HashMap::new();
         opts.insert(
             "string_k".to_string(),
@@ -951,7 +832,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
         // {string_k} and {num_k} are both substituted
@@ -962,7 +843,7 @@ mod tests {
     async fn test_prepare_multi_bind_verification_flag() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["{a} {b} {c}".to_string()],
@@ -976,7 +857,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::from([("cwd".to_string(), tmp.path().to_string_lossy().into_owned())]);
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
         // The three real binds plus the synthetic `_stage_scratchpad` bind.
@@ -988,18 +869,27 @@ mod tests {
             prepared
                 .output_uris
                 .iter()
-                .any(|(k, uri, opt)| k == "__gml_scratch"
+                .any(|(k, uri, opt)| k == "__gml_scratchpad"
                     && uri == "artifact://_scratchpad/test.md"
                     && *opt),
             "a synthetic optional scratchpad bind must be present"
         );
+        // The scratchpad is exposed as exactly one implicit artifact.
+        assert_eq!(prepared.implicit_artifacts.len(), 1);
+        assert_eq!(prepared.implicit_artifacts[0].kind, "scratchpad");
+        assert_eq!(
+            prepared.implicit_artifacts[0].uri,
+            "artifact://_scratchpad/test.md"
+        );
+        assert_eq!(prepared.implicit_artifacts[0].bind_key, "__gml_scratchpad");
+        assert!(prepared.implicit_artifacts[0].optional);
     }
 
     #[tokio::test]
     async fn test_prepare_synthetic_scratchpad_binding() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         let agent = Agent {
             name: "stage-a".to_string(),
             prompts: vec!["hi".to_string()],
@@ -1009,22 +899,28 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::from([("cwd".to_string(), tmp.path().to_string_lossy().into_owned())]);
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
 
         assert_eq!(prepared.output_uris.len(), 1);
         let (key, uri, optional) = &prepared.output_uris[0];
-        assert_eq!(key, "__gml_scratch");
+        assert_eq!(key, "__gml_scratchpad");
         assert_eq!(uri, "artifact://_scratchpad/stage-a.md");
         assert!(*optional);
-        // The checkout path and the model-writable path are recorded.
-        assert!(prepared.scratchpad_persist_path.contains("stage-a.md"));
+        // The checkout path and the model-writable path are recorded on the
+        // single implicit artifact.
+        assert_eq!(prepared.implicit_artifacts.len(), 1);
+        assert!(prepared.implicit_artifacts[0]
+            .persist_path
+            .contains("stage-a.md"));
         assert_eq!(
-            prepared.output_paths["__gml_scratch"],
-            prepared.scratchpad_persist_path
+            prepared.output_paths["__gml_scratchpad"],
+            prepared.implicit_artifacts[0].persist_path
         );
-        assert!(prepared.scratchpad_path.ends_with("_scratchpad.md"));
+        assert!(prepared.implicit_artifacts[0]
+            .model_path
+            .ends_with("_scratchpad.md"));
         // No real outputs means no expected artifacts.
         assert!(prepared.expected_artifact_paths.is_empty());
     }
@@ -1032,9 +928,10 @@ mod tests {
     #[tokio::test]
     async fn test_commit_agent_persists_scratchpad_content() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let store = make_state_store(ensure_artifact_dir(&tmp));
+        let ad = ensure_artifact_dir(&tmp);
+        let store = make_state_store(ad.clone());
         let agent = agent_with_bind("out", "artifact://out.md");
-        let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
+        let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
             .await
             .unwrap();
         std::fs::write(&prepared.output_paths["out"], "body").unwrap();
@@ -1042,7 +939,7 @@ mod tests {
         // the artifact URI on commit.
         let scratchpad = tmp.path().join("_scratchpad.md");
         std::fs::write(&scratchpad, "remember: the answer is 42").unwrap();
-        prepared.scratchpad_path = scratchpad.to_string_lossy().into_owned();
+        prepared.implicit_artifacts[0].model_path = scratchpad;
 
         commit_agent(&prepared, &store).await.unwrap();
 
@@ -1058,19 +955,16 @@ mod tests {
     #[tokio::test]
     async fn test_commit_agent_skips_absent_scratchpad() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let store = make_state_store(ensure_artifact_dir(&tmp));
+        let ad = ensure_artifact_dir(&tmp);
+        let store = make_state_store(ad.clone());
         let agent = agent_with_bind("out", "artifact://out.md");
-        let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
+        let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
             .await
             .unwrap();
         std::fs::write(&prepared.output_paths["out"], "body").unwrap();
         // Point the scratchpad at a path that does not exist.
-        prepared.scratchpad_path = tmp
-            .path()
-            .join("missing")
-            .join("_scratchpad.md")
-            .to_string_lossy()
-            .into_owned();
+        prepared.implicit_artifacts[0].model_path =
+            tmp.path().join("missing").join("_scratchpad.md");
 
         commit_agent(&prepared, &store).await.unwrap();
 
@@ -1081,7 +975,8 @@ mod tests {
     #[tokio::test]
     async fn test_accumulate_scratchpads_ordered_and_skips_empty() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let store = make_state_store(ensure_artifact_dir(&tmp));
+        let ad = ensure_artifact_dir(&tmp);
+        let store = make_state_store(ad.clone());
         // Stages in execution order: a, b, c
         let stage_order: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
         let uri_b = Uri::parse("artifact://_scratchpad/b.md").unwrap();
@@ -1105,7 +1000,7 @@ mod tests {
     async fn test_prepare_no_interpolation_map_runs_prompt_unchanged() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["Static prompt".to_string()],
@@ -1115,7 +1010,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
         assert!(prepared.prompt.ends_with("Static prompt"));
@@ -1146,9 +1041,10 @@ mod tests {
     #[tokio::test]
     async fn test_commit_agent_rejects_missing_non_optional() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let store = make_state_store(ensure_artifact_dir(&tmp));
+        let ad = ensure_artifact_dir(&tmp);
+        let store = make_state_store(ad.clone());
         let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
             .await
             .unwrap();
         let err = commit_agent(&prepared, &store).await.unwrap_err();
@@ -1159,9 +1055,10 @@ mod tests {
     #[tokio::test]
     async fn test_commit_agent_accepts_empty_file() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let store = make_state_store(ensure_artifact_dir(&tmp));
+        let ad = ensure_artifact_dir(&tmp);
+        let store = make_state_store(ad.clone());
         let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
             .await
             .unwrap();
         std::fs::write(&prepared.output_paths["out"], "").unwrap();
@@ -1172,9 +1069,10 @@ mod tests {
     #[tokio::test]
     async fn test_commit_agent_allows_missing_optional() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let store = make_state_store(ensure_artifact_dir(&tmp));
+        let ad = ensure_artifact_dir(&tmp);
+        let store = make_state_store(ad.clone());
         let agent = agent_with_bind("out?", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
             .await
             .unwrap();
         commit_agent(&prepared, &store).await.unwrap();
@@ -1184,7 +1082,8 @@ mod tests {
     #[tokio::test]
     async fn test_commit_agent_multi_output_missing_non_optional_errors() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let store = make_state_store(ensure_artifact_dir(&tmp));
+        let ad = ensure_artifact_dir(&tmp);
+        let store = make_state_store(ad.clone());
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -1196,7 +1095,7 @@ mod tests {
             ]),
             landscape: true,
         };
-        let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
+        let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
             .await
             .unwrap();
         // Pin iteration order so the missing bind is evaluated last.
@@ -1212,7 +1111,8 @@ mod tests {
     #[tokio::test]
     async fn test_commit_agent_multi_output_missing_optional_ok() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let store = make_state_store(ensure_artifact_dir(&tmp));
+        let ad = ensure_artifact_dir(&tmp);
+        let store = make_state_store(ad.clone());
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -1224,7 +1124,7 @@ mod tests {
             ]),
             landscape: true,
         };
-        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
             .await
             .unwrap();
         std::fs::write(&prepared.output_paths["a"], "content").unwrap();
@@ -1236,9 +1136,10 @@ mod tests {
     #[tokio::test]
     async fn test_commit_agent_registers_produced_file() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let store = make_state_store(ensure_artifact_dir(&tmp));
+        let ad = ensure_artifact_dir(&tmp);
+        let store = make_state_store(ad.clone());
         let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
             .await
             .unwrap();
         std::fs::write(&prepared.output_paths["out"], "content").unwrap();
@@ -1250,7 +1151,7 @@ mod tests {
     async fn test_system_prompt_override_wins() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -1263,7 +1164,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
         assert_eq!(prepared.system_prompt(), "custom override prompt");
@@ -1273,7 +1174,7 @@ mod tests {
     async fn test_system_prompt_falls_back_to_harness_default() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         let agent = Agent {
             name: "test".to_string(),
             prompts: vec!["hi".to_string()],
@@ -1283,7 +1184,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)
+        let mut prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
         prepared.cwd = "/work".to_string();
@@ -1295,7 +1196,7 @@ mod tests {
     async fn test_prepare_rejects_stage_name_with_path_traversal() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad);
+        let store = make_state_store(ad.clone());
         for bad_name in &["../escape", "sub/dir", "back\\slash"] {
             let agent = Agent {
                 name: (*bad_name).to_string(),
@@ -1306,7 +1207,7 @@ mod tests {
                 landscape: true,
             };
             let fw = HashMap::new();
-            let err = prepare_agent(&agent, &store, &store, "", &fw)
+            let err = prepare_agent(&agent, &store, &store, "", &fw, &ad)
                 .await
                 .unwrap_err();
             assert!(

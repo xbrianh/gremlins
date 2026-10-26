@@ -500,7 +500,11 @@ impl RunContext {
             format!("[{}] ", params.label)
         };
         let compaction_opts = params.compaction_opts;
-        let scratchpad_root = params.cwd.clone();
+        let scratchpad_root = params
+            .scratchpad_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .or_else(|| params.cwd.clone());
         Self {
             idle_timeout,
             prefix,
