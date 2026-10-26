@@ -3851,8 +3851,8 @@ mod tests {
 
     #[test]
     fn edit_scope_start_beyond_eof_error() {
-        // A scope starting past the last line selects nothing, so the match is
-        // reported as not found rather than a line-count error.
+        // A scope starting past the last line is rejected as a line-count
+        // error per the plan.
         let dir = tmp();
         std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
         let args = serde_json::json!({
@@ -3861,7 +3861,7 @@ mod tests {
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("old_string not found"), "got: {result}");
+        assert!(result.contains("exceeds file line count"), "got: {result}");
     }
 
     #[test]

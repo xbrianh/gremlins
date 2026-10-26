@@ -255,20 +255,39 @@ fn apply_edits(
             ));
         }
 
-        // Every occurrence of `old_str` is eligible unless a scope narrows the
-        // window; the uniqueness check only counts in-scope occurrences.
+        // When a scope is set, search only the scope byte window so that
+        // multiline needles overlapping earlier out-of-scope occurrences
+        // are not shadowed by the global non-overlapping match_indices walk.
         let scope = edit
             .scope_start
             .map(|s| scope_byte_range(line_offsets, content_len, s, edit.scope_end));
-        let mut positions = content
+        let search_window = match scope {
+            Some((s, e)) => &content[s..e],
+            None => content,
+        };
+        let window_offset = scope.map_or(0, |(s, _)| s);
+
+        // Reject scope_start past the last logical line (trailing newline
+        // does not add a line).
+        if let Some(s) = edit.scope_start {
+            let line_count = if content.ends_with('\n') {
+                line_offsets.len().saturating_sub(1)
+            } else {
+                line_offsets.len()
+            };
+            if s > line_count {
+                return Err(format!(
+                    "Error: edit {} 'start_line' ({}) exceeds file line count ({}) in {file_path}",
+                    i + 1,
+                    s,
+                    line_count
+                ));
+            }
+        }
+
+        let mut positions = search_window
             .match_indices(old_str.as_str())
-            .map(|(pos, _)| pos)
-            .filter(|pos| match scope {
-                Some((scope_start_byte, scope_end_byte)) => {
-                    *pos >= scope_start_byte && pos + old_str.len() <= scope_end_byte
-                }
-                None => true,
-            });
+            .map(|(pos, _)| pos + window_offset);
 
         let first = match positions.next() {
             Some(pos) => pos,
@@ -624,6 +643,23 @@ mod tests {
         let offs = offsets(content);
         let out = apply_edits(content, &edits, "f.txt", &offs).unwrap();
         assert_eq!(out, "x\nBAR\nfoo\n");
+    }
+
+    #[test]
+    fn apply_scope_multiline_needle_scoped_to_later_occurrence() {
+        // Regression: a multiline needle whose first (out-of-scope) occurrence
+        // shadows a later in-scope occurrence when using global match_indices.
+        // Scoped byte-slice search finds the correct one.
+        let content = "foo\nfoo\nfoo\n";
+        let edits = vec![EditOp {
+            old_str: "foo\nfoo".into(),
+            new_str: "BAR\nBAZ".into(),
+            scope_start: Some(2),
+            scope_end: Some(3),
+        }];
+        let offs = offsets(content);
+        let out = apply_edits(content, &edits, "f.txt", &offs).unwrap();
+        assert_eq!(out, "foo\nBAR\nBAZ\n");
     }
 
     #[test]

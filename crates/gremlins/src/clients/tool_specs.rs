@@ -174,7 +174,7 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool
 
 /// Build a short summary of the fields present in a mixed-mode edit object,
 /// so the error message shows what the model actually sent.
-pub(crate) fn describe_edit_provided_fields(
+ fn describe_edit_provided_fields(
     obj: &serde_json::Map<String, serde_json::Value>,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -311,8 +311,9 @@ pub(crate) fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option
                         i + 1
                     ));
                 }
-                // 'start_line'/'end_line' are optional scope fields, but they
-                // must be supplied together.
+                // 'start_line'/'end_line' are optional scope fields.
+                // 'end_line' requires 'start_line'; 'start_line' alone is
+                // valid (open-ended downward scope to EOF).
                 let has_start = obj.contains_key("start_line");
                 let has_end = obj.contains_key("end_line");
                 if has_end && !has_start {
