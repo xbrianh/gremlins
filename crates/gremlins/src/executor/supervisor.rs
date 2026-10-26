@@ -3024,7 +3024,17 @@ async fn reusable_chat_gremlin_id(session: &SessionHandle) -> Option<String> {
             if let Some(id) = s.chat_gremlins.keys().next().cloned() {
                 (Some(id), None)
             } else if let Some(cur) = &s.current_turn {
-                (None, Some(cur.done.clone()))
+                // The watch channel is sticky: if `done` is already
+                // `true` the turn completed but did not re-insert a
+                // gremlin (e.g. a stop removed it after a soft
+                // interrupt).  Waiting on a completed turn with no
+                // parked gremlin would spin forever, so return
+                // `None` immediately.
+                if *cur.done.borrow() {
+                    (None, None)
+                } else {
+                    (None, Some(cur.done.clone()))
+                }
             } else {
                 (None, None)
             }
@@ -4619,6 +4629,46 @@ mod tests {
         let _ = tx.send(true);
         assert!(a_task.await.unwrap());
         assert!(b_task.await.unwrap());
+    }
+
+    /// After a soft interrupt, `current_turn` stays installed with `done ==
+    /// true` and `interrupted == true`.  If a stop path then removes the
+    /// parked gremlin without clearing `current_turn`, the next chat must
+    /// not loop forever in [`reusable_chat_gremlin_id`] waiting on a
+    /// turn that already completed.
+    #[tokio::test]
+    async fn reusable_chat_gremlin_id_returns_none_when_done_turn_has_no_gremlin() {
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new("test-sess".to_string()),
+        ));
+        let (tx, rx) = watch::channel(true); // already completed
+        {
+            let mut s = session.lock().await;
+            s.current_turn = Some(super::CurrentTurn {
+                id: "grem-1".to_string(),
+                turn: Some("1".to_string()),
+                cancel: super::CancelToken::new(),
+                soft_cancel: Arc::new(AtomicBool::new(false)),
+                done: rx,
+                done_tx: Arc::new(tx),
+                interrupted: true,
+            });
+            // gremlin was stopped externally — chat_gremlins is empty
+        }
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            super::reusable_chat_gremlin_id(&session),
+        )
+        .await;
+
+        match result {
+            Ok(None) => {} // expected: no gremlin, no infinite loop
+            Ok(Some(id)) => panic!("expected None, got Some({id:?})"),
+            Err(_elapsed) => panic!(
+                "reusable_chat_gremlin_id hung waiting on a completed turn with no parked gremlin"
+            ),
+        }
     }
 
     #[test]
