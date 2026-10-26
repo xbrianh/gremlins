@@ -233,7 +233,7 @@
       },
       options: {
         cmds: [
-          'BEST="{drag_best_val}"\n[ -z "$BEST" ] && BEST="N/A"\nBASE_SUM=$(python3 -c \'import json,sys; data=json.load(sys.stdin); print(round(sum(m["ln_drag"] for m in data["modules"]), 2))\' < {baseline_report})\n{\n  echo "drag-optimizer: reduce drag for {target}"\n  echo ""\n  echo "Baseline ln_drag sum: $BASE_SUM \\u2192 Best: $BEST"\n  echo "Target: {target}"\n} > {commit_message}\n',
+          'BEST="{drag_best_val}"\n[ -z "$BEST" ] && BEST="N/A"\nBASE_SUM=$(python3 -c \'import json,sys; data=json.load(sys.stdin); print(round(sum(m["ln_drag"] for m in data["modules"]), 2))\' < {baseline_report})\n{\n  echo "drag-optimizer: reduce drag for {target}"\n  echo ""\n  echo "Baseline ln_drag sum: $BASE_SUM → Best: $BEST"\n  echo "Target: {target}"\n} > {commit_message}\n',
         ],
       },
     },

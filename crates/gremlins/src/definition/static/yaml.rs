@@ -16,10 +16,11 @@ use crate::builders::artifacts::{InterpolationValue, OutputTarget};
 use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
 use crate::builders::definition::{fill_builder_names, DefinitionBuilder, LandBuilder};
 use crate::builders::exec::ExecBuilder;
-use crate::clients::client::{validate_task_model_spec, ModelURI};
+use crate::clients::client::validate_task_model_spec;
 use crate::clients::task_kind::TaskKind;
 use crate::config;
 use crate::definition::r#static::expand;
+use crate::model_uri::ModelURI;
 use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
 use crate::stage_spec::node::StageSpec;
@@ -103,19 +104,6 @@ impl StaticDefinition {
             None,
         )
     }
-
-    /// Read an already-expanded JSON file — no expansion, no project-root
-    /// walk. Strips the `__gremlins_expanded__` sentinel before dispatching.
-    pub fn from_expanded_json_file(
-        path: &Path,
-        model_override: Option<&str>,
-        config_default_model: Option<&str>,
-    ) -> Result<Self, SchemaError> {
-        let data = std::fs::read(path)
-            .map_err(|e| SchemaError::Generic(format!("failed to read {}: {e}", path.display())))?;
-        let expanded = parse_expanded_json(&data)?;
-        from_expanded_value(expanded, path, model_override, config_default_model, None)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -179,7 +167,7 @@ fn from_expanded_value(
 
     // Bake every stage and default model with the current settings profile
     // (source-definition path only). Expanded definitions from
-    // `from_expanded_bytes` / `from_expanded_json_file` pass `None` here:
+    // `from_expanded_bytes` passes `None` here:
     // their values are already concrete `provider/model[?k=v]` strings, so
     // no profile resolution is needed and a missing/malformed settings.yaml
     // must not block resuming from a baked definition.

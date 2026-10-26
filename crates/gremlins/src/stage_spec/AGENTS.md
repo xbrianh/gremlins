@@ -21,17 +21,17 @@ per-stage builder (`AgentBuilder`, `ExecBuilder`, `SequenceBuilder`,
 | `builders/exec.rs` | `ExecBuilder` — builder pattern for `BuilderStage::Exec`. Validates interpolation syntax, bind/interpolation key collisions, and unused keys. Unlike `AgentBuilder`, rejects **all** `FRAMEWORK_KEYS` in options (including `model`). |
 | `builders/composite.rs` | `SequenceBuilder`, `ParallelBuilder` — builder patterns for composite stages. Validates empty-body rejection, max-iterations, nested-parallel rejection, and child-name uniqueness/validity. |
 | `builders/definition.rs` | `DefinitionBuilder` — programmatic (non-YAML) builder for `StaticDefinition`. Also `BootstrapBuilder` and `LandBuilder`. |
-| `definition/static/yaml.rs` | YAML ingestion — `StaticDefinition::from_json5_file` expands, then `stage_from_yaml` dispatches to the per-stage builders. |
+| `definition/static/yaml.rs` | JSON5 ingestion — `StaticDefinition::from_json5_file` expands, then `stage_from_json` dispatches to the per-stage builders. |
 
 ## Architecture
 
 Parsing happens in two layers:
 
-1. **YAML layer** (`definition/static/yaml.rs::stage_from_yaml`). Runs
+1. **JSON5 layer** (`definition/static/yaml.rs::stage_from_json`). Runs
    first. Matches `type` to the correct builder (`AgentBuilder`,
    `ExecBuilder`, `SequenceBuilder`, `ParallelBuilder`), calls
    `.build()` → `BuilderStage`, and descends into composite bodies
-   (recursing into `stage_from_yaml`). Builders validate per-stage
+   (recursing into `stage_from_json`). Builders validate per-stage
    constraints (interpolation syntax, framework-key collisions,
    bind/interpolation key collisions, unused keys, empty-body rejection,
    nested-parallel rejection, child-name uniqueness).
@@ -80,12 +80,12 @@ bare `parallel:` sugar.
 | You want to … | Look at |
 |---|---|
 | Add a new stage type | Recipe below; `builders/agent.rs` for leaf, `builders/composite.rs` for composite |
-| Understand parse flow | `definition/static/yaml.rs` — `StaticDefinition::from_json5_file` → `stage_from_yaml` → per-type builder → `BuilderStage` |
+| Understand parse flow | `definition/static/yaml.rs` — `StaticDefinition::from_json5_file` → `stage_from_json` → per-type builder → `BuilderStage` |
 | Understand name-filling | `builders/definition.rs::fill_builder_names` → `definition/static/loader::fill_names` |
-| Change serialization shape | `node.rs` — `to_yaml` / `*_to_yaml` helpers |
+| Change serialization shape | `node.rs` — `to_json` / `*_to_json` helpers |
 | Add a composite-only attribute | `composite.rs` (struct), `node.rs` (serialize), `builders/composite.rs` (builder) |
 | Understand variable substitution | `executor/vars.rs::substitute_vars` |
-| Find `ModelURI` | `clients/client.rs` — the canonical definition of `ModelURI::parse` |
+| Find `ModelURI` | `model_uri.rs` — the canonical definition of `ModelURI::parse` |
 
 ## Adding a new stage type
 
@@ -95,10 +95,10 @@ bare `parallel:` sugar.
 2. **BuilderStage variant.** Add a variant to `BuilderStage` in `node.rs`.
    For composites, include `StageAttrs`, `model: Option<ModelURI>`,
    and `body: Vec<BuilderStage>`.
-3. **Wire into `stage_from_yaml`.** Add a match arm and a `foo_from_yaml`
+3. **Wire into `stage_from_json`.** Add a match arm and a `foo_from_json`
    helper in `definition/static/yaml.rs`.
-4. **Serialization.** Add a `*_to_yaml` helper and a match arm in
-   `BuilderStage::to_yaml`. Add a match arm in `to_stage_node` for
+4. **Serialization.** Add a `*_to_json` helper and a match arm in
+   `BuilderStage::to_json`. Add a match arm in `to_stage_node` for
    bind/interpolation propagation.
 5. **Accessors.** Add match arms to `name()`, `stage_type()`, `model()`,
    `skip_if_exists()`, `body()`, `set_name()`.

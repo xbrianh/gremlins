@@ -20,7 +20,13 @@ pub(crate) fn load_json_file(path: &Path) -> Result<serde_json::Value, SchemaErr
         },
         _ => SchemaError::Generic(format!("could not read {}: {}", path.display(), e)),
     })?;
-    let parsed: serde_json::Value = json5::from_str(&text)?;
+    // Reject JSON5 numeric literals that serde_json::Value cannot represent
+    // or that json5 silently coerces (NaN, Infinity, hex, leading +).
+    reject_json5_numeric_literals(&text, path)?;
+    let parsed: serde_json::Value = json5::from_str(&text).map_err(|e| SchemaError::YamlParse {
+        label: path.display().to_string(),
+        msg: e.to_string(),
+    })?;
     if !parsed.is_object() {
         return Err(SchemaError::YamlNotMapping {
             label: path.display().to_string(),
@@ -28,6 +34,26 @@ pub(crate) fn load_json_file(path: &Path) -> Result<serde_json::Value, SchemaErr
         });
     }
     Ok(parsed)
+}
+
+/// Reject JSON5 numeric-literals that `serde_json::Value` cannot represent
+/// (`NaN`, `Infinity`, `-Infinity`) or that the `json5` crate silently coerces
+/// into plain numbers (hex `0x…`, leading `+`).
+fn reject_json5_numeric_literals(text: &str, path: &Path) -> Result<(), SchemaError> {
+    // Pattern matches standalone JSON5 numeric literals:
+    //   \bNaN\b | \bInfinity\b | 0[xX][0-9a-fA-F]+ | [+][0-9]
+    let re = regex::Regex::new(r"\bNaN\b|\bInfinity\b|[-]?Infinity\b|0[xX][0-9a-fA-F_]+|[+][0-9]")
+        .unwrap();
+    if let Some(m) = re.find(text) {
+        return Err(SchemaError::YamlParse {
+            label: path.display().to_string(),
+            msg: format!(
+                "JSON5 numeric literal {:?} is not supported; use a plain decimal number instead",
+                m.as_str()
+            ),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn resolve_prompt_dir(
