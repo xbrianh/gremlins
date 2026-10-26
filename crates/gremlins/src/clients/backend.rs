@@ -64,6 +64,9 @@ pub struct RunParams {
     pub(crate) compaction_opts: Option<CompactionOpts>,
     /// Whether skills are available for this chat session.
     pub(crate) skills_available: bool,
+    /// Discovered skills for this session. Session-bound so concurrent chat
+    /// sessions resolve their own project's skills instead of a shared slot.
+    pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
     /// Shared mutable reference to active skill names.
     pub active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
     /// Compaction algorithm (set alongside compaction_opts).
@@ -103,6 +106,7 @@ impl Clone for RunParams {
             prepopulated_messages: self.prepopulated_messages.clone(),
             compaction_opts: self.compaction_opts,
             skills_available: self.skills_available,
+            discovered_skills: self.discovered_skills.clone(),
             active_skills: self.active_skills.clone(),
             compactor: self.compactor.clone(),
             token_usage_sink: self.token_usage_sink.clone(),
@@ -154,9 +158,7 @@ pub trait Backend: Send + Sync {
 
     /// Resume a paused or timed-out run.
     async fn resume(&self) -> Result<CompletedRun, ClientError> {
-        Err(ClientError::Runtime {
-            message: "resume not supported".into(),
-        })
+        self.run(self.last_run_params()?, None).await
     }
 
     /// Reap all child processes for a given gremlin ID.

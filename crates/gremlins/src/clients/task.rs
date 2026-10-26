@@ -463,6 +463,7 @@ mod tests {
             },
             active_skills: None,
             skills_available: false,
+            discovered_skills: None,
         }
     }
 

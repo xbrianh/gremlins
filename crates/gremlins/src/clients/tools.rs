@@ -110,6 +110,9 @@ pub(crate) struct AgentLoopRuntime {
     /// Whether skills are available (chat-only). Doubles as the canonical
     /// chat predicate for tool gates (Mischief bypass, LoadSkill inclusion).
     pub(crate) skills_available: bool,
+    /// Discovered skills for this session. Session-bound so concurrent chat
+    /// sessions resolve their own project's skills instead of a shared slot.
+    pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
 }
 impl AgentLoopRuntime {
     /// Send one completed live-output line for the tool call identified by
@@ -712,28 +715,8 @@ impl ToolRegistry {
 
 static GLOBAL_TOOL_REGISTRY: OnceLock<ToolRegistry> = OnceLock::new();
 
-pub(crate) fn set_global_tool_registry(reg: ToolRegistry) {
-    GLOBAL_TOOL_REGISTRY
-        .set(reg)
-        .expect("global tool registry already set");
-}
-
-#[cfg(not(test))]
 fn global_registry() -> &'static ToolRegistry {
-    GLOBAL_TOOL_REGISTRY.get().expect(
-        "global tool registry not initialized -- call set_global_tool_registry during start",
-    )
-}
-
-#[cfg(test)]
-#[allow(static_mut_refs)]
-fn global_registry() -> &'static ToolRegistry {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    static mut REG: Option<ToolRegistry> = None;
-    ONCE.call_once(|| unsafe {
-        REG = Some(crate::toolbox::default_registry());
-    });
-    unsafe { REG.as_ref().unwrap() }
+    GLOBAL_TOOL_REGISTRY.get_or_init(crate::toolbox::default_registry)
 }
 
 pub(crate) async fn invoke(
@@ -983,12 +966,6 @@ mod tests {
     }
 
     fn ctx(cwd: &Path) -> AgentLoopRuntime {
-        // Ensure the landscape explorer is initialized for tests that
-        // call landscape_invoke / landscape_sync. Silently ignored if
-        // another test already installed it.
-        crate::toolbox::landscape::set_landscape_explorer(
-            std::sync::Arc::new(crate::landscape::LandscapeExplorer),
-        );
         AgentLoopRuntime {
             cwd: Some(cwd.to_path_buf()),
             extra_env: None,
@@ -1006,6 +983,7 @@ mod tests {
             },
             active_skills: None,
             skills_available: false,
+            discovered_skills: None,
         }
     }
 
@@ -1593,6 +1571,7 @@ mod tests {
             },
             active_skills: None,
             skills_available: false,
+            discovered_skills: None,
         };
         let args = serde_json::json!({"command": "pwd; ls"}).to_string();
         let output = bash_invoke(&c, &args, "tool-test-id").await;
@@ -1632,6 +1611,7 @@ mod tests {
             },
             active_skills: None,
             skills_available: false,
+            discovered_skills: None,
         };
         let expected = canonicalize_or_ancestor(&dir);
         let args = serde_json::json!({"command": "pwd"}).to_string();
@@ -1669,6 +1649,7 @@ mod tests {
             },
             active_skills: None,
             skills_available: false,
+            discovered_skills: None,
         };
         let expected = canonicalize_or_ancestor(&project);
         // Ensure the daemon cwd is genuinely different from project root.
@@ -2112,6 +2093,7 @@ mod tests {
             },
             active_skills: None,
             skills_available: false,
+            discovered_skills: None,
         };
         let out = invoke("tool-test-id", "Mischief", &c, "{}").await;
         assert!(
@@ -2142,6 +2124,7 @@ mod tests {
             },
             active_skills: Some(Arc::new(std::sync::Mutex::new(vec![]))),
             skills_available: true,
+            discovered_skills: None,
         };
         let out = invoke("tool-test-id", "Mischief", &c, "{}").await;
         assert!(
@@ -2207,8 +2190,8 @@ mod tests {
     #[test]
     fn load_skill_unknown_name() {
         let _lock = EnvGuard::lock();
-        crate::toolbox::skills_registry::set_skills(Arc::new(vec![]));
         let mut c = ctx(&tmp());
+        c.discovered_skills = Some(Arc::new(vec![]));
         c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
         c.skills_available = true;
         let result = load_skill_invoke(&c, &serde_json::json!({"name": "nonexistent"}));
@@ -2236,7 +2219,7 @@ mod tests {
             skill,
             files: vec![],
         };
-        crate::toolbox::skills_registry::set_skills(Arc::new(vec![loaded]));
+        c.discovered_skills = Some(Arc::new(vec![loaded]));
         c.skills_available = true;
         let result = load_skill_invoke(&c, &serde_json::json!({"name": "secret-ops"}));
         assert!(
@@ -2264,7 +2247,7 @@ mod tests {
             skill,
             files: vec![],
         };
-        crate::toolbox::skills_registry::set_skills(Arc::new(vec![loaded]));
+        c.discovered_skills = Some(Arc::new(vec![loaded]));
         c.skills_available = true;
         let result = load_skill_invoke(&c, &serde_json::json!({"name": "pdf"}));
         assert!(
@@ -3044,6 +3027,7 @@ mod tests {
             },
             active_skills: None,
             skills_available: false,
+            discovered_skills: None,
         };
         let write_args =
             serde_json::json!({"file_path": target.to_str().unwrap(), "content": "nope"})
@@ -3963,6 +3947,7 @@ mod tests {
             },
             active_skills: None,
             skills_available: false,
+            discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -3995,6 +3980,7 @@ mod tests {
             },
             active_skills: None,
             skills_available: false,
+            discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -4025,6 +4011,7 @@ mod tests {
             },
             active_skills: None,
             skills_available: false,
+            discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": ""}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -4062,6 +4049,7 @@ mod tests {
             },
             active_skills: None,
             skills_available: false,
+            discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Bogus", "prompt": "go"}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -4094,6 +4082,7 @@ mod tests {
             },
             active_skills: None,
             skills_available: false,
+            discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
         assert_eq!(
@@ -4567,6 +4556,7 @@ mod tests {
             },
             active_skills: None,
             skills_available: false,
+            discovered_skills: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
@@ -4601,6 +4591,7 @@ mod tests {
             },
             active_skills: None,
             skills_available: false,
+            discovered_skills: None,
         }
     }
 
@@ -4711,10 +4702,6 @@ mod tests {
         crate::config::clear_global();
         crate::config::init_global().unwrap();
 
-        crate::toolbox::landscape::set_landscape_explorer(
-            std::sync::Arc::new(crate::landscape::LandscapeExplorer),
-        );
-
         let dir = tmp();
         std::fs::write(dir.join("a.rs"), "fn main() {}").unwrap();
 
@@ -4732,10 +4719,6 @@ mod tests {
         let _sandbox = crate::test_support::Sandbox::new();
         crate::config::clear_global();
         crate::config::init_global().unwrap();
-
-        crate::toolbox::landscape::set_landscape_explorer(
-            std::sync::Arc::new(crate::landscape::LandscapeExplorer),
-        );
 
         let dir = tmp();
         std::fs::write(dir.join("a.rs"), "fn main() {}").unwrap();
@@ -4757,10 +4740,6 @@ mod tests {
         ));
         crate::config::clear_global();
         crate::config::init_global().unwrap();
-
-        crate::toolbox::landscape::set_landscape_explorer(
-            std::sync::Arc::new(crate::landscape::LandscapeExplorer),
-        );
 
         let dir = tmp();
         std::fs::write(dir.join("a.rs"), "fn main() {}").unwrap();

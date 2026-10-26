@@ -2310,6 +2310,7 @@ pub(crate) async fn run_agent_loop(
         telemetry,
         active_skills: ctx.params.active_skills.clone(),
         skills_available: ctx.params.skills_available,
+        discovered_skills: ctx.params.discovered_skills.clone(),
     };
     let tool_defs = tools::tool_definitions(opts.tool_filter, ctx.params.skills_available);
 
@@ -4092,6 +4093,7 @@ mod tests {
                 prepopulated_messages: None,
                 compaction_opts: None,
                 skills_available: false,
+                discovered_skills: None,
                 compactor: None,
                 active_skills: None,
                 token_usage_sink: TokenUsageSink(None),
@@ -4160,7 +4162,15 @@ mod tests {
         let mut compacted = None;
         let compactor: Arc<dyn crate::clients::compaction::Compactor> =
             Arc::new(crate::executor::conversation::ConversationCompactor);
-        let first = build_request_messages(&history, &mut compacted, 0, Some(opts), Some(compactor.clone()), 0, 0);
+        let first = build_request_messages(
+            &history,
+            &mut compacted,
+            0,
+            Some(opts),
+            Some(compactor.clone()),
+            0,
+            0,
+        );
         assert!(
             compacted.is_some(),
             "an over-threshold multi-round turn must compact"
@@ -4176,8 +4186,15 @@ mod tests {
         for round in 0..5 {
             history.push(assistant_tool_message("small", &[], &[]));
             history.push(Message::user(format!("[turn {}]: small {round}", round)));
-            let request =
-                build_request_messages(&history, &mut compacted, 0, Some(opts), Some(compactor.clone()), 0, 0);
+            let request = build_request_messages(
+                &history,
+                &mut compacted,
+                0,
+                Some(opts),
+                Some(compactor.clone()),
+                0,
+                0,
+            );
             assert!(compacted.is_some());
             assert_eq!(compacted.as_ref().unwrap().prefix, prefix_before);
             assert_eq!(compacted.as_ref().unwrap().cut, cut_before);
@@ -4199,7 +4216,15 @@ mod tests {
         let mut compacted = None;
         let compactor: Arc<dyn crate::clients::compaction::Compactor> =
             Arc::new(crate::executor::conversation::ConversationCompactor);
-        let first = build_request_messages(&history, &mut compacted, 0, Some(opts), Some(compactor.clone()), 0, 0);
+        let first = build_request_messages(
+            &history,
+            &mut compacted,
+            0,
+            Some(opts),
+            Some(compactor.clone()),
+            0,
+            0,
+        );
         assert!(compacted.is_some(), "first pass must compact");
         assert!(compaction::token_len(&first) < full_len);
         let first_cut = compacted.as_ref().unwrap().cut;
@@ -4229,7 +4254,15 @@ mod tests {
             )));
         }
 
-        let second = build_request_messages(&history, &mut compacted, 0, Some(opts), Some(compactor.clone()), 0, 0);
+        let second = build_request_messages(
+            &history,
+            &mut compacted,
+            0,
+            Some(opts),
+            Some(compactor.clone()),
+            0,
+            0,
+        );
         let fresh = compacted
             .as_ref()
             .expect("a second compaction pass must be cached");
@@ -4271,7 +4304,15 @@ mod tests {
         let mut compacted = None;
         let compactor: Arc<dyn crate::clients::compaction::Compactor> =
             Arc::new(crate::executor::conversation::ConversationCompactor);
-        let _ = build_request_messages(&history, &mut compacted, 0, Some(opts), Some(compactor.clone()), 0, 0);
+        let _ = build_request_messages(
+            &history,
+            &mut compacted,
+            0,
+            Some(opts),
+            Some(compactor.clone()),
+            0,
+            0,
+        );
         assert!(compacted.is_some());
 
         // Simulate a mid-tool pause re-run popping messages back below the cut.
@@ -4280,7 +4321,15 @@ mod tests {
         }
         history.pop();
 
-        let request = build_request_messages(&history, &mut compacted, 0, Some(opts), Some(compactor.clone()), 0, 0);
+        let request = build_request_messages(
+            &history,
+            &mut compacted,
+            0,
+            Some(opts),
+            Some(compactor.clone()),
+            0,
+            0,
+        );
         assert!(
             compacted.is_none() || compacted.as_ref().is_some_and(|c| c.cut <= history.len()),
             "a stale cached cut must not survive a history pop"
@@ -4325,7 +4374,15 @@ mod tests {
         let mut compacted = None;
         let compactor: Arc<dyn crate::clients::compaction::Compactor> =
             Arc::new(crate::executor::conversation::ConversationCompactor);
-        let request = build_request_messages(&history, &mut compacted, 0, Some(opts), Some(compactor), 0, 0);
+        let request = build_request_messages(
+            &history,
+            &mut compacted,
+            0,
+            Some(opts),
+            Some(compactor),
+            0,
+            0,
+        );
 
         let has_scratchpad = request
             .iter()
@@ -7104,6 +7161,7 @@ mod tests {
             },
             active_skills: None,
             skills_available: false,
+            discovered_skills: None,
         }
     }
 

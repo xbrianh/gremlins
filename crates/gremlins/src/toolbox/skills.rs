@@ -22,14 +22,14 @@ pub(crate) fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value
         None => return "Error: missing 'name' for LoadSkill tool".to_string(),
     };
 
-    let Some(discovered) = super::skills_registry::get_skills() else {
+    let Some(discovered) = ctx.discovered_skills.as_ref() else {
         return "Error: LoadSkill is only available in chat sessions".to_string();
     };
     let Some(active) = &ctx.active_skills else {
         return "Error: LoadSkill is only available in chat sessions".to_string();
     };
     // Look up the skill by name.
-    let loaded = match crate::skills::find_skill(&discovered, name, true) {
+    let loaded = match crate::skills::find_skill(discovered, name, true) {
         Some(l) => l,
         None => return format!("Error: skill {name:?} not found"),
     };

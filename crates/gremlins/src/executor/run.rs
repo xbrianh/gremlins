@@ -660,12 +660,6 @@ async fn run_agent(
     let compactor: Option<Arc<dyn Compactor>> = compaction_opts
         .map(|_| Arc::new(conversation::ConversationCompactor) as Arc<dyn Compactor>);
 
-    // Publish the discovered skills to the process-global registry so the
-    // LoadSkill tool can resolve them while the agent loop runs.
-    if let Some(ref skills) = gremlin.discovered_skills {
-        crate::toolbox::skills_registry::set_skills(Arc::clone(skills));
-    }
-
     // ── Live usage tracker for failure persistence ─────
     let live_usage = std::sync::Arc::new(std::sync::Mutex::new(
         None::<(crate::clients::protocol::UsageStats, Option<f64>)>,
@@ -706,6 +700,7 @@ async fn run_agent(
         compaction_opts,
         compactor,
         skills_available: gremlin.discovered_skills.is_some(),
+        discovered_skills: gremlin.discovered_skills.clone(),
         active_skills: gremlin.active_skills.clone(),
         token_usage_sink: {
             let gremlin_id = gremlin.id.to_string();
@@ -1137,16 +1132,6 @@ impl Gremlin {
     /// Drive every stage to the end, returning the exit code.
     /// `resume_from` names a stage to resume from (None = fresh start).
     pub async fn run(&mut self, resume_from: Option<&str>) -> Result<i32, RunError> {
-        // Ensure tool registry initialized exactly once across the process
-        // lifetime; must happen before the first agent loop invokes a tool.
-        static INIT_REGISTRY: std::sync::Once = std::sync::Once::new();
-        INIT_REGISTRY.call_once(|| {
-            crate::clients::tools::set_global_tool_registry(crate::toolbox::default_registry());
-            crate::toolbox::landscape::set_landscape_explorer(std::sync::Arc::new(
-                crate::landscape::LandscapeExplorer,
-            ));
-        });
-
         self.init_runtime(resume_from).await?;
 
         let bootstrap = self.definition.bootstrap();

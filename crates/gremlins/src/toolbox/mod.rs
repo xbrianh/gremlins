@@ -13,7 +13,6 @@ pub(crate) mod landscape;
 pub(crate) mod landscape_fn;
 pub(crate) mod read;
 pub(crate) mod skills;
-pub(crate) mod skills_registry;
 pub(crate) mod websearch;
 pub(crate) mod write;
 use std::sync::Arc;

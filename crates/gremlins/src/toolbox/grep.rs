@@ -369,11 +369,7 @@ mod tests {
 
     #[test]
     fn context_separates_non_contiguous_blocks() {
-        let out = collect(
-            "a\nb\nc\nd\ne\nf\ng\n",
-            "b|f",
-            options(1, 1, 2000),
-        );
+        let out = collect("a\nb\nc\nd\ne\nf\ng\n", "b|f", options(1, 1, 2000));
         assert_eq!(
             out.matches.join("\n"),
             "f.txt-1-a\nf.txt:2:b\nf.txt-3-c\n--\nf.txt-5-e\nf.txt:6:f\nf.txt-7-g"

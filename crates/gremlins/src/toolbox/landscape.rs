@@ -10,23 +10,13 @@ use crate::clients::tools::{
 
 pub(crate) struct LandscapeTool;
 
-/// Module-level explorer, set once at startup. The `LandscapeTool` handler
-/// reads it on every invocation — the concrete implementation lives in
-/// `crate::landscape` and is injected from `executor/run.rs`.
+/// Module-level explorer, initialized lazily on first use. The `LandscapeTool`
+/// handler reads it on every invocation — the concrete implementation lives in
+/// `crate::landscape`.
 static EXPLORER: OnceLock<Arc<dyn LandscapeExplorerFn>> = OnceLock::new();
 
-pub(crate) fn set_landscape_explorer(explorer: Arc<dyn LandscapeExplorerFn>) {
-    // Silently ignore re-sets so tests in the same process can each
-    // install the explorer without coordination.
-    let _ = EXPLORER.set(explorer);
-}
-
-/// Fallback used in tests and when the static hasn't been initialized
-/// (panics with a clear message at the actual call site).
 fn get_explorer() -> &'static Arc<dyn LandscapeExplorerFn> {
-    EXPLORER
-        .get()
-        .expect("landscape explorer not initialized — call set_landscape_explorer during start")
+    EXPLORER.get_or_init(|| Arc::new(crate::landscape::LandscapeExplorer))
 }
 
 #[async_trait]
