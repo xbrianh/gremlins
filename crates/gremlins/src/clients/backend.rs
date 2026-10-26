@@ -74,8 +74,8 @@ pub struct RunParams {
     /// Sink for per-turn token-usage events emitted by the agent loop.
     /// The executor layer wires this to the daemon event broadcast.
     pub token_usage_sink: crate::clients::token_usage::TokenUsageSink,
-    /// Path to the persistent stage scratchpad file (`_scratchpad.md`).
-    /// When `Some`, the agent loop reads and re-injects scratchpad content
+    /// Path to the persistent stage scratchpad file (under
+    /// `.gremlins/implicit/_scratchpad.md` in the checkout artifact dir).    /// When `Some`, the agent loop reads and re-injects scratchpad content
     /// on each turn. `None` disables the per-turn injection.
     pub scratchpad_path: Option<PathBuf>,
 }

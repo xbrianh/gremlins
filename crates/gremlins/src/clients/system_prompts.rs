@@ -35,8 +35,7 @@ ALWAYS use Landscape first when exploring unknown code — it maps structure wit
 Work root:     {work}\n\
 </directories>\n\
 <scratchpad>\n\
-You have a persistent scratchpad at _scratchpad.md in the worktree root\n\
-directory. Use the Write tool to update it with findings, decisions, and\n\
+You have a persistent scratchpad at {{scratchpad_path}}. Use the Write tool to update it with findings, decisions, and\n\
 context you want to preserve across turns — file paths, discovered\n\
 patterns, TODO items, architectural notes. Keep it concise.\n\
 \n\
@@ -202,8 +201,8 @@ mod tests {
             "agent prompt must describe the scratchpad; got: {prompt}"
         );
         assert!(
-            prompt.contains("_scratchpad.md"),
-            "agent prompt must name the scratchpad file; got: {prompt}"
+            prompt.contains("{scratchpad_path}"),
+            "agent prompt must name the scratchpad placeholder; got: {prompt}"
         );
     }
 
@@ -215,8 +214,8 @@ mod tests {
             "task prompt must not mention scratchpad; nested workers are stateless; got: {prompt}"
         );
         assert!(
-            !prompt.contains("_scratchpad.md"),
-            "task prompt must not name the scratchpad file; got: {prompt}"
+            !prompt.contains("{scratchpad_path}"),
+            "task prompt must not name the scratchpad placeholder; got: {prompt}"
         );
     }
 
@@ -228,8 +227,8 @@ mod tests {
             "fork prompt must not mention scratchpad; nested workers are stateless; got: {prompt}"
         );
         assert!(
-            !prompt.contains("_scratchpad.md"),
-            "fork prompt must not name the scratchpad file; got: {prompt}"
+            !prompt.contains("{scratchpad_path}"),
+            "fork prompt must not name the scratchpad placeholder; got: {prompt}"
         );
     }
 }
