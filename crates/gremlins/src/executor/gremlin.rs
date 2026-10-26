@@ -1597,11 +1597,26 @@ mod tests {
         let path = std::env::var("PATH").unwrap_or_default();
         for dir in std::env::split_paths(&path) {
             let candidate = dir.join("env");
-            if candidate.is_file() {
-                return candidate.to_string_lossy().into_owned();
+            if let Ok(meta) = std::fs::metadata(&candidate) {
+                if meta.is_file() && executable(&meta) {
+                    return candidate.to_string_lossy().into_owned();
+                }
             }
         }
         "env".to_string()
+    }
+
+    /// True when at least one execute bit is set — the OS will try.
+    #[cfg(unix)]
+    fn executable(meta: &std::fs::Metadata) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+
+    /// On non-Unix `is_file()` is the best proxy we have.
+    #[cfg(not(unix))]
+    fn executable(_meta: &std::fs::Metadata) -> bool {
+        true
     }
 
     #[test]
