@@ -18,13 +18,11 @@ use crate::executor::state::StateStore;
 
 /// A harness-managed implicit artifact.
 ///
-/// | Aspect            | Value                             |
-/// |-------------------|-----------------------------------|
-/// | URI scheme        | `artifact://_{kind}/{stage}.md`   |
-/// | Model-writable    | `{artifact_dir}/_{kind}.md`       |
-/// | Persist           | `{artifact_dir}/_{kind}/{stage}.md` |
-/// | Bind key          | `__gml_{kind}`                    |
-/// | Optional          | always true                       |
+/// | Aspect            | Value                                        |
+/// |-------------------|----------------------------------------------|
+/// | URI scheme        | `artifact://_{kind}/{stage}.md`              |
+/// | Model-writable    | `{artifact_dir}/.gremlins/implicit/_{kind}.md` |/// | Bind key          | `__gml_{kind}`                               |
+/// | Optional          | always true                                  |
 #[derive(Debug)]
 pub(crate) struct ImplicitArtifact {
     /// The kind name, e.g. `"scratchpad"`.
@@ -42,6 +40,12 @@ pub(crate) struct ImplicitArtifact {
     /// Always `true` for implicit artifacts.
     pub(crate) optional: bool,
 }
+
+/// Directory under the checkout artifact dir where harness-reserved implicit
+/// live files are written, e.g.  `.gremlins/implicit/scratchpad.md`.
+/// User-declared artifact paths inside this namespace are rejected by
+/// [`ImplicitArtifact::validate_no_collisions`].
+pub(crate) const IMPLICIT_LIVE_DIR: &str = ".gremlins/implicit";
 
 impl ImplicitArtifact {
     /// Create an implicit artifact for the given kind.
@@ -75,7 +79,14 @@ impl ImplicitArtifact {
         let uri_str = format!("artifact://_{kind}/{name}");
         let uri = Uri::parse(&uri_str)?;
         let persist_path = local_state.path_for_uri(&uri).await?;
-        let model_path = artifact_dir.join(format!("_{kind}.md"));
+        let model_path = artifact_dir
+            .join(IMPLICIT_LIVE_DIR)
+            .join(format!("_{kind}.md"));
+        // Ensure the model-writable parent directory exists so reset /
+        // resume can open the file.
+        if let Some(parent) = model_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
         Ok(Self {
             kind: kind.to_string(),
             uri: uri_str,
@@ -84,6 +95,40 @@ impl ImplicitArtifact {
             bind_key: format!("__gml_{kind}"),
             optional: true,
         })
+    }
+
+    /// Reject user-declared artifact bindings that collide with this
+    /// implicit artifact's live path, persist path, or synthetic URI.
+    ///
+    /// `user_uris` must be the raw URIs of user-declared output bindings;
+    /// `user_paths` must be the resolved filesystem paths of those bindings
+    /// plus any filepath interpolation entries.
+    pub(crate) fn validate_no_collisions(
+        &self,
+        user_uris: &[String],
+        user_paths: &[String],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for u in user_uris {
+            if u == &self.uri {
+                return Err(format!(
+                    "user-declared artifact URI {u:?} conflicts with \
+                     harness-reserved implicit artifact '{}'",
+                    self.kind
+                )
+                .into());
+            }
+        }
+        for p in user_paths {
+            if Path::new(p) == self.model_path.as_path() || p == &self.persist_path {
+                return Err(format!(
+                    "user-declared artifact path {p:?} conflicts with \
+                     harness-reserved implicit artifact '{}' path",
+                    self.kind
+                )
+                .into());
+            }
+        }
+        Ok(())
     }
 
     /// Persist the artifact: read the model-writable file with containment

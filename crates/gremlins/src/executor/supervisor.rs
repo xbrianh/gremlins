@@ -1156,13 +1156,25 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
         // Retain the Gremlin so its TempDir lives through the persist.
         let _gremlin = s.chat_gremlins.remove(id);
         s.chat_ids.remove(id);
-        if let Some(cur) = &s.current_turn {
+        // Clone done before releasing the lock, then await turn completion
+        // so the model finishes flushing its live scratchpad before we
+        // accumulate — matching what stop_session_chat_gremlin does.
+        let done = if let Some(cur) = &s.current_turn {
             if cur.id == id {
                 cur.soft_cancel.store(false, Ordering::Relaxed);
                 cur.cancel.cancel();
+                Some(cur.done.clone())
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
         drop(s);
+        // Wait for in-flight turn to finish so its scratchpad is committed.
+        if let Some(mut done_rx) = done {
+            let _ = done_rx.wait_for(|v| *v).await;
+        }
         // Persist accumulated scratchpad artifacts to the XDG project
         // scratchpad before calling handle_stop so working memory from
         // committed turns survives. When a turn was in-flight, its error

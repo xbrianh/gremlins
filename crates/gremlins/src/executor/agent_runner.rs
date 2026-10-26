@@ -103,10 +103,13 @@ pub async fn prepare_agent(
             source: e,
         })?;
 
+    // Capture filepath-interpolated values for collision validation before
+    // the merge (which consumes `filepath_interpolated`).
+    let filepath_values: Vec<String> = filepath_interpolated.values().cloned().collect();
+
     // Merge: filepath shadows content on key collision.
     let mut interpolation_map: HashMap<String, String> = content_interpolated;
     interpolation_map.extend(filepath_interpolated);
-
     let mut output_paths: HashMap<String, String> = HashMap::new();
     let mut output_uris: Vec<(String, String, bool)> = Vec::new();
     for (raw_key, raw_uri_str) in &agent.outputs_map {
@@ -161,10 +164,10 @@ pub async fn prepare_agent(
     let expected_artifact_paths: Vec<String> = output_paths.values().cloned().collect();
 
     // Synthetic scratchpad binding via ImplicitArtifact. The model writes to
-    // {artifact_dir}/_scratchpad.md (not the worktree), and the harness commits
-    // it under artifact://_scratchpad/{stage}.md. The bind is optional and
-    // excluded from expected_artifact_paths so it never triggers a
-    // missing-artifact reminder.
+    // {artifact_dir}/.gremlins/implicit/scratchpad.md (not the worktree), and
+    // the harness commits it under artifact://_scratchpad/{stage}.md. The bind
+    // is optional and excluded from expected_artifact_paths so it never
+    // triggers a missing-artifact reminder.
     let scratchpad =
         ImplicitArtifact::for_kind("scratchpad", name, loop_iter, artifact_dir, local_state)
             .await
@@ -172,17 +175,31 @@ pub async fn prepare_agent(
                 name: name.clone(),
                 detail: e.to_string(),
             })?;
+
+    // Validate that the implicit scratchpad does not collide with any
+    // user-declared artifact — URI collisions could silently overwrite
+    // checked-out outputs, and path collisions could corrupt the live file.
+    let user_uris: Vec<String> = output_uris.iter().map(|(_, u, _)| u.clone()).collect();
+    let user_paths: Vec<String> = output_paths
+        .values()
+        .chain(filepath_values.iter())
+        .cloned()
+        .collect();
+    scratchpad
+        .validate_no_collisions(&user_uris, &user_paths)
+        .map_err(|e| AgentError::Generic {
+            name: name.clone(),
+            detail: e.to_string(),
+        })?;
+
     output_paths.insert(scratchpad.bind_key.clone(), scratchpad.persist_path.clone());
     output_uris.push((
         scratchpad.bind_key.clone(),
         scratchpad.uri.clone(),
         scratchpad.optional,
-    ));
-
-    // Read the hidden sandbox opt-out. It is honored only when the
-    // gremlin's kind is "chat" (set programmatically by the chat builder,
-    // never by user YAML), so containment cannot be disabled by arbitrary
-    // user-defined stages.
+    )); // gremlin's kind is "chat" (set programmatically by the chat builder,
+        // never by user YAML), so containment cannot be disabled by arbitrary
+        // user-defined stages.
     let allow_all = framework_subs.get("kind").map(|s| s.as_str()) == Some("chat")
         && agent
             .options
