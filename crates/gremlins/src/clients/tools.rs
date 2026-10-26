@@ -2367,45 +2367,75 @@ mod tests {
             &serde_json::json!({"file_path": "x", "edits": [{}]}),
         )
         .unwrap();
-        assert!(
-            err.contains("must have either 'old_string' (match mode) or 'start_line' (range mode)")
-        );
-        assert!(err.contains("edit 1"));
+        assert!(err.contains("missing 'old_string'"), "got: {err}");
+        assert!(err.contains("edit 1"), "got: {err}");
     }
+
     #[test]
-    fn validate_tool_args_edit_mixed_prefer_range_ok() {
-        // Mixed-mode with complete range fields: range mode wins, no error.
+    fn validate_tool_args_edit_missing_new_string() {
+        // old_string is always required, and new_string accompanies it.
+        let err = validate_tool_args(
+            "Edit",
+            &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a"}]}),
+        )
+        .unwrap();
+        assert!(err.contains("missing 'new_string'"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_tool_args_edit_scoped_ok() {
+        // A complete scope (start_line + end_line) is valid alongside the
+        // always-required old_string/new_string.
         assert!(validate_tool_args(
             "Edit",
-            &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "new_string": "z", "start_line": 1, "end_line": 1, "replacement": "b"}]}),
+            &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "new_string": "b", "start_line": 1, "end_line": 2}]}),
         )
         .is_none());
     }
 
     #[test]
-    fn validate_tool_args_edit_mixed_incomplete_range_error() {
-        // Mixed-mode with incomplete range fields: errors with provided info.
-        let err = validate_tool_args(
+    fn validate_tool_args_edit_start_line_only_ok() {
+        // start_line without end_line is a valid open-ended scope.
+        assert!(validate_tool_args(
             "Edit",
-            &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "new_string": "z", "start_line": 1}]}),
+            &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "new_string": "b", "start_line": 1}]}),
         )
-        .unwrap();
-        assert!(err.contains("missing 'end_line'"), "got: {err}");
-        assert!(err.contains("start_line=1"), "got: {err}");
-        assert!(err.contains("old_string"), "got: {err}");
+        .is_none());
     }
 
     #[test]
-    fn validate_tool_args_edit_mixed_missing_replacement_error() {
-        // Mixed-mode with start_line and end_line but no replacement: errors with provided info.
+    fn validate_tool_args_edit_end_line_without_start_error() {
         let err = validate_tool_args(
             "Edit",
-            &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "start_line": 1, "end_line": 2}]}),
+            &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "new_string": "b", "end_line": 2}]}),
         )
         .unwrap();
-        assert!(err.contains("missing 'replacement'"), "got: {err}");
-        assert!(err.contains("start_line=1"), "got: {err}");
-        assert!(err.contains("end_line=2"), "got: {err}");
+        assert!(err.contains("'end_line'"), "got: {err}");
+        assert!(err.contains("'start_line'"), "got: {err}");
+        assert!(err.contains("edit 1"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_tool_args_edit_scope_without_old_string_error() {
+        // The old line-range form is gone: a lone start_line/end_line (even with
+        // replacement) is rejected because old_string is always required.
+        let err = validate_tool_args(
+            "Edit",
+            &serde_json::json!({"file_path": "x", "edits": [{"start_line": 1, "end_line": 2, "replacement": "b"}]}),
+        )
+        .unwrap();
+        assert!(err.contains("missing 'old_string'"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_tool_args_edit_start_after_end_error() {
+        let err = validate_tool_args(
+            "Edit",
+            &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "new_string": "b", "start_line": 3, "end_line": 2}]}),
+        )
+        .unwrap();
+        assert!(err.contains("'start_line'"), "got: {err}");
+        assert!(err.contains("'end_line'"), "got: {err}");
     }
 
     #[test]
@@ -3680,15 +3710,16 @@ mod tests {
         assert!(result.contains("missing 'edits'"));
     }
 
-    // --- Range edit tests ---
+    // --- Scoped edit tests ---
 
     #[test]
-    fn edit_range_basic_replacement() {
+    fn edit_scoped_match_replaces_within_scope() {
+        // "alpha" appears on lines 1 and 3; the scope selects line 3 only.
         let dir = tmp();
-        std::fs::write(dir.join("f.txt"), "line1\nline2\nline3\nline4\n").unwrap();
+        std::fs::write(dir.join("f.txt"), "alpha\nbeta\nalpha\ngamma\n").unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "edits": [{"start_line": 2, "end_line": 3, "replacement": "new2\nnew3\n"}]
+            "edits": [{"old_string": "alpha", "new_string": "ALPHA", "start_line": 3, "end_line": 3}]
         })
         .to_string();
         assert_eq!(
@@ -3697,17 +3728,17 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(dir.join("f.txt")).unwrap(),
-            "line1\nnew2\nnew3\nline4\n"
+            "alpha\nbeta\nALPHA\ngamma\n"
         );
     }
 
     #[test]
-    fn edit_range_end_beyond_eof() {
+    fn edit_scope_end_beyond_eof_clamps() {
         let dir = tmp();
-        std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
+        std::fs::write(dir.join("f.txt"), "line1\ntarget\nline3\n").unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "edits": [{"start_line": 2, "end_line": 5, "replacement": "new2"}]
+            "edits": [{"old_string": "target", "new_string": "TARGET", "start_line": 2, "end_line": 100}]
         })
         .to_string();
         assert_eq!(
@@ -3716,19 +3747,20 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(dir.join("f.txt")).unwrap(),
-            "line1\nnew2"
+            "line1\nTARGET\nline3\n"
         );
     }
 
     #[test]
-    fn edit_mixed_match_and_range() {
+    fn edit_both_scoped_and_unscoped() {
+        // One unscoped edit and one scoped edit in the same batch.
         let dir = tmp();
         std::fs::write(dir.join("f.txt"), "alpha\nbeta\ngamma\ndelta\n").unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
             "edits": [
                 {"old_string": "alpha", "new_string": "A"},
-                {"start_line": 3, "end_line": 3, "replacement": "C\n"}
+                {"old_string": "gamma", "new_string": "G", "start_line": 3, "end_line": 3}
             ]
         })
         .to_string();
@@ -3738,19 +3770,19 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(dir.join("f.txt")).unwrap(),
-            "A\nbeta\nC\ndelta\n"
+            "A\nbeta\nG\ndelta\n"
         );
     }
 
     #[test]
     fn edit_mixed_overlap_rejected() {
         let dir = tmp();
-        std::fs::write(dir.join("f.txt"), "line1\nline2\nline3\n").unwrap();
+        std::fs::write(dir.join("f.txt"), "0123456789\n").unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
             "edits": [
-                {"old_string": "line1\n", "new_string": "x"},
-                {"start_line": 1, "end_line": 1, "replacement": "y\n"}
+                {"old_string": "234", "new_string": "x"},
+                {"old_string": "456", "new_string": "y", "start_line": 1, "end_line": 1}
             ]
         })
         .to_string();
@@ -3764,25 +3796,13 @@ mod tests {
         std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "edits": [{"start_line": 3, "end_line": 2, "replacement": "x"}]
+            "edits": [{"old_string": "line1", "new_string": "x", "start_line": 3, "end_line": 2}]
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("start_line"));
-        assert!(result.contains(">"));
-    }
-
-    #[test]
-    fn edit_range_missing_replacement_error() {
-        let dir = tmp();
-        std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
-        let args = serde_json::json!({
-            "file_path": "f.txt",
-            "edits": [{"start_line": 1, "end_line": 1}]
-        })
-        .to_string();
-        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("replacement"));
+        assert!(result.contains("start_line"), "got: {result}");
+        assert!(result.contains("end_line"), "got: {result}");
+        assert!(result.contains(">"), "got: {result}");
     }
 
     #[test]
@@ -3799,100 +3819,87 @@ mod tests {
     }
 
     #[test]
-    fn edit_mixed_prefer_range_applies_range() {
-        // Mixed-mode with complete range fields: range mode wins, old_string/new_string ignored.
-        // Use old_string NOT present in the file to prove match-mode isn't consulted.
+    fn edit_end_line_without_start_line_error() {
         let dir = tmp();
         std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "edits": [{"old_string": "nonexistent", "new_string": "x", "start_line": 1, "end_line": 1, "replacement": "y\n"}]
+            "edits": [{"old_string": "line1", "new_string": "x", "end_line": 2}]
         })
         .to_string();
-        assert_eq!(
-            edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args),
-            "OK"
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(
+            result.contains("'end_line' requires 'start_line'"),
+            "got: {result}"
         );
-        assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "y\n");
     }
 
     #[test]
-    fn edit_mixed_incomplete_range_error() {
-        // Mixed-mode with incomplete range fields: errors with actionable detail.
-        let dir = tmp();
-        std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
-        let args = serde_json::json!({
-            "file_path": "f.txt",
-            "edits": [{"old_string": "line1", "new_string": "x", "start_line": 1}]
-        })
-        .to_string();
-        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("missing 'end_line'"), "got: {result}");
-        assert!(result.contains("start_line"), "got: {result}");
-    }
-
-    #[test]
-    fn edit_mixed_missing_replacement_error() {
-        // Mixed-mode with start_line and end_line but no replacement: errors with provided info.
+    fn edit_scope_start_gt_end_error() {
+        // start_line greater than end_line is rejected within a scope.
         let dir = tmp();
         std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "edits": [{"old_string": "line1", "start_line": 1, "end_line": 2}]
-        })
-        .to_string();
-        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("missing 'replacement'"), "got: {result}");
-        assert!(result.contains("start_line"), "got: {result}");
-    }
-
-    #[test]
-    fn edit_mixed_invalid_bounds_error() {
-        // Mixed-mode with invalid range bounds still fails range validation.
-        let dir = tmp();
-        std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
-        let args = serde_json::json!({
-            "file_path": "f.txt",
-            "edits": [{"old_string": "nonexistent", "new_string": "x", "start_line": 2, "end_line": 1, "replacement": "y"}]
+            "edits": [{"old_string": "line1", "new_string": "x", "start_line": 2, "end_line": 1}]
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
         assert!(result.contains("start_line"), "got: {result}");
         assert!(result.contains("end_line"), "got: {result}");
     }
+
     #[test]
-    fn edit_range_start_line_beyond_eof_error() {
+    fn edit_scope_start_beyond_eof_error() {
+        // A scope starting past the last line selects nothing, so the match is
+        // reported as not found rather than a line-count error.
         let dir = tmp();
         std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "edits": [{"start_line": 3, "end_line": 3, "replacement": "x"}]
+            "edits": [{"old_string": "line1", "new_string": "x", "start_line": 3, "end_line": 3}]
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("exceeds file line count"));
+        assert!(result.contains("old_string not found"), "got: {result}");
     }
 
     #[test]
-    fn edit_range_start_line_zero_error() {
+    fn edit_scope_start_line_zero_error() {
         let dir = tmp();
         std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "edits": [{"start_line": 0, "end_line": 1, "replacement": "x"}]
+            "edits": [{"old_string": "line1", "new_string": "x", "start_line": 0, "end_line": 1}]
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("positive integer"));
+        assert!(result.contains("positive integer"), "got: {result}");
     }
 
     #[test]
-    fn edit_range_delete_line() {
+    fn edit_scoped_match_missing_outside_scope() {
+        // "target" exists on line 2, but the scope is line 3 — scope-aware error.
         let dir = tmp();
-        std::fs::write(dir.join("f.txt"), "keep\nremove\nkeep\n").unwrap();
+        std::fs::write(dir.join("f.txt"), "line1\ntarget\nline3\n").unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "edits": [{"start_line": 2, "end_line": 2, "replacement": ""}]
+            "edits": [{"old_string": "target", "new_string": "TARGET", "start_line": 3, "end_line": 3}]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.contains("old_string not found"), "got: {result}");
+        assert!(result.contains("between lines 3-3"), "got: {result}");
+    }
+
+    #[test]
+    fn edit_scoped_match_start_line_only() {
+        // start_line without end_line scopes from that line to end of file.
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "target\nline2\ntarget\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"old_string": "target", "new_string": "TARGET", "start_line": 3}]
         })
         .to_string();
         assert_eq!(
@@ -3901,18 +3908,18 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(dir.join("f.txt")).unwrap(),
-            "keep\nkeep\n"
+            "target\nline2\nTARGET\n"
         );
     }
 
     #[test]
-    fn edit_range_insert_before_line() {
+    fn edit_scoped_match_disambiguates() {
+        // "dup" appears twice; the scope narrows to the line-1 occurrence.
         let dir = tmp();
-        std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
-        // Replacing line 2 with extra content before it
+        std::fs::write(dir.join("f.txt"), "dup\nother\ndup\n").unwrap();
         let args = serde_json::json!({
             "file_path": "f.txt",
-            "edits": [{"start_line": 2, "end_line": 2, "replacement": "inserted\nline2\n"}]
+            "edits": [{"old_string": "dup", "new_string": "DUP", "start_line": 1, "end_line": 1}]
         })
         .to_string();
         assert_eq!(
@@ -3921,8 +3928,64 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(dir.join("f.txt")).unwrap(),
-            "line1\ninserted\nline2\n"
+            "DUP\nother\ndup\n"
         );
+    }
+
+    #[test]
+    fn edit_scoped_match_still_non_unique() {
+        // Both occurrences fall inside the scope, so it is still non-unique.
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "dup\nother\ndup\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"old_string": "dup", "new_string": "DUP", "start_line": 1, "end_line": 3}]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.contains("not unique"), "got: {result}");
+    }
+
+    #[test]
+    fn edit_scope_rejects_non_integer_start_line() {
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"old_string": "line1", "new_string": "x", "start_line": "2", "end_line": 2}]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.contains("must be an integer"), "got: {result}");
+        assert!(result.contains("start_line"), "got: {result}");
+    }
+
+    #[test]
+    fn edit_scope_rejects_non_integer_end_line() {
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"old_string": "line1", "new_string": "x", "start_line": 1, "end_line": "2"}]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.contains("must be an integer"), "got: {result}");
+        assert!(result.contains("end_line"), "got: {result}");
+    }
+
+    #[test]
+    fn edit_scope_end_line_without_start_error() {
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "f.txt",
+            "edits": [{"old_string": "line1", "new_string": "x", "end_line": 2}]
+        })
+        .to_string();
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.contains("end_line"), "got: {result}");
+        assert!(result.contains("start_line"), "got: {result}");
     }
 
     // --- Part 3: Task tests ---
