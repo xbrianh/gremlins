@@ -96,10 +96,16 @@ struct CurrentTurn {
     /// forwarding task reads this when its cancel token fires to decide
     /// between recovering the partial turn and discarding it.
     soft_cancel: Arc<AtomicBool>,
-    /// Fired (with a stored permit) once the turn has re-inserted its
-    /// gremlin (or dropped it). A follow-up `chat` for the same id waits on
-    /// this so it never sees the gremlin as "unknown" mid-turn.
-    done: Arc<tokio::sync::Notify>,
+    /// Set to `true` once the turn has re-inserted its gremlin (or dropped
+    /// it). A follow-up `chat` for the same id waits on this so it never
+    /// sees the gremlin as "unknown" mid-turn. Waiters clone the receiver;
+    /// the value is sticky so a waiter that subscribes after the turn
+    /// finished still proceeds immediately.
+    done: watch::Receiver<bool>,
+    /// Sender paired with `done`. Kept here so paths that clear
+    /// `current_turn` outside of `run_chat_turn` (e.g. hard-cancel of an
+    /// already-interrupted turn) can still publish completion.
+    done_tx: Arc<watch::Sender<bool>>,
     /// True when a soft-interrupt has already emitted `ended` for this
     /// turn. The turn stays alive so a hard cancel within the double-press
     /// window can still clean up the partial artifact and interrupt flag.
@@ -965,7 +971,7 @@ async fn teardown_session_impl(session: &SessionHandle, state_root: &Path, abort
         let turn_done = if let Some(cur) = &s.current_turn {
             cur.soft_cancel.store(false, Ordering::Relaxed);
             cur.cancel.cancel();
-            Some(Arc::clone(&cur.done))
+            Some(cur.done.clone())
         } else {
             None
         };
@@ -1001,8 +1007,8 @@ async fn teardown_session_impl(session: &SessionHandle, state_root: &Path, abort
 
     // Wait for a cancelled in-flight turn to finish and relinquish its
     // `Gremlin` before we clean up the run map entry it may still touch.
-    if let Some(done) = turn_done {
-        done.notified().await;
+    if let Some(mut done) = turn_done {
+        let _ = done.wait_for(|v| *v).await;
     }
 
     for id in &chat_ids {
@@ -1221,7 +1227,7 @@ async fn stop_session_chat_gremlin(id: &str) {
                 if cur.id == id {
                     cur.soft_cancel.store(false, Ordering::Relaxed);
                     cur.cancel.cancel();
-                    Some(Arc::clone(&cur.done))
+                    Some(cur.done.clone())
                 } else {
                     None
                 }
@@ -1232,8 +1238,8 @@ async fn stop_session_chat_gremlin(id: &str) {
             // Only wait for the turn to drain when a live run-map entry
             // confirms the task is actually in flight.
             if live {
-                if let Some(done) = done {
-                    done.notified().await;
+                if let Some(mut done) = done {
+                    let _ = done.wait_for(|v| *v).await;
                 }
             }
             if let (Some(ref source), Some(ref pr)) = (&scratchpad_source, &project_root) {
@@ -2955,7 +2961,8 @@ async fn handle_chat(
     // 7. Run the stage in the background. Events are forwarded as
     //    unsolicited JSON lines to this connection while the dispatch
     //    loop stays live for cancel_chat and close_session.
-    let done = Arc::new(tokio::sync::Notify::new());
+    let (done_tx, done_rx) = watch::channel(false);
+    let done_tx = Arc::new(done_tx);
     let soft_cancel = Arc::new(AtomicBool::new(false));
     {
         let mut s = session.lock().await;
@@ -2964,7 +2971,8 @@ async fn handle_chat(
             turn: turn.clone(),
             cancel: turn_cancel.clone(),
             soft_cancel: Arc::clone(&soft_cancel),
-            done: Arc::clone(&done),
+            done: done_rx,
+            done_tx: Arc::clone(&done_tx),
             interrupted: false,
         });
     }
@@ -2976,7 +2984,7 @@ async fn handle_chat(
         turn_cancel: turn_cancel.clone(),
         soft_cancel: Arc::clone(&soft_cancel),
         session: Arc::clone(session),
-        done: Arc::clone(&done),
+        done: done_tx,
     };
     tokio::spawn(async move {
         run_chat_turn(turn_ctx, stage, gremlin, stream_rx, writer_for_turn).await;
@@ -3016,15 +3024,35 @@ async fn reusable_chat_gremlin_id(session: &SessionHandle) -> Option<String> {
             if let Some(id) = s.chat_gremlins.keys().next().cloned() {
                 (Some(id), None)
             } else if let Some(cur) = &s.current_turn {
-                (None, Some(Arc::clone(&cur.done)))
+                // The watch channel is sticky: if `done` is already
+                // `true` the turn completed but did not re-insert a
+                // gremlin (e.g. a stop removed it after a soft
+                // interrupt).  Waiting on a completed turn with no
+                // parked gremlin would spin forever, so return
+                // `None` immediately.
+                if *cur.done.borrow() {
+                    (None, None)
+                } else {
+                    (None, Some(cur.done.clone()))
+                }
             } else {
                 (None, None)
             }
         };
         match (id, wait) {
             (Some(id), _) => return Some(id),
-            (None, Some(done)) => {
-                done.notified().await;
+            (None, Some(mut done)) => {
+                if done.wait_for(|v| *v).await.is_err() {
+                    // Sender dropped without publishing. Re-check the
+                    // session under the lock: the turn may have been
+                    // cleared by another path and re-inserted the
+                    // gremlin in the meantime.
+                    let s = session.lock().await;
+                    if let Some(id) = s.chat_gremlins.keys().next().cloned() {
+                        return Some(id);
+                    }
+                    return None;
+                }
                 continue;
             }
             (None, None) => return None,
@@ -3107,7 +3135,7 @@ struct TurnCtx {
     turn_cancel: Arc<CancelToken>,
     soft_cancel: Arc<AtomicBool>,
     session: SessionHandle,
-    done: Arc<tokio::sync::Notify>,
+    done: Arc<watch::Sender<bool>>,
 }
 
 async fn run_chat_turn(
@@ -3163,7 +3191,7 @@ async fn run_chat_turn(
     async fn clear_turn(
         turn_cancel: &Arc<CancelToken>,
         session: &SessionHandle,
-        done: &tokio::sync::Notify,
+        done: &watch::Sender<bool>,
     ) {
         let mut s = session.lock().await;
         if let Some(cur) = &s.current_turn {
@@ -3171,7 +3199,7 @@ async fn run_chat_turn(
                 s.current_turn = None;
             }
         }
-        done.notify_waiters();
+        let _ = done.send(true);
     }
 
     async fn finish(
@@ -3179,7 +3207,7 @@ async fn run_chat_turn(
         run_task: &mut tokio::task::JoinHandle<(Result<(), crate::executor::RunError>, Gremlin)>,
         turn_cancel: &Arc<CancelToken>,
         session: &SessionHandle,
-        done: &tokio::sync::Notify,
+        done: &watch::Sender<bool>,
     ) {
         match run_task.await {
             Ok((_, gremlin)) => {
@@ -3197,7 +3225,7 @@ async fn run_chat_turn(
         gremlin: Option<Gremlin>,
         turn_cancel: &Arc<CancelToken>,
         session: &SessionHandle,
-        done: &tokio::sync::Notify,
+        done: &watch::Sender<bool>,
     ) {
         if let Some(gremlin) = gremlin {
             reinsert_chat_gremlin(id, gremlin, session).await;
@@ -3374,7 +3402,7 @@ async fn run_chat_turn(
                                     }
                                 }
                             }
-                            done.notify_waiters();
+                            let _ = done.send(true);
                             let payload = chat_payload(
                                 &turn,
                                 serde_json::json!({"type": "ended", "id": id, "reason": "interrupted"}),
@@ -3442,7 +3470,7 @@ async fn run_chat_turn(
                         }
                     }
                 }
-                done.notify_waiters();
+                let _ = done.send(true);
                 let payload = chat_payload(&turn, serde_json::json!({"type": "ended", "id": id, "reason": "cancelled"}));
                 let _ = writer.write_json_line(&payload).await;
                 return;
@@ -3495,7 +3523,7 @@ async fn run_chat_turn(
                         s.current_turn = None;
                     }
                 }
-                done.notify_waiters();
+                let _ = done.send(true);
                 let payload = chat_payload(&turn, serde_json::json!({"type": "ended", "id": id, "reason": message}));
                 let _ = writer.write_json_line(&payload).await;
                 return;
@@ -3551,7 +3579,7 @@ async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &Se
                 // since the turn task has already returned.
                 let id = cur.id.clone();
                 let turn = cur.turn.clone();
-                let done = Arc::clone(&cur.done);
+                let done_tx = Arc::clone(&cur.done_tx);
                 drop(s);
 
                 let gremlin_opt = {
@@ -3588,7 +3616,8 @@ async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &Se
                     drop(s);
                 }
 
-                done.notify_waiters();
+                let _ = done_tx.send(true);
+
                 let payload = chat_payload(
                     &turn,
                     serde_json::json!({"type": "ended", "id": id, "reason": "cancelled"}),
@@ -3601,7 +3630,7 @@ async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &Se
             }
 
             // Normal (non-interrupted) path: cancel the token but leave
-            // `current_turn` installed — its `done` `Notify` is what
+            // `current_turn` installed — its `done` watch receiver is what
             // `handle_chat` waits on when the gremlin is temporarily out
             // of `chat_gremlins`. `run_chat_turn::finish` clears
             // `current_turn` once the turn has completed and re-inserted
@@ -4575,6 +4604,73 @@ mod tests {
         ModelURI::parse(spec).unwrap()
     }
 
+    #[tokio::test]
+    async fn turn_completion_watch_is_lossless_and_broadcasts() {
+        let (tx, rx) = watch::channel(false);
+
+        // Publish before any waiter subscribes: a late subscriber must still
+        // observe the completion immediately.
+        let _ = tx.send(true);
+        let mut late = rx.clone();
+        let _ = late.wait_for(|v| *v).await;
+        assert!(*late.borrow());
+
+        // A subscriber that clones after publication also sees the sticky
+        // value without waiting for another send.
+        let mut latest = rx.clone();
+        let _ = latest.wait_for(|v| *v).await;
+
+        // One publication releases every concurrent waiter.
+        let (tx, rx) = watch::channel(false);
+        let (mut a, mut b) = (rx.clone(), rx.clone());
+        let a_task = tokio::spawn(async move { a.wait_for(|v| *v).await.is_ok() });
+        let b_task = tokio::spawn(async move { b.wait_for(|v| *v).await.is_ok() });
+        tokio::task::yield_now().await;
+        let _ = tx.send(true);
+        assert!(a_task.await.unwrap());
+        assert!(b_task.await.unwrap());
+    }
+
+    /// After a soft interrupt, `current_turn` stays installed with `done ==
+    /// true` and `interrupted == true`.  If a stop path then removes the
+    /// parked gremlin without clearing `current_turn`, the next chat must
+    /// not loop forever in [`reusable_chat_gremlin_id`] waiting on a
+    /// turn that already completed.
+    #[tokio::test]
+    async fn reusable_chat_gremlin_id_returns_none_when_done_turn_has_no_gremlin() {
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new("test-sess".to_string()),
+        ));
+        let (tx, rx) = watch::channel(true); // already completed
+        {
+            let mut s = session.lock().await;
+            s.current_turn = Some(super::CurrentTurn {
+                id: "grem-1".to_string(),
+                turn: Some("1".to_string()),
+                cancel: super::CancelToken::new(),
+                soft_cancel: Arc::new(AtomicBool::new(false)),
+                done: rx,
+                done_tx: Arc::new(tx),
+                interrupted: true,
+            });
+            // gremlin was stopped externally — chat_gremlins is empty
+        }
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            super::reusable_chat_gremlin_id(&session),
+        )
+        .await;
+
+        match result {
+            Ok(None) => {} // expected: no gremlin, no infinite loop
+            Ok(Some(id)) => panic!("expected None, got Some({id:?})"),
+            Err(_elapsed) => panic!(
+                "reusable_chat_gremlin_id hung waiting on a completed turn with no parked gremlin"
+            ),
+        }
+    }
+
     #[test]
     fn parallel_runtime_keys_classifies_markers_relative_to_target() {
         let stages = vec![
@@ -5525,15 +5621,19 @@ model-profiles:
         // Simulate an in-flight turn: the gremlin leaves `chat_gremlins` but
         // its id remains on `current_turn`, and the run map still carries the
         // same store (a cloned Arc, so it survives the dropped `Gremlin`).
+        let done_tx;
         {
             let mut s = session.lock().await;
             s.chat_gremlins.remove(&id);
+            let (tx, rx) = watch::channel(false);
+            done_tx = Arc::new(tx);
             s.current_turn = Some(super::CurrentTurn {
                 id: id.clone(),
                 turn: Some("1".to_string()),
                 cancel: super::CancelToken::new(),
                 soft_cancel: Arc::new(AtomicBool::new(false)),
-                done: Arc::new(tokio::sync::Notify::new()),
+                done: rx,
+                done_tx: Arc::clone(&done_tx),
                 interrupted: false,
             });
         }
@@ -5696,15 +5796,19 @@ model-profiles:
             super::ClientSession::new("sess-stop-test".to_string()),
         ));
         let cancel = super::CancelToken::new();
+        let done_tx;
         {
             let mut s = session.lock().await;
             s.chat_ids.insert("chat-stop".to_string());
+            let (tx, rx) = watch::channel(false);
+            done_tx = Arc::new(tx);
             s.current_turn = Some(super::CurrentTurn {
                 id: "chat-stop".to_string(),
                 turn: Some("1".to_string()),
                 cancel: cancel.clone(),
                 soft_cancel: Arc::new(AtomicBool::new(false)),
-                done: Arc::new(tokio::sync::Notify::new()),
+                done: rx,
+                done_tx: Arc::clone(&done_tx),
                 interrupted: false,
             });
         }
