@@ -132,6 +132,12 @@ pub fn resolve_definition_path_in(
     base_dir: PathBuf,
 ) -> Result<PathBuf, DiscoveryError> {
     let candidate = PathBuf::from(name_or_path);
+    if candidate
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml"))
+    {
+        return Err(DiscoveryError::LegacyYaml { path: candidate });
+    }
     if candidate.extension().is_some_and(|ext| ext == "json5") || candidate.components().count() > 1
     {
         let resolved = candidate
@@ -284,6 +290,63 @@ mod tests {
         let (_env, project) = setup_dirs();
         let err = resolve_definition_path("nope.json5", project.path().to_path_buf()).unwrap_err();
         assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_resolve_definition_path_rejects_relative_yaml_path() {
+        let (_env, project) = setup_dirs();
+        let err = resolve_definition_path("./demo.yaml", project.path().to_path_buf()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("legacy YAML") && msg.contains(".json5"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_definition_path_rejects_absolute_yaml_path() {
+        let (_env, project) = setup_dirs();
+        let overlay = project.path().join(".gremlins");
+        fs::create_dir_all(&overlay).unwrap();
+        let yaml = overlay.join("demo.yaml");
+        fs::write(&yaml, "stages: []").unwrap();
+        let err = resolve_definition_path(yaml.to_str().unwrap(), project.path().to_path_buf())
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("legacy YAML") && msg.contains(".json5"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_definition_path_rejects_yml_extension() {
+        let (_env, project) = setup_dirs();
+        let overlay = project.path().join(".gremlins");
+        fs::create_dir_all(&overlay).unwrap();
+        let yml = overlay.join("demo.yml");
+        fs::write(&yml, "stages: []").unwrap();
+        let err = resolve_definition_path(yml.to_str().unwrap(), project.path().to_path_buf())
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("legacy YAML") && msg.contains(".json5"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_definition_path_accepts_generated_json_bundle() {
+        let (_env, project) = setup_dirs();
+        let overlay = project.path().join(".gremlins");
+        fs::create_dir_all(&overlay).unwrap();
+        let bundle = overlay.join("bundle.json");
+        fs::write(&bundle, r#"{"__gremlins_expanded__": true}"#).unwrap();
+
+        let result =
+            resolve_definition_path(bundle.to_str().unwrap(), project.path().to_path_buf())
+                .unwrap();
+        assert!(result.ends_with("bundle.json"));
     }
 
     #[test]

@@ -9,6 +9,9 @@ pub enum DiscoveryError {
     #[error("gremlin definition file not found: {path}")]
     File { path: PathBuf },
 
+    #[error("gremlin definition {path:?} uses a legacy YAML extension; rename it to .json5")]
+    LegacyYaml { path: PathBuf },
+
     #[error("gremlin definition {name:?} not found in {dirs}")]
     Path { name: String, dirs: String },
 }

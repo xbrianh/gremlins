@@ -39,21 +39,211 @@ pub(crate) fn load_json_file(path: &Path) -> Result<serde_json::Value, SchemaErr
 /// Reject JSON5 numeric-literals that `serde_json::Value` cannot represent
 /// (`NaN`, `Infinity`, `-Infinity`) or that the `json5` crate silently coerces
 /// into plain numbers (hex `0x…`, leading `+`).
-fn reject_json5_numeric_literals(text: &str, path: &Path) -> Result<(), SchemaError> {
-    // Pattern matches standalone JSON5 numeric literals:
-    //   \bNaN\b | \bInfinity\b | 0[xX][0-9a-fA-F]+ | [+][0-9]
-    let re = regex::Regex::new(r"\bNaN\b|\bInfinity\b|[-]?Infinity\b|0[xX][0-9a-fA-F_]+|[+][0-9]")
-        .unwrap();
-    if let Some(m) = re.find(text) {
-        return Err(SchemaError::YamlParse {
-            label: path.display().to_string(),
-            msg: format!(
-                "JSON5 numeric literal {:?} is not supported; use a plain decimal number instead",
-                m.as_str()
-            ),
-        });
+///
+/// JSON5 is scanned with enough structure to avoid false positives in strings,
+/// comments, and unquoted property names: string/comment contents are replaced
+/// with spaces first, then value tokens are inspected. Signed decimal
+/// exponents (e.g. `1e+3`) are preserved because the `+` is inside the number
+/// token rather than at its start.
+pub(crate) fn reject_json5_numeric_literals(text: &str, path: &Path) -> Result<(), SchemaError> {
+    let cleaned = strip_json5_strings_and_comments(text);
+    let bytes = cleaned.as_bytes();
+    let len = bytes.len();
+
+    let mut stack: Vec<Container> = Vec::new();
+    // At the top level the document must begin with a value. Inside an object
+    // the next token is a key; inside an array (or after a colon) the next
+    // token is a value.
+    let mut expect_value = true;
+    let mut i = 0;
+
+    while i < len {
+        match bytes[i] {
+            b' ' | b'\t' | b'\r' | b'\n' => i += 1,
+            b'{' => {
+                stack.push(Container::Object);
+                expect_value = false;
+                i += 1;
+            }
+            b'}' => {
+                stack.pop();
+                expect_value = false;
+                i += 1;
+            }
+            b'[' => {
+                stack.push(Container::Array);
+                expect_value = true;
+                i += 1;
+            }
+            b']' => {
+                stack.pop();
+                expect_value = false;
+                i += 1;
+            }
+            b':' => {
+                expect_value = true;
+                i += 1;
+            }
+            b',' => {
+                expect_value = matches!(stack.last(), Some(Container::Array));
+                i += 1;
+            }
+            _ => {
+                let end = token_end(&cleaned, i);
+                if expect_value {
+                    reject_problematic_value_token(&bytes[i..end], path)?;
+                }
+                i = end;
+                expect_value = false;
+            }
+        }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum Container {
+    Object,
+    Array,
+}
+
+/// Replace string and comment contents with spaces so that `NaN`, `0xFF`, and
+/// leading-plus patterns inside quoted prompts and comments cannot trip the
+/// numeric-literal check. Newlines inside comments are preserved so structure
+/// scanning still sees them as whitespace (which it always did).
+fn strip_json5_strings_and_comments(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => {
+                let quote = bytes[i];
+                out.push(b' ');
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        out.push(b' ');
+                        i += 1;
+                        if i < bytes.len() {
+                            out.push(b' ');
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    if bytes[i] == quote {
+                        out.push(b' ');
+                        i += 1;
+                        break;
+                    }
+                    out.push(b' ');
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    out.push(b' ');
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                out.push(b' ');
+                out.push(b' ');
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    if bytes[i] == b'\n' {
+                        out.push(b'\n');
+                    } else {
+                        out.push(b' ');
+                    }
+                    i += 1;
+                }
+                if i + 1 < bytes.len() {
+                    out.push(b' ');
+                    out.push(b' ');
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out)
+        .expect("replacing JSON5 string/comment bytes with spaces preserves UTF-8")
+}
+
+/// Return the end index (exclusive) of the non-whitespace, non-delimiter token
+/// starting at `start`. JSON structure delimiters and whitespace terminate a
+/// token; everything else — digits, letters, `+`, `-`, `.`, and so on — is
+/// part of it.
+fn token_end(cleaned: &str, start: usize) -> usize {
+    let bytes = cleaned.as_bytes();
+    let mut end = start;
+    while end < bytes.len()
+        && !matches!(
+            bytes[end],
+            b'{' | b'}' | b'[' | b']' | b':' | b',' | b' ' | b'\t' | b'\r' | b'\n'
+        )
+    {
+        end += 1;
+    }
+    end
+}
+
+/// Inspect a value token from the stripped JSON5 text and reject the numeric
+/// literal forms that `serde_json::Value` cannot represent or that `json5`
+/// silently coerces.
+fn reject_problematic_value_token(token: &[u8], path: &Path) -> Result<(), SchemaError> {
+    if token.is_empty() {
+        return Ok(());
+    }
+
+    let mut digits_start = 0;
+    if token[0] == b'-' || token[0] == b'+' {
+        if token.get(1).is_some_and(|c| c.is_ascii_digit()) && token[0] == b'+' {
+            return Err(numeric_literal_error(
+                path,
+                token,
+                "leading-plus numeric literal",
+            ));
+        }
+        digits_start = 1;
+    }
+
+    if digits_start + 1 < token.len()
+        && token[digits_start] == b'0'
+        && matches!(token[digits_start + 1], b'x' | b'X')
+    {
+        return Err(numeric_literal_error(
+            path,
+            token,
+            "hexadecimal numeric literal",
+        ));
+    }
+
+    let word = String::from_utf8_lossy(token);
+    if matches!(word.as_ref(), "NaN" | "Infinity" | "-Infinity") {
+        return Err(numeric_literal_error(
+            path,
+            token,
+            "non-finite numeric literal",
+        ));
+    }
+    Ok(())
+}
+
+fn numeric_literal_error(path: &Path, token: &[u8], kind: &str) -> SchemaError {
+    SchemaError::YamlParse {
+        label: path.display().to_string(),
+        msg: format!(
+            "JSON5 {kind} {} is not supported; use a plain decimal number instead",
+            String::from_utf8_lossy(token)
+        ),
+    }
 }
 
 pub(crate) fn resolve_prompt_dir(
@@ -1099,6 +1289,41 @@ mod tests {
             skip, "artifact://{loop_iter}/done",
             "skip_if_exists on sequence wrapper should preserve {{loop_iter}}"
         );
+    }
+
+    #[test]
+    fn reject_json5_numeric_literals_allows_strings_comments_and_exponents() {
+        let path = Path::new("demo.json5");
+        // `NaN`/`0xFF` appear only inside strings and a comment; `1e+3` is a
+        // valid signed decimal exponent; `NaN` as an unquoted key is valid.
+        reject_json5_numeric_literals(
+            r#"{
+              // echo NaN in a comment
+              "cmd": 'echo NaN',
+              shell: "echo 0xFF",
+              NaN: 1,
+              amount: 1e+3,
+            }"#,
+            path,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn reject_json5_numeric_literals_rejects_real_bad_literals() {
+        let path = Path::new("demo.json5");
+        for (bad, needle) in [
+            ("{ value: NaN }", "NaN"),
+            ("{ value: Infinity }", "Infinity"),
+            ("{ value: -Infinity }", "-Infinity"),
+            ("{ value: 0xFF }", "0xFF"),
+            ("{ value: +1 }", "+1"),
+        ] {
+            let err = reject_json5_numeric_literals(bad, path).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains(needle), "{msg}");
+            assert!(msg.contains("not supported"), "{msg}");
+        }
     }
 
     #[test]
