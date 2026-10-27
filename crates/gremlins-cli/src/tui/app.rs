@@ -713,6 +713,7 @@ impl App {
     /// The input bar becomes the incremental query editor; `input` holds
     /// the query string and `input_cursor` sits at its end.
     pub fn enter_search(&mut self) {
+        self.clear_completion();
         let saved_input = std::mem::take(&mut self.input);
         let saved_cursor = self.input_cursor;
         self.input_cursor = 0;
