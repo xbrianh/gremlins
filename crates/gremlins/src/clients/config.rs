@@ -3,6 +3,8 @@ use std::path::Path;
 
 use log::warn;
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use crate::config::StrictString;
 
@@ -39,7 +41,7 @@ fn parse_provider_auth(v: &str) -> Result<ProviderAuth, String> {
 
 /// The `azure:` block nested under a provider entry in providers.yaml.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct AzureEntry {
+pub(crate) struct AzureEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     auth: Option<StrictString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -229,7 +231,7 @@ impl Providers {
     }
 
     /// Get the OAuth client id for a provider name.
-    pub fn client_id(&self, provider: &str) -> Option<&str> {
+    pub(crate) fn client_id(&self, provider: &str) -> Option<&str> {
         self.client_ids
             .get(provider)
             .map(|s| s.as_str())
@@ -237,7 +239,7 @@ impl Providers {
     }
 
     /// Get the OAuth refresh token for a provider name.
-    pub fn refresh_token(&self, provider: &str) -> Option<&str> {
+    pub(crate) fn refresh_token(&self, provider: &str) -> Option<&str> {
         self.refresh_tokens
             .get(provider)
             .map(|s| s.as_str())
@@ -298,20 +300,22 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
                 azure_auth_scopes.insert(k.clone(), scope);
             }
         }
-        // Validate: refresh-token without client-id is an error → skip the entry
+        // Validate: refresh-token without client-id is an error — skip OAuth
+        // fields for this entry but keep any non-OAuth fields that were
+        // already processed above.
         let client_id = normalize(v.client_id);
         let refresh_token = normalize(v.refresh_token);
         if refresh_token.is_some() && client_id.is_none() {
             warn!(
-                "providers.yaml entry {k:?} has refresh-token without client-id — skipping entry"
+                "providers.yaml entry {k:?} has refresh-token without client-id — ignoring OAuth fields"
             );
-            continue;
-        }
-        if let Some(cid) = client_id {
-            client_ids.insert(k.clone(), cid);
-        }
-        if let Some(rt) = refresh_token {
-            refresh_tokens.insert(k.clone(), rt);
+        } else {
+            if let Some(cid) = client_id {
+                client_ids.insert(k.clone(), cid);
+            }
+            if let Some(rt) = refresh_token {
+                refresh_tokens.insert(k.clone(), rt);
+            }
         }
         if !api_keys.contains_key(&k)
             && !base_urls.contains_key(&k)
@@ -468,29 +472,112 @@ pub fn load_providers_file() -> Result<ProvidersFile, ProvidersError> {
 }
 
 /// Serialize `file` and write it to `providers.yaml`, creating the parent dir.
+///
+/// Loads the existing file as a `serde_yaml::Value` so that unknown keys
+/// and ordering for other providers are preserved; only the entries in `file`
+/// are merged in.
 pub fn save_providers_file(file: &ProvidersFile) -> Result<(), ProvidersError> {
     let path = providers_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let yaml = serde_yaml::to_string(file)?;
-    std::fs::write(&path, yaml)?;
+
+    // Load existing file as Value to preserve unknown keys and key order.
+    let mut root: serde_yaml::Value = match std::fs::read_to_string(&path) {
+        Ok(content) => serde_yaml::from_str(&content)
+            .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        }
+        Err(e) => return Err(ProvidersError::Io(e)),
+    };
+
+    let mapping = match &mut root {
+        serde_yaml::Value::Mapping(m) => m,
+        _ => {
+            // File exists but isn't a mapping; overwrite.
+            root = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+            root.as_mapping_mut().unwrap()
+        }
+    };
+
+    // Merge entries from `file` into the mapping.
+    for (provider, entry) in &file.0 {
+        let entry_value = serde_yaml::to_value(entry)?;
+        mapping.insert(serde_yaml::Value::String(provider.clone()), entry_value);
+    }
+
+    let yaml = serde_yaml::to_string(&root)?;
+    write_atomic(&path, &yaml)?;
     Ok(())
 }
 
 /// Persist a provider's OAuth refresh token to `providers.yaml`.
+///
+/// Works directly with `serde_yaml::Value` so that only the single
+/// `refresh-token` key is touched — all other keys, comments (best-effort),
+/// and key ordering are preserved.
 pub(crate) fn persist_refresh_token(provider: &str, refresh_token: &str) -> Result<(), String> {
     let path = providers_path();
-    let mut file = match load_providers_file() {
-        Ok(f) => f,
-        Err(e) => return Err(format!("failed to load {}: {e}", path.display())),
+    let mut root: serde_yaml::Value = match std::fs::read_to_string(&path) {
+        Ok(content) => serde_yaml::from_str(&content)
+            .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        }
+        Err(e) => {
+            return Err(format!("failed to read {}: {e}", path.display()));
+        }
     };
-    let entry = file.0.entry(provider.to_string()).or_default();
-    entry.set_refresh_token(refresh_token.to_string());
-    if let Err(e) = save_providers_file(&file) {
-        return Err(format!("failed to save {}: {e}", path.display()));
+
+    let mapping = root
+        .as_mapping_mut()
+        .ok_or_else(|| format!("{} is not a mapping", path.display()))?;
+
+    let entry = mapping
+        .entry(serde_yaml::Value::String(provider.to_string()))
+        .or_insert(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+
+    if let serde_yaml::Value::Mapping(entry_map) = entry {
+        entry_map.insert(
+            serde_yaml::Value::String("refresh-token".to_string()),
+            serde_yaml::Value::String(refresh_token.to_string()),
+        );
     }
+
+    let yaml = serde_yaml::to_string(&root)
+        .map_err(|e| format!("failed to serialize {}: {e}", path.display()))?;
+
+    write_atomic_str(&path, &yaml)
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+
     Ok(())
+}
+
+/// Write `content` to `path` atomically: write to a same-directory temp file
+/// with restricted permissions, sync, then rename over the target.
+#[allow(unused_mut)]
+fn write_atomic(path: &Path, content: &str) -> Result<(), std::io::Error> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".providers")
+        .suffix(".tmp")
+        .tempfile_in(dir)?;
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(tmp.path())?.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(tmp.path(), perms)?;
+    }
+    std::io::Write::write_all(&mut tmp, content.as_bytes())?;
+    tmp.as_file_mut().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// Convenience wrapper for callers that already have a `String` error type.
+fn write_atomic_str(path: &Path, content: &str) -> Result<(), String> {
+    write_atomic(path, content).map_err(|e| format!("I/O error: {e}"))
 }
 
 // ---------------------------------------------------------------------------

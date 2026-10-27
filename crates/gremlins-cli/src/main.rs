@@ -10,6 +10,7 @@ use gremlins::config;
 // The crate-level `gremlins::config` module already binds the name `config`,
 // so import the provider-credential helpers from `clients::config` under an
 // alias to avoid a name collision.
+use gremlins::clients::backends::copilot as copilot_backend;
 use gremlins::clients::config as provider_config;
 use gremlins::clients::github_auth;
 use gremlins::core::discovery;
@@ -2036,20 +2037,44 @@ async fn auth_copilot_login(client_id: &str) -> Result<(), String> {
     // Ensure global config so user_config_root resolves.
     gremlins::config::init_global().map_err(|e| e.to_string())?;
 
+    // Refuse if a higher-precedence credential already exists.
+    if std::env::var("GITHUB_COPILOT_API_KEY").is_ok_and(|v| !v.trim().is_empty())
+        || std::env::var("COPILOT_API_KEY").is_ok_and(|v| !v.trim().is_empty())
+    {
+        return Err(
+            "GITHUB_COPILOT_API_KEY or COPILOT_API_KEY is set — OAuth login would be ignored. \
+             Unset those env vars first."
+                .to_string(),
+        );
+    }
+
     // Check if credentials already exist.
     let existing = provider_config::load_providers_file()
         .map_err(|e| format!("failed to load providers.yaml: {e}"))?;
     if let Some(entry) = existing.0.get("copilot") {
+        if entry.api_key().is_some() {
+            return Err(
+                "copilot api-key already configured in providers.yaml — OAuth login would be \
+                 ignored. Remove the api-key first with a text editor, or use \
+                 \"gremlins auth copilot logout\" to remove OAuth credentials."
+                    .to_string(),
+            );
+        }
         if entry.client_id().is_some() || entry.refresh_token().is_some() {
             return Err(
-                "copilot OAuth already configured — use \"gremlins auth copilot logout\" to remove existing credentials first".to_string()
+                "copilot OAuth already configured — use \"gremlins auth copilot logout\" to \
+                 remove existing credentials first"
+                    .to_string(),
             );
         }
     }
 
-    // Start device flow.
-    eprintln!("Starting GitHub device flow...");
-    let device = github_auth::start_device_flow(client_id)?;
+    // Start device flow — these are blocking HTTP calls, so run them
+    // off the tokio runtime.
+    let cid = client_id.to_string();
+    let device = tokio::task::spawn_blocking(move || github_auth::start_device_flow(&cid))
+        .await
+        .map_err(|e| format!("device flow panicked: {e}"))??;
 
     // Print instructions.
     eprintln!(
@@ -2063,8 +2088,13 @@ async fn auth_copilot_login(client_id: &str) -> Result<(), String> {
 
     eprintln!("Waiting for authorization (press Ctrl+C to cancel)...");
 
-    let credentials =
-        github_auth::complete_device_flow(client_id, &device.device_code, interval, deadline)?;
+    let cid = client_id.to_string();
+    let device_code = device.device_code.clone();
+    let credentials = tokio::task::spawn_blocking(move || {
+        github_auth::complete_device_flow(&cid, &device_code, interval, deadline)
+    })
+    .await
+    .map_err(|e| format!("device flow panicked: {e}"))??;
 
     // Write to providers.yaml.
     let mut file = provider_config::load_providers_file()
@@ -2097,12 +2127,21 @@ async fn auth_copilot_status() -> Result<(), String> {
 
     match (entry.client_id(), entry.refresh_token()) {
         (Some(_client_id), Some(_refresh_token)) => {
-            let provider = github_auth::GitHubAppTokenProvider::new(
-                _client_id.to_string(),
-                _refresh_token.to_string(),
-            );
-            match provider.access_token().await {
-                Ok(_) => println!("copilot: ✓ OAuth credential valid"),
+            // Use the public end-to-end validator — refreshes the GitHub
+            // token, exchanges it for a Copilot session, and reports the
+            // session expiry. No persistence, so this is read-only.
+            match copilot_backend::check_copilot_oauth_credential(_client_id, _refresh_token) {
+                Ok(status) => {
+                    println!("copilot: ✓ OAuth credential valid");
+                    if let Some(exp) = status.expires_at {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        let remaining = exp.saturating_sub(now);
+                        println!("  Copilot session expires in {} seconds", remaining);
+                    }
+                }
                 Err(e) => println!("copilot: ✗ credential invalid: {e}"),
             }
         }

@@ -71,12 +71,13 @@ fn resolve_auth(
     if let Some(key) = crate::config::copilot_api_key() {
         return Ok(CopilotConfig::new(key).client());
     }
+    // Load providers.yaml once for steps 2 and 3.
+    let providers = crate::clients::config::Providers::load();
     // 2. providers.yaml copilot.api-key
-    if let Some(key) = crate::clients::config::api_key("", PROVIDER_NAME) {
-        return Ok(CopilotConfig::new(key).client());
+    if let Some(key) = providers.get(PROVIDER_NAME) {
+        return Ok(CopilotConfig::new(key.to_string()).client());
     }
     // 3. providers.yaml copilot.client-id + copilot.refresh-token
-    let providers = crate::clients::config::Providers::load();
     if let (Some(client_id), Some(refresh_token)) = (
         providers.client_id(PROVIDER_NAME).map(|s| s.to_string()),
         providers.refresh_token(PROVIDER_NAME).map(|s| s.to_string()),
@@ -122,6 +123,33 @@ fn resolve_auth(
             .join("providers.yaml")
             .display(),
     ))
+}
+
+/// Result of validating a Copilot OAuth credential end-to-end.
+#[derive(Debug, Clone)]
+pub struct CopilotCredentialStatus {
+    /// Unix timestamp when the Copilot session expires, if the server
+    /// returned one.
+    pub expires_at: Option<i64>,
+}
+
+/// Validate a Copilot OAuth credential end-to-end: refresh the GitHub access
+/// token, exchange it for a Copilot session, and return the session status.
+///
+/// Does NOT persist the rotated refresh token — safe for read-only commands
+/// like `gremlins auth copilot status`.
+pub fn check_copilot_oauth_credential(
+    client_id: &str,
+    refresh_token: &str,
+) -> Result<CopilotCredentialStatus, String> {
+    let provider =
+        github_auth::GitHubAppTokenProvider::new_without_persister(client_id, refresh_token);
+    let access_token = provider.access_token_sync()?;
+    let exchanger = BlockingCopilotTokenExchanger::new();
+    let session = exchanger.exchange(&access_token)?;
+    Ok(CopilotCredentialStatus {
+        expires_at: session.expires_at,
+    })
 }
 
 /// Read a nonblank GitHub access token from the environment.
@@ -825,6 +853,8 @@ mod tests {
         assert!(err.contains("GITHUB_TOKEN"), "got: {err}");
         assert!(err.contains("GH_TOKEN"), "got: {err}");
         assert!(err.contains("client-id"), "got: {err}");
+        assert!(!err.contains("gh auth"), "error should not mention gh CLI: {err}");
+        assert!(!err.contains("gh "), "error should not mention gh CLI: {err}");
     }
 
     #[test]

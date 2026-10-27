@@ -19,7 +19,6 @@ pub(crate) const DEFAULT_ACCESS_TOKEN_URL: &str = "https://github.com/login/oaut
 
 const GITHUB_OAUTH_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS: u64 = 30;
-const BODY_TRUNCATION_CHARS: usize = 200;
 
 // ── Public types ─────────────────────────────────────────────────────────
 
@@ -92,10 +91,18 @@ pub struct GitHubAppTokenProvider {
     inner: Arc<ProviderInner>,
 }
 
+/// Both the refresh token and cached access token are guarded by a single
+/// mutex so the cache check + refresh sequence is atomic — two concurrent
+/// callers cannot both observe an empty cache and race to rotate the same
+/// single-use refresh token.
+struct ProviderState {
+    refresh_token: String,
+    access_token: Option<CachedAccessToken>,
+}
+
 struct ProviderInner {
     client_id: String,
-    refresh_token: Mutex<String>,
-    access_token: Mutex<Option<CachedAccessToken>>,
+    state: Mutex<ProviderState>,
     token_url: String,
     persist: Option<Arc<dyn RefreshTokenPersister>>,
 }
@@ -107,7 +114,20 @@ impl GitHubAppTokenProvider {
             client_id.into(),
             refresh_token.into(),
             Some(Arc::new(ProvidersFilePersister::new("copilot"))),
-            DEFAULT_DEVICE_CODE_URL.to_string(),
+            DEFAULT_ACCESS_TOKEN_URL.to_string(),
+        )
+    }
+
+    /// Create a provider that does NOT persist refreshed tokens — useful for
+    /// read-only validation commands.
+    pub fn new_without_persister(
+        client_id: impl Into<String>,
+        refresh_token: impl Into<String>,
+    ) -> Self {
+        Self::with_parts(
+            client_id.into(),
+            refresh_token.into(),
+            None,
             DEFAULT_ACCESS_TOKEN_URL.to_string(),
         )
     }
@@ -117,14 +137,15 @@ impl GitHubAppTokenProvider {
         client_id: String,
         refresh_token: String,
         persist: Option<Arc<dyn RefreshTokenPersister>>,
-        _device_code_url: String,
         token_url: String,
     ) -> Self {
         Self {
             inner: Arc::new(ProviderInner {
                 client_id,
-                refresh_token: Mutex::new(refresh_token),
-                access_token: Mutex::new(None),
+                state: Mutex::new(ProviderState {
+                    refresh_token,
+                    access_token: None,
+                }),
                 token_url,
                 persist,
             }),
@@ -136,42 +157,28 @@ impl GitHubAppTokenProvider {
     /// Performs blocking HTTP, so it must run on a blocking thread (see
     /// [`Self::access_token`]) rather than directly on a tokio worker.
     pub(crate) fn access_token_sync(&self) -> Result<String, String> {
-        if let Some(token) = self.inner.cached_access_token() {
-            return Ok(token);
+        let mut state = self.inner.state.lock().unwrap();
+
+        // Check the cache while we hold the lock.
+        if let Some(cached) = &state.access_token {
+            if cached.expires_at > Instant::now() {
+                return Ok(cached.token.clone());
+            }
         }
-        self.inner.refresh()
-    }
 
-    /// Async access for external consumers (e.g., CLI status).
-    pub async fn access_token(&self) -> Result<String, String> {
-        if let Some(token) = self.inner.cached_access_token() {
-            return Ok(token);
-        }
-        let provider = self.clone();
-        tokio::task::spawn_blocking(move || provider.access_token_sync())
-            .await
-            .map_err(|err| format!("GitHub token refresh task failed: {err}"))?
-    }
-}
+        // Cache miss or expired — refresh, still holding the lock so no
+        // other caller can race us on the single-use refresh token.
+        let response = refresh_access_token(
+            &self.inner.token_url,
+            &self.inner.client_id,
+            &state.refresh_token,
+        )?;
 
-impl ProviderInner {
-    /// The cached access token, when it is still within its validity window.
-    fn cached_access_token(&self) -> Option<String> {
-        let guard = self.access_token.lock().unwrap();
-        guard
-            .as_ref()
-            .filter(|cached| cached.expires_at > Instant::now())
-            .map(|cached| cached.token.clone())
-    }
-
-    /// Refresh via the OAuth token endpoint, rotating both stored tokens.
-    fn refresh(&self) -> Result<String, String> {
-        let refresh_token = self.refresh_token.lock().unwrap().clone();
-        let response = refresh_access_token(&self.token_url, &self.client_id, &refresh_token)?;
-
-        let rotating = response.refresh_token.unwrap_or(refresh_token);
-        *self.refresh_token.lock().unwrap() = rotating.clone();
-        if let Some(persist) = &self.persist {
+        let rotating = response
+            .refresh_token
+            .unwrap_or(state.refresh_token.clone());
+        state.refresh_token = rotating.clone();
+        if let Some(persist) = &self.inner.persist {
             if let Err(err) = persist.persist(&rotating) {
                 warn!("failed to persist GitHub refresh token: {err}");
             }
@@ -180,11 +187,29 @@ impl ProviderInner {
         let access_token = response
             .access_token
             .ok_or_else(|| "token refresh returned no access token".to_string())?;
-        *self.access_token.lock().unwrap() = Some(CachedAccessToken {
+        state.access_token = Some(CachedAccessToken {
             token: access_token.clone(),
             expires_at: access_token_expires_at(response.expires_in),
         });
         Ok(access_token)
+    }
+
+    /// Async access for external consumers (e.g., CLI status).
+    pub async fn access_token(&self) -> Result<String, String> {
+        // Check the cache first on the async path to avoid a pointless
+        // spawn when the token is still fresh.
+        {
+            let state = self.inner.state.lock().unwrap();
+            if let Some(cached) = &state.access_token {
+                if cached.expires_at > Instant::now() {
+                    return Ok(cached.token.clone());
+                }
+            }
+        }
+        let provider = self.clone();
+        tokio::task::spawn_blocking(move || provider.access_token_sync())
+            .await
+            .map_err(|err| format!("GitHub token refresh task failed: {err}"))?
     }
 }
 
@@ -301,7 +326,7 @@ pub(crate) fn complete_device_flow_with_url(
     token_url: &str,
     client_id: &str,
     device_code: &str,
-    interval: Duration,
+    mut interval: Duration,
     deadline: Instant,
 ) -> Result<DeviceFlowCredentials, String> {
     loop {
@@ -323,7 +348,8 @@ pub(crate) fn complete_device_flow_with_url(
                 std::thread::sleep(interval);
             }
             Some("slow_down") => {
-                std::thread::sleep(interval + Duration::from_secs(5));
+                interval += Duration::from_secs(5);
+                std::thread::sleep(interval);
             }
             Some(err) => {
                 let detail = response
@@ -377,6 +403,10 @@ fn refresh_access_token(
 
 /// Low-level OAuth token endpoint POST, returning the parsed response
 /// including any error fields the endpoint reports with a 200.
+///
+/// Error messages never include the raw response body — only the standard
+/// `error` / `error_description` fields returned by GitHub's OAuth endpoint
+/// and the HTTP status code. The token response body may contain credentials.
 fn request_oauth_token(
     token_url: &str,
     form: &[(&str, &str)],
@@ -403,8 +433,7 @@ fn request_oauth_token(
         Ok(parsed) => {
             if !status.is_success() && parsed.error.is_none() {
                 return Err(format!(
-                    "OAuth token request failed with HTTP {status}: {}",
-                    truncate_body(&body)
+                    "OAuth token request failed with HTTP {status} (no error detail)"
                 ));
             }
             Ok(parsed)
@@ -412,25 +441,12 @@ fn request_oauth_token(
         Err(_) => {
             if !status.is_success() {
                 return Err(format!(
-                    "OAuth token request failed with HTTP {status}: {}",
-                    truncate_body(&body)
+                    "OAuth token request failed with HTTP {status} (unparseable response)"
                 ));
             }
-            Err(format!(
-                "invalid OAuth token response: {}",
-                truncate_body(&body)
-            ))
+            Err("invalid OAuth token response (unparseable)".to_string())
         }
     }
-}
-
-/// Truncate a response body for an error message, cutting on a char boundary.
-fn truncate_body(body: &str) -> String {
-    if body.chars().count() <= BODY_TRUNCATION_CHARS {
-        return body.to_string();
-    }
-    let prefix: String = body.chars().take(BODY_TRUNCATION_CHARS).collect();
-    format!("{prefix}...")
 }
 
 // ── Form encoding ────────────────────────────────────────────────────────
