@@ -21,7 +21,7 @@ fn default_model_placeholder() -> ModelURI {
 
 pub(crate) mod bundle;
 pub(crate) mod expand;
-pub(crate) mod loader;
+pub mod loader;
 pub(crate) mod prompts;
 pub(crate) mod resolve;
 pub(crate) mod yaml;

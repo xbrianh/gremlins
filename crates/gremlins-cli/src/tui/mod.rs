@@ -2,6 +2,7 @@ pub mod app;
 pub mod buffer;
 pub mod chat;
 mod chat_context;
+mod chat_prefetch;
 pub mod client;
 pub mod commands;
 pub mod completion;
@@ -11,6 +12,20 @@ pub mod motif;
 pub mod screen;
 pub mod theme;
 pub mod widgets;
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Mutex;
+
+    /// Serializes tests across modules that mutate the process-global
+    /// `GREMLINS_*` environment variables and call
+    /// `gremlins::config::clear_global()`. `chat_context` and
+    /// `chat_prefetch` each build throwaway sandboxes but share one process
+    /// environment; a per-module lock would let their guards race (for
+    /// example, one test removes `GREMLINS_SANDBOX_ROOT` while another reads
+    /// it through `state_root()`).
+    pub(crate) static CONFIG_ENV_LOCK: Mutex<()> = Mutex::new(());
+}
 
 use std::collections::HashMap;
 use std::io::{self, IsTerminal};
@@ -529,8 +544,36 @@ fn send_chat_input(
         // event loop. On timeout or failure the prompt is sent without a
         // context block rather than being dropped.
         let project_root_str = project_root.to_string_lossy().into_owned();
-        let context = match tokio::time::timeout(
+        // Establish a shared absolute deadline so pre-fetch and the static
+        // context snapshot together fit within CONTEXT_TIMEOUT rather than
+        // each getting an independent timeout.
+        let shared_deadline = Instant::now() + CONTEXT_TIMEOUT;
+
+        // Pre-fetch context from the operator's message (gremlin IDs, file
+        // paths, definition names) so the model doesn't burn its first turn
+        // on discovery tools. Passes the shared deadline so the matchers
+        // return completed sections when time runs out.
+        let prefetch_input = input.clone();
+        let prefetch_root = project_root_str.clone();
+        let enriched_input = match tokio::time::timeout(
             CONTEXT_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                chat_prefetch::prefetch_context(&prefetch_input, &prefetch_root, shared_deadline)
+            }),
+        )
+        .await
+        {
+            Ok(Ok(pf)) if !pf.is_empty() => format!("{pf}\n\n---\n\n{input}"),
+            _ => input,
+        };
+
+        // Use the remaining budget from the shared deadline for the static
+        // context snapshot.
+        let remaining = shared_deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO);
+        let context = match tokio::time::timeout(
+            remaining,
             tokio::task::spawn_blocking(move || {
                 chat_context::build_chat_context(&project_root_str)
             }),
@@ -546,7 +589,7 @@ fn send_chat_input(
         // reflects the operator's shell at submit time.
         let env: HashMap<String, String> = std::env::vars().collect();
         let request = build_chat_request(
-            &input,
+            &enriched_input,
             &turn_id,
             &project_root.to_string_lossy(),
             &context,

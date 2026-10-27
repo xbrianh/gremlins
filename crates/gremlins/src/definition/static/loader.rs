@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::schemas::error::SchemaError;
 
 /// A flattened stage descriptor used for name-filling.
-pub(crate) struct StageEntry {
+pub struct StageEntry {
     pub name: Option<String>,
     pub auto_name: Option<String>,
     pub stage_type: Option<String>,
@@ -19,7 +19,7 @@ pub(crate) struct StageNode {
     pub body: Vec<StageNode>,
 }
 
-pub(crate) fn fill_names(stages: &mut [StageEntry]) -> Result<(), SchemaError> {
+pub fn fill_names(stages: &mut [StageEntry]) -> Result<(), SchemaError> {
     let mut used: HashSet<String> = HashSet::new();
     let mut name_counts: HashMap<String, usize> = HashMap::new();
     for stage in stages.iter() {
