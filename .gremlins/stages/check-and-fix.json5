@@ -1,0 +1,36 @@
+{
+  "required-options": ["cmds"],
+  stages: [
+    {
+      name: "format",
+      type: "exec",
+      options: {
+        timeout: 300,
+        cmds: [
+          "make autoformat || true",
+          "git add -A",
+          "git diff --cached --quiet || git commit -m 'format'",
+        ],
+      },
+    },
+    {
+      name: "verify",
+      type: "verify",
+      options: {
+        cmds: ["{{options.cmds}}"],
+        max_iterations: "{{options.max_iterations | default(7)}}",
+      },
+      prompt: ["style_guide.md", "dev-env-howto.md", "verify_fix.md"],
+    },
+    {
+      name: "commit",
+      type: "exec",
+      options: {
+        cmds: [
+          "git add -A",
+          'git diff --cached --quiet || git commit -m "fix checks"',
+        ],
+      },
+    },
+  ],
+}

@@ -53,43 +53,7 @@
     "github-wait-copilot": "github-wait-copilot",
     "github-wait-ci": "github-wait-ci",
     "github-push-to-pr-branch": "github-push-to-pr-branch",
-    "complexity-review": "complexity-review",
-    "check-and-fix": {
-      type: "sequence",
-      body: [
-        {
-          name: "format",
-          type: "exec",
-          options: {
-            timeout: 300,
-            cmds: [
-              "make autoformat || true",
-              "git add -A",
-              "git diff --cached --quiet || git commit -m 'format'",
-            ],
-          },
-        },
-        {
-          name: "verify",
-          type: "verify",
-          options: {
-            cmds: ["make -j8 check && make -j8 test"],
-            max_iterations: 7,
-          },
-          prompt: ["style_guide.md", "dev-env-howto.md", "verify_fix.md"],
-        },
-        {
-          name: "commit",
-          type: "exec",
-          options: {
-            cmds: [
-              "git add -A",
-              'git diff --cached --quiet || git commit -m "fix checks"',
-            ],
-          },
-        },
-      ],
-    },
+    "check-and-fix": "check-and-fix",
   },
   stages: [
     {
@@ -98,95 +62,11 @@
       prompt: ["style_guide.md", "plan_gh.md"],
     },
     {
-      name: "implement",
-      type: "implement",
-      prompt: [
-        "task-guide.md",
-        "style_guide.md",
-        "dev-env-howto.md",
-        "implement.md",
-      ],
-    },
-    {
-      name: "verify-implementation",
-      type: "check-and-fix",
-    },
-    {
-      name: "compute-diff",
-      type: "exec",
-      interpolation: {
-        inputs: {
-          base_sha: 'content("artifact://base_sha")',
-        },
-        outputs: {
-          diff: "artifact://diff.txt",
-        },
-      },
+      name: "implement-and-qa",
+      type: "implement-and-qa",
       options: {
-        cmds: ["git diff {base_sha}...HEAD > {diff}"],
+        verify_cmds: "make -j8 check && make -j8 test",
       },
-    },
-    {
-      type: "parallel",
-      fork: {
-        cmds: ['git worktree add --detach "$GREMLIN_FORK_WORKDIR" HEAD'],
-      },
-      body: [
-        {
-          name: "review-one",
-          type: "agent",
-          interpolation: {
-            inputs: {
-              plan: 'content("artifact://plan.md")',
-              diff: 'content("artifact://diff.txt")',
-            },
-            outputs: {
-              filepath: "artifact://review-one.md",
-            },
-          },
-          prompt: ["review.md"],
-        },
-        {
-          name: "review-two",
-          type: "agent",
-          interpolation: {
-            inputs: {
-              plan: 'content("artifact://plan.md")',
-              diff: 'content("artifact://diff.txt")',
-            },
-            outputs: {
-              filepath: "artifact://review-two.md",
-            },
-          },
-          prompt: ["review.md"],
-        },
-        {
-          name: "complexity-review",
-          type: "complexity-review",
-          prompt: ["complexity_review.md"],
-        },
-      ],
-    },
-    {
-      name: "address",
-      type: "agent",
-      prompt: ["style_guide.md", "dev-env-howto.md", "address.md"],
-      interpolation: {
-        inputs: {
-          plan: 'content("artifact://plan.md")',
-          diff: 'content("artifact://diff.txt")',
-          review_one: 'content("artifact://review-one.md")',
-          review_two: 'content("artifact://review-two.md")',
-          complexity_review: 'content("artifact://complexity-review.md")',
-        },
-        outputs: {
-          address_summary: "artifact://address-summary.md",
-        },
-      },
-    },
-    {
-      name: "verify-address-fixes",
-      type: "check-and-fix",
     },
     {
       name: "open-pr",
@@ -236,6 +116,9 @@
     {
       name: "verify-github-review-fixes",
       type: "check-and-fix",
+      options: {
+        cmds: "make -j8 check && make -j8 test",
+      },
     },
     {
       name: "push-review-fixes",

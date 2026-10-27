@@ -1,0 +1,108 @@
+{
+  "required-options": ["verify_cmds"],
+  stages: [
+    // ── implement ────────────────────────────────────────────────────
+    {
+      name: "implement",
+      type: "implement",
+      prompt: [
+        "task-guide.md",
+        "style_guide.md",
+        "dev-env-howto.md",
+        "implement.md",
+      ],
+    },
+    // ── verify implementation ────────────────────────────────────────
+    {
+      name: "verify-implementation",
+      type: "check-and-fix",
+      options: {
+        cmds: "{{options.verify_cmds}}",
+      },
+    },
+    // ── compute diff ─────────────────────────────────────────────────
+    {
+      name: "compute-diff",
+      type: "exec",
+      interpolation: {
+        inputs: {
+          diff_base: 'content("{{options.diff_base | default(\"artifact://base_sha\")}}")',
+        },
+        outputs: {
+          diff: "artifact://diff.txt",
+        },
+      },
+      options: {
+        cmds: ["git diff {diff_base}...HEAD > {diff}"],
+      },
+    },
+    // ── parallel reviews ─────────────────────────────────────────────
+    {
+      type: "parallel",
+      fork: {
+        cmds: ['git worktree add --detach "$GREMLIN_FORK_WORKDIR" HEAD'],
+      },
+      body: [
+        {
+          name: "review-one",
+          type: "agent",
+          interpolation: {
+            inputs: {
+              plan: 'content("artifact://plan.md")',
+              diff: 'content("artifact://diff.txt")',
+            },
+            outputs: {
+              filepath: "artifact://review-one.md",
+            },
+          },
+          prompt: ["review.md"],
+        },
+        {
+          name: "review-two",
+          type: "agent",
+          interpolation: {
+            inputs: {
+              plan: 'content("artifact://plan.md")',
+              diff: 'content("artifact://diff.txt")',
+            },
+            outputs: {
+              filepath: "artifact://review-two.md",
+            },
+          },
+          prompt: ["review.md"],
+        },
+        {
+          name: "complexity-review",
+          type: "complexity-review",
+          prompt: ["complexity_review.md"],
+        },
+      ],
+    },
+    // ── address review feedback ──────────────────────────────────────
+    {
+      name: "address",
+      type: "agent",
+      prompt: ["style_guide.md", "dev-env-howto.md", "address.md"],
+      interpolation: {
+        inputs: {
+          plan: 'content("artifact://plan.md")',
+          diff: 'content("artifact://diff.txt")',
+          review_one: 'content("artifact://review-one.md")',
+          review_two: 'content("artifact://review-two.md")',
+          complexity_review: 'content("artifact://complexity-review.md")',
+        },
+        outputs: {
+          address_summary: "artifact://address-summary.md",
+        },
+      },
+    },
+    // ── verify address fixes ─────────────────────────────────────────
+    {
+      name: "verify-address-fixes",
+      type: "check-and-fix",
+      options: {
+        cmds: "{{options.verify_cmds}}",
+      },
+    },
+  ],
+}
