@@ -183,6 +183,18 @@
             diff_base: "artifact://{loop_iter}/iter_start_sha.txt",
           },
         },
+        // --- cleanup build artifacts so scoring is not inflated ---
+        {
+          name: "cleanup-build-artifacts",
+          type: "exec",
+          options: {
+            cmds: [
+              "cargo clean 2>/dev/null || true",
+              "find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true",
+              "find . -type f -name '*.pyc' -delete 2>/dev/null || true",
+            ],
+          },
+        },
         // --- score: re-measure drag and rotate state for the next iteration ---
         {
           name: "score",

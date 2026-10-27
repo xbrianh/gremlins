@@ -1,5 +1,10 @@
 {
   "required-options": ["verify_cmds"],
+  // Input contract: reads `artifact://plan.md` (written by an upstream plan
+  // stage) and, unless `options.diff_base` is set, the run's
+  // `artifact://base_sha`. Internal outputs (`diff.txt`, `review-one.md`,
+  // `review-two.md`, `complexity-review.md`, `address-summary.md`) are
+  // emitted under fixed artifact names consumed by downstream stages.
   stages: [
     // ── implement ────────────────────────────────────────────────────
     {
