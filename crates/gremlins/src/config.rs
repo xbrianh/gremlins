@@ -1163,11 +1163,11 @@ pub(crate) fn completion_nudge_budget() -> usize {
 /// Default cap for tool output: 300 000 bytes.
 pub(crate) const DEFAULT_MAX_TOOL_OUTPUT_BYTES: u64 = 300_000;
 
-/// Default headless (pipeline) compaction threshold: 100 000 tokens.
-pub(crate) const DEFAULT_COMPACTION_THRESHOLD_TOKENS: u64 = 100_000;
+/// Default headless (pipeline) compaction threshold: 50 000 tokens.
+pub(crate) const DEFAULT_COMPACTION_THRESHOLD_TOKENS: u64 = 50_000;
 
-/// Default chat compaction threshold: 200 000 tokens.
-pub(crate) const DEFAULT_COMPACTION_THRESHOLD_TOKENS_CHAT: u64 = 200_000;
+/// Default chat compaction threshold: 64 000 tokens.
+pub(crate) const DEFAULT_COMPACTION_THRESHOLD_TOKENS_CHAT: u64 = 64_000;
 
 /// Default ceiling for a serialized prompt: 1 MiB.
 pub(crate) const DEFAULT_MAX_PROMPT_BYTES: u64 = 1_048_576;
@@ -1236,7 +1236,7 @@ pub(crate) fn max_tool_output_bytes() -> u64 {
 }
 
 /// GREMLINS_COMPACTION_THRESHOLD_TOKENS — soft token trigger for headless
-/// (pipeline) conversation compaction. Default 100 000. 0 disables proactive
+/// (pipeline) conversation compaction. Default 50 000. 0 disables proactive
 /// compaction; the hard `max-prompt-bytes` ceiling still applies. Settings.yaml
 /// `compaction.threshold-tokens` takes precedence over the env var.
 pub(crate) fn compaction_threshold_tokens() -> u64 {
@@ -1251,7 +1251,7 @@ pub(crate) fn compaction_threshold_tokens() -> u64 {
 }
 
 /// GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT — soft token trigger for chat
-/// conversation compaction. Default 200 000. 0 disables proactive compaction;
+/// conversation compaction. Default 64 000. 0 disables proactive compaction;
 /// the hard `max-prompt-bytes` ceiling still applies. Settings.yaml
 /// `compaction.threshold-tokens-chat` takes precedence over the env var.
 pub(crate) fn compaction_threshold_tokens_chat() -> u64 {
@@ -2696,7 +2696,7 @@ model-profiles:
         let mut env = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", dir.path());
-        // No settings.yaml, no env var — should get the 100_000/200_000
+        // No settings.yaml, no env var — should get the 50_000/64_000
         // defaults.
         let cfg = Config::load().unwrap();
         assert_eq!(
