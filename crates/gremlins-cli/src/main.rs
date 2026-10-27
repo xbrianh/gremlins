@@ -2177,9 +2177,12 @@ async fn auth_copilot_status() -> Result<(), String> {
                 Err(e) => println!("copilot: ✗ credential invalid: {e}"),
             }
         }
-        (_, None, Some(github_token)) => {
+        (_, _, Some(github_token)) => {
             // Static GitHub access token — validate by exchanging for a
-            // Copilot session.
+            // Copilot session. This accepts github-token alongside leftover
+            // refresh-token (with no client-id) rather than falling through
+            // to "no credentials configured"; complete client-id/refresh-token
+            // pairs are handled by the preceding arm.
             let token = github_token.to_string();
             match tokio::task::spawn_blocking(move || {
                 copilot_backend::check_copilot_github_token(&token)
