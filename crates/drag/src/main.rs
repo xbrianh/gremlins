@@ -479,9 +479,10 @@ async fn run() -> Result<(), String> {
             if node.starts_with(mod_name)
                 && node.as_str().len() > mod_name.len()
                 && node.as_bytes()[mod_name.len()] == b':'
-                && best.is_none_or(|(n, _)| mod_name.len() > n.len()) {
-                    best = Some((mod_name, count));
-                }
+                && best.is_none_or(|(n, _)| mod_name.len() > n.len())
+            {
+                best = Some((mod_name, count));
+            }
         }
         if let Some((_, count)) = best {
             token_counts.insert(node.clone(), count);
