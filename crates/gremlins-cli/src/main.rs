@@ -1186,7 +1186,7 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
 
 /// Remove a single gremlin by id.
 /// Routes through the daemon when reachable so it can broadcast RunRemoved.
-/// Falls back to direct `Gremlin::clean(true)` only when the daemon is down.
+/// Falls back to direct `Gremlin::clean(purge)` only when the daemon is down.
 async fn rm_one(id: &str, purge: bool) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
