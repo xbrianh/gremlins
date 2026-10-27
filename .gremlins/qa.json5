@@ -1,0 +1,316 @@
+{
+  prompt_dir: "prompts",
+  // QA a range of commits already present in the repository — there is no
+  // plan file, so this pipeline verifies, reviews, and fixes an existing
+  // slice of history rather than implementing a plan.
+  //
+  // Usage:
+  //   gremlins launch qa
+  //   gremlins launch qa --target-ref feature-branch --base-ref main
+  //   gremlins launch qa --target-ref <sha> --base-ref <sha>
+  //
+  // Parameters (launch-time):
+  //   target-ref  (optional)  tip of the commit range under QA (default: HEAD)
+  //   base-ref    (optional)  base of the commit range under QA
+  //                           (default: the repo's default branch)
+  //
+  // The commits under QA are `git diff <base-ref>..<target-ref>`. The worktree
+  // is checked out at `target-ref`; the diff and structural report are computed
+  // relative to `base-ref`. QA runs format + check + test, performs semantic
+  // and structural review, addresses the findings, re-verifies, and writes a
+  // commit message. `gremlins land` then squash-merges the worktree (and any
+  // QA fixes) back into the main branch.
+  bootstrap: {
+    source: {
+      "target-ref": {
+        type: "string",
+        optional: true,
+      },
+      "base-ref": {
+        type: "string",
+        optional: true,
+      },
+    },
+    launch_cmds: [
+      'set -euo pipefail\nTARGET_REF={target-ref}\n[ -z "$TARGET_REF" ] && TARGET_REF=HEAD\nBASE_REF={base-ref}\nif [ -z "$BASE_REF" ]; then\n  BASE_REF=$(git -C "$GREMLINS_PROJECT_ROOT" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed \'s|^refs/remotes/origin/||\')\n  [ -z "$BASE_REF" ] && BASE_REF=main\nfi\nTARGET_SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "$TARGET_REF")\nBASE_SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "$BASE_REF")\ngit -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$TARGET_SHA"\nprintf "%s" "$BASE_REF" > "$GREMLINS_STATE_DIR/artifacts/base_ref"\nprintf "%s" "$TARGET_REF" > "$GREMLINS_STATE_DIR/artifacts/target_ref"\nprintf "%s" "$BASE_SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"\nprintf "%s" "$TARGET_SHA" > "$GREMLINS_STATE_DIR/artifacts/target_sha"',
+    ],
+    cli_out: {
+      base_ref: "artifact://base_ref",
+      target_ref: "artifact://target_ref",
+      base_sha: "artifact://base_sha",
+      target_sha: "artifact://target_sha",
+    },
+    env: 'export GREMLINS_OPENAI_AGENTS_MAX_TURNS=\'1000\'\nexport CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${GREMLINS_PROJECT_ROOT}/.cargo-gremlin-target}"\nexport CARGO_INCREMENTAL=0\nTHE_ENV="${GREMLINS_PROJECT_ROOT}/.gremlins/env"\nif [ -f "$THE_ENV" ]; then\n    source "$THE_ENV"\nfi\nexport PREFIX="${GREMLINS_STATE_DIR}/install"\nexport PATH="${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}"\n',
+  },
+  land: {
+    interpolation: {
+      inputs: {
+        message: "artifact://commit_message.txt",
+      },
+    },
+    land_cmds: [
+      'WORKTREE_HEAD=$(git -C "$GREMLIN_WORKDIR" rev-parse HEAD)',
+      'git merge --squash "$WORKTREE_HEAD"',
+      'git diff --cached --quiet || git commit -F "{message}"',
+    ],
+    clean_cmds: [
+      'git worktree remove --force "$GREMLIN_WORKDIR" || true',
+      "git worktree prune",
+    ],
+  },
+  stages: [
+    // ── verify the chunk: format, then check + test with fix loop ─────
+    {
+      name: "verify-chunk-format",
+      type: "exec",
+      options: {
+        timeout: 300,
+        cmds: [
+          "make autoformat || true",
+          "git add -A",
+          "git diff --cached --quiet || git commit -m 'format'",
+        ],
+      },
+    },
+    {
+      name: "verify-chunk",
+      type: "sequence",
+      skip_if_exists: "artifact://{loop_iter}/done",
+      "max-iterations": 7,
+      body: [
+        {
+          name: "cmd",
+          type: "exec",
+          interpolation: {
+            outputs: {
+              "verify_log?": "artifact://{loop_iter}/verify_output.txt",
+              "done?": "artifact://{loop_iter}/done",
+              exec_exit_code: "artifact://{loop_iter}/exec_exit_code",
+            },
+          },
+          options: {
+            timeout: 900,
+            cmds: [
+              '(make -j8 check && make -j8 test) > "{verify_log}" 2>&1; rc=$?; printf \'%d\' "$rc" > "{exec_exit_code}"; if [ "$rc" -eq 0 ]; then printf \'done\' > "{done}"; fi; true',
+            ],
+          },
+        },
+        {
+          name: "fix",
+          type: "sequence",
+          skip_if_exists: "artifact://{loop_iter}/done",
+          body: [
+            {
+              type: "agent",
+              prompt: ["style_guide.md", "dev-env-howto.md", "verify_fix.md"],
+              interpolation: {
+                inputs: {
+                  verify_output: 'content("artifact://{loop_iter}/verify_output.txt")',
+                },
+              },
+            },
+          ],
+        },
+      ],
+    },
+    {
+      name: "verify-chunk-commit",
+      type: "exec",
+      options: {
+        cmds: [
+          "git add -A",
+          'git diff --cached --quiet || git commit -m "fix checks"',
+        ],
+      },
+    },
+    // ── compute the diff of the whole range (plus any QA fixes) ───────
+    {
+      name: "compute-diff",
+      type: "exec",
+      interpolation: {
+        inputs: {
+          base_sha: 'content("artifact://base_sha")',
+        },
+        outputs: {
+          diff: "artifact://diff.txt",
+        },
+      },
+      options: {
+        cmds: ["git diff {base_sha}..HEAD > \"{diff}\""],
+      },
+    },
+    // ── parallel reviews: two semantic + one structural ───────────────
+    {
+      name: "reviews",
+      type: "parallel",
+      fork: {
+        cmds: ['git worktree add --detach "$GREMLIN_FORK_WORKDIR" HEAD'],
+      },
+      body: [
+        {
+          name: "review-one",
+          type: "agent",
+          interpolation: {
+            inputs: {
+              diff: 'content("artifact://diff.txt")',
+            },
+            outputs: {
+              filepath: "artifact://review-one.md",
+            },
+          },
+          prompt: ["qa_review.md"],
+        },
+        {
+          name: "review-two",
+          type: "agent",
+          interpolation: {
+            inputs: {
+              diff: 'content("artifact://diff.txt")',
+            },
+            outputs: {
+              filepath: "artifact://review-two.md",
+            },
+          },
+          prompt: ["qa_review.md"],
+        },
+        {
+          name: "complexity-review",
+          type: "sequence",
+          body: [
+            {
+              name: "collect",
+              type: "exec",
+              interpolation: {
+                inputs: {
+                  base_sha: 'content("artifact://base_sha")',
+                },
+                outputs: {
+                  report: "artifact://complexity-report.md",
+                  tree: "artifact://complexity-report.md.tree",
+                  dot: "artifact://complexity-report.md.dot",
+                  adjacency: "artifact://complexity-report.md.adjacency",
+                },
+              },
+              options: {
+                timeout: 300,
+                cmds: [
+                  'cargo_modules_report "{base_sha}" "artifact://complexity-report.md" "{report}" "{tree}" "{dot}" "{adjacency}" "--two-dot"',
+                ],
+              },
+            },
+            {
+              name: "review",
+              type: "agent",
+              interpolation: {
+                inputs: {
+                  diff: 'content("artifact://diff.txt")',
+                  report: 'content("artifact://complexity-report.md")',
+                },
+                outputs: {
+                  filepath: "artifact://complexity-review.md",
+                },
+              },
+              prompt: ["qa_complexity_review.md"],
+            },
+          ],
+        },
+      ],
+    },
+    // ── address review feedback ───────────────────────────────────────
+    {
+      name: "address",
+      type: "agent",
+      prompt: ["style_guide.md", "dev-env-howto.md", "qa_address.md"],
+      interpolation: {
+        inputs: {
+          diff: 'content("artifact://diff.txt")',
+          review_one: 'content("artifact://review-one.md")',
+          review_two: 'content("artifact://review-two.md")',
+          complexity_review: 'content("artifact://complexity-review.md")',
+        },
+        outputs: {
+          address_summary: "artifact://address-summary.md",
+        },
+      },
+    },
+    // ── verify the address fixes ──────────────────────────────────────
+    {
+      name: "verify-address-format",
+      type: "exec",
+      options: {
+        timeout: 300,
+        cmds: [
+          "make autoformat || true",
+          "git add -A",
+          "git diff --cached --quiet || git commit -m 'format'",
+        ],
+      },
+    },
+    {
+      name: "verify-address",
+      type: "sequence",
+      skip_if_exists: "artifact://{loop_iter}/done",
+      "max-iterations": 7,
+      body: [
+        {
+          name: "cmd",
+          type: "exec",
+          interpolation: {
+            outputs: {
+              "verify_log?": "artifact://{loop_iter}/verify_output.txt",
+              "done?": "artifact://{loop_iter}/done",
+              exec_exit_code: "artifact://{loop_iter}/exec_exit_code",
+            },
+          },
+          options: {
+            timeout: 900,
+            cmds: [
+              '(make -j8 check && make -j8 test) > "{verify_log}" 2>&1; rc=$?; printf \'%d\' "$rc" > "{exec_exit_code}"; if [ "$rc" -eq 0 ]; then printf \'done\' > "{done}"; fi; true',
+            ],
+          },
+        },
+        {
+          name: "fix",
+          type: "sequence",
+          skip_if_exists: "artifact://{loop_iter}/done",
+          body: [
+            {
+              type: "agent",
+              prompt: ["style_guide.md", "dev-env-howto.md", "verify_fix.md"],
+              interpolation: {
+                inputs: {
+                  verify_output: 'content("artifact://{loop_iter}/verify_output.txt")',
+                },
+              },
+            },
+          ],
+        },
+      ],
+    },
+    {
+      name: "verify-address-commit",
+      type: "exec",
+      options: {
+        cmds: [
+          "git add -A",
+          'git diff --cached --quiet || git commit -m "fix checks"',
+        ],
+      },
+    },
+    // ── commit message for the squash land ────────────────────────────
+    {
+      name: "commit-message",
+      type: "agent",
+      prompt: ["qa_commit_message.md"],
+      interpolation: {
+        inputs: {
+          diff: 'content("artifact://diff.txt")',
+          address_summary: 'content("artifact://address-summary.md")',
+        },
+        outputs: {
+          commit_message: "artifact://commit_message.txt",
+        },
+      },
+    },
+  ],
+}
