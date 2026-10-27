@@ -28,8 +28,9 @@ use crate::executor::send_log;
 use crate::executor::stage_stream::send_stage_boundary;
 use crate::executor::state;
 use crate::executor::state::{Checkout, Collision, FileSystemStateStore, StateStore};
-use crate::executor::supervisor::get_run_map;
+use crate::executor::supervisor::{emit_event, get_run_map};
 use crate::executor::vars;
+use crate::executor::DaemonEvent;
 use crate::executor::RunError;
 use crate::landscape::{LandscapeBlock, LandscapeError, LandscapeExplorer};
 use indexmap::IndexMap;
@@ -1236,7 +1237,7 @@ impl Gremlin {
                         &self.runtime_config.log_tx,
                         format!("stage '{}': bailed: {}", stage.name(), reason),
                     );
-                    crate::executor::supervisor::emit_event(crate::executor::DaemonEvent::Bail {
+                    emit_event(DaemonEvent::Bail {
                         id: self.id.to_string(),
                         reason: reason.clone(),
                     });

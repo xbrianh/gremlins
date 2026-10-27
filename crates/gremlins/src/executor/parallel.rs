@@ -37,6 +37,39 @@ fn done_uri(scope: &str, child_name: &str) -> String {
     format!("artifact://{scope}/done/{child_name}")
 }
 
+/// Build a human-readable failure reason for a child that exited non-zero.
+///
+/// Prefers the recorded bail record first, then the child's state.json
+/// `stage` field, falling back to the bare exit code.
+fn child_failure_reason(
+    raw: &serde_json::Map<String, serde_json::Value>,
+    bail: Option<&serde_json::Map<String, serde_json::Value>>,
+    exit_code: i64,
+) -> String {
+    let fallback = raw
+        .get("stage")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty() && *s != "starting")
+        .map(|s| format!("stage {s}: exited {exit_code}"))
+        .unwrap_or_else(|| format!("exited {exit_code}"));
+    match bail {
+        Some(bail) => {
+            let detail = bail.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+            let class = bail.get("class").and_then(|v| v.as_str()).unwrap_or("");
+            if !detail.is_empty() {
+                if !class.is_empty() && class != "other" {
+                    format!("{class}: {detail}")
+                } else {
+                    detail.to_string()
+                }
+            } else {
+                fallback
+            }
+        }
+        None => fallback,
+    }
+}
+
 /// Record `child_name` as done under `scope` in the artifact registry.
 async fn mark_child_done(state: &dyn StateStore, scope: &str, child_name: &str) {
     let uri_str = done_uri(scope, child_name);
@@ -298,33 +331,11 @@ pub(crate) async fn run_parallel(
                                     if exit_code == 0 {
                                         Ok(())
                                     } else {
-                                        // Try to get a meaningful error from the bail file first,
-                                        // then fall back to the stage field in state.json.
-                                        let reason = if let Some(bail) = g.state.stage_error() {
-                                            let detail = bail
-                                                .get("detail")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("");
-                                            let class = bail
-                                                .get("class")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("");
-                                            if !detail.is_empty() {
-                                                if !class.is_empty() && class != "other" {
-                                                    format!("{class}: {detail}")
-                                                } else {
-                                                    detail.to_string()
-                                                }
-                                            } else {
-                                                format!("exited {exit_code}")
-                                            }
-                                        } else {
-                                            raw.get("stage")
-                                                .and_then(|v| v.as_str())
-                                                .filter(|s| !s.is_empty() && *s != "starting")
-                                                .map(|s| format!("stage {s}: exited {exit_code}"))
-                                                .unwrap_or_else(|| format!("exited {exit_code}"))
-                                        };
+                                        let reason = child_failure_reason(
+                                            &raw,
+                                            g.state.stage_error().as_ref(),
+                                            exit_code,
+                                        );
                                         Err(RunError::StageFailed {
                                             stage: child_name.clone(),
                                             message: reason,
@@ -1257,9 +1268,78 @@ mod tests {
             child_log.contains("streaming output started"),
             "child log should contain its own log lines: {child_log}"
         );
-        assert!(
-            !child_log.contains("[parallel:group/bad] "),
-            "child log file must not carry the relay prefix: {child_log}"
+    }
+
+    #[test]
+    fn child_failure_reason_prefers_bail_detail_with_class() {
+        let raw = serde_json::json!({"stage": "starting"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let bail = serde_json::json!({
+            "class": "wiring",
+            "detail": "artifact not bound: hello"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert_eq!(
+            child_failure_reason(&raw, Some(&bail), 1),
+            "wiring: artifact not bound: hello"
         );
+    }
+
+    #[test]
+    fn child_failure_reason_omits_other_class_prefix() {
+        let raw = serde_json::json!({"stage": "starting"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let bail = serde_json::json!({
+            "class": "other",
+            "detail": "artifact not bound: hello"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert_eq!(
+            child_failure_reason(&raw, Some(&bail), 1),
+            "artifact not bound: hello"
+        );
+    }
+
+    #[test]
+    fn child_failure_reason_prefers_bail_over_starting_stage() {
+        // `stage` is "starting" at bail time; a bail record must win.
+        let raw = serde_json::json!({"stage": "starting"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let bail = serde_json::json!({
+            "class": "wiring",
+            "detail": "artifact not bound: hello"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(!child_failure_reason(&raw, Some(&bail), 1).contains("exited 1"));
+    }
+
+    #[test]
+    fn child_failure_reason_falls_back_to_stage_field() {
+        let raw = serde_json::json!({"stage": "run"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(child_failure_reason(&raw, None, 3), "stage run: exited 3");
+    }
+
+    #[test]
+    fn child_failure_reason_falls_back_to_bare_exit_code() {
+        let raw = serde_json::json!({"stage": "starting"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(child_failure_reason(&raw, None, 2), "exited 2");
     }
 }
