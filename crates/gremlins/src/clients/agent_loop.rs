@@ -88,6 +88,7 @@ struct LedgerWriteEntry {
 struct LedgerLandscapeEntry {
     age: usize,
     seq: usize,
+    path: String,
     output: String,
 }
 
@@ -242,12 +243,14 @@ impl ToolLedger {
                 // caller collects the file_path and applies after the batch.
             }
             "Landscape" => {
+                let file_path = Self::parse_str(&args, "file_path").to_string();
                 let age = turn_num;
                 self.seq += 1;
                 let seq = self.seq;
                 self.landscape = Some(LedgerLandscapeEntry {
                     age,
                     seq,
+                    path: file_path,
                     output: output.to_string(),
                 });
             }
@@ -395,12 +398,12 @@ impl ToolLedger {
 
     /// Build a serializable snapshot of the worker's file observations
     /// (Read/Grep/Landscape) plus the mutation paths, for reporting up to
-    /// the parent loop of a Scout task. Entries are ordered most-recent-first
-    /// and capped by `max_tool_output_bytes`, keeping the newest reads and
-    /// marking the rest as truncated.
+    /// the parent loop of a Scout task. Entries are ordered most-recent-first.
+    ///
+    /// No byte cap is applied here: the parent deduplicates against its own
+    /// ledger first and only then applies the configured output budget, so
+    /// already-seen files cannot crowd out unseen reads.
     pub(crate) fn file_observations(&self) -> FileObservations {
-        let max_bytes = crate::config::max_tool_output_bytes() as usize;
-
         let mut items: Vec<(usize, FileObservation)> = Vec::new();
 
         for ((path, offset, limit), entry) in &self.reads {
@@ -434,7 +437,7 @@ impl ToolLedger {
                 entry.seq,
                 FileObservation {
                     tool: "Landscape".to_string(),
-                    path: String::new(),
+                    path: entry.path.clone(),
                     offset: 0,
                     limit: 0,
                     pattern: None,
@@ -445,20 +448,7 @@ impl ToolLedger {
 
         // Most-recent-first: higher seq == later observation.
         items.sort_by_key(|a| std::cmp::Reverse(a.0));
-
-        // Cap total bytes, keeping the newest reads; note truncation.
-        let mut total = 0usize;
-        let mut keep = Vec::new();
-        let mut truncated = false;
-        for (_, item) in items {
-            let cost = item.output.len().saturating_add(item.path.len());
-            if total.saturating_add(cost) > max_bytes {
-                truncated = true;
-                break;
-            }
-            total += cost;
-            keep.push(item);
-        }
+        let items = items.into_iter().map(|(_, item)| item).collect();
 
         // Mutation paths: dedup, preserving order.
         let mut written_paths: Vec<String> = Vec::new();
@@ -469,8 +459,8 @@ impl ToolLedger {
         }
 
         FileObservations {
-            items: keep,
-            truncated,
+            items,
+            truncated: false,
             written_paths,
         }
     }
@@ -485,7 +475,7 @@ impl ToolLedger {
             "Grep" => self
                 .greps
                 .contains_key(&(obs.pattern.clone().unwrap_or_default(), obs.path.clone())),
-            "Landscape" => self.landscape.is_some(),
+            "Landscape" => self.landscape.as_ref().is_some_and(|e| e.path == obs.path),
             _ => false,
         }
     }
@@ -524,6 +514,14 @@ impl ToolLedger {
                     },
                 );
             }
+            "Landscape" => {
+                self.landscape = Some(LedgerLandscapeEntry {
+                    age: turn_num,
+                    seq,
+                    path: obs.path.clone(),
+                    output: obs.output.clone(),
+                });
+            }
             _ => {}
         }
     }
@@ -543,54 +541,112 @@ fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &st
 /// the message history. A truncation marker is preserved when the worker read
 /// more than the output budget permitted.
 fn fold_scout_output(output: &str, ledger: &mut ToolLedger, turn_num: usize) -> String {
-    let Some((mut obs, prefix)) = FileObservations::parse_block(output) else {
+    let Some((mut obs, prefix, suffix)) = FileObservations::parse_block(output) else {
         return output.to_string();
     };
 
     // A worker's Write/Edit must invalidate the parent's stale copy of any
-    // file it touched, so the parent never serves an outdated read.
+    // file it touched, so the parent never serves an outdated read. Record
+    // those paths too, so a Scout nested inside a Scout propagates the
+    // invalidation all the way up the chain.
     for fp in &obs.written_paths {
         ledger.invalidate_after_write(fp);
+        if !ledger.mutations.iter().any(|m| m == fp) {
+            ledger.mutations.push(fp.clone());
+        }
     }
 
     // Drop observations the parent has already read this run.
     obs.items.retain(|o| !ledger.has_observation(o));
 
-    // Absorb the surviving observations so a Scout nested inside a Scout
-    // still reports them up the chain (recursion composes at every level).
-    for o in &obs.items {
+    // Absorb the surviving observations oldest-first so a higher seq still
+    // means more recent when this loop reports to its own parent.
+    let mut absorbed = obs.items.clone();
+    absorbed.reverse();
+    for o in &absorbed {
         ledger.absorb_observation(o, turn_num);
     }
 
     if obs.items.is_empty() && !obs.truncated {
-        return prefix.to_string();
+        return format!("{prefix}{suffix}");
     }
 
     let mut out = prefix.to_string();
     out.push_str("\n\n## Scout observations\n");
-    if obs.truncated {
+
+    let max_bytes = crate::config::max_tool_output_bytes() as usize;
+    let budget = if max_bytes == 0 {
+        usize::MAX
+    } else {
+        max_bytes
+    };
+    let mut truncated = obs.truncated;
+    let mut section = String::new();
+    let mut used = 0usize;
+
+    // Items are most-recent-first; keep the newest observations and a prefix
+    // of any single oversized observation rather than dropping it entirely.
+    for o in &obs.items {
+        let rendered = render_observation(o);
+        if used.saturating_add(rendered.len()) <= budget {
+            section.push_str(&rendered);
+            used += rendered.len();
+        } else if used < budget {
+            let remaining = budget - used;
+            section.push_str(&truncate_to_bytes(&rendered, remaining));
+            truncated = true;
+            break;
+        } else {
+            truncated = true;
+            break;
+        }
+    }
+
+    if truncated {
         out.push_str(
             "> Some observations were omitted: the worker read more than the output budget.\n\n",
         );
     }
-    for o in &obs.items {
-        match o.tool.as_str() {
-            "Read" => out.push_str(&format!(
-                "### Read: {} (offset {}..{})\n{}\n\n",
-                o.path,
-                o.offset,
-                o.offset.saturating_add(o.limit),
-                o.output
-            )),
-            "Grep" => out.push_str(&format!(
-                "### Grep: {} in {}\n{}\n\n",
-                o.pattern.as_deref().unwrap_or(""),
-                o.path,
-                o.output
-            )),
-            "Landscape" => out.push_str(&format!("### Landscape: {}\n{}\n\n", o.path, o.output)),
-            _ => {}
+    out.push_str(&section);
+    out.push_str(suffix);
+    out
+}
+
+/// Render one worker observation as the markdown section injected into the
+/// parent's message history.
+fn render_observation(o: &FileObservation) -> String {
+    match o.tool.as_str() {
+        "Read" => format!(
+            "### Read: {} (offset {}..{})\n{}\n\n",
+            o.path,
+            o.offset,
+            o.offset.saturating_add(o.limit),
+            o.output
+        ),
+        "Grep" => format!(
+            "### Grep: {} in {}\n{}\n\n",
+            o.pattern.as_deref().unwrap_or(""),
+            o.path,
+            o.output
+        ),
+        "Landscape" if o.path.is_empty() => format!("### Landscape\n{}\n\n", o.output),
+        "Landscape" => format!("### Landscape: {}\n{}\n\n", o.path, o.output),
+        _ => String::new(),
+    }
+}
+
+/// Return a prefix of `s` that fits within `max_bytes` at a UTF-8 character
+/// boundary.
+fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
+    let mut out = String::with_capacity(max_bytes);
+    let mut used = 0usize;
+    for c in s.chars() {
+        let cl = c.len_utf8();
+        if used + cl > max_bytes {
+            break;
         }
+        out.push(c);
+        used += cl;
     }
     out
 }
@@ -686,6 +742,11 @@ fn task_kind_is_fork(args: &serde_json::Value) -> bool {
         .and_then(|v| v.as_str())
         .and_then(super::task_kind::TaskKind::parse)
         == Some(super::task_kind::TaskKind::Fork)
+}
+
+fn task_kind_from_args(args_json: &str) -> Option<super::task_kind::TaskKind> {
+    let args: serde_json::Value = serde_json::from_str(args_json).ok()?;
+    super::task_kind::TaskKind::parse(args.get("kind")?.as_str()?)
 }
 
 /// Sleep for the turn-level backoff, aborting early when the cancel token is
@@ -1834,11 +1895,14 @@ impl LoopState {
                     }
                 }
             }
-            // Task (Scout) results carry the worker's file observations as a
+            // Only Scout Task results carry the worker's file observations as a
             // machine-parseable block. Fold them into readable content and
             // deduplicate against the parent's own reads before writing them
-            // into history, so already-seen files are not re-injected.
-            let history_output = if job.name == "Task" {
+            // into history, so already-seen files are not re-injected. Fork
+            // and Implement stay prose-only.
+            let history_output = if job.name == "Task"
+                && task_kind_from_args(&job.args) == Some(super::task_kind::TaskKind::Scout)
+            {
                 fold_scout_output(&output, &mut self.tool_ledger, self.turn_num)
             } else {
                 output
@@ -3545,6 +3609,7 @@ mod tests {
     use super::*;
     use crate::clients::format::{key_arg, ledger_key_arg};
     use crate::clients::interactive::InteractiveChannels;
+    use crate::test_support::EnvGuard;
     use http::StatusCode;
     use rig_core::driver::DynModel;
     use rig_core::message::{Issuer, Reasoning, ReasoningContent, ToolFunction, UserContent};
@@ -8230,6 +8295,9 @@ mod tests {
 
     #[test]
     fn fold_scout_dedups_against_parent_reads() {
+        let _env = EnvGuard::lock();
+        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
+
         let mut ledger = ToolLedger::new();
         let args_json =
             serde_json::json!({"file_path": "/tmp/foo.rs", "offset": 0, "limit": 0}).to_string();
@@ -8265,6 +8333,9 @@ mod tests {
 
     #[test]
     fn fold_scout_passes_through_unread_file() {
+        let _env = EnvGuard::lock();
+        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
+
         let mut ledger = ToolLedger::new();
         let obs = FileObservations {
             items: vec![make_read_obs("/tmp/bar.rs", "bar content", 5, 20)],
@@ -8282,6 +8353,9 @@ mod tests {
 
     #[test]
     fn fold_scout_invalidates_writes_and_absorbs_into_ledger() {
+        let _env = EnvGuard::lock();
+        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
+
         let mut ledger = ToolLedger::new();
         // Parent previously read the file; worker then wrote it.
         let args_json =
@@ -8320,6 +8394,9 @@ mod tests {
 
     #[test]
     fn fold_scout_no_block_returns_unchanged() {
+        let _env = EnvGuard::lock();
+        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
+
         let mut ledger = ToolLedger::new();
         let output = "plain prose without markers";
         let folded = fold_scout_output(output, &mut ledger, 1);
@@ -8328,6 +8405,9 @@ mod tests {
 
     #[test]
     fn fold_scout_truncated_preserves_marker() {
+        let _env = EnvGuard::lock();
+        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
+
         let mut ledger = ToolLedger::new();
         let obs = FileObservations {
             items: vec![],
@@ -8340,5 +8420,113 @@ mod tests {
             folded.contains("Some observations were omitted"),
             "truncation marker must appear"
         );
+    }
+
+    #[test]
+    fn fold_scout_caps_after_dedup_and_keeps_newest() {
+        let _env = EnvGuard::lock();
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "60");
+
+        let mut ledger = ToolLedger::new();
+        // Parent already read old.rs; the Scout reports it again plus new.rs.
+        let old_args =
+            serde_json::json!({"file_path": "/tmp/old.rs", "offset": 0, "limit": 0}).to_string();
+        ledger.record(
+            "Read",
+            &key_arg(&serde_json::json!({"file_path": "/tmp/old.rs"})),
+            "old",
+            &old_args,
+            1,
+        );
+
+        let obs = FileObservations {
+            items: vec![
+                make_read_obs("/tmp/new.rs", "new contents", 0, 0),
+                make_read_obs("/tmp/old.rs", "old", 0, 0),
+            ],
+            truncated: false,
+            written_paths: vec![],
+        };
+        let scout_output = format!("Done.{}", obs.render_block());
+        let folded = fold_scout_output(&scout_output, &mut ledger, 2);
+
+        assert!(
+            folded.contains("new contents"),
+            "newest unseen read must survive the cap, got: {folded:?}"
+        );
+        assert!(
+            !folded.contains("### Read: /tmp/old.rs"),
+            "already-seen read must be deduped before the cap is applied, got: {folded:?}"
+        );
+    }
+
+    #[test]
+    fn fold_scout_keeps_prefix_of_oversized_observation() {
+        let _env = EnvGuard::lock();
+        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "40");
+
+        let mut ledger = ToolLedger::new();
+        let obs = FileObservations {
+            items: vec![make_read_obs("/tmp/huge.rs", "0123456789", 0, 0)],
+            truncated: false,
+            written_paths: vec![],
+        };
+        let scout_output = format!("Done.{}", obs.render_block());
+        let folded = fold_scout_output(&scout_output, &mut ledger, 1);
+
+        assert!(
+            folded.contains("### Read: /tmp/huge.rs"),
+            "oversized observation must keep a prefix rather than vanishing, got: {folded:?}"
+        );
+        assert!(
+            folded.contains("Some observations were omitted"),
+            "oversized observation must carry the truncation marker"
+        );
+    }
+
+    #[test]
+    fn fold_scout_absorbs_landscape_and_propagates_writes() {
+        let _env = EnvGuard::lock();
+        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
+
+        let mut ledger = ToolLedger::new();
+        let landscape = FileObservation {
+            tool: "Landscape".into(),
+            path: "/tmp/dir".into(),
+            offset: 0,
+            limit: 0,
+            pattern: None,
+            output: "tree".into(),
+        };
+        let obs = FileObservations {
+            items: vec![
+                make_read_obs("/tmp/child.rs", "child content", 0, 0),
+                landscape,
+            ],
+            truncated: false,
+            written_paths: vec!["/tmp/wrote.rs".into()],
+        };
+        let scout_output = format!("Child.{}", obs.render_block());
+        let folded = fold_scout_output(&scout_output, &mut ledger, 2);
+
+        assert!(folded.contains("child content"));
+        assert!(folded.contains("### Landscape: /tmp/dir"));
+        assert!(ledger.has_observation(&make_read_obs("/tmp/child.rs", "child content", 0, 0)));
+        assert!(ledger.has_observation(&FileObservation {
+            tool: "Landscape".into(),
+            path: "/tmp/dir".into(),
+            offset: 0,
+            limit: 0,
+            pattern: None,
+            output: String::new(),
+        }));
+
+        // The outer ledger must report the nested write upward too.
+        let reported = ledger.file_observations();
+        assert!(reported.written_paths.iter().any(|p| p == "/tmp/wrote.rs"));
+        assert!(reported
+            .items
+            .iter()
+            .any(|o| { o.tool == "Landscape" && o.path == "/tmp/dir" }));
     }
 }

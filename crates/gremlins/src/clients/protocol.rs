@@ -120,9 +120,10 @@ impl FileObservations {
     }
 
     /// Try to extract a `FileObservations` block from `text`. Returns the
-    /// parsed observations and the prefix (everything before the block) if
-    /// found, or `None` if no block is present.
-    pub fn parse_block(text: &str) -> Option<(FileObservations, &str)> {
+    /// parsed observations, the prefix (everything before the block), and the
+    /// suffix (everything after the block) when found, or `None` when no block
+    /// is present.
+    pub fn parse_block(text: &str) -> Option<(FileObservations, &str, &str)> {
         let start_marker = "\n\n__SCOUT_OBSERVATIONS__\n";
         let end_marker = "\n__END_SCOUT_OBSERVATIONS__";
         let start = text.find(start_marker)?;
@@ -130,7 +131,8 @@ impl FileObservations {
         let json_end = text[json_start..].find(end_marker)?;
         let json = &text[json_start..json_start + json_end];
         let obs: FileObservations = serde_json::from_str(json).ok()?;
-        Some((obs, &text[..start]))
+        let end = json_start + json_end + end_marker.len();
+        Some((obs, &text[..start], &text[end..]))
     }
 }
 
@@ -200,8 +202,9 @@ mod tests {
         };
 
         let block = obs.render_block();
-        let (parsed, prefix) = FileObservations::parse_block(&block).unwrap();
+        let (parsed, prefix, suffix) = FileObservations::parse_block(&block).unwrap();
         assert_eq!(prefix, "");
+        assert_eq!(suffix, "");
         assert_eq!(parsed, obs);
     }
 
@@ -219,8 +222,24 @@ mod tests {
         };
         let block = obs.render_block();
         let text = format!("Done summary here.{block}");
-        let (parsed, prefix) = FileObservations::parse_block(&text).unwrap();
+        let (parsed, prefix, suffix) = FileObservations::parse_block(&text).unwrap();
         assert_eq!(prefix, "Done summary here.");
+        assert_eq!(suffix, "");
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn parse_block_with_suffix() {
+        let obs = FileObservations {
+            items: vec![],
+            truncated: false,
+            written_paths: vec![],
+        };
+        let block = obs.render_block();
+        let text = format!("before{block}after");
+        let (parsed, prefix, suffix) = FileObservations::parse_block(&text).unwrap();
+        assert_eq!(prefix, "before");
+        assert_eq!(suffix, "after");
         assert!(parsed.is_empty());
     }
 
