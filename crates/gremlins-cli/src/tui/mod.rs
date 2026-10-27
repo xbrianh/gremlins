@@ -532,14 +532,20 @@ fn send_chat_input(
         let project_root_str = project_root.to_string_lossy().into_owned();
         // Pre-fetch context from the operator's message (gremlin IDs, file
         // paths, definition names) so the model doesn't burn its first turn
-        // on discovery tools.
-        let enriched_input = {
-            let prefetch = chat_prefetch::prefetch_context(&input, &project_root_str);
-            if prefetch.is_empty() {
-                input
-            } else {
-                format!("{prefetch}\n\n---\n\n{input}")
-            }
+        // on discovery tools. Runs under its own 2-second timeout inside
+        // spawn_blocking so a slow filesystem can't stall the event loop.
+        let prefetch_input = input.clone();
+        let prefetch_root = project_root_str.clone();
+        let enriched_input = match tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || {
+                chat_prefetch::prefetch_context(&prefetch_input, &prefetch_root)
+            }),
+        )
+        .await
+        {
+            Ok(Ok(pf)) if !pf.is_empty() => format!("{pf}\n\n---\n\n{input}"),
+            _ => input,
         };
         let context = match tokio::time::timeout(
             CONTEXT_TIMEOUT,
