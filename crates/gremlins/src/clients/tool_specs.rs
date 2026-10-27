@@ -320,8 +320,8 @@ pub(crate) fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option
                         i + 1
                     ));
                 } // 'start_line'/'end_line' are optional scope fields;
-                  // both accept zero (clamped to 1 by the executor), and
-                  // start_line > end_line is handled by scope_byte_range.
+                  // both must be positive integers, end_line requires start_line,
+                  // and start_line must not exceed end_line.
                 let has_start = obj.contains_key("start_line");
                 let has_end = obj.contains_key("end_line");
                 if has_start {
@@ -344,6 +344,22 @@ pub(crate) fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option
                                 i + 1
                             ));
                         }
+                    }
+                    if !has_start {
+                        return Some(format!(
+                            "Error: edit {} 'end_line' requires 'start_line' for Edit tool",
+                            i + 1
+                        ));
+                    }
+                }
+                if has_start && has_end {
+                    let start = obj.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let end = obj.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if start > end {
+                        return Some(format!(
+                            "Error: edit {} 'start_line' > 'end_line' for Edit tool",
+                            i + 1
+                        ));
                     }
                 }
             }
