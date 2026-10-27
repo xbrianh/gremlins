@@ -808,8 +808,8 @@ mod tests {
         let old_str = "hello";
         let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, None, None);
         assert!(msg.contains("diverges at byte offset 5"), "got: {msg}");
-        assert!(msg.contains("expected:"), "got: {msg}");
-        assert!(msg.contains("actual:"), "got: {msg}");
+        assert!(msg.contains(r#"expected: "hello""#), "got: {msg}");
+        assert!(msg.contains(r#"actual:   "hello world""#), "got: {msg}");
     }
 
     #[test]
@@ -818,8 +818,8 @@ mod tests {
         let old_str = "hello\nworld";
         let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, None, None);
         assert!(msg.contains("diverges at byte offset 5"), "got: {msg}");
-        assert!(msg.contains("expected:"), "got: {msg}");
-        assert!(msg.contains("actual:"), "got: {msg}");
+        assert!(msg.contains(r#"expected: "hello\nworld""#), "got: {msg}");
+        assert!(msg.contains(r#"actual:   "hello""#), "got: {msg}");
     }
 
     #[test]
@@ -831,6 +831,8 @@ mod tests {
         let old_str = "line2\nline3";
         let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, Some(2), Some(2));
         assert!(msg.contains("between lines 2-2"), "got: {msg}");
-        assert!(msg.contains("diverges at byte offset"), "got: {msg}");
+        assert!(msg.contains("diverges at byte offset 12"), "got: {msg}");
+        assert!(msg.contains(r#"expected: "line2\nline3""#), "got: {msg}");
+        assert!(msg.contains(r#"actual:   "line2\n""#), "got: {msg}");
     }
 }
