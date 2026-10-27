@@ -23,6 +23,11 @@ const BUNDLED_CONFIG: &str = include_str!("../config/bundled.json5");
 #[derive(Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct DragConfig {
+    /// Target path (file or directory) to score.
+    /// When GREMLINS_DRAG_CLI_CONFIG is set, this field provides the
+    /// target — no positional CLI argument is required.
+    #[serde(default)]
+    pub path: Option<String>,
     #[serde(default)]
     pub weights: WeightsConfig,
     #[serde(default)]
@@ -55,6 +60,7 @@ fn default_estimates() -> usize {
 impl Default for DragConfig {
     fn default() -> Self {
         Self {
+            path: None,
             weights: WeightsConfig::default(),
             model: None,
             tokenizer: String::new(),
@@ -96,8 +102,12 @@ impl DragConfig {
                 serde_json5::from_str(&content)
                     .map_err(|e| format!("invalid config in {}: {e}", path.display()))?
             }
-            (None, Some(env_json)) => serde_json5::from_str(&env_json)
-                .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: invalid JSON5: {e}"))?,
+            (None, Some(env_path)) => {
+                let content = std::fs::read_to_string(&env_path)
+                    .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: {}: {e}", env_path))?;
+                serde_json5::from_str(&content)
+                    .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: {}: {e}", env_path))?
+            }
             (None, None) => serde_json5::from_str(BUNDLED_CONFIG)
                 .map_err(|e| format!("internal error: bundled config is invalid: {e}"))?,
         };
