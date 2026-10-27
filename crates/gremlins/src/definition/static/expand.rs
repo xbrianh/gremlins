@@ -1019,6 +1019,36 @@ fn _expand_stage_def(
         // Validate call-site interpolation shape before distributing to stages
         validate_call_site_interpolation(call_site_map)?;
 
+        // Read flatten_into_parent: when true, inner stages are expanded
+        // inline into the caller instead of being wrapped in a sequence.
+        let flatten_into_parent = def_map
+            .get("flatten_into_parent")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // When flattening, reject definition-level keys that must live on the
+        // wrapper (which does not exist in flatten mode).
+        if flatten_into_parent {
+            for key in &[
+                "max-iterations",
+                "interval",
+                "skip_if_exists",
+                "model",
+                "task-models",
+            ] {
+                if def_map.contains_key(*key) {
+                    return Err(SchemaError::StageDef {
+                        name: def_name.to_string(),
+                        msg: format!(
+                            "'{key}' cannot be used with 'flatten_into_parent: true'; \
+                             remove 'flatten_into_parent: true' to enable wrapping \
+                             or move '{key}' to each call site"
+                        ),
+                    });
+                }
+            }
+        }
+
         let mut result: Vec<serde_json::Value> = Vec::new();
         for (i, raw_inner) in inner_list.iter().enumerate() {
             let substituted = substitute_recipe(raw_inner, &ctx_value)?;
@@ -1031,7 +1061,10 @@ fn _expand_stage_def(
             }
             let inner_map = inner.as_object_mut().unwrap();
 
-            if i == 0 {
+            // Only propagate call-site name / model / task-models to the first
+            // inner stage when flattening. When wrapping, those keys live on the
+            // sequence wrapper instead.
+            if flatten_into_parent && i == 0 {
                 if let Some(name) = call_site_map.get("name") {
                     inner_map.insert("name".to_string(), name.clone());
                 } else if inner_map.contains_key("name") {
@@ -1044,6 +1077,8 @@ fn _expand_stage_def(
                 if let Some(task_models) = call_site_map.get("task-models") {
                     inner_map.insert("task-models".to_string(), task_models.clone());
                 }
+            }
+            if i == 0 {
                 // Merge call-site interpolation.inputs into inner stage's interpolation.inputs
                 if let Some(interpolation_val) = call_site_map.get("interpolation") {
                     if let Some(m) = interpolation_val.as_object() {
@@ -1148,6 +1183,82 @@ fn _expand_stage_def(
             )?;
             result.extend(expanded);
         }
+        // Unrecognized-key validation — applies in both modes.
+        let recognized: &[&str] = &[
+            "stages",
+            "flatten_into_parent",
+            "required-options",
+            "required-prompt",
+            "max-iterations",
+            "interval",
+            "skip_if_exists",
+            "model",
+            "task-models",
+            "name",
+            "interpolation",
+        ];
+        for key in def_map.keys() {
+            if !recognized.contains(&key.as_str()) {
+                return Err(SchemaError::StageDef {
+                    name: def_name.to_string(),
+                    msg: format!("unrecognized key {key:?} in stage definition"),
+                });
+            }
+        }
+
+        // When wrapping (default), build a sequence that contains the expanded
+        // inner stages. Call-site values take precedence over definition-level
+        // values for shared keys.
+        if !flatten_into_parent {
+            let mut seq = serde_json::Map::new();
+
+            // Name: call-site name or the definition file stem.
+            let wrapper_name = call_site_map
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| def_name.to_string());
+            seq.insert("name".to_string(), serde_json::Value::String(wrapper_name));
+            seq.insert(
+                "type".to_string(),
+                serde_json::Value::String("sequence".to_string()),
+            );
+            seq.insert("body".to_string(), serde_json::Value::Array(result));
+
+            // model: call-site takes precedence
+            if let Some(model) = call_site_map.get("model") {
+                seq.insert("model".to_string(), model.clone());
+            } else if let Some(model) = def_map.get("model") {
+                seq.insert("model".to_string(), model.clone());
+            }
+
+            // task-models: call-site takes precedence
+            if let Some(tm) = call_site_map.get("task-models") {
+                seq.insert("task-models".to_string(), tm.clone());
+            } else if let Some(tm) = def_map.get("task-models") {
+                seq.insert("task-models".to_string(), tm.clone());
+            }
+
+            // max-iterations: definition-level only
+            if let Some(mi) = def_map.get("max-iterations") {
+                seq.insert("max-iterations".to_string(), mi.clone());
+            }
+
+            // interval: definition-level only
+            if let Some(interval) = def_map.get("interval") {
+                seq.insert("interval".to_string(), interval.clone());
+            }
+
+            // skip_if_exists: call-site takes precedence
+            if let Some(sif) = call_site_map.get("skip_if_exists") {
+                seq.insert("skip_if_exists".to_string(), sif.clone());
+            } else if let Some(sif) = def_map.get("skip_if_exists") {
+                seq.insert("skip_if_exists".to_string(), sif.clone());
+            }
+
+            return Ok(vec![serde_json::Value::Object(seq)]);
+        }
+
         return Ok(result);
     }
 
@@ -1621,5 +1732,305 @@ mod tests {
                 "error must name {legacy:?} and its replacement {replacement:?}, got: {msg}"
             );
         }
+    }
+
+    // ── flatten_into_parent tests ───────────────────────────────────────
+
+    /// Helper: build a resolver that returns DefinitionNotFound for every name.
+    fn not_found_resolver() -> impl DefinitionResolver {
+        struct R;
+        impl DefinitionResolver for R {
+            fn resolve(&self, name: &str, _: &std::path::Path) -> Result<PathBuf, SchemaError> {
+                Err(SchemaError::DefinitionNotFound {
+                    name: name.to_string(),
+                    available: String::new(),
+                })
+            }
+        }
+        R
+    }
+
+    /// Convenience wrapper around _expand_stage_def with default arguments.
+    fn expand_stage_def(
+        call_site: &serde_json::Value,
+        def_name: &str,
+        stage_defs: &HashMap<String, serde_json::Value>,
+    ) -> Result<Vec<serde_json::Value>, SchemaError> {
+        _expand_stage_def(
+            call_site,
+            def_name,
+            stage_defs,
+            &PathBuf::from("."),
+            &PathBuf::from("."),
+            Path::new("."),
+            &[],
+            &HashMap::new(),
+            &HashSet::new(),
+            &not_found_resolver(),
+        )
+    }
+
+    #[test]
+    fn default_wrap_two_stage_recipe_returns_single_sequence() {
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "stages": [
+                    {"name": "first", "type": "agent", "prompt": ["hello\n"]},
+                    {"name": "second", "type": "exec", "options": {"cmds": ["true"]}}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site =
+            serde_json::from_str::<serde_json::Value>(r#"{"name": "wrapper", "type": "mydef"}"#)
+                .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        assert_eq!(result.len(), 1, "default wrap produces a single stage");
+        let seq = &result[0];
+        assert_eq!(seq["type"].as_str().unwrap(), "sequence");
+        assert_eq!(seq["name"].as_str().unwrap(), "wrapper");
+        let body = seq["body"].as_array().unwrap();
+        assert_eq!(body.len(), 2, "body contains both inner stages");
+    }
+
+    #[test]
+    fn flatten_into_parent_true_produces_flat_stages() {
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "stages": [
+                    {"name": "first", "type": "agent", "prompt": ["hello\n"]},
+                    {"name": "second", "type": "exec", "options": {"cmds": ["true"]}}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site =
+            serde_json::from_str::<serde_json::Value>(r#"{"name": "inline", "type": "mydef"}"#)
+                .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        assert_eq!(result.len(), 2, "flatten produces two top-level stages");
+        assert_eq!(result[0]["name"].as_str().unwrap(), "inline");
+        assert_eq!(result[1]["name"].as_str().unwrap(), "second");
+    }
+
+    #[test]
+    fn flatten_with_max_iterations_errors() {
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "max-iterations": 3,
+                "stages": [
+                    {"name": "s", "type": "agent", "prompt": ["hi\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site =
+            serde_json::from_str::<serde_json::Value>(r#"{"name": "x", "type": "mydef"}"#).unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let err = expand_stage_def(&call_site, "mydef", &defs).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max-iterations"),
+            "error must name max-iterations: {msg}"
+        );
+        assert!(
+            msg.contains("flatten_into_parent"),
+            "error must mention flatten: {msg}"
+        );
+    }
+
+    #[test]
+    fn flatten_with_interval_errors() {
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "interval": 60,
+                "stages": [{"name": "s", "type": "agent", "prompt": ["hi\n"]}]
+            }"#,
+        )
+        .unwrap();
+        let call_site =
+            serde_json::from_str::<serde_json::Value>(r#"{"name": "x", "type": "mydef"}"#).unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let err = expand_stage_def(&call_site, "mydef", &defs).unwrap_err();
+        assert!(err.to_string().contains("interval"));
+    }
+
+    #[test]
+    fn flatten_with_skip_if_exists_errors() {
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "skip_if_exists": "artifact://done",
+                "stages": [{"name": "s", "type": "agent", "prompt": ["hi\n"]}]
+            }"#,
+        )
+        .unwrap();
+        let call_site =
+            serde_json::from_str::<serde_json::Value>(r#"{"name": "x", "type": "mydef"}"#).unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let err = expand_stage_def(&call_site, "mydef", &defs).unwrap_err();
+        assert!(err.to_string().contains("skip_if_exists"));
+    }
+
+    #[test]
+    fn flatten_with_def_model_errors() {
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "model": "openai/gpt-4",
+                "stages": [{"name": "s", "type": "agent", "prompt": ["hi\n"]}]
+            }"#,
+        )
+        .unwrap();
+        let call_site =
+            serde_json::from_str::<serde_json::Value>(r#"{"name": "x", "type": "mydef"}"#).unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let err = expand_stage_def(&call_site, "mydef", &defs).unwrap_err();
+        assert!(err.to_string().contains("model"));
+    }
+
+    #[test]
+    fn wrap_puts_call_site_model_and_task_models_on_sequence() {
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "stages": [
+                    {"name": "inner", "type": "agent", "prompt": ["hi\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "name": "wrapped",
+                "type": "mydef",
+                "model": "anthropic/claude",
+                "task-models": {"plan": "openai/gpt-4"}
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        assert_eq!(result.len(), 1);
+        let seq = &result[0];
+        assert_eq!(seq["type"].as_str().unwrap(), "sequence");
+        assert_eq!(seq["model"].as_str().unwrap(), "anthropic/claude");
+        let tm = seq["task-models"].as_object().unwrap();
+        assert_eq!(tm["plan"].as_str().unwrap(), "openai/gpt-4");
+        // Inner stage must NOT have model/task-models propagated
+        let body = seq["body"].as_array().unwrap();
+        let inner = &body[0];
+        assert!(
+            inner.get("model").is_none(),
+            "inner stage must not get model in wrap mode"
+        );
+        assert!(
+            inner.get("task-models").is_none(),
+            "inner stage must not get task-models in wrap mode"
+        );
+    }
+
+    #[test]
+    fn wrap_passes_def_max_iterations_to_sequence() {
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "max-iterations": 5,
+                "stages": [
+                    {"name": "inner", "type": "agent", "prompt": ["hi\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site =
+            serde_json::from_str::<serde_json::Value>(r#"{"name": "w", "type": "mydef"}"#).unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        let seq = &result[0];
+        assert_eq!(seq["max-iterations"].as_i64().unwrap(), 5);
+    }
+
+    #[test]
+    fn wrap_call_site_skip_if_exists_takes_precedence() {
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "skip_if_exists": "artifact://def-done",
+                "stages": [
+                    {"name": "inner", "type": "agent", "prompt": ["hi\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "name": "w",
+                "type": "mydef",
+                "skip_if_exists": "artifact://cs-done"
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        let seq = &result[0];
+        assert_eq!(
+            seq["skip_if_exists"].as_str().unwrap(),
+            "artifact://cs-done"
+        );
+    }
+
+    #[test]
+    fn unrecognized_key_at_definition_level_errors() {
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "stages": [
+                    {"name": "inner", "type": "agent", "prompt": ["hi\n"]}
+                ],
+                "foo": "bar"
+            }"#,
+        )
+        .unwrap();
+        let call_site =
+            serde_json::from_str::<serde_json::Value>(r#"{"name": "w", "type": "mydef"}"#).unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let err = expand_stage_def(&call_site, "mydef", &defs).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unrecognized"),
+            "error must mention unrecognized: {msg}"
+        );
+        assert!(msg.contains("foo"), "error must name the bad key: {msg}");
     }
 }
