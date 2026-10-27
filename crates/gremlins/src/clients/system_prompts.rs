@@ -4,6 +4,10 @@ use std::path::Path;
 // System prompts
 // ---------------------------------------------------------------------------
 
+/// Shared batching guidance used by every system prompt. Kept in one place so
+/// the agent, task, and fork prompts never drift apart.
+pub(crate) const BATCHING_GUIDANCE: &str = "Before every turn, scan the tools you're about to call. When two or more calls are independent (neither depends on the other's result), batch them in a single message. Good: Read foo.rs + Grep \"pattern\" + Bash \"cargo check\" — three independent operations in one turn. Bad: those same three calls spread across three serial turns. After writing files, batch all spot-checks (Reads and Greps) into one turn rather than one check per turn; if the build passes and spot-checks look correct, call Done.";
+
 /// System prompt injected into every agent stage. Carries the tool roster,
 /// directory layout, and pragmatic guidance (e.g. delegation policy).
 /// Model-specific guidance will need to live here in the future; for now,
@@ -26,11 +30,8 @@ replacements), Grep (regex search), Glob (find files \
 by pattern), Bash (shell commands), Task, Done\n\
 Edit is for code changes (not Bash scripts/sed). Read/Grep/Glob are for file inspection (not shell sed/grep/tail).\n\
 </tools>\n\
-Before every turn, scan the tools you're about to call. When two or more \
-calls are independent (neither depends on the other's result), batch them in \
-a single message. The harness executes concurrent calls in parallel, so \
-batching reduces wall-clock time. Serial chains of single-call turns are the \
-most expensive pattern — avoid them. `Done` signals turn completion and must be the sole call in its message — never batch it with other tools.\n\
+{batching}\n\
+`Done` signals turn completion and must be the sole call in its message — never batch it with other tools.\n\
 ALWAYS use Landscape first when exploring unknown code — it maps structure without reading files.\nCall Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Work root:     {work}\n\
@@ -45,6 +46,7 @@ every turn, so you never need to Read it. To update it, write the full\n\
 revised content with the Write tool.\n\
 </scratchpad>\
 ",
+        batching = BATCHING_GUIDANCE,
         work = work_root.display(),
     )
 }
@@ -69,16 +71,14 @@ replacements), Grep (regex search), Glob (find files \
 by pattern), Bash (shell commands), Task, Done\n\
 Edit is for code changes (not Bash scripts/sed). Read/Grep/Glob are for file inspection (not shell sed/grep/tail).\n\
 </tools>\n\
-Before every turn, scan the tools you're about to call. When two or more \
-calls are independent (neither depends on the other's result), batch them in \
-a single message. The harness executes concurrent calls in parallel, so \
-batching reduces wall-clock time. Serial chains of single-call turns are the \
-most expensive pattern — avoid them. `Done` signals turn completion and must be the sole call in its message — never batch it with other tools.\n\
+{batching}\n\
+`Done` signals turn completion and must be the sole call in its message — never batch it with other tools.\n\
 ALWAYS use Landscape first when exploring unknown code — it maps structure without reading files.\nCall Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Work root:     {work}\n\
 </directories>\
 ",
+        batching = BATCHING_GUIDANCE,
         work = work_root.display(),
     )
 }
@@ -95,11 +95,8 @@ Landscape (structural outline), Read (read files), Write (create files), Edit (t
 replacements), Grep (regex search), Glob (find files \
 by pattern), Bash (shell commands), Done\n\
 </tools>\n\
-Before every turn, scan the tools you're about to call. When two or more \
-calls are independent (neither depends on the other's result), batch them in \
-a single message. The harness executes concurrent calls in parallel, so \
-batching reduces wall-clock time. Serial chains of single-call turns are the \
-most expensive pattern — avoid them. `Done` signals turn completion and must be the sole call in its message — never batch it with other tools.\n\
+{batching}\n\
+`Done` signals turn completion and must be the sole call in its message — never batch it with other tools.\n\
 Use Landscape first when exploring code — it maps structure without reading files.\nThis is a forked child agent with the parent's full context. Do not call \
 Task.\n\
 Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
@@ -107,6 +104,7 @@ Call Done(summary) alongside your final message when your work is complete. The 
 Work root:     {work}\n\
 </directories>\
 ",
+        batching = BATCHING_GUIDANCE,
         work = work_root.display(),
     )
 }
@@ -246,6 +244,35 @@ mod tests {
         assert!(
             !prompt.contains("{scratchpad_path}"),
             "fork prompt must not name the scratchpad placeholder; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_all_prompts_share_batching_guidance() {
+        let expected = r#"Before every turn, scan the tools you're about to call. When two or more calls are independent (neither depends on the other's result), batch them in a single message. Good: Read foo.rs + Grep "pattern" + Bash "cargo check" — three independent operations in one turn. Bad: those same three calls spread across three serial turns. After writing files, batch all spot-checks (Reads and Greps) into one turn rather than one check per turn; if the build passes and spot-checks look correct, call Done."#;
+        assert_eq!(
+            BATCHING_GUIDANCE, expected,
+            "BATCHING_GUIDANCE constant must match the expected literal; update both or neither"
+        );
+
+        let agent = agent_system_prompt(Path::new("/work"));
+        let task = task_system_prompt(Path::new("/work"));
+        let fork = fork_system_prompt(Path::new("/work"));
+        for (name, prompt) in [("agent", &agent), ("task", &task), ("fork", &fork)] {
+            assert!(
+                prompt.contains(expected),
+                "{name} prompt must include the shared batching guidance; got: {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_chat_system_prompt_matches_batching_guidance() {
+        let chat_md = include_str!("../../prompts/chat_system.md");
+        assert!(
+            chat_md.contains(BATCHING_GUIDANCE),
+            "chat_system.md must include the same batching guidance as BATCHING_GUIDANCE; \
+             edit both or neither to prevent desync"
         );
     }
 }
