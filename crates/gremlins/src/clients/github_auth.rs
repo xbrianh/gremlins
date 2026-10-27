@@ -78,6 +78,43 @@ pub trait RefreshTokenPersister: Send + Sync {
     fn persist(&self, refresh_token: &str) -> Result<(), String>;
 }
 
+// ── Cross-process advisory lock ──────────────────────────────────────────
+
+/// Acquire an exclusive advisory flock on `providers.yaml.lock`.
+///
+/// Blocks until the lock is acquired.  The lock is released when the
+/// returned [`File`] is dropped.
+#[cfg(unix)]
+fn acquire_providers_lock() -> Result<std::fs::File, String> {
+    use std::os::fd::AsRawFd;
+    let path = crate::clients::config::providers_lock_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create dir for providers lock: {e}"))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| format!("failed to open providers lock {}: {e}", path.display()))?;
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if ret != 0 {
+        return Err(format!(
+            "failed to lock providers.lock: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn acquire_providers_lock() -> Result<(), String> {
+    // Advisory lock not available; rely on atomic writes for best-effort
+    // safety.
+    Ok(())
+}
+
 // ── GitHubAppTokenProvider ───────────────────────────────────────────────
 
 /// Manages a GitHub App OAuth user-to-server token lifecycle.
@@ -156,6 +193,11 @@ impl GitHubAppTokenProvider {
     ///
     /// Performs blocking HTTP, so it must run on a blocking thread (see
     /// [`Self::access_token`]) rather than directly on a tokio worker.
+    ///
+    /// Before refreshing, acquires a cross-process advisory lock on
+    /// `providers.yaml.lock` and re-reads the latest refresh token from
+    /// `providers.yaml` so that multiple backends or processes sharing the
+    /// same credential do not race to consume the single-use refresh token.
     pub(crate) fn access_token_sync(&self) -> Result<String, String> {
         let mut state = self.inner.state.lock().unwrap();
 
@@ -165,6 +207,19 @@ impl GitHubAppTokenProvider {
                 return Ok(cached.token.clone());
             }
         }
+
+        // Acquire cross-process advisory lock before refreshing.
+        #[cfg(unix)]
+        let _lock = acquire_providers_lock()?;
+
+        // Re-read the latest refresh token from disk — another process or
+        // backend may have rotated it since we loaded our in-memory
+        // snapshot.
+        let refresh_token = match crate::clients::config::read_oauth_credential("copilot") {
+            Ok((_, Some(rt))) => rt,
+            _ => state.refresh_token.clone(),
+        };
+        state.refresh_token = refresh_token;
 
         // Cache miss or expired — refresh, still holding the lock so no
         // other caller can race us on the single-use refresh token.

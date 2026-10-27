@@ -84,17 +84,22 @@ fn resolve_auth(
     ) {
         let exchanger = make_exchanger()?;
         let token_provider = Arc::new(github_auth::GitHubAppTokenProvider::new(
-            client_id,
+            client_id.clone(),
             refresh_token,
         ));
-        let sessions = Arc::new(CopilotSessionProvider::new(token_provider, exchanger));
-        let placeholder = CopilotSession {
-            token: "unset".into(),
-            api_base: None,
-            expires_at: None,
-        };
+        // Exchange eagerly so the Copilot client is built with the real
+        // API base from the token exchange response (some accounts are
+        // assigned a non-default endpoint).  This also validates the
+        // credential at build time rather than on the first request.
+        let access_token = token_provider.access_token_sync()?;
+        let session = exchanger.exchange(&access_token)?;
+        let sessions = Arc::new(CopilotSessionProvider::with_session(
+            token_provider,
+            exchanger,
+            session.clone(),
+        ));
         return Ok(copilot_client_with_session(
-            placeholder,
+            session,
             CopilotTokenRefreshMiddleware::new(sessions),
         ));
     }
@@ -136,14 +141,15 @@ pub struct CopilotCredentialStatus {
 /// Validate a Copilot OAuth credential end-to-end: refresh the GitHub access
 /// token, exchange it for a Copilot session, and return the session status.
 ///
-/// Does NOT persist the rotated refresh token — safe for read-only commands
-/// like `gremlins auth copilot status`.
+/// Uses the persisting provider so the rotated refresh token is saved to
+/// `providers.yaml` — GitHub App refresh tokens are single-use, and
+/// discarding the replacement would break subsequent authentication.
 pub fn check_copilot_oauth_credential(
     client_id: &str,
     refresh_token: &str,
 ) -> Result<CopilotCredentialStatus, String> {
     let provider =
-        github_auth::GitHubAppTokenProvider::new_without_persister(client_id, refresh_token);
+        github_auth::GitHubAppTokenProvider::new(client_id, refresh_token);
     let access_token = provider.access_token_sync()?;
     let exchanger = BlockingCopilotTokenExchanger::new();
     let session = exchanger.exchange(&access_token)?;
@@ -315,17 +321,6 @@ struct CopilotSessionProvider {
 }
 
 impl CopilotSessionProvider {
-    fn new(
-        token_provider: Arc<dyn TokenProvider>,
-        exchanger: Arc<dyn CopilotTokenExchanger>,
-    ) -> Self {
-        Self {
-            token_provider,
-            exchanger,
-            session: tokio::sync::Mutex::new(None),
-        }
-    }
-
     fn with_session(
         token_provider: Arc<dyn TokenProvider>,
         exchanger: Arc<dyn CopilotTokenExchanger>,

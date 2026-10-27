@@ -2127,10 +2127,17 @@ async fn auth_copilot_status() -> Result<(), String> {
 
     match (entry.client_id(), entry.refresh_token()) {
         (Some(_client_id), Some(_refresh_token)) => {
-            // Use the public end-to-end validator — refreshes the GitHub
-            // token, exchanges it for a Copilot session, and reports the
-            // session expiry. No persistence, so this is read-only.
-            match copilot_backend::check_copilot_oauth_credential(_client_id, _refresh_token) {
+            // Run validation on a blocking worker — the checker uses
+            // reqwest::blocking internally and must never run on a tokio
+            // worker thread.
+            let cid = _client_id.to_string();
+            let rt = _refresh_token.to_string();
+            match tokio::task::spawn_blocking(move || {
+                copilot_backend::check_copilot_oauth_credential(&cid, &rt)
+            })
+            .await
+            .map_err(|e| format!("credential check panicked: {e}"))?
+            {
                 Ok(status) => {
                     println!("copilot: ✓ OAuth credential valid");
                     if let Some(exp) = status.expires_at {
@@ -2171,8 +2178,9 @@ fn auth_copilot_logout() -> Result<(), String> {
         }
         entry.clear_oauth();
         if entry.is_empty() {
-            file.0.remove("copilot");
-            println!("copilot: removed (entry was empty)");
+            // Keep the empty entry in the file so save_providers_file
+            // removes it from the persisted YAML.
+            println!("copilot: removed");
         } else {
             println!("copilot: OAuth credentials removed (api-key preserved)");
         }
