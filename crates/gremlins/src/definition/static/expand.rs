@@ -957,6 +957,10 @@ fn _expand_stage_def(
             },
         };
 
+        // Validate call-site interpolation shape before checking flatten constraints
+        // so malformed call-site data is reported before definition-structure errors.
+        validate_call_site_interpolation(call_site_map)?;
+
         // When flattening, reject definition-level keys that must live on the
         // wrapper (which does not exist in flatten mode).
         if flatten_into_parent {
@@ -994,33 +998,6 @@ fn _expand_stage_def(
             .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
 
-        // When flattening, expose call-site interpolation inputs and outputs
-        // through ctx.options so every inner stage can reference them via
-        // {{options.<key>}}. The verbatim interpolation merge below is skipped
-        // for flattened recipes, so this is the only channel for those values.
-        if flatten_into_parent {
-            if let Some(inputs) = call_site_map
-                .get("interpolation")
-                .and_then(|v| v.as_object())
-                .and_then(|m| m.get("inputs"))
-                .and_then(|v| v.as_object())
-            {
-                for (k, v) in inputs {
-                    cs_opts.insert(k.clone(), v.clone());
-                }
-            }
-            if let Some(outputs) = call_site_map
-                .get("interpolation")
-                .and_then(|v| v.as_object())
-                .and_then(|m| m.get("outputs"))
-                .and_then(|v| v.as_object())
-            {
-                for (k, v) in outputs {
-                    cs_opts.insert(k.clone(), v.clone());
-                }
-            }
-        }
-
         for opt in &required_opts {
             let val = cs_opts.get(opt);
             let is_empty = match val {
@@ -1038,6 +1015,38 @@ fn _expand_stage_def(
                     name: stage_display.to_string(),
                     msg: format!("required option {opt:?} is missing or empty"),
                 });
+            }
+        }
+
+        // When flattening, expose call-site interpolation inputs and outputs
+        // through ctx.options so every inner stage can reference them via
+        // {{options.<key>}}. The verbatim interpolation merge below is skipped
+        // for flattened recipes, so this is the only channel for those values.
+        //
+        // Merge precedence (last-write-wins): call-site options, then
+        // interpolation.outputs, then interpolation.inputs.  Inputs win over
+        // outputs because they are the typical artifact source channel and
+        // matching a same-named output would silently break the data flow.
+        if flatten_into_parent {
+            if let Some(outputs) = call_site_map
+                .get("interpolation")
+                .and_then(|v| v.as_object())
+                .and_then(|m| m.get("outputs"))
+                .and_then(|v| v.as_object())
+            {
+                for (k, v) in outputs {
+                    cs_opts.insert(k.clone(), v.clone());
+                }
+            }
+            if let Some(inputs) = call_site_map
+                .get("interpolation")
+                .and_then(|v| v.as_object())
+                .and_then(|m| m.get("inputs"))
+                .and_then(|v| v.as_object())
+            {
+                for (k, v) in inputs {
+                    cs_opts.insert(k.clone(), v.clone());
+                }
             }
         }
 
@@ -1089,9 +1098,6 @@ fn _expand_stage_def(
         );
 
         let ctx_value = serde_json::Value::Object(ctx);
-
-        // Validate call-site interpolation shape before distributing to stages
-        validate_call_site_interpolation(call_site_map)?;
 
         let mut result: Vec<serde_json::Value> = Vec::new();
         for (i, raw_inner) in inner_list.iter().enumerate() {
@@ -2107,6 +2113,112 @@ mod tests {
             last_outputs["result"].as_str().unwrap(),
             "artifact://result.md"
         );
+    }
+
+    #[test]
+    fn flatten_interpolation_input_wins_over_call_site_option_on_key_collision() {
+        // Plan guardrail: when call-site options and interpolation.inputs share a
+        // key, the interpolation input wins because it is merged after options.
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "stages": [
+                    {"name": "s", "type": "agent", "prompt": ["{{options.plan}}\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "name": "cs",
+                "type": "mydef",
+                "options": {"plan": "from-options"},
+                "interpolation": {
+                    "inputs": {"plan": "from-interpolation"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0]["prompt"][0].as_str().unwrap(),
+            "from-interpolation\n"
+        );
+    }
+
+    #[test]
+    fn flatten_interpolation_input_wins_over_output_on_key_collision() {
+        // When interpolation.inputs and interpolation.outputs share a key,
+        // inputs win because they are merged after outputs.
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "stages": [
+                    {"name": "s", "type": "agent", "prompt": ["{{options.artifact}}\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "name": "cs",
+                "type": "mydef",
+                "interpolation": {
+                    "inputs": {"artifact": "artifact://input.md"},
+                    "outputs": {"artifact": "artifact://output.md"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0]["prompt"][0].as_str().unwrap(),
+            "artifact://input.md\n"
+        );
+    }
+
+    #[test]
+    fn flatten_interpolation_key_does_not_satisfy_required_option() {
+        // Interpolation inputs/outputs are injected into cs_opts *after* the
+        // required_opts check, so an interpolation key must not accidentally
+        // satisfy a required option.
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "required-options": ["plan"],
+                "stages": [
+                    {"name": "s", "type": "agent", "prompt": ["hi\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "name": "cs",
+                "type": "mydef",
+                "interpolation": {
+                    "inputs": {"plan": "content(\"artifact://plan.md\")"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let err = expand_stage_def(&call_site, "mydef", &defs).unwrap_err();
+        assert!(err.to_string().contains("required option"));
+        assert!(err.to_string().contains("plan"));
     }
 
     #[test]
