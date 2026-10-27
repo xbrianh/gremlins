@@ -1,4 +1,5 @@
 {
+  "flatten_into_parent": true,
   "required-options": ["verify_cmds"],
   // Input contract: reads the plan written by an upstream plan stage and,
   // unless `options.diff_base` is set, the run's `artifact://base_sha`.
