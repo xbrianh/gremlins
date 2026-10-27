@@ -853,20 +853,30 @@ fn validate_call_site_interpolation(
             }
         }
     }
-    // Validate inputs values are mappings (not scalars)
+    // Validate inputs values are mappings (not scalars) and every value is a string
     if let Some(inputs_val) = interp_map.get("inputs").filter(|v| !v.is_null()) {
-        if !inputs_val.is_object() {
-            return Err(SchemaError::Generic(
-                "'interpolation.inputs' must be a mapping".to_string(),
-            ));
+        let inputs_map = inputs_val.as_object().ok_or_else(|| {
+            SchemaError::Generic("'interpolation.inputs' must be a mapping".to_string())
+        })?;
+        for (k, v) in inputs_map {
+            if !v.is_string() {
+                return Err(SchemaError::Generic(format!(
+                    "'interpolation.inputs.{k}' must be a string"
+                )));
+            }
         }
     }
-    // Validate outputs values are mappings (not scalars)
+    // Validate outputs values are mappings (not scalars) and every value is a string
     if let Some(outputs_val) = interp_map.get("outputs").filter(|v| !v.is_null()) {
-        if !outputs_val.is_object() {
-            return Err(SchemaError::Generic(
-                "'interpolation.outputs' must be a mapping".to_string(),
-            ));
+        let outputs_map = outputs_val.as_object().ok_or_else(|| {
+            SchemaError::Generic("'interpolation.outputs' must be a mapping".to_string())
+        })?;
+        for (k, v) in outputs_map {
+            if !v.is_string() {
+                return Err(SchemaError::Generic(format!(
+                    "'interpolation.outputs.{k}' must be a string"
+                )));
+            }
         }
     }
     Ok(())
@@ -941,7 +951,58 @@ fn _expand_stage_def(
             })
             .unwrap_or_default();
 
-        let cs_opts: HashMap<String, serde_json::Value> = call_site_map
+        // Read flatten_into_parent before building the substitution context:
+        // when true, inner stages are expanded inline into the caller and
+        // call-site interpolation inputs/outputs are injected into ctx.options.
+        let flatten_into_parent = match def_map.get("flatten_into_parent") {
+            None => false,
+            Some(v) => match v.as_bool() {
+                Some(b) => b,
+                None => {
+                    return Err(SchemaError::StageDef {
+                        name: def_name.to_string(),
+                        msg: format!("'flatten_into_parent' must be a boolean, got {:?}", v),
+                    });
+                }
+            },
+        };
+
+        // Validate call-site interpolation shape before checking flatten constraints
+        // so malformed call-site data is reported before definition-structure errors.
+        validate_call_site_interpolation(call_site_map)?;
+
+        // When flattening, reject definition-level keys that must live on the
+        // wrapper (which does not exist in flatten mode).
+        if flatten_into_parent {
+            // Keys that can be set at the call site — advise moving them there.
+            let call_site_keys: &[&str] = &["model", "task-models"];
+            // Keys that only live on the wrapper — advise removing flatten.
+            let wrapper_only_keys: &[&str] = &["max-iterations", "interval", "skip_if_exists"];
+
+            for key in call_site_keys.iter().chain(wrapper_only_keys.iter()) {
+                if def_map.contains_key(*key) {
+                    let hint = if call_site_keys.contains(key) {
+                        format!(
+                            "remove 'flatten_into_parent: true' to enable wrapping \
+                             or move '{key}' to each call site"
+                        )
+                    } else {
+                        format!(
+                            "remove 'flatten_into_parent: true' so '{key}' can live \
+                             on the sequence wrapper"
+                        )
+                    };
+                    return Err(SchemaError::StageDef {
+                        name: def_name.to_string(),
+                        msg: format!(
+                            "'{key}' cannot be used with 'flatten_into_parent: true'; {hint}"
+                        ),
+                    });
+                }
+            }
+        }
+
+        let mut cs_opts: HashMap<String, serde_json::Value> = call_site_map
             .get("options")
             .and_then(|v| v.as_object())
             .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -964,6 +1025,38 @@ fn _expand_stage_def(
                     name: stage_display.to_string(),
                     msg: format!("required option {opt:?} is missing or empty"),
                 });
+            }
+        }
+
+        // When flattening, expose call-site interpolation inputs and outputs
+        // through ctx.options so every inner stage can reference them via
+        // {{options.<key>}}. The verbatim interpolation merge below is skipped
+        // for flattened recipes, so this is the only channel for those values.
+        //
+        // Merge precedence (last-write-wins): call-site options, then
+        // interpolation.outputs, then interpolation.inputs.  Inputs win over
+        // outputs because they are the typical artifact source channel and
+        // matching a same-named output would silently break the data flow.
+        if flatten_into_parent {
+            if let Some(outputs) = call_site_map
+                .get("interpolation")
+                .and_then(|v| v.as_object())
+                .and_then(|m| m.get("outputs"))
+                .and_then(|v| v.as_object())
+            {
+                for (k, v) in outputs {
+                    cs_opts.insert(k.clone(), v.clone());
+                }
+            }
+            if let Some(inputs) = call_site_map
+                .get("interpolation")
+                .and_then(|v| v.as_object())
+                .and_then(|m| m.get("inputs"))
+                .and_then(|v| v.as_object())
+            {
+                for (k, v) in inputs {
+                    cs_opts.insert(k.clone(), v.clone());
+                }
             }
         }
 
@@ -1016,55 +1109,6 @@ fn _expand_stage_def(
 
         let ctx_value = serde_json::Value::Object(ctx);
 
-        // Validate call-site interpolation shape before distributing to stages
-        validate_call_site_interpolation(call_site_map)?;
-
-        // Read flatten_into_parent: when true, inner stages are expanded
-        // inline into the caller instead of being wrapped in a sequence.
-        let flatten_into_parent = match def_map.get("flatten_into_parent") {
-            None => false,
-            Some(v) => match v.as_bool() {
-                Some(b) => b,
-                None => {
-                    return Err(SchemaError::StageDef {
-                        name: def_name.to_string(),
-                        msg: format!("'flatten_into_parent' must be a boolean, got {:?}", v),
-                    });
-                }
-            },
-        };
-
-        // When flattening, reject definition-level keys that must live on the
-        // wrapper (which does not exist in flatten mode).
-        if flatten_into_parent {
-            // Keys that can be set at the call site — advise moving them there.
-            let call_site_keys: &[&str] = &["model", "task-models"];
-            // Keys that only live on the wrapper — advise removing flatten.
-            let wrapper_only_keys: &[&str] = &["max-iterations", "interval", "skip_if_exists"];
-
-            for key in call_site_keys.iter().chain(wrapper_only_keys.iter()) {
-                if def_map.contains_key(*key) {
-                    let hint = if call_site_keys.contains(key) {
-                        format!(
-                            "remove 'flatten_into_parent: true' to enable wrapping \
-                             or move '{key}' to each call site"
-                        )
-                    } else {
-                        format!(
-                            "remove 'flatten_into_parent: true' so '{key}' can live \
-                             on the sequence wrapper"
-                        )
-                    };
-                    return Err(SchemaError::StageDef {
-                        name: def_name.to_string(),
-                        msg: format!(
-                            "'{key}' cannot be used with 'flatten_into_parent: true'; {hint}"
-                        ),
-                    });
-                }
-            }
-        }
-
         let mut result: Vec<serde_json::Value> = Vec::new();
         for (i, raw_inner) in inner_list.iter().enumerate() {
             let substituted = substitute_recipe(raw_inner, &ctx_value)?;
@@ -1094,7 +1138,7 @@ fn _expand_stage_def(
                     inner_map.insert("task-models".to_string(), task_models.clone());
                 }
             }
-            if i == 0 {
+            if !flatten_into_parent && i == 0 {
                 // Merge call-site interpolation.inputs into inner stage's interpolation.inputs
                 if let Some(interpolation_val) = call_site_map.get("interpolation") {
                     if let Some(m) = interpolation_val.as_object() {
@@ -1134,7 +1178,7 @@ fn _expand_stage_def(
                     }
                 }
             }
-            if i == last_idx {
+            if !flatten_into_parent && i == last_idx {
                 // Merge call-site interpolation.outputs into inner stage's interpolation.outputs
                 if let Some(interp_val) = call_site_map.get("interpolation") {
                     if let Some(m) = interp_val.as_object() {
@@ -1946,6 +1990,315 @@ mod tests {
 
         let err = expand_stage_def(&call_site, "mydef", &defs).unwrap_err();
         assert!(err.to_string().contains("model"));
+    }
+
+    #[test]
+    fn flatten_injects_call_site_interpolation_inputs_into_options() {
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "stages": [
+                    {"name": "first", "type": "agent", "prompt": ["plan: {{options.plan}}\n"]},
+                    {"name": "second", "type": "exec", "options": {"cmds": ["cat {{options.plan}}"]}}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "name": "inline",
+                "type": "mydef",
+                "interpolation": {
+                    "inputs": {
+                        "plan": "content(\"artifact://plan.md\")"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        assert_eq!(result.len(), 2);
+
+        assert_eq!(
+            result[0]["prompt"][0].as_str().unwrap(),
+            "plan: content(\"artifact://plan.md\")\n"
+        );
+        assert_eq!(
+            result[1]["options"]["cmds"][0].as_str().unwrap(),
+            "cat content(\"artifact://plan.md\")"
+        );
+        assert!(result[0].get("interpolation").is_none());
+        assert!(result[1].get("interpolation").is_none());
+    }
+
+    #[test]
+    fn flatten_injects_call_site_interpolation_outputs_into_options() {
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "stages": [
+                    {"name": "first", "type": "agent", "prompt": ["out: {{options.artifact}}\n"]},
+                    {"name": "second", "type": "agent", "prompt": ["again: {{options.artifact}}\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "name": "flat",
+                "type": "mydef",
+                "interpolation": {
+                    "outputs": {
+                        "artifact": "artifact://result.md"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result[0]["prompt"][0].as_str().unwrap(),
+            "out: artifact://result.md\n"
+        );
+        assert_eq!(
+            result[1]["prompt"][0].as_str().unwrap(),
+            "again: artifact://result.md\n"
+        );
+        assert!(result[0].get("interpolation").is_none());
+        assert!(result[1].get("interpolation").is_none());
+    }
+
+    #[test]
+    fn wrapped_recipe_merges_call_site_interpolation_into_first_and_last() {
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "stages": [
+                    {"name": "first", "type": "agent", "prompt": ["hi\n"]},
+                    {"name": "middle", "type": "agent", "prompt": ["mid\n"]},
+                    {"name": "last", "type": "agent", "prompt": ["bye\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "name": "wrapped",
+                "type": "mydef",
+                "interpolation": {
+                    "inputs": {"plan": "content(\"artifact://plan.md\")"},
+                    "outputs": {"result": "artifact://result.md"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        assert_eq!(result.len(), 1);
+        let seq = &result[0];
+        assert_eq!(seq["type"].as_str().unwrap(), "sequence");
+        let body = seq["body"].as_array().unwrap();
+        assert_eq!(body.len(), 3);
+
+        let first_inputs = body[0]["interpolation"]["inputs"].as_object().unwrap();
+        assert_eq!(
+            first_inputs["plan"].as_str().unwrap(),
+            "content(\"artifact://plan.md\")"
+        );
+        assert!(body[0]["interpolation"].get("outputs").is_none());
+        assert!(body[1].get("interpolation").is_none());
+        let last_outputs = body[2]["interpolation"]["outputs"].as_object().unwrap();
+        assert_eq!(
+            last_outputs["result"].as_str().unwrap(),
+            "artifact://result.md"
+        );
+    }
+
+    #[test]
+    fn flatten_interpolation_input_wins_over_call_site_option_on_key_collision() {
+        // Plan guardrail: when call-site options and interpolation.inputs share a
+        // key, the interpolation input wins because it is merged after options.
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "stages": [
+                    {"name": "s", "type": "agent", "prompt": ["{{options.plan}}\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "name": "cs",
+                "type": "mydef",
+                "options": {"plan": "from-options"},
+                "interpolation": {
+                    "inputs": {"plan": "from-interpolation"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0]["prompt"][0].as_str().unwrap(),
+            "from-interpolation\n"
+        );
+    }
+
+    #[test]
+    fn flatten_interpolation_input_wins_over_output_on_key_collision() {
+        // When interpolation.inputs and interpolation.outputs share a key,
+        // inputs win because they are merged after outputs.
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "stages": [
+                    {"name": "s", "type": "agent", "prompt": ["{{options.artifact}}\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "name": "cs",
+                "type": "mydef",
+                "interpolation": {
+                    "inputs": {"artifact": "artifact://input.md"},
+                    "outputs": {"artifact": "artifact://output.md"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0]["prompt"][0].as_str().unwrap(),
+            "artifact://input.md\n"
+        );
+    }
+
+    #[test]
+    fn flatten_interpolation_key_does_not_satisfy_required_option() {
+        // Interpolation inputs/outputs are injected into cs_opts *after* the
+        // required_opts check, so an interpolation key must not accidentally
+        // satisfy a required option.
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "required-options": ["plan"],
+                "stages": [
+                    {"name": "s", "type": "agent", "prompt": ["hi\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "name": "cs",
+                "type": "mydef",
+                "interpolation": {
+                    "inputs": {"plan": "content(\"artifact://plan.md\")"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let err = expand_stage_def(&call_site, "mydef", &defs).unwrap_err();
+        assert!(err.to_string().contains("required option"));
+        assert!(err.to_string().contains("plan"));
+    }
+
+    #[test]
+    fn flatten_rejects_non_string_interpolation_input_value() {
+        // Non-string values in interpolation.inputs must be rejected even when
+        // flattening, since the downstream json_string_map validation is bypassed.
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "stages": [
+                    {"name": "s", "type": "agent", "prompt": ["hi\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "name": "cs",
+                "type": "mydef",
+                "interpolation": {
+                    "inputs": {"plan": 123}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let err = expand_stage_def(&call_site, "mydef", &defs).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'interpolation.inputs.plan' must be a string"),
+            "expected string-validation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn flatten_rejects_non_string_interpolation_output_value() {
+        // Non-string values in interpolation.outputs must be rejected even when
+        // flattening, since the downstream json_string_map validation is bypassed.
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "stages": [
+                    {"name": "s", "type": "agent", "prompt": ["hi\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "name": "cs",
+                "type": "mydef",
+                "interpolation": {
+                    "outputs": {"result": true}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let err = expand_stage_def(&call_site, "mydef", &defs).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'interpolation.outputs.result' must be a string"),
+            "expected string-validation error, got: {err}"
+        );
     }
 
     #[test]
