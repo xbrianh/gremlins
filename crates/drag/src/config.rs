@@ -172,21 +172,21 @@ pub struct WeightsConfig {
 }
 
 fn default_w2() -> f64 {
-    0.0
+    0.5
 }
 fn default_m() -> f64 {
-    0.0
+    2.5
 }
 fn default_p() -> f64 {
-    0.0
+    2.5
 }
 
 impl Default for WeightsConfig {
     fn default() -> Self {
         Self {
-            w2: 0.0,
-            m: 0.0,
-            p: 0.0,
+            w2: 0.5,
+            m: 2.5,
+            p: 2.5,
         }
     }
 }
@@ -306,10 +306,10 @@ mod tests {
     #[test]
     fn default_config_has_schema_defaults() {
         let config = DragConfig::default();
-        // Weights default to 0.0 (schema default), not the bundled values.
-        assert_eq!(config.weights.w2, 0.0);
-        assert_eq!(config.weights.m, 0.0);
-        assert_eq!(config.weights.p, 0.0);
+        // Weights default to 0.5, 2.5, 2.5 (schema defaults match bundled config).
+        assert_eq!(config.weights.w2, 0.5);
+        assert_eq!(config.weights.m, 2.5);
+        assert_eq!(config.weights.p, 2.5);
         // Operational fields default to empty / zero.
         assert_eq!(config.tokenizer, "");
         assert_eq!(config.estimates_per_survey, 0);
@@ -321,14 +321,16 @@ mod tests {
     }
 
     #[test]
-    fn partial_json_gets_schema_defaults_not_bundled() {
+    fn partial_json_gets_bundled_defaults() {
         // When a user provides a minimal JSON, omitted fields get schema defaults.
+        // Schema defaults now match bundled values (0.5, 2.5, 2.5) so partial
+        // overrides don't silently zero the weights.
         let json = r#"{"weights": {"w2": 1.0}}"#;
         let config: DragConfig = serde_json5::from_str(json).expect("partial config should parse");
         assert_eq!(config.weights.w2, 1.0);
-        // m and p fall back to schema defaults (0.0), not bundled values.
-        assert_eq!(config.weights.m, 0.0);
-        assert_eq!(config.weights.p, 0.0);
+        // m and p fall back to schema defaults (2.5), matching bundled values.
+        assert_eq!(config.weights.m, 2.5);
+        assert_eq!(config.weights.p, 2.5);
         // Omitted top-level fields get schema defaults.
         assert_eq!(config.tokenizer, "");
         assert_eq!(config.estimates_per_survey, 0);

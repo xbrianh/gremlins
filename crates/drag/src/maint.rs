@@ -333,11 +333,6 @@ pub(crate) async fn score_package_maintainability(
     Ok(result)
 }
 
-/// Compute package-level drag: `exp(p·(1−maint)) · Σ module_drags`.
-pub(crate) fn compute_package_drag(p: f64, maint_score: f64, module_drag_sum: f64) -> f64 {
-    (p * (1.0 - maint_score)).exp() * module_drag_sum
-}
-
 // ---------------------------------------------------------------------------
 // Prompt
 // ---------------------------------------------------------------------------
@@ -362,6 +357,9 @@ fn build_dim_prompt(
          ```\n{landscape}```\n\n\
          ## Public API\n\n\
          {api_section}\n\n\
+         **Scope**: If this package contains sub-packages, limit your assessment\n\
+         to this package's own modules and organization — sub-package internals\n\
+         are scored independently.\n\n\
          ## Dimension: {label}\n\n\
          {description}\n\n\
          {preamble}\n\n\
