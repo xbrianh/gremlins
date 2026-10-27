@@ -24,6 +24,7 @@ Landscape first for structure, then Grep for targeted search.\n\
 Landscape (structural outline), Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
 by pattern), Bash (shell commands), Task, Done\n\
+Edit is for code changes (not Bash scripts/sed). Read/Grep/Glob are for file inspection (not shell sed/grep/tail).\n\
 </tools>\n\
 Before every turn, scan the tools you're about to call. When two or more \
 calls are independent (neither depends on the other's result), batch them in \
@@ -53,6 +54,9 @@ revised content with the Write tool.\n\
 pub(crate) fn task_system_prompt(work_root: &Path) -> String {
     format!(
         "\
+<important>\n\
+Think and write in a terse, to-the-point style. Make brief statements that get to the point. Do this for reasoning and writing \
+</important>\n\
 <discovery>\n\
 Landscape is your most powerful discovery tool. Use it when starting a new \
 task, exploring an unfamiliar directory, finding where something lives, or \
@@ -63,6 +67,7 @@ Landscape first for structure, then Grep for targeted search.\n\
 Landscape (structural outline), Read (read files), Write (create files), Edit (targeted \
 replacements), Grep (regex search), Glob (find files \
 by pattern), Bash (shell commands), Task, Done\n\
+Edit is for code changes (not Bash scripts/sed). Read/Grep/Glob are for file inspection (not shell sed/grep/tail).\n\
 </tools>\n\
 Before every turn, scan the tools you're about to call. When two or more \
 calls are independent (neither depends on the other's result), batch them in \
@@ -137,11 +142,15 @@ mod tests {
     }
 
     #[test]
-    fn test_task_system_prompt_omits_delegation_guidance() {
+    fn test_task_system_prompt_includes_important_style() {
         let prompt = task_system_prompt(Path::new("/work"));
         assert!(
-            !prompt.contains("<important>") && !prompt.contains("<important>"),
-            "child prompt must not inject delegation guidance; got: {prompt}"
+            prompt.contains("<important>"),
+            "task prompt must include the terse-style guidance block; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("terse, to-the-point style"),
+            "task prompt must include terse style text; got: {prompt}"
         );
     }
 
@@ -156,6 +165,10 @@ mod tests {
             prompt.contains("Call Done(summary) alongside your final message"),
             "agent prompt must include Done instruction; got: {prompt}"
         );
+        assert!(
+            prompt.contains("Edit is for code changes (not Bash scripts/sed). Read/Grep/Glob are for file inspection (not shell sed/grep/tail)."),
+            "agent prompt must include anti-pattern tool guidance; got: {prompt}"
+        );
     }
 
     #[test]
@@ -168,6 +181,10 @@ mod tests {
         assert!(
             prompt.contains("Call Done(summary) alongside your final message"),
             "task prompt must include Done instruction; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("Edit is for code changes (not Bash scripts/sed). Read/Grep/Glob are for file inspection (not shell sed/grep/tail)."),
+            "task prompt must include anti-pattern tool guidance; got: {prompt}"
         );
     }
 
