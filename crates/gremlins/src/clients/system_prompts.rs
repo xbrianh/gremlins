@@ -6,7 +6,7 @@ use std::path::Path;
 
 /// Shared batching guidance used by every system prompt. Kept in one place so
 /// the agent, task, and fork prompts never drift apart.
-const BATCHING_GUIDANCE: &str = "Before every turn, scan the tools you're about to call. When two or more calls are independent (neither depends on the other's result), batch them in a single message. Good: Read foo.rs + Grep \"pattern\" + Bash \"cargo check\" — three independent operations in one turn. Bad: those same three calls spread across three serial turns. After writing files, batch all spot-checks (Reads and Greps) into one turn rather than one check per turn; if the build passes and spot-checks look correct, call Done.";
+pub(crate) const BATCHING_GUIDANCE: &str = "Before every turn, scan the tools you're about to call. When two or more calls are independent (neither depends on the other's result), batch them in a single message. Good: Read foo.rs + Grep \"pattern\" + Bash \"cargo check\" — three independent operations in one turn. Bad: those same three calls spread across three serial turns. After writing files, batch all spot-checks (Reads and Greps) into one turn rather than one check per turn; if the build passes and spot-checks look correct, call Done.";
 
 /// System prompt injected into every agent stage. Carries the tool roster,
 /// directory layout, and pragmatic guidance (e.g. delegation policy).
@@ -249,14 +249,30 @@ mod tests {
 
     #[test]
     fn test_all_prompts_share_batching_guidance() {
+        let expected = r#"Before every turn, scan the tools you're about to call. When two or more calls are independent (neither depends on the other's result), batch them in a single message. Good: Read foo.rs + Grep "pattern" + Bash "cargo check" — three independent operations in one turn. Bad: those same three calls spread across three serial turns. After writing files, batch all spot-checks (Reads and Greps) into one turn rather than one check per turn; if the build passes and spot-checks look correct, call Done."#;
+        assert_eq!(
+            BATCHING_GUIDANCE, expected,
+            "BATCHING_GUIDANCE constant must match the expected literal; update both or neither"
+        );
+
         let agent = agent_system_prompt(Path::new("/work"));
         let task = task_system_prompt(Path::new("/work"));
         let fork = fork_system_prompt(Path::new("/work"));
         for (name, prompt) in [("agent", &agent), ("task", &task), ("fork", &fork)] {
             assert!(
-                prompt.contains(BATCHING_GUIDANCE),
+                prompt.contains(expected),
                 "{name} prompt must include the shared batching guidance; got: {prompt}"
             );
         }
+    }
+
+    #[test]
+    fn test_chat_system_prompt_matches_batching_guidance() {
+        let chat_md = include_str!("../../prompts/chat_system.md");
+        assert!(
+            chat_md.contains(BATCHING_GUIDANCE),
+            "chat_system.md must include the same batching guidance as BATCHING_GUIDANCE; \
+             edit both or neither to prevent desync"
+        );
     }
 }
