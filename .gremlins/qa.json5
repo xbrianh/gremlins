@@ -32,7 +32,7 @@
       },
     },
     launch_cmds: [
-      'TARGET_REF="{target-ref}"\n[ -z "$TARGET_REF" ] && TARGET_REF=HEAD\nBASE_REF="{base-ref}"\nif [ -z "$BASE_REF" ]; then\n  BASE_REF=$(git -C "$GREMLINS_PROJECT_ROOT" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed \'s|^refs/remotes/origin/||\')\n  [ -z "$BASE_REF" ] && BASE_REF=main\nfi\nTARGET_SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "$TARGET_REF")\nBASE_SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "$BASE_REF")\ngit -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$TARGET_SHA"\nprintf "%s" "$BASE_REF" > "$GREMLINS_STATE_DIR/artifacts/base_ref"\nprintf "%s" "$TARGET_REF" > "$GREMLINS_STATE_DIR/artifacts/target_ref"\nprintf "%s" "$BASE_SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"\nprintf "%s" "$TARGET_SHA" > "$GREMLINS_STATE_DIR/artifacts/target_sha"',
+      'set -euo pipefail\nTARGET_REF={target-ref}\n[ -z "$TARGET_REF" ] && TARGET_REF=HEAD\nBASE_REF={base-ref}\nif [ -z "$BASE_REF" ]; then\n  BASE_REF=$(git -C "$GREMLINS_PROJECT_ROOT" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed \'s|^refs/remotes/origin/||\')\n  [ -z "$BASE_REF" ] && BASE_REF=main\nfi\nTARGET_SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "$TARGET_REF")\nBASE_SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "$BASE_REF")\ngit -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$TARGET_SHA"\nprintf "%s" "$BASE_REF" > "$GREMLINS_STATE_DIR/artifacts/base_ref"\nprintf "%s" "$TARGET_REF" > "$GREMLINS_STATE_DIR/artifacts/target_ref"\nprintf "%s" "$BASE_SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"\nprintf "%s" "$TARGET_SHA" > "$GREMLINS_STATE_DIR/artifacts/target_sha"',
     ],
     cli_out: {
       base_ref: "artifact://base_ref",
@@ -136,7 +136,7 @@
         },
       },
       options: {
-        cmds: ["git diff {base_sha}..HEAD > {diff}"],
+        cmds: ["git diff {base_sha}..HEAD > \"{diff}\""],
       },
     },
     // ── parallel reviews: two semantic + one structural ───────────────
@@ -194,7 +194,7 @@
               options: {
                 timeout: 300,
                 cmds: [
-                  'cargo_modules_report "{base_sha}" "artifact://complexity-report.md" "{report}" "{tree}" "{dot}" "{adjacency}"',
+                  'cargo_modules_report "{base_sha}" "artifact://complexity-report.md" "{report}" "{tree}" "{dot}" "{adjacency}" "--two-dot"',
                 ],
               },
             },
