@@ -425,6 +425,13 @@ pub(crate) fn complete_device_flow_with_url(
                 })?;
                 // The first-party Copilot OAuth client-id does not return a
                 // refresh token — the access token is long-lived and static.
+                if response.refresh_token.is_none() && client_id != DEFAULT_COPILOT_OAUTH_CLIENT_ID
+                {
+                    warn!(
+                        "OAuth client {client_id} returned no refresh token — \
+                         the access token may be short-lived"
+                    );
+                }
                 return Ok(DeviceFlowCredentials {
                     access_token,
                     refresh_token: response.refresh_token,
@@ -544,4 +551,47 @@ fn encode_form_component(value: &str) -> String {
         }
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    #[test]
+    fn complete_device_flow_missing_refresh_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let token_url = format!("http://{addr}/token");
+
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let body = r#"{"access_token":"gho_test123","token_type":"bearer"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body,
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+
+        let result = complete_device_flow_with_url(
+            &token_url,
+            DEFAULT_COPILOT_OAUTH_CLIENT_ID,
+            "fake-device-code",
+            Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(5),
+        );
+
+        let creds = result.expect("device flow should complete");
+        assert_eq!(creds.access_token, "gho_test123");
+        assert!(
+            creds.refresh_token.is_none(),
+            "refresh token should be absent when server omits it"
+        );
+    }
 }

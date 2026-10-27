@@ -214,10 +214,7 @@ async fn main() {
         Some(Cmds::Auth { command }) => match command {
             AuthCmds::Copilot { command } => match command {
                 CopilotAuthCmds::Login { client_id } => {
-                    let cid = client_id
-                        .as_deref()
-                        .unwrap_or(github_auth::DEFAULT_COPILOT_OAUTH_CLIENT_ID);
-                    auth_copilot_login(cid).await
+                    auth_copilot_login(copilot_login_client_id(client_id.as_deref())).await
                 }
                 CopilotAuthCmds::Status => auth_copilot_status().await,
                 CopilotAuthCmds::Logout => auth_copilot_logout(),
@@ -2038,6 +2035,12 @@ async fn tail_log_lines(path: &Path, n: usize) -> Result<Vec<String>, String> {
 
 // ── auth copilot ─────────────────────────────────────────────────────────
 
+/// Resolve the Copilot OAuth client-id supplied on the CLI, defaulting to the
+/// first-party Copilot OAuth app when none was given.
+fn copilot_login_client_id(client_id: Option<&str>) -> &str {
+    client_id.unwrap_or(github_auth::DEFAULT_COPILOT_OAUTH_CLIENT_ID)
+}
+
 async fn auth_copilot_login(client_id: &str) -> Result<(), String> {
     // Ensure global config so user_config_root resolves.
     gremlins::config::init_global().map_err(|e| e.to_string())?;
@@ -2174,7 +2177,7 @@ async fn auth_copilot_status() -> Result<(), String> {
                 Err(e) => println!("copilot: ✗ credential invalid: {e}"),
             }
         }
-        (Some(_), None, Some(github_token)) => {
+        (_, None, Some(github_token)) => {
             // Static GitHub access token — validate by exchanging for a
             // Copilot session.
             let token = github_token.to_string();
@@ -2510,5 +2513,51 @@ mod tests {
 
         let (outcome, _) = rm_all_entry("gr-test-0001", &state_json, None, false).await;
         assert!(matches!(outcome, RmAllEntry::Ignored));
+    }
+
+    // --- copilot login parsing ---
+
+    #[test]
+    fn copilot_login_parse_without_client_id() {
+        let cli = Cli::try_parse_from(["gremlins", "auth", "copilot", "login"])
+            .expect("login args must parse");
+        let Some(Cmds::Auth {
+            command:
+                AuthCmds::Copilot {
+                    command: CopilotAuthCmds::Login { client_id },
+                },
+        }) = cli.command
+        else {
+            panic!("expected copilot login command");
+        };
+        assert_eq!(client_id.as_deref(), None);
+        assert_eq!(
+            copilot_login_client_id(client_id.as_deref()),
+            github_auth::DEFAULT_COPILOT_OAUTH_CLIENT_ID
+        );
+    }
+
+    #[test]
+    fn copilot_login_parse_with_client_id() {
+        let cli = Cli::try_parse_from([
+            "gremlins",
+            "auth",
+            "copilot",
+            "login",
+            "--client-id",
+            "Iv1.own-app",
+        ])
+        .expect("login args must parse");
+        let Some(Cmds::Auth {
+            command:
+                AuthCmds::Copilot {
+                    command: CopilotAuthCmds::Login { client_id },
+                },
+        }) = cli.command
+        else {
+            panic!("expected copilot login command");
+        };
+        assert_eq!(client_id.as_deref(), Some("Iv1.own-app"));
+        assert_eq!(copilot_login_client_id(client_id.as_deref()), "Iv1.own-app");
     }
 }

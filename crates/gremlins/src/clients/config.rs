@@ -1218,6 +1218,21 @@ mod tests {
         ));
     }
 
+    // --- ProviderEntry github-token round-trip ---
+
+    #[test]
+    fn test_provider_entry_github_token_roundtrip() {
+        let yaml = "github-token: gho_static123\n";
+        let entry: ProviderEntry = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(entry.github_token(), Some("gho_static123"));
+        assert!(entry.refresh_token().is_none());
+        assert!(entry.client_id().is_none());
+
+        let serialized = serde_yaml::to_string(&entry).unwrap();
+        let round: ProviderEntry = serde_yaml::from_str(&serialized).unwrap();
+        assert_eq!(round.github_token(), Some("gho_static123"));
+    }
+
     #[test]
     fn test_parse_provider_auth_invalid() {
         assert!(parse_provider_auth("bogus").is_err());
