@@ -346,7 +346,6 @@ pub(crate) fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option
                         }
                     }
                 }
-
             }
         }
     }
