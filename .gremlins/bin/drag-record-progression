@@ -3,15 +3,18 @@
 # refactors span files outside the original target scope.
 #
 # Usage:
-#   drag-record-progression WORKDIR STATE_DIR CURRENT_TARGET BASE_SHA
-#                          LOOP_ITER CONFIG_PATH PROGRESSION_IN
-#                          PROGRESSION_OUT TARGET_OUT
+#   drag-record-progression WORKDIR STATE_DIR BASE_SHA LOOP_ITER
+#                          CONFIG_PATH PROGRESSION_IN PROGRESSION_OUT
+#                          CONFIG_OUT
+#
+# The current target is read from CONFIG_PATH (which GREMLINS_DRAG_CLI_CONFIG
+# also points to).  All gremlins-drag invocations use the env var — no
+# --config or target arguments needed.
 #
 # When the target broadens (changed files span a wider common root), this
 # script recomputes ALL prior progression entries by checking out each
 # entry's iter_end_sha and re-running gremlins-drag with the new target.
-# This keeps the progression self-consistent — every entry is measured
-# against the same target scope.
+# It updates the mutable CONFIG_PATH and writes a snapshot to CONFIG_OUT.
 #
 # When the target is unchanged, the script reads drag values from the
 # score stage's artifacts and appends as before.
@@ -24,13 +27,12 @@ source "$SCRIPT_DIR/lib/logging.sh"
 
 WORKDIR="$1"
 STATE_DIR="$2"
-CURRENT_TARGET="$3"
-BASE_SHA="$4"
-LOOP_ITER="$5"
-CONFIG_PATH="$6"
-PROGRESSION_IN="$7"
-PROGRESSION_OUT="$8"
-TARGET_OUT="$9"
+BASE_SHA="$3"
+LOOP_ITER="$4"
+CONFIG_PATH="$5"
+PROGRESSION_IN="$6"
+PROGRESSION_OUT="$7"
+CONFIG_OUT="$8"
 
 # ── per-iteration artifact paths ────────────────────────────────────────────
 
@@ -71,9 +73,9 @@ common_prefix() {
 }
 
 # Run gremlins-drag and extract the .drag field.
+# Config and target are read from GREMLINS_DRAG_CLI_CONFIG env var.
 drag_sum() {
-    local target="$1"
-    gremlins-drag --config "$CONFIG_PATH" "$target" | jq '.drag'
+    gremlins-drag | jq '.drag'
 }
 
 # Sanitize a numeric value read from a file.
@@ -118,7 +120,12 @@ if jq -e --arg iter "$LOOP_ITER" \
     exit 0
 fi
 
-# ── step 1: compute common root across ALL changes since baseline ───────────
+# ── step 1: read current target from config and compute common root ──────────
+
+CURRENT_TARGET=$(jq -r '.path // ""' "$CONFIG_PATH")
+if [ -z "$CURRENT_TARGET" ]; then
+    die "record-progression: no .path in config $CONFIG_PATH"
+fi
 
 # If the target is a single file, use its directory for the common-root
 # computation (gremlins-drag accepts both files and dirs).
@@ -163,7 +170,7 @@ if [ "$NEW_TARGET" != "$TARGET_DIR" ]; then
 
         git -C "$WORKDIR" checkout --quiet "$SHA"
 
-        DRAG=$(drag_sum "$NEW_TARGET")
+        DRAG=$(drag_sum)
 
         if [ "$FIRST" = true ]; then
             # Baseline entry: drag_before stays null.
@@ -188,7 +195,7 @@ if [ "$NEW_TARGET" != "$TARGET_DIR" ]; then
     git -C "$WORKDIR" checkout --quiet "$HEAD_SAVED"
 
     # Compute current iteration drag at HEAD with the new target.
-    CURRENT_DRAG=$(drag_sum "$NEW_TARGET")
+    CURRENT_DRAG=$(drag_sum)
     DRAG_BEFORE="$PREV_DRAG"
     DRAG_AFTER="$CURRENT_DRAG"
 
@@ -196,13 +203,8 @@ if [ "$NEW_TARGET" != "$TARGET_DIR" ]; then
     printf '%s' "$CURRENT_DRAG" > "$STATE_DIR/artifacts/drag_best.txt"
 
     # Re-run to get the full report for drag_current.json.
-    gremlins-drag --config "$CONFIG_PATH" "$NEW_TARGET" > "$STATE_DIR/drag_current.json"
+    gremlins-drag > "$STATE_DIR/drag_current.json"
 
-    # Rotate drag_previous.json — the score stage already rotated it, but it
-    # used the old target.  Overwrite with the previous entry's report.
-    # We don't have the full report for prior entries, so use the score
-    # stage's drag_previous.json as-is.  The planning agent tolerates slight
-    # inconsistencies here.
     info "record-progression: recomputed progression with target=$NEW_TARGET, drag=$CURRENT_DRAG"
 else
     # Target unchanged — use values from the score stage.
@@ -212,10 +214,16 @@ else
     DRAG_AFTER=$(sanitize_num "$DRAG_AFTER_PATH")
 fi
 
-# ── step 3: write the (possibly broadened) target for the next iteration ────
+# ── step 3: update mutable config and write config snapshot ─────────────────
 
-printf '%s' "$NEW_TARGET" > "$TARGET_OUT"
-info "record-progression: wrote target=$NEW_TARGET to target_out"
+# Update the mutable config with the (possibly broadened) target.
+jq --arg target "$NEW_TARGET" '.path = $target' "$CONFIG_PATH" > "$CONFIG_PATH.tmp" \
+    && mv "$CONFIG_PATH.tmp" "$CONFIG_PATH"
+
+# Write the config snapshot artifact for the next iteration.
+cp "$CONFIG_PATH" "$CONFIG_OUT"
+
+info "record-progression: config target=$NEW_TARGET"
 
 # ── step 4: append current iteration entry ──────────────────────────────────
 

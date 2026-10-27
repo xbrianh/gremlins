@@ -197,9 +197,14 @@ async fn run() -> Result<(), String> {
         return Ok(());
     }
 
-    let path = cli.path.ok_or_else(|| {
-        "<PATH> is required unless --explain or --clear-cache is used".to_string()
-    })?;
+    // When GREMLINS_DRAG_CLI_CONFIG is set, the target comes from
+    // config.path; otherwise it must be passed as a positional argument.
+    let path = cli
+        .path
+        .or_else(|| config.path.clone().map(PathBuf::from))
+        .ok_or_else(|| {
+            "<PATH> is required unless --explain or --clear-cache is used".to_string()
+        })?;
 
     // 1. Discover packages (Rust + Python, best-effort) anchored at the
     //    user-supplied path so that packages are found regardless of cwd.
