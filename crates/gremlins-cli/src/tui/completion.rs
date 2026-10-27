@@ -125,38 +125,57 @@ fn expand_home(word: &str) -> Option<PathBuf> {
     })
 }
 
+/// Resolve a listing directory to an absolute path.
+///
+/// Relative directories are joined onto the process working directory. When
+/// the joined path exists, it is resolved through the filesystem so `.` and
+/// `..` components follow symlinks exactly as [`std::fs::read_dir`] will.
+/// Collapsing `..` lexically would list the wrong directory for
+/// `link/../needle` when `link` is a symlink. When the joined path does not
+/// exist, the unresolved absolute path is returned unchanged; `complete`
+/// then fails to list it and reports the usual silent failure. Returns
+/// `None` when the working directory cannot be determined.
+fn absolutize(dir: PathBuf) -> Option<PathBuf> {
+    if dir.is_absolute() {
+        return Some(dir);
+    }
+    let joined = std::env::current_dir().ok()?.join(dir);
+    // `canonicalize` resolves dot components through the filesystem. If the
+    // directory does not exist, fall back to the joined path so `complete`
+    // keeps its usual silent failure when `read_dir` reports the error.
+    match std::fs::canonicalize(&joined) {
+        Ok(path) => Some(path),
+        Err(_) => Some(joined),
+    }
+}
+
 /// Normalize a path word for directory listing.
 ///
-/// Returns the directory to list and the partial component that must match
-/// entry names. A path with no trailing separator keeps the final component
-/// as the partial; a path ending in `/` (or with no component at all) lists
-/// inside that directory with an empty partial.
-fn split_prefix(word: &str, expanded: PathBuf) -> (PathBuf, String) {
-    if word.ends_with('/') {
+/// Returns the directory to list — always absolute — and the partial
+/// component that must match entry names. A path with no trailing separator
+/// keeps the final component as the partial; a path ending in `/` (or with
+/// no component at all) lists inside that directory with an empty partial.
+fn split_prefix(word: &str, expanded: PathBuf) -> Option<(PathBuf, String)> {
+    let (dir, partial) = if word.ends_with('/') {
         (expanded, String::new())
     } else {
         match (expanded.parent(), expanded.file_name()) {
             (Some(dir), Some(file)) if !dir.as_os_str().is_empty() => {
                 (dir.to_path_buf(), file.to_string_lossy().into_owned())
             }
-            // The expanded path has no parent (e.g. a relative filename).
-            (_, Some(file)) => (PathBuf::from("."), file.to_string_lossy().into_owned()),
+            // The expanded path has no parent (e.g. a bare relative
+            // filename); the listing directory is the working directory.
+            (_, Some(file)) => (PathBuf::new(), file.to_string_lossy().into_owned()),
             (Some(dir), None) => (dir.to_path_buf(), String::new()),
-            (None, None) => (PathBuf::from("."), String::new()),
+            (None, None) => (PathBuf::new(), String::new()),
         }
-    }
+    };
+    Some((absolutize(dir)?, partial))
 }
 
 /// Build the full path word for a directory entry.
 fn entry_path_word(dir: &Path, name: &str, is_dir: bool) -> String {
-    // A listing directory of `.` means a bare relative filename; emit the
-    // entry name directly rather than a `./`-prefixed path so the replaced
-    // token matches the form the user typed.
-    let mut out = if dir == Path::new(".") {
-        name.to_string()
-    } else {
-        dir.join(name).to_string_lossy().into_owned()
-    };
+    let mut out = dir.join(name).to_string_lossy().into_owned();
     if is_dir && !out.ends_with('/') {
         out.push('/');
     }
@@ -183,7 +202,7 @@ pub fn complete(input: &str, cursor: usize) -> Option<CompletionState> {
     let (dir, partial) = if word == "~" {
         (expanded, String::new())
     } else {
-        split_prefix(word, expanded)
+        split_prefix(word, expanded)?
     };
 
     let entries = match std::fs::read_dir(&dir) {
@@ -235,6 +254,7 @@ fn word_start(input: &str, cursor: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
 
     #[test]
     fn path_word_extracts_after_last_whitespace() {
@@ -332,18 +352,72 @@ mod tests {
         assert!(expand_home("~nobody").is_none());
     }
 
+    /// Process-wide CWD changes affect every test thread, so serialise them
+    /// behind a lock and always restore the previous directory on drop —
+    /// even on panic.
+    static CWD_LOCK: Mutex<()> = Mutex::new(());
+
+    struct CwdGuard {
+        prev: PathBuf,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl CwdGuard {
+        fn enter(dir: &Path) -> Self {
+            let lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::current_dir().expect("current_dir");
+            std::env::set_current_dir(dir).expect("set cwd");
+            CwdGuard { prev, _lock: lock }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.prev);
+        }
+    }
+
     #[test]
     fn split_prefix_handles_trailing_slash() {
-        let (dir, partial) = split_prefix("src/", PathBuf::from("src"));
-        assert_eq!(dir, PathBuf::from("src"));
+        let (dir, partial) = split_prefix("/src/", PathBuf::from("/src")).unwrap();
+        assert_eq!(dir, PathBuf::from("/src"));
         assert_eq!(partial, "");
     }
 
     #[test]
-    fn split_prefix_handles_plain_filename() {
-        let (dir, partial) = split_prefix("Ca", PathBuf::from("Ca"));
-        assert_eq!(dir, PathBuf::from("."));
+    fn split_prefix_absolutizes_relative_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("crates")).unwrap();
+        let _cwd = CwdGuard::enter(tmp.path());
+        let (dir, partial) = split_prefix("crates/gr", PathBuf::from("crates/gr")).unwrap();
+        assert!(dir.is_absolute());
+        assert_eq!(
+            dir,
+            std::fs::canonicalize(tmp.path()).unwrap().join("crates")
+        );
+        assert_eq!(partial, "gr");
+    }
+
+    #[test]
+    fn split_prefix_absolutizes_plain_filename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _cwd = CwdGuard::enter(tmp.path());
+        let (dir, partial) = split_prefix("Ca", PathBuf::from("Ca")).unwrap();
+        assert_eq!(dir, std::fs::canonicalize(tmp.path()).unwrap());
         assert_eq!(partial, "Ca");
+    }
+
+    #[test]
+    fn split_prefix_collapses_dot_and_parent_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("crates")).unwrap();
+        let _cwd = CwdGuard::enter(tmp.path());
+        let (dir, partial) =
+            split_prefix("./crates/../gr", PathBuf::from("./crates/../gr")).unwrap();
+        assert_eq!(dir, std::fs::canonicalize(tmp.path()).unwrap());
+        assert_eq!(partial, "gr");
+        let s = dir.to_string_lossy();
+        assert!(!s.contains("/./") && !s.contains("/../"));
     }
 
     #[test]
@@ -353,12 +427,6 @@ mod tests {
             "src/main.rs"
         );
         assert_eq!(entry_path_word(Path::new("src"), "sub", true), "src/sub/");
-    }
-
-    #[test]
-    fn entry_path_word_omits_dot_prefix_for_cwd() {
-        assert_eq!(entry_path_word(Path::new("."), "main.rs", false), "main.rs");
-        assert_eq!(entry_path_word(Path::new("."), "sub", true), "sub/");
     }
 
     #[test]
@@ -396,5 +464,63 @@ mod tests {
     fn completion_failure_is_silent() {
         let input = "/definitely/not/here/pa";
         assert!(complete(input, input.len()).is_none());
+    }
+
+    #[test]
+    fn completion_emits_absolute_candidates_for_relative_and_bare_inputs() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("crates")).unwrap();
+        std::fs::write(tmp.path().join("crates").join("gremlins-cli"), "x").unwrap();
+        std::fs::write(tmp.path().join("Cargo.toml"), "x").unwrap();
+        let _cwd = CwdGuard::enter(tmp.path());
+
+        // A relative prefix lists from an absolute directory.
+        let input = "crates/gr";
+        let state = complete(input, input.len()).unwrap();
+        assert!(!state.candidates.is_empty());
+        assert!(state.candidates.iter().all(|c| Path::new(c).is_absolute()));
+        assert!(state.candidates.iter().all(|c| !c.contains("/./")));
+
+        // A bare filename resolves against the working directory.
+        let input = "Cargo";
+        let state = complete(input, input.len()).unwrap();
+        assert_eq!(
+            state.candidates,
+            vec![format!(
+                "{}/Cargo.toml",
+                std::fs::canonicalize(tmp.path()).unwrap().display()
+            )]
+        );
+    }
+
+    /// Regression test: `..` must be resolved by the filesystem, not by
+    /// lexically popping path components. When `link` is a symlink to
+    /// `target/sub`, completing `link/../needle` lists `target`, so the
+    /// candidate is `target/needle` — not `work/needle`.
+    #[cfg(unix)]
+    #[test]
+    fn completion_resolves_parent_through_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        let target = tmp.path().join("target");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(target.join("sub")).unwrap();
+        std::fs::write(work.join("needle"), "work").unwrap();
+        std::fs::write(target.join("needle"), "target").unwrap();
+        symlink(target.join("sub"), work.join("link")).unwrap();
+
+        let _cwd = CwdGuard::enter(&work);
+        let input = "link/../needle";
+        let state = complete(input, input.len()).unwrap();
+
+        assert_eq!(
+            state.candidates,
+            vec![format!(
+                "{}/needle",
+                std::fs::canonicalize(&target).unwrap().display()
+            )]
+        );
     }
 }
