@@ -343,6 +343,8 @@ impl<B: Backend> LiveArea<B> {
             watch_following: app.watch_following.as_deref(),
             watch_follow_error: app.watch_follow_error.as_deref(),
             completion_preview: app.completion_preview_suffix(),
+            history_search: app.history_search.as_ref(),
+            history_search_match: app.search_match_text(),
         }
     }
 

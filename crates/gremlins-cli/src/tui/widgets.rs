@@ -26,7 +26,7 @@ use ratatui::{
     widgets::{Paragraph, Widget, Wrap},
 };
 
-use crate::tui::app::ActiveRun;
+use crate::tui::app::{ActiveRun, HistorySearch};
 use crate::tui::buffer::{line_wrapped_height, tail_window, wrapped_height, LineBuffer};
 use crate::tui::markdown;
 use crate::tui::motif::{self, glyph};
@@ -59,6 +59,10 @@ pub struct RenderContext<'a> {
     pub watch_follow_error: Option<&'a str>,
     /// Inline completion preview suffix (paint-only, never submitted).
     pub completion_preview: Option<&'a str>,
+    /// Active reverse history search state, if any.
+    pub history_search: Option<&'a HistorySearch>,
+    /// Current match text for the search prompt (pre-computed by caller).
+    pub history_search_match: Option<&'a str>,
 }
 
 /// A single LiveArea rendering region.
@@ -2425,6 +2429,12 @@ impl LiveAreaWidget for InputBarWidget {
             return;
         }
 
+        // ── Reverse history search mode ───────────────────────
+        if let Some(search) = ctx.history_search {
+            self.render_search(area, buf, ctx, search);
+            return;
+        }
+
         // Build the styled logical lines, adding the paint-only preview suffix
         // immediately after the real input on the final line. Measurement now
         // includes the preview so the extended line is allocated enough rows;
@@ -2468,6 +2478,77 @@ impl LiveAreaWidget for InputBarWidget {
                 let cell = &mut buf[(area.x + col_in_row, area.y + vis_row)];
                 cell.set_style(Style::default().bg(DEFAULT_THEME.cursor));
             }
+        }
+    }
+}
+
+impl InputBarWidget {
+    /// Render the reverse history search prompt instead of the normal
+    /// chevron + input.
+    fn render_search(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        ctx: &RenderContext,
+        search: &HistorySearch,
+    ) {
+        use ratatui::text::Text;
+
+        let width = area.width;
+
+        let prefix = if search.matches.is_empty() {
+            "(failed reverse-i-search)".to_string()
+        } else {
+            "(reverse-i-search)".to_string()
+        };
+
+        // Build the prompt line: prefix + `'` + query + `': ` + match
+        let match_text = ctx.history_search_match.unwrap_or("");
+
+        let prompt_style = Style::default().fg(DEFAULT_THEME.accent_primary);
+        let fail_style = Style::default().fg(DEFAULT_THEME.danger);
+        let prefix_style = if search.matches.is_empty() {
+            fail_style
+        } else {
+            prompt_style
+        };
+
+        let line = Line::from(vec![
+            Span::styled(format!("{prefix}'"), prefix_style),
+            Span::raw(ctx.input.to_string()),
+            Span::styled(
+                format!("': {match_text}"),
+                Style::default().fg(DEFAULT_THEME.subtle),
+            ),
+        ]);
+
+        let full_rows = wrapped_height(std::slice::from_ref(&line), width).max(1) as u16;
+        let paragraph = Paragraph::new(Text::from(line)).wrap(Wrap { trim: false });
+        let full_area = Rect::new(0, 0, width, full_rows);
+        let mut full_buf = Buffer::empty(full_area);
+        paragraph.render(full_area, &mut full_buf);
+
+        // Copy the visible vertical window.
+        for y in 0..area.height {
+            let src_y = y;
+            if src_y >= full_rows {
+                break;
+            }
+            for x in 0..width {
+                let cell = full_buf[(x, src_y)].clone();
+                buf[(area.x + x, area.y + y)] = cell;
+            }
+        }
+
+        // Cursor: at the end of the query string, just before the closing `'`.
+        // The cursor byte position in the rendered line is
+        // `prefix.len() + 1 + query.len()` (prefix + opening quote + query).
+        let cursor_offset = prefix.len() + 1 + ctx.cursor.min(ctx.input.len());
+        let cursor_row = cursor_offset as u16 / width;
+        let cursor_col = cursor_offset as u16 % width;
+        if cursor_row < area.height && cursor_col < width {
+            let cell = &mut buf[(area.x + cursor_col, area.y + cursor_row)];
+            cell.set_style(Style::default().bg(DEFAULT_THEME.cursor));
         }
     }
 }
@@ -4498,6 +4579,8 @@ mod tests {
             watch_following: None,
             watch_follow_error: None,
             completion_preview: None,
+            history_search: None,
+            history_search_match: None,
         }
     }
 
