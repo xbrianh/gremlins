@@ -555,7 +555,7 @@ pub(crate) async fn score_package_maintainability(
         // Only cache and return when EVERY dimension got at least one real estimate.
         let all_dims_complete = DIMENSIONS.iter().all(|dim| {
             let key = (pkg_key.clone(), dim.name.to_string());
-            estimates_map.get(&key).is_some_and(|v| !v.is_empty())
+            estimates_map.get(&key).is_some_and(|v| v.len() >= estimates)
         });
 
         if !all_dims_complete {

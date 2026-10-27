@@ -468,9 +468,16 @@ pub fn format_landscape(outlines: &[FileOutline], root: &Path) -> String {
 
         // Emit directory header when directory changes.
         if parent != last_dir.as_deref() {
-            if let Some(dir) = parent {
-                if !dir.as_os_str().is_empty() {
+            match parent {
+                Some(dir) if !dir.as_os_str().is_empty() => {
                     result.push_str(&format!("{}/\n", dir.display()));
+                }
+                _ => {
+                    // Root directory — emit explicit header when returning
+                    // from a nested subdirectory so files aren't misattributed.
+                    if last_dir.as_ref().is_some_and(|d| !d.as_os_str().is_empty()) {
+                        result.push_str("./\n");
+                    }
                 }
             }
             last_dir = parent.map(|p| p.to_path_buf());

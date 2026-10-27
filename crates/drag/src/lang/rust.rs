@@ -798,20 +798,21 @@ fn parent_module_file(rel: &Path, src_dir: &Path, is_bin: bool) -> PathBuf {
 
     if rel_str.ends_with("/mod.rs") {
         // src/foo/mod.rs → module is foo.
-        // Parent could be lib.rs, main.rs, or foo's parent.
-        match rel.parent() {
-            Some(parent_dir) if !parent_dir.as_os_str().is_empty() => {
-                // src/a/foo/mod.rs → parent module is a
-                let parent_str = parent_dir.to_string_lossy();
-                let candidate_rs = src_dir.join(format!("{parent_str}.rs"));
+        // The immediate parent directory IS the module.
+        // The containing module that declares `mod foo;` is the grandparent.
+        match rel.parent().and_then(|p| p.parent()) {
+            Some(grandparent) if !grandparent.as_os_str().is_empty() => {
+                // src/a/foo/mod.rs → containing module is a
+                let gp_str = grandparent.to_string_lossy();
+                let candidate_rs = src_dir.join(format!("{gp_str}.rs"));
                 if candidate_rs.exists() {
                     candidate_rs
                 } else {
-                    src_dir.join(parent_dir).join("mod.rs")
+                    src_dir.join(grandparent).join("mod.rs")
                 }
             }
             _ => {
-                // Top-level: src/foo/mod.rs → parent is lib.rs or main.rs
+                // Top-level: src/foo/mod.rs → containing module is lib.rs or main.rs
                 if is_bin {
                     src_dir.join("main.rs")
                 } else {
@@ -856,11 +857,18 @@ fn has_cfg_test_mod_decl(parent_src: &str, module_name: &str) -> bool {
         if preceding.ends_with(']') {
             // Look backwards for the matching `#[cfg(`.
             if let Some(attr_start) = preceding.rfind("#[cfg(") {
-                let attr_body = &preceding[attr_start + 6..];
-                // Drop the trailing `]` (we already know it ends with `]`).
-                let attr_body = attr_body.strip_suffix(']').unwrap_or(attr_body);
-                if attr_body.contains("test") {
-                    return true;
+                let candidate = &preceding[attr_start..];
+                // Find the closing `]` of this attribute.
+                if let Some(bracket_end) = candidate.find(']') {
+                    // The text between `]` and `mod <name>;` must be whitespace-only.
+                    // Otherwise the attribute belongs to a different declaration.
+                    let after_attr = &candidate[bracket_end + 1..];
+                    if after_attr.trim().is_empty() {
+                        let attr_body = &candidate[6..bracket_end];
+                        if attr_body.contains("test") {
+                            return true;
+                        }
+                    }
                 }
             }
         }

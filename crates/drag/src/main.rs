@@ -462,6 +462,34 @@ async fn run() -> Result<(), String> {
         }
     }
 
+    // Resolve inline modules to their owning file: any graph node (from edges)
+    // that has no token count inherits the count of its longest prefix that
+    // does have one.  Example: `crate::foo::nested` (inline) → `crate::foo`.
+    let all_graph_nodes: std::collections::HashSet<String> = edges
+        .iter()
+        .flat_map(|(s, d)| [s.clone(), d.clone()])
+        .collect();
+    for node in &all_graph_nodes {
+        if token_counts.contains_key(node) {
+            continue;
+        }
+        // Find the longest prefix that has a token count.
+        let mut best: Option<(&str, usize)> = None;
+        for (mod_name, &count) in &token_counts {
+            if node.starts_with(mod_name)
+                && node.as_str().len() > mod_name.len()
+                && node.as_bytes()[mod_name.len()] == b':'
+            {
+                if best.map_or(true, |(n, _)| mod_name.len() > n.len()) {
+                    best = Some((mod_name, count));
+                }
+            }
+        }
+        if let Some((_, count)) = best {
+            token_counts.insert(node.clone(), count);
+        }
+    }
+
     let footprint_map = compute_footprint(&edges, &token_counts);
 
     let mut scores: Vec<ModuleDrag> = Vec::new();
@@ -725,6 +753,10 @@ fn strip_cfg_test(source: &str) -> Result<String, String> {
             }
             syn::visit_mut::visit_item_mod_mut(self, m);
         }
+        fn visit_item_impl_mut(&mut self, i: &mut syn::ItemImpl) {
+            i.items.retain(|ii| !has_cfg_test_attr(impl_item_attrs(ii)));
+            syn::visit_mut::visit_item_impl_mut(self, i);
+        }
     }
     CfgTestStripper.visit_file_mut(&mut file);
 
@@ -765,6 +797,17 @@ fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
         Item::Type(i) => &i.attrs,
         Item::Union(i) => &i.attrs,
         Item::Use(i) => &i.attrs,
+        _ => &[],
+    }
+}
+
+fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
+    match item {
+        syn::ImplItem::Const(c) => &c.attrs,
+        syn::ImplItem::Fn(f) => &f.attrs,
+        syn::ImplItem::Type(t) => &t.attrs,
+        syn::ImplItem::Macro(m) => &m.attrs,
+        syn::ImplItem::Verbatim(_) => &[],
         _ => &[],
     }
 }
