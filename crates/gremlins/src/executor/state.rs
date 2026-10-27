@@ -148,6 +148,11 @@ pub trait StateStore: Send + Sync + Debug {
 
     fn accumulate_token_usage(&self, usage: &HashMap<String, i64>);
 
+    /// Accumulate token usage delta into the per-stage breakdown for
+    /// `stage_path` (dotted path like `implement.scout-1`). A no-op when
+    /// `usage` is empty.
+    fn accumulate_stage_token_usage(&self, stage_path: &str, usage: &HashMap<String, i64>);
+
     /// Create the `finished` marker and patch terminal fields.
     fn write_terminal_state(&self, exit_code: i32);
 
@@ -1144,6 +1149,35 @@ impl StateStore for FileSystemStateStore {
         });
     }
 
+    fn accumulate_stage_token_usage(&self, stage_path: &str, usage: &HashMap<String, i64>) {
+        if usage.is_empty() {
+            return;
+        }
+        let sf = self.state_file();
+        if !sf.exists() {
+            return;
+        }
+        let usage = usage.clone();
+        let stage_path = stage_path.to_string();
+        let _ = locked_update(&sf, move |data| {
+            let entries = data
+                .get("stage_usage")
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
+            let mut existing: Map<String, Value> = entries
+                .get(&stage_path)
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
+            for (k, v) in &usage {
+                let cur = existing.get(k).map(as_i64).unwrap_or(0);
+                existing.insert(k.clone(), Value::from(cur + v));
+            }
+            let mut entries = entries;
+            entries.insert(stage_path, Value::Object(existing));
+            data.insert("stage_usage".into(), Value::Object(entries));
+        });
+    }
+
     fn stage_error(&self) -> Option<Map<String, Value>> {
         let sf = self.state_file();
         if !sf.exists() {
@@ -1639,6 +1673,7 @@ impl StateStore for ScopedFileSystemStateStore {
     delegate!(inner, fn patch(&self, delete: &[String], fields: &Map<String, Value>));
     delegate!(inner, fn record_stage_error(&self, class: &str, detail: &str));
     delegate!(inner, fn accumulate_token_usage(&self, usage: &HashMap<String, i64>));
+    delegate!(inner, fn accumulate_stage_token_usage(&self, stage_path: &str, usage: &HashMap<String, i64>));
     delegate!(inner, fn write_terminal_state(&self, exit_code: i32));
     delegate!(inner, fn add_subprocess_cost(&self, amount: f64));
     delegate!(inner, fn patch_parallel_attempt(&self, child_key: &str, attempt: &str));
@@ -1806,6 +1841,7 @@ impl StateData {
     delegate!(pub store, fn patch(&self, delete: &[String], fields: &Map<String, Value>));
     delegate!(pub store, fn record_stage_error(&self, class: &str, detail: &str));
     delegate!(pub store, fn accumulate_token_usage(&self, usage: &HashMap<String, i64>));
+    delegate!(pub(crate) store, fn accumulate_stage_token_usage(&self, stage_path: &str, usage: &HashMap<String, i64>));
     delegate!(pub store, fn state_tree(&self) -> Map<String, Value>);
     delegate!(pub store, fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError>);
     pub(crate) fn open_blob(
@@ -3341,6 +3377,13 @@ mod tests {
                 unimplemented!()
             }
             fn accumulate_token_usage(&self, _usage: &HashMap<String, i64>) {
+                unimplemented!()
+            }
+            fn accumulate_stage_token_usage(
+                &self,
+                _stage_path: &str,
+                _usage: &HashMap<String, i64>,
+            ) {
                 unimplemented!()
             }
             fn write_terminal_state(&self, _exit_code: i32) {

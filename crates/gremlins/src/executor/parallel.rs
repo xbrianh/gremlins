@@ -663,6 +663,25 @@ fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
         gremlin.state.accumulate_token_usage(&delta);
     }
 
+    // Per-stage token breakdown.
+    if let Some(stage_usage) = tree.get("stage_usage").and_then(|v| v.as_object()) {
+        let prefix = format!("{}.", outcome.child_name);
+        for (stage_path, usage_val) in stage_usage {
+            if let Some(usage_obj) = usage_val.as_object() {
+                let mut delta = HashMap::new();
+                for (key, value) in usage_obj {
+                    if let Some(n) = value.as_i64() {
+                        delta.insert(key.clone(), n);
+                    }
+                }
+                let full_path = format!("{prefix}{stage_path}");
+                gremlin
+                    .state
+                    .accumulate_stage_token_usage(&full_path, &delta);
+            }
+        }
+    }
+
     // Subprocess cost.
     if let Some(cost) = tree.get("subprocess_cost_usd") {
         if let Some(n) = cost.as_f64() {

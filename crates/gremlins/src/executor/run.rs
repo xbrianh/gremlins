@@ -246,7 +246,7 @@ async fn run_stage_scoped(
     }
 
     let result = match stage {
-        ExecutorStage::Agent { .. } => run_agent(stage, gremlin, enc_model, enc_tm).await,
+        ExecutorStage::Agent { .. } => run_agent(stage, gremlin, scope, enc_model, enc_tm).await,
         ExecutorStage::Exec { .. } => run_exec(stage, gremlin, enc_model, enc_tm).await,
         ExecutorStage::Sequence(_) => {
             run_sequence(stage, gremlin, scope, display_stage, enc_model, enc_tm).await
@@ -444,6 +444,7 @@ fn client_run_err(error: ClientError, name: &str) -> RunError {
 async fn run_agent(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
+    scope: &str,
     enclosing_model: Option<&ModelURI>,
     enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
@@ -455,6 +456,8 @@ async fn run_agent(
     else {
         unreachable!("run_agent is only called for agent stages")
     };
+
+    let stage_path = stage_key(scope, &agent.name);
 
     let task_models_by_kind = resolve_task_models(
         gremlin.runtime_config.default_task_models.as_ref(),
@@ -787,6 +790,9 @@ async fn run_agent(
                     .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
                 );
                 gremlin.state.accumulate_token_usage(&delta);
+                gremlin
+                    .state
+                    .accumulate_stage_token_usage(&stage_path, &delta);
             }
             // Flush the live scratchpad into the main state store so a
             // cancelled/failed chat turn does not drop in-flight working
@@ -830,6 +836,9 @@ async fn run_agent(
             .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
         );
         gremlin.state.accumulate_token_usage(&delta);
+        gremlin
+            .state
+            .accumulate_stage_token_usage(&stage_path, &delta);
     }
 
     if is_chat {
@@ -1323,6 +1332,40 @@ impl Gremlin {
                     last_cached_input_tokens: None,
                 },
             );
+        }
+
+        // ── Emit per-stage token breakdown ─────
+        if let Some(stage_usage) = self
+            .state
+            .state_tree()
+            .get("stage_usage")
+            .and_then(|v| v.as_object())
+        {
+            let artifact_dir = self.state.state_dir().join("artifacts");
+            let path = artifact_dir.join("token_breakdown.jsonl");
+            let mut output = String::new();
+            for (stage_path, usage_val) in stage_usage {
+                let Some(usage) = usage_val.as_object() else {
+                    continue;
+                };
+                let mut line = serde_json::Map::new();
+                line.insert(
+                    "stage".to_string(),
+                    serde_json::Value::String(stage_path.replace('/', ".")),
+                );
+                for (key, value) in usage {
+                    line.insert(key.clone(), value.clone());
+                }
+                if let Ok(json) = serde_json::to_string(&line) {
+                    output.push_str(&json);
+                    output.push('\n');
+                }
+            }
+            if let Err(e) =
+                std::fs::create_dir_all(&artifact_dir).and_then(|_| std::fs::write(&path, &output))
+            {
+                log::warn!("failed to write token breakdown artifact: {e}");
+            }
         }
     }
 }
