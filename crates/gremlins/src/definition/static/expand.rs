@@ -1021,28 +1021,44 @@ fn _expand_stage_def(
 
         // Read flatten_into_parent: when true, inner stages are expanded
         // inline into the caller instead of being wrapped in a sequence.
-        let flatten_into_parent = def_map
-            .get("flatten_into_parent")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let flatten_into_parent = match def_map.get("flatten_into_parent") {
+            None => false,
+            Some(v) => match v.as_bool() {
+                Some(b) => b,
+                None => {
+                    return Err(SchemaError::StageDef {
+                        name: def_name.to_string(),
+                        msg: format!("'flatten_into_parent' must be a boolean, got {:?}", v),
+                    });
+                }
+            },
+        };
 
         // When flattening, reject definition-level keys that must live on the
         // wrapper (which does not exist in flatten mode).
         if flatten_into_parent {
-            for key in &[
-                "max-iterations",
-                "interval",
-                "skip_if_exists",
-                "model",
-                "task-models",
-            ] {
+            // Keys that can be set at the call site — advise moving them there.
+            let call_site_keys: &[&str] = &["model", "task-models"];
+            // Keys that only live on the wrapper — advise removing flatten.
+            let wrapper_only_keys: &[&str] = &["max-iterations", "interval", "skip_if_exists"];
+
+            for key in call_site_keys.iter().chain(wrapper_only_keys.iter()) {
                 if def_map.contains_key(*key) {
+                    let hint = if call_site_keys.contains(key) {
+                        format!(
+                            "remove 'flatten_into_parent: true' to enable wrapping \
+                             or move '{key}' to each call site"
+                        )
+                    } else {
+                        format!(
+                            "remove 'flatten_into_parent: true' so '{key}' can live \
+                             on the sequence wrapper"
+                        )
+                    };
                     return Err(SchemaError::StageDef {
                         name: def_name.to_string(),
                         msg: format!(
-                            "'{key}' cannot be used with 'flatten_into_parent: true'; \
-                             remove 'flatten_into_parent: true' to enable wrapping \
-                             or move '{key}' to each call site"
+                            "'{key}' cannot be used with 'flatten_into_parent: true'; {hint}"
                         ),
                     });
                 }
@@ -2032,5 +2048,30 @@ mod tests {
             "error must mention unrecognized: {msg}"
         );
         assert!(msg.contains("foo"), "error must name the bad key: {msg}");
+    }
+
+    #[test]
+    fn flatten_into_parent_must_be_boolean() {
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": "true",
+                "stages": [
+                    {"name": "s", "type": "agent", "prompt": ["hi\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site =
+            serde_json::from_str::<serde_json::Value>(r#"{"name": "x", "type": "mydef"}"#).unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let err = expand_stage_def(&call_site, "mydef", &defs).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must be a boolean"),
+            "error must say must be a boolean: {msg}"
+        );
     }
 }
