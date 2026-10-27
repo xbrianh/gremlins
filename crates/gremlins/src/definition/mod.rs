@@ -24,7 +24,7 @@ pub use crate::stage_spec::parallel::{ErrorPolicy, ForkSpec, JoinSpec};
 
 pub(crate) mod chat;
 pub use chat::ChatDefinition;
-pub(crate) mod r#static;
+pub mod r#static;
 pub use r#static::bundle::bundle_definition;
 pub use r#static::StaticDefinition;
 

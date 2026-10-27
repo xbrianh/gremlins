@@ -530,16 +530,21 @@ fn send_chat_input(
         // event loop. On timeout or failure the prompt is sent without a
         // context block rather than being dropped.
         let project_root_str = project_root.to_string_lossy().into_owned();
+        // Establish a shared absolute deadline so pre-fetch and the static
+        // context snapshot together fit within CONTEXT_TIMEOUT rather than
+        // each getting an independent timeout.
+        let shared_deadline = Instant::now() + CONTEXT_TIMEOUT;
+
         // Pre-fetch context from the operator's message (gremlin IDs, file
         // paths, definition names) so the model doesn't burn its first turn
-        // on discovery tools. Runs under its own 2-second timeout inside
-        // spawn_blocking so a slow filesystem can't stall the event loop.
+        // on discovery tools. Passes the shared deadline so the matchers
+        // return completed sections when time runs out.
         let prefetch_input = input.clone();
         let prefetch_root = project_root_str.clone();
         let enriched_input = match tokio::time::timeout(
-            Duration::from_secs(2),
+            CONTEXT_TIMEOUT,
             tokio::task::spawn_blocking(move || {
-                chat_prefetch::prefetch_context(&prefetch_input, &prefetch_root)
+                chat_prefetch::prefetch_context(&prefetch_input, &prefetch_root, shared_deadline)
             }),
         )
         .await
@@ -547,8 +552,14 @@ fn send_chat_input(
             Ok(Ok(pf)) if !pf.is_empty() => format!("{pf}\n\n---\n\n{input}"),
             _ => input,
         };
+
+        // Use the remaining budget from the shared deadline for the static
+        // context snapshot.
+        let remaining = shared_deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO);
         let context = match tokio::time::timeout(
-            CONTEXT_TIMEOUT,
+            remaining,
             tokio::task::spawn_blocking(move || {
                 chat_context::build_chat_context(&project_root_str)
             }),
