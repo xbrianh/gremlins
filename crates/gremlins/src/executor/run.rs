@@ -28,8 +28,9 @@ use crate::executor::send_log;
 use crate::executor::stage_stream::send_stage_boundary;
 use crate::executor::state;
 use crate::executor::state::{Checkout, Collision, FileSystemStateStore, StateStore};
-use crate::executor::supervisor::get_run_map;
+use crate::executor::supervisor::{emit_event, get_run_map};
 use crate::executor::vars;
+use crate::executor::DaemonEvent;
 use crate::executor::RunError;
 use crate::landscape::{LandscapeBlock, LandscapeError, LandscapeExplorer};
 use indexmap::IndexMap;
@@ -1089,6 +1090,10 @@ async fn run_sequence(
             ))
             .await
             {
+                send_log(
+                    &gremlin.runtime_config.log_tx,
+                    format!("sequence '{}': child stage failed: {}", seq.name, error),
+                );
                 outcome = Err(error);
                 gremlin.loop_iter = saved_loop_iter;
                 return outcome;
@@ -1228,12 +1233,24 @@ impl Gremlin {
             match stage_result {
                 Ok(()) => {}
                 Err(RunError::Bail { reason }) => {
+                    send_log(
+                        &self.runtime_config.log_tx,
+                        format!("stage '{}': bailed: {}", stage.name(), reason),
+                    );
+                    emit_event(DaemonEvent::Bail {
+                        id: self.id.to_string(),
+                        reason: reason.clone(),
+                    });
                     self.state
                         .record_stage_error("other", &truncate(&reason, 200));
                     exit_code = 1;
                     break;
                 }
                 Err(error) => {
+                    send_log(
+                        &self.runtime_config.log_tx,
+                        format!("stage '{}': error: {}", stage.name(), error),
+                    );
                     self.state.record_stage_error(
                         "other",
                         &truncate(&format!("unexpected error: {error}"), 200),
@@ -2175,12 +2192,41 @@ mod tests {
             .build()
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        gremlin.runtime_config.log_tx = Some(log_tx);
+
         let stage = take_first_stage(&mut gremlin).await;
 
         match run_stage(&stage, &mut gremlin).await {
             Err(RunError::StageFailed { stage, .. }) => assert_eq!(stage, "bad"),
             other => panic!("expected StageFailed, got {other:?}"),
         }
+
+        // The repeating sequence logs the child failure.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut lines = Vec::new();
+        while std::time::Instant::now() < deadline {
+            match log_rx.try_recv() {
+                Ok(line) => lines.push(line),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        let failure_line = lines
+            .iter()
+            .find(|l| l.contains("child stage failed"))
+            .expect("log should contain the child failure line");
+        assert!(
+            failure_line.contains("poll"),
+            "failure line must name the sequence: {failure_line}"
+        );
+        assert!(
+            failure_line.contains("bad"),
+            "failure line must name the failing child: {failure_line}"
+        );
     }
 
     #[tokio::test]
@@ -2343,6 +2389,117 @@ mod tests {
                 .unwrap();
         assert_eq!(raw["status"], "stopped");
         assert_eq!(raw["exit_code"], 1);
+    }
+
+    #[tokio::test]
+    async fn run_bail_logs_artifact_key_in_child_log_and_parent_relay() {
+        // A missing non-optional artifact causes a Bail. The artifact key
+        // must appear in the child's own log and in the parent relay channel.
+        let stages = vec![AgentBuilder::new("writer")
+            .model(model("cmd/sh -c 'cat >/dev/null'"))
+            .output("out", output("artifact://out.md"))
+            .prompt("hi {out}")
+            .build()
+            .unwrap()];
+        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        gremlin.runtime_config.log_tx = Some(log_tx);
+
+        // Subscribe to the event broadcast before running so we see the Bail.
+        let mut event_rx = crate::executor::supervisor::get_event_tx().subscribe();
+
+        assert_eq!(gremlin.run(None).await.unwrap(), 1);
+
+        // ── parent relay (log_tx) ──
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut lines = Vec::new();
+        while std::time::Instant::now() < deadline {
+            match log_rx.try_recv() {
+                Ok(line) => lines.push(line),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        let bail_line = lines
+            .iter()
+            .find(|l| l.starts_with("stage 'writer': bailed:"))
+            .expect("parent log should contain the bail line");
+        assert!(
+            bail_line.contains("out"),
+            "bail line must mention the missing artifact key: {bail_line}"
+        );
+
+        // ── Bail event ──
+        let mut got_bail = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if let crate::executor::DaemonEvent::Bail { ref id, ref reason } = event {
+                assert!(!id.is_empty(), "Bail event id must not be empty");
+                assert!(
+                    reason.contains("out"),
+                    "Bail reason must mention the missing artifact: {reason}"
+                );
+                got_bail = true;
+            }
+        }
+        assert!(got_bail, "expected a Bail event, but none was received");
+
+        // ── persisted bail file ──
+        let state_dir = sandbox.path().join("state").join("gr-test-0001");
+        let bail_file = std::fs::read_dir(&state_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("bail_"))
+            })
+            .expect("a bail file");
+        let bail: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(bail_file).unwrap()).unwrap();
+        assert_eq!(bail["class"], "other");
+    }
+
+    #[tokio::test]
+    async fn run_non_bail_failure_reaches_parent_log() {
+        // A non-bail failure (StageFailed) must still reach the parent log
+        // channel so operators can see it in the live log.
+        let stages = vec![ExecBuilder::new("broken")
+            .cmds(vec!["gremlins-nonexistent-cmd-xyz".to_string()])
+            .build()
+            .unwrap()];
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        gremlin.runtime_config.log_tx = Some(log_tx);
+
+        match gremlin.run(None).await {
+            Err(RunError::StageFailed { stage, .. }) => assert_eq!(stage, "broken"),
+            other => panic!("expected StageFailed, got {other:?}"),
+        }
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut lines = Vec::new();
+        while std::time::Instant::now() < deadline {
+            match log_rx.try_recv() {
+                Ok(line) => lines.push(line),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        let error_line = lines
+            .iter()
+            .find(|l| l.contains("stage 'broken': error:"))
+            .expect("parent log should contain the error line");
+        assert!(
+            error_line.contains("broken"),
+            "error line must name the failing stage: {error_line}"
+        );
     }
 
     #[tokio::test]
