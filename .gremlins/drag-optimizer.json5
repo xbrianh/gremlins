@@ -73,11 +73,12 @@
       'printf "%s" {p} > "$GREMLINS_STATE_DIR/artifacts/p.txt"',
       'printf "%s" {skip-maintainability} > "$GREMLINS_STATE_DIR/artifacts/skip_maint.txt"',
       'BASE_REF={base_ref} && SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "${BASE_REF:-HEAD}") && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && printf "%s" "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"',
-      // Build a drag config JSON file from the bundled config with bootstrap
+      // Build a drag config JSON file from the project config with bootstrap
       // parameter overrides.  gremlins-drag no longer accepts scoring flags
       // (--estimates-per-survey, --p, --skip-maintainability) on the CLI;
       // all scoring parameters live in the config file.
-      'CONFIG_SRC="{drag-config}"; if [ -n "$CONFIG_SRC" ] && [ -f "$CONFIG_SRC" ]; then echo "using drag config: $CONFIG_SRC"; sed "s|^[[:space:]]*//.*||" "$CONFIG_SRC" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"; else sed "s|^[[:space:]]*//.*||" "$GREMLINS_PROJECT_ROOT/crates/drag/config/bundled.json5" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"; fi',
+      // Default: .gremlins/drag-config.json5; override: --drag-config <path>.
+      'CONFIG_SRC="{drag-config}"; if [ -n "$CONFIG_SRC" ] && [ -f "$CONFIG_SRC" ]; then echo "using drag config: $CONFIG_SRC"; sed "s|^[[:space:]]*//.*||" "$CONFIG_SRC" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"; else sed "s|^[[:space:]]*//.*||" "$GREMLINS_PROJECT_ROOT/.gremlins/drag-config.json5" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"; fi',
       "MODEL_VAL=\"{drag-model}\" && ESTIMATES_VAL=\"{estimates-per-survey}\" && P_VAL=\"{p}\" && SKIP_MAINT_VAL=\"{skip-maintainability}\" && [ -z \"$ESTIMATES_VAL\" ] && ESTIMATES_VAL=\"5\" && [ -z \"$P_VAL\" ] && P_VAL=\"2.5\" && jq --arg model \"$MODEL_VAL\" --argjson estimates \"$ESTIMATES_VAL\" --argjson p_val \"$P_VAL\" --arg skip_maint \"$SKIP_MAINT_VAL\" 'if $model != \"\" then .model = $model else . end | .estimates_per_survey = $estimates | .weights.p = $p_val | if $skip_maint != \"\" and $skip_maint != \"false\" then .skip_maintainability = true else . end' \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\" > \"$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json\" && mv \"$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json\" \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\"",
     ],
     cli_out: {
