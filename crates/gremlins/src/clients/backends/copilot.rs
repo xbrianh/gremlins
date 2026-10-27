@@ -103,30 +103,42 @@ fn resolve_auth(
             CopilotTokenRefreshMiddleware::new(sessions),
         ));
     }
+    // 3b. providers.yaml copilot.github-token (static GitHub access token)
+    if let Some(access_token) = providers.github_token(PROVIDER_NAME).map(|s| s.to_string()) {
+        return copilot_client_from_static_token(make_exchanger()?, access_token);
+    }
     // 4. GITHUB_TOKEN / GH_TOKEN env vars (static GitHub access token)
     if let Some(access_token) = github_access_token() {
-        let exchanger = make_exchanger()?;
-        let session = exchange_github_token_sync(exchanger.clone(), &access_token)?;
-        let token_provider = Arc::new(StaticTokenProvider {
-            token: access_token,
-        });
-        let sessions = Arc::new(CopilotSessionProvider::with_session(
-            token_provider,
-            exchanger,
-            session.clone(),
-        ));
-        return Ok(copilot_client_with_session(
-            session,
-            CopilotTokenRefreshMiddleware::new(sessions),
-        ));
+        return copilot_client_from_static_token(make_exchanger()?, access_token);
     }
     Err(format!(
         "no credentials for provider '{PROVIDER_NAME}': set GITHUB_COPILOT_API_KEY, \
          COPILOT_API_KEY, GITHUB_TOKEN, or GH_TOKEN; or add an entry with \
-         \"api-key\" or \"client-id\" + \"refresh-token\" in {}",
+         \"api-key\", \"client-id\" + \"refresh-token\", or \"github-token\" in {}",
         crate::config::user_config_root()
             .join("providers.yaml")
             .display(),
+    ))
+}
+
+/// Exchange a static GitHub access token for a Copilot session and build a
+/// client that refreshes the session when it expires.
+fn copilot_client_from_static_token(
+    exchanger: Arc<dyn CopilotTokenExchanger>,
+    access_token: String,
+) -> Result<Copilot, String> {
+    let session = exchange_github_token_sync(exchanger.clone(), &access_token)?;
+    let token_provider = Arc::new(StaticTokenProvider {
+        token: access_token,
+    });
+    let sessions = Arc::new(CopilotSessionProvider::with_session(
+        token_provider,
+        exchanger,
+        session.clone(),
+    ));
+    Ok(copilot_client_with_session(
+        session,
+        CopilotTokenRefreshMiddleware::new(sessions),
     ))
 }
 
@@ -151,8 +163,21 @@ pub fn check_copilot_oauth_credential(
     let provider =
         github_auth::GitHubAppTokenProvider::new(client_id, refresh_token);
     let access_token = provider.access_token_sync()?;
-    let exchanger = BlockingCopilotTokenExchanger::new();
-    let session = exchanger.exchange(&access_token)?;
+    status_from_exchange(&BlockingCopilotTokenExchanger::new(), &access_token)
+}
+
+/// Validate a static GitHub access token by exchanging it for a Copilot
+/// session token and returning the session status.
+pub fn check_copilot_github_token(token: &str) -> Result<CopilotCredentialStatus, String> {
+    status_from_exchange(&BlockingCopilotTokenExchanger::new(), token)
+}
+
+/// Exchange an access token and wrap the resulting session status.
+fn status_from_exchange(
+    exchanger: &dyn CopilotTokenExchanger,
+    access_token: &str,
+) -> Result<CopilotCredentialStatus, String> {
+    let session = exchanger.exchange(access_token)?;
     Ok(CopilotCredentialStatus {
         expires_at: session.expires_at,
     })
