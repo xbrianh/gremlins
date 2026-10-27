@@ -64,6 +64,53 @@ fn scope_byte_range(
     (start, end.max(start))
 }
 
+const DIVERGENCE_SNIPPET_RADIUS: usize = 120;
+
+/// Extract a bounded, human-readable byte window around `byte_index`.
+///
+/// The slice is capped to `radius` bytes on either side so diagnostics stay
+/// concise even for very large `old_string` values. UTF-8 boundaries are not
+/// guaranteed for the byte range, so the slice is rendered lossily rather than
+/// risking a panic.
+fn snippet_around(s: &str, byte_index: usize, radius: usize) -> String {
+    let bytes = s.as_bytes();
+    let start = byte_index.saturating_sub(radius);
+    let end = (byte_index + radius).min(bytes.len());
+    String::from_utf8_lossy(&bytes[start..end]).into_owned()
+}
+
+/// Walk `old_str` and the file content byte-by-byte from `content_start` and
+/// report the first point where they diverge.
+///
+/// `content_end` is the exclusive end of the search window, so scoped searches
+/// never read past the scope. When one side is shorter than the other the
+/// report uses the byte offset where that side ends, and the snippets show
+/// what each side has at that point.
+fn divergence_report(
+    content: &str,
+    content_start: usize,
+    content_end: usize,
+    old_str: &str,
+) -> String {
+    let actual = &content[content_start..content_end];
+    let actual_bytes = actual.as_bytes();
+    let expected_bytes = old_str.as_bytes();
+    let common = actual_bytes.len().min(expected_bytes.len());
+
+    let mut rel = 0;
+    while rel < common && actual_bytes[rel] == expected_bytes[rel] {
+        rel += 1;
+    }
+
+    let divergence_offset = content_start + rel;
+    let expected_snippet = snippet_around(old_str, rel, DIVERGENCE_SNIPPET_RADIUS);
+    let actual_snippet = snippet_around(actual, rel, DIVERGENCE_SNIPPET_RADIUS);
+
+    format!(
+        " — diverges at byte offset {divergence_offset}:\n  expected: {expected_snippet:?}\n  actual:   {actual_snippet:?}"
+    )
+}
+
 fn edit_not_found_diagnostic(
     content: &str,
     file_path: &str,
@@ -116,7 +163,8 @@ fn edit_not_found_diagnostic(
             .unwrap_or(content.len());
         let context_end = context_end.min(cap_byte);
         let context = &content[context_start..context_end];
-        format!(" — did you mean to match near line {line_no}? Found:\n{context}")
+        let divergence = divergence_report(content, pos, window_end, old_str);
+        format!(" — did you mean to match near line {line_no}? Found:\n{context}\n{divergence}")
     } else {
         String::new()
     };
@@ -740,5 +788,49 @@ mod tests {
         let offs = offsets(content);
         let err = apply_edits(content, &edits, "f.txt", &offs).unwrap_err();
         assert!(err.contains("not unique"), "got: {err}");
+    }
+
+    #[test]
+    fn diagnostic_reports_divergence_when_second_line_differs() {
+        let content = "alpha\nbeta\n";
+        let old_str = "alpha\ngamma";
+        let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, None, None);
+        assert!(msg.contains("diverges at byte offset 6"), "got: {msg}");
+        assert!(msg.contains("expected:"), "got: {msg}");
+        assert!(msg.contains("actual:"), "got: {msg}");
+        assert!(msg.contains(r#""alpha\ngamma""#), "got: {msg}");
+        assert!(msg.contains(r#""alpha\nbeta\n""#), "got: {msg}");
+    }
+
+    #[test]
+    fn diagnostic_reports_truncation_when_old_is_shorter() {
+        let content = "hello world";
+        let old_str = "hello";
+        let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, None, None);
+        assert!(msg.contains("diverges at byte offset 5"), "got: {msg}");
+        assert!(msg.contains("expected:"), "got: {msg}");
+        assert!(msg.contains("actual:"), "got: {msg}");
+    }
+
+    #[test]
+    fn diagnostic_reports_truncation_when_old_is_longer() {
+        let content = "hello";
+        let old_str = "hello\nworld";
+        let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, None, None);
+        assert!(msg.contains("diverges at byte offset 5"), "got: {msg}");
+        assert!(msg.contains("expected:"), "got: {msg}");
+        assert!(msg.contains("actual:"), "got: {msg}");
+    }
+
+    #[test]
+    fn diagnostic_divergence_respects_scope_window() {
+        // The first line matches inside the scope, but the rest of `old_str`
+        // extends past the scope window. The divergence report must stop at the
+        // window boundary rather than reading the rest of the file.
+        let content = "line1\nline2\nline3\n";
+        let old_str = "line2\nline3";
+        let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, Some(2), Some(2));
+        assert!(msg.contains("between lines 2-2"), "got: {msg}");
+        assert!(msg.contains("diverges at byte offset"), "got: {msg}");
     }
 }
