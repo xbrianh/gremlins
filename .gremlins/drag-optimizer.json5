@@ -150,11 +150,26 @@
               context: "artifact://{loop_iter}/drag_context.md",
               iter_start_sha: "artifact://{loop_iter}/iter_start_sha.txt",
               progression_in: "artifact://{loop_iter}/progression_in.json",
+              target: "artifact://{loop_iter}/target.txt",
             },
           },
           options: {
             cmds: [
               'git -C "$GREMLIN_WORKDIR" rev-parse HEAD > "$GREMLINS_STATE_DIR/artifacts/{loop_iter}/iter_start_sha.txt"',
+              // Scoped target — iteration 1 copies the bootstrap target;
+              // subsequent iterations read the previous iteration's
+              // (possibly broadened) target from record-progression.
+              'if [ "{loop_iter}" = "1" ]; then
+  cp "$GREMLINS_STATE_DIR/artifacts/target.txt" {target}
+else
+  PREV=$(({loop_iter} - 1))
+  if [ -f "$GREMLINS_STATE_DIR/artifacts/$PREV/drag_target.txt" ]; then
+    cp "$GREMLINS_STATE_DIR/artifacts/$PREV/drag_target.txt" {target}
+  else
+    cp "$GREMLINS_STATE_DIR/artifacts/target.txt" {target}
+  fi
+fi
+',
               // Copy the latest cumulative progression into a scoped artifact
               // for this iteration.  Iteration 1 reads the baseline seed;
               // subsequent iterations read the previous iteration's output.
@@ -175,7 +190,7 @@ fi
           type: "agent",
           interpolation: {
             inputs: {
-              target: 'content("artifact://target.txt")',
+              target: 'content("artifact://{loop_iter}/target.txt")',
               drag_context: 'content("artifact://{loop_iter}/drag_context.md")',
               instructions: 'content("artifact://instructions.txt")',
               explain: 'content("artifact://explain.txt")',
@@ -221,7 +236,7 @@ fi
           type: "exec",
           interpolation: {
             inputs: {
-              target: 'content("artifact://target.txt")',
+              target: 'content("artifact://{loop_iter}/target.txt")',
             },
             outputs: {
               report: "artifact://{loop_iter}/report.json",
@@ -252,7 +267,7 @@ fi
           type: "agent",
           interpolation: {
             inputs: {
-              target: 'content("artifact://target.txt")',
+              target: 'content("artifact://{loop_iter}/target.txt")',
               plan: 'content("artifact://{loop_iter}/plan.md")',
               drag_before: 'content("artifact://{loop_iter}/drag_before.txt")',
               drag_after: 'content("artifact://{loop_iter}/drag_after.txt")',
@@ -288,27 +303,38 @@ fi
           },
         },
         // --- record-progression: append iteration entry to the progression artifact ---
+        // When the target broadens (changed files span a wider common root),
+        // this stage recomputes ALL prior progression entries by checking out
+        // each entry's iter_end_sha and re-running gremlins-drag with the new
+        // target.  This keeps the progression self-consistent — every entry is
+        // measured against the same target scope.  Delegates to the helper
+        // script drag-record-progression.
         {
           name: "record-progression",
           type: "exec",
           interpolation: {
             inputs: {
-              drag_before_path: "artifact://{loop_iter}/drag_before.txt",
-              drag_after_path: "artifact://{loop_iter}/drag_after.txt",
-              iter_start_sha_path: "artifact://{loop_iter}/iter_start_sha.txt",
-              iter_end_sha_path: "artifact://{loop_iter}/iter_end_sha.txt",
-              commit_count_path: "artifact://{loop_iter}/commit_count.txt",
-              verdict_path: "artifact://{loop_iter}/drag_reduced.txt",
-              target: 'content("artifact://target.txt")',
-              progression_path: "artifact://{loop_iter}/progression_in.json",
+              target_val: 'content("artifact://{loop_iter}/target.txt")',
+              base_sha_val: 'content("artifact://base_sha")',
+              progression_in: "artifact://{loop_iter}/progression_in.json",
             },
             outputs: {
               progression_out: "artifact://{loop_iter}/drag_progression.json",
+              target_out: "artifact://{loop_iter}/drag_target.txt",
             },
           },
           options: {
             cmds: [
-              '# Read the progression-in artifact (scoped to this iteration by\n# prepare-context) and append this iteration\'s entry, writing to a\n# new scoped output — immutable, no in-place mutation.\nif [ ! -f {progression_path} ]; then\n  echo "progression_in.json not found; skipping record-progression"\n  echo "[]" > {progression_out}\n  exit 0\nfi\nEXISTING=$(cat {progression_path})\n\n# Sanitize all values read from files — trim trailing newlines and\n# validate numeric fields so --argjson receives clean JSON scalars.\n_drag_before=$(tr -d \'\\n\' < {drag_before_path} 2>/dev/null || echo "0")\n_drag_after=$(tr -d \'\\n\' < {drag_after_path} 2>/dev/null || echo "0")\n_start_sha=$(tr -d \'\\n\' < {iter_start_sha_path} 2>/dev/null || echo "")\n_end_sha=$(tr -d \'\\n\' < {iter_end_sha_path} 2>/dev/null || echo "")\n_commits=$(tr -d \'\\n\' < {commit_count_path} 2>/dev/null || echo "0")\n_verdict=$(tr -d \'\\n\' < {verdict_path} 2>/dev/null || echo "")\n\n# Validate numeric fields — fall back to 0 if they are not numbers.\ncase "$_drag_before" in \'\'|*[!0-9.]*) _drag_before=0 ;; esac\ncase "$_drag_after"  in \'\'|*[!0-9.]*) _drag_after=0  ;; esac\ncase "$_commits"    in \'\'|*[!0-9]*)  _commits=0     ;; esac\n\n# Check for an existing entry with the same iteration to avoid duplicates\n# when the stage is re-run (e.g. pipeline resume).\nif echo "$EXISTING" | jq -e --arg iter "{loop_iter}" \'map(select(.iteration == $iter)) | length > 0\' > /dev/null 2>&1; then\n  echo "entry for iteration {loop_iter} already exists; skipping"\n  exit 0\nfi\n\n# Rolled-back iterations record iter_start_sha as iter_end_sha\n# because the rollback reset HEAD back to the starting commit.\nif [ "$_verdict" = "rolled_back" ]; then\n  _end_sha="$_start_sha"\nfi\n\n# Append the new entry and write to the scoped output artifact.\necho "$EXISTING" | jq \\\n  --arg target "{target}" \\\n  --arg iter "{loop_iter}" \\\n  --argjson drag_before "$_drag_before" \\\n  --argjson drag_after "$_drag_after" \\\n  --arg iter_start_sha "$_start_sha" \\\n  --arg iter_end_sha "$_end_sha" \\\n  --argjson commits "$_commits" \\\n  --arg verdict "$_verdict" \\\n  \'. + [{"iteration":$iter,"target":$target,"iter_start_sha":$iter_start_sha,"iter_end_sha":$iter_end_sha,"drag_before":$drag_before,"drag_after":$drag_after,"drag_delta":($drag_after - $drag_before),"commits":$commits,"verdict":$verdict}]\' \\\n  > {progression_out}\n\necho "recorded progression entry for iteration {loop_iter} (verdict=$_verdict)"\nif [ "$_verdict" = "no_progress" ]; then\n  echo "bailing: no progress with 3+ entries"\n  exit 1\nfi\n',
+              'drag-record-progression \
+  "$GREMLIN_WORKDIR" \
+  "$GREMLINS_STATE_DIR" \
+  "{target_val}" \
+  "{base_sha_val}" \
+  "{loop_iter}" \
+  "$GREMLINS_STATE_DIR/artifacts/drag_config.json" \
+  {progression_in} \
+  {progression_out} \
+  {target_out}',
             ],
           },
         },
@@ -320,7 +346,6 @@ fi
       type: "exec",
       interpolation: {
         inputs: {
-          target: 'content("artifact://target.txt")',
           baseline_report: "artifact://baseline/report.json",
           drag_best_val: 'content("artifact://drag_best.txt")',
         },
@@ -330,10 +355,10 @@ fi
       },
       options: {
         cmds: [
-          // Find the latest cumulative progression artifact.  Each iteration
-          // wrote artifact://{N}/drag_progression.json; pick the newest.
-          // Fall back to the baseline seed if no iteration artifacts exist.
-          'LATEST=$(ls -t "$GREMLINS_STATE_DIR/artifacts/"*/drag_progression.json 2>/dev/null | head -1)\nFALLBACK="$GREMLINS_STATE_DIR/artifacts/drag_progression.json"\nPROGRESSION="${LATEST:-$FALLBACK}"\nBEST="{drag_best_val}"\n[ -z "$BEST" ] && BEST="N/A"\nBASE_SUM=$(jq \'.drag\' < {baseline_report})\nITER_COUNT=$(jq \'. | length - 1\' "$PROGRESSION" 2>/dev/null || echo "0")\nTRAJECTORY=$(jq -r \'[.[] | select(.verdict == "reduced" or .verdict == "baseline") | "\\(.iteration): \\(.drag_after)"] | join(" → ")\' "$PROGRESSION" 2>/dev/null)\n{\n  echo "drag-optimizer: reduce drag for {target}"\n  echo ""\n  echo "Baseline drag sum: $BASE_SUM → Best: $BEST"\n  echo "Trajectory: $TRAJECTORY"\n  echo "Iterations: $ITER_COUNT"\n  echo "Target: {target}"\n} > {commit_message}\n',
+          // Find the latest cumulative progression and scoped target.
+          // Each iteration writes artifact://{N}/drag_progression.json
+          // and artifact://{N}/drag_target.txt; pick the newest.
+          'LATEST=$(ls -t "$GREMLINS_STATE_DIR/artifacts/"*/drag_progression.json 2>/dev/null | head -1)\nFALLBACK="$GREMLINS_STATE_DIR/artifacts/drag_progression.json"\nPROGRESSION="${LATEST:-$FALLBACK}"\nLATEST_TARGET=$(ls -t "$GREMLINS_STATE_DIR/artifacts/"*/drag_target.txt 2>/dev/null | head -1)\nif [ -n "$LATEST_TARGET" ]; then\n  TARGET=$(tr -d \'\\n\' < "$LATEST_TARGET")\nelse\n  TARGET=$(tr -d \'\\n\' < "$GREMLINS_STATE_DIR/artifacts/target.txt")\nfi\nBEST="{drag_best_val}"\n[ -z "$BEST" ] && BEST="N/A"\nBASE_SUM=$(jq \'.drag\' < {baseline_report})\nITER_COUNT=$(jq \'. | length - 1\' "$PROGRESSION" 2>/dev/null || echo "0")\nTRAJECTORY=$(jq -r \'[.[] | select(.verdict == "reduced" or .verdict == "baseline") | "\\(.iteration): \\(.drag_after)"] | join(" → ")\' "$PROGRESSION" 2>/dev/null)\n{\n  echo "drag-optimizer: reduce drag for $TARGET"\n  echo ""\n  echo "Baseline drag sum: $BASE_SUM → Best: $BEST"\n  echo "Trajectory: $TRAJECTORY"\n  echo "Iterations: $ITER_COUNT"\n  echo "Target: $TARGET"\n} > {commit_message}\n',
         ],
       },
     },
