@@ -103,6 +103,23 @@ fn resolve_auth(
             CopilotTokenRefreshMiddleware::new(sessions),
         ));
     }
+    // 3b. providers.yaml copilot.github-token (static GitHub access token)
+    if let Some(access_token) = providers.github_token(PROVIDER_NAME).map(|s| s.to_string()) {
+        let exchanger = make_exchanger()?;
+        let session = exchange_github_token_sync(exchanger.clone(), &access_token)?;
+        let token_provider = Arc::new(StaticTokenProvider {
+            token: access_token,
+        });
+        let sessions = Arc::new(CopilotSessionProvider::with_session(
+            token_provider,
+            exchanger,
+            session.clone(),
+        ));
+        return Ok(copilot_client_with_session(
+            session,
+            CopilotTokenRefreshMiddleware::new(sessions),
+        ));
+    }
     // 4. GITHUB_TOKEN / GH_TOKEN env vars (static GitHub access token)
     if let Some(access_token) = github_access_token() {
         let exchanger = make_exchanger()?;
@@ -123,7 +140,7 @@ fn resolve_auth(
     Err(format!(
         "no credentials for provider '{PROVIDER_NAME}': set GITHUB_COPILOT_API_KEY, \
          COPILOT_API_KEY, GITHUB_TOKEN, or GH_TOKEN; or add an entry with \
-         \"api-key\" or \"client-id\" + \"refresh-token\" in {}",
+         \"api-key\", \"client-id\" + \"refresh-token\", or \"github-token\" in {}",
         crate::config::user_config_root()
             .join("providers.yaml")
             .display(),
@@ -153,6 +170,18 @@ pub fn check_copilot_oauth_credential(
     let access_token = provider.access_token_sync()?;
     let exchanger = BlockingCopilotTokenExchanger::new();
     let session = exchanger.exchange(&access_token)?;
+    Ok(CopilotCredentialStatus {
+        expires_at: session.expires_at,
+    })
+}
+
+/// Validate a static GitHub access token by exchanging it for a Copilot
+/// session token and returning the session status.
+pub fn check_copilot_github_token(
+    token: &str,
+) -> Result<CopilotCredentialStatus, String> {
+    let exchanger = BlockingCopilotTokenExchanger::new();
+    let session = exchanger.exchange(token)?;
     Ok(CopilotCredentialStatus {
         expires_at: session.expires_at,
     })

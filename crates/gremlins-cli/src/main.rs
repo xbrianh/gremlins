@@ -150,9 +150,9 @@ enum AuthCmds {
 enum CopilotAuthCmds {
     /// Log in via GitHub OAuth device flow.
     Login {
-        /// GitHub App client ID.
+        /// GitHub App client ID (defaults to the first-party Copilot OAuth app).
         #[arg(long)]
-        client_id: String,
+        client_id: Option<String>,
     },
     /// Check whether a Copilot OAuth credential is valid.
     Status,
@@ -213,7 +213,12 @@ async fn main() {
         Some(Cmds::Version) => version_cmd().await,
         Some(Cmds::Auth { command }) => match command {
             AuthCmds::Copilot { command } => match command {
-                CopilotAuthCmds::Login { client_id } => auth_copilot_login(&client_id).await,
+                CopilotAuthCmds::Login { client_id } => {
+                    let cid = client_id
+                        .as_deref()
+                        .unwrap_or(github_auth::DEFAULT_COPILOT_OAUTH_CLIENT_ID);
+                    auth_copilot_login(cid).await
+                }
                 CopilotAuthCmds::Status => auth_copilot_status().await,
                 CopilotAuthCmds::Logout => auth_copilot_logout(),
             },
@@ -2060,7 +2065,10 @@ async fn auth_copilot_login(client_id: &str) -> Result<(), String> {
                     .to_string(),
             );
         }
-        if entry.client_id().is_some() || entry.refresh_token().is_some() {
+        if entry.client_id().is_some()
+            || entry.refresh_token().is_some()
+            || entry.github_token().is_some()
+        {
             return Err(
                 "copilot OAuth already configured — use \"gremlins auth copilot logout\" to \
                  remove existing credentials first"
@@ -2101,7 +2109,17 @@ async fn auth_copilot_login(client_id: &str) -> Result<(), String> {
         .map_err(|e| format!("failed to load providers.yaml: {e}"))?;
     let entry = file.0.entry("copilot".to_string()).or_default();
     entry.set_client_id(client_id.to_string());
-    entry.set_refresh_token(credentials.refresh_token);
+    match credentials.refresh_token {
+        Some(refresh_token) => {
+            entry.set_refresh_token(refresh_token);
+        }
+        None => {
+            // First-party Copilot OAuth client-id returns a long-lived static
+            // access token with no refresh token; persist it directly as
+            // github-token.
+            entry.set_github_token(credentials.access_token.clone());
+        }
+    }
     provider_config::save_providers_file(&file)
         .map_err(|e| format!("failed to save providers.yaml: {e}"))?;
 
@@ -2125,8 +2143,12 @@ async fn auth_copilot_status() -> Result<(), String> {
         }
     };
 
-    match (entry.client_id(), entry.refresh_token()) {
-        (Some(_client_id), Some(_refresh_token)) => {
+    match (
+        entry.client_id(),
+        entry.refresh_token(),
+        entry.github_token(),
+    ) {
+        (Some(_client_id), Some(_refresh_token), _) => {
             // Run validation on a blocking worker — the checker uses
             // reqwest::blocking internally and must never run on a tokio
             // worker thread.
@@ -2152,10 +2174,34 @@ async fn auth_copilot_status() -> Result<(), String> {
                 Err(e) => println!("copilot: ✗ credential invalid: {e}"),
             }
         }
-        (Some(_), None) => {
-            println!("copilot: client-id configured but no refresh-token — run \"gremlins auth copilot login\"");
+        (Some(_), None, Some(github_token)) => {
+            // Static GitHub access token — validate by exchanging for a
+            // Copilot session.
+            let token = github_token.to_string();
+            match tokio::task::spawn_blocking(move || {
+                copilot_backend::check_copilot_github_token(&token)
+            })
+            .await
+            .map_err(|e| format!("credential check panicked: {e}"))?
+            {
+                Ok(status) => {
+                    println!("copilot: ✓ github-token valid");
+                    if let Some(exp) = status.expires_at {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        let remaining = exp.saturating_sub(now);
+                        println!("  Copilot session expires in {} seconds", remaining);
+                    }
+                }
+                Err(e) => println!("copilot: ✗ credential invalid: {e}"),
+            }
         }
-        (None, _) => {
+        (Some(_), None, None) => {
+            println!("copilot: client-id configured but no refresh-token or github-token — run \"gremlins auth copilot login\"");
+        }
+        (None, _, _) => {
             if entry.api_key().is_some() {
                 println!("copilot: api-key configured (OAuth not set)");
             } else {
@@ -2172,7 +2218,10 @@ fn auth_copilot_logout() -> Result<(), String> {
     let mut file = provider_config::load_providers_file()
         .map_err(|e| format!("failed to load providers.yaml: {e}"))?;
     if let Some(entry) = file.0.get_mut("copilot") {
-        if entry.client_id().is_none() && entry.refresh_token().is_none() {
+        if entry.client_id().is_none()
+            && entry.refresh_token().is_none()
+            && entry.github_token().is_none()
+        {
             println!("copilot: no OAuth credentials to remove");
             return Ok(());
         }

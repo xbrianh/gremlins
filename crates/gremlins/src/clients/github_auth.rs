@@ -14,6 +14,11 @@ use crate::clients::token_provider::{TokenProvider, TokenProviderError};
 /// OAuth scope requested for Copilot user-to-server tokens.
 pub const GITHUB_SCOPE_COPILOT: &str = "copilot";
 
+/// Default first-party Copilot OAuth client-id.  When no `--client-id` is
+/// given, the CLI uses this id — the resulting access token is long-lived
+/// and static (no refresh token is returned).
+pub const DEFAULT_COPILOT_OAUTH_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
+
 pub(crate) const DEFAULT_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 pub(crate) const DEFAULT_ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 
@@ -39,7 +44,9 @@ pub struct DeviceCodeResponse {
 #[derive(Debug, Clone)]
 pub struct DeviceFlowCredentials {
     pub access_token: String,
-    pub refresh_token: String,
+    /// OAuth refresh token — `None` for the first-party Copilot
+    /// client-id whose access token is long-lived and static.
+    pub refresh_token: Option<String>,
     pub expires_in: Option<u64>,
 }
 
@@ -416,12 +423,11 @@ pub(crate) fn complete_device_flow_with_url(
                 let access_token = response.access_token.ok_or_else(|| {
                     "device flow completed but no access token returned".to_string()
                 })?;
-                let refresh_token = response.refresh_token.ok_or_else(|| {
-                    "device flow completed but no refresh token returned".to_string()
-                })?;
+                // The first-party Copilot OAuth client-id does not return a
+                // refresh token — the access token is long-lived and static.
                 return Ok(DeviceFlowCredentials {
                     access_token,
-                    refresh_token,
+                    refresh_token: response.refresh_token,
                     expires_in: response.expires_in,
                 });
             }

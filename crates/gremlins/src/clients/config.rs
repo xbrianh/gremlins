@@ -64,6 +64,7 @@ pub struct Providers {
     azure_auth_scopes: HashMap<String, String>,
     client_ids: HashMap<String, String>,
     refresh_tokens: HashMap<String, String>,
+    github_tokens: HashMap<String, String>,
 }
 
 /// Typed structure for providers.yaml — a newtype over the provider map.
@@ -101,6 +102,12 @@ pub struct ProviderEntry {
         skip_serializing_if = "Option::is_none"
     )]
     refresh_token: Option<StrictString>,
+    #[serde(
+        rename = "github-token",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    github_token: Option<StrictString>,
 }
 
 impl ProviderEntry {
@@ -117,6 +124,11 @@ impl ProviderEntry {
     /// The provider's OAuth refresh token, if set.
     pub fn refresh_token(&self) -> Option<&str> {
         self.refresh_token.as_ref().map(|s| s.0.as_str())
+    }
+
+    /// The provider's static GitHub access token, if set.
+    pub fn github_token(&self) -> Option<&str> {
+        self.github_token.as_ref().map(|s| s.0.as_str())
     }
 
     /// The provider's base URL, if set.
@@ -139,10 +151,16 @@ impl ProviderEntry {
         self.refresh_token = Some(StrictString(v));
     }
 
-    /// Clear the provider's OAuth credentials (client id + refresh token).
+    /// Set the provider's static GitHub access token.
+    pub fn set_github_token(&mut self, v: String) {
+        self.github_token = Some(StrictString(v));
+    }
+
+    /// Clear the provider's OAuth credentials (client id + refresh token + github token).
     pub fn clear_oauth(&mut self) {
         self.client_id = None;
         self.refresh_token = None;
+        self.github_token = None;
     }
 
     /// Whether every field is unset.
@@ -155,6 +173,7 @@ impl ProviderEntry {
             && self.azure.is_none()
             && self.client_id.is_none()
             && self.refresh_token.is_none()
+            && self.github_token.is_none()
     }
 }
 
@@ -245,6 +264,14 @@ impl Providers {
             .map(|s| s.as_str())
             .filter(|s| !s.trim().is_empty())
     }
+
+    /// Get the static GitHub access token for a provider name.
+    pub(crate) fn github_token(&self, provider: &str) -> Option<&str> {
+        self.github_tokens
+            .get(provider)
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
 }
 
 /// Normalize a [`StrictString`] config value: trim surrounding whitespace
@@ -276,6 +303,7 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
     let mut azure_auth_scopes = HashMap::new();
     let mut client_ids = HashMap::new();
     let mut refresh_tokens = HashMap::new();
+    let mut github_tokens = HashMap::new();
     for (k, v) in providers_file.0 {
         if let Some(api_key) = normalize(v.api_key) {
             api_keys.insert(k.clone(), api_key);
@@ -317,6 +345,9 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
                 refresh_tokens.insert(k.clone(), rt);
             }
         }
+        if let Some(gt) = normalize(v.github_token) {
+            github_tokens.insert(k.clone(), gt);
+        }
         if !api_keys.contains_key(&k)
             && !base_urls.contains_key(&k)
             && !tokens.contains_key(&k)
@@ -326,6 +357,7 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
             && !azure_auth_scopes.contains_key(&k)
             && !client_ids.contains_key(&k)
             && !refresh_tokens.contains_key(&k)
+            && !github_tokens.contains_key(&k)
         {
             warn!("providers.yaml entry {k:?} has no non-empty fields — skipping");
         }
@@ -340,6 +372,7 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
         azure_auth_scopes,
         client_ids,
         refresh_tokens,
+        github_tokens,
     })
 }
 
@@ -568,7 +601,8 @@ fn patch_provider_entry(mapping: &mut serde_yaml::Mapping, provider: &str, entry
         || entry.api_version.is_some()
         || entry.azure.is_some()
         || entry.client_id.is_some()
-        || entry.refresh_token.is_some();
+        || entry.refresh_token.is_some()
+        || entry.github_token.is_some();
 
     if !has_fields {
         mapping.remove(&key);
@@ -621,6 +655,11 @@ fn patch_provider_entry(mapping: &mut serde_yaml::Mapping, provider: &str, entry
         prov_map,
         "refresh-token",
         entry.refresh_token.as_ref().map(|s| s.0.as_str()),
+    );
+    upsert_string(
+        prov_map,
+        "github-token",
+        entry.github_token.as_ref().map(|s| s.0.as_str()),
     );
 
     // azure is a nested mapping — replace it wholesale when present,
