@@ -95,10 +95,12 @@
       interpolation: {
         inputs: {
           target: 'content("artifact://target.txt")',
+          base_sha: "artifact://base_sha",
         },
         outputs: {
           report: "artifact://baseline/report.json",
           drag_best: "artifact://drag_best.txt",
+          progression: "artifact://drag_progression.json",
         },
       },
       options: {
@@ -107,6 +109,7 @@
           'cp {report} "$GREMLINS_STATE_DIR/drag_current.json"',
           "cat {report} | jq '.drag' > {drag_best}\n",
           'echo "baseline sum drag = $(cat {drag_best})"',
+          'if [ -f {progression} ]; then\n  echo "drag_progression.json already exists; skipping baseline seed"\nelse\n  BASE_SHA=$(cat {base_sha}) && DRAG=$(jq \'.drag\' < {report}) && jq -n --arg target "{target}" --arg base_sha "$BASE_SHA" --argjson drag "$DRAG" \'[{"iteration":"baseline","target":$target,"iter_start_sha":$base_sha,"iter_end_sha":$base_sha,"drag_before":null,"drag_after":$drag,"drag_delta":null,"commits":null,"verdict":"baseline"}]\' > {progression} && echo "seeded drag_progression.json (baseline drag=$DRAG)"\nfi',
         ],
       },
     },
@@ -209,6 +212,8 @@
               report: "artifact://{loop_iter}/report.json",
               drag_before: "artifact://{loop_iter}/drag_before.txt",
               drag_after: "artifact://{loop_iter}/drag_after.txt",
+              iter_end_sha: "artifact://{loop_iter}/iter_end_sha.txt",
+              commit_count: "artifact://{loop_iter}/commit_count.txt",
             },
           },
           options: {
@@ -216,12 +221,17 @@
               'gremlins-drag --config "$GREMLINS_STATE_DIR/artifacts/drag_config.json" "{target}" > {report}',
               'STATE_DIR="$GREMLINS_STATE_DIR"\ndrag_sum() {\n  jq '.drag' < "$1"\n}\nif [ -f "$STATE_DIR/drag_current.json" ]; then\n  drag_sum "$STATE_DIR/drag_current.json" > {drag_before}\n  cp "$STATE_DIR/drag_current.json" "$STATE_DIR/drag_previous.json"\nelse\n  printf "0" > {drag_before}\nfi\ncp {report} "$STATE_DIR/drag_current.json"\n',
               'STATE_DIR="$GREMLINS_STATE_DIR"\ndrag_sum() {\n  jq '.drag' < "$1"\n}\nAFTER=$(drag_sum "$STATE_DIR/drag_current.json")\nprintf "%s" "$AFTER" > {drag_after}\nBEST=$(cat "$GREMLINS_STATE_DIR/artifacts/drag_best.txt" 2>/dev/null)\nif ! awk -v a="$AFTER" -v b="$BEST" \'BEGIN { exit (b < a) ? 0 : 1 }\' 2>/dev/null; then\n  BEST="$AFTER"\nfi\nprintf "%s" "$BEST" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"\necho "iteration {loop_iter} drag = $AFTER (best = $BEST)"\n',
+              'git -C "$GREMLIN_WORKDIR" rev-parse HEAD | tr -d \'\n\' > {iter_end_sha}',
+              'ITER_START=$(cat "$GREMLINS_STATE_DIR/artifacts/{loop_iter}/iter_start_sha.txt" 2>/dev/null) || { echo "FATAL: iter_start_sha.txt missing for {loop_iter}" >&2; exit 1; }\nCOMMITS=$(git -C "$GREMLIN_WORKDIR" rev-list --count "$ITER_START..HEAD" 2>/dev/null || echo "0")\nprintf "%s" "$COMMITS" > {commit_count}',
             ],
           },
         },
         // --- evaluate: agent judges legitimacy (gaming detection only — QA already verified correctness) ---
         // `drag_reduced` is a required output — only written for legitimate,
         // drag-reducing iterations. Missing → bail for operator review.
+        // Exception: when fewer than 3 entries exist in the progression
+        // artifact, non-improving iterations still write `reduced` so the
+        // optimizer can gather enough data points.
         {
           name: "drag-optimize-evaluate",
           type: "agent",
@@ -232,13 +242,14 @@
               drag_before: 'content("artifact://{loop_iter}/drag_before.txt")',
               drag_after: 'content("artifact://{loop_iter}/drag_after.txt")',
               iter_start_sha: 'content("artifact://{loop_iter}/iter_start_sha.txt")',
+              progression: 'content("artifact://drag_progression.json")',
             },
             outputs: {
               drag_reduced: "artifact://{loop_iter}/drag_reduced.txt",
             },
           },
           prompt: [
-            'Evaluate the just-completed refactoring iteration for {target}.\n\n## Drag scores\n\n- Before: {drag_before}\n- After: {drag_after}\n\n## The plan\n\n{plan}\n\n## Your job\n\nQA (verification, semantic review, complexity review) has already run and\npassed — the code compiles, tests pass, and reviewers approved the design.\nYour ONLY job is to detect **score gaming**: changes whose primary effect\nis to manipulate the drag formula without genuinely making the code easier\nto understand, modify, or maintain.\n\nRun read-only git commands (`git diff {iter_start_sha}`, `git log`, `git show`)\nto inspect exactly what changed.\n\n### Score gaming patterns to look for\n\nUse your judgment — don\'t pattern-match mechanically. Examples:\n\n- Cosmetic-only changes: renames without clarity gain, reordering\n  without structural benefit, whitespace-only changes\n- Splitting files without reducing actual coupling\n- Adding indirection that obscures rather than clarifies\n- Mechanically extracting `#[cfg(test)] mod tests` blocks that are\n  already cleanly separated at the bottom of a production file into\n  separate test files — pure churn with zero hygiene gain\n- Moving, splitting, or reorganizing test code without improving\n  test_hygiene\n- Deleting or weakening tests to shrink a file (breaks correctness;\n  also pointless for drag since tests are stripped from token counts)\n\n### Legitimate refactoring\n\nLegitimate changes make the code genuinely easier to maintain:\nsimpler control flow, reduced coupling, better abstractions, less\nduplication, tighter APIs, clearer names, flatter dependency chains,\nsplitting dumping-ground files by concern, breaking up mega-functions,\nand relocating tests that are genuinely interleaved with production\ncode (not already in a clean bottom-of-file `mod tests` block).\n\n**Scope is not a signal of gaming.** A refactoring that touches many\nfiles to restructure module boundaries or untangle complex coupling is\nentirely legitimate. Judge the quality of the changes, not the size of\nthe diff.\n\n### Your verdict\n\nWrite ONLY one word — your verdict — to `{drag_reduced}`. You MAY run\nread-only git commands (`git diff`, `git log`, `git show`) to inspect\nchanges. Do NOT run mutating git commands and do NOT modify any files.\nAn exec stage after this one handles rollback if needed.\n\n**Legitimate AND drag improved (after < before):**\nWrite `reduced`. The iteration succeeded.\n\n**Legitimate BUT drag did not improve:**\nDo NOT write `{drag_reduced}`. The pipeline will bail for operator review.\n\n**Score gaming:**\nWrite `rolled_back`. An exec stage will undo the commit and repair\nthe state files. Explain clearly what gaming pattern you detected.\n\nSummary:\n- Write `reduced` → drag improved, loop continues.\n- Write `rolled_back` → gaming, loop continues after exec rollback.\n- Write nothing → no progress, bail for operator review.\n',
+            'Evaluate the just-completed refactoring iteration for {target}.\n\n## Drag scores\n\n- Before: {drag_before}\n- After: {drag_after}\n\n## The plan\n\n{plan}\n\n## Drag progression so far\n\n{progression}\n\n## Your job\n\nQA (verification, semantic review, complexity review) has already run and\npassed — the code compiles, tests pass, and reviewers approved the design.\nYour ONLY job is to detect **score gaming**: changes whose primary effect\nis to manipulate the drag formula without genuinely making the code easier\nto understand, modify, or maintain.\n\nRun read-only git commands (`git diff {iter_start_sha}`, `git log`, `git show`)\nto inspect exactly what changed.\n\n### Score gaming patterns to look for\n\nUse your judgment — don\'t pattern-match mechanically. Examples:\n\n- Cosmetic-only changes: renames without clarity gain, reordering\n  without structural benefit, whitespace-only changes\n- Splitting files without reducing actual coupling\n- Adding indirection that obscures rather than clarifies\n- Mechanically extracting `#[cfg(test)] mod tests` blocks that are\n  already cleanly separated at the bottom of a production file into\n  separate test files — pure churn with zero hygiene gain\n- Moving, splitting, or reorganizing test code without improving\n  test_hygiene\n- Deleting or weakening tests to shrink a file (breaks correctness;\n  also pointless for drag since tests are stripped from token counts)\n\n### Legitimate refactoring\n\nLegitimate changes make the code genuinely easier to maintain:\nsimpler control flow, reduced coupling, better abstractions, less\nduplication, tighter APIs, clearer names, flatter dependency chains,\nsplitting dumping-ground files by concern, breaking up mega-functions,\nand relocating tests that are genuinely interleaved with production\ncode (not already in a clean bottom-of-file `mod tests` block).\n\n**Scope is not a signal of gaming.** A refactoring that touches many\nfiles to restructure module boundaries or untangle complex coupling is\nentirely legitimate. Judge the quality of the changes, not the size of\nthe diff.\n\n### Your verdict\n\nWrite ONLY one word — your verdict — to `{drag_reduced}`. You MAY run\nread-only git commands (`git diff`, `git log`, `git show`) to inspect\nchanges. Do NOT run mutating git commands and do NOT modify any files.\nAn exec stage after this one handles rollback if needed.\n\n**Legitimate AND drag improved (after < before):**\nWrite `reduced`. The iteration succeeded.\n\n**Legitimate BUT drag did not improve:**\nCheck the drag progression above. Count the entries (baseline +\niterations). If there are fewer than 3 entries, write `reduced` — the\noptimizer needs at least a few attempts to understand the codebase\'s\ndrag drivers; early non-improving iterations are expected and should\nnot bail. Otherwise (3+ entries and no improvement), write\n`no_progress`. The pipeline will record this iteration and then bail\nfor operator review.\n\n**Score gaming:**\nWrite `rolled_back`. An exec stage will undo the commit and repair\nthe state files. Explain clearly what gaming pattern you detected.\n\nSummary:\n- Write `reduced` → drag improved (or < 3 entries, keep going), loop continues.\n- Write `rolled_back` → gaming, loop continues after exec rollback.\n- Write `no_progress` → no improvement with 3+ entries, record and bail for operator review.\n',
           //# Your job
           //# Your verdict
           options: {
@@ -251,13 +262,35 @@
           type: "exec",
           interpolation: {
             inputs: {
-              verdict: 'content("artifact://{loop_iter}/drag_reduced.txt")',
+              verdict_path: "artifact://{loop_iter}/drag_reduced.txt",
               iter_start_sha: 'content("artifact://{loop_iter}/iter_start_sha.txt")',
             },
           },
           options: {
             cmds: [
-              'if [ "{verdict}" = "rolled_back" ]; then\n  echo "rolling back iteration {loop_iter} (gaming detected)"\n  git -C "$GREMLIN_WORKDIR" reset --hard {iter_start_sha}\n  if [ -f "$GREMLINS_STATE_DIR/drag_previous.json" ]; then\n    cp "$GREMLINS_STATE_DIR/drag_previous.json" "$GREMLINS_STATE_DIR/drag_current.json"\n    DRAG_BEFORE=$(cat "$GREMLINS_STATE_DIR/artifacts/{loop_iter}/drag_before.txt" 2>/dev/null)\n    printf "%s" "${DRAG_BEFORE:-0}" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"\n    echo "restored drag_best to pre-iteration value"\n  fi\nelif [ "{verdict}" = "reduced" ]; then\n  echo "iteration {loop_iter} is legitimate with drag improvement"\nelse\n  echo "iteration {loop_iter} verdict is unknown: {verdict}"\nfi\n',
+              '# Read and sanitize the verdict. The evaluate agent always writes a verdict.\nVERDICT=""\nif [ -f {verdict_path} ]; then\n  VERDICT=$(tr -d \'\\n\' < {verdict_path})\nfi\n\n# Apply the verdict.\nif [ "$VERDICT" = "rolled_back" ]; then\n  echo "rolling back iteration {loop_iter} (gaming detected)"\n  git -C "$GREMLIN_WORKDIR" reset --hard {iter_start_sha}\n  if [ -f "$GREMLINS_STATE_DIR/drag_previous.json" ]; then\n    cp "$GREMLINS_STATE_DIR/drag_previous.json" "$GREMLINS_STATE_DIR/drag_current.json"\n    DRAG_BEFORE=$(cat "$GREMLINS_STATE_DIR/artifacts/{loop_iter}/drag_before.txt" 2>/dev/null)\n    printf "%s" "${DRAG_BEFORE:-0}" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"\n    echo "restored drag_best to pre-iteration value"\n  fi\nelif [ "$VERDICT" = "reduced" ]; then\n  echo "iteration {loop_iter} is legitimate with drag improvement"\nelif [ "$VERDICT" = "no_progress" ]; then\n  echo "iteration {loop_iter}: no progress with 3+ entries; recording and bailing"\nelse\n  echo "iteration {loop_iter} verdict is unknown or empty: $VERDICT"\nfi\n',
+            ],
+          },
+        },
+        // --- record-progression: append iteration entry to the progression artifact ---
+        {
+          name: "record-progression",
+          type: "exec",
+          interpolation: {
+            inputs: {
+              drag_before_path: "artifact://{loop_iter}/drag_before.txt",
+              drag_after_path: "artifact://{loop_iter}/drag_after.txt",
+              iter_start_sha_path: "artifact://{loop_iter}/iter_start_sha.txt",
+              iter_end_sha_path: "artifact://{loop_iter}/iter_end_sha.txt",
+              commit_count_path: "artifact://{loop_iter}/commit_count.txt",
+              verdict_path: "artifact://{loop_iter}/drag_reduced.txt",
+              target: 'content("artifact://target.txt")',
+              progression_path: "artifact://drag_progression.json",
+            },
+          },
+          options: {
+            cmds: [
+              '# Read the existing progression artifact into a shell variable first,\n# then write the updated JSON back — this avoids truncating the file\n# before jq can read it (both {progression_path} and {progression_path} resolve\n# to the same artifact path).\nif [ ! -f {progression_path} ]; then\n  echo "drag_progression.json not found; skipping record-progression"\n  echo "[]" > {progression_path}\n  exit 0\nfi\nEXISTING=$(cat {progression_path})\n\n# Sanitize all values read from files — trim trailing newlines and\n# validate numeric fields so --argjson receives clean JSON scalars.\n_drag_before=$(tr -d \'\\n\' < {drag_before_path} 2>/dev/null || echo "0")\n_drag_after=$(tr -d \'\\n\' < {drag_after_path} 2>/dev/null || echo "0")\n_start_sha=$(tr -d \'\\n\' < {iter_start_sha_path} 2>/dev/null || echo "")\n_end_sha=$(tr -d \'\\n\' < {iter_end_sha_path} 2>/dev/null || echo "")\n_commits=$(tr -d \'\\n\' < {commit_count_path} 2>/dev/null || echo "0")\n_verdict=$(tr -d \'\\n\' < {verdict_path} 2>/dev/null || echo "")\n\n# Validate numeric fields — fall back to 0 if they are not numbers.\ncase "$_drag_before" in \'\'|*[!0-9.]*) _drag_before=0 ;; esac\ncase "$_drag_after"  in \'\'|*[!0-9.]*) _drag_after=0  ;; esac\ncase "$_commits"    in \'\'|*[!0-9]*)  _commits=0     ;; esac\n\n# Check for an existing entry with the same iteration to avoid duplicates\n# when the stage is re-run (e.g. pipeline resume).\nif echo "$EXISTING" | jq -e --arg iter "{loop_iter}" \'map(select(.iteration == $iter)) | length > 0\' > /dev/null 2>&1; then\n  echo "entry for iteration {loop_iter} already exists; skipping"\n  exit 0\nfi\n\n# Rolled-back iterations record iter_start_sha as iter_end_sha\n# because the rollback reset HEAD back to the starting commit.\nif [ "$_verdict" = "rolled_back" ]; then\n  _end_sha="$_start_sha"\nfi\n\n# Append the new entry.  Read from the shell variable, write to the\n# output path — no truncation race because we already slurped EXISTING.\necho "$EXISTING" | jq \\\n  --arg target "{target}" \\\n  --arg iter "{loop_iter}" \\\n  --argjson drag_before "$_drag_before" \\\n  --argjson drag_after "$_drag_after" \\\n  --arg iter_start_sha "$_start_sha" \\\n  --arg iter_end_sha "$_end_sha" \\\n  --argjson commits "$_commits" \\\n  --arg verdict "$_verdict" \\\n  \'. + [{"iteration":$iter,"target":$target,"iter_start_sha":$iter_start_sha,"iter_end_sha":$iter_end_sha,"drag_before":$drag_before,"drag_after":$drag_after,"drag_delta":($drag_after - $drag_before),"commits":$commits,"verdict":$verdict}]\' \\\n  > {progression_path}\n\necho "recorded progression entry for iteration {loop_iter} (verdict=$_verdict)"\nif [ "$_verdict" = "no_progress" ]; then\n  echo "bailing: no progress with 3+ entries"\n  exit 1\nfi\n',
             ],
           },
         },
@@ -272,6 +305,7 @@
           target: 'content("artifact://target.txt")',
           baseline_report: "artifact://baseline/report.json",
           drag_best_val: 'content("artifact://drag_best.txt")',
+          progression_path: "artifact://drag_progression.json",
         },
         outputs: {
           commit_message: "artifact://commit_message.txt",
@@ -279,7 +313,7 @@
       },
       options: {
         cmds: [
-          'BEST="{drag_best_val}"\n[ -z "$BEST" ] && BEST="N/A"\nBASE_SUM=$(jq '.drag' < {baseline_report})\n{\n  echo "drag-optimizer: reduce drag for {target}"\n  echo ""\n  echo "Baseline drag sum: $BASE_SUM \u2192 Best: $BEST"\n  echo "Target: {target}"\n} > {commit_message}\n',
+          'BEST="{drag_best_val}"\n[ -z "$BEST" ] && BEST="N/A"\nBASE_SUM=$(jq \'.drag\' < {baseline_report})\nITER_COUNT=$(jq \'. | length - 1\' {progression_path} 2>/dev/null || echo "0")\nTRAJECTORY=$(jq -r \'[.[] | select(.verdict == "reduced" or .verdict == "baseline") | "\\(.iteration): \\(.drag_after)"] | join(" → ")\' {progression_path} 2>/dev/null)\n{\n  echo "drag-optimizer: reduce drag for {target}"\n  echo ""\n  echo "Baseline drag sum: $BASE_SUM → Best: $BEST"\n  echo "Trajectory: $TRAJECTORY"\n  echo "Iterations: $ITER_COUNT"\n  echo "Target: {target}"\n} > {commit_message}\n',
         ],
       },
     },
