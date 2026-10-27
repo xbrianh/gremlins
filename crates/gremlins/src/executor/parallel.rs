@@ -298,13 +298,33 @@ pub(crate) async fn run_parallel(
                                     if exit_code == 0 {
                                         Ok(())
                                     } else {
-                                        // Try to get a meaningful error from the bail file or state.
-                                        let reason = raw
-                                            .get("stage")
-                                            .and_then(|v| v.as_str())
-                                            .filter(|s| !s.is_empty() && *s != "starting")
-                                            .map(|s| format!("stage {s}: exited {exit_code}"))
-                                            .unwrap_or_else(|| format!("exited {exit_code}"));
+                                        // Try to get a meaningful error from the bail file first,
+                                        // then fall back to the stage field in state.json.
+                                        let reason = if let Some(bail) = g.state.stage_error() {
+                                            let detail = bail
+                                                .get("detail")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            let class = bail
+                                                .get("class")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            if !detail.is_empty() {
+                                                if !class.is_empty() && class != "other" {
+                                                    format!("{class}: {detail}")
+                                                } else {
+                                                    detail.to_string()
+                                                }
+                                            } else {
+                                                format!("exited {exit_code}")
+                                            }
+                                        } else {
+                                            raw.get("stage")
+                                                .and_then(|v| v.as_str())
+                                                .filter(|s| !s.is_empty() && *s != "starting")
+                                                .map(|s| format!("stage {s}: exited {exit_code}"))
+                                                .unwrap_or_else(|| format!("exited {exit_code}"))
+                                        };
                                         Err(RunError::StageFailed {
                                             stage: child_name.clone(),
                                             message: reason,

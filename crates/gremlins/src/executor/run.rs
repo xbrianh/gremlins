@@ -1089,6 +1089,10 @@ async fn run_sequence(
             ))
             .await
             {
+                send_log(
+                    &gremlin.runtime_config.log_tx,
+                    format!("sequence '{}': child stage failed: {}", seq.name, error),
+                );
                 outcome = Err(error);
                 gremlin.loop_iter = saved_loop_iter;
                 return outcome;
@@ -1228,12 +1232,24 @@ impl Gremlin {
             match stage_result {
                 Ok(()) => {}
                 Err(RunError::Bail { reason }) => {
+                    send_log(
+                        &self.runtime_config.log_tx,
+                        format!("stage '{}': bailed: {}", stage.name(), reason),
+                    );
+                    crate::executor::supervisor::emit_event(crate::executor::DaemonEvent::Bail {
+                        id: self.id.to_string(),
+                        reason: reason.clone(),
+                    });
                     self.state
                         .record_stage_error("other", &truncate(&reason, 200));
                     exit_code = 1;
                     break;
                 }
                 Err(error) => {
+                    send_log(
+                        &self.runtime_config.log_tx,
+                        format!("stage '{}': error: {}", stage.name(), error),
+                    );
                     self.state.record_stage_error(
                         "other",
                         &truncate(&format!("unexpected error: {error}"), 200),
