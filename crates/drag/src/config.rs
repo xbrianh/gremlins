@@ -8,7 +8,7 @@
 // The --model CLI flag always wins: it replaces the model field from
 // whichever source was resolved.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -23,16 +23,33 @@ const BUNDLED_CONFIG: &str = include_str!("../config/bundled.json5");
 #[derive(Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct DragConfig {
+    #[serde(default)]
     pub weights: WeightsConfig,
+    #[serde(default)]
     pub model: Option<String>,
+    #[serde(default = "default_tokenizer")]
     pub tokenizer: String,
+    #[serde(default = "default_estimates")]
     pub estimates_per_survey: usize,
+    #[serde(default)]
     pub skip_maintainability: bool,
+    #[serde(default)]
     pub verbose: bool,
+    #[serde(default)]
     pub format: OutputFormat,
+    #[serde(default)]
     pub cache: Option<PathBuf>,
+    #[serde(default)]
     pub comprehensibility: ComprehensibilityConfig,
+    #[serde(default)]
     pub maintainability: MaintainabilityConfig,
+}
+
+fn default_tokenizer() -> String {
+    "o200k_base".to_string()
+}
+fn default_estimates() -> usize {
+    1
 }
 
 impl Default for DragConfig {
@@ -97,14 +114,19 @@ impl DragConfig {
     /// poisoning.  Any change to dimensions, descriptions, or anchors produces
     /// a different hash, preventing cross-config cache hits.
     pub fn comprehensibility_hash(&self) -> String {
-        let json = serde_json::to_string(&self.comprehensibility).unwrap_or_default();
+        // Serialize with sorted keys for deterministic output across
+        // processes (structural_anchors is a BTreeMap, but other maps
+        // may be added in the future).
+        let json = serde_json::to_string(&self.comprehensibility)
+            .expect("comprehensibility config must serialize");
         blake3::hash(json.as_bytes()).to_hex()[..16].to_string()
     }
 
     /// Compute a hash of the maintainability survey definition for cache-key
     /// poisoning.
     pub fn maintainability_hash(&self) -> String {
-        let json = serde_json::to_string(&self.maintainability).unwrap_or_default();
+        let json = serde_json::to_string(&self.maintainability)
+            .expect("maintainability config must serialize");
         blake3::hash(json.as_bytes()).to_hex()[..16].to_string()
     }
 }
@@ -148,9 +170,10 @@ impl Default for WeightsConfig {
 // Output format
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
+    #[default]
     Human,
     Json,
 }
@@ -172,8 +195,9 @@ pub struct ComprehensibilityConfig {
     #[serde(default)]
     pub dimensions: Vec<ComprehensibilityDimensionDef>,
     /// Per-dimension structural anchors, keyed by dimension key.
+    /// BTreeMap provides deterministic serialization for cache-key hashing.
     #[serde(default)]
-    pub structural_anchors: HashMap<String, String>,
+    pub structural_anchors: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -321,5 +345,84 @@ mod tests {
         let h1 = cfg.comprehensibility_hash();
         let h2 = cfg.comprehensibility_hash();
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn maintainability_hash_stable() {
+        let mut cfg = DragConfig::default();
+        cfg.maintainability
+            .dimensions
+            .push(MaintainabilityDimensionDef {
+                key: "test".into(),
+                label: "Test".into(),
+                description: "desc".into(),
+                anchors: "0: bad\n4: good".into(),
+            });
+        let h1 = cfg.maintainability_hash();
+        let h2 = cfg.maintainability_hash();
+        assert_eq!(h1, h2);
+    }
+
+    // ── DragConfig::load tests ──
+    //
+    // These test the individual components rather than calling load()
+    // directly because load() reads GREMLINS_DRAG_CLI_CONFIG from the
+    // process environment, which is not thread-safe for parallel tests.
+
+    #[test]
+    fn load_bundled_parses_with_expected_values() {
+        let config: DragConfig =
+            serde_json5::from_str(BUNDLED_CONFIG).expect("bundled config must parse");
+        assert_eq!(config.comprehensibility.dimensions.len(), 7);
+        assert_eq!(config.maintainability.dimensions.len(), 10);
+        assert_eq!(config.tokenizer, "o200k_base");
+        assert_eq!(config.weights.w2, 0.5);
+    }
+
+    #[test]
+    fn model_override_replaces_model_field() {
+        // Simulate what load() does: parse the bundled config, then
+        // replace model if --model is given.
+        let mut config: DragConfig =
+            serde_json5::from_str(BUNDLED_CONFIG).expect("bundled config must parse");
+        assert!(config.model.is_none());
+        config.model = Some("openai/gpt-4o".to_string());
+        assert_eq!(config.model.as_deref(), Some("openai/gpt-4o"));
+        // Other fields unchanged.
+        assert_eq!(config.comprehensibility.dimensions.len(), 7);
+    }
+
+    #[test]
+    fn file_config_overrides_bundled_fields() {
+        // When a file is given, its fields replace the bundled config
+        // (no merging of survey text).
+        let json = r#"{"tokenizer": "cl100k_base", "verbose": true}"#;
+        let config: DragConfig = serde_json5::from_str(json).expect("file config must parse");
+        assert_eq!(config.tokenizer, "cl100k_base");
+        assert!(config.verbose);
+        // Omitted fields get schema defaults, not bundled values.
+        assert!(config.comprehensibility.dimensions.is_empty());
+    }
+
+    #[test]
+    fn model_override_on_file_config() {
+        // --model overrides the model field from a file config.
+        let json = r#"{"model": "anthropic/claude", "tokenizer": "cl100k_base"}"#;
+        let mut config: DragConfig = serde_json5::from_str(json).expect("file config must parse");
+        assert_eq!(config.model.as_deref(), Some("anthropic/claude"));
+        // --model override
+        config.model = Some("openai/gpt-4o".to_string());
+        assert_eq!(config.model.as_deref(), Some("openai/gpt-4o"));
+        assert_eq!(config.tokenizer, "cl100k_base");
+    }
+
+    #[test]
+    fn partial_file_config_gets_schema_defaults_for_survey() {
+        // A file that sets only weights leaves survey dimensions empty.
+        let json = r#"{"weights": {"w2": 1.0}}"#;
+        let config: DragConfig = serde_json5::from_str(json).expect("partial config must parse");
+        assert_eq!(config.weights.w2, 1.0);
+        assert!(config.comprehensibility.dimensions.is_empty());
+        assert!(config.maintainability.dimensions.is_empty());
     }
 }

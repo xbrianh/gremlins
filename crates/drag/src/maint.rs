@@ -45,14 +45,14 @@ fn build_maint_breakdown(dims: &HashMap<&str, f64>) -> HashMap<String, u8> {
 /// Compute the maintainability score (0–1) directly from unrounded f64
 /// dimension medians, avoiding the upward bias of per-dimension rounding.
 ///
-/// `dim_count` is the number of configured dimensions; the maximum possible
-/// sum is `dim_count * 4`. An empty dimension set yields the neutral 0.5.
-fn compute_maint_score_from_map(dims: &HashMap<&str, f64>, dim_count: usize) -> f64 {
-    if dim_count == 0 {
+/// The maximum possible sum is `dims.len() * 4`. An empty dimension set
+/// yields the neutral 0.5.
+fn compute_maint_score_from_map(dims: &HashMap<&str, f64>) -> f64 {
+    if dims.is_empty() {
         return 0.5;
     }
     let sum: f64 = dims.values().sum();
-    let max = dim_count as f64 * 4.0;
+    let max = dims.len() as f64 * 4.0;
     (sum / max).clamp(0.0, 1.0)
 }
 
@@ -289,7 +289,7 @@ pub(crate) async fn score_package_maintainability(
         }
 
         // Compute maint_score from the unrounded f64 medians.
-        let maint_score = compute_maint_score_from_map(&dim_medians, maint_config.dimensions.len());
+        let maint_score = compute_maint_score_from_map(&dim_medians);
 
         eprintln!("  [{pkg_name}] maint: {maint_score:.3}");
 
@@ -759,12 +759,12 @@ mod tests {
         for key in TEN_DIMS {
             m.insert(key, 2.0);
         }
-        let score = compute_maint_score_from_map(&m, 10);
+        let score = compute_maint_score_from_map(&m);
         assert!((score - 0.5).abs() < 1e-9);
 
         // One dimension at 2.5 → sum = 20.5, score = 0.5125.
         m.insert("decomposition", 2.5);
-        let score = compute_maint_score_from_map(&m, 10);
+        let score = compute_maint_score_from_map(&m);
         assert!((score - 0.5125).abs() < 1e-9);
     }
 
@@ -776,13 +776,13 @@ mod tests {
         }
         m.insert("decomposition", 1.0);
         // Sum = 1.0 + 9*2.0 = 19.0, score = 19/40 = 0.475.
-        let score = compute_maint_score_from_map(&m, 10);
+        let score = compute_maint_score_from_map(&m);
         assert!((score - 0.475).abs() < 1e-9);
     }
 
     #[test]
     fn maint_score_empty_dims_is_neutral() {
         let m: HashMap<&str, f64> = HashMap::new();
-        assert!((compute_maint_score_from_map(&m, 0) - 0.5).abs() < 1e-9);
+        assert!((compute_maint_score_from_map(&m) - 0.5).abs() < 1e-9);
     }
 }

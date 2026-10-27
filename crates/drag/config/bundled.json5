@@ -80,7 +80,7 @@
 
   // ── Maintainability survey (package-level) ──
   "maintainability": {
-    "preamble": "Target audience: an experienced developer evaluating whether the\npackage is well-organized for long-term maintenance. Judge the\npackage's structure — not correctness, not performance.\n\nScore this single dimension on a 0–4 scale using these anchors:",
+    "preamble": "Target audience: an experienced developer evaluating whether the package is well-organized for long-term maintenance. Judge the package's structure — not correctness, not performance.\n\nScore this single dimension on a 0–4 scale using these anchors:",
 
     "dimensions": [
       {

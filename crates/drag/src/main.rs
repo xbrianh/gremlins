@@ -331,14 +331,14 @@ async fn run() -> Result<(), String> {
 
     // 7. Comprehensibility
     if config.estimates_per_survey < 1 {
-        return Err("--estimates-per-survey must be >= 1".to_string());
+        return Err("estimates_per_survey must be >= 1".to_string());
     }
 
     let cache_state: CacheState = cache_path.clone();
 
     score_comprehensibility(
         &model_spec,
-        config.verbose,
+        cli.verbose || config.verbose,
         config.estimates_per_survey,
         &target_modules,
         &mut scores,
@@ -378,7 +378,7 @@ async fn run() -> Result<(), String> {
     let package_drags: Vec<PackageDrag> = if !config.skip_maintainability {
         let maint_scores = maint::score_package_maintainability(
             &model_spec,
-            config.verbose,
+            cli.verbose || config.verbose,
             config.estimates_per_survey,
             &scoring_packages,
             cache_state.clone(),
@@ -919,6 +919,11 @@ async fn score_comprehensibility(
     comprehensibility_config: &ComprehensibilityConfig,
     config_hash: &str,
 ) -> Result<(), String> {
+    // Validate dimensions before spawning any LLM tasks.
+    if comprehensibility_config.dimensions.is_empty() {
+        return Err("comprehensibility config has no dimensions".to_string());
+    }
+
     // `model_spec` is already fully resolved by `resolve_comprehensibility_model`.
     // Diagnostics are best-effort — model construction may fail for cmd/… backends.
     if verbose {
@@ -1178,6 +1183,14 @@ async fn run_comp_agent(
     verbose: bool,
     comprehensibility_config: &ComprehensibilityConfig,
 ) -> Result<ComprehensibilityScores, CompAgentError> {
+    // Validate we have dimensions to score — an empty config would produce
+    // NaN scores and nonsensical prompts.
+    if comprehensibility_config.dimensions.is_empty() {
+        return Err(CompAgentError::Fatal(
+            "comprehensibility config has no dimensions".to_string(),
+        ));
+    }
+
     let model_uri = ModelURI::parse(model_spec)
         .map_err(|e| CompAgentError::Fatal(format!("invalid model: {e}")))?;
 
@@ -1185,7 +1198,7 @@ async fn run_comp_agent(
     let dim_list = comprehensibility_config
         .dimensions
         .iter()
-        .map(|d| format!("— {}: {}", d.label, d.description))
+        .map(|d| format!("— {}: {}", d.key, d.description))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -1366,7 +1379,7 @@ fn print_explain(config: &DragConfig) {
         "  normalized over {} points ({n_maint}×4). Only computed when packages are",
         n_maint * 4
     );
-    println!("  present and --skip-maintainability is not set.\n");
+    println!("  present and skip_maintainability is not set.\n");
     for (i, dim) in config.maintainability.dimensions.iter().enumerate() {
         println!("  {}. {}", i + 1, dim.description);
         if !dim.anchors.is_empty() {
