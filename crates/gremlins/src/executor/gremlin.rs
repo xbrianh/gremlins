@@ -1922,6 +1922,49 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn clean_preserves_state_dir_with_closed_marker() {
+        let fx = GitSandbox::new();
+        if fx.is_skipped() {
+            eprintln!("git is unavailable; skipping clean_preserves_state_dir_with_closed_marker");
+            return;
+        }
+
+        let definition =
+            StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
+        let created = Gremlin::init(
+            "gr-test",
+            fx.definition_path(),
+            &definition,
+            &HashMap::new(),
+            None,
+            &GremlinConfig::default(),
+        )
+        .unwrap();
+        let id = created.id.to_string();
+        let workdir = created
+            .workdir
+            .as_ref()
+            .map(|w| w.path().to_path_buf())
+            .unwrap();
+        let state_dir = created.state.state_dir();
+        drop(created);
+
+        // clean(false) preserves the state directory with a closed marker.
+        let handle = Gremlin::from(&id).unwrap();
+        handle.clean(false).await;
+
+        // State dir still exists with a closed marker.
+        assert!(state_dir.is_dir(), "state directory should be preserved");
+        assert!(
+            state_dir.join("closed").is_file(),
+            "closed marker should exist"
+        );
+        // Workspace is removed.
+        assert!(!workdir.exists(), "workspace should be removed");
+    }
+
+    #[tokio::test]
     // The env guard holds a plain mutex across the run's awaits; safe because
     // `#[tokio::test]` drives a current-thread runtime, so no other task can be
     // scheduled on this thread while the lock is held.

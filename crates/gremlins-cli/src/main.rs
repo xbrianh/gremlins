@@ -98,6 +98,9 @@ enum Cmds {
         /// Remove every gremlin in a terminal state (done/stopped/orphaned).
         #[arg(long, conflicts_with = "id")]
         all: bool,
+        /// Fully delete the state directory (default: preserve state with a closed marker).
+        #[arg(long)]
+        purge: bool,
     },
     /// Run the definition's land block in the current working directory.
     Land {
@@ -159,11 +162,11 @@ async fn main() {
         Some(Cmds::Log { id }) => log_gremlin(&id).await,
         Some(Cmds::Debug { id }) => debug_gremlin(&id).await,
         Some(Cmds::Clean { id, keep }) => clean(&id, keep).await,
-        Some(Cmds::Rm { id, all }) => {
+        Some(Cmds::Rm { id, all, purge }) => {
             if all {
-                rm_all().await
+                rm_all(purge).await
             } else if let Some(ref id) = id {
-                rm_one(id).await
+                rm_one(id, purge).await
             } else {
                 Err("gremlins rm requires an <id> or --all".to_string())
             }
@@ -1183,8 +1186,8 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
 
 /// Remove a single gremlin by id.
 /// Routes through the daemon when reachable so it can broadcast RunRemoved.
-/// Falls back to direct `Gremlin::clean(true)` only when the daemon is down.
-async fn rm_one(id: &str) -> Result<(), String> {
+/// Falls back to direct `Gremlin::clean(purge)` only when the daemon is down.
+async fn rm_one(id: &str, purge: bool) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
     validate_gremlin_id(id).map_err(|_| {
@@ -1204,8 +1207,11 @@ async fn rm_one(id: &str) -> Result<(), String> {
         Ok(mut stream) => {
             spawn::check_version(&mut stream).await?;
 
-            let response =
-                spawn::send_request(&mut stream, serde_json::json!({"op": "rm", "id": id})).await;
+            let response = spawn::send_request(
+                &mut stream,
+                serde_json::json!({"op": "rm", "id": id, "purge": purge}),
+            )
+            .await;
             match response {
                 Ok(resp) => {
                     if resp.get("type").and_then(|v| v.as_str()) == Some("error") {
@@ -1258,13 +1264,13 @@ async fn rm_one(id: &str) -> Result<(), String> {
         log::warn!("gremlin {id}: could not load definition for clean commands: {e}");
     }
 
-    gremlin.clean(true).await;
+    gremlin.clean(purge).await;
     println!("gremlin {id} removed");
     Ok(())
 }
 
 /// Remove every gremlin in a terminal state (done/stopped/orphaned).
-async fn rm_all() -> Result<(), String> {
+async fn rm_all(purge: bool) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
     let entries = state::list_state_dirs();
@@ -1277,7 +1283,8 @@ async fn rm_all() -> Result<(), String> {
     let mut executor_reachable: Option<bool> = None;
 
     for (id, state_json_path) in &entries {
-        let (outcome, next_reachable) = rm_all_entry(id, state_json_path, executor_reachable).await;
+        let (outcome, next_reachable) =
+            rm_all_entry(id, state_json_path, executor_reachable, purge).await;
         executor_reachable = next_reachable;
         match outcome {
             RmAllEntry::Removed => removed += 1,
@@ -1312,6 +1319,7 @@ async fn rm_all_entry(
     id: &str,
     state_json_path: &Path,
     mut executor_reachable: Option<bool>,
+    purge: bool,
 ) -> (RmAllEntry, Option<bool>) {
     let Some(state_dir) = state_json_path.parent() else {
         return (RmAllEntry::Ignored, executor_reachable);
@@ -1373,7 +1381,7 @@ async fn rm_all_entry(
     }
 
     // Delegate to the single-id helper. Errors are logged, not fatal.
-    match rm_one(id).await {
+    match rm_one(id, purge).await {
         Ok(()) => (RmAllEntry::Removed, executor_reachable),
         Err(e) => (RmAllEntry::Skipped(e), executor_reachable),
     }
@@ -2183,5 +2191,69 @@ mod tests {
                 "also refactor".to_string(),
             ]
         );
+    }
+
+    // --- rm purge flag parsing ---
+
+    #[test]
+    fn rm_parse_purge_flag_true() {
+        let cli = Cli::try_parse_from(["gremlins", "rm", "--purge", "some-id"])
+            .expect("rm --purge args must parse");
+        let Some(Cmds::Rm { id, all, purge }) = cli.command else {
+            panic!("expected rm command");
+        };
+        assert_eq!(id.as_deref(), Some("some-id"));
+        assert!(!all);
+        assert!(purge);
+    }
+
+    #[test]
+    fn rm_parse_default_no_purge() {
+        let cli = Cli::try_parse_from(["gremlins", "rm", "some-id"]).expect("rm args must parse");
+        let Some(Cmds::Rm { id, all, purge }) = cli.command else {
+            panic!("expected rm command");
+        };
+        assert_eq!(id.as_deref(), Some("some-id"));
+        assert!(!all);
+        assert!(!purge);
+    }
+
+    #[test]
+    fn rm_parse_purge_flag_with_all() {
+        let cli = Cli::try_parse_from(["gremlins", "rm", "--all", "--purge"])
+            .expect("rm --all --purge must parse");
+        let Some(Cmds::Rm { id, all, purge }) = cli.command else {
+            panic!("expected rm command");
+        };
+        assert!(id.is_none());
+        assert!(all);
+        assert!(purge);
+    }
+
+    #[test]
+    fn rm_parse_all_default_no_purge() {
+        let cli = Cli::try_parse_from(["gremlins", "rm", "--all"]).expect("rm --all must parse");
+        let Some(Cmds::Rm { id, all, purge }) = cli.command else {
+            panic!("expected rm command");
+        };
+        assert!(id.is_none());
+        assert!(all);
+        assert!(!purge);
+    }
+
+    // --- rm_all_entry closed marker skip ---
+
+    #[tokio::test]
+    async fn rm_all_entry_skips_closed_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("gr-test-0001");
+        fs::create_dir_all(&state_dir).unwrap();
+        let state_json = state_dir.join("state.json");
+        fs::write(&state_json, r#"{"id":"gr-test-0001","status":"done"}"#).unwrap();
+        // Touch the closed marker.
+        fs::write(state_dir.join("closed"), "").unwrap();
+
+        let (outcome, _) = rm_all_entry("gr-test-0001", &state_json, None, false).await;
+        assert!(matches!(outcome, RmAllEntry::Ignored));
     }
 }

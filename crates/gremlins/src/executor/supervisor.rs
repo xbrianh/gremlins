@@ -1920,6 +1920,11 @@ async fn handle_rm(request: &Value, _state_root: &Path) -> Value {
         Err(resp) => return resp,
     };
 
+    let purge = request
+        .get("purge")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     // Serialise with concurrent resume/launch for this id so that a
     // resume cannot register the gremlin in RUN_MAP while we're about
     // to destroy its workspace.
@@ -1948,7 +1953,7 @@ async fn handle_rm(request: &Value, _state_root: &Path) -> Value {
         log::warn!("gremlin {id}: could not load definition for clean commands: {e}");
     }
 
-    gremlin.clean(true).await;
+    gremlin.clean(purge).await;
 
     emit_event(DaemonEvent::RunRemoved { id: id.to_string() });
 
