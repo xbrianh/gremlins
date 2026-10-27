@@ -127,7 +127,13 @@ fn edit_not_found_diagnostic(
         None => String::new(),
     };
 
-    let first_line = old_str.lines().next().unwrap_or("").trim();
+    let first_line_raw = old_str.lines().next().unwrap_or("");
+    // `needle` is the trimmed first line, but `old_str` still carries any
+    // leading whitespace. Re-anchor the divergence walk to where that
+    // whitespace begins so the byte-by-byte comparison measures the real
+    // mismatch instead of tripping over the stripped indent.
+    let leading_ws = first_line_raw.len() - first_line_raw.trim_start().len();
+    let first_line = first_line_raw.trim();
     let needle: &str = if first_line.is_empty() {
         return format!(
             "Error: old_string not found{scope_label} in {file_path} (edit {edit_num}) — first line is empty or whitespace-only"
@@ -163,7 +169,10 @@ fn edit_not_found_diagnostic(
             .unwrap_or(content.len());
         let context_end = context_end.min(cap_byte);
         let context = &content[context_start..context_end];
-        let divergence = divergence_report(content, pos, window_end, old_str);
+        // Account for the leading whitespace trimmed off `needle` without
+        // stepping back across the scope boundary.
+        let content_start = pos.saturating_sub(leading_ws).max(window_start);
+        let divergence = divergence_report(content, content_start, window_end, old_str);
         format!(" — did you mean to match near line {line_no}? Found:\n{context}\n{divergence}")
     } else {
         String::new()
@@ -800,6 +809,19 @@ mod tests {
         assert!(msg.contains("actual:"), "got: {msg}");
         assert!(msg.contains(r#""alpha\ngamma""#), "got: {msg}");
         assert!(msg.contains(r#""alpha\nbeta\n""#), "got: {msg}");
+    }
+
+    #[test]
+    fn diagnostic_accounts_for_leading_whitespace_on_first_line() {
+        // The trimmed probe "alpha" matches at byte 2, but `old_str` carries a
+        // two-space indent. The divergence must be reported at the true
+        // mismatch on the second line (byte 8), not at the indent.
+        let content = "  alpha\nbeta\n";
+        let old_str = "  alpha\ngamma";
+        let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, None, None);
+        assert!(msg.contains("diverges at byte offset 8"), "got: {msg}");
+        assert!(msg.contains(r#""  alpha\ngamma""#), "got: {msg}");
+        assert!(msg.contains(r#""  alpha\nbeta\n""#), "got: {msg}");
     }
 
     #[test]
