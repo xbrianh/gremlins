@@ -3,9 +3,15 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use gremlins::config;
+// The crate-level `gremlins::config` module already binds the name `config`,
+// so import the provider-credential helpers from `clients::config` under an
+// alias to avoid a name collision.
+use gremlins::clients::config as provider_config;
+use gremlins::clients::github_auth;
 use gremlins::core::discovery;
 use gremlins::core::proc::run_shell_async;
 use gremlins::definition::{ExecutorStage, GremlinDefinition, StaticDefinition};
@@ -112,6 +118,11 @@ enum Cmds {
         /// Gremlin definition: a bare name (resolved under .gremlins/) or a path.
         definition: String,
     },
+    /// Manage provider authentication credentials.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCmds,
+    },
     #[command(hide = true, name = "serve")]
     Serve {
         /// Lock file descriptor (internal, inherited from parent).
@@ -124,6 +135,30 @@ enum Cmds {
     #[command(external_subcommand)]
     External(Vec<OsString>),
 }
+
+#[derive(Subcommand)]
+enum AuthCmds {
+    /// Copilot OAuth device-flow authentication.
+    Copilot {
+        #[command(subcommand)]
+        command: CopilotAuthCmds,
+    },
+}
+
+#[derive(Subcommand)]
+enum CopilotAuthCmds {
+    /// Log in via GitHub OAuth device flow.
+    Login {
+        /// GitHub App client ID.
+        #[arg(long)]
+        client_id: String,
+    },
+    /// Check whether a Copilot OAuth credential is valid.
+    Status,
+    /// Remove Copilot OAuth credentials from providers.yaml.
+    Logout,
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -175,6 +210,13 @@ async fn main() {
         Some(Cmds::Bundle { definition }) => bundle(&definition).await,
         Some(Cmds::Serve { lock_fd }) => serve_daemon(lock_fd).await,
         Some(Cmds::Version) => version_cmd().await,
+        Some(Cmds::Auth { command }) => match command {
+            AuthCmds::Copilot { command } => match command {
+                CopilotAuthCmds::Login { client_id } => auth_copilot_login(&client_id).await,
+                CopilotAuthCmds::Status => auth_copilot_status().await,
+                CopilotAuthCmds::Logout => auth_copilot_logout(),
+            },
+        },
         Some(Cmds::External(args)) => status_external(&args).await,
         None => match tui::run().await {
             Ok(()) => Ok(()),
@@ -537,7 +579,8 @@ async fn status_external(args: &[OsString]) -> Result<(), String> {
 
 /// Known subcommand names (including hidden `serve`).
 const KNOWN_SUBCOMMANDS: &[&str] = &[
-    "launch", "ls", "info", "stop", "resume", "log", "debug", "clean", "rm", "land", "serve",
+    "launch", "ls", "info", "stop", "resume", "log", "debug", "clean", "rm", "land", "auth",
+    "serve",
 ];
 
 /// If `arg` looks like a mistyped subcommand, return the closest match by
@@ -1985,6 +2028,122 @@ async fn tail_log_lines(path: &Path, n: usize) -> Result<Vec<String>, String> {
     };
 
     Ok(keep.iter().map(|s| s.to_string()).collect())
+}
+
+// ── auth copilot ─────────────────────────────────────────────────────────
+
+async fn auth_copilot_login(client_id: &str) -> Result<(), String> {
+    // Ensure global config so user_config_root resolves.
+    gremlins::config::init_global().map_err(|e| e.to_string())?;
+
+    // Check if credentials already exist.
+    let existing = provider_config::load_providers_file()
+        .map_err(|e| format!("failed to load providers.yaml: {e}"))?;
+    if let Some(entry) = existing.0.get("copilot") {
+        if entry.client_id().is_some() || entry.refresh_token().is_some() {
+            return Err(
+                "copilot OAuth already configured — use \"gremlins auth copilot logout\" to remove existing credentials first".to_string()
+            );
+        }
+    }
+
+    // Start device flow.
+    eprintln!("Starting GitHub device flow...");
+    let device = github_auth::start_device_flow(client_id)?;
+
+    // Print instructions.
+    eprintln!(
+        "\nTo authorize, open this URL in a browser:\n\n    {}\n\nAnd enter the code: {}\n",
+        device.verification_uri, device.user_code
+    );
+
+    let interval = Duration::from_secs(device.interval.unwrap_or(5));
+    let expires_in = device.expires_in.unwrap_or(900);
+    let deadline = std::time::Instant::now() + Duration::from_secs(expires_in);
+
+    eprintln!("Waiting for authorization (press Ctrl+C to cancel)...");
+
+    let credentials =
+        github_auth::complete_device_flow(client_id, &device.device_code, interval, deadline)?;
+
+    // Write to providers.yaml.
+    let mut file = provider_config::load_providers_file()
+        .map_err(|e| format!("failed to load providers.yaml: {e}"))?;
+    let entry = file.0.entry("copilot".to_string()).or_default();
+    entry.set_client_id(client_id.to_string());
+    entry.set_refresh_token(credentials.refresh_token);
+    provider_config::save_providers_file(&file)
+        .map_err(|e| format!("failed to save providers.yaml: {e}"))?;
+
+    eprintln!(
+        "✓ Authenticated successfully! Access token expires in {} seconds.",
+        credentials.expires_in.unwrap_or(0)
+    );
+    Ok(())
+}
+
+async fn auth_copilot_status() -> Result<(), String> {
+    gremlins::config::init_global().map_err(|e| e.to_string())?;
+
+    let file = provider_config::load_providers_file()
+        .map_err(|e| format!("failed to load providers.yaml: {e}"))?;
+    let entry = match file.0.get("copilot") {
+        Some(e) => e,
+        None => {
+            println!("copilot: not configured in providers.yaml");
+            return Ok(());
+        }
+    };
+
+    match (entry.client_id(), entry.refresh_token()) {
+        (Some(_client_id), Some(_refresh_token)) => {
+            let provider = github_auth::GitHubAppTokenProvider::new(
+                _client_id.to_string(),
+                _refresh_token.to_string(),
+            );
+            match provider.access_token().await {
+                Ok(_) => println!("copilot: ✓ OAuth credential valid"),
+                Err(e) => println!("copilot: ✗ credential invalid: {e}"),
+            }
+        }
+        (Some(_), None) => {
+            println!("copilot: client-id configured but no refresh-token — run \"gremlins auth copilot login\"");
+        }
+        (None, _) => {
+            if entry.api_key().is_some() {
+                println!("copilot: api-key configured (OAuth not set)");
+            } else {
+                println!("copilot: no credentials configured");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn auth_copilot_logout() -> Result<(), String> {
+    gremlins::config::init_global().map_err(|e| e.to_string())?;
+
+    let mut file = provider_config::load_providers_file()
+        .map_err(|e| format!("failed to load providers.yaml: {e}"))?;
+    if let Some(entry) = file.0.get_mut("copilot") {
+        if entry.client_id().is_none() && entry.refresh_token().is_none() {
+            println!("copilot: no OAuth credentials to remove");
+            return Ok(());
+        }
+        entry.clear_oauth();
+        if entry.is_empty() {
+            file.0.remove("copilot");
+            println!("copilot: removed (entry was empty)");
+        } else {
+            println!("copilot: OAuth credentials removed (api-key preserved)");
+        }
+    } else {
+        println!("copilot: not configured");
+        return Ok(());
+    }
+    provider_config::save_providers_file(&file)
+        .map_err(|e| format!("failed to save providers.yaml: {e}"))?;
+    Ok(())
 }
 
 #[cfg(test)]

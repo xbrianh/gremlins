@@ -1,8 +1,7 @@
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use rig_core::http_client::middleware::HttpMiddleware;
@@ -13,23 +12,23 @@ use rig_core::providers::copilot::{Copilot, CopilotConfig, CopilotIntent};
 use rig_core::wasm_compat::WasmBoxedFuture;
 use serde::Deserialize;
 
-use crate::clients::cancel::CancelToken;
 use crate::clients::backend::{Backend, ClientError, RunParams};
+use crate::clients::cancel::CancelToken;
 use crate::clients::cancels::CancelsMap;
+use crate::clients::github_auth;
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::model::GremlinsModel;
 use crate::clients::native::NativeRunState;
 use crate::clients::openai_protocol;
 use crate::clients::params::{self, ResolvedParams};
 use crate::clients::protocol::CompletedRun;
+use crate::clients::token_provider::{TokenProvider, TokenProviderError};
 
 const PROVIDER_NAME: &str = "copilot";
 const DEFAULT_MODEL: &str = "gpt-4o";
 
 const GITHUB_COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
 const GITHUB_COPILOT_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
-const GH_CLI_TIMEOUT: Duration = Duration::from_secs(5);
-const GH_CLI_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const COPILOT_EDITOR_VERSION: &str = "vscode/1.107.0";
 const COPILOT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.35.0";
 const COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.35.0";
@@ -59,39 +58,66 @@ struct CopilotSession {
 /// OAuth device-code flow is disabled — gremlins run unattended.
 ///
 /// Auth precedence: `GITHUB_COPILOT_API_KEY` → `COPILOT_API_KEY` →
-/// `providers.yaml` `"copilot"` entry (`api-key`) → `GITHUB_TOKEN` →
-/// `GH_TOKEN` → `gh auth token`.
+/// `providers.yaml` `"copilot"` entry (`api-key`) → `providers.yaml`
+/// `client-id` + `refresh-token` → `GITHUB_TOKEN` → `GH_TOKEN`.
 ///
 /// `make_exchanger` is only invoked after the session-token sources miss and a
 /// GitHub access token is found, so the blocking client is never built for a
 /// pre-exchanged session token.
-fn resolve_auth_with_gh_runner(
-    gh_runner: &OsStr,
+fn resolve_auth(
     make_exchanger: impl FnOnce() -> Result<Arc<dyn CopilotTokenExchanger>, String>,
 ) -> Result<Copilot, String> {
+    // 1. GITHUB_COPILOT_API_KEY / COPILOT_API_KEY env vars
     if let Some(key) = crate::config::copilot_api_key() {
         return Ok(CopilotConfig::new(key).client());
     }
+    // 2. providers.yaml copilot.api-key
     if let Some(key) = crate::clients::config::api_key("", PROVIDER_NAME) {
         return Ok(CopilotConfig::new(key).client());
     }
-    if let Some(access_token) = github_access_token_with_gh_runner(gh_runner) {
+    // 3. providers.yaml copilot.client-id + copilot.refresh-token
+    let providers = crate::clients::config::Providers::load();
+    if let (Some(client_id), Some(refresh_token)) = (
+        providers.client_id(PROVIDER_NAME).map(|s| s.to_string()),
+        providers.refresh_token(PROVIDER_NAME).map(|s| s.to_string()),
+    ) {
+        let exchanger = make_exchanger()?;
+        let token_provider = Arc::new(github_auth::GitHubAppTokenProvider::new(
+            client_id,
+            refresh_token,
+        ));
+        let sessions = Arc::new(CopilotSessionProvider::new(token_provider, exchanger));
+        let placeholder = CopilotSession {
+            token: "unset".into(),
+            api_base: None,
+            expires_at: None,
+        };
+        return Ok(copilot_client_with_session(
+            placeholder,
+            CopilotTokenRefreshMiddleware::new(sessions),
+        ));
+    }
+    // 4. GITHUB_TOKEN / GH_TOKEN env vars (static GitHub access token)
+    if let Some(access_token) = github_access_token() {
         let exchanger = make_exchanger()?;
         let session = exchange_github_token_sync(exchanger.clone(), &access_token)?;
-        let manager = Arc::new(GitHubSessionManager::new(
-            access_token,
+        let token_provider = Arc::new(StaticTokenProvider {
+            token: access_token,
+        });
+        let sessions = Arc::new(CopilotSessionProvider::with_session(
+            token_provider,
             exchanger,
             session.clone(),
         ));
         return Ok(copilot_client_with_session(
             session,
-            CopilotTokenRefreshMiddleware::new(manager),
+            CopilotTokenRefreshMiddleware::new(sessions),
         ));
     }
     Err(format!(
         "no credentials for provider '{PROVIDER_NAME}': set GITHUB_COPILOT_API_KEY, \
-         COPILOT_API_KEY, GITHUB_TOKEN, or GH_TOKEN; add an entry with \"api-key\" in {}; \
-         or authenticate the gh CLI (`gh auth login` / `gh auth token`).",
+         COPILOT_API_KEY, GITHUB_TOKEN, or GH_TOKEN; or add an entry with \
+         \"api-key\" or \"client-id\" + \"refresh-token\" in {}",
         crate::config::user_config_root()
             .join("providers.yaml")
             .display(),
@@ -106,54 +132,9 @@ fn github_access_token_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// Resolve a GitHub access token: `GITHUB_TOKEN` → `GH_TOKEN` → `gh auth token`.
-fn github_access_token_with_gh_runner(gh_runner: &OsStr) -> Option<String> {
-    github_access_token_env("GITHUB_TOKEN")
-        .or_else(|| github_access_token_env("GH_TOKEN"))
-        .or_else(|| gh_auth_token_from(gh_runner))
-}
-
-/// Read `gh auth token`, returning `None` when the CLI or login is absent.
-///
-/// The child runs with stdin closed and prompts disabled, and is killed after
-/// a short deadline so a keychain prompt or hung `gh` cannot stall an
-/// unattended run.
-fn gh_auth_token_from(gh_runner: &OsStr) -> Option<String> {
-    let mut child = std::process::Command::new(gh_runner)
-        .args(["auth", "token"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .env("GH_PROMPT_DISABLED", "1")
-        .spawn()
-        .ok()?;
-
-    let deadline = Instant::now() + GH_CLI_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(GH_CLI_POLL_INTERVAL),
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
-
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout)
-        .ok()
-        .map(|token| token.trim().to_string())
-        .filter(|token| !token.is_empty())
+/// Read a nonblank GitHub access token from GITHUB_TOKEN or GH_TOKEN env.
+fn github_access_token() -> Option<String> {
+    github_access_token_env("GITHUB_TOKEN").or_else(|| github_access_token_env("GH_TOKEN"))
 }
 
 /// Exchange a GitHub access token for a Copilot session token.
@@ -297,21 +278,33 @@ fn session_expired(session: &CopilotSession) -> bool {
     now >= expires_at.saturating_sub(COPILOT_TOKEN_EXPIRY_SKEW_SECONDS)
 }
 
-/// Shared GitHub credential and the current session, refreshed atomically.
-struct GitHubSessionManager {
-    access_token: String,
+/// Resolves a Copilot session credential from a GitHub access-token provider,
+/// refreshing the exchanged Copilot session when it expires.
+struct CopilotSessionProvider {
+    token_provider: Arc<dyn TokenProvider>,
     exchanger: Arc<dyn CopilotTokenExchanger>,
     session: tokio::sync::Mutex<Option<CopilotSession>>,
 }
 
-impl GitHubSessionManager {
+impl CopilotSessionProvider {
     fn new(
-        access_token: String,
+        token_provider: Arc<dyn TokenProvider>,
+        exchanger: Arc<dyn CopilotTokenExchanger>,
+    ) -> Self {
+        Self {
+            token_provider,
+            exchanger,
+            session: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    fn with_session(
+        token_provider: Arc<dyn TokenProvider>,
         exchanger: Arc<dyn CopilotTokenExchanger>,
         session: CopilotSession,
     ) -> Self {
         Self {
-            access_token,
+            token_provider,
             exchanger,
             session: tokio::sync::Mutex::new(Some(session)),
         }
@@ -325,22 +318,39 @@ impl GitHubSessionManager {
             }
         }
 
+        let access_token = self
+            .token_provider
+            .get_token(github_auth::GITHUB_SCOPE_COPILOT)
+            .await
+            .map_err(|e| format!("failed to refresh GitHub access token: {e}"))?;
         let fresh =
-            exchange_github_token_async(self.exchanger.clone(), self.access_token.clone()).await?;
+            exchange_github_token_async(self.exchanger.clone(), access_token).await?;
         *guard = Some(fresh.clone());
         Ok(fresh)
     }
 }
 
-/// Replaces the bearer credential before every Copilot request, refreshing a
+/// A [`TokenProvider`] that always yields a fixed GitHub access token.
+struct StaticTokenProvider {
+    token: String,
+}
+
+#[async_trait]
+impl TokenProvider for StaticTokenProvider {
+    async fn get_token(&self, _scope: &str) -> Result<String, TokenProviderError> {
+        Ok(self.token.clone())
+    }
+}
+
+/// Replaces the bearer credential before every Copilot request, refreshing the
 /// GitHub-token-backed session when it expires.
 #[derive(Clone)]
 struct CopilotTokenRefreshMiddleware {
-    sessions: Arc<GitHubSessionManager>,
+    sessions: Arc<CopilotSessionProvider>,
 }
 
 impl CopilotTokenRefreshMiddleware {
-    fn new(sessions: Arc<GitHubSessionManager>) -> Self {
+    fn new(sessions: Arc<CopilotSessionProvider>) -> Self {
         Self { sessions }
     }
 }
@@ -452,17 +462,16 @@ impl CopilotBackend {
     ///
     /// Auth precedence: `GITHUB_COPILOT_API_KEY` → `COPILOT_API_KEY` →
     /// `providers.yaml` `"copilot"` entry → `GITHUB_TOKEN` → `GH_TOKEN` →
-    /// `gh auth token` → error.
+    /// error.
     pub fn build(
         model: &str,
         native_block: &HashMap<String, Vec<String>>,
         extra_params: &indexmap::IndexMap<String, String>,
     ) -> Result<Arc<dyn Backend>, String> {
-        Self::build_with_gh_runner(
+        Self::build_with_exchanger(
             model,
             native_block,
             extra_params,
-            OsStr::new("gh"),
             || {
                 Ok(Arc::new(BlockingCopilotTokenExchanger::new())
                     as Arc<dyn CopilotTokenExchanger>)
@@ -470,17 +479,15 @@ impl CopilotBackend {
         )
     }
 
-    /// Shared construction path; `gh_runner` and `make_exchanger` are
-    /// parameters so tests can drive the backend without the real `gh` CLI or
-    /// network access.
-    fn build_with_gh_runner(
+    /// Shared construction path; `make_exchanger` is a parameter so tests can
+    /// drive the backend without network access.
+    fn build_with_exchanger(
         model: &str,
         native_block: &HashMap<String, Vec<String>>,
         extra_params: &indexmap::IndexMap<String, String>,
-        gh_runner: &OsStr,
         make_exchanger: impl FnOnce() -> Result<Arc<dyn CopilotTokenExchanger>, String>,
     ) -> Result<Arc<dyn Backend>, String> {
-        let client = resolve_auth_with_gh_runner(gh_runner, make_exchanger)?;
+        let client = resolve_auth(make_exchanger)?;
 
         let model = if model.is_empty() {
             DEFAULT_MODEL.to_string()
@@ -618,7 +625,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     const FAKE_API_KEY: &str = "tid=1;exp=9999999999";
-    const MISSING_GH: &str = "/definitely/missing/gremlins-gh";
 
     fn scrub_copilot_env(guard: &mut EnvGuard) {
         guard.remove("GITHUB_COPILOT_API_KEY");
@@ -629,8 +635,7 @@ mod tests {
     }
 
     /// Set up an isolated sandbox with no providers.yaml and no GitHub
-    /// credentials in the environment. The real `gh` CLI is kept away by
-    /// injecting an explicit missing runner rather than by mutating `PATH`.
+    /// credentials in the environment.
     fn isolated_env() -> EnvGuard {
         let mut guard = EnvGuard::lock();
         scrub_copilot_env(&mut guard);
@@ -640,12 +645,8 @@ mod tests {
         guard
     }
 
-    fn resolve_auth_without_gh() -> Result<Copilot, String> {
-        resolve_auth_with_gh_runner(OsStr::new(MISSING_GH), || Ok(unreachable_exchanger()))
-    }
-
-    fn github_access_token_without_gh() -> Option<String> {
-        github_access_token_with_gh_runner(OsStr::new(MISSING_GH))
+    fn resolve_auth_unreachable() -> Result<Copilot, String> {
+        resolve_auth(|| Ok(unreachable_exchanger()))
     }
 
     #[derive(Clone)]
@@ -667,6 +668,12 @@ mod tests {
             api_base: None,
             expires_at: Some(expires_at),
         }
+    }
+
+    fn static_token_provider(token: &str) -> Arc<dyn TokenProvider> {
+        Arc::new(StaticTokenProvider {
+            token: token.to_string(),
+        })
     }
 
     struct CountingExchanger {
@@ -768,11 +775,10 @@ mod tests {
     fn build_rejects_missing_credentials() {
         let _guard = isolated_env();
 
-        let result = CopilotBackend::build_with_gh_runner(
+        let result = CopilotBackend::build_with_exchanger(
             "gpt-4o",
             &HashMap::new(),
             &indexmap::IndexMap::new(),
-            OsStr::new(MISSING_GH),
             || Ok(unreachable_exchanger()),
         );
         let err = result.expect_err("should be an error");
@@ -785,14 +791,14 @@ mod tests {
     fn auth_github_copilot_api_key() {
         let mut guard = isolated_env();
         guard.set("GITHUB_COPILOT_API_KEY", FAKE_API_KEY);
-        assert!(resolve_auth_without_gh().is_ok());
+        assert!(resolve_auth_unreachable().is_ok());
     }
 
     #[test]
     fn auth_copilot_api_key_fallback() {
         let mut guard = isolated_env();
         guard.set("COPILOT_API_KEY", FAKE_API_KEY);
-        assert!(resolve_auth_without_gh().is_ok());
+        assert!(resolve_auth_unreachable().is_ok());
     }
 
     #[test]
@@ -807,18 +813,18 @@ mod tests {
         )
         .unwrap();
         guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
-        assert!(resolve_auth_without_gh().is_ok());
+        assert!(resolve_auth_unreachable().is_ok());
     }
 
     #[test]
     fn auth_missing_credentials_error_names_github_sources() {
         let _guard = isolated_env();
 
-        let err = resolve_auth_without_gh().unwrap_err();
+        let err = resolve_auth_unreachable().unwrap_err();
         assert!(err.contains("GITHUB_COPILOT_API_KEY"), "got: {err}");
         assert!(err.contains("GITHUB_TOKEN"), "got: {err}");
         assert!(err.contains("GH_TOKEN"), "got: {err}");
-        assert!(err.contains("gh auth token"), "got: {err}");
+        assert!(err.contains("client-id"), "got: {err}");
     }
 
     #[test]
@@ -826,7 +832,7 @@ mod tests {
         let mut guard = isolated_env();
         guard.set("GITHUB_COPILOT_API_KEY", FAKE_API_KEY);
         guard.set("GITHUB_TOKEN", "should-not-be-exchanged");
-        assert!(resolve_auth_without_gh().is_ok());
+        assert!(resolve_auth_unreachable().is_ok());
     }
 
     #[test]
@@ -842,7 +848,7 @@ mod tests {
         .unwrap();
         guard.set("GREMLINS_SANDBOX_ROOT", tmp.path());
         guard.set("GITHUB_TOKEN", "should-not-be-exchanged");
-        assert!(resolve_auth_without_gh().is_ok());
+        assert!(resolve_auth_unreachable().is_ok());
     }
 
     #[test]
@@ -851,7 +857,7 @@ mod tests {
         guard.set("GH_TOKEN", "from-gh-token");
         guard.set("GITHUB_TOKEN", "from-github-token");
         assert_eq!(
-            github_access_token_without_gh().as_deref(),
+            github_access_token().as_deref(),
             Some("from-github-token")
         );
     }
@@ -860,26 +866,7 @@ mod tests {
     fn auth_gh_token_env_fallback() {
         let mut guard = isolated_env();
         guard.set("GH_TOKEN", "from-gh-token");
-        assert_eq!(
-            github_access_token_without_gh().as_deref(),
-            Some("from-gh-token")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn auth_gh_cli_fallback() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _guard = isolated_env();
-        let tmp = tempfile::tempdir().unwrap();
-        let gh = tmp.path().join("gh");
-        std::fs::write(&gh, "#!/bin/sh\necho from-gh-cli\n").unwrap();
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(
-            github_access_token_with_gh_runner(gh.as_os_str()).as_deref(),
-            Some("from-gh-cli")
-        );
+        assert_eq!(github_access_token().as_deref(), Some("from-gh-token"));
     }
 
     // ── token exchange tests ──────────────────────────────────────────
@@ -1012,13 +999,17 @@ mod tests {
     #[tokio::test]
     async fn session_manager_renews_only_when_expired() {
         let exchanger = Arc::new(CountingExchanger::new(i64::MAX));
-        let manager = GitHubSessionManager::new("gh-token".into(), exchanger.clone(), fresh_session(1));
+        let sessions = CopilotSessionProvider::with_session(
+            static_token_provider("gh-token"),
+            exchanger.clone(),
+            fresh_session(1),
+        );
 
-        let first = manager.ensure_fresh().await.unwrap();
+        let first = sessions.ensure_fresh().await.unwrap();
         assert_eq!(first.expires_at, Some(i64::MAX));
         assert_eq!(exchanger.calls.load(AtomicOrdering::SeqCst), 1);
 
-        let second = manager.ensure_fresh().await.unwrap();
+        let second = sessions.ensure_fresh().await.unwrap();
         assert_eq!(second.expires_at, Some(i64::MAX));
         assert_eq!(exchanger.calls.load(AtomicOrdering::SeqCst), 1);
     }
@@ -1026,12 +1017,12 @@ mod tests {
     #[tokio::test]
     async fn middleware_replaces_authorization_header() {
         let exchanger = Arc::new(CountingExchanger::new(i64::MAX));
-        let manager = GitHubSessionManager::new(
-            "gh-token".into(),
+        let sessions = CopilotSessionProvider::with_session(
+            static_token_provider("gh-token"),
             exchanger.clone(),
             fresh_session(i64::MAX),
         );
-        let middleware = CopilotTokenRefreshMiddleware::new(Arc::new(manager));
+        let middleware = CopilotTokenRefreshMiddleware::new(Arc::new(sessions));
         let mut headers = HeaderMap::new();
 
         middleware
@@ -1052,8 +1043,12 @@ mod tests {
     #[tokio::test]
     async fn middleware_refreshes_expired_session() {
         let exchanger = Arc::new(CountingExchanger::new(i64::MAX));
-        let manager = GitHubSessionManager::new("gh-token".into(), exchanger.clone(), fresh_session(1));
-        let middleware = CopilotTokenRefreshMiddleware::new(Arc::new(manager));
+        let sessions = CopilotSessionProvider::with_session(
+            static_token_provider("gh-token"),
+            exchanger.clone(),
+            fresh_session(1),
+        );
+        let middleware = CopilotTokenRefreshMiddleware::new(Arc::new(sessions));
         let mut headers = HeaderMap::new();
 
         middleware

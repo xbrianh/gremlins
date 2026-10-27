@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
 use log::warn;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::clients::task_kind::TaskKind;
 
@@ -182,6 +182,15 @@ impl<'de> Deserialize<'de> for StrictString {
             }
         }
         deserializer.deserialize_any(Visitor)
+    }
+}
+
+impl Serialize for StrictString {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
     }
 }
 
