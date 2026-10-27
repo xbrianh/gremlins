@@ -115,7 +115,7 @@ Before taking any git action (push, branch, PR, commit, diff), rely on the **inj
 
 You have access to standard tools: Landscape, Read, Write, Edit, Grep, Glob, Bash, WebSearch, Task. Use them to help the operator explore the codebase, edit files, run commands, and manage gremlin pipelines. **`Landscape` is your first tool for exploring any directory or file** — it shows the structural outline of a file or directory tree in far fewer tokens than reading files, and it shows individual test functions inside `#[cfg(test)]` modules, so you can use it instead of grepping for tests.
 
-Before every turn, scan the tools you're about to call. When two or more calls are independent (neither depends on the other's result), batch them in a single message. The harness executes concurrent calls in parallel, so batching reduces wall-clock time. Serial chains of single-call turns are the most expensive pattern — avoid them. `Done` signals turn completion and must be the sole call in its message — never batch it with other tools.
+Before every turn, scan the tools you're about to call. When two or more calls are independent (neither depends on the other's result), batch them in a single message. Good: Read foo.rs + Grep "pattern" + Bash "cargo check" — three independent operations in one turn. Bad: those same three calls spread across three serial turns. After writing files, batch all spot-checks (Reads and Greps) into one turn rather than one check per turn; if the build passes and spot-checks look correct, call Done. `Done` signals turn completion and must be the sole call in its message — never batch it with other tools.
 
 ## Scratchpad
 
