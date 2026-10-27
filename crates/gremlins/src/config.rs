@@ -1026,8 +1026,12 @@ pub fn merge_task_models(
 ///
 /// Layer order (later wins on key conflict):
 /// 1. Global `default-task-models` from settings.yaml
-/// 2. Enclosing composite stage's effective task-models
-/// 3. Current stage's own `task-models`
+/// 2. Current stage's own `task-models`
+/// 3. Enclosing composite stage's effective task-models
+///
+/// Enclosing (call-site) overrides always take precedence over
+/// stage-level task-models, which may have been inflated with
+/// profile defaults that should not shadow explicit caller intent.
 ///
 /// Returns `None` when all layers are empty.
 pub fn merge_task_models_runtime(
@@ -1041,13 +1045,16 @@ pub fn merge_task_models_runtime(
             merged.insert(k.clone(), v.clone());
         }
     }
-    if let Some(e) = enclosing {
-        for (k, v) in e {
+    if let Some(s) = stage {
+        for (k, v) in s {
             merged.insert(k.clone(), v.clone());
         }
     }
-    if let Some(s) = stage {
-        for (k, v) in s {
+    // Enclosing (call-site / wrapper) overrides always take precedence
+    // over stage-level task-models, which may have been inflated with
+    // profile defaults baked in by json_task_models.
+    if let Some(e) = enclosing {
+        for (k, v) in e {
             merged.insert(k.clone(), v.clone());
         }
     }

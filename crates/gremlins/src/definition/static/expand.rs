@@ -1245,31 +1245,51 @@ fn _expand_stage_def(
             if let Some(model) = call_site_map.get("model") {
                 seq.insert("model".to_string(), model.clone());
             } else if let Some(model) = def_map.get("model") {
-                seq.insert("model".to_string(), model.clone());
+                seq.insert("model".to_string(), substitute_recipe(model, &ctx_value)?);
             }
 
             // task-models: call-site takes precedence
             if let Some(tm) = call_site_map.get("task-models") {
                 seq.insert("task-models".to_string(), tm.clone());
             } else if let Some(tm) = def_map.get("task-models") {
-                seq.insert("task-models".to_string(), tm.clone());
+                // Substitute each value in the map individually.
+                let substituted = match tm {
+                    serde_json::Value::Object(m) => {
+                        let mut out = serde_json::Map::new();
+                        for (k, v) in m {
+                            out.insert(k.clone(), substitute_recipe(v, &ctx_value)?);
+                        }
+                        serde_json::Value::Object(out)
+                    }
+                    other => substitute_recipe(other, &ctx_value)?,
+                };
+                seq.insert("task-models".to_string(), substituted);
             }
 
             // max-iterations: definition-level only
             if let Some(mi) = def_map.get("max-iterations") {
-                seq.insert("max-iterations".to_string(), mi.clone());
+                seq.insert(
+                    "max-iterations".to_string(),
+                    substitute_recipe(mi, &ctx_value)?,
+                );
             }
 
             // interval: definition-level only
             if let Some(interval) = def_map.get("interval") {
-                seq.insert("interval".to_string(), interval.clone());
+                seq.insert(
+                    "interval".to_string(),
+                    substitute_recipe(interval, &ctx_value)?,
+                );
             }
 
             // skip_if_exists: call-site takes precedence
             if let Some(sif) = call_site_map.get("skip_if_exists") {
                 seq.insert("skip_if_exists".to_string(), sif.clone());
             } else if let Some(sif) = def_map.get("skip_if_exists") {
-                seq.insert("skip_if_exists".to_string(), sif.clone());
+                seq.insert(
+                    "skip_if_exists".to_string(),
+                    substitute_recipe(sif, &ctx_value)?,
+                );
             }
 
             return Ok(vec![serde_json::Value::Object(seq)]);
@@ -2072,6 +2092,184 @@ mod tests {
         assert!(
             msg.contains("must be a boolean"),
             "error must say must be a boolean: {msg}"
+        );
+    }
+
+    #[test]
+    fn wrap_substitutes_def_max_iterations_placeholder() {
+        // Definition-level max-iterations can reference call-site options.
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "max-iterations": "{{options.max_iterations | default(3)}}",
+                "stages": [
+                    {"name": "inner", "type": "agent", "prompt": ["hi\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        // When the option is supplied, it is used.
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{"name": "w", "type": "mydef", "options": {"max_iterations": 7}}"#,
+        )
+        .unwrap();
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        let seq = &result[0];
+        assert_eq!(
+            seq["max-iterations"].as_i64().unwrap(),
+            7,
+            "supplied option resolves to 7"
+        );
+
+        // When omitted, the default applies.
+        let call_site =
+            serde_json::from_str::<serde_json::Value>(r#"{"name": "w", "type": "mydef"}"#).unwrap();
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        let seq = &result[0];
+        assert_eq!(
+            seq["max-iterations"].as_i64().unwrap(),
+            3,
+            "default resolves to 3"
+        );
+    }
+
+    #[test]
+    fn wrap_substitutes_def_model_placeholder() {
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "model": "{{options.x}}",
+                "task-models": {"plan": "{{options.x}}"},
+                "stages": [
+                    {"name": "inner", "type": "agent", "prompt": ["hi\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{"name": "w", "type": "mydef", "options": {"x": "anthropic/claude"}}"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        let seq = &result[0];
+        assert_eq!(seq["model"].as_str().unwrap(), "anthropic/claude");
+        assert_eq!(
+            seq["task-models"].as_object().unwrap()["plan"]
+                .as_str()
+                .unwrap(),
+            "anthropic/claude"
+        );
+    }
+
+    #[test]
+    fn wrap_call_site_model_takes_precedence_over_def_placeholder() {
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "model": "{{options.x}}",
+                "stages": [
+                    {"name": "inner", "type": "agent", "prompt": ["hi\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        // Call-site model wins even though the definition would also resolve.
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{"name": "w", "type": "mydef", "model": "openai/gpt-4", "options": {"x": "anthropic/claude"}}"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        let seq = &result[0];
+        assert_eq!(seq["model"].as_str().unwrap(), "openai/gpt-4");
+    }
+
+    #[test]
+    fn wrap_substitutes_def_interval_placeholder() {
+        // Definition-level interval can reference call-site options.
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "interval": "{{options.delay | default(1.5)}}",
+                "stages": [
+                    {"name": "inner", "type": "agent", "prompt": ["hi\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        // When the option is supplied, it is used.
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{"name": "w", "type": "mydef", "options": {"delay": 2.5}}"#,
+        )
+        .unwrap();
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        let seq = &result[0];
+        assert_eq!(
+            seq["interval"].as_f64().unwrap(),
+            2.5,
+            "supplied option resolves to 2.5"
+        );
+
+        // When omitted, the default applies.
+        let call_site =
+            serde_json::from_str::<serde_json::Value>(r#"{"name": "w", "type": "mydef"}"#).unwrap();
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        let seq = &result[0];
+        assert_eq!(
+            seq["interval"].as_f64().unwrap(),
+            1.5,
+            "default resolves to 1.5"
+        );
+    }
+
+    #[test]
+    fn wrap_substitutes_def_skip_if_exists_placeholder() {
+        // Definition-level skip_if_exists can reference call-site options.
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "skip_if_exists": "{{options.guard_uri | default('artifact://sentinel-default')}}",
+                "stages": [
+                    {"name": "inner", "type": "agent", "prompt": ["hi\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{"name": "w", "type": "mydef", "options": {"guard_uri": "artifact://sentinel"}}"#,
+        )
+        .unwrap();
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        let seq = &result[0];
+        assert_eq!(
+            seq["skip_if_exists"].as_str().unwrap(),
+            "artifact://sentinel",
+            "supplied option resolves correctly"
+        );
+
+        // When omitted, the default applies.
+        let call_site =
+            serde_json::from_str::<serde_json::Value>(r#"{"name": "w", "type": "mydef"}"#).unwrap();
+        let result = expand_stage_def(&call_site, "mydef", &defs).unwrap();
+        let seq = &result[0];
+        assert_eq!(
+            seq["skip_if_exists"].as_str().unwrap(),
+            "artifact://sentinel-default",
+            "default resolves correctly"
         );
     }
 }
