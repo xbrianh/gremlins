@@ -229,15 +229,12 @@ fn parse_edits(edits_arr: &[serde_json::Value], file_path: &str) -> Result<Vec<E
         };
 
         // Optional scope: `start_line` may stand alone (open-ended downward);
-        // `end_line` without `start_line` is rejected.
-        let scope_start = match obj.get("start_line") {
+        // `end_line` without `start_line` defaults scope_start to 1.
+        // Zero values are clamped to 1; start_line > end_line is accepted
+        // and handled by scope_byte_range at execution time.
+        let mut scope_start = match obj.get("start_line") {
             Some(v) => match v.as_u64() {
-                Some(0) => {
-                    return Err(format!(
-                        "Error: edit {} 'start_line' must be a positive integer in {file_path}",
-                        i + 1
-                    ));
-                }
+                Some(0) => Some(1usize),
                 Some(n) => Some(n as usize),
                 None => {
                     return Err(format!(
@@ -250,12 +247,7 @@ fn parse_edits(edits_arr: &[serde_json::Value], file_path: &str) -> Result<Vec<E
         };
         let scope_end = match obj.get("end_line") {
             Some(v) => match v.as_u64() {
-                Some(0) => {
-                    return Err(format!(
-                        "Error: edit {} 'end_line' must be a positive integer in {file_path}",
-                        i + 1
-                    ));
-                }
+                Some(0) => Some(1usize),
                 Some(n) => Some(n as usize),
                 None => {
                     return Err(format!(
@@ -266,21 +258,9 @@ fn parse_edits(edits_arr: &[serde_json::Value], file_path: &str) -> Result<Vec<E
             },
             None => None,
         };
-        // Reject end_line without start_line.
+        // When end_line is given without start_line, default start to line 1.
         if scope_start.is_none() && scope_end.is_some() {
-            return Err(format!(
-                "Error: edit {} 'end_line' requires 'start_line' in {file_path}",
-                i + 1
-            ));
-        }
-        // Reject start_line > end_line.
-        if let (Some(s), Some(e)) = (scope_start, scope_end) {
-            if s > e {
-                return Err(format!(
-                    "Error: edit {} 'start_line' > 'end_line' in {file_path}",
-                    i + 1
-                ));
-            }
+            scope_start = Some(1);
         }
 
         edits.push(EditOp {
@@ -310,21 +290,6 @@ fn apply_edits(
                 "Error: old_string is empty in {file_path} (edit {})",
                 i + 1
             ));
-        }
-
-        // Reject start_line exceeding the file line count.
-        if let Some(s) = edit.scope_start {
-            let start_byte = line_offsets
-                .get(s.saturating_sub(1))
-                .copied()
-                .unwrap_or(content.len());
-            if start_byte >= content_len {
-                return Err(format!(
-                    "Error: edit {} 'start_line' exceeds file line count ({}) in {file_path}",
-                    i + 1,
-                    content.lines().count()
-                ));
-            }
         }
 
         // When a scope is set, search only the scope byte window so that
@@ -519,63 +484,58 @@ mod tests {
     }
 
     #[test]
-    fn parse_edits_end_line_without_start_line_error() {
-        let err = parse_edits(
+    fn parse_edits_end_line_without_start_line_defaults_to_one() {
+        let edits = parse_edits(
             &[serde_json::json!({
                 "old_string": "a", "new_string": "b", "end_line": 3
             })],
             "f.txt",
         )
-        .unwrap_err();
-        assert!(
-            err.contains("'end_line' requires 'start_line'"),
-            "got: {err}"
-        );
+        .unwrap();
+        assert_eq!(edits[0].scope_start, Some(1));
+        assert_eq!(edits[0].scope_end, Some(3));
     }
 
     #[test]
-    fn parse_edits_start_after_end_error() {
-        let err = parse_edits(
+    fn parse_edits_start_after_end_accepted() {
+        let edits = parse_edits(
             &[serde_json::json!({
                 "old_string": "a", "new_string": "b",
                 "start_line": 3, "end_line": 2
             })],
             "f.txt",
         )
-        .unwrap_err();
-        assert!(err.contains("'start_line' > 'end_line'"), "got: {err}");
+        .unwrap();
+        assert_eq!(edits[0].scope_start, Some(3));
+        assert_eq!(edits[0].scope_end, Some(2));
     }
 
     #[test]
-    fn parse_edits_zero_start_line_error() {
-        let err = parse_edits(
+    fn parse_edits_zero_start_line_clamped() {
+        let edits = parse_edits(
             &[serde_json::json!({
                 "old_string": "a", "new_string": "b",
                 "start_line": 0, "end_line": 2
             })],
             "f.txt",
         )
-        .unwrap_err();
-        assert!(
-            err.contains("'start_line' must be a positive integer"),
-            "got: {err}"
-        );
+        .unwrap();
+        assert_eq!(edits[0].scope_start, Some(1));
+        assert_eq!(edits[0].scope_end, Some(2));
     }
 
     #[test]
-    fn parse_edits_zero_end_line_error() {
-        let err = parse_edits(
+    fn parse_edits_zero_end_line_clamped() {
+        let edits = parse_edits(
             &[serde_json::json!({
                 "old_string": "a", "new_string": "b",
                 "start_line": 1, "end_line": 0
             })],
             "f.txt",
         )
-        .unwrap_err();
-        assert!(
-            err.contains("'end_line' must be a positive integer"),
-            "got: {err}"
-        );
+        .unwrap();
+        assert_eq!(edits[0].scope_start, Some(1));
+        assert_eq!(edits[0].scope_end, Some(1));
     }
 
     #[test]

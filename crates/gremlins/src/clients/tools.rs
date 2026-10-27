@@ -2404,15 +2404,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_tool_args_edit_end_line_without_start_error() {
-        let err = validate_tool_args(
+    fn validate_tool_args_edit_end_line_without_start_accepted() {
+        // end_line without start_line is accepted; the executor defaults
+        // scope_start to 1.
+        assert!(validate_tool_args(
             "Edit",
             &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "new_string": "b", "end_line": 2}]}),
         )
-        .unwrap();
-        assert!(err.contains("'end_line'"), "got: {err}");
-        assert!(err.contains("'start_line'"), "got: {err}");
-        assert!(err.contains("edit 1"), "got: {err}");
+        .is_none());
     }
 
     #[test]
@@ -2446,14 +2445,14 @@ mod tests {
         );
     }
     #[test]
-    fn validate_tool_args_edit_start_after_end_error() {
-        let err = validate_tool_args(
+    fn validate_tool_args_edit_start_after_end_accepted() {
+        // start_line > end_line is accepted; the executor's scope_byte_range
+        // clamps the window.
+        assert!(validate_tool_args(
             "Edit",
             &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "new_string": "b", "start_line": 3, "end_line": 2}]}),
         )
-        .unwrap();
-        assert!(err.contains("'start_line'"), "got: {err}");
-        assert!(err.contains("'end_line'"), "got: {err}");
+        .is_none());
     }
 
     #[test]
@@ -3809,7 +3808,10 @@ mod tests {
     }
 
     #[test]
-    fn edit_range_start_gt_end_error() {
+    fn edit_range_start_gt_end_clamped() {
+        // start_line > end_line is accepted; scope_byte_range clamps
+        // the window, producing a not-found diagnostic when the match
+        // falls outside the clamped range.
         let dir = tmp();
         std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
         let args = serde_json::json!({
@@ -3818,9 +3820,8 @@ mod tests {
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("start_line"), "got: {result}");
-        assert!(result.contains("end_line"), "got: {result}");
-        assert!(result.contains(">"), "got: {result}");
+        assert!(result.contains("old_string not found"), "got: {result}");
+        assert!(result.contains("between lines 3-2"), "got: {result}");
     }
 
     #[test]
@@ -3837,7 +3838,8 @@ mod tests {
     }
 
     #[test]
-    fn edit_end_line_without_start_line_error() {
+    fn edit_end_line_without_start_line_accepted() {
+        // end_line without start_line defaults scope_start to 1.
         let dir = tmp();
         std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
         let args = serde_json::json!({
@@ -3846,15 +3848,15 @@ mod tests {
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(
-            result.contains("'end_line' requires 'start_line'"),
-            "got: {result}"
-        );
+        assert_eq!(result, "OK", "got: {result}");
+        assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "x\n");
     }
 
     #[test]
-    fn edit_scope_start_gt_end_error() {
-        // start_line greater than end_line is rejected within a scope.
+    fn edit_scope_start_gt_end_clamped() {
+        // start_line > end_line within a scope is accepted; scope_byte_range
+        // clamps, producing a not-found diagnostic when the match falls
+        // outside the clamped range.
         let dir = tmp();
         std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
         let args = serde_json::json!({
@@ -3863,14 +3865,14 @@ mod tests {
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("start_line"), "got: {result}");
-        assert!(result.contains("end_line"), "got: {result}");
+        assert!(result.contains("old_string not found"), "got: {result}");
+        assert!(result.contains("between lines 2-1"), "got: {result}");
     }
 
     #[test]
-    fn edit_scope_start_beyond_eof_error() {
-        // A scope starting past the last line is rejected as a line-count
-        // error per the plan.
+    fn edit_scope_start_beyond_eof_clamped() {
+        // A scope starting past the last line is clamped to EOF by
+        // scope_byte_range, producing a not-found diagnostic.
         let dir = tmp();
         std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
         let args = serde_json::json!({
@@ -3879,11 +3881,12 @@ mod tests {
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("exceeds file line count"), "got: {result}");
+        assert!(result.contains("old_string not found"), "got: {result}");
     }
 
     #[test]
-    fn edit_scope_start_line_zero_error() {
+    fn edit_scope_start_line_zero_clamped() {
+        // Zero start_line is clamped to 1 by the executor.
         let dir = tmp();
         std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
         let args = serde_json::json!({
@@ -3892,7 +3895,8 @@ mod tests {
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("positive integer"), "got: {result}");
+        assert_eq!(result, "OK", "got: {result}");
+        assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "x\n");
     }
 
     #[test]
@@ -3993,7 +3997,8 @@ mod tests {
     }
 
     #[test]
-    fn edit_scope_end_line_without_start_error() {
+    fn edit_scope_end_line_without_start_accepted() {
+        // end_line without start_line defaults scope_start to 1.
         let dir = tmp();
         std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
         let args = serde_json::json!({
@@ -4002,8 +4007,8 @@ mod tests {
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("end_line"), "got: {result}");
-        assert!(result.contains("start_line"), "got: {result}");
+        assert_eq!(result, "OK", "got: {result}");
+        assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "x\n");
     }
 
     // --- Part 3: Task tests ---
