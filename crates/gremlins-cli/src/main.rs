@@ -2192,4 +2192,68 @@ mod tests {
             ]
         );
     }
+
+    // --- rm purge flag parsing ---
+
+    #[test]
+    fn rm_parse_purge_flag_true() {
+        let cli = Cli::try_parse_from(["gremlins", "rm", "--purge", "some-id"])
+            .expect("rm --purge args must parse");
+        let Some(Cmds::Rm { id, all, purge }) = cli.command else {
+            panic!("expected rm command");
+        };
+        assert_eq!(id.as_deref(), Some("some-id"));
+        assert!(!all);
+        assert!(purge);
+    }
+
+    #[test]
+    fn rm_parse_default_no_purge() {
+        let cli = Cli::try_parse_from(["gremlins", "rm", "some-id"]).expect("rm args must parse");
+        let Some(Cmds::Rm { id, all, purge }) = cli.command else {
+            panic!("expected rm command");
+        };
+        assert_eq!(id.as_deref(), Some("some-id"));
+        assert!(!all);
+        assert!(!purge);
+    }
+
+    #[test]
+    fn rm_parse_purge_flag_with_all() {
+        let cli = Cli::try_parse_from(["gremlins", "rm", "--all", "--purge"])
+            .expect("rm --all --purge must parse");
+        let Some(Cmds::Rm { id, all, purge }) = cli.command else {
+            panic!("expected rm command");
+        };
+        assert!(id.is_none());
+        assert!(all);
+        assert!(purge);
+    }
+
+    #[test]
+    fn rm_parse_all_default_no_purge() {
+        let cli = Cli::try_parse_from(["gremlins", "rm", "--all"]).expect("rm --all must parse");
+        let Some(Cmds::Rm { id, all, purge }) = cli.command else {
+            panic!("expected rm command");
+        };
+        assert!(id.is_none());
+        assert!(all);
+        assert!(!purge);
+    }
+
+    // --- rm_all_entry closed marker skip ---
+
+    #[tokio::test]
+    async fn rm_all_entry_skips_closed_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("gr-test-0001");
+        fs::create_dir_all(&state_dir).unwrap();
+        let state_json = state_dir.join("state.json");
+        fs::write(&state_json, r#"{"id":"gr-test-0001","status":"done"}"#).unwrap();
+        // Touch the closed marker.
+        fs::write(state_dir.join("closed"), "").unwrap();
+
+        let (outcome, _) = rm_all_entry("gr-test-0001", &state_json, None, false).await;
+        assert!(matches!(outcome, RmAllEntry::Ignored));
+    }
 }
