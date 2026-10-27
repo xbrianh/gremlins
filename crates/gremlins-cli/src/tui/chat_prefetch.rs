@@ -455,13 +455,13 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use std::time::Instant;
 
-    /// Serialize tests that mutate the process-wide `GREMLINS_SANDBOX_ROOT`
-    /// and `gremlins::config::clear_global()`. Tests that only work with
-    /// local temp dirs (no global mutation) don't need this lock.
-    static GLOBAL_CONFIG_LOCK: Mutex<()> = Mutex::new(());
+    // Serialize tests that mutate the process-wide `GREMLINS_SANDBOX_ROOT`
+    // and `gremlins::config::clear_global()`. This lock is shared with the
+    // `chat_context` test module because both mutate the same process-global
+    // environment/config; a per-module lock would let them race.
+    use crate::tui::test_support::CONFIG_ENV_LOCK as GLOBAL_CONFIG_LOCK;
 
     /// Set up a temporary sandbox directory as `GREMLINS_SANDBOX_ROOT`.
     /// Returns the guard (must be held for the test duration) and the

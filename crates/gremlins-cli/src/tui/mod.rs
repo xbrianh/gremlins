@@ -13,6 +13,20 @@ pub mod screen;
 pub mod theme;
 pub mod widgets;
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Mutex;
+
+    /// Serializes tests across modules that mutate the process-global
+    /// `GREMLINS_*` environment variables and call
+    /// `gremlins::config::clear_global()`. `chat_context` and
+    /// `chat_prefetch` each build throwaway sandboxes but share one process
+    /// environment; a per-module lock would let their guards race (for
+    /// example, one test removes `GREMLINS_SANDBOX_ROOT` while another reads
+    /// it through `state_root()`).
+    pub(crate) static CONFIG_ENV_LOCK: Mutex<()> = Mutex::new(());
+}
+
 use std::collections::HashMap;
 use std::io::{self, IsTerminal};
 use std::sync::Arc;

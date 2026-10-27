@@ -476,9 +476,10 @@ mod tests {
 
     impl ConfigEnvGuard {
         fn lock() -> Self {
-            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
             let mut guard = Self {
-                _lock: LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+                _lock: crate::tui::test_support::CONFIG_ENV_LOCK
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
                 // An empty config root: `global_config()` resolves against this
                 // and finds no settings.yaml, so overlay resolution falls back
                 // to the project's own `.gremlins/` rather than any real file.
