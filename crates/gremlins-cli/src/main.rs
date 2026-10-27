@@ -1207,8 +1207,11 @@ async fn rm_one(id: &str, purge: bool) -> Result<(), String> {
         Ok(mut stream) => {
             spawn::check_version(&mut stream).await?;
 
-            let response =
-                spawn::send_request(&mut stream, serde_json::json!({"op": "rm", "id": id, "purge": purge})).await;
+            let response = spawn::send_request(
+                &mut stream,
+                serde_json::json!({"op": "rm", "id": id, "purge": purge}),
+            )
+            .await;
             match response {
                 Ok(resp) => {
                     if resp.get("type").and_then(|v| v.as_str()) == Some("error") {
@@ -1280,7 +1283,8 @@ async fn rm_all(purge: bool) -> Result<(), String> {
     let mut executor_reachable: Option<bool> = None;
 
     for (id, state_json_path) in &entries {
-        let (outcome, next_reachable) = rm_all_entry(id, state_json_path, executor_reachable, purge).await;
+        let (outcome, next_reachable) =
+            rm_all_entry(id, state_json_path, executor_reachable, purge).await;
         executor_reachable = next_reachable;
         match outcome {
             RmAllEntry::Removed => removed += 1,
