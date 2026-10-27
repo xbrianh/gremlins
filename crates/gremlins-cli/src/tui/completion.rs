@@ -185,6 +185,13 @@ pub fn complete(input: &str, cursor: usize) -> Option<CompletionState> {
     } else {
         split_prefix(word, expanded)
     };
+    // Always list from an absolute directory so every emitted candidate is
+    // an absolute path, regardless of the operator's working directory.
+    let dir = if dir.is_absolute() {
+        dir
+    } else {
+        std::env::current_dir().ok()?.join(dir)
+    };
 
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
