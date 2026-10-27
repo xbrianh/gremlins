@@ -1268,6 +1268,10 @@ mod tests {
             child_log.contains("streaming output started"),
             "child log should contain its own log lines: {child_log}"
         );
+        assert!(
+            !child_log.contains("[parallel:group/bad]"),
+            "child's own log file must not contain parent relay prefix: {child_log}"
+        );
     }
 
     #[test]

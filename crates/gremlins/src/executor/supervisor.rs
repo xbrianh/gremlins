@@ -255,7 +255,7 @@ fn init_event_broadcast() -> &'static broadcast::Sender<DaemonEvent> {
     })
 }
 
-fn get_event_tx() -> &'static broadcast::Sender<DaemonEvent> {
+pub(crate) fn get_event_tx() -> &'static broadcast::Sender<DaemonEvent> {
     init_event_broadcast()
 }
 
