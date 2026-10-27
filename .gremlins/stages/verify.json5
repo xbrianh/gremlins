@@ -1,4 +1,5 @@
 {
+  "flatten_into_parent": true,
   "required-options": ["cmds"],
   "required-prompt": true,
   stages: [

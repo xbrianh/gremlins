@@ -55,6 +55,7 @@ async fn mark_child_done(state: &dyn StateStore, scope: &str, child_name: &str) 
 pub(crate) async fn run_parallel(
     stage: &ExecutorStage,
     gremlin: &mut Gremlin,
+    scope: &str,
     enclosing_model: Option<&ModelURI>,
     enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
@@ -109,7 +110,10 @@ pub(crate) async fn run_parallel(
             gremlin.loop_iter.clone()
         }
     };
-    let scope = stage_key(&stable_loop_iter, group_name);
+    let inner_scope = stage_key(&stable_loop_iter, group_name);
+    // Scope children under the enclosing sequence so that two
+    // callers of the same recipe get distinct completion keys.
+    let scope = stage_key(scope, &inner_scope);
     let mut done: HashSet<String> = HashSet::new();
     for child in children {
         let child_name = child.first_stage_name().to_string();
@@ -762,7 +766,7 @@ mod tests {
             join: None,
         };
         let (_sandbox, mut gremlin) = test_gremlin(vec![], "cmd/true");
-        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        let result = run_parallel(&stage, &mut gremlin, "", None, None).await;
         assert!(result.is_ok());
     }
 
@@ -781,7 +785,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd/true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        let result = run_parallel(&stage, &mut gremlin, "", None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -807,7 +811,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd/true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        let result = run_parallel(&stage, &mut gremlin, "", None, None).await;
         match result {
             Err(RunError::StageFailed { stage, .. }) => {
                 assert_eq!(stage, "bad");
@@ -838,7 +842,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd/true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        let result = run_parallel(&stage, &mut gremlin, "", None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -862,7 +866,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd/true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        let result = run_parallel(&stage, &mut gremlin, "", None, None).await;
         match result {
             Err(RunError::StageFailed { .. }) => {}
             other => panic!("expected StageFailed, got {other:?}"),
@@ -893,7 +897,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd/true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        let result = run_parallel(&stage, &mut gremlin, "", None, None).await;
         match result {
             Err(RunError::StageFailed { stage, .. }) => {
                 assert_eq!(stage, "bad");
@@ -930,7 +934,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd/true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        let result = run_parallel(&stage, &mut gremlin, "", None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -959,7 +963,7 @@ mod tests {
         mark_child_done(gremlin.state.store_ref(), &scope, "a").await;
 
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        let result = run_parallel(&stage, &mut gremlin, "", None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
 
         assert!(gremlin.state.is_registered(&done_uri(&scope, "a")).await);
@@ -990,7 +994,7 @@ mod tests {
         mark_child_done(gremlin.state.store_ref(), &scope, "b").await;
 
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        let result = run_parallel(&stage, &mut gremlin, "", None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -1009,7 +1013,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd/true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        let result = run_parallel(&stage, &mut gremlin, "", None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -1030,7 +1034,7 @@ mod tests {
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd/true");
 
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        let result = run_parallel(&stage, &mut gremlin, "", None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
 
         let merged_key = "writer/out.txt";
@@ -1056,7 +1060,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd/true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        let result = run_parallel(&stage, &mut gremlin, "", None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -1076,7 +1080,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd/true");
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        let result = run_parallel(&stage, &mut gremlin, "", None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
@@ -1098,7 +1102,7 @@ mod tests {
             .insert("plan".to_string(), "cmd/false".to_string());
 
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        let result = run_parallel(&stage, &mut gremlin, "", None, None).await;
         assert!(
             result.is_ok(),
             "group model should beat profile stage model, got {result:?}"
@@ -1153,7 +1157,7 @@ mod tests {
         let stage = first_executor_stage(&stages);
         // ErrorPolicy::All with one failing child keeps group_error None so
         // `run_parallel` still cleans up successful children (child `a`).
-        let _ = run_parallel(&stage, &mut gremlin, None, None).await;
+        let _ = run_parallel(&stage, &mut gremlin, "", None, None).await;
 
         // The child's log writer is a separate spawned task; drain the parent
         // channel briefly so every relayed line is collected.
@@ -1190,7 +1194,7 @@ mod tests {
         gremlin.runtime_config.log_tx = Some(parent_log_tx.clone());
 
         let stage = first_executor_stage(&stages);
-        let result = run_parallel(&stage, &mut gremlin, None, None).await;
+        let result = run_parallel(&stage, &mut gremlin, "", None, None).await;
         assert!(result.is_err(), "expected failing child, got Ok");
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

@@ -247,8 +247,12 @@ async fn run_stage_scoped(
     let result = match stage {
         ExecutorStage::Agent { .. } => run_agent(stage, gremlin, enc_model, enc_tm).await,
         ExecutorStage::Exec { .. } => run_exec(stage, gremlin, enc_model, enc_tm).await,
-        ExecutorStage::Sequence(_) => run_sequence(stage, gremlin, scope, enc_model, enc_tm).await,
-        ExecutorStage::Parallel { .. } => run_parallel(stage, gremlin, enc_model, enc_tm).await,
+        ExecutorStage::Sequence(_) => {
+            run_sequence(stage, gremlin, scope, display_stage, enc_model, enc_tm).await
+        }
+        ExecutorStage::Parallel { .. } => {
+            run_parallel(stage, gremlin, scope, enc_model, enc_tm).await
+        }
         ExecutorStage::Done => Ok(()),
     };
 
@@ -968,6 +972,7 @@ async fn run_sequence(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
     scope: &str,
+    display_stage: &str,
     enclosing_model: Option<&ModelURI>,
     enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
@@ -983,6 +988,13 @@ async fn run_sequence(
     let key = stage_key(scope, &seq.name);
     let max_iterations = seq.max_iterations.max(1);
     let skip_guard = &seq.skip_if_exists;
+
+    // Preserve the outermost display identity through nested sequences.
+    let effective_display = if !display_stage.is_empty() {
+        display_stage
+    } else {
+        &seq.name
+    };
 
     // Non-repeating: run children once.
     if max_iterations == 1 {
@@ -1004,7 +1016,7 @@ async fn run_sequence(
                 child,
                 gremlin,
                 &key,
-                &seq.name,
+                effective_display,
                 enclosing_model,
                 enclosing_task_models,
             ))
@@ -1071,7 +1083,7 @@ async fn run_sequence(
                 child,
                 gremlin,
                 &loop_iter,
-                &seq.name,
+                effective_display,
                 enclosing_model,
                 enclosing_task_models,
             ))
