@@ -1227,7 +1227,7 @@ pub(crate) fn max_tool_output_bytes() -> u64 {
 }
 
 /// GREMLINS_COMPACTION_THRESHOLD_TOKENS — soft token trigger for headless
-/// (pipeline) conversation compaction. Default 100 000. 0 disables proactive
+/// (pipeline) conversation compaction. Default 50 000. 0 disables proactive
 /// compaction; the hard `max-prompt-bytes` ceiling still applies. Settings.yaml
 /// `compaction.threshold-tokens` takes precedence over the env var.
 pub(crate) fn compaction_threshold_tokens() -> u64 {
@@ -1242,7 +1242,7 @@ pub(crate) fn compaction_threshold_tokens() -> u64 {
 }
 
 /// GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT — soft token trigger for chat
-/// conversation compaction. Default 200 000. 0 disables proactive compaction;
+/// conversation compaction. Default 64 000. 0 disables proactive compaction;
 /// the hard `max-prompt-bytes` ceiling still applies. Settings.yaml
 /// `compaction.threshold-tokens-chat` takes precedence over the env var.
 pub(crate) fn compaction_threshold_tokens_chat() -> u64 {
