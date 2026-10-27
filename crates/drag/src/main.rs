@@ -1,8 +1,10 @@
+mod config;
 mod lang;
 mod maint;
 mod scoring;
 mod util;
 
+use config::{ComprehensibilityConfig, ComprehensibilityDimensionDef, DragConfig, OutputFormat};
 use scoring::{compute_drag, compute_footprint};
 use util::{extract_json, median, truncate, CacheState, CompAgentError};
 
@@ -19,95 +21,31 @@ use gremlins::model_uri::ModelURI;
 
 use lang::PackageInfo;
 
-/// Help text appended after the auto-generated options table.
-const GREMLINS_DRAG_CLI_CONFIG_HELP: &str = "\
-Environment:
-  GREMLINS_DRAG_CLI_CONFIG  A JSON object that locks all scoring parameters.
-                            When set, no CLI arguments are accepted except
-                            --help, --explain, --clear-cache, and --version.
-                            All scoring parameters and the path are taken from the
-                            JSON object. Output is always JSON.
-
-                            JSON fields (all optional, defaults shown):
-                            {
-                              \"path\": null,
-                              \"model\": null,
-                              \"tokenizer\": \"o200k_base\",
-                              \"w2\": 0.5,
-                              \"m\": 2.5,
-                              \"p\": 2.5,
-                              \"skip_maintainability\": false,
-                              \"verbose\": false,
-                              \"estimates_per_survey\": 1,
-                              \"cache\": null,
-                              \"explain\": false
-                            }
-
-                            Example:
-                            GREMLINS_DRAG_CLI_CONFIG='{\"path\":\"src/\",\"w2\":1.0,\"m\":3.0}' gremlins-drag
-
-                            Meta-commands like --explain and --clear-cache may be
-                            combined with GREMLINS_DRAG_CLI_CONFIG. Scoring parameters
-                            come from the env var; the flag just enables the action.";
-
 /// Compute drag scores for source modules.
 #[derive(Parser)]
-#[command(name = "gremlins-drag", after_long_help = GREMLINS_DRAG_CLI_CONFIG_HELP)]
+#[command(name = "gremlins-drag")]
 struct Cli {
     /// Source file or directory to score. Recognized extensions: .rs, .py.
     /// If a file, scores that module. If a directory, scores all modules
     /// under it. Required unless --explain or --clear-cache is used.
     path: Option<PathBuf>,
 
-    /// Output JSON instead of a human-readable table.
+    /// Path to a JSON5 config file. Overrides the bundled config.
+    /// Mutually exclusive with GREMLINS_DRAG_CLI_CONFIG.
     #[arg(long)]
-    json: bool,
+    config: Option<PathBuf>,
 
     /// Model spec for comprehensibility scoring (e.g. "openai/gpt-4o").
-    /// Defaults to the gremlins default model.
+    /// Overrides the model field from the resolved config.
     #[arg(long)]
     model: Option<String>,
-
-    /// Tokenizer name for tiktoken-rs (e.g. "o200k_base", "cl100k_base").
-    #[arg(long, default_value = "o200k_base")]
-    tokenizer: String,
-
-    /// Weight for the footprint term in the drag formula.
-    #[arg(long, default_value_t = 0.5)]
-    w2: f64,
-
-    /// Exponent for the comprehensibility penalty
-    /// (m=2.5 balances merges vs splits).
-    #[arg(long, default_value_t = 2.5)]
-    m: f64,
-
-    /// Exponent for the package maintainability penalty.
-    #[arg(long, default_value_t = 2.5)]
-    p: f64,
-
-    /// Skip package-level maintainability scoring; only compute
-    /// module-level drag.
-    #[arg(long)]
-    skip_maintainability: bool,
 
     /// Print the resolved model spec and diagnostic information.
     #[arg(short = 'v', long)]
     verbose: bool,
 
-    /// Number of independent LLM estimates per survey for comprehensibility
-    /// scoring (median is used). Default 1.
-    #[arg(long = "estimates-per-survey", default_value_t = 1)]
-    estimates_per_survey: usize,
-
-    /// Path to a JSONL cache file for comprehensibility scores.
-    /// When set, this path overrides the default cache location.
-    /// The default cache lives under the gremlins shared state directory
-    /// (e.g. `drag/comprehensibility-cache.jsonl`).
-    #[arg(long)]
-    cache: Option<PathBuf>,
-
     /// Delete the comprehensibility cache file and exit.
-    /// The cache path is resolved from `--cache` if given, otherwise
+    /// The cache path is resolved from the config if given, otherwise
     /// the default location is used (same logic as the main run).
     #[arg(long)]
     clear_cache: bool,
@@ -119,98 +57,20 @@ struct Cli {
     explain: bool,
 }
 
-/// JSON-driven config for `GREMLINS_DRAG_CLI_CONFIG` env var.
-/// Maps every CLI option except `clear_cache` (always false via env).
-/// `json` output is forced when the env var is used — no field needed.
-#[derive(Deserialize)]
-#[serde(default)]
-struct DragCliConfig {
-    path: Option<PathBuf>,
-    model: Option<String>,
-    #[serde(default = "default_tokenizer")]
-    tokenizer: String,
-    #[serde(default = "default_w2")]
-    w2: f64,
-    #[serde(default = "default_m")]
-    m: f64,
-    #[serde(default = "default_p")]
-    p: f64,
-    skip_maintainability: bool,
-    verbose: bool,
-    #[serde(default = "default_estimates_per_survey")]
-    estimates_per_survey: usize,
-    cache: Option<PathBuf>,
-    explain: bool,
-}
-
-fn default_tokenizer() -> String {
-    "o200k_base".to_string()
-}
-fn default_w2() -> f64 {
-    0.5
-}
-fn default_m() -> f64 {
-    2.5
-}
-fn default_p() -> f64 {
-    2.5
-}
-fn default_estimates_per_survey() -> usize {
-    1
-}
-
-impl Default for DragCliConfig {
-    fn default() -> Self {
-        Self {
-            path: None,
-            model: None,
-            tokenizer: default_tokenizer(),
-            w2: default_w2(),
-            m: default_m(),
-            p: default_p(),
-            skip_maintainability: false,
-            verbose: false,
-            estimates_per_survey: default_estimates_per_survey(),
-            cache: None,
-            explain: false,
-        }
-    }
-}
-
-impl DragCliConfig {
-    fn into_cli(self) -> Cli {
-        Cli {
-            path: self.path,
-            json: true, // env-var driven → always JSON output
-            model: self.model,
-            tokenizer: self.tokenizer,
-            w2: self.w2,
-            m: self.m,
-            p: self.p,
-            skip_maintainability: self.skip_maintainability,
-            verbose: self.verbose,
-            estimates_per_survey: self.estimates_per_survey,
-            cache: self.cache,
-            clear_cache: false,
-            explain: self.explain,
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Output types
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
 struct DragReport {
-    config: DragConfig,
+    config: ReportConfig,
     modules: Vec<ModuleDrag>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     packages: Vec<PackageDrag>,
 }
 
 #[derive(Serialize)]
-struct DragConfig {
+struct ReportConfig {
     w2: f64,
     m: f64,
     p: f64,
@@ -251,59 +111,17 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
-    let cli: Cli = match std::env::var("GREMLINS_DRAG_CLI_CONFIG")
-        .ok()
-        .filter(|v| !v.is_empty())
-    {
-        Some(json) => {
-            let args: Vec<String> = std::env::args().collect();
-
-            // --help, -h, --version, -V always pass through to clap.
-            if args
-                .iter()
-                .any(|a| a == "--help" || a == "-h" || a == "--version" || a == "-V")
-            {
-                Cli::parse()
-            } else if args.len() > 1 {
-                // Allow --explain and --clear-cache alongside the env config.
-                let non_meta: Vec<_> = args
-                    .iter()
-                    .skip(1)
-                    .filter(|a| !(a.as_str() == "--explain" || a.as_str() == "--clear-cache"))
-                    .collect();
-                if !non_meta.is_empty() {
-                    return Err(
-                        "GREMLINS_DRAG_CLI_CONFIG is set — no CLI arguments allowed \
-                         except --help, --explain, --clear-cache, and --version. \
-                         Run `gremlins-drag` with no arguments."
-                            .to_string(),
-                    );
-                }
-                let mut cli = serde_json::from_str::<DragCliConfig>(&json)
-                    .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: invalid JSON: {e}"))?
-                    .into_cli();
-                if args.iter().any(|a| a == "--explain") {
-                    cli.explain = true;
-                }
-                if args.iter().any(|a| a == "--clear-cache") {
-                    cli.clear_cache = true;
-                }
-                cli
-            } else {
-                serde_json::from_str::<DragCliConfig>(&json)
-                    .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: invalid JSON: {e}"))?
-                    .into_cli()
-            }
-        }
-        None => Cli::parse(),
-    };
+    let cli = Cli::parse();
+    let config = DragConfig::load(cli.config.clone(), cli.model.clone())?;
+    let comp_config_hash = config.comprehensibility_hash();
+    let maint_config_hash = config.maintainability_hash();
 
     // Initialize config early so cache path resolution (and --clear-cache)
     // respect any configured state-root overrides.
     gremlins::config::init_global().map_err(|e| e.to_string())?;
 
     // ── resolve cache path (--clear-cache needs it) ──
-    let cache_path: PathBuf = match &cli.cache {
+    let cache_path: PathBuf = match &config.cache {
         Some(p) => p.clone(),
         None => {
             let state = gremlins::config::state_root();
@@ -324,7 +142,7 @@ async fn run() -> Result<(), String> {
     }
 
     if cli.explain {
-        print_explain(cli.w2, cli.m, cli.p);
+        print_explain(&config);
         return Ok(());
     }
 
@@ -361,7 +179,7 @@ async fn run() -> Result<(), String> {
     }
 
     // ── resolve model & cache path early (both needed for key computation) ──
-    let model_spec = resolve_comprehensibility_model(cli.model.as_deref())?;
+    let model_spec = resolve_comprehensibility_model(config.model.as_deref())?;
 
     let cache_map = load_cache(&cache_path)?;
     eprintln!(
@@ -377,10 +195,15 @@ async fn run() -> Result<(), String> {
         if source.trim().is_empty() {
             continue;
         }
-        let key = compute_cache_key(&source, &model_spec, cli.estimates_per_survey);
+        let key = compute_cache_key(
+            &source,
+            &model_spec,
+            config.estimates_per_survey,
+            &comp_config_hash,
+        );
         if let Some(entry) = cache_map.get(&key) {
             // Only accept cached entries whose estimate count matches.
-            if entry.estimates == cli.estimates_per_survey {
+            if entry.estimates == config.estimates_per_survey {
                 module_cache.insert(module.clone(), entry.clone());
             }
         }
@@ -428,9 +251,9 @@ async fn run() -> Result<(), String> {
     //    module.  `footprint(m)` sums token counts across a module and its
     //    transitive dependency closure, so the full package source tree is
     //    needed even when only a subset of modules is scored.
-    let tokenizer = parse_tokenizer(&cli.tokenizer)?;
+    let tokenizer = parse_tokenizer(&config.tokenizer)?;
     let bpe = tiktoken_rs::bpe_for_tokenizer(tokenizer)
-        .map_err(|e| format!("failed to load tokenizer {}: {e}", cli.tokenizer))?;
+        .map_err(|e| format!("failed to load tokenizer {}: {e}", config.tokenizer))?;
 
     let mut token_counts: HashMap<String, usize> = HashMap::new();
     for pkg in &scoring_packages {
@@ -507,7 +330,7 @@ async fn run() -> Result<(), String> {
     }
 
     // 7. Comprehensibility
-    if cli.estimates_per_survey < 1 {
+    if config.estimates_per_survey < 1 {
         return Err("--estimates-per-survey must be >= 1".to_string());
     }
 
@@ -515,12 +338,14 @@ async fn run() -> Result<(), String> {
 
     score_comprehensibility(
         &model_spec,
-        cli.verbose,
-        cli.estimates_per_survey,
+        config.verbose,
+        config.estimates_per_survey,
         &target_modules,
         &mut scores,
         cache_state.clone(),
         module_cache,
+        &config.comprehensibility,
+        &comp_config_hash,
     )
     .await?;
 
@@ -547,16 +372,18 @@ async fn run() -> Result<(), String> {
     for s in &mut scores {
         // SAFETY: we just verified every module has a score.
         let comp = s.comprehensibility.unwrap();
-        s.drag = compute_drag(cli.w2, cli.m, s.footprint, comp);
+        s.drag = compute_drag(config.weights.w2, config.weights.m, s.footprint, comp);
     }
     // ── Package-level maintainability ──
-    let package_drags: Vec<PackageDrag> = if !cli.skip_maintainability {
+    let package_drags: Vec<PackageDrag> = if !config.skip_maintainability {
         let maint_scores = maint::score_package_maintainability(
             &model_spec,
-            cli.verbose,
-            cli.estimates_per_survey,
+            config.verbose,
+            config.estimates_per_survey,
             &scoring_packages,
             cache_state.clone(),
+            &config.maintainability,
+            &maint_config_hash,
         )
         .await?;
 
@@ -585,7 +412,7 @@ async fn run() -> Result<(), String> {
             let maint = maint_scores.get(&pkg_key).copied().unwrap_or(0.5);
             let module_drags = pkg_module_drags.get(&pkg_key);
             let module_drag_sum: f64 = module_drags.map(|v| v.iter().sum()).unwrap_or(0.0);
-            let drag = maint::compute_package_drag(cli.p, maint, module_drag_sum);
+            let drag = maint::compute_package_drag(config.weights.p, maint, module_drag_sum);
             pdrags.push(PackageDrag {
                 package: pkg_name,
                 maint_score: maint,
@@ -606,12 +433,12 @@ async fn run() -> Result<(), String> {
     });
 
     // 10. Output
-    if cli.json {
+    if matches!(config.format, OutputFormat::Json) {
         let report = DragReport {
-            config: DragConfig {
-                w2: cli.w2,
-                m: cli.m,
-                p: cli.p,
+            config: ReportConfig {
+                w2: config.weights.w2,
+                m: config.weights.m,
+                p: config.weights.p,
             },
             modules: scores,
             packages: package_drags,
@@ -621,7 +448,7 @@ async fn run() -> Result<(), String> {
             serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
         );
     } else {
-        print_human_table(&scores, &package_drags, cli.skip_maintainability);
+        print_human_table(&scores, &package_drags, config.skip_maintainability);
     }
 
     Ok(())
@@ -823,17 +650,9 @@ fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
 const MAX_COMP_RETRIES: u32 = 3;
 const COMP_BACKOFF: [f64; 2] = [1.0, 2.0];
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct ComprehensibilityScores {
-    naming: u8,
-    control_flow: u8,
-    data_flow: u8,
-    abstractions: u8,
-    /// File-structural dimensions (must be present — retry on omission).
-    cohesion: u8,
-    sizing: u8,
-    test_hygiene: u8,
-}
+/// Dimension key → score (0–4). Keys are defined by the comprehensibility
+/// config; a missing key means the model omitted that dimension.
+type ComprehensibilityScores = HashMap<String, u8>;
 
 /// One line in the JSONL cache file.
 ///
@@ -869,18 +688,26 @@ fn default_estimates() -> usize {
 }
 
 /// Compute a BLAKE3-based cache key from the file's full source text,
-/// the resolved model URI, and the estimate count.
+/// the resolved model URI, the estimate count, and the survey config hash.
 ///
-/// Key = first 16 hex chars of `blake3(content || "\0" || model_uri || "\0" || estimates)`.
+/// Key = first 16 hex chars of
+/// `blake3(content || "\0" || model_uri || "\0" || estimates || "\0" || config_hash)`.
 /// The 64-bit truncation is fine at realistic cache sizes but collision
 /// risk grows past ~10⁵–10⁶ entries for strict uniqueness guarantees.
-fn compute_cache_key(content: &str, model_uri: &str, estimates: usize) -> String {
+fn compute_cache_key(
+    content: &str,
+    model_uri: &str,
+    estimates: usize,
+    config_hash: &str,
+) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(content.as_bytes());
     hasher.update(b"\0");
     hasher.update(model_uri.as_bytes());
     hasher.update(b"\0");
     hasher.update(&estimates.to_le_bytes());
+    hasher.update(b"\0");
+    hasher.update(config_hash.as_bytes());
     hasher.finalize().to_hex()[..16].to_string()
 }
 
@@ -940,9 +767,9 @@ fn append_cache_entry(path: &Path, entry: &CacheEntry) -> Result<(), String> {
 /// Resolve the model to use for comprehensibility scoring.
 /// If `--model` was given, resolve it through profiles.
 /// Otherwise, use the gremlins default model.
-fn resolve_comprehensibility_model(cli_model: Option<&str>) -> Result<String, String> {
+fn resolve_comprehensibility_model(model_opt: Option<&str>) -> Result<String, String> {
     gremlins::config::init_global().map_err(|e| e.to_string())?;
-    let spec = match cli_model {
+    let spec = match model_opt {
         Some(spec) => spec.to_string(),
         None => {
             let config = gremlins::config::global_config().map_err(|e| e.to_string())?;
@@ -1080,6 +907,7 @@ struct CompEstimate {
     breakdown: ComprehensibilityScores,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn score_comprehensibility(
     model_spec: &str,
     verbose: bool,
@@ -1088,6 +916,8 @@ async fn score_comprehensibility(
     scores: &mut [ModuleDrag],
     cache_state: CacheState,
     module_cache: HashMap<String, CacheEntry>,
+    comprehensibility_config: &ComprehensibilityConfig,
+    config_hash: &str,
 ) -> Result<(), String> {
     // `model_spec` is already fully resolved by `resolve_comprehensibility_model`.
     // Diagnostics are best-effort — model construction may fail for cmd/… backends.
@@ -1173,21 +1003,34 @@ async fn score_comprehensibility(
             let abs_path = abs_path.clone();
             let prompt = prompt.clone();
             let model_spec = model_spec.to_string();
+            let comp_config = comprehensibility_config.clone();
+            let config_hash = config_hash.to_string();
 
             handles.push(tokio::spawn(async move {
-                let cache_key = compute_cache_key(&source, &model_spec, estimates);
+                let cache_key = compute_cache_key(&source, &model_spec, estimates, &config_hash);
+                let dim_keys: Vec<String> = comp_config
+                    .dimensions
+                    .iter()
+                    .map(|d| d.key.clone())
+                    .collect();
 
                 for attempt in 0..MAX_COMP_RETRIES {
-                    match run_comp_agent(&module, &source, &prompt, &model_spec, verbose).await {
+                    match run_comp_agent(
+                        &module,
+                        &source,
+                        &prompt,
+                        &model_spec,
+                        verbose,
+                        &comp_config,
+                    )
+                    .await
+                    {
                         Ok(c) => {
-                            let raw: f64 = (c.naming as f64
-                                + c.control_flow as f64
-                                + c.data_flow as f64
-                                + c.abstractions as f64
-                                + c.cohesion as f64
-                                + c.sizing as f64
-                                + c.test_hygiene as f64)
-                                / 28.0;
+                            let sum: f64 = dim_keys
+                                .iter()
+                                .map(|k| *c.get(k).unwrap_or(&0) as f64)
+                                .sum();
+                            let raw = sum / (dim_keys.len() * 4) as f64;
                             let score = raw.clamp(0.0, 1.0);
 
                             return Ok(CompEstimate {
@@ -1333,46 +1176,55 @@ async fn run_comp_agent(
     prompt: &str,
     model_spec: &str,
     verbose: bool,
+    comprehensibility_config: &ComprehensibilityConfig,
 ) -> Result<ComprehensibilityScores, CompAgentError> {
     let model_uri = ModelURI::parse(model_spec)
         .map_err(|e| CompAgentError::Fatal(format!("invalid model: {e}")))?;
 
+    // Assemble the scoring prompt dynamically from the comprehensibility config.
+    let dim_list = comprehensibility_config
+        .dimensions
+        .iter()
+        .map(|d| format!("— {}: {}", d.label, d.description))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let structural = comprehensibility_config
+        .dimensions
+        .iter()
+        .filter_map(|d| {
+            comprehensibility_config
+                .structural_anchors
+                .get(&d.key)
+                .map(|a| format!("{}: {}", d.key, a))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let structural_section = if structural.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nAnchors for the structural dimensions:\n{structural}")
+    };
+
+    let dim_keys = comprehensibility_config
+        .dimensions
+        .iter()
+        .map(|d| d.key.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+
     let stage = AgentBuilder::new("score")
         .option("src", source)
         .prompt(format!(
-            "{prompt}\n\n\
-             Score the above source file on comprehensibility.\n\n\
-             The FILE SHAPE section is a structural skeleton — use it to\n\
-             assess the file's organization before reading the source.\n\n\
-             Target reader: a competent developer familiar with the language \n\
-             but unfamiliar with this file.  Do not assume shorter code is \n\
-             better or longer code is clearer.  Do not judge correctness.\n\n\
-             Score seven dimensions on a 0-4 scale:\n\
-             — naming: Are identifiers descriptive and consistent?\n\
-             — control_flow: Can loops, branches, and early returns be followed?\n\
-             — data_flow: Can data movement through the module be traced?\n\
-             — abstractions: Are interfaces, types, and layers well-chosen?\n\
-             — cohesion: Does the file have one clear responsibility, or is it a dumping ground?\n\
-             — sizing: Are functions/types well-sized, or are there mega-functions with huge parameter lists?\n\
-             — test_hygiene: Are tests inline and dominant, or cleanly separated from production code?\n\n\
-             4: Clear on a first careful reading.\n\
-             3: Clear with minor rereading or navigation.\n\
-             2: Requires substantial tracing or inference.\n\
-             1: Important behavior is obscured.\n\
-             0: Cannot reliably understand from supplied context.\n\n\
-             Anchors for the structural dimensions:\n\
-             cohesion: 0=dumping ground (5+ unrelated concerns), 1=3-4 concerns with informal boundaries,\n\
-             2=2-3 concerns with one dominant, 3=primary responsibility + minor secondary,\n\
-             4=single crystal-clear responsibility.\n\
-             sizing: 0=multiple 200+ line functions, 1=at least one 150+ line function,\n\
-             2=mostly reasonable with 1-2 outliers, 3=consistently well-sized (max ~60-80 lines),\n\
-             4=every function fits on screen, minimal params, state in context structs.\n\
-             test_hygiene: 0=tests >50% of file inline, 1=30-50% inline,\n\
-             2=<30% inline, 3=cleanly separated at bottom in single test module,\n\
-             4=tests in dedicated test files, zero test code in production file.\n\n\
-             Produce a JSON object with seven fields: naming, control_flow, data_flow,\n\
-             abstractions, cohesion, sizing, test_hygiene.\n\
-             Write the JSON to {{comprehensibility}}."
+            "{prompt}\n\n{preamble}\n\n\
+             Score {n} dimensions on a 0-4 scale:\n{dim_list}\n\n\
+             {generic_anchors}{structural_section}\n\n\
+             Produce a JSON object with these fields: {dim_keys}.\n\
+             Write the JSON to {{comprehensibility}}.",
+            preamble = comprehensibility_config.preamble,
+            n = comprehensibility_config.dimensions.len(),
+            generic_anchors = comprehensibility_config.generic_anchors,
         ))
         .output("comprehensibility", output("artifact://comprehensibility"))
         .landscape(false)
@@ -1429,21 +1281,23 @@ async fn run_comp_agent(
     let scores: ComprehensibilityScores = serde_json::from_str(&json_str)
         .map_err(|e| CompAgentError::Retryable(format!("parse: {e}")))?;
 
-    // Validate every dimension is in the requested 0–4 range.
-    // Out-of-range values mean the model misbehaved — retryable.
-    for (name, val) in [
-        ("naming", scores.naming),
-        ("control_flow", scores.control_flow),
-        ("data_flow", scores.data_flow),
-        ("abstractions", scores.abstractions),
-        ("cohesion", scores.cohesion),
-        ("sizing", scores.sizing),
-        ("test_hygiene", scores.test_hygiene),
-    ] {
-        if val > 4 {
-            return Err(CompAgentError::Retryable(format!(
-                "{name}={val} out of 0–4 range"
-            )));
+    // Validate every configured dimension is present and in the 0–4 range.
+    // A missing or out-of-range value means the model misbehaved — retryable.
+    for dim in &comprehensibility_config.dimensions {
+        match scores.get(&dim.key) {
+            None => {
+                return Err(CompAgentError::Retryable(format!(
+                    "missing dimension {}",
+                    dim.key
+                )));
+            }
+            Some(&val) if val > 4 => {
+                return Err(CompAgentError::Retryable(format!(
+                    "{}={val} out of 0–4 range",
+                    dim.key
+                )));
+            }
+            _ => {}
         }
     }
 
@@ -1459,7 +1313,10 @@ async fn run_comp_agent(
 /// responds to change (curves). This is the single source of truth for the
 /// drag model; `gremlins-drag --explain` feeds the drag-optimizer pipeline so
 /// its prompts never hardcode a second copy.
-fn print_explain(w2: f64, m: f64, p: f64) {
+fn print_explain(config: &DragConfig) {
+    let w2 = config.weights.w2;
+    let m = config.weights.m;
+    let p = config.weights.p;
     let factor_footprint = |f: usize| -> f64 { (1.0 + f as f64).powf(w2) };
     let factor_comp = |c: f64| -> f64 { (m * (1.0 - c)).exp() };
     let factor_maint = |c: f64| -> f64 { (p * (1.0 - c)).exp() };
@@ -1478,37 +1335,46 @@ fn print_explain(w2: f64, m: f64, p: f64) {
     println!("  never contributes to token_count or footprint, but it does affect the");
     println!("  test_hygiene comprehensibility dimension.\n");
 
+    let comp_dims: &[ComprehensibilityDimensionDef] = &config.comprehensibility.dimensions;
+    let n_dims = comp_dims.len();
     println!("## Comprehensibility survey\n");
-    println!("  Comprehensibility is scored by an LLM survey on seven dimensions, each");
-    println!("  rated 0–4 and normalized over 28 points (7×4). Four are classic");
-    println!("  readability dimensions; three are structural dimensions that catch");
-    println!("  file-level pathologies:\n");
-    println!("  1. naming        — Are identifiers descriptive and consistent?");
-    println!("  2. control_flow  — Can loops, branches, and early returns be followed?");
-    println!("  3. data_flow     — Can data movement through the module be traced?");
-    println!("  4. abstractions  — Are interfaces, types, and layers well-chosen?");
-    println!("  5. cohesion      — Does the file have one clear responsibility, or is it");
-    println!("                     a dumping ground? Anchors: 0 = dumping ground (5+ unrelated");
-    println!("                     concerns); 4 = single crystal-clear responsibility.");
-    println!("  6. sizing        — Are functions/types well-sized, or are there mega-functions");
-    println!("                     with huge parameter lists? Anchors: 0 = multiple 200+ line");
-    println!("                     functions; 4 = every function fits on screen, minimal params.");
-    println!("  7. test_hygiene  — Are tests inline and dominant, or cleanly separated from");
-    println!("                     production code? Anchors: 0 = tests >50% of file inline;");
-    println!("                     4 = tests in dedicated test files, zero test code in");
-    println!("                     production file.\n");
+    println!("  Comprehensibility is scored by an LLM survey on {n_dims} dimensions, each");
+    println!(
+        "  rated 0–4 and normalized over {} points ({n_dims}×4):\n",
+        n_dims * 4
+    );
+    for (i, dim) in comp_dims.iter().enumerate() {
+        println!("  {}. {}  — {}", i + 1, dim.label, dim.description);
+        if let Some(anchors) = config.comprehensibility.structural_anchors.get(&dim.key) {
+            println!("     Anchors:");
+            for line in anchors.lines() {
+                println!("     {line}");
+            }
+        }
+    }
+    println!();
     println!("  A FILE SHAPE skeleton is prepended to the scoring prompt: total lines,");
     println!("  function count, submodule count, test-function count, largest function");
     println!("  span, test ratio, concern clusters, and the item outline. Structural");
     println!("  pathologies — god-files, god-functions, inline test bloat, zero submodules —");
     println!("  depress the score directly.\n");
 
+    let n_maint = config.maintainability.dimensions.len();
     println!("## Package maintainability survey\n");
-    println!("  Package maintainability is scored on ten dimensions, each 0–4,");
-    println!("  normalized over 40 points (10×4). Only computed when packages are");
+    println!("  Package maintainability is scored on {n_maint} dimensions, each 0–4,");
+    println!(
+        "  normalized over {} points ({n_maint}×4). Only computed when packages are",
+        n_maint * 4
+    );
     println!("  present and --skip-maintainability is not set.\n");
-    for line in maint::explain_dimensions().lines() {
-        println!("  {line}");
+    for (i, dim) in config.maintainability.dimensions.iter().enumerate() {
+        println!("  {}. {}", i + 1, dim.description);
+        if !dim.anchors.is_empty() {
+            println!("     Anchors:");
+            for line in dim.anchors.lines() {
+                println!("     {line}");
+            }
+        }
     }
 
     println!("# Drag curves (w2={w2}, m={m}, p={p})\n");
@@ -1738,19 +1604,22 @@ mod tests {
 
     #[test]
     fn cache_key_is_deterministic() {
-        let k1 = compute_cache_key("fn main() {}", "openai/gpt-4o", 1);
-        let k2 = compute_cache_key("fn main() {}", "openai/gpt-4o", 1);
+        let k1 = compute_cache_key("fn main() {}", "openai/gpt-4o", 1, "cfg-a");
+        let k2 = compute_cache_key("fn main() {}", "openai/gpt-4o", 1, "cfg-a");
         assert_eq!(k1, k2);
         assert_eq!(k1.len(), 16);
         // Different content → different key.
-        let k3 = compute_cache_key("fn main() { /* changed */ }", "openai/gpt-4o", 1);
+        let k3 = compute_cache_key("fn main() { /* changed */ }", "openai/gpt-4o", 1, "cfg-a");
         assert_ne!(k1, k3);
         // Different model → different key.
-        let k4 = compute_cache_key("fn main() {}", "anthropic/claude", 1);
+        let k4 = compute_cache_key("fn main() {}", "anthropic/claude", 1, "cfg-a");
         assert_ne!(k1, k4);
         // Different estimates → different key.
-        let k5 = compute_cache_key("fn main() {}", "openai/gpt-4o", 5);
+        let k5 = compute_cache_key("fn main() {}", "openai/gpt-4o", 5, "cfg-a");
         assert_ne!(k1, k5);
+        // Different config hash → different key.
+        let k6 = compute_cache_key("fn main() {}", "openai/gpt-4o", 1, "cfg-b");
+        assert_ne!(k1, k6);
     }
 
     #[test]
@@ -1799,7 +1668,7 @@ mod tests {
         assert_eq!(map.len(), 1);
         let entry = map.get("deadbeef12345678").unwrap();
         assert_eq!(entry.comprehensibility, 0.75);
-        assert_eq!(entry.breakdown.naming, 3);
+        assert_eq!(entry.breakdown.get("naming"), Some(&3));
     }
 
     #[test]
@@ -1827,15 +1696,18 @@ mod tests {
             token_count: 100,
             estimates: 1,
             comprehensibility: 0.5,
-            breakdown: ComprehensibilityScores {
-                naming: 2,
-                control_flow: 2,
-                data_flow: 2,
-                abstractions: 2,
-                cohesion: 0,
-                sizing: 0,
-                test_hygiene: 0,
-            },
+            breakdown: [
+                ("naming", 2),
+                ("control_flow", 2),
+                ("data_flow", 2),
+                ("abstractions", 2),
+                ("cohesion", 0),
+                ("sizing", 0),
+                ("test_hygiene", 0),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         };
         append_cache_entry(&cache_path, &entry).unwrap();
         let map = load_cache(&cache_path).unwrap();
