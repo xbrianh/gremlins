@@ -4,7 +4,7 @@
 //! [`App`](crate::tui::app::App) stay I/O-free: they only call
 //! [`complete`] and keep the returned inert [`CompletionState`].
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 /// The result of one completion step.
 ///
@@ -127,27 +127,26 @@ fn expand_home(word: &str) -> Option<PathBuf> {
 
 /// Resolve a listing directory to an absolute path.
 ///
-/// Relative directories are joined onto the process working directory, with
-/// `.` and `..` components collapsed in-process so emitted candidates never
-/// contain a dot segment. The path need not exist on disk; it only has to be
-/// listable by [`std::fs::read_dir`]. Returns `None` when the working
-/// directory cannot be determined.
+/// Relative directories are joined onto the process working directory. When
+/// the joined path exists, it is resolved through the filesystem so `.` and
+/// `..` components follow symlinks exactly as [`std::fs::read_dir`] will.
+/// Collapsing `..` lexically would list the wrong directory for
+/// `link/../needle` when `link` is a symlink. When the joined path does not
+/// exist, the unresolved absolute path is returned unchanged; `complete`
+/// then fails to list it and reports the usual silent failure. Returns
+/// `None` when the working directory cannot be determined.
 fn absolutize(dir: PathBuf) -> Option<PathBuf> {
     if dir.is_absolute() {
         return Some(dir);
     }
-    let mut out = std::env::current_dir().ok()?;
-    for component in dir.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::Normal(segment) => out.push(segment),
-            Component::RootDir | Component::Prefix(_) => {}
-        }
+    let joined = std::env::current_dir().ok()?.join(dir);
+    // `canonicalize` resolves dot components through the filesystem. If the
+    // directory does not exist, fall back to the joined path so `complete`
+    // keeps its usual silent failure when `read_dir` reports the error.
+    match std::fs::canonicalize(&joined) {
+        Ok(path) => Some(path),
+        Err(_) => Some(joined),
     }
-    Some(out)
 }
 
 /// Normalize a path word for directory listing.
@@ -388,6 +387,7 @@ mod tests {
     #[test]
     fn split_prefix_absolutizes_relative_directory() {
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("crates")).unwrap();
         let _cwd = CwdGuard::enter(tmp.path());
         let (dir, partial) = split_prefix("crates/gr", PathBuf::from("crates/gr")).unwrap();
         assert!(dir.is_absolute());
@@ -410,6 +410,7 @@ mod tests {
     #[test]
     fn split_prefix_collapses_dot_and_parent_components() {
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("crates")).unwrap();
         let _cwd = CwdGuard::enter(tmp.path());
         let (dir, partial) =
             split_prefix("./crates/../gr", PathBuf::from("./crates/../gr")).unwrap();
@@ -488,6 +489,37 @@ mod tests {
             vec![format!(
                 "{}/Cargo.toml",
                 std::fs::canonicalize(tmp.path()).unwrap().display()
+            )]
+        );
+    }
+
+    /// Regression test: `..` must be resolved by the filesystem, not by
+    /// lexically popping path components. When `link` is a symlink to
+    /// `target/sub`, completing `link/../needle` lists `target`, so the
+    /// candidate is `target/needle` — not `work/needle`.
+    #[cfg(unix)]
+    #[test]
+    fn completion_resolves_parent_through_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        let target = tmp.path().join("target");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(target.join("sub")).unwrap();
+        std::fs::write(work.join("needle"), "work").unwrap();
+        std::fs::write(target.join("needle"), "target").unwrap();
+        symlink(target.join("sub"), work.join("link")).unwrap();
+
+        let _cwd = CwdGuard::enter(&work);
+        let input = "link/../needle";
+        let state = complete(input, input.len()).unwrap();
+
+        assert_eq!(
+            state.candidates,
+            vec![format!(
+                "{}/needle",
+                std::fs::canonicalize(&target).unwrap().display()
             )]
         );
     }
