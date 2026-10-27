@@ -110,13 +110,20 @@ impl ActiveRun {
 /// saved so it can be restored on cancel.
 pub struct HistorySearch {
     /// Indices into `input_history` that match the query, newest first.
-    pub matches: Vec<usize>,
+    matches: Vec<usize>,
     /// Current position within `matches` (0 = first / newest match).
-    pub position: usize,
+    position: usize,
     /// The input text snapshotted before search started, restored on cancel.
-    pub saved_input: String,
+    saved_input: String,
     /// Cursor position snapshotted before search started.
-    pub saved_cursor: usize,
+    saved_cursor: usize,
+}
+
+impl HistorySearch {
+    /// Whether no history entries match the current query.
+    pub fn is_failed(&self) -> bool {
+        self.matches.is_empty()
+    }
 }
 
 /// Which full screen is currently active.

@@ -36,8 +36,8 @@ use crate::tui::buffer::{line_wrapped_height, wrapped_height};
 use crate::tui::motif;
 use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::widgets::{
-    layout_widgets, render_wrapped_tail, DebugWidget, InfoBarWidget, InputBarWidget,
-    LiveAreaWidget, RenderContext, StreamingWidget, TranscriptWidget,
+    layout_widgets, render_wrapped_tail, DebugWidget, HistorySearchRender, InfoBarWidget,
+    InputBarWidget, LiveAreaWidget, RenderContext, StreamingWidget, TranscriptWidget,
 };
 use crate::tui::{REASONING_COMPLETED_TITLE, REASONING_PLACEHOLDER_TITLE};
 
@@ -343,8 +343,13 @@ impl<B: Backend> LiveArea<B> {
             watch_following: app.watch_following.as_deref(),
             watch_follow_error: app.watch_follow_error.as_deref(),
             completion_preview: app.completion_preview_suffix(),
-            history_search: app.history_search.as_ref(),
-            history_search_match: app.search_match_text(),
+            history_search: app
+                .history_search
+                .as_ref()
+                .map(|search| HistorySearchRender {
+                    failed: search.is_failed(),
+                    match_text: app.search_match_text(),
+                }),
         }
     }
 

@@ -26,11 +26,12 @@ use ratatui::{
     widgets::{Paragraph, Widget, Wrap},
 };
 
-use crate::tui::app::{ActiveRun, HistorySearch};
+use crate::tui::app::ActiveRun;
 use crate::tui::buffer::{line_wrapped_height, tail_window, wrapped_height, LineBuffer};
 use crate::tui::markdown;
 use crate::tui::motif::{self, glyph};
 use crate::tui::theme::DEFAULT_THEME;
+use unicode_width::UnicodeWidthStr;
 /// Shared read-only state handed to each widget's [`LiveAreaWidget::render`]
 /// and [`LiveAreaWidget::min_height`].
 ///
@@ -60,9 +61,19 @@ pub struct RenderContext<'a> {
     /// Inline completion preview suffix (paint-only, never submitted).
     pub completion_preview: Option<&'a str>,
     /// Active reverse history search state, if any.
-    pub history_search: Option<&'a HistorySearch>,
-    /// Current match text for the search prompt (pre-computed by caller).
-    pub history_search_match: Option<&'a str>,
+    pub history_search: Option<HistorySearchRender<'a>>,
+}
+
+/// Pre-computed reverse history search render state.
+///
+/// Decouples the input bar widget from the `HistorySearch` state machine
+/// in `app` — the widget only needs to know whether the search failed and
+/// what match text (if any) to display.
+pub struct HistorySearchRender<'a> {
+    /// Whether no history entries matched the query.
+    pub failed: bool,
+    /// The current match text, or `None` when no matches exist.
+    pub match_text: Option<&'a str>,
 }
 
 /// A single LiveArea rendering region.
@@ -2430,7 +2441,7 @@ impl LiveAreaWidget for InputBarWidget {
         }
 
         // ── Reverse history search mode ───────────────────────
-        if let Some(search) = ctx.history_search {
+        if let Some(search) = &ctx.history_search {
             self.render_search(area, buf, ctx, search);
             return;
         }
@@ -2490,24 +2501,28 @@ impl InputBarWidget {
         area: Rect,
         buf: &mut Buffer,
         ctx: &RenderContext,
-        search: &HistorySearch,
+        search_render: &HistorySearchRender,
     ) {
         use ratatui::text::Text;
 
         let width = area.width;
+        if width == 0 {
+            return;
+        }
 
-        let prefix = if search.matches.is_empty() {
+        let prefix = if search_render.failed {
             "(failed reverse-i-search)".to_string()
         } else {
             "(reverse-i-search)".to_string()
         };
 
-        // Build the prompt line: prefix + `'` + query + `': ` + match
-        let match_text = ctx.history_search_match.unwrap_or("");
+        // Build the prompt line: prefix + `'` + query + `': ` + match.
+        // On failure, the match text is the required `_` placeholder.
+        let match_text = search_render.match_text.unwrap_or("_");
 
         let prompt_style = Style::default().fg(DEFAULT_THEME.accent_primary);
         let fail_style = Style::default().fg(DEFAULT_THEME.danger);
-        let prefix_style = if search.matches.is_empty() {
+        let prefix_style = if search_render.failed {
             fail_style
         } else {
             prompt_style
@@ -2528,9 +2543,28 @@ impl InputBarWidget {
         let mut full_buf = Buffer::empty(full_area);
         paragraph.render(full_area, &mut full_buf);
 
+        // Compute the cursor's (row, col) in the full paragraph.
+        // The cursor sits after `prefix` + opening `'` + display-width of
+        // the query up to `ctx.cursor` bytes. `UnicodeWidthStr` gives the
+        // correct column count for multi-byte and wide characters.
+        let cursor_byte = ctx.cursor.min(ctx.input.len());
+        let query_prefix = &ctx.input[..cursor_byte];
+        let query_display_width = UnicodeWidthStr::width(query_prefix);
+        let cursor_offset = prefix.len() + 1 + query_display_width;
+        let cursor_row = cursor_offset as u16 / width;
+        let cursor_col = cursor_offset as u16 % width;
+
+        // Scroll the visible window so the cursor row stays inside `area`,
+        // mirroring how the normal input bar uses `v_scroll`.
+        let scroll = if cursor_row < area.height {
+            0
+        } else {
+            cursor_row - area.height + 1
+        };
+
         // Copy the visible vertical window.
         for y in 0..area.height {
-            let src_y = y;
+            let src_y = scroll + y;
             if src_y >= full_rows {
                 break;
             }
@@ -2540,15 +2574,13 @@ impl InputBarWidget {
             }
         }
 
-        // Cursor: at the end of the query string, just before the closing `'`.
-        // The cursor byte position in the rendered line is
-        // `prefix.len() + 1 + query.len()` (prefix + opening quote + query).
-        let cursor_offset = prefix.len() + 1 + ctx.cursor.min(ctx.input.len());
-        let cursor_row = cursor_offset as u16 / width;
-        let cursor_col = cursor_offset as u16 % width;
-        if cursor_row < area.height && cursor_col < width {
-            let cell = &mut buf[(area.x + cursor_col, area.y + cursor_row)];
-            cell.set_style(Style::default().bg(DEFAULT_THEME.cursor));
+        // Paint the cursor, adjusting for the scroll offset.
+        let vis_row = cursor_row.checked_sub(scroll);
+        if let Some(vis_row) = vis_row {
+            if vis_row < area.height && cursor_col < width {
+                let cell = &mut buf[(area.x + cursor_col, area.y + vis_row)];
+                cell.set_style(Style::default().bg(DEFAULT_THEME.cursor));
+            }
         }
     }
 }
@@ -4580,7 +4612,6 @@ mod tests {
             watch_follow_error: None,
             completion_preview: None,
             history_search: None,
-            history_search_match: None,
         }
     }
 
