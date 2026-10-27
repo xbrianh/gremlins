@@ -1,4 +1,5 @@
 {
+  prompt_dir: "prompts",
   // Drag score optimizer — iterative refactoring loop driven by gremlins-drag.
   //
   // Usage:
@@ -23,7 +24,8 @@
   //      a. Plan — an agent inspects the latest drag reports, considers the
   //         drivers of the drag score and candidate strategies, and writes a
   //         concrete implementation plan.
-  //      b. Implement — an agent applies the plan to the target.
+  //      b. Implement & QA — implement the plan, then verify, review, and
+  //         address review feedback (delegates to implement-and-qa).
   //      c. Evaluate — re-run gremlins-drag, compare before/after drag, write
   //         an evaluation report, and bail if the iteration made no progress.
   //   3. Land — merge the worktree back into the main branch (manual via
@@ -124,9 +126,9 @@
       },
     },
     // ── optimize loop ─────────────────────────────────────────────────────
-    // Each iteration runs plan → implement → evaluate. The exec stages around
-    // those three (context prep, cleanup, commit, progress guard, scoring) are
-    // plumbing that keeps the worktree, artifacts, and state files consistent.
+    // Each iteration runs plan → implement-and-qa → score → evaluate.
+    // The exec stages around those (context prep, scoring) are plumbing that
+    // keep the worktree, artifacts, and state files consistent.
     {
       name: "optimize",
       type: "sequence",
@@ -173,30 +175,17 @@
             idle_timeout: 600,
           },
         },
-        // --- implement: apply the plan to the target ---
+        // --- implement & QA: apply the plan, verify, review, and address feedback ---
         {
-          name: "drag-optimize-implement",
-          type: "agent",
-          interpolation: {
-            inputs: {
-              target: 'content("artifact://target.txt")',
-              plan: 'content("artifact://{loop_iter}/plan.md")',
-              drag_context: 'content("artifact://{loop_iter}/drag_context.md")',
-              instructions: 'content("artifact://instructions.txt")',
-            },
-            outputs: {
-              summary: "artifact://{loop_iter}/summary.md",
-            },
-          },
-          prompt: [
-            'Implement the refactoring plan below for the target at {target} to reduce its drag score.\n\n**Your overriding goal is simple, beautiful, correct code.** Do not cut\ncorners or settle for a partial implementation. If the plan calls for deep\nrestructuring, carry it through completely. The metric is drag, but the\nobjective is genuine maintainability — code that future developers will\nthank you for. Hard work now compounds into less work later.\n\n## Plan\n\n{plan}\n\n## Current drag state (for reference)\n\n{drag_context}\n\n## Rules\n- Follow the plan. If you discover a better approach mid-implementation,\n  prefer the plan unless it is clearly wrong; note any deviation in your summary.\n- **Strive for simple, beautiful, correct code.** Do not take shortcuts\n  or settle for a partial fix when the plan calls for deeper restructuring.\n  Difficult changes — redesigning module boundaries, flattening dependency\n  chains, untangling control flow — are worth the effort. Correctness and\n  clarity today mean far less maintenance burden tomorrow.\n- Do NOT break correctness. After changes, verify the code still\n  compiles / runs / imports cleanly (use whatever toolchain is available:\n  `cargo check`, `python3 -m py_compile`, etc.).\n- Run tests if a test runner is available.\n- If no safe refactoring can reduce drag, say so clearly and explain why.\n- **Test code does not count toward token_count or footprint.**\n  `gremlins-drag` strips `#[cfg(test)]` modules from Rust source\n  files before counting tokens, so test code has zero effect on the\n  footprint term. Do not reorganize test code that is already in a\n  clean `mod tests` block at the bottom of a file.\n- The plan you are implementing should contain no test-only\n  changes. If the plan includes mechanical test extraction, note\n  in your summary that you skipped it and explain why.\n- Write a concise summary of what you changed (or why you couldn\'t) to\n  `{summary}`.\n\n## Additional guidance\n{instructions}\n',
-          ],
-          //# Rules
-          //# Additional guidance
+          name: "implement-and-qa",
+          type: "implement-and-qa",
           options: {
-            idle_timeout: 600,
+            verify_cmds: "make -j8 check && make -j8 test",
+            diff_base: "artifact://{loop_iter}/iter_start_sha.txt",
+            artifact_ns: "{loop_iter}/",
           },
         },
+        // --- cleanup build artifacts so scoring is not inflated ---
         {
           name: "cleanup-build-artifacts",
           type: "exec",
@@ -205,31 +194,6 @@
               "cargo clean 2>/dev/null || true",
               "find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true",
               "find . -type f -name '*.pyc' -delete 2>/dev/null || true",
-            ],
-          },
-        },
-        {
-          name: "commit",
-          type: "exec",
-          options: {
-            cmds: [
-              "git add -A",
-              "git diff --cached --quiet || git commit -m 'refactor: reduce drag (iter {loop_iter})'\n",
-            ],
-          },
-        },
-        {
-          name: "require-progress",
-          type: "exec",
-          interpolation: {
-            inputs: {
-              base_sha: 'content("artifact://base_sha")',
-            },
-          },
-          options: {
-            cmds: [
-              'git merge-base --is-ancestor "{base_sha}" HEAD',
-              'test `git rev-list --count "{base_sha}..HEAD"` -gt 0',
             ],
           },
         },
@@ -255,7 +219,7 @@
             ],
           },
         },
-        // --- evaluate: agent judges legitimacy, rolls back gaming, bails on no progress ---
+        // --- evaluate: agent judges legitimacy (gaming detection only — QA already verified correctness) ---
         // `drag_reduced` is a required output — only written for legitimate,
         // drag-reducing iterations. Missing → bail for operator review.
         {
@@ -265,7 +229,6 @@
             inputs: {
               target: 'content("artifact://target.txt")',
               plan: 'content("artifact://{loop_iter}/plan.md")',
-              summary: 'content("artifact://{loop_iter}/summary.md")',
               drag_before: 'content("artifact://{loop_iter}/drag_before.txt")',
               drag_after: 'content("artifact://{loop_iter}/drag_after.txt")',
               iter_start_sha: 'content("artifact://{loop_iter}/iter_start_sha.txt")',
@@ -275,7 +238,7 @@
             },
           },
           prompt: [
-            'Evaluate the just-completed refactoring iteration for {target}.\n\n## Drag scores\n\n- Before: {drag_before}\n- After: {drag_after}\n\n## The plan\n\n{plan}\n\n## What the implementer reported\n\n{summary}\n\n## Your job\n\nRun read-only git commands (`git diff {iter_start_sha}`, `git log`, `git show`)\nto inspect exactly what changed. Then answer this\nquestion:\n\n**Did this iteration genuinely improve maintainability, or did it\ngame the drag score?**\n\nRemember: the goal is simple, beautiful, correct code. Drag measures\nit, but genuine structural improvement is what counts. An ambitious\nrefactoring that meaningfully simplifies the codebase is success —\neven if the drag reduction is modest. Conversely, a cheap change that\nnudges the score without making the code better is failure.\n\n### Score gaming\n\nScore gaming means changes whose primary effect is to manipulate the\ndrag formula without genuinely making the code easier to understand,\nmodify, or maintain. Use your judgment — don\'t pattern-match.\nExamples (not an exhaustive list):\n\n- Cosmetic-only changes: renames without clarity gain, reordering\n  without structural benefit, whitespace-only changes\n- Splitting files without reducing actual coupling\n- Adding indirection that obscures rather than clarifies\n- Mechanically extracting `#[cfg(test)] mod tests` blocks that are\n  already cleanly separated at the bottom of a production file into\n  separate test files — this is pure churn with zero hygiene gain\n  (the tests were already out of the production code path)\n- Moving, splitting, or reorganizing test code without improving\n  test_hygiene — e.g. renaming test files, reordering test functions,\n  or shuffling test modules between directories\n- Deleting or weakening tests to shrink a file (breaks correctness\n  guarantee; also pointless for drag since tests are stripped from\n  token counts)\n\n### Legitimate refactoring\n\nLegitimate changes make the code genuinely easier to maintain:\nsimpler control flow, reduced coupling, better abstractions, less\nduplication, tighter APIs, clearer names, flatter dependency chains,\nsplitting dumping-ground files by concern, breaking up mega-functions,\nand relocating tests that are genuinely interleaved with production\ncode (not already in a clean bottom-of-file `mod tests` block). The\ndiff should show meaningful structural improvement — not just\nrearranging deck chairs.\n\n**Scope is not a signal of gaming.** A refactoring that touches many\nfiles to restructure module boundaries, untangle complex coupling, or\nredesign abstractions can be entirely legitimate. Judge the quality of\nthe changes, not the size of the diff. Large, careful restructurings\nthat genuinely simplify the codebase are exactly what we want.\n\n### Your verdict\n\nWrite ONLY one word — your verdict — to `{drag_reduced}`. You MAY run\nread-only git commands (`git diff`, `git log`, `git show`) to inspect\nchanges. Do NOT run mutating git commands (commit, reset, branch,\netc.) and do NOT modify any files. Only write the verdict to\n`{drag_reduced}`. An exec stage after this one will\nhandle rollback if needed.\n\n**Legitimate AND drag improved (after < before):**\nWrite `reduced`. The iteration succeeded.\n\n**Legitimate BUT drag did not improve:**\nDo NOT write `{drag_reduced}`. The pipeline will bail for operator\nreview.\n\n**Score gaming:**\nWrite `rolled_back`. An exec stage will undo the commit and repair\nthe state files. Explain clearly what gaming pattern you detected.\n\nSummary:\n- Write `reduced` → drag improved, loop continues.\n- Write `rolled_back` → gaming, loop continues after exec rollback.\n- Write nothing → no progress, bail for operator review.\n',
+            'Evaluate the just-completed refactoring iteration for {target}.\n\n## Drag scores\n\n- Before: {drag_before}\n- After: {drag_after}\n\n## The plan\n\n{plan}\n\n## Your job\n\nQA (verification, semantic review, complexity review) has already run and\npassed — the code compiles, tests pass, and reviewers approved the design.\nYour ONLY job is to detect **score gaming**: changes whose primary effect\nis to manipulate the drag formula without genuinely making the code easier\nto understand, modify, or maintain.\n\nRun read-only git commands (`git diff {iter_start_sha}`, `git log`, `git show`)\nto inspect exactly what changed.\n\n### Score gaming patterns to look for\n\nUse your judgment — don\'t pattern-match mechanically. Examples:\n\n- Cosmetic-only changes: renames without clarity gain, reordering\n  without structural benefit, whitespace-only changes\n- Splitting files without reducing actual coupling\n- Adding indirection that obscures rather than clarifies\n- Mechanically extracting `#[cfg(test)] mod tests` blocks that are\n  already cleanly separated at the bottom of a production file into\n  separate test files — pure churn with zero hygiene gain\n- Moving, splitting, or reorganizing test code without improving\n  test_hygiene\n- Deleting or weakening tests to shrink a file (breaks correctness;\n  also pointless for drag since tests are stripped from token counts)\n\n### Legitimate refactoring\n\nLegitimate changes make the code genuinely easier to maintain:\nsimpler control flow, reduced coupling, better abstractions, less\nduplication, tighter APIs, clearer names, flatter dependency chains,\nsplitting dumping-ground files by concern, breaking up mega-functions,\nand relocating tests that are genuinely interleaved with production\ncode (not already in a clean bottom-of-file `mod tests` block).\n\n**Scope is not a signal of gaming.** A refactoring that touches many\nfiles to restructure module boundaries or untangle complex coupling is\nentirely legitimate. Judge the quality of the changes, not the size of\nthe diff.\n\n### Your verdict\n\nWrite ONLY one word — your verdict — to `{drag_reduced}`. You MAY run\nread-only git commands (`git diff`, `git log`, `git show`) to inspect\nchanges. Do NOT run mutating git commands and do NOT modify any files.\nAn exec stage after this one handles rollback if needed.\n\n**Legitimate AND drag improved (after < before):**\nWrite `reduced`. The iteration succeeded.\n\n**Legitimate BUT drag did not improve:**\nDo NOT write `{drag_reduced}`. The pipeline will bail for operator review.\n\n**Score gaming:**\nWrite `rolled_back`. An exec stage will undo the commit and repair\nthe state files. Explain clearly what gaming pattern you detected.\n\nSummary:\n- Write `reduced` → drag improved, loop continues.\n- Write `rolled_back` → gaming, loop continues after exec rollback.\n- Write nothing → no progress, bail for operator review.\n',
           //# Your job
           //# Your verdict
           options: {
@@ -297,7 +260,8 @@
               'if [ "{verdict}" = "rolled_back" ]; then\n  echo "rolling back iteration {loop_iter} (gaming detected)"\n  git -C "$GREMLIN_WORKDIR" reset --hard {iter_start_sha}\n  if [ -f "$GREMLINS_STATE_DIR/drag_previous.json" ]; then\n    cp "$GREMLINS_STATE_DIR/drag_previous.json" "$GREMLINS_STATE_DIR/drag_current.json"\n    DRAG_BEFORE=$(cat "$GREMLINS_STATE_DIR/artifacts/{loop_iter}/drag_before.txt" 2>/dev/null)\n    printf "%s" "${DRAG_BEFORE:-0}" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"\n    echo "restored drag_best to pre-iteration value"\n  fi\nelif [ "{verdict}" = "reduced" ]; then\n  echo "iteration {loop_iter} is legitimate with drag improvement"\nelse\n  echo "iteration {loop_iter} verdict is unknown: {verdict}"\nfi\n',
             ],
           },
-        },      ],
+        },
+      ],
     },
     // ── commit message ────────────────────────────────────────────────────
     {

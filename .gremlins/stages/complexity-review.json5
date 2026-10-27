@@ -13,16 +13,16 @@
               base_sha: 'content("artifact://base_sha")',
             },
             outputs: {
-              report: "artifact://complexity-report.md",
-              tree: "artifact://complexity-report.md.tree",
-              dot: "artifact://complexity-report.md.dot",
-              adjacency: "artifact://complexity-report.md.adjacency",
+              report: 'artifact://{{options.artifact_ns | default("")}}complexity-report.md',
+              tree: 'artifact://{{options.artifact_ns | default("")}}complexity-report.md.tree',
+              dot: 'artifact://{{options.artifact_ns | default("")}}complexity-report.md.dot',
+              adjacency: 'artifact://{{options.artifact_ns | default("")}}complexity-report.md.adjacency',
             },
           },
           options: {
             timeout: 300,
             cmds: [
-              'cargo_modules_report "{base_sha}" "artifact://complexity-report.md" "{report}" "{tree}" "{dot}" "{adjacency}"',
+              'cargo_modules_report "{base_sha}" "artifact://{{options.artifact_ns | default(\"\")}}complexity-report.md" "{report}" "{tree}" "{dot}" "{adjacency}"',
             ],
           },
         },
@@ -31,12 +31,12 @@
           type: "agent",
           interpolation: {
             inputs: {
-              plan: 'content("artifact://plan.md")',
-              diff: 'content("artifact://diff.txt")',
-              report: 'content("artifact://complexity-report.md")',
+              plan: 'content("artifact://{{options.artifact_ns | default(\"\")}}plan.md")',
+              diff: 'content("artifact://{{options.artifact_ns | default(\"\")}}diff.txt")',
+              report: 'content("artifact://{{options.artifact_ns | default(\"\")}}complexity-report.md")',
             },
             outputs: {
-              filepath: "artifact://complexity-review.md",
+              filepath: 'artifact://{{options.artifact_ns | default("")}}complexity-review.md',
             },
           },
           prompt: ["{{prompt}}"],
