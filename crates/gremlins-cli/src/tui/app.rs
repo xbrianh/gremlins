@@ -52,6 +52,9 @@ pub struct App {
     /// Active skill names for the current session. Populated by `/skill`;
     /// cleared by `/clear`. Sent to the daemon on each chat request.
     pub active_skills: Vec<String>,
+    /// Active reverse history search state (Ctrl+R). When `Some`, the
+    /// input bar renders the search prompt instead of the normal chevron.
+    pub history_search: Option<HistorySearch>,
 }
 
 /// One tracked gremlin run.
@@ -97,6 +100,29 @@ impl ActiveRun {
             last_prompt_tokens: None,
             last_cached_input_tokens: None,
         }
+    }
+}
+
+/// Interactive reverse history search state (Ctrl+R).
+///
+/// During search, `App::input` holds the incremental query string and
+/// `App::input_cursor` tracks position within it. The pre-search input is
+/// saved so it can be restored on cancel.
+pub struct HistorySearch {
+    /// Indices into `input_history` that match the query, newest first.
+    matches: Vec<usize>,
+    /// Current position within `matches` (0 = first / newest match).
+    position: usize,
+    /// The input text snapshotted before search started, restored on cancel.
+    saved_input: String,
+    /// Cursor position snapshotted before search started.
+    saved_cursor: usize,
+}
+
+impl HistorySearch {
+    /// Whether no history entries match the current query.
+    pub fn is_failed(&self) -> bool {
+        self.matches.is_empty()
     }
 }
 
@@ -153,6 +179,7 @@ impl App {
             width: 80,
             completion: None,
             active_skills: Vec::new(),
+            history_search: None,
         }
     }
 
@@ -677,6 +704,107 @@ impl App {
         };
         self.history_cursor = Some(next);
         self.input_history.get(next).map(|s| s.as_str())
+    }
+
+    // ── Reverse history search (Ctrl+R) ─────────────────────────
+
+    /// Enter reverse history search mode. Snapshots the current input and
+    /// builds the initial match list (every history entry, newest first).
+    /// The input bar becomes the incremental query editor; `input` holds
+    /// the query string and `input_cursor` sits at its end.
+    pub fn enter_search(&mut self) {
+        self.clear_completion();
+        let saved_input = std::mem::take(&mut self.input);
+        let saved_cursor = self.input_cursor;
+        self.input_cursor = 0;
+        let matches: Vec<usize> = (0..self.input_history.len()).rev().collect();
+        self.history_search = Some(HistorySearch {
+            matches,
+            position: 0,
+            saved_input,
+            saved_cursor,
+        });
+    }
+
+    /// Append `ch` to the search query and rebuild the match list.
+    pub fn search_push_char(&mut self, ch: char) {
+        let Some(_search) = &self.history_search else {
+            return;
+        };
+        self.input.push(ch);
+        self.input_cursor = self.input.len();
+        self.rebuild_search_matches();
+    }
+
+    /// Remove the last character from the search query and rebuild matches.
+    pub fn search_backspace(&mut self) {
+        let Some(_search) = &self.history_search else {
+            return;
+        };
+        self.input.pop();
+        self.input_cursor = self.input.len();
+        self.rebuild_search_matches();
+    }
+
+    /// Cycle to the next (older) match, wrapping around to the newest.
+    pub fn search_next(&mut self) {
+        let Some(search) = &mut self.history_search else {
+            return;
+        };
+        if !search.matches.is_empty() {
+            search.position = (search.position + 1) % search.matches.len();
+        }
+    }
+
+    /// Cancel search: restore the saved input and clear search state.
+    pub fn cancel_search(&mut self) {
+        let Some(search) = self.history_search.take() else {
+            return;
+        };
+        self.input = search.saved_input;
+        self.input_cursor = search.saved_cursor;
+    }
+
+    /// Accept the current match: fill the input bar with the matched entry
+    /// but do **not** submit it. Returns to normal editing mode.
+    pub fn accept_search(&mut self) {
+        let Some(search) = self.history_search.take() else {
+            return;
+        };
+        if let Some(&idx) = search.matches.get(search.position) {
+            if let Some(entry) = self.input_history.get(idx) {
+                self.input = entry.clone();
+                self.input_cursor = self.input.len();
+                return;
+            }
+        }
+        // No match selected — restore saved input.
+        self.input = search.saved_input;
+        self.input_cursor = search.saved_cursor;
+    }
+
+    /// Return the current search match text, if any.
+    pub fn search_match_text(&self) -> Option<&str> {
+        let search = self.history_search.as_ref()?;
+        let idx = search.matches.get(search.position)?;
+        self.input_history.get(*idx).map(|s| s.as_str())
+    }
+
+    /// Rebuild the match list from the current query (which is `self.input`).
+    fn rebuild_search_matches(&mut self) {
+        let Some(search) = &mut self.history_search else {
+            return;
+        };
+        let query_lower = self.input.to_lowercase();
+        search.matches = self
+            .input_history
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, entry)| entry.to_lowercase().contains(&query_lower))
+            .map(|(i, _)| i)
+            .collect();
+        search.position = 0;
     }
 
     /// Move forward through history (toward a fresh line). Returns the

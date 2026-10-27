@@ -59,6 +59,20 @@ pub struct RenderContext<'a> {
     pub watch_follow_error: Option<&'a str>,
     /// Inline completion preview suffix (paint-only, never submitted).
     pub completion_preview: Option<&'a str>,
+    /// Active reverse history search state, if any.
+    pub history_search: Option<HistorySearchRender<'a>>,
+}
+
+/// Pre-computed reverse history search render state.
+///
+/// Decouples the input bar widget from the `HistorySearch` state machine
+/// in `app` — the widget only needs to know whether the search failed and
+/// what match text (if any) to display.
+pub struct HistorySearchRender<'a> {
+    /// Whether no history entries matched the query.
+    pub failed: bool,
+    /// The current match text, or `None` when no matches exist.
+    pub match_text: Option<&'a str>,
 }
 
 /// A single LiveArea rendering region.
@@ -2178,6 +2192,42 @@ impl InputBarWidget {
         (wrapped_height(&lines, width).max(1).min(u16::MAX as usize)) as u16
     }
 
+    /// Wrapped rows of the current render context, using the search prompt
+    /// when history search is active so the layout reserves enough height.
+    fn wrapped_rows_for_ctx(&self, width: u16, ctx: &RenderContext) -> u16 {
+        if let Some(search) = &ctx.history_search {
+            let line = Self::search_line(ctx.input, search);
+            (line_wrapped_height(&line, width)
+                .max(1)
+                .min(u16::MAX as usize)) as u16
+        } else {
+            self.wrapped_rows(width, ctx.input, ctx.completion_preview)
+        }
+    }
+
+    /// Build the single logical line for the reverse history search prompt.
+    fn search_line(query: &str, search: &HistorySearchRender) -> Line<'static> {
+        let prefix = if search.failed {
+            "(failed reverse-i-search)"
+        } else {
+            "(reverse-i-search)"
+        };
+        let match_text = search.match_text.unwrap_or("_");
+        let prefix_style = if search.failed {
+            Style::default().fg(DEFAULT_THEME.danger)
+        } else {
+            Style::default().fg(DEFAULT_THEME.accent_primary)
+        };
+        Line::from(vec![
+            Span::styled(format!("{prefix}'"), prefix_style),
+            Span::raw(query.to_string()),
+            Span::styled(
+                format!("': {match_text}"),
+                Style::default().fg(DEFAULT_THEME.subtle),
+            ),
+        ])
+    }
+
     /// Build the styled logical lines: the prompt chevron on the first line,
     /// with each `'\n'` in the input producing a hard line break and
     /// continuation lines indented two cells to align past the chevron.
@@ -2407,12 +2457,11 @@ impl LiveAreaWidget for InputBarWidget {
     fn min_height(&self, width: u16, ctx: &RenderContext) -> u16 {
         // Minimum: the wrapped content, capped at 5 rows. The bar is not
         // shrunk below its visible text unless the viewport cannot fit it.
-        self.wrapped_rows(width, ctx.input, ctx.completion_preview)
-            .min(5)
+        self.wrapped_rows_for_ctx(width, ctx).min(5)
     }
 
     fn desired_height(&self, width: u16, ctx: &RenderContext) -> u16 {
-        self.wrapped_rows(width, ctx.input, ctx.completion_preview)
+        self.wrapped_rows_for_ctx(width, ctx)
     }
 
     fn max_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
@@ -2422,6 +2471,12 @@ impl LiveAreaWidget for InputBarWidget {
     fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
         let width = area.width;
         if width == 0 {
+            return;
+        }
+
+        // ── Reverse history search mode ───────────────────────
+        if let Some(search) = &ctx.history_search {
+            self.render_search(area, buf, ctx, search);
             return;
         }
 
@@ -2469,6 +2524,117 @@ impl LiveAreaWidget for InputBarWidget {
                 cell.set_style(Style::default().bg(DEFAULT_THEME.cursor));
             }
         }
+    }
+}
+
+impl InputBarWidget {
+    /// Render the reverse history search prompt instead of the normal
+    /// chevron + input.
+    fn render_search(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        ctx: &RenderContext,
+        search_render: &HistorySearchRender,
+    ) {
+        use ratatui::text::Text;
+
+        let width = area.width;
+        if width == 0 {
+            return;
+        }
+
+        // Build the render line (no marker) and the cursor-finding line
+        // (with a styled marker at the cursor position). Because both
+        // lines differ only in that single style, they wrap identically.
+        let cursor_byte = ctx.cursor.min(ctx.input.len());
+        let render_line = Self::search_line(ctx.input, search_render);
+        let marker_line = Self::search_line_with_marker(ctx.input, search_render, cursor_byte);
+
+        let full_rows = wrapped_height(std::slice::from_ref(&render_line), width).max(1) as u16;
+        let full_area = Rect::new(0, 0, width, full_rows);
+        let mut full_buf = Buffer::empty(full_area);
+        Paragraph::new(Text::from(render_line))
+            .wrap(Wrap { trim: false })
+            .render(full_area, &mut full_buf);
+
+        // Locate the cursor through the marker line, which wraps exactly
+        // like the render line because the text content is identical.
+        let cursor_pos = Self::locate_marker(std::slice::from_ref(&marker_line), width);
+        let (cursor_row, cursor_col) = cursor_pos.unwrap_or((full_rows - 1, width - 1));
+
+        // Scroll the visible window so the cursor row stays inside `area`,
+        // mirroring how the normal input bar uses `v_scroll`.
+        let scroll = if cursor_row < area.height {
+            0
+        } else {
+            cursor_row - area.height + 1
+        };
+
+        // Copy the visible vertical window.
+        for y in 0..area.height {
+            let src_y = scroll + y;
+            if src_y >= full_rows {
+                break;
+            }
+            for x in 0..width {
+                let cell = full_buf[(x, src_y)].clone();
+                buf[(area.x + x, area.y + y)] = cell;
+            }
+        }
+
+        // Paint the cursor, adjusting for the scroll offset.
+        let vis_row = cursor_row.checked_sub(scroll);
+        if let Some(vis_row) = vis_row {
+            if vis_row < area.height && cursor_col < width {
+                let cell = &mut buf[(area.x + cursor_col, area.y + vis_row)];
+                cell.set_style(Style::default().bg(DEFAULT_THEME.cursor));
+            }
+        }
+    }
+
+    /// Build the search line with a marker-styled span at `marker_at` bytes
+    /// into the query. The marker uses [`Self::marker_style`] so
+    /// [`Self::locate_marker`] can find it after word wrapping.
+    fn search_line_with_marker(
+        query: &str,
+        search: &HistorySearchRender,
+        marker_at: usize,
+    ) -> Line<'static> {
+        let prefix = if search.failed {
+            "(failed reverse-i-search)"
+        } else {
+            "(reverse-i-search)"
+        };
+        let match_text = search.match_text.unwrap_or("_");
+        let prefix_style = if search.failed {
+            Style::default().fg(DEFAULT_THEME.danger)
+        } else {
+            Style::default().fg(DEFAULT_THEME.accent_primary)
+        };
+
+        // Build query spans, splitting at the marker byte.
+        let marker_at = marker_at.min(query.len());
+        let mut spans: Vec<Span<'static>> = vec![Span::styled(format!("{prefix}'"), prefix_style)];
+        if marker_at > 0 {
+            spans.push(Span::raw(query[..marker_at].to_string()));
+        }
+        if marker_at < query.len() {
+            let ch = query[marker_at..]
+                .chars()
+                .next()
+                .expect("marker within query");
+            spans.push(Span::styled(ch.to_string(), Self::marker_style()));
+            let rest = &query[marker_at + ch.len_utf8()..];
+            if !rest.is_empty() {
+                spans.push(Span::raw(rest.to_string()));
+            }
+        }
+        spans.push(Span::styled(
+            format!("': {match_text}"),
+            Style::default().fg(DEFAULT_THEME.subtle),
+        ));
+        Line::from(spans)
     }
 }
 
@@ -4498,6 +4664,7 @@ mod tests {
             watch_following: None,
             watch_follow_error: None,
             completion_preview: None,
+            history_search: None,
         }
     }
 

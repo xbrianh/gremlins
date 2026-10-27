@@ -1305,9 +1305,42 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             Some(ev) = ct_rx.recv() => {
                 match ev {
                     Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                        KeyCode::Char('r')
+                            if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                        {
+                            // Ctrl+R reverse history search — Chat screen only.
+                            if !app.screen.is_chat() {
+                                continue;
+                            }
+                            if app.history_search.is_some() {
+                                // Already searching: cycle to next (older) match.
+                                app.search_next();
+                            } else {
+                                // Enter search mode.
+                                app.enter_search();
+                            }
+                            live_area.ensure_input_cursor_visible(
+                                app.input_cursor,
+                                &app.input,
+                                app.width,
+                            );
+                        }
                         KeyCode::Char('c')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
+                            // Ctrl+C during search cancels the search and
+                            // restores the saved input — it must NEVER
+                            // propagate to the interrupt / quit path.
+                            if app.history_search.is_some() {
+                                app.cancel_search();
+                                live_area.ensure_input_cursor_visible(
+                                    app.input_cursor,
+                                    &app.input,
+                                    app.width,
+                                );
+                                continue;
+                            }
+
                             let now = Instant::now();
 
                             if app.active_request {
@@ -1379,6 +1412,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         KeyCode::Char('d')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
+                            if app.history_search.is_some() {
+                                continue;
+                            }
                             // Ctrl+D only dismisses the debug view's prompt;
                             // Runs falls through to the empty-input quit path
                             // below, preserving the documented quit key.
@@ -1429,6 +1465,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         KeyCode::Char('g')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
+                            if app.history_search.is_some() {
+                                continue;
+                            }
                             if !app.screen.is_chat() {
                                 continue;
                             }
@@ -1502,6 +1541,19 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         }
 
                         KeyCode::Esc => {
+                            // Search-mode Esc cancels the search without
+                            // clearing the input bar — the saved input is
+                            // restored verbatim.
+                            if app.history_search.is_some() {
+                                app.cancel_search();
+                                live_area.ensure_input_cursor_visible(
+                                    app.input_cursor,
+                                    &app.input,
+                                    app.width,
+                                );
+                                continue;
+                            }
+
                             // Non-chat layering first (watch pane close ->
                             // exit to chat); unchanged regardless of turn
                             // state.
@@ -1571,7 +1623,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         KeyCode::Tab => {
                             // Debug view owns a prompt; completion is for the
                             // main input bar only.
-                            if app.screen.has_prompt() || !app.screen.is_chat() {
+                            if app.history_search.is_some() || app.screen.has_prompt() || !app.screen.is_chat() {
                                 continue;
                             }
 
@@ -1619,7 +1671,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             );
                         }
                         KeyCode::BackTab => {
-                            if app.screen.has_prompt() || !app.screen.is_chat() {
+                            if app.history_search.is_some() || app.screen.has_prompt() || !app.screen.is_chat() {
                                 continue;
                             }
                             let Some(state) = app.completion.as_ref() else {
@@ -1645,6 +1697,18 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             );
                         }
                         KeyCode::Enter => {
+                            // Search-mode Enter places the matched line into
+                            // the input bar but does NOT submit it.
+                            if app.history_search.is_some() {
+                                app.accept_search();
+                                live_area.ensure_input_cursor_visible(
+                                    app.input_cursor,
+                                    &app.input,
+                                    app.width,
+                                );
+                                continue;
+                            }
+
                             // Debug view owns a prompt: submit into its
                             // scrollback instead of the main input bar.
                             if app.screen.has_prompt() {
@@ -1889,7 +1953,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
                         }
                         KeyCode::Left => {
-                            if app.screen.has_prompt() || !app.screen.is_chat() {
+                            if app.history_search.is_some() || app.screen.has_prompt() || !app.screen.is_chat() {
                                 continue;
                             }
                             app.cursor_left();
@@ -1901,7 +1965,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             );
                         }
                         KeyCode::Right => {
-                            if app.screen.has_prompt() || !app.screen.is_chat() {
+                            if app.history_search.is_some() || app.screen.has_prompt() || !app.screen.is_chat() {
                                 continue;
                             }
                             app.cursor_right();
@@ -1913,7 +1977,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             );
                         }
                         KeyCode::Home => {
-                            if app.screen.has_prompt() || !app.screen.is_chat() {
+                            if app.history_search.is_some() || app.screen.has_prompt() || !app.screen.is_chat() {
                                 continue;
                             }
                             app.cursor_home();
@@ -1925,7 +1989,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             );
                         }
                         KeyCode::End => {
-                            if app.screen.has_prompt() || !app.screen.is_chat() {
+                            if app.history_search.is_some() || app.screen.has_prompt() || !app.screen.is_chat() {
                                 continue;
                             }
                             app.cursor_end();
@@ -1937,7 +2001,14 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             );
                         }
                         KeyCode::Backspace => {
-                            if let Some(prompt) = live_area.debug_prompt_mut() {
+                            if app.history_search.is_some() {
+                                app.search_backspace();
+                                live_area.ensure_input_cursor_visible(
+                                    app.input_cursor,
+                                    &app.input,
+                                    app.width,
+                                );
+                            } else if let Some(prompt) = live_area.debug_prompt_mut() {
                                 prompt.pop();
                             } else if app.screen.is_chat() {
                                 app.delete_before_cursor();
@@ -1950,6 +2021,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
                         }
                         KeyCode::Delete => {
+                            // Delete is a no-op during search mode.
+                            if app.history_search.is_some() {
+                                continue;
+                            }
                             if app.screen.has_prompt() || !app.screen.is_chat() {
                                 continue;
                             }
@@ -1974,7 +2049,14 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             app.watch_move(-1);
                         }
                         KeyCode::Char(ch) => {
-                            if let Some(prompt) = live_area.debug_prompt_mut() {
+                            if app.history_search.is_some() {
+                                app.search_push_char(ch);
+                                live_area.ensure_input_cursor_visible(
+                                    app.input_cursor,
+                                    &app.input,
+                                    app.width,
+                                );
+                            } else if let Some(prompt) = live_area.debug_prompt_mut() {
                                 prompt.push(ch);
                             } else if app.screen.is_chat() {
                                 app.insert_char(ch);
@@ -1989,6 +2071,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
                         }
                         KeyCode::Up => {
+                            if app.history_search.is_some() {
+                                continue;
+                            }
                             if app.screen == Screen::Runs {
                                 app.watch_move(-1);
                             } else if app.screen.is_chat() {
@@ -2005,6 +2090,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
                         }
                         KeyCode::Down => {
+                            if app.history_search.is_some() {
+                                continue;
+                            }
                             if app.screen == Screen::Runs {
                                 app.watch_move(1);
                             } else if app.screen.is_chat() && app.history_cursor.is_some() {
