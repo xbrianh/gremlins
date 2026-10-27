@@ -440,6 +440,7 @@ impl CmdBackend {
                 cost_usd: state.cost_usd,
                 token_usage: None,
                 messages: None,
+                file_observations: None,
             }
         } else {
             let (text, timed_out) = Self::read_plain(
@@ -472,6 +473,7 @@ impl CmdBackend {
                 cost_usd: None,
                 token_usage: None,
                 messages: None,
+                file_observations: None,
             }
         };
 

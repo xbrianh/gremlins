@@ -52,6 +52,12 @@ pub struct CompletedRun {
     /// backend captures it. Used by the chat gremlin to persist full model
     /// context between stages via `artifact://conversation.json`.
     pub messages: Option<Vec<Message>>,
+    /// Nested-loop file observations (Read/Grep/Landscape + mutation paths).
+    /// Populated for nested agent loops (Task workers) so the parent can
+    /// deduplicate Scout observations against its own ToolLedger.
+    /// The top-level chat loop leaves this `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_observations: Option<FileObservations>,
 }
 
 /// Sum two optional token counters.
@@ -65,6 +71,66 @@ pub fn add_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a + b),
         (a, b) => a.or(b),
+    }
+}
+
+/// One file observation captured from a worker agent's Read, Grep, or Landscape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileObservation {
+    /// Tool name: "Read", "Grep", or "Landscape".
+    pub tool: String,
+    /// File path for Read; search path for Grep; directory for Landscape.
+    pub path: String,
+    #[serde(default)]
+    pub offset: u64,
+    #[serde(default)]
+    pub limit: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    /// Exact tool output captured by the worker.
+    pub output: String,
+}
+
+/// Aggregated file observations from a nested agent loop plus mutation paths
+/// for parent-ledger invalidation.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct FileObservations {
+    pub items: Vec<FileObservation>,
+    /// True when observations were truncated to fit the configured output budget.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Files the worker modified (Write/Edit), used to invalidate stale parent-ledger reads.
+    #[serde(default)]
+    pub written_paths: Vec<String>,
+}
+
+impl FileObservations {
+    /// Whether this snapshot carries nothing worth reporting: no reads, no
+    /// mutation paths, and no truncation marker.
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty() && self.written_paths.is_empty() && !self.truncated
+    }
+
+    /// Render observations as a machine-parseable block for embedding in
+    /// the Task tool output. The block is a JSON line between guard markers.
+    pub fn render_block(&self) -> String {
+        let json = serde_json::to_string(self)
+            .unwrap_or_else(|_| r#"{"items":[],"truncated":false,"written_paths":[]}"#.to_string());
+        format!("\n\n__SCOUT_OBSERVATIONS__\n{json}\n__END_SCOUT_OBSERVATIONS__")
+    }
+
+    /// Try to extract a `FileObservations` block from `text`. Returns the
+    /// parsed observations and the prefix (everything before the block) if
+    /// found, or `None` if no block is present.
+    pub fn parse_block(text: &str) -> Option<(FileObservations, &str)> {
+        let start_marker = "\n\n__SCOUT_OBSERVATIONS__\n";
+        let end_marker = "\n__END_SCOUT_OBSERVATIONS__";
+        let start = text.find(start_marker)?;
+        let json_start = start + start_marker.len();
+        let json_end = text[json_start..].find(end_marker)?;
+        let json = &text[json_start..json_start + json_end];
+        let obs: FileObservations = serde_json::from_str(json).ok()?;
+        Some((obs, &text[..start]))
     }
 }
 
@@ -106,5 +172,85 @@ mod tests {
         assert_eq!(decoded.cache_creation_input_tokens, None);
         assert_eq!(decoded.reasoning_tokens, Some(2));
         assert_eq!(decoded.turns, 4);
+    }
+
+    #[test]
+    fn file_observations_render_parse_roundtrip() {
+        let obs = FileObservations {
+            items: vec![
+                FileObservation {
+                    tool: "Read".into(),
+                    path: "/tmp/foo.rs".into(),
+                    offset: 10,
+                    limit: 40,
+                    pattern: None,
+                    output: "line 11 content\nline 12\n".into(),
+                },
+                FileObservation {
+                    tool: "Grep".into(),
+                    path: "/tmp/bar".into(),
+                    offset: 0,
+                    limit: 0,
+                    pattern: Some("needle".into()),
+                    output: "bar.rs:42:match".into(),
+                },
+            ],
+            truncated: false,
+            written_paths: vec!["src/lib.rs".into()],
+        };
+
+        let block = obs.render_block();
+        let (parsed, prefix) = FileObservations::parse_block(&block).unwrap();
+        assert_eq!(prefix, "");
+        assert_eq!(parsed, obs);
+    }
+
+    #[test]
+    fn parse_block_missing_returns_none() {
+        assert!(FileObservations::parse_block("just prose, no markers").is_none());
+    }
+
+    #[test]
+    fn parse_block_with_prose_prefix() {
+        let obs = FileObservations {
+            items: vec![],
+            truncated: false,
+            written_paths: vec![],
+        };
+        let block = obs.render_block();
+        let text = format!("Done summary here.{block}");
+        let (parsed, prefix) = FileObservations::parse_block(&text).unwrap();
+        assert_eq!(prefix, "Done summary here.");
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn is_empty_no_content_no_truncation() {
+        let obs = FileObservations {
+            items: vec![],
+            truncated: false,
+            written_paths: vec![],
+        };
+        assert!(obs.is_empty());
+    }
+
+    #[test]
+    fn is_empty_with_truncation() {
+        let obs = FileObservations {
+            items: vec![],
+            truncated: true,
+            written_paths: vec![],
+        };
+        assert!(!obs.is_empty());
+    }
+
+    #[test]
+    fn is_empty_with_written_paths() {
+        let obs = FileObservations {
+            items: vec![],
+            truncated: false,
+            written_paths: vec!["src/lib.rs".into()],
+        };
+        assert!(!obs.is_empty());
     }
 }

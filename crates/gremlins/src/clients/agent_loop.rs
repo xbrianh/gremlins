@@ -29,7 +29,9 @@ use super::format::{
     ledger_key_arg, trunc, truncate_ledger_value,
 };
 use super::model::{GremlinsModel, GremlinsModelError};
-use super::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
+use super::protocol::{
+    add_opt, CompletedRun, FileObservation, FileObservations, TurnStats, UsageStats,
+};
 use super::token_usage::{TokenUsageEvent, TokenUsageSink};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 
@@ -62,6 +64,8 @@ struct LedgerReadEntry {
     count: usize,
     content_hash: u64,
     seq: usize,
+    /// Exact tool output, stored for nested-loop observations.
+    output: String,
 }
 
 #[derive(Clone)]
@@ -70,12 +74,21 @@ struct LedgerGrepEntry {
     count: usize,
     content_hash: u64,
     seq: usize,
+    /// Exact tool output, stored for nested-loop observations.
+    output: String,
 }
 
 #[derive(Clone)]
 struct LedgerWriteEntry {
     age: usize,
     seq: usize,
+}
+
+#[derive(Clone)]
+struct LedgerLandscapeEntry {
+    age: usize,
+    seq: usize,
+    output: String,
 }
 
 pub(crate) struct ToolLedger {
@@ -86,10 +99,12 @@ pub(crate) struct ToolLedger {
     greps: std::collections::HashMap<(String, String), LedgerGrepEntry>,
     /// Key: file_path.
     writes: std::collections::HashMap<String, LedgerWriteEntry>,
-    /// Single landscape entry: (age, seq).
-    landscape: Option<(usize, usize)>,
+    /// Single landscape entry.
+    landscape: Option<LedgerLandscapeEntry>,
     /// Monotonic counter so we can sort entries by first-access order.
     seq: usize,
+    /// File paths mutated by Write or Edit, for parent-ledger invalidation.
+    mutations: Vec<String>,
 }
 
 impl ToolLedger {
@@ -100,6 +115,7 @@ impl ToolLedger {
             writes: std::collections::HashMap::new(),
             landscape: None,
             seq: 0,
+            mutations: Vec::new(),
         }
     }
 
@@ -154,6 +170,7 @@ impl ToolLedger {
                         existing.last_age = age;
                         existing.content_hash = content_hash;
                         existing.seq = seq;
+                        existing.output = output.to_string();
                     }
                 } else {
                     self.reads.insert(
@@ -163,6 +180,7 @@ impl ToolLedger {
                             count: 1,
                             content_hash,
                             seq,
+                            output: output.to_string(),
                         },
                     );
                 }
@@ -186,6 +204,7 @@ impl ToolLedger {
                         existing.last_age = age;
                         existing.content_hash = content_hash;
                         existing.seq = seq;
+                        existing.output = output.to_string();
                     }
                 } else {
                     self.greps.insert(
@@ -195,6 +214,7 @@ impl ToolLedger {
                             count: 1,
                             content_hash,
                             seq,
+                            output: output.to_string(),
                         },
                     );
                 }
@@ -204,11 +224,20 @@ impl ToolLedger {
                 let age = turn_num;
                 self.seq += 1;
                 let seq = self.seq;
-                self.writes.insert(file_path, LedgerWriteEntry { age, seq });
+                self.writes
+                    .insert(file_path.clone(), LedgerWriteEntry { age, seq });
+                // Track the mutation so nested-loop observations can invalidate
+                // the parent's stale reads for this file.
+                self.mutations.push(file_path);
                 // Invalidation deferred — caller applies after recording
                 // all observations for the turn.
             }
             "Edit" => {
+                let file_path = Self::parse_str(&args, "file_path").to_string();
+                // Edits mutate content too; track for parent-ledger invalidation.
+                if !file_path.is_empty() {
+                    self.mutations.push(file_path);
+                }
                 // Edit is not tracked per plan.  Invalidation is deferred;
                 // caller collects the file_path and applies after the batch.
             }
@@ -216,7 +245,11 @@ impl ToolLedger {
                 let age = turn_num;
                 self.seq += 1;
                 let seq = self.seq;
-                self.landscape = Some((age, seq));
+                self.landscape = Some(LedgerLandscapeEntry {
+                    age,
+                    seq,
+                    output: output.to_string(),
+                });
             }
             _ => {
                 // Bash, Task, Done, Glob, WebSearch, Mischief — not tracked.
@@ -346,8 +379,8 @@ impl ToolLedger {
         }
 
         // Landscape entry.
-        if let Some((age, seq)) = self.landscape {
-            items.push((seq, format!("L({}t)", age_of(age))));
+        if let Some(entry) = &self.landscape {
+            items.push((entry.seq, format!("L({}t)", age_of(entry.age))));
         }
 
         items.sort_by_key(|(se, _)| *se);
@@ -359,12 +392,207 @@ impl ToolLedger {
             format!("[seen]\n{}", lines.join("\n"))
         }
     }
+
+    /// Build a serializable snapshot of the worker's file observations
+    /// (Read/Grep/Landscape) plus the mutation paths, for reporting up to
+    /// the parent loop of a Scout task. Entries are ordered most-recent-first
+    /// and capped by `max_tool_output_bytes`, keeping the newest reads and
+    /// marking the rest as truncated.
+    pub(crate) fn file_observations(&self) -> FileObservations {
+        let max_bytes = crate::config::max_tool_output_bytes() as usize;
+
+        let mut items: Vec<(usize, FileObservation)> = Vec::new();
+
+        for ((path, offset, limit), entry) in &self.reads {
+            items.push((
+                entry.seq,
+                FileObservation {
+                    tool: "Read".to_string(),
+                    path: path.clone(),
+                    offset: *offset,
+                    limit: *limit,
+                    pattern: None,
+                    output: entry.output.clone(),
+                },
+            ));
+        }
+        for ((pattern, path), entry) in &self.greps {
+            items.push((
+                entry.seq,
+                FileObservation {
+                    tool: "Grep".to_string(),
+                    path: path.clone(),
+                    offset: 0,
+                    limit: 0,
+                    pattern: Some(pattern.clone()),
+                    output: entry.output.clone(),
+                },
+            ));
+        }
+        if let Some(entry) = &self.landscape {
+            items.push((
+                entry.seq,
+                FileObservation {
+                    tool: "Landscape".to_string(),
+                    path: String::new(),
+                    offset: 0,
+                    limit: 0,
+                    pattern: None,
+                    output: entry.output.clone(),
+                },
+            ));
+        }
+
+        // Most-recent-first: higher seq == later observation.
+        items.sort_by_key(|a| std::cmp::Reverse(a.0));
+
+        // Cap total bytes, keeping the newest reads; note truncation.
+        let mut total = 0usize;
+        let mut keep = Vec::new();
+        let mut truncated = false;
+        for (_, item) in items {
+            let cost = item.output.len().saturating_add(item.path.len());
+            if total.saturating_add(cost) > max_bytes {
+                truncated = true;
+                break;
+            }
+            total += cost;
+            keep.push(item);
+        }
+
+        // Mutation paths: dedup, preserving order.
+        let mut written_paths: Vec<String> = Vec::new();
+        for p in &self.mutations {
+            if !written_paths.iter().any(|w| w == p) {
+                written_paths.push(p.clone());
+            }
+        }
+
+        FileObservations {
+            items: keep,
+            truncated,
+            written_paths,
+        }
+    }
+
+    /// Whether the ledger already records an observation matching `obs`, so a
+    /// Scout's file read can be deduplicated against the parent's own reads.
+    pub(crate) fn has_observation(&self, obs: &FileObservation) -> bool {
+        match obs.tool.as_str() {
+            "Read" => self
+                .reads
+                .contains_key(&(obs.path.clone(), obs.offset, obs.limit)),
+            "Grep" => self
+                .greps
+                .contains_key(&(obs.pattern.clone().unwrap_or_default(), obs.path.clone())),
+            "Landscape" => self.landscape.is_some(),
+            _ => false,
+        }
+    }
+
+    /// Record a worker's file observation as if this loop had read it, so a
+    /// Scout nested inside a Scout propagates its observations up the chain
+    /// when this loop itself reports to its own parent.
+    pub(crate) fn absorb_observation(&mut self, obs: &FileObservation, turn_num: usize) {
+        self.seq += 1;
+        let seq = self.seq;
+        let content_hash = Self::hash(&obs.output);
+        match obs.tool.as_str() {
+            "Read" => {
+                let key = (obs.path.clone(), obs.offset, obs.limit);
+                self.reads.insert(
+                    key,
+                    LedgerReadEntry {
+                        last_age: turn_num,
+                        count: 1,
+                        content_hash,
+                        seq,
+                        output: obs.output.clone(),
+                    },
+                );
+            }
+            "Grep" => {
+                let key = (obs.pattern.clone().unwrap_or_default(), obs.path.clone());
+                self.greps.insert(
+                    key,
+                    LedgerGrepEntry {
+                        last_age: turn_num,
+                        count: 1,
+                        content_hash,
+                        seq,
+                        output: obs.output.clone(),
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
     if let Some(tx) = tx {
         let _ = tx.send(format!("{prefix}{msg}"));
     }
+}
+
+/// Fold a Scout Task result's embedded file observations into a readable
+/// form, deduplicated against the parent's own [`ToolLedger`].
+///
+/// Files the worker wrote invalidate the parent's stale ledger entries; files
+/// the parent has already read are dropped so they are not re-injected into
+/// the message history. A truncation marker is preserved when the worker read
+/// more than the output budget permitted.
+fn fold_scout_output(output: &str, ledger: &mut ToolLedger, turn_num: usize) -> String {
+    let Some((mut obs, prefix)) = FileObservations::parse_block(output) else {
+        return output.to_string();
+    };
+
+    // A worker's Write/Edit must invalidate the parent's stale copy of any
+    // file it touched, so the parent never serves an outdated read.
+    for fp in &obs.written_paths {
+        ledger.invalidate_after_write(fp);
+    }
+
+    // Drop observations the parent has already read this run.
+    obs.items.retain(|o| !ledger.has_observation(o));
+
+    // Absorb the surviving observations so a Scout nested inside a Scout
+    // still reports them up the chain (recursion composes at every level).
+    for o in &obs.items {
+        ledger.absorb_observation(o, turn_num);
+    }
+
+    if obs.items.is_empty() && !obs.truncated {
+        return prefix.to_string();
+    }
+
+    let mut out = prefix.to_string();
+    out.push_str("\n\n## Scout observations\n");
+    if obs.truncated {
+        out.push_str(
+            "> Some observations were omitted: the worker read more than the output budget.\n\n",
+        );
+    }
+    for o in &obs.items {
+        match o.tool.as_str() {
+            "Read" => out.push_str(&format!(
+                "### Read: {} (offset {}..{})\n{}\n\n",
+                o.path,
+                o.offset,
+                o.offset.saturating_add(o.limit),
+                o.output
+            )),
+            "Grep" => out.push_str(&format!(
+                "### Grep: {} in {}\n{}\n\n",
+                o.pattern.as_deref().unwrap_or(""),
+                o.path,
+                o.output
+            )),
+            "Landscape" => out.push_str(&format!("### Landscape: {}\n{}\n\n", o.path, o.output)),
+            _ => {}
+        }
+    }
+    out
 }
 
 fn cancelled_error(message: impl Into<String>, history: &[Message]) -> ClientError {
@@ -1606,10 +1834,19 @@ impl LoopState {
                     }
                 }
             }
+            // Task (Scout) results carry the worker's file observations as a
+            // machine-parseable block. Fold them into readable content and
+            // deduplicate against the parent's own reads before writing them
+            // into history, so already-seen files are not re-injected.
+            let history_output = if job.name == "Task" {
+                fold_scout_output(&output, &mut self.tool_ledger, self.turn_num)
+            } else {
+                output
+            };
             result_msgs.push(Message::tool_result(
                 CallId::from_wire(job.id.clone()),
                 ToolName::new(job.name.clone()).expect("tool name must not be empty"),
-                output,
+                history_output,
             ));
         }
         // Apply deferred invalidations now that all observations
@@ -2043,6 +2280,11 @@ impl LoopState {
                     captured,
                     usage,
                     Some(messages),
+                    if nested {
+                        Some(self.tool_ledger.file_observations())
+                    } else {
+                        None
+                    },
                 ))));
             }
             _ => {}
@@ -2180,6 +2422,11 @@ impl LoopState {
             captured,
             usage,
             Some(messages),
+            if nested {
+                Some(self.tool_ledger.file_observations())
+            } else {
+                None
+            },
         )))
     }
 
@@ -2633,6 +2880,7 @@ fn completed_run(
     events: &Option<Vec<serde_json::Value>>,
     usage: UsageStats,
     messages: Option<Vec<Message>>,
+    file_observations: Option<FileObservations>,
 ) -> CompletedRun {
     CompletedRun {
         exit_code: 0,
@@ -2642,6 +2890,7 @@ fn completed_run(
         cost_usd: None,
         token_usage: Some(usage),
         messages,
+        file_observations,
     }
 }
 
@@ -7963,6 +8212,133 @@ mod tests {
         assert_eq!(
             done_count, 1,
             "Done tool_use must appear exactly once in artifact-exhausted path, got {done_count}"
+        );
+    }
+
+    // ---- Scout file-observation end-to-end tests ----
+
+    fn make_read_obs(path: &str, output: &str, offset: u64, limit: u64) -> FileObservation {
+        FileObservation {
+            tool: "Read".into(),
+            path: path.into(),
+            offset,
+            limit,
+            pattern: None,
+            output: output.into(),
+        }
+    }
+
+    #[test]
+    fn fold_scout_dedups_against_parent_reads() {
+        let mut ledger = ToolLedger::new();
+        let args_json =
+            serde_json::json!({"file_path": "/tmp/foo.rs", "offset": 0, "limit": 0}).to_string();
+        // Simulate parent already having read /tmp/foo.rs
+        ledger.record(
+            "Read",
+            &key_arg(&serde_json::json!({"file_path": "/tmp/foo.rs"})),
+            "content A",
+            &args_json,
+            1,
+        );
+
+        let obs = FileObservations {
+            items: vec![make_read_obs("/tmp/foo.rs", "content A", 0, 0)],
+            truncated: false,
+            written_paths: vec![],
+        };
+        let scout_output = format!("Done.{}", obs.render_block());
+
+        // fold_scout_output should dedup the already-read file and return
+        // only the "Done." prose.
+        let folded = fold_scout_output(&scout_output, &mut ledger, 2);
+        assert!(
+            !folded.contains("content A"),
+            "already-read file must be deduplicated, got: {folded:?}"
+        );
+        assert!(folded.starts_with("Done."), "prose prefix preserved");
+        assert!(
+            !folded.contains("__SCOUT_OBSERVATIONS__"),
+            "no block markers in output"
+        );
+    }
+
+    #[test]
+    fn fold_scout_passes_through_unread_file() {
+        let mut ledger = ToolLedger::new();
+        let obs = FileObservations {
+            items: vec![make_read_obs("/tmp/bar.rs", "bar content", 5, 20)],
+            truncated: false,
+            written_paths: vec![],
+        };
+        let scout_output = format!("Ran scout.{}", obs.render_block());
+        let folded = fold_scout_output(&scout_output, &mut ledger, 1);
+        assert!(
+            folded.contains("bar content"),
+            "unread file must appear in output"
+        );
+        assert!(folded.starts_with("Ran scout."), "prose prefix preserved");
+    }
+
+    #[test]
+    fn fold_scout_invalidates_writes_and_absorbs_into_ledger() {
+        let mut ledger = ToolLedger::new();
+        // Parent previously read the file; worker then wrote it.
+        let args_json =
+            serde_json::json!({"file_path": "/tmp/shared.rs", "offset": 0, "limit": 0}).to_string();
+        ledger.record(
+            "Read",
+            &key_arg(&serde_json::json!({"file_path": "/tmp/shared.rs"})),
+            "stale content",
+            &args_json,
+            1,
+        );
+
+        let obs = FileObservations {
+            items: vec![make_read_obs("/tmp/other.rs", "other", 0, 0)],
+            truncated: false,
+            written_paths: vec!["/tmp/shared.rs".into()],
+        };
+        let scout_output = format!("Done.{}", obs.render_block());
+        let folded = fold_scout_output(&scout_output, &mut ledger, 2);
+
+        // The stale read of /tmp/shared.rs should be invalidated.
+        assert!(
+            !ledger.has_observation(&make_read_obs("/tmp/shared.rs", "", 0, 0)),
+            "written file must be invalidated in parent ledger"
+        );
+        // /tmp/other.rs should be absorbed.
+        assert!(
+            ledger.has_observation(&make_read_obs("/tmp/other.rs", "other", 0, 0)),
+            "unread file must be absorbed into parent ledger for propagation"
+        );
+        assert!(
+            folded.contains("other"),
+            "unread file appears in rendered output"
+        );
+    }
+
+    #[test]
+    fn fold_scout_no_block_returns_unchanged() {
+        let mut ledger = ToolLedger::new();
+        let output = "plain prose without markers";
+        let folded = fold_scout_output(output, &mut ledger, 1);
+        assert_eq!(folded, output);
+    }
+
+    #[test]
+    fn fold_scout_truncated_preserves_marker() {
+        let mut ledger = ToolLedger::new();
+        let obs = FileObservations {
+            items: vec![],
+            truncated: true,
+            written_paths: vec![],
+        };
+        let scout_output = format!("OK.{}", obs.render_block());
+        let folded = fold_scout_output(&scout_output, &mut ledger, 1);
+        assert!(
+            folded.contains("Some observations were omitted"),
+            "truncation marker must appear"
         );
     }
 }

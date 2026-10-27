@@ -234,7 +234,18 @@ fn make_task_runner_at_depth(
 
                 match result {
                     Ok(completed) => {
-                        let out = completed.text_result.unwrap_or_default();
+                        let mut out = completed.text_result.unwrap_or_default();
+                        // Scout carries its file observations (Read/Grep/Landscape
+                        // plus mutation paths) up to the parent as structured data
+                        // appended to the prose, so the parent can act on the exact
+                        // bytes without re-reading. Fork and Implement stay prose-only.
+                        if kind == TaskKind::Scout {
+                            if let Some(obs) = completed.file_observations {
+                                if !obs.is_empty() {
+                                    out.push_str(&obs.render_block());
+                                }
+                            }
+                        }
                         log::info!(
                             "task complete: kind={kind} prompt_len={p_len} prompt_preview={p_preview:?} output_len={o_len} output_preview={o_preview:?} has_done_header={has_done} has_md_header={has_md}",
                             p_len = task.len(),
