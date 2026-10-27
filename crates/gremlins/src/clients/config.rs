@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use log::warn;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use crate::config::StrictString;
 
@@ -38,11 +40,11 @@ fn parse_provider_auth(v: &str) -> Result<ProviderAuth, String> {
 // ---------------------------------------------------------------------------
 
 /// The `azure:` block nested under a provider entry in providers.yaml.
-#[derive(Debug, Deserialize)]
-struct AzureEntry {
-    #[serde(default)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub(crate) struct AzureEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     auth: Option<StrictString>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     scope: Option<StrictString>,
 }
 
@@ -52,7 +54,7 @@ struct AzureEntry {
 
 /// Parsed content of providers.yaml.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Providers {
+pub struct Providers {
     api_keys: HashMap<String, String>,
     base_urls: HashMap<String, String>,
     tokens: HashMap<String, String>,
@@ -60,6 +62,8 @@ pub(crate) struct Providers {
     api_versions: HashMap<String, String>,
     azure_auth_methods: HashMap<String, String>,
     azure_auth_scopes: HashMap<String, String>,
+    client_ids: HashMap<String, String>,
+    refresh_tokens: HashMap<String, String>,
 }
 
 /// Typed structure for providers.yaml — a newtype over the provider map.
@@ -67,24 +71,91 @@ pub(crate) struct Providers {
 /// Uses `StrictString` for credential fields so non-string values (e.g.
 /// integers) are rejected at the deserialization layer rather than silently
 /// coerced by serde_yaml.
-#[derive(Debug, Deserialize)]
-struct ProvidersFile(HashMap<String, ProviderEntry>);
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct ProvidersFile(pub HashMap<String, ProviderEntry>);
 
 /// Typed structure for a single provider entry in providers.yaml.
-#[derive(Debug, Deserialize)]
-struct ProviderEntry {
-    #[serde(rename = "api-key", default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct ProviderEntry {
+    #[serde(rename = "api-key", default, skip_serializing_if = "Option::is_none")]
     api_key: Option<StrictString>,
-    #[serde(rename = "base-url", default)]
+    #[serde(rename = "base-url", default, skip_serializing_if = "Option::is_none")]
     base_url: Option<StrictString>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     token: Option<StrictString>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     endpoint: Option<StrictString>,
-    #[serde(rename = "api-version", default)]
+    #[serde(
+        rename = "api-version",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     api_version: Option<StrictString>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     azure: Option<AzureEntry>,
+    #[serde(rename = "client-id", default, skip_serializing_if = "Option::is_none")]
+    client_id: Option<StrictString>,
+    #[serde(
+        rename = "refresh-token",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    refresh_token: Option<StrictString>,
+}
+
+impl ProviderEntry {
+    /// The provider's API key, if set.
+    pub fn api_key(&self) -> Option<&str> {
+        self.api_key.as_ref().map(|s| s.0.as_str())
+    }
+
+    /// The provider's OAuth client id, if set.
+    pub fn client_id(&self) -> Option<&str> {
+        self.client_id.as_ref().map(|s| s.0.as_str())
+    }
+
+    /// The provider's OAuth refresh token, if set.
+    pub fn refresh_token(&self) -> Option<&str> {
+        self.refresh_token.as_ref().map(|s| s.0.as_str())
+    }
+
+    /// The provider's base URL, if set.
+    pub fn base_url(&self) -> Option<&str> {
+        self.base_url.as_ref().map(|s| s.0.as_str())
+    }
+
+    /// Set the provider's API key.
+    pub fn set_api_key(&mut self, v: String) {
+        self.api_key = Some(StrictString(v));
+    }
+
+    /// Set the provider's OAuth client id.
+    pub fn set_client_id(&mut self, v: String) {
+        self.client_id = Some(StrictString(v));
+    }
+
+    /// Set the provider's OAuth refresh token.
+    pub fn set_refresh_token(&mut self, v: String) {
+        self.refresh_token = Some(StrictString(v));
+    }
+
+    /// Clear the provider's OAuth credentials (client id + refresh token).
+    pub fn clear_oauth(&mut self) {
+        self.client_id = None;
+        self.refresh_token = None;
+    }
+
+    /// Whether every field is unset.
+    pub fn is_empty(&self) -> bool {
+        self.api_key.is_none()
+            && self.base_url.is_none()
+            && self.token.is_none()
+            && self.endpoint.is_none()
+            && self.api_version.is_none()
+            && self.azure.is_none()
+            && self.client_id.is_none()
+            && self.refresh_token.is_none()
+    }
 }
 
 impl Providers {
@@ -158,6 +229,22 @@ impl Providers {
             .map(|s| s.as_str())
             .filter(|s| !s.trim().is_empty())
     }
+
+    /// Get the OAuth client id for a provider name.
+    pub(crate) fn client_id(&self, provider: &str) -> Option<&str> {
+        self.client_ids
+            .get(provider)
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Get the OAuth refresh token for a provider name.
+    pub(crate) fn refresh_token(&self, provider: &str) -> Option<&str> {
+        self.refresh_tokens
+            .get(provider)
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
 }
 
 /// Normalize a [`StrictString`] config value: trim surrounding whitespace
@@ -187,6 +274,8 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
     let mut api_versions = HashMap::new();
     let mut azure_auth_methods = HashMap::new();
     let mut azure_auth_scopes = HashMap::new();
+    let mut client_ids = HashMap::new();
+    let mut refresh_tokens = HashMap::new();
     for (k, v) in providers_file.0 {
         if let Some(api_key) = normalize(v.api_key) {
             api_keys.insert(k.clone(), api_key);
@@ -211,6 +300,23 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
                 azure_auth_scopes.insert(k.clone(), scope);
             }
         }
+        // Validate: refresh-token without client-id is an error — skip OAuth
+        // fields for this entry but keep any non-OAuth fields that were
+        // already processed above.
+        let client_id = normalize(v.client_id);
+        let refresh_token = normalize(v.refresh_token);
+        if refresh_token.is_some() && client_id.is_none() {
+            warn!(
+                "providers.yaml entry {k:?} has refresh-token without client-id — ignoring OAuth fields"
+            );
+        } else {
+            if let Some(cid) = client_id {
+                client_ids.insert(k.clone(), cid);
+            }
+            if let Some(rt) = refresh_token {
+                refresh_tokens.insert(k.clone(), rt);
+            }
+        }
         if !api_keys.contains_key(&k)
             && !base_urls.contains_key(&k)
             && !tokens.contains_key(&k)
@@ -218,6 +324,8 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
             && !api_versions.contains_key(&k)
             && !azure_auth_methods.contains_key(&k)
             && !azure_auth_scopes.contains_key(&k)
+            && !client_ids.contains_key(&k)
+            && !refresh_tokens.contains_key(&k)
         {
             warn!("providers.yaml entry {k:?} has no non-empty fields — skipping");
         }
@@ -230,11 +338,13 @@ fn parse_api_keys(path: &Path) -> Result<Providers, ProvidersError> {
         api_versions,
         azure_auth_methods,
         azure_auth_scopes,
+        client_ids,
+        refresh_tokens,
     })
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ProvidersError {
+pub enum ProvidersError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -340,6 +450,271 @@ pub(crate) fn azure_auth_scope(env_var_name: &str, provider_name: &str, default:
         .azure_auth_scope(provider_name)
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| default.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// providers.yaml read/write helpers
+// ---------------------------------------------------------------------------
+
+/// Path to `providers.yaml` under the user config root.
+pub fn providers_path() -> std::path::PathBuf {
+    crate::config::user_config_root().join("providers.yaml")
+}
+
+/// Path to the advisory lock file for cross-process coordination of
+/// providers.yaml mutations.
+pub fn providers_lock_path() -> std::path::PathBuf {
+    let mut p = providers_path().into_os_string();
+    p.push(".lock");
+    std::path::PathBuf::from(p)
+}
+
+/// Read the OAuth client-id and refresh-token for `provider` directly from
+/// `providers.yaml` on disk, bypassing any in-memory cache.
+///
+/// Returns `Ok((None, None))` when the file is absent.  Propagates parse
+/// errors so malformed YAML is never silently overwritten.
+pub(crate) fn read_oauth_credential(
+    provider: &str,
+) -> Result<(Option<String>, Option<String>), String> {
+    let path = providers_path();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((None, None));
+        }
+        Err(e) => return Err(format!("failed to read {}: {e}", path.display())),
+    };
+    let root: serde_yaml::Value = serde_yaml::from_str(&content)
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+
+    let entry = root.get(provider).and_then(|v| v.as_mapping());
+    let client_id = entry
+        .and_then(|m| m.get(serde_yaml::Value::String("client-id".into())))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let refresh_token = entry
+        .and_then(|m| m.get(serde_yaml::Value::String("refresh-token".into())))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    Ok((client_id, refresh_token))
+}
+
+/// Load and parse `providers.yaml`, returning an empty file when it is absent.
+pub fn load_providers_file() -> Result<ProvidersFile, ProvidersError> {
+    let path = providers_path();
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Ok(serde_yaml::from_str(&content)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ProvidersFile::default()),
+        Err(e) => Err(ProvidersError::Io(e)),
+    }
+}
+
+/// Serialize `file` and write it to `providers.yaml`, creating the parent dir.
+///
+/// Loads the existing file as a `serde_yaml::Value` and patches individual
+/// known fields per provider so that unknown keys, comments (best-effort),
+/// and ordering for all providers are preserved.  Fields present in `file`
+/// are upserted; fields set to `None` in the serialized entry are removed
+/// from the mapping.  A provider whose entry is fully empty is removed
+/// from the file.
+pub fn save_providers_file(file: &ProvidersFile) -> Result<(), ProvidersError> {
+    let path = providers_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Load existing file as Value to preserve unknown keys and key order.
+    let mut root: serde_yaml::Value = match std::fs::read_to_string(&path) {
+        Ok(content) => serde_yaml::from_str(&content)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        }
+        Err(e) => return Err(ProvidersError::Io(e)),
+    };
+
+    let mapping = match &mut root {
+        serde_yaml::Value::Mapping(m) => m,
+        _ => {
+            // File exists but isn't a mapping; overwrite.
+            root = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+            root.as_mapping_mut().unwrap()
+        }
+    };
+
+    // Patch individual known fields so unknown keys in each provider
+    // entry are preserved.  Fully-empty entries are removed.
+    for (provider, entry) in &file.0 {
+        patch_provider_entry(mapping, provider, entry);
+    }
+
+    let yaml = serde_yaml::to_string(&root)?;
+    write_atomic(&path, &yaml)?;
+    Ok(())
+}
+
+/// Patch (or remove) the fields of a single provider inside the YAML
+/// mapping, leaving unknown keys intact.
+fn patch_provider_entry(mapping: &mut serde_yaml::Mapping, provider: &str, entry: &ProviderEntry) {
+    let key = serde_yaml::Value::String(provider.to_string());
+
+    // Determine which known fields are present.
+    let has_fields = entry.api_key.is_some()
+        || entry.base_url.is_some()
+        || entry.token.is_some()
+        || entry.endpoint.is_some()
+        || entry.api_version.is_some()
+        || entry.azure.is_some()
+        || entry.client_id.is_some()
+        || entry.refresh_token.is_some();
+
+    if !has_fields {
+        mapping.remove(&key);
+        return;
+    }
+
+    let prov_entry = mapping
+        .entry(key)
+        .or_insert(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+
+    let prov_map = match prov_entry {
+        serde_yaml::Value::Mapping(m) => m,
+        _ => {
+            *prov_entry = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+            prov_entry.as_mapping_mut().unwrap()
+        }
+    };
+
+    upsert_string(
+        prov_map,
+        "api-key",
+        entry.api_key.as_ref().map(|s| s.0.as_str()),
+    );
+    upsert_string(
+        prov_map,
+        "base-url",
+        entry.base_url.as_ref().map(|s| s.0.as_str()),
+    );
+    upsert_string(
+        prov_map,
+        "token",
+        entry.token.as_ref().map(|s| s.0.as_str()),
+    );
+    upsert_string(
+        prov_map,
+        "endpoint",
+        entry.endpoint.as_ref().map(|s| s.0.as_str()),
+    );
+    upsert_string(
+        prov_map,
+        "api-version",
+        entry.api_version.as_ref().map(|s| s.0.as_str()),
+    );
+    upsert_string(
+        prov_map,
+        "client-id",
+        entry.client_id.as_ref().map(|s| s.0.as_str()),
+    );
+    upsert_string(
+        prov_map,
+        "refresh-token",
+        entry.refresh_token.as_ref().map(|s| s.0.as_str()),
+    );
+
+    // azure is a nested mapping — replace it wholesale when present,
+    // remove when absent.
+    match &entry.azure {
+        Some(azure) => {
+            let az_val = serde_yaml::to_value(azure).unwrap_or_default();
+            prov_map.insert(serde_yaml::Value::String("azure".to_string()), az_val);
+        }
+        None => {
+            prov_map.remove(serde_yaml::Value::String("azure".to_string()));
+        }
+    }
+}
+
+/// Upsert or remove a string field in a YAML mapping.
+fn upsert_string(map: &mut serde_yaml::Mapping, key: &str, value: Option<&str>) {
+    let k = serde_yaml::Value::String(key.to_string());
+    match value {
+        Some(v) => {
+            map.insert(k, serde_yaml::Value::String(v.to_string()));
+        }
+        None => {
+            map.remove(&k);
+        }
+    }
+}
+
+/// Persist a provider's OAuth refresh token to `providers.yaml`.
+///
+/// Works directly with `serde_yaml::Value` so that only the single
+/// `refresh-token` key is touched — all other keys, comments (best-effort),
+/// and key ordering are preserved.
+pub(crate) fn persist_refresh_token(provider: &str, refresh_token: &str) -> Result<(), String> {
+    let path = providers_path();
+    let mut root: serde_yaml::Value = match std::fs::read_to_string(&path) {
+        Ok(content) => serde_yaml::from_str(&content)
+            .map_err(|e| format!("failed to parse {}: {e}", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        }
+        Err(e) => {
+            return Err(format!("failed to read {}: {e}", path.display()));
+        }
+    };
+
+    let mapping = root
+        .as_mapping_mut()
+        .ok_or_else(|| format!("{} is not a mapping", path.display()))?;
+
+    let entry = mapping
+        .entry(serde_yaml::Value::String(provider.to_string()))
+        .or_insert(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+
+    if let serde_yaml::Value::Mapping(entry_map) = entry {
+        entry_map.insert(
+            serde_yaml::Value::String("refresh-token".to_string()),
+            serde_yaml::Value::String(refresh_token.to_string()),
+        );
+    }
+
+    let yaml = serde_yaml::to_string(&root)
+        .map_err(|e| format!("failed to serialize {}: {e}", path.display()))?;
+
+    write_atomic_str(&path, &yaml)
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+
+    Ok(())
+}
+
+/// Write `content` to `path` atomically: write to a same-directory temp file
+/// with restricted permissions, sync, then rename over the target.
+#[allow(unused_mut)]
+fn write_atomic(path: &Path, content: &str) -> Result<(), std::io::Error> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".providers")
+        .suffix(".tmp")
+        .tempfile_in(dir)?;
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(tmp.path())?.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(tmp.path(), perms)?;
+    }
+    std::io::Write::write_all(&mut tmp, content.as_bytes())?;
+    tmp.as_file_mut().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// Convenience wrapper for callers that already have a `String` error type.
+fn write_atomic_str(path: &Path, content: &str) -> Result<(), String> {
+    write_atomic(path, content).map_err(|e| format!("I/O error: {e}"))
 }
 
 // ---------------------------------------------------------------------------
