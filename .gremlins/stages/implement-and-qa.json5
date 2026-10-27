@@ -1,15 +1,22 @@
 {
   "required-options": ["verify_cmds"],
-  // Input contract: reads `artifact://plan.md` (written by an upstream plan
-  // stage) and, unless `options.diff_base` is set, the run's
-  // `artifact://base_sha`. Internal outputs (`diff.txt`, `review-one.md`,
-  // `review-two.md`, `complexity-review.md`, `address-summary.md`) are
-  // emitted under fixed artifact names consumed by downstream stages.
+  // Input contract: reads the plan written by an upstream plan stage and,
+  // unless `options.diff_base` is set, the run's `artifact://base_sha`.
+  // `options.artifact_ns` (optional) is a prefix applied to the plan and QA
+  // artifact names so looping callers (e.g. drag-optimizer) can keep each
+  // iteration's plan and review outputs distinct. It defaults to "" for the
+  // non-looping local/gh pipelines. Internal outputs (`diff.txt`,
+  // `review-one.md`, `review-two.md`, `complexity-review.md`,
+  // `address-summary.md`) are emitted under the namespaced artifact names
+  // consumed by downstream stages.
   stages: [
     // ── implement ────────────────────────────────────────────────────
     {
       name: "implement",
       type: "implement",
+      options: {
+        artifact_ns: '{{options.artifact_ns | default("")}}',
+      },
       prompt: [
         "task-guide.md",
         "style_guide.md",
@@ -34,7 +41,7 @@
           diff_base: 'content("{{options.diff_base | default(\"artifact://base_sha\")}}")',
         },
         outputs: {
-          diff: "artifact://diff.txt",
+          diff: 'artifact://{{options.artifact_ns | default("")}}diff.txt',
         },
       },
       options: {
@@ -53,11 +60,11 @@
           type: "agent",
           interpolation: {
             inputs: {
-              plan: 'content("artifact://plan.md")',
-              diff: 'content("artifact://diff.txt")',
+              plan: 'content("artifact://{{options.artifact_ns | default(\"\")}}plan.md")',
+              diff: 'content("artifact://{{options.artifact_ns | default(\"\")}}diff.txt")',
             },
             outputs: {
-              filepath: "artifact://review-one.md",
+              filepath: 'artifact://{{options.artifact_ns | default("")}}review-one.md',
             },
           },
           prompt: ["review.md"],
@@ -67,11 +74,11 @@
           type: "agent",
           interpolation: {
             inputs: {
-              plan: 'content("artifact://plan.md")',
-              diff: 'content("artifact://diff.txt")',
+              plan: 'content("artifact://{{options.artifact_ns | default(\"\")}}plan.md")',
+              diff: 'content("artifact://{{options.artifact_ns | default(\"\")}}diff.txt")',
             },
             outputs: {
-              filepath: "artifact://review-two.md",
+              filepath: 'artifact://{{options.artifact_ns | default("")}}review-two.md',
             },
           },
           prompt: ["review.md"],
@@ -79,6 +86,9 @@
         {
           name: "complexity-review",
           type: "complexity-review",
+          options: {
+            artifact_ns: '{{options.artifact_ns | default("")}}',
+          },
           prompt: ["complexity_review.md"],
         },
       ],
@@ -90,14 +100,14 @@
       prompt: ["style_guide.md", "dev-env-howto.md", "address.md"],
       interpolation: {
         inputs: {
-          plan: 'content("artifact://plan.md")',
-          diff: 'content("artifact://diff.txt")',
-          review_one: 'content("artifact://review-one.md")',
-          review_two: 'content("artifact://review-two.md")',
-          complexity_review: 'content("artifact://complexity-review.md")',
+          plan: 'content("artifact://{{options.artifact_ns | default(\"\")}}plan.md")',
+          diff: 'content("artifact://{{options.artifact_ns | default(\"\")}}diff.txt")',
+          review_one: 'content("artifact://{{options.artifact_ns | default(\"\")}}review-one.md")',
+          review_two: 'content("artifact://{{options.artifact_ns | default(\"\")}}review-two.md")',
+          complexity_review: 'content("artifact://{{options.artifact_ns | default(\"\")}}complexity-review.md")',
         },
         outputs: {
-          address_summary: "artifact://address-summary.md",
+          address_summary: 'artifact://{{options.artifact_ns | default("")}}address-summary.md',
         },
       },
     },

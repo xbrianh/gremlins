@@ -6,7 +6,7 @@
       type: "agent",
       interpolation: {
         inputs: {
-          plan: 'content("artifact://plan.md")',
+          plan: 'content("artifact://{{options.artifact_ns | default(\"\")}}plan.md")',
         },
       },
       prompt: ["{{prompt}}"],
