@@ -2,6 +2,7 @@ pub mod app;
 pub mod buffer;
 pub mod chat;
 mod chat_context;
+mod chat_prefetch;
 pub mod client;
 pub mod commands;
 pub mod completion;
@@ -529,6 +530,17 @@ fn send_chat_input(
         // event loop. On timeout or failure the prompt is sent without a
         // context block rather than being dropped.
         let project_root_str = project_root.to_string_lossy().into_owned();
+        // Pre-fetch context from the operator's message (gremlin IDs, file
+        // paths, definition names) so the model doesn't burn its first turn
+        // on discovery tools.
+        let enriched_input = {
+            let prefetch = chat_prefetch::prefetch_context(&input, &project_root_str);
+            if prefetch.is_empty() {
+                input
+            } else {
+                format!("{prefetch}\n\n---\n\n{input}")
+            }
+        };
         let context = match tokio::time::timeout(
             CONTEXT_TIMEOUT,
             tokio::task::spawn_blocking(move || {
@@ -546,7 +558,7 @@ fn send_chat_input(
         // reflects the operator's shell at submit time.
         let env: HashMap<String, String> = std::env::vars().collect();
         let request = build_chat_request(
-            &input,
+            &enriched_input,
             &turn_id,
             &project_root.to_string_lossy(),
             &context,
