@@ -319,28 +319,14 @@ pub(crate) fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option
                         "Error: edit {} missing 'new_string' for Edit tool",
                         i + 1
                     ));
-                } // 'start_line'/'end_line' are optional scope fields.
-                  // 'end_line' requires 'start_line'; 'start_line' alone is
-                  // valid (open-ended downward scope to EOF).
+                } // 'start_line'/'end_line' are optional scope fields;
+                  // both accept zero (clamped to 1 by the executor), and
+                  // start_line > end_line is handled by scope_byte_range.
                 let has_start = obj.contains_key("start_line");
                 let has_end = obj.contains_key("end_line");
-                if has_end && !has_start {
-                    let provided = describe_edit_provided_fields(obj);
-                    return Some(format!(
-                        "Error: edit {} has 'end_line' without 'start_line' — provide both to scope the search{}",
-                        i + 1,
-                        provided
-                    ));
-                }
                 if has_start {
                     match obj.get("start_line").and_then(|v| v.as_u64()) {
-                        Some(n) if n > 0 => {}
-                        Some(_) => {
-                            return Some(format!(
-                                "Error: edit {} 'start_line' must be a positive integer for Edit tool",
-                                i + 1
-                            ));
-                        }
+                        Some(_) => {}
                         None => {
                             return Some(format!(
                                 "Error: edit {} 'start_line' must be an integer for Edit tool",
@@ -351,13 +337,7 @@ pub(crate) fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option
                 }
                 if has_end {
                     match obj.get("end_line").and_then(|v| v.as_u64()) {
-                        Some(n) if n > 0 => {}
-                        Some(_) => {
-                            return Some(format!(
-                                "Error: edit {} 'end_line' must be a positive integer for Edit tool",
-                                i + 1
-                            ));
-                        }
+                        Some(_) => {}
                         None => {
                             return Some(format!(
                                 "Error: edit {} 'end_line' must be an integer for Edit tool",
@@ -366,18 +346,7 @@ pub(crate) fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option
                         }
                     }
                 }
-                if has_start && has_end {
-                    let start_line = obj.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let end_line = obj.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0);
-                    if start_line > end_line {
-                        return Some(format!(
-                            "Error: edit {} 'start_line' ({}) > 'end_line' ({}) for Edit tool",
-                            i + 1,
-                            start_line,
-                            end_line
-                        ));
-                    }
-                }
+
             }
         }
     }
@@ -407,7 +376,7 @@ fn tool_parameters(spec: &ToolSpec) -> serde_json::Value {
                         },
                         "start_line": {
                             "type": "integer",
-                            "description": "When old_string appears multiple times, scope the search to start at this 1-based line (inclusive)"
+                            "description": "When old_string appears multiple times, scope the search to start at this 1-based line (inclusive; clamps to EOF if beyond last line)"
                         },
                         "end_line": {
                             "type": "integer",

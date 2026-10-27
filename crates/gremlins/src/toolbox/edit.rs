@@ -229,16 +229,10 @@ fn parse_edits(edits_arr: &[serde_json::Value], file_path: &str) -> Result<Vec<E
         };
 
         // Optional scope: `start_line` may stand alone (open-ended downward);
-        // `end_line` requires `start_line`.
+        // `end_line` without `start_line` defaults scope_start to 1.
         let scope_start = match obj.get("start_line") {
             Some(v) => match v.as_u64() {
-                Some(n) if n > 0 => Some(n as usize),
-                Some(_) => {
-                    return Err(format!(
-                        "Error: edit {} 'start_line' must be a positive integer in {file_path}",
-                        i + 1
-                    ))
-                }
+                Some(n) => Some((n as usize).max(1)),
                 None => {
                     return Err(format!(
                         "Error: edit {} 'start_line' must be an integer in {file_path}",
@@ -249,39 +243,23 @@ fn parse_edits(edits_arr: &[serde_json::Value], file_path: &str) -> Result<Vec<E
             None => None,
         };
         let scope_end = match obj.get("end_line") {
-            Some(v) => {
-                if scope_start.is_none() {
+            Some(v) => match v.as_u64() {
+                Some(n) => Some((n as usize).max(1)),
+                None => {
                     return Err(format!(
-                        "Error: edit {} 'end_line' requires 'start_line' in {file_path}",
+                        "Error: edit {} 'end_line' must be an integer in {file_path}",
                         i + 1
-                    ));
+                    ))
                 }
-                match v.as_u64() {
-                    Some(n) if n > 0 => Some(n as usize),
-                    Some(_) => {
-                        return Err(format!(
-                            "Error: edit {} 'end_line' must be a positive integer in {file_path}",
-                            i + 1
-                        ))
-                    }
-                    None => {
-                        return Err(format!(
-                            "Error: edit {} 'end_line' must be an integer in {file_path}",
-                            i + 1
-                        ))
-                    }
-                }
-            }
+            },
             None => None,
         };
-        if let (Some(s), Some(en)) = (scope_start, scope_end) {
-            if s > en {
-                return Err(format!(
-                    "Error: edit {} 'start_line' ({s}) > 'end_line' ({en}) in {file_path}",
-                    i + 1
-                ));
-            }
-        }
+        // Default scope_start to 1 when end_line is present without start_line.
+        let scope_start = if scope_start.is_none() && scope_end.is_some() {
+            Some(1)
+        } else {
+            scope_start
+        };
 
         edits.push(EditOp {
             old_str,
@@ -323,24 +301,6 @@ fn apply_edits(
             None => content,
         };
         let window_offset = scope.map_or(0, |(s, _)| s);
-
-        // Reject scope_start past the last logical line (trailing newline
-        // does not add a line).
-        if let Some(s) = edit.scope_start {
-            let line_count = if content.ends_with('\n') {
-                line_offsets.len().saturating_sub(1)
-            } else {
-                line_offsets.len()
-            };
-            if s > line_count {
-                return Err(format!(
-                    "Error: edit {} 'start_line' ({}) exceeds file line count ({}) in {file_path}",
-                    i + 1,
-                    s,
-                    line_count
-                ));
-            }
-        }
 
         // Use find + offset-1 check instead of match_indices so we
         // detect overlapping occurrences.  match_indices skips by match
@@ -522,57 +482,58 @@ mod tests {
     }
 
     #[test]
-    fn parse_edits_end_line_without_start_line_is_error() {
-        let err = parse_edits(
+    fn parse_edits_end_line_without_start_line_defaults_to_one() {
+        let edits = parse_edits(
             &[serde_json::json!({
                 "old_string": "a", "new_string": "b", "end_line": 3
             })],
             "f.txt",
         )
-        .unwrap_err();
-        assert!(
-            err.contains("'end_line' requires 'start_line'"),
-            "got: {err}"
-        );
+        .unwrap();
+        assert_eq!(edits[0].scope_start, Some(1));
+        assert_eq!(edits[0].scope_end, Some(3));
     }
 
     #[test]
-    fn parse_edits_rejects_start_after_end() {
-        let err = parse_edits(
+    fn parse_edits_start_after_end_is_accepted() {
+        let edits = parse_edits(
             &[serde_json::json!({
                 "old_string": "a", "new_string": "b",
                 "start_line": 3, "end_line": 2
             })],
             "f.txt",
         )
-        .unwrap_err();
-        assert!(err.contains("> 'end_line'"), "got: {err}");
+        .unwrap();
+        assert_eq!(edits[0].scope_start, Some(3));
+        assert_eq!(edits[0].scope_end, Some(2));
     }
 
     #[test]
-    fn parse_edits_rejects_zero_start_line() {
-        let err = parse_edits(
+    fn parse_edits_zero_start_line_clamped_to_one() {
+        let edits = parse_edits(
             &[serde_json::json!({
                 "old_string": "a", "new_string": "b",
                 "start_line": 0, "end_line": 2
             })],
             "f.txt",
         )
-        .unwrap_err();
-        assert!(err.contains("positive integer"), "got: {err}");
+        .unwrap();
+        assert_eq!(edits[0].scope_start, Some(1));
+        assert_eq!(edits[0].scope_end, Some(2));
     }
 
     #[test]
-    fn parse_edits_rejects_zero_end_line() {
-        let err = parse_edits(
+    fn parse_edits_zero_end_line_clamped_to_one() {
+        let edits = parse_edits(
             &[serde_json::json!({
                 "old_string": "a", "new_string": "b",
                 "start_line": 1, "end_line": 0
             })],
             "f.txt",
         )
-        .unwrap_err();
-        assert!(err.contains("positive integer"), "got: {err}");
+        .unwrap();
+        assert_eq!(edits[0].scope_start, Some(1));
+        assert_eq!(edits[0].scope_end, Some(1));
     }
 
     #[test]
