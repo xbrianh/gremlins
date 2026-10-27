@@ -733,6 +733,7 @@ impl Gremlin {
             self.workdir.as_ref().map(|w| w.path()),
             &state_dir,
             &self.runtime_config.base_process_env,
+            &self.stage_inputs,
         )?;
 
         // Nothing below this line can fail, so this is the commit point.
@@ -1498,8 +1499,10 @@ pub fn system_env(
 ///
 /// The system variables are seeded into the base *before* the bootstrap script
 /// is sourced, so the script can read them (e.g. to point `VIRTUAL_ENV` at the
-/// workspace), then re-asserted on top afterwards. The script can shape
-/// the environment but can never redirect the harness's paths.
+/// The source values (`stage_inputs`) are also seeded as `GREMLINS_SOURCE_<KEY>`
+/// variables, with non-alphanumeric characters replaced by underscores, so a
+/// bootstrap script can read launch parameters without depending on artifact
+/// files that `launch_cmds` hasn't created yet.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_env(
     bootstrap_env: Option<&str>,
@@ -1508,11 +1511,30 @@ pub(crate) fn resolve_env(
     workdir: Option<&Path>,
     state_dir: &Path,
     base_env: &HashMap<String, String>,
+    stage_inputs: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, RunError> {
     let system = system_env(gremlin_id, project_root, workdir, state_dir);
 
     let mut base: HashMap<String, String> = base_env.clone();
     base.extend(system.clone());
+
+    // Inject source values so the bootstrap env script can read launch
+    // parameters directly (e.g. GREMLINS_SOURCE_TARGET) instead of
+    // depending on artifacts that launch_cmds hasn't written yet.
+    for (key, value) in stage_inputs {
+        let var_name = format!(
+            "GREMLINS_SOURCE_{}",
+            key.to_ascii_uppercase()
+                .chars()
+                .map(|c| if c.is_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                })
+                .collect::<String>()
+        );
+        base.insert(var_name, value.clone());
+    }
 
     let mut env = match bootstrap_env {
         Some(script) if !script.trim().is_empty() => {
@@ -1583,7 +1605,16 @@ mod tests {
         let state_dir = dir.path().join("state");
 
         let base_env: HashMap<String, String> = std::env::vars().collect();
-        let env = resolve_env(None, "gr-test", &project_root, None, &state_dir, &base_env).unwrap();
+        let env = resolve_env(
+            None,
+            "gr-test",
+            &project_root,
+            None,
+            &state_dir,
+            &base_env,
+            &HashMap::new(),
+        )
+        .unwrap();
 
         assert_eq!(env["GREMLINS_GREMLIN_ID"], "gr-test");
         assert_eq!(env["GREMLINS_PROJECT_ROOT"], project_root.to_string_lossy());
@@ -1641,6 +1672,7 @@ mod tests {
             None,
             &state_dir,
             &base_env,
+            &HashMap::new(),
         )
         .unwrap();
 
@@ -1674,6 +1706,7 @@ mod tests {
             Some(&workdir),
             &state_dir,
             &base_env,
+            &HashMap::new(),
         )
         .unwrap();
 
@@ -1695,12 +1728,42 @@ mod tests {
             None,
             &state_dir,
             &base_env,
+            &HashMap::new(),
         )
         .unwrap_err();
         assert!(
             matches!(error, RunError::BootstrapFailed { .. }),
             "unexpected {error:?}"
         );
+    }
+
+    #[test]
+    fn resolve_env_injects_source_vars() {
+        let _guard = EnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        let project_root = dir.path().join("project");
+        let state_dir = dir.path().join("state");
+
+        let base_env: HashMap<String, String> = std::env::vars().collect();
+        let stage_inputs: HashMap<String, String> = HashMap::from([
+            ("target".to_string(), "src/main.rs".to_string()),
+            ("drag-model".to_string(), "openai/gpt-4o".to_string()),
+            ("estimates-per-survey".to_string(), "5".to_string()),
+        ]);
+        let env = resolve_env(
+            None,
+            "gr-test",
+            &project_root,
+            None,
+            &state_dir,
+            &base_env,
+            &stage_inputs,
+        )
+        .unwrap();
+
+        assert_eq!(env["GREMLINS_SOURCE_TARGET"], "src/main.rs");
+        assert_eq!(env["GREMLINS_SOURCE_DRAG_MODEL"], "openai/gpt-4o");
+        assert_eq!(env["GREMLINS_SOURCE_ESTIMATES_PER_SURVEY"], "5");
     }
 
     // --- framework substitutions ---

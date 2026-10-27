@@ -50,7 +50,7 @@ const SCANNERS: &[Scanner] = &[
     },
 ];
 
-pub(crate) fn scan(extension: &str, content: &str, collapse_tests: bool) -> Vec<OutlineItem> {
+pub fn scan(extension: &str, content: &str, collapse_tests: bool) -> Vec<OutlineItem> {
     for scanner in SCANNERS {
         if scanner.extensions.contains(&extension) {
             return (scanner.scan)(content, collapse_tests);

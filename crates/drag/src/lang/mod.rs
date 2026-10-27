@@ -126,15 +126,27 @@ pub fn file_to_module(file: &Path, packages: &[PackageInfo]) -> Option<(String, 
 /// Produce the language-specific dependency-graph edges for the given package.
 pub fn dependency_graph(pkg: &PackageInfo) -> Result<Vec<(String, String)>, String> {
     match pkg {
-        PackageInfo::Rust(r) => {
-            // `r.dir` is the canonicalized directory containing the package's
-            // Cargo.toml. `cargo modules` resolves the workspace by walking up
-            // from that manifest, so the package manifest is a valid anchor
-            // even when the process CWD is outside the workspace.
-            let manifest_path = r.dir.join("Cargo.toml");
-            rust::rust_dependency_graph(&r.pkg_name, &manifest_path)
-        }
+        PackageInfo::Rust(r) => rust::rust_dependency_graph(r),
         PackageInfo::Python(p) => python::python_dependency_graph(&p.root_dir, &p.dir),
+    }
+}
+
+/// Enumerate the source files that belong to a package's module tree.
+///
+/// For Rust, this is the crate's `src/` directory; for Python, the package
+/// directory itself.  The caller maps each file back to a module with
+/// [`file_to_module`] when building the full token-count map.
+pub fn package_files(pkg: &PackageInfo) -> std::io::Result<Vec<PathBuf>> {
+    match pkg {
+        PackageInfo::Rust(r) => {
+            let src_dir = r.dir.join("src");
+            if src_dir.is_dir() {
+                collect_source_files(&src_dir)
+            } else {
+                Ok(Vec::new())
+            }
+        }
+        PackageInfo::Python(p) => collect_source_files(&p.dir),
     }
 }
 

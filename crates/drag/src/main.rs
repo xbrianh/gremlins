@@ -1,4 +1,10 @@
 mod lang;
+mod maint;
+mod scoring;
+mod util;
+
+use scoring::{compute_drag, compute_footprint};
+use util::{extract_json, median, truncate, CacheState, CompAgentError};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -13,13 +19,44 @@ use gremlins::model_uri::ModelURI;
 
 use lang::PackageInfo;
 
+/// Help text appended after the auto-generated options table.
+const GREMLINS_DRAG_CLI_CONFIG_HELP: &str = "\
+Environment:
+  GREMLINS_DRAG_CLI_CONFIG  A JSON object that locks all scoring parameters.
+                            When set, no CLI arguments are accepted except
+                            --help, --explain, --clear-cache, and --version.
+                            All scoring parameters and the path are taken from the
+                            JSON object. Output is always JSON.
+
+                            JSON fields (all optional, defaults shown):
+                            {
+                              \"path\": null,
+                              \"model\": null,
+                              \"tokenizer\": \"o200k_base\",
+                              \"w2\": 0.5,
+                              \"m\": 2.5,
+                              \"p\": 2.5,
+                              \"skip_maintainability\": false,
+                              \"verbose\": false,
+                              \"estimates_per_survey\": 1,
+                              \"cache\": null,
+                              \"explain\": false
+                            }
+
+                            Example:
+                            GREMLINS_DRAG_CLI_CONFIG='{\"path\":\"src/\",\"w2\":1.0,\"m\":3.0}' gremlins-drag
+
+                            Meta-commands like --explain and --clear-cache may be
+                            combined with GREMLINS_DRAG_CLI_CONFIG. Scoring parameters
+                            come from the env var; the flag just enables the action.";
+
 /// Compute drag scores for source modules.
 #[derive(Parser)]
-#[command(name = "gremlins-drag")]
+#[command(name = "gremlins-drag", after_long_help = GREMLINS_DRAG_CLI_CONFIG_HELP)]
 struct Cli {
     /// Source file or directory to score. Recognized extensions: .rs, .py.
     /// If a file, scores that module. If a directory, scores all modules
-    /// under it. Required unless --curves is used.
+    /// under it. Required unless --explain or --clear-cache is used.
     path: Option<PathBuf>,
 
     /// Output JSON instead of a human-readable table.
@@ -35,35 +72,32 @@ struct Cli {
     #[arg(long, default_value = "o200k_base")]
     tokenizer: String,
 
-    /// Weight for token_count in the ln_drag formula.
-    #[arg(long, default_value_t = 1.0)]
-    w1: f64,
-
-    /// Weight for graph_complexity in the ln_drag formula.
-    #[arg(long, default_value_t = 2.0)]
+    /// Weight for the footprint term in the drag formula.
+    #[arg(long, default_value_t = 0.5)]
     w2: f64,
 
-    /// Weight for comprehensibility in the ln_drag formula (subtracted).
-    #[arg(long, default_value_t = 3.0)]
-    w3: f64,
+    /// Exponent for the comprehensibility penalty
+    /// (m=2.5 balances merges vs splits).
+    #[arg(long, default_value_t = 2.5)]
+    m: f64,
 
-    /// Weight for the consumer discount (subtracted). More consumers =
-    /// the module boundary is pulling its weight, so drag is reduced.
-    #[arg(long, default_value_t = 2.0)]
-    w4: f64,
+    /// Exponent for the package maintainability penalty.
+    #[arg(long, default_value_t = 2.5)]
+    p: f64,
 
-    /// Added to comprehensibility before taking ln() to avoid ln(0).
-    #[arg(long, default_value_t = 0.01)]
-    epsilon: f64,
+    /// Skip package-level maintainability scoring; only compute
+    /// module-level drag.
+    #[arg(long)]
+    skip_maintainability: bool,
 
     /// Print the resolved model spec and diagnostic information.
     #[arg(short = 'v', long)]
     verbose: bool,
 
-    /// Number of independent LLM estimates per module for comprehensibility
+    /// Number of independent LLM estimates per survey for comprehensibility
     /// scoring (median is used). Default 1.
-    #[arg(long, default_value_t = 1)]
-    comprehensibility_estimates: usize,
+    #[arg(long = "estimates-per-survey", default_value_t = 1)]
+    estimates_per_survey: usize,
 
     /// Path to a JSONL cache file for comprehensibility scores.
     /// When set, this path overrides the default cache location.
@@ -78,11 +112,89 @@ struct Cli {
     #[arg(long)]
     clear_cache: bool,
 
-    /// Print drag curves showing how token count, graph complexity, and
-    /// comprehensibility contribute to ln_drag at the current weights.
-    /// Exits immediately after printing; no modules are scored.
+    /// Print a full explanation of the drag calculation — formula, survey
+    /// dimensions, and drag curves at the current weights. Exits immediately
+    /// after printing; no modules are scored.
     #[arg(long)]
-    curves: bool,
+    explain: bool,
+}
+
+/// JSON-driven config for `GREMLINS_DRAG_CLI_CONFIG` env var.
+/// Maps every CLI option except `clear_cache` (always false via env).
+/// `json` output is forced when the env var is used — no field needed.
+#[derive(Deserialize)]
+#[serde(default)]
+struct DragCliConfig {
+    path: Option<PathBuf>,
+    model: Option<String>,
+    #[serde(default = "default_tokenizer")]
+    tokenizer: String,
+    #[serde(default = "default_w2")]
+    w2: f64,
+    #[serde(default = "default_m")]
+    m: f64,
+    #[serde(default = "default_p")]
+    p: f64,
+    skip_maintainability: bool,
+    verbose: bool,
+    #[serde(default = "default_estimates_per_survey")]
+    estimates_per_survey: usize,
+    cache: Option<PathBuf>,
+    explain: bool,
+}
+
+fn default_tokenizer() -> String {
+    "o200k_base".to_string()
+}
+fn default_w2() -> f64 {
+    0.5
+}
+fn default_m() -> f64 {
+    2.5
+}
+fn default_p() -> f64 {
+    2.5
+}
+fn default_estimates_per_survey() -> usize {
+    1
+}
+
+impl Default for DragCliConfig {
+    fn default() -> Self {
+        Self {
+            path: None,
+            model: None,
+            tokenizer: default_tokenizer(),
+            w2: default_w2(),
+            m: default_m(),
+            p: default_p(),
+            skip_maintainability: false,
+            verbose: false,
+            estimates_per_survey: default_estimates_per_survey(),
+            cache: None,
+            explain: false,
+        }
+    }
+}
+
+impl DragCliConfig {
+    fn into_cli(self) -> Cli {
+        Cli {
+            path: self.path,
+            json: true, // env-var driven → always JSON output
+            model: self.model,
+            tokenizer: self.tokenizer,
+            w2: self.w2,
+            m: self.m,
+            p: self.p,
+            skip_maintainability: self.skip_maintainability,
+            verbose: self.verbose,
+            estimates_per_survey: self.estimates_per_survey,
+            cache: self.cache,
+            clear_cache: false,
+            explain: self.explain,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -93,15 +205,15 @@ struct Cli {
 struct DragReport {
     config: DragConfig,
     modules: Vec<ModuleDrag>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    packages: Vec<PackageDrag>,
 }
 
 #[derive(Serialize)]
 struct DragConfig {
-    w1: f64,
     w2: f64,
-    w3: f64,
-    w4: f64,
-    epsilon: f64,
+    m: f64,
+    p: f64,
 }
 
 #[derive(Serialize)]
@@ -109,15 +221,21 @@ struct ModuleDrag {
     module: String,
     file: String,
     token_count: usize,
-    fan_in: usize,
-    fan_out: usize,
-    graph_complexity: usize,
+    /// Total token count of the module plus all modules transitively
+    /// reachable from it (including the module itself).
+    footprint: usize,
     comprehensibility: Option<f64>,
-    /// `exp(ln_drag)`. A monotonic transform of `ln_drag`; it adds no
-    /// additional ranking information.
+    /// The drag metric: `(1+footprint)^w2 · exp(m·(1−comp))`.
     drag: f64,
-    /// The drag metric: `w1*ln(tokens) + w2*ln(complexity) - w4*ln(1+consumers) - w3*ln(comp)`.
-    ln_drag: f64,
+}
+
+/// Per-package drag summary emitted in JSON output.
+#[derive(Serialize)]
+struct PackageDrag {
+    package: String,
+    maint_score: f64,
+    module_drag_sum: f64,
+    drag: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -133,13 +251,58 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
-    let cli = Cli::parse();
+    let cli: Cli = match std::env::var("GREMLINS_DRAG_CLI_CONFIG")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        Some(json) => {
+            let args: Vec<String> = std::env::args().collect();
+
+            // --help, -h, --version, -V always pass through to clap.
+            if args
+                .iter()
+                .any(|a| a == "--help" || a == "-h" || a == "--version" || a == "-V")
+            {
+                Cli::parse()
+            } else if args.len() > 1 {
+                // Allow --explain and --clear-cache alongside the env config.
+                let non_meta: Vec<_> = args
+                    .iter()
+                    .skip(1)
+                    .filter(|a| !(a.as_str() == "--explain" || a.as_str() == "--clear-cache"))
+                    .collect();
+                if !non_meta.is_empty() {
+                    return Err(
+                        "GREMLINS_DRAG_CLI_CONFIG is set — no CLI arguments allowed \
+                         except --help, --explain, --clear-cache, and --version. \
+                         Run `gremlins-drag` with no arguments."
+                            .to_string(),
+                    );
+                }
+                let mut cli = serde_json::from_str::<DragCliConfig>(&json)
+                    .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: invalid JSON: {e}"))?
+                    .into_cli();
+                if args.iter().any(|a| a == "--explain") {
+                    cli.explain = true;
+                }
+                if args.iter().any(|a| a == "--clear-cache") {
+                    cli.clear_cache = true;
+                }
+                cli
+            } else {
+                serde_json::from_str::<DragCliConfig>(&json)
+                    .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: invalid JSON: {e}"))?
+                    .into_cli()
+            }
+        }
+        None => Cli::parse(),
+    };
 
     // Initialize config early so cache path resolution (and --clear-cache)
     // respect any configured state-root overrides.
     gremlins::config::init_global().map_err(|e| e.to_string())?;
 
-    // ── resolve cache path (needed by --curves? no, but --clear-cache needs it) ──
+    // ── resolve cache path (--clear-cache needs it) ──
     let cache_path: PathBuf = match &cli.cache {
         Some(p) => p.clone(),
         None => {
@@ -160,14 +323,14 @@ async fn run() -> Result<(), String> {
         return Ok(());
     }
 
-    if cli.curves {
-        print_curves(cli.w1, cli.w2, cli.w3, cli.w4, cli.epsilon);
+    if cli.explain {
+        print_explain(cli.w2, cli.m, cli.p);
         return Ok(());
     }
 
-    let path = cli
-        .path
-        .ok_or_else(|| "<PATH> is required unless --curves or --clear-cache is used".to_string())?;
+    let path = cli.path.ok_or_else(|| {
+        "<PATH> is required unless --explain or --clear-cache is used".to_string()
+    })?;
 
     // 1. Discover packages (Rust + Python, best-effort) anchored at the
     //    user-supplied path so that packages are found regardless of cwd.
@@ -214,10 +377,10 @@ async fn run() -> Result<(), String> {
         if source.trim().is_empty() {
             continue;
         }
-        let key = compute_cache_key(&source, &model_spec, cli.comprehensibility_estimates);
+        let key = compute_cache_key(&source, &model_spec, cli.estimates_per_survey);
         if let Some(entry) = cache_map.get(&key) {
             // Only accept cached entries whose estimate count matches.
-            if entry.estimates == cli.comprehensibility_estimates {
+            if entry.estimates == cli.estimates_per_survey {
                 module_cache.insert(module.clone(), entry.clone());
             }
         }
@@ -227,7 +390,7 @@ async fn run() -> Result<(), String> {
         eprintln!("  {cache_hit_count} modules have complete cache hits");
     }
 
-    // 4. Build dependency graph (fan-out per package in parallel).
+    // 4. Build dependency graph (one graph per package, in parallel).
     let mut edges: Vec<(String, String)> = Vec::new();
 
     let relevant_packages: HashSet<String> = target_modules
@@ -261,42 +424,91 @@ async fn run() -> Result<(), String> {
         }
     }
 
-    // 5. Compute fan-in / fan-out
-    let (fan_out_map, fan_in_map) = compute_degrees(&edges);
-
-    // 6. Count tokens and assemble per-module metrics.
-    //    Use cached values when available; compute fresh otherwise.
+    // 5. Load the tokenizer once and count tokens for every in-package
+    //    module.  `footprint(m)` sums token counts across a module and its
+    //    transitive dependency closure, so the full package source tree is
+    //    needed even when only a subset of modules is scored.
     let tokenizer = parse_tokenizer(&cli.tokenizer)?;
     let bpe = tiktoken_rs::bpe_for_tokenizer(tokenizer)
         .map_err(|e| format!("failed to load tokenizer {}: {e}", cli.tokenizer))?;
 
+    let mut token_counts: HashMap<String, usize> = HashMap::new();
+    for pkg in &scoring_packages {
+        let files = lang::package_files(pkg)
+            .map_err(|e| format!("failed to enumerate files for {}: {e}", pkg.name()))?;
+        for file in files {
+            // Skip files that are gated behind #[cfg(test)] in their parent
+            // module (e.g. `#[cfg(test)] mod tests;` → src/tests.rs).
+            if let lang::PackageInfo::Rust(rpkg) = pkg {
+                if lang::rust::is_module_file_cfg_test_gated(&file, rpkg) {
+                    continue;
+                }
+            }
+            if let Some((module, _)) = lang::file_to_module(&file, &packages) {
+                let n = count_tokens(bpe, &file)?;
+                token_counts.insert(module, n);
+            }
+        }
+    }
+    // 6. Compute transitive dependency footprints and assemble per-module
+    //    metrics.  A module's footprint includes its own token count, so
+    //    every scored module needs one — even when it falls outside the
+    //    discovered packages.
+    //    Comprehensibility stays scoped to `--target` modules only.
+    for (module, file, _pkg_key) in &target_modules {
+        if !token_counts.contains_key(module) {
+            let n = count_tokens(bpe, file)?;
+            token_counts.insert(module.clone(), n);
+        }
+    }
+
+    // Resolve inline modules to their owning file: any graph node (from edges)
+    // that has no token count inherits the count of its longest prefix that
+    // does have one.  Example: `crate::foo::nested` (inline) → `crate::foo`.
+    let all_graph_nodes: std::collections::HashSet<String> = edges
+        .iter()
+        .flat_map(|(s, d)| [s.clone(), d.clone()])
+        .collect();
+    for node in &all_graph_nodes {
+        if token_counts.contains_key(node) {
+            continue;
+        }
+        // Find the longest prefix that has a token count.
+        let mut best: Option<(&str, usize)> = None;
+        for (mod_name, &count) in &token_counts {
+            if node.starts_with(mod_name)
+                && node.as_str().len() > mod_name.len()
+                && node.as_bytes()[mod_name.len()] == b':'
+                && best.is_none_or(|(n, _)| mod_name.len() > n.len())
+            {
+                best = Some((mod_name, count));
+            }
+        }
+        if let Some((_, count)) = best {
+            token_counts.insert(node.clone(), count);
+        }
+    }
+
+    let footprint_map = compute_footprint(&edges, &token_counts);
+
     let mut scores: Vec<ModuleDrag> = Vec::new();
     for (module, file, _pkg_key) in &target_modules {
-        // Token count is tokenizer-dependent and always recomputed fresh.
-        // Cached token counts are not reused because the cache key does not
-        // include the tokenizer selection.
-        let token_count = count_tokens(bpe, file)?;
-        let fan_out = fan_out_map.get(module).copied().unwrap_or(0);
-        let fan_in = fan_in_map.get(module).copied().unwrap_or(0);
-        let graph_complexity = fan_in + fan_out;
+        let token_count = token_counts.get(module).copied().unwrap_or(0);
+        let footprint = footprint_map.get(module).copied().unwrap_or(0);
 
         scores.push(ModuleDrag {
             module: module.clone(),
             file: file.to_string_lossy().into_owned(),
             token_count,
-            fan_in,
-            fan_out,
-            graph_complexity,
+            footprint,
             comprehensibility: None,
             drag: 0.0,
-            ln_drag: 0.0,
         });
     }
 
-    // 7. Comprehensibility. Failures skip individual modules rather than
-    //    aborting the whole run.
-    if cli.comprehensibility_estimates < 1 {
-        return Err("--comprehensibility-estimates must be >= 1".to_string());
+    // 7. Comprehensibility
+    if cli.estimates_per_survey < 1 {
+        return Err("--estimates-per-survey must be >= 1".to_string());
     }
 
     let cache_state: CacheState = cache_path.clone();
@@ -304,36 +516,92 @@ async fn run() -> Result<(), String> {
     score_comprehensibility(
         &model_spec,
         cli.verbose,
-        cli.comprehensibility_estimates,
+        cli.estimates_per_survey,
         &target_modules,
         &mut scores,
-        cache_state,
+        cache_state.clone(),
         module_cache,
     )
     .await?;
 
-    // 8. Compute the final drag scores once, after any scoring.
-    for s in &mut scores {
-        s.ln_drag = compute_ln_drag(
-            &DragConfig {
-                w1: cli.w1,
-                w2: cli.w2,
-                w3: cli.w3,
-                w4: cli.w4,
-                epsilon: cli.epsilon,
-            },
-            s.token_count,
-            s.graph_complexity,
-            s.fan_in,
-            s.comprehensibility,
-        );
-        s.drag = s.ln_drag.exp();
+    // Any module that still has no comprehensibility score is a hard error.
+    let unscored: Vec<&str> = scores
+        .iter()
+        .filter_map(|s| {
+            if s.comprehensibility.is_none() {
+                Some(s.module.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if !unscored.is_empty() {
+        return Err(format!(
+            "comprehensibility scoring failed for {} module(s): {}",
+            unscored.len(),
+            unscored.join(", ")
+        ));
     }
 
-    // 9. Sort by ln_drag descending
+    // 8. Compute the final drag scores once, after any scoring.
+    for s in &mut scores {
+        // SAFETY: we just verified every module has a score.
+        let comp = s.comprehensibility.unwrap();
+        s.drag = compute_drag(cli.w2, cli.m, s.footprint, comp);
+    }
+    // ── Package-level maintainability ──
+    let package_drags: Vec<PackageDrag> = if !cli.skip_maintainability {
+        let maint_scores = maint::score_package_maintainability(
+            &model_spec,
+            cli.verbose,
+            cli.estimates_per_survey,
+            &scoring_packages,
+            cache_state.clone(),
+        )
+        .await?;
+
+        // Build a lookup: (module, file) → pkg_key.
+        let module_pkg: HashMap<(&str, &str), &str> = target_modules
+            .iter()
+            .map(|(m, f, pkg)| ((m.as_str(), f.to_str().unwrap_or("")), pkg.as_str()))
+            .collect();
+
+        // Group module drags by package key.
+        let mut pkg_module_drags: HashMap<String, Vec<f64>> = HashMap::new();
+        for s in &scores {
+            let key = (s.module.as_str(), s.file.as_str());
+            if let Some(pkg_key) = module_pkg.get(&key) {
+                pkg_module_drags
+                    .entry((*pkg_key).to_string())
+                    .or_default()
+                    .push(s.drag);
+            }
+        }
+
+        let mut pdrags = Vec::new();
+        for pkg in &scoring_packages {
+            let pkg_key = pkg.key();
+            let pkg_name = pkg.name().to_string();
+            let maint = maint_scores.get(&pkg_key).copied().unwrap_or(0.5);
+            let module_drags = pkg_module_drags.get(&pkg_key);
+            let module_drag_sum: f64 = module_drags.map(|v| v.iter().sum()).unwrap_or(0.0);
+            let drag = maint::compute_package_drag(cli.p, maint, module_drag_sum);
+            pdrags.push(PackageDrag {
+                package: pkg_name,
+                maint_score: maint,
+                module_drag_sum,
+                drag,
+            });
+        }
+        pdrags
+    } else {
+        Vec::new()
+    };
+
+    // 9. Sort by drag descending
     scores.sort_by(|a, b| {
-        b.ln_drag
-            .partial_cmp(&a.ln_drag)
+        b.drag
+            .partial_cmp(&a.drag)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -341,20 +609,19 @@ async fn run() -> Result<(), String> {
     if cli.json {
         let report = DragReport {
             config: DragConfig {
-                w1: cli.w1,
                 w2: cli.w2,
-                w3: cli.w3,
-                w4: cli.w4,
-                epsilon: cli.epsilon,
+                m: cli.m,
+                p: cli.p,
             },
             modules: scores,
+            packages: package_drags,
         };
         println!(
             "{}",
             serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
         );
     } else {
-        print_human_table(&scores);
+        print_human_table(&scores, &package_drags, cli.skip_maintainability);
     }
 
     Ok(())
@@ -428,24 +695,7 @@ fn parse_tokenizer(name: &str) -> Result<tiktoken_rs::tokenizer::Tokenizer, Stri
 // ---------------------------------------------------------------------------
 // Graph computations
 // ---------------------------------------------------------------------------
-
-/// Compute fan-out and fan-in maps from edge list.
-/// Self-edges (src == dst) are excluded — they do not represent
-/// inter-module dependencies and inflate complexity.
-fn compute_degrees(edges: &[(String, String)]) -> (HashMap<String, usize>, HashMap<String, usize>) {
-    let mut fan_out: HashMap<String, usize> = HashMap::new();
-    let mut fan_in: HashMap<String, usize> = HashMap::new();
-
-    for (src, dst) in edges {
-        if src == dst {
-            continue;
-        }
-        *fan_out.entry(src.clone()).or_insert(0) += 1;
-        *fan_in.entry(dst.clone()).or_insert(0) += 1;
-    }
-
-    (fan_out, fan_in)
-}
+// (see `crates/drag/src/scoring.rs` for compute_footprint and compute_drag)
 
 // ---------------------------------------------------------------------------
 // Token counting
@@ -457,29 +707,114 @@ fn count_tokens(tokenizer: &tiktoken_rs::CoreBPE, file: &Path) -> Result<usize, 
     if source.is_empty() {
         return Ok(0);
     }
+    // Strip #[cfg(test)] items from Rust source before counting.
+    // Test code inflates drag scores but moving it around does not
+    // improve real maintainability — it just shifts tokens around.
+    // Excluding it removes the incentive to game the metric.
+    let source = if file.extension().and_then(|e| e.to_str()) == Some("rs") {
+        strip_cfg_test(&source).unwrap_or_else(|e| {
+            eprintln!(
+                "  WARNING: {} — counting raw source (cfg(test) items NOT stripped)",
+                e
+            );
+            source.clone()
+        })
+    } else {
+        source
+    };
     Ok(tokenizer.encode_with_special_tokens(&source).len())
 }
 
-/// Compute the log-drag score for a module.
-///
-/// Comprehensibility is always scored now (the `--comprehensibility` flag
-/// was removed). The `Option` remains for backward compatibility with
-/// minimal refactoring but the `None` branch is effectively unreachable.
-fn compute_ln_drag(
-    config: &DragConfig,
-    token_count: usize,
-    graph_complexity: usize,
-    consumers: usize,
-    comprehensibility: Option<f64>,
-) -> f64 {
-    let ln = config.w1 * (token_count.max(1) as f64).ln()
-        + config.w2 * (graph_complexity.max(1) as f64).ln()
-        - config.w4 * ((consumers + 1).max(1) as f64).ln();
-    match comprehensibility {
-        Some(c) => ln - config.w3 * (c + config.epsilon).ln(),
-        None => ln,
+/// Use `syn` to parse the Rust source and remove all items annotated
+/// with `#[cfg(test)]`.  Regenerated source uses `quote` formatting,
+/// which may differ from the original; this is fine since we only
+/// count tokens.
+fn strip_cfg_test(source: &str) -> Result<String, String> {
+    use syn::visit_mut::VisitMut;
+
+    let mut file =
+        syn::parse_file(source).map_err(|e| format!("failed to strip #[cfg(test)]: {e}"))?;
+
+    // Top-level items.
+    file.items
+        .retain(|item| !has_cfg_test_attr(item_attrs(item)));
+
+    // Walk nested modules and strip #[cfg(test)] items inside them.
+    struct CfgTestStripper;
+    impl syn::visit_mut::VisitMut for CfgTestStripper {
+        fn visit_file_mut(&mut self, f: &mut syn::File) {
+            f.items.retain(|item| !has_cfg_test_attr(item_attrs(item)));
+            syn::visit_mut::visit_file_mut(self, f);
+        }
+        fn visit_item_mod_mut(&mut self, m: &mut syn::ItemMod) {
+            if let Some((_, ref mut items)) = &mut m.content {
+                items.retain(|item| !has_cfg_test_attr(item_attrs(item)));
+            }
+            syn::visit_mut::visit_item_mod_mut(self, m);
+        }
+        fn visit_item_impl_mut(&mut self, i: &mut syn::ItemImpl) {
+            i.items.retain(|ii| !has_cfg_test_attr(impl_item_attrs(ii)));
+            syn::visit_mut::visit_item_impl_mut(self, i);
+        }
+    }
+    CfgTestStripper.visit_file_mut(&mut file);
+
+    use quote::ToTokens;
+    Ok(file.into_token_stream().to_string())
+}
+
+fn has_cfg_test_attr(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        a.path().segments.iter().any(|s| s.ident == "cfg")
+            && a.meta.require_list().is_ok_and(|meta| {
+                let tokens = meta.tokens.to_string();
+                // Match test as a standalone token: `test` but not `test_foo`.
+                let trimmed = tokens.trim();
+                trimmed == "test"
+                    || trimmed.contains(", test,")
+                    || trimmed.starts_with("test,")
+                    || trimmed.ends_with(", test")
+            })
+    })
+}
+
+fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+    use syn::Item;
+    match item {
+        Item::Const(i) => &i.attrs,
+        Item::Enum(i) => &i.attrs,
+        Item::ExternCrate(i) => &i.attrs,
+        Item::Fn(i) => &i.attrs,
+        Item::ForeignMod(i) => &i.attrs,
+        Item::Impl(i) => &i.attrs,
+        Item::Macro(i) => &i.attrs,
+        Item::Mod(i) => &i.attrs,
+        Item::Static(i) => &i.attrs,
+        Item::Struct(i) => &i.attrs,
+        Item::Trait(i) => &i.attrs,
+        Item::TraitAlias(i) => &i.attrs,
+        Item::Type(i) => &i.attrs,
+        Item::Union(i) => &i.attrs,
+        Item::Use(i) => &i.attrs,
+        _ => &[],
     }
 }
+
+fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
+    match item {
+        syn::ImplItem::Const(c) => &c.attrs,
+        syn::ImplItem::Fn(f) => &f.attrs,
+        syn::ImplItem::Type(t) => &t.attrs,
+        syn::ImplItem::Macro(m) => &m.attrs,
+        syn::ImplItem::Verbatim(_) => &[],
+        _ => &[],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Drag formula
+// ---------------------------------------------------------------------------
+// `compute_drag` lives in `crates/drag/src/scoring.rs`.
 
 // ---------------------------------------------------------------------------
 // Comprehensibility scoring
@@ -488,29 +823,16 @@ fn compute_ln_drag(
 const MAX_COMP_RETRIES: u32 = 3;
 const COMP_BACKOFF: [f64; 2] = [1.0, 2.0];
 
-/// Classification of an error from [`run_comp_agent`].
-#[derive(Debug)]
-enum CompAgentError {
-    /// A transient failure worth retrying (model produced no/malformed JSON).
-    Retryable(String),
-    /// A non-retryable failure (bail, missing artifact after agent loop exhausted retries).
-    Fatal(String),
-}
-
-impl std::fmt::Display for CompAgentError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CompAgentError::Retryable(s) | CompAgentError::Fatal(s) => write!(f, "{s}"),
-        }
-    }
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct ComprehensibilityScores {
     naming: u8,
     control_flow: u8,
     data_flow: u8,
     abstractions: u8,
+    /// File-structural dimensions (must be present — retry on omission).
+    cohesion: u8,
+    sizing: u8,
+    test_hygiene: u8,
 }
 
 /// One line in the JSONL cache file.
@@ -519,9 +841,9 @@ struct ComprehensibilityScores {
 ///
 /// **What the cache actually fast-paths:** only `token_count` and
 /// `comprehensibility` are restored on a cache hit. The remaining fields
-/// (`file`, `model`, `fan_in`, `fan_out`, `graph_complexity`, `breakdown`)
-/// are stored for inspection/debugging but are never read back — graph
-/// metrics are position/context-dependent and always recomputed fresh.
+/// (`file`, `model`, `breakdown`) are stored for inspection/debugging but
+/// are never read back — dependency footprints are position/context-dependent
+/// and always recomputed fresh.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct CacheEntry {
     /// BLAKE3 hash of (content || "\0" || model_uri),
@@ -533,12 +855,6 @@ struct CacheEntry {
     model: String,
     /// Token count from tiktoken BPE (model-independent; stored here for convenience).
     token_count: usize,
-    /// Fan-in count from the dependency graph (model-independent).
-    fan_in: usize,
-    /// Fan-out count from the dependency graph (model-independent).
-    fan_out: usize,
-    /// Graph complexity = fan_in + fan_out.
-    graph_complexity: usize,
     /// Number of estimates used to produce the median.
     #[serde(default = "default_estimates")]
     estimates: usize,
@@ -571,8 +887,8 @@ fn compute_cache_key(content: &str, model_uri: &str, estimates: usize) -> String
 /// Load a JSONL cache file, returning a map keyed by `CacheEntry::key`.
 ///
 /// An empty or missing file is treated as a cold cache (empty map).
-/// Any line that is not valid JSON or fails to deserialize as a [`CacheEntry`]
-/// produces an error that includes the file path and 1-based line number.
+/// Lines that are not valid JSON or fail to deserialize as a [`CacheEntry`]
+/// are skipped with a warning (run with `--clear-cache` to rebuild).
 fn load_cache(path: &Path) -> Result<HashMap<String, CacheEntry>, String> {
     if !path.exists() {
         return Ok(HashMap::new());
@@ -582,14 +898,21 @@ fn load_cache(path: &Path) -> Result<HashMap<String, CacheEntry>, String> {
     let mut map = HashMap::new();
     for (line_no, line) in content.lines().enumerate() {
         let line = line.trim();
-        let entry: CacheEntry = serde_json::from_str(line).map_err(|e| {
-            format!(
-                "{}:{}: invalid cache entry: {e}",
-                path.display(),
-                line_no + 1
-            )
-        })?;
-        map.insert(entry.key.clone(), entry);
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<CacheEntry>(line) {
+            Ok(entry) => {
+                map.insert(entry.key.clone(), entry);
+            }
+            Err(e) => {
+                eprintln!(
+                    "  WARNING: {}:{}: skipping invalid cache entry: {e}. Run with --clear-cache to rebuild.",
+                    path.display(),
+                    line_no + 1
+                );
+            }
+        }
     }
     Ok(map)
 }
@@ -631,8 +954,114 @@ fn resolve_comprehensibility_model(cli_model: Option<&str>) -> Result<String, St
     gremlins::config::resolve_model_with_global(&spec)
 }
 
-/// Shared comprehensibility cache: the JSONL file path it is persisted to.
-type CacheState = PathBuf;
+/// Build a compact structural skeleton for a source file, suitable for
+/// prepending to the LLM prompt. Uses the landscape scanner for item-level
+/// structure and source text for line counts.
+fn build_file_skeleton(source: &str, extension: &str) -> String {
+    use std::collections::BTreeMap;
+
+    let total_lines = source.lines().count();
+
+    // Run the landscape scanner on the raw source (same regex the explorer
+    // uses) to get outline items with test modules collapsed.
+    let items = gremlins::landscape::heuristic::scan(extension, source, true);
+    let items_no_collapse = gremlins::landscape::heuristic::scan(extension, source, false);
+
+    // Count production functions (non-test)
+    let prod_fns: Vec<_> = items.iter().filter(|i| i.kind == "fn").collect();
+    let test_fns: Vec<_> = items_no_collapse
+        .iter()
+        .filter(|i| i.kind == "fn")
+        .collect();
+    let test_fn_count = test_fns.len().saturating_sub(prod_fns.len());
+
+    // Submodule count (mod items not named "tests")
+    let submodule_count = items
+        .iter()
+        .filter(|i| i.kind == "mod" && i.name != "tests")
+        .count();
+
+    // Largest function: approximate by computing spans between consecutive items
+    let mut largest_fn_lines = 0usize;
+    let mut all_items_sorted: Vec<(usize, &str, &str)> = items
+        .iter()
+        .map(|i| (i.line, i.kind, i.name.as_str()))
+        .collect();
+    all_items_sorted.sort_by_key(|(l, _, _)| *l);
+    for w in all_items_sorted.windows(2) {
+        if w[0].1 == "fn" {
+            let span = w[1].0.saturating_sub(w[0].0);
+            if span > largest_fn_lines {
+                largest_fn_lines = span;
+            }
+        }
+    }
+    // Also check the last item if it's a function
+    if let Some(last) = all_items_sorted.last() {
+        if last.1 == "fn" {
+            let span = total_lines.saturating_sub(last.0);
+            if span > largest_fn_lines {
+                largest_fn_lines = span;
+            }
+        }
+    }
+
+    // Estimate test ratio: find the mod tests entry and compute its span
+    let test_ratio_pct =
+        if let Some(test_mod) = items.iter().find(|i| i.name == "tests" && i.kind == "mod") {
+            // Approximate: the test module starts at test_mod.line and goes to end of file
+            let test_lines = total_lines.saturating_sub(test_mod.line.saturating_sub(1));
+            ((test_lines as f64 / total_lines as f64) * 100.0) as usize
+        } else {
+            0
+        };
+
+    // Concern clusters: group fns by prefix heuristic
+    let mut clusters: BTreeMap<String, usize> = BTreeMap::new();
+    for item in &prod_fns {
+        let prefix = item.name.split('_').next().unwrap_or(&item.name);
+        *clusters.entry(prefix.to_string()).or_default() += 1;
+    }
+    // Only show clusters with >= 2 fns
+    let cluster_parts: Vec<String> = clusters
+        .iter()
+        .filter(|(_, &c)| c >= 2)
+        .map(|(prefix, count)| format!("{prefix} ({count} fns)"))
+        .collect();
+
+    // Format outline items compactly
+    let mut outline_parts: Vec<String> = Vec::new();
+    for item in &items {
+        outline_parts.push(format!(
+            "  {}|{}|{}",
+            item.line,
+            item.kind,
+            gremlins::landscape::escape_landscape_delimiters(&item.name)
+        ));
+    }
+
+    let mut skeleton = String::new();
+    skeleton.push_str(&format!(
+        "FILE SHAPE: {total_lines} lines, {} functions, {} submodules, {} test functions\n",
+        prod_fns.len(),
+        submodule_count,
+        test_fn_count,
+    ));
+    if largest_fn_lines > 0 {
+        skeleton.push_str(&format!(
+            "Largest function span: ~{largest_fn_lines} lines\n"
+        ));
+    }
+    skeleton.push_str(&format!("Test ratio: {test_ratio_pct}% of file\n"));
+    skeleton.push_str(&format!("Submodule count: {submodule_count}\n"));
+    if !cluster_parts.is_empty() {
+        skeleton.push_str(&format!("Concern clusters: {}\n", cluster_parts.join(", ")));
+    }
+    skeleton.push_str("\nStructure:\n");
+    skeleton.push_str(&outline_parts.join("\n"));
+
+    skeleton
+}
 
 /// Handle for a single comprehensibility scoring task.
 /// On success returns all the info needed to compute the median and write the cache.
@@ -647,7 +1076,7 @@ struct CompEstimate {
     abs_path: String,
     model_spec: String,
     cache_key: String,
-    cached_metrics: Option<(usize, usize, usize, usize)>,
+    token_count: usize,
     breakdown: ComprehensibilityScores,
 }
 
@@ -694,15 +1123,10 @@ async fn score_comprehensibility(
     // Scores collected so far (cache hits go straight here).
     let mut by_module: HashMap<String, Vec<f64>> = HashMap::new();
 
-    // Build a module → metrics lookup from scores for cache-miss writeback.
-    let metrics: HashMap<String, (usize, usize, usize, usize)> = scores
+    // Build a module → token count lookup from scores for cache-miss writeback.
+    let module_tokens: HashMap<String, usize> = scores
         .iter()
-        .map(|s| {
-            (
-                s.module.clone(),
-                (s.token_count, s.fan_in, s.fan_out, s.graph_complexity),
-            )
-        })
+        .map(|s| (s.module.clone(), s.token_count))
         .collect();
 
     for (module, file, _pkg) in modules.iter() {
@@ -737,9 +1161,11 @@ async fn score_comprehensibility(
             .into_owned();
 
         let fence = lang::code_fence(file);
-        let prompt = format!("SOURCE FILE ({module}):\n\n```{fence}\n{source}\n```");
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("rs");
+        let skeleton = build_file_skeleton(&source, ext);
+        let prompt = format!("{skeleton}\n\nSOURCE FILE ({module}):\n\n```{fence}\n{source}\n```");
 
-        let cached_metrics = metrics.get(module.as_str()).copied();
+        let token_count = module_tokens.get(module.as_str()).copied().unwrap_or(0);
 
         for _ in 0..estimates {
             let module = module.clone();
@@ -757,12 +1183,12 @@ async fn score_comprehensibility(
                             let raw: f64 = (c.naming as f64
                                 + c.control_flow as f64
                                 + c.data_flow as f64
-                                + c.abstractions as f64)
-                                / 16.0;
+                                + c.abstractions as f64
+                                + c.cohesion as f64
+                                + c.sizing as f64
+                                + c.test_hygiene as f64)
+                                / 28.0;
                             let score = raw.clamp(0.0, 1.0);
-                            if score >= 1.0 {
-                                eprintln!("  [{module}] WARNING: perfect score (all 4s)");
-                            }
 
                             return Ok(CompEstimate {
                                 module,
@@ -770,7 +1196,7 @@ async fn score_comprehensibility(
                                 abs_path,
                                 model_spec,
                                 cache_key,
-                                cached_metrics,
+                                token_count,
                                 breakdown: c,
                             });
                         }
@@ -857,6 +1283,9 @@ async fn score_comprehensibility(
         };
 
         let med = median(&scores_for_module);
+        if med >= 1.0 {
+            eprintln!("  [{module}] WARNING: perfect score (all 4s)");
+        }
         eprintln!("  {module}: {med:.3}");
         let s = match scores.iter_mut().find(|s| s.module == *module) {
             Some(s) => s,
@@ -872,24 +1301,18 @@ async fn score_comprehensibility(
         // ── Write a single cache entry with the median score (cache-miss only) ──
         if let Some(estimates_vec) = estimates_map.get(module.as_str()) {
             if let Some(first) = estimates_vec.first() {
-                if let Some(metrics) = first.cached_metrics {
-                    let cp = &cache_state;
-                    let (tc, fi, fo, gc) = metrics;
-                    let entry = CacheEntry {
-                        key: first.cache_key.clone(),
-                        file: first.abs_path.clone(),
-                        model: first.model_spec.clone(),
-                        token_count: tc,
-                        fan_in: fi,
-                        fan_out: fo,
-                        graph_complexity: gc,
-                        estimates,
-                        comprehensibility: med,
-                        breakdown: first.breakdown.clone(),
-                    };
-                    if let Err(e) = append_cache_entry(cp, &entry) {
-                        eprintln!("  [{module}] WARNING: failed to append cache entry: {e}");
-                    }
+                let cp = &cache_state;
+                let entry = CacheEntry {
+                    key: first.cache_key.clone(),
+                    file: first.abs_path.clone(),
+                    model: first.model_spec.clone(),
+                    token_count: first.token_count,
+                    estimates,
+                    comprehensibility: med,
+                    breakdown: first.breakdown.clone(),
+                };
+                if let Err(e) = append_cache_entry(cp, &entry) {
+                    eprintln!("  [{module}] WARNING: failed to append cache entry: {e}");
                 }
             }
         }
@@ -919,17 +1342,37 @@ async fn run_comp_agent(
         .prompt(format!(
             "{prompt}\n\n\
              Score the above source file on comprehensibility.\n\n\
-             Target reader: a competent developer familiar with the language \
-             but unfamiliar with this file.  Do not assume shorter code is \
+             The FILE SHAPE section is a structural skeleton — use it to\n\
+             assess the file's organization before reading the source.\n\n\
+             Target reader: a competent developer familiar with the language \n\
+             but unfamiliar with this file.  Do not assume shorter code is \n\
              better or longer code is clearer.  Do not judge correctness.\n\n\
-             Score four dimensions on a 0-4 scale:\n\
+             Score seven dimensions on a 0-4 scale:\n\
+             — naming: Are identifiers descriptive and consistent?\n\
+             — control_flow: Can loops, branches, and early returns be followed?\n\
+             — data_flow: Can data movement through the module be traced?\n\
+             — abstractions: Are interfaces, types, and layers well-chosen?\n\
+             — cohesion: Does the file have one clear responsibility, or is it a dumping ground?\n\
+             — sizing: Are functions/types well-sized, or are there mega-functions with huge parameter lists?\n\
+             — test_hygiene: Are tests inline and dominant, or cleanly separated from production code?\n\n\
              4: Clear on a first careful reading.\n\
              3: Clear with minor rereading or navigation.\n\
              2: Requires substantial tracing or inference.\n\
              1: Important behavior is obscured.\n\
              0: Cannot reliably understand from supplied context.\n\n\
-             Produce a JSON object with four fields: naming, control_flow,\
-             data_flow, abstractions.  Write the JSON to {{comprehensibility}}."
+             Anchors for the structural dimensions:\n\
+             cohesion: 0=dumping ground (5+ unrelated concerns), 1=3-4 concerns with informal boundaries,\n\
+             2=2-3 concerns with one dominant, 3=primary responsibility + minor secondary,\n\
+             4=single crystal-clear responsibility.\n\
+             sizing: 0=multiple 200+ line functions, 1=at least one 150+ line function,\n\
+             2=mostly reasonable with 1-2 outliers, 3=consistently well-sized (max ~60-80 lines),\n\
+             4=every function fits on screen, minimal params, state in context structs.\n\
+             test_hygiene: 0=tests >50% of file inline, 1=30-50% inline,\n\
+             2=<30% inline, 3=cleanly separated at bottom in single test module,\n\
+             4=tests in dedicated test files, zero test code in production file.\n\n\
+             Produce a JSON object with seven fields: naming, control_flow, data_flow,\n\
+             abstractions, cohesion, sizing, test_hygiene.\n\
+             Write the JSON to {{comprehensibility}}."
         ))
         .output("comprehensibility", output("artifact://comprehensibility"))
         .landscape(false)
@@ -993,6 +1436,9 @@ async fn run_comp_agent(
         ("control_flow", scores.control_flow),
         ("data_flow", scores.data_flow),
         ("abstractions", scores.abstractions),
+        ("cohesion", scores.cohesion),
+        ("sizing", scores.sizing),
+        ("test_hygiene", scores.test_hygiene),
     ] {
         if val > 4 {
             return Err(CompAgentError::Retryable(format!(
@@ -1005,310 +1451,151 @@ async fn run_comp_agent(
 }
 
 // ---------------------------------------------------------------------------
-// JSON extraction
+// Drag explanation
 // ---------------------------------------------------------------------------
 
-/// Extract a JSON object from an LLM response, handling common failure modes.
-///
-/// Tries these strategies in order:
-/// 1. Strip markdown code fences (` ```json ` / ` ``` `).
-/// 2. Find the outermost `{...}` pair (handles text before/after JSON).
-/// 3. Clean common JSON formatting errors (trailing commas, comments).
-fn extract_json(text: &str) -> Option<String> {
-    let text = text.trim();
+/// Print a self-contained explanation of the drag calculation: the formula,
+/// the comprehensibility and maintainability surveys, and how each factor
+/// responds to change (curves). This is the single source of truth for the
+/// drag model; `gremlins-drag --explain` feeds the drag-optimizer pipeline so
+/// its prompts never hardcode a second copy.
+fn print_explain(w2: f64, m: f64, p: f64) {
+    let factor_footprint = |f: usize| -> f64 { (1.0 + f as f64).powf(w2) };
+    let factor_comp = |c: f64| -> f64 { (m * (1.0 - c)).exp() };
+    let factor_maint = |c: f64| -> f64 { (p * (1.0 - c)).exp() };
 
-    // ── 1. Strip markdown code fences ──
-    let mut inner = text;
+    println!("# Drag model\n");
+    println!("## Formula\n");
+    println!("  drag(m) = (1+footprint)^w2 · exp(m·(1−comprehensibility))");
+    println!("  drag(p) = exp(p·(1−maint)) · Σ drag(m)   (Σ over modules in package p)\n");
+    println!("  The total minimized is the sum of drag across all items:");
+    println!("  - packages present → Σ drag(p)");
+    println!("  - modules only     → Σ drag(m)\n");
+    println!("  `footprint` is the token count of a module plus every module it");
+    println!("  transitively reaches (including itself). Higher drag means the");
+    println!("  module or package is harder to maintain and change.");
+    println!("  Token counts are computed with `#[cfg(test)]` items stripped: test code");
+    println!("  never contributes to token_count or footprint, but it does affect the");
+    println!("  test_hygiene comprehensibility dimension.\n");
 
-    // Strip opening fence: ```json or ``` (possibly with no newline after).
-    inner = inner
-        .strip_prefix("```json")
-        .or_else(|| inner.strip_prefix("```"))
-        .unwrap_or(inner)
-        .trim();
+    println!("## Comprehensibility survey\n");
+    println!("  Comprehensibility is scored by an LLM survey on seven dimensions, each");
+    println!("  rated 0–4 and normalized over 28 points (7×4). Four are classic");
+    println!("  readability dimensions; three are structural dimensions that catch");
+    println!("  file-level pathologies:\n");
+    println!("  1. naming        — Are identifiers descriptive and consistent?");
+    println!("  2. control_flow  — Can loops, branches, and early returns be followed?");
+    println!("  3. data_flow     — Can data movement through the module be traced?");
+    println!("  4. abstractions  — Are interfaces, types, and layers well-chosen?");
+    println!("  5. cohesion      — Does the file have one clear responsibility, or is it");
+    println!("                     a dumping ground? Anchors: 0 = dumping ground (5+ unrelated");
+    println!("                     concerns); 4 = single crystal-clear responsibility.");
+    println!("  6. sizing        — Are functions/types well-sized, or are there mega-functions");
+    println!("                     with huge parameter lists? Anchors: 0 = multiple 200+ line");
+    println!("                     functions; 4 = every function fits on screen, minimal params.");
+    println!("  7. test_hygiene  — Are tests inline and dominant, or cleanly separated from");
+    println!("                     production code? Anchors: 0 = tests >50% of file inline;");
+    println!("                     4 = tests in dedicated test files, zero test code in");
+    println!("                     production file.\n");
+    println!("  A FILE SHAPE skeleton is prepended to the scoring prompt: total lines,");
+    println!("  function count, submodule count, test-function count, largest function");
+    println!("  span, test ratio, concern clusters, and the item outline. Structural");
+    println!("  pathologies — god-files, god-functions, inline test bloat, zero submodules —");
+    println!("  depress the score directly.\n");
 
-    // Strip closing fence: last ``` in the text.
-    if let Some(pos) = inner.rfind("```") {
-        // Only strip if it appears to be a closing fence (at end or on its own line).
-        let tail = inner[pos..].trim();
-        if tail == "```" || tail.starts_with("```\n") || tail.starts_with("```\r") {
-            inner = inner[..pos].trim();
-        }
+    println!("## Package maintainability survey\n");
+    println!("  Package maintainability is scored on ten dimensions, each 0–4,");
+    println!("  normalized over 40 points (10×4). Only computed when packages are");
+    println!("  present and --skip-maintainability is not set.\n");
+    for line in maint::explain_dimensions().lines() {
+        println!("  {line}");
     }
 
-    // ── 2. Find outermost JSON object ──
-    let json_str = find_json_object(inner)?;
-
-    // ── 3. Clean and return ──
-    Some(clean_json(&json_str))
-}
-
-/// Find the outermost `{...}` pair in text, respecting string boundaries.
-fn find_json_object(text: &str) -> Option<String> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut start = None;
-    let mut depth = 0u32;
-    let mut in_string = false;
-    let mut escape = false;
-
-    for (i, &ch) in chars.iter().enumerate() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        if ch == '\\' && in_string {
-            escape = true;
-            continue;
-        }
-        if ch == '"' {
-            in_string = !in_string;
-            continue;
-        }
-        if in_string {
-            continue;
-        }
-        if ch == '{' {
-            if depth == 0 {
-                start = Some(i);
-            }
-            depth += 1;
-        } else if ch == '}' && depth > 0 {
-            depth -= 1;
-            if depth == 0 {
-                let s = start?;
-                return Some(chars[s..=i].iter().collect());
-            }
-        }
-    }
-    None
-}
-
-/// Clean common JSON formatting errors in LLM output:
-/// - `//` line comments
-/// - `/* */` block comments
-/// - Trailing commas before `}` or `]`
-fn clean_json(json: &str) -> String {
-    let mut result = String::with_capacity(json.len());
-    let chars: Vec<char> = json.chars().collect();
-    let mut in_string = false;
-    let mut escape = false;
-    let mut in_block_comment = false;
-    let mut i = 0;
-
-    while i < chars.len() {
-        let ch = chars[i];
-
-        // ── block comment ──
-        if in_block_comment {
-            if ch == '*' && i + 1 < chars.len() && chars[i + 1] == '/' {
-                in_block_comment = false;
-                i += 2;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-
-        // ── string escape ──
-        if escape {
-            escape = false;
-            result.push(ch);
-            i += 1;
-            continue;
-        }
-        if ch == '\\' && in_string {
-            escape = true;
-            result.push(ch);
-            i += 1;
-            continue;
-        }
-
-        // ── string boundary ──
-        if ch == '"' {
-            in_string = !in_string;
-            result.push(ch);
-            i += 1;
-            continue;
-        }
-
-        // Inside a string: copy verbatim.
-        if in_string {
-            result.push(ch);
-            i += 1;
-            continue;
-        }
-
-        // ── line comment ──
-        if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
-            // Skip to end of line.
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-
-        // ── block comment start ──
-        if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
-            in_block_comment = true;
-            i += 2;
-            continue;
-        }
-
-        result.push(ch);
-        i += 1;
+    println!("# Drag curves (w2={w2}, m={m}, p={p})\n");
+    println!("  Footprint factor ((1+footprint)^w2, w2={w2}):");
+    for footprint in [0, 5, 10, 50, 100, 500, 1000, 5000] {
+        println!(
+            "    {footprint:>5} footprint  → {:>10.3}",
+            factor_footprint(footprint)
+        );
     }
 
-    // ── trailing commas ──
-    // Replace `,}` and `,]` with `}` / `]`, handling whitespace between.
-    remove_trailing_commas(&result)
-}
-
-/// Remove commas immediately before `}` or `]`, ignoring whitespace.
-fn remove_trailing_commas(json: &str) -> String {
-    let chars: Vec<char> = json.chars().collect();
-    let mut out = String::with_capacity(json.len());
-    let len = chars.len();
-    let mut i = 0;
-
-    while i < len {
-        let ch = chars[i];
-
-        // Look ahead from a comma: if the next non-whitespace char is } or ],
-        // skip this comma.
-        if ch == ',' {
-            let mut j = i + 1;
-            while j < len
-                && (chars[j] == ' ' || chars[j] == '\t' || chars[j] == '\n' || chars[j] == '\r')
-            {
-                j += 1;
-            }
-            if j < len && (chars[j] == '}' || chars[j] == ']') {
-                // Skip the comma, then copy the whitespace between comma and closer.
-                i += 1; // skip the comma itself
-                while i < j {
-                    out.push(chars[i]);
-                    i += 1;
-                }
-                continue;
-            }
-        }
-
-        out.push(ch);
-        i += 1;
+    println!("\n  Comprehensibility factor (exp(m·(1−comp)), m={m}):");
+    for comp in [0.10, 0.25, 0.50, 0.75, 0.90, 1.00] {
+        println!("    {comp:.2}  → {:>10.3}", factor_comp(comp));
     }
 
-    out
-}
-
-// ---------------------------------------------------------------------------
-// Drag curves
-// ---------------------------------------------------------------------------
-
-fn print_curves(w1: f64, w2: f64, w3: f64, w4: f64, epsilon: f64) {
-    let contrib_tokens = |n: usize| -> f64 { w1 * (n.max(1) as f64).ln() };
-    let contrib_complexity = |c: usize| -> f64 { w2 * (c.max(1) as f64).ln() };
-    let contrib_comp = |c: f64| -> f64 { -w3 * (c + epsilon).ln() };
-    let contrib_consumers = |n: usize| -> f64 { -w4 * ((n + 1).max(1) as f64).ln() };
-
-    println!("Drag curves (w1={w1}, w2={w2}, w3={w3}, w4={w4}, ε={epsilon}):\n");
-
-    println!("  Token count (w1={w1}):");
-    for tokens in [100, 250, 500, 1000, 2000, 5000] {
-        println!("    {tokens:>5} tokens  → {:>7.2}", contrib_tokens(tokens));
+    println!("\n  Maintainability factor (exp(p·(1−maint)), p={p}):");
+    for maint in [0.10, 0.25, 0.50, 0.75, 0.90, 1.00] {
+        println!("    {maint:.2}  → {:>10.3}", factor_maint(maint));
     }
 
-    println!("\n  Graph complexity (w2={w2}):");
-    for c in [1, 5, 10, 20, 50, 100] {
-        println!("    {c:>3}  → {:>7.2}", contrib_complexity(c));
-    }
-
-    println!("\n  Consumers discount (w4={w4}, fan-in):");
-    for n in [0, 1, 2, 3, 5, 10] {
-        println!("    {n:>2} consumers  → {:>7.2}", contrib_consumers(n));
-    }
-
-    println!("\n  Comprehensibility (w3={w3}, ε={epsilon}):");
-    for comp in [0.10, 0.25, 0.50, 0.75, 0.90] {
-        println!("    {comp:.2}  → {:>7.2}", contrib_comp(comp));
-    }
-
-    println!("\n  Higher positive values = more drag.");
-    println!("  Negative values (consumers, comprehensibility) reduce drag.");
+    println!("\n  All factors are multiplied together; larger values mean more drag.");
+    println!("  Comprehensibility below 1.0 amplifies drag by up to exp(m).");
+    println!("  Maintainability below 1.0 amplifies package drag by up to exp(p).");
 }
 
 // ---------------------------------------------------------------------------
 // Output
 // ---------------------------------------------------------------------------
 
-fn print_human_table(scores: &[ModuleDrag]) {
+fn print_human_table(scores: &[ModuleDrag], package_drags: &[PackageDrag], skip_maint: bool) {
     // Show a "comp" column only when every module was scored (i.e. after a
     // successful comprehensibility run). When unscored, all are None.
     let has_comp = scores.iter().all(|s| s.comprehensibility.is_some());
 
     if has_comp {
         println!(
-            "{:<55} {:>8} {:>8} {:>8} {:>12} {:>6} {:>10}",
-            "module", "tokens", "fan-in", "fan-out", "complexity", "comp", "drag (ln)"
+            "{:<55} {:>8} {:>10} {:>6} {:>14}",
+            "module", "tokens", "footprint", "comp", "drag"
         );
-        println!("{}", "-".repeat(116));
+        println!("{}", "-".repeat(97));
     } else {
         println!(
-            "{:<55} {:>8} {:>8} {:>8} {:>12} {:>10}",
-            "module", "tokens", "fan-in", "fan-out", "complexity", "drag (ln)"
+            "{:<55} {:>8} {:>10} {:>14}",
+            "module", "tokens", "footprint", "drag"
         );
-        println!("{}", "-".repeat(110));
+        println!("{}", "-".repeat(90));
     }
 
     for s in scores {
         if has_comp {
             let c = s.comprehensibility.expect("has_comp guarantees Some");
             println!(
-                "{:<55} {:>8} {:>8} {:>8} {:>12} {:>6.2} {:>10.2}",
+                "{:<55} {:>8} {:>10} {:>6.2} {:>14.1}",
                 truncate(&s.module, 54),
                 s.token_count,
-                s.fan_in,
-                s.fan_out,
-                s.graph_complexity,
+                s.footprint,
                 c,
-                s.ln_drag,
+                s.drag,
             );
         } else {
             println!(
-                "{:<55} {:>8} {:>8} {:>8} {:>12} {:>10.2}",
+                "{:<55} {:>8} {:>10} {:>14.1}",
                 truncate(&s.module, 54),
                 s.token_count,
-                s.fan_in,
-                s.fan_out,
-                s.graph_complexity,
-                s.ln_drag,
+                s.footprint,
+                s.drag,
             );
         }
     }
-}
 
-fn truncate(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len {
-        return s;
-    }
-    let mut end = max_len;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
-/// Return the median of a non-empty slice of f64 values.
-/// Odd-length: middle element after sort. Even-length: average of the two
-/// middle elements.
-fn median(values: &[f64]) -> f64 {
-    debug_assert!(!values.is_empty(), "median of empty slice");
-    let mut sorted: Vec<f64> = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = sorted.len();
-    if n % 2 == 1 {
-        sorted[n / 2]
-    } else {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    if !skip_maint && !package_drags.is_empty() {
+        println!();
+        println!(
+            "{:<55} {:>12} {:>14} {:>14}",
+            "package", "maint", "Σ module drag", "package drag"
+        );
+        println!("{}", "-".repeat(99));
+        for p in package_drags {
+            println!(
+                "{:<55} {:>12.3} {:>14.1} {:>14.1}",
+                truncate(&p.package, 54),
+                p.maint_score,
+                p.module_drag_sum,
+                p.drag,
+            );
+        }
     }
 }
 
@@ -1323,71 +1610,10 @@ mod tests {
     }
 
     #[test]
-    fn computes_degrees() {
-        let edges = vec![
-            ("a".to_string(), "b".to_string()),
-            ("a".to_string(), "c".to_string()),
-            ("b".to_string(), "c".to_string()),
-        ];
-        let (fan_out, fan_in) = compute_degrees(&edges);
-        assert_eq!(fan_out.get("a"), Some(&2));
-        assert_eq!(fan_out.get("b"), Some(&1));
-        assert_eq!(fan_in.get("c"), Some(&2));
-        assert_eq!(fan_in.get("b"), Some(&1));
-    }
-
-    #[test]
-    fn self_edges_filtered() {
-        let edges = vec![
-            ("a".to_string(), "a".to_string()),
-            ("a".to_string(), "b".to_string()),
-            ("b".to_string(), "b".to_string()),
-        ];
-        let (fan_out, fan_in) = compute_degrees(&edges);
-        // Self-edges are excluded; only a→b is counted.
-        assert_eq!(fan_out.get("a"), Some(&1));
-        assert_eq!(fan_in.get("b"), Some(&1));
-        // a→a and b→b are not present in either map.
-        assert_eq!(fan_in.get("a"), None);
-        assert_eq!(fan_out.get("b"), None);
-    }
-
-    #[test]
     fn truncate_is_char_boundary_safe() {
         // "é" is two bytes; cutting at byte 1 would be a non-boundary.
         assert_eq!(truncate("éx", 1), "");
         assert_eq!(truncate("abc", 2), "ab");
-    }
-
-    #[test]
-    fn ln_drag_omits_comprehensibility_term_when_unscored() {
-        let no_comp = compute_ln_drag(
-            &DragConfig {
-                w1: 1.0,
-                w2: 0.4,
-                w3: 0.4,
-                w4: 2.0,
-                epsilon: 0.01,
-            },
-            100,
-            2,
-            0,
-            None,
-        );
-        let with_comp = compute_ln_drag(
-            &DragConfig {
-                w1: 1.0,
-                w2: 0.4,
-                w3: 0.4,
-                w4: 2.0,
-                epsilon: 0.01,
-            },
-            100,
-            2,
-            0,
-            Some(1.0),
-        );
-        assert!((no_comp - with_comp - 0.4 * 1.01f64.ln()).abs() < 1e-12);
     }
 
     // ── JSON extraction tests ──
@@ -1396,17 +1622,17 @@ mod tests {
     fn extract_plain_json() {
         let raw = r#"{"naming": 3, "control_flow": 2, "data_flow": 2, "abstractions": 3}"#;
         let extracted = extract_json(raw).unwrap();
-        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
-        assert_eq!(scores.naming, 3);
-        assert_eq!(scores.control_flow, 2);
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
+        assert_eq!(scores["control_flow"], 2);
     }
 
     #[test]
     fn extract_json_fenced() {
         let raw = "```json\n{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3}\n```";
         let extracted = extract_json(raw).unwrap();
-        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
-        assert_eq!(scores.naming, 3);
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
     }
 
     #[test]
@@ -1414,40 +1640,40 @@ mod tests {
         let raw =
             "```\n{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3}\n```";
         let extracted = extract_json(raw).unwrap();
-        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
-        assert_eq!(scores.naming, 3);
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
     }
 
     #[test]
     fn extract_json_with_text_before() {
         let raw = "Here is my assessment of the file:\n\n{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3}\n\nHope that helps.";
         let extracted = extract_json(raw).unwrap();
-        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
-        assert_eq!(scores.naming, 3);
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
     }
 
     #[test]
     fn extract_json_with_trailing_comma() {
         let raw = "{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3,}";
         let extracted = extract_json(raw).unwrap();
-        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
-        assert_eq!(scores.naming, 3);
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
     }
 
     #[test]
     fn extract_json_with_line_comment() {
         let raw = "{\n// scoring notes\n\"naming\": 3,\n\"control_flow\": 2,\n\"data_flow\": 2,\n\"abstractions\": 3\n}";
         let extracted = extract_json(raw).unwrap();
-        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
-        assert_eq!(scores.naming, 3);
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
     }
 
     #[test]
     fn extract_json_with_block_comment() {
         let raw = "{\n/* scoring notes */\n\"naming\": 3,\n\"control_flow\": 2,\n\"data_flow\": 2,\n\"abstractions\": 3\n}";
         let extracted = extract_json(raw).unwrap();
-        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
-        assert_eq!(scores.naming, 3);
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
     }
 
     #[test]
@@ -1455,8 +1681,8 @@ mod tests {
         // The most common failure mode: markdown fence, trailing comma, extra text.
         let raw = "Here's the score:\n\n```json\n{\n  \"naming\": 3,\n  \"control_flow\": 2,\n  \"data_flow\": 2,\n  \"abstractions\": 3,\n}\n```\n\nLet me know if you need anything else.";
         let extracted = extract_json(raw).unwrap();
-        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
-        assert_eq!(scores.naming, 3);
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
     }
 
     #[test]
@@ -1464,8 +1690,8 @@ mod tests {
         let raw =
             "```json\n{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3}";
         let extracted = extract_json(raw).unwrap();
-        let scores: ComprehensibilityScores = serde_json::from_str(&extracted).unwrap();
-        assert_eq!(scores.naming, 3);
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
     }
 
     #[test]
@@ -1480,16 +1706,6 @@ mod tests {
     #[test]
     fn extract_json_no_braces_returns_none() {
         assert!(extract_json("just some text, no json here").is_none());
-    }
-
-    #[test]
-    fn remove_trailing_comma_before_brace() {
-        assert_eq!(remove_trailing_commas("{\"a\": 1,}"), "{\"a\": 1}");
-    }
-
-    #[test]
-    fn remove_trailing_comma_with_newline() {
-        assert_eq!(remove_trailing_commas("{\"a\": 1,\n}"), "{\"a\": 1\n}");
     }
 
     // ── median tests ──
@@ -1544,44 +1760,31 @@ mod tests {
     }
 
     #[test]
-    fn load_cache_blank_line_errors() {
+    fn load_cache_blank_lines_skipped() {
         let dir = std::env::temp_dir().join("drag-test-blank-line");
         let _ = std::fs::create_dir_all(&dir);
         let cache_path = dir.join("cache.jsonl");
-        // Write a file where line 2 is blank.
+        // Line 2 is blank; it should be skipped, leaving the valid entry.
         std::fs::write(
             &cache_path,
-            "{\"key\":\"abc\",\"file\":\"/f.rs\",\"model\":\"m\",\"token_count\":10,\"fan_in\":0,\"fan_out\":0,\"graph_complexity\":0,\"comprehensibility\":0.5,\"breakdown\":{\"naming\":2,\"control_flow\":2,\"data_flow\":2,\"abstractions\":2}}\n\n",
+            "{\"key\":\"abc\",\"file\":\"/f.rs\",\"model\":\"m\",\"token_count\":10,\"comprehensibility\":0.5,\"breakdown\":{\"naming\":2,\"control_flow\":2,\"data_flow\":2,\"abstractions\":2,\"cohesion\":1,\"sizing\":1,\"test_hygiene\":1}}\n\n",
         )
         .unwrap();
-        let err = load_cache(&cache_path).unwrap_err();
+        let map = load_cache(&cache_path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(
-            err.contains(&cache_path.display().to_string()),
-            "error should contain cache file path, got: {err}"
-        );
-        assert!(
-            err.contains(":2:"),
-            "error should mention line 2, got: {err}"
-        );
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("abc"));
     }
 
     #[test]
-    fn load_cache_malformed_line_errors_with_line_number() {
+    fn load_cache_malformed_line_skipped() {
         let dir = std::env::temp_dir().join("drag-test-malformed");
         let _ = std::fs::create_dir_all(&dir);
         let cache_path = dir.join("cache.jsonl");
         std::fs::write(&cache_path, "not valid json\n").unwrap();
-        let err = load_cache(&cache_path).unwrap_err();
+        let map = load_cache(&cache_path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(
-            err.contains(&cache_path.display().to_string()),
-            "error should contain cache file path, got: {err}"
-        );
-        assert!(
-            err.contains(":1:"),
-            "error should mention line 1, got: {err}"
-        );
+        assert!(map.is_empty());
     }
 
     #[test]
@@ -1589,7 +1792,7 @@ mod tests {
         let dir = std::env::temp_dir().join("drag-test-valid");
         let _ = std::fs::create_dir_all(&dir);
         let cache_path = dir.join("cache.jsonl");
-        let line = "{\"key\":\"deadbeef12345678\",\"file\":\"/src/main.rs\",\"model\":\"openai/gpt-4o\",\"token_count\":42,\"fan_in\":1,\"fan_out\":2,\"graph_complexity\":3,\"comprehensibility\":0.75,\"breakdown\":{\"naming\":3,\"control_flow\":3,\"data_flow\":3,\"abstractions\":3}}\n";
+        let line = "{\"key\":\"deadbeef12345678\",\"file\":\"/src/main.rs\",\"model\":\"openai/gpt-4o\",\"token_count\":42,\"comprehensibility\":0.75,\"breakdown\":{\"naming\":3,\"control_flow\":3,\"data_flow\":3,\"abstractions\":3,\"cohesion\":3,\"sizing\":3,\"test_hygiene\":3}}\n";
         std::fs::write(&cache_path, line).unwrap();
         let map = load_cache(&cache_path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -1597,6 +1800,19 @@ mod tests {
         let entry = map.get("deadbeef12345678").unwrap();
         assert_eq!(entry.comprehensibility, 0.75);
         assert_eq!(entry.breakdown.naming, 3);
+    }
+
+    #[test]
+    fn load_cache_accepts_v1_entries_ignoring_graph_fields() {
+        let dir = std::env::temp_dir().join("drag-test-v1-reject");
+        let _ = std::fs::create_dir_all(&dir);
+        let cache_path = dir.join("cache.jsonl");
+        let line = "{\"key\":\"deadbeef12345678\",\"file\":\"/src/main.rs\",\"model\":\"openai/gpt-4o\",\"token_count\":42,\"fan_in\":1,\"fan_out\":2,\"graph_complexity\":3,\"comprehensibility\":0.75,\"breakdown\":{\"naming\":3,\"control_flow\":3,\"data_flow\":3,\"abstractions\":3,\"cohesion\":3,\"sizing\":3,\"test_hygiene\":3}}\n";
+        std::fs::write(&cache_path, line).unwrap();
+        let map = load_cache(&cache_path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("deadbeef12345678"));
     }
 
     #[test]
@@ -1609,9 +1825,6 @@ mod tests {
             file: "/abs/path/module.rs".to_string(),
             model: "openai/gpt-4o".to_string(),
             token_count: 100,
-            fan_in: 2,
-            fan_out: 3,
-            graph_complexity: 5,
             estimates: 1,
             comprehensibility: 0.5,
             breakdown: ComprehensibilityScores {
@@ -1619,6 +1832,9 @@ mod tests {
                 control_flow: 2,
                 data_flow: 2,
                 abstractions: 2,
+                cohesion: 0,
+                sizing: 0,
+                test_hygiene: 0,
             },
         };
         append_cache_entry(&cache_path, &entry).unwrap();
@@ -1629,5 +1845,45 @@ mod tests {
         assert_eq!(loaded.comprehensibility, 0.5);
         assert_eq!(loaded.file, "/abs/path/module.rs");
         assert_eq!(loaded.model, "openai/gpt-4o");
+    }
+
+    // ── strip_cfg_test ──────────────────────────────────────────────
+
+    #[test]
+    fn strip_cfg_test_removes_test_module() {
+        let src =
+            "fn main() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn it_works() {}\n}\n";
+        let stripped = strip_cfg_test(src).unwrap();
+        // The test module should be gone, main should remain.
+        assert!(stripped.contains("fn main"));
+        assert!(!stripped.contains("it_works"));
+    }
+    #[test]
+    fn strip_cfg_test_keeps_regular_module() {
+        let src = "pub mod util {\n    pub fn helper() {}\n}\n";
+        let stripped = strip_cfg_test(src).unwrap();
+        assert!(stripped.contains("mod util"));
+        assert!(stripped.contains("fn helper"));
+    }
+    #[test]
+    fn strip_cfg_test_parse_failure_is_error() {
+        let src = "fn broken(\n";
+        let result = strip_cfg_test(src);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn strip_cfg_test_strips_cfg_test_fn() {
+        let src = "fn main() {}\n\n#[cfg(test)]\nfn test_helper() {}\n";
+        let stripped = strip_cfg_test(src).unwrap();
+        assert!(stripped.contains("fn main"));
+        assert!(!stripped.contains("test_helper"));
+    }
+    #[test]
+    fn strip_cfg_test_strips_cfg_test_impl() {
+        let src = "struct Foo;\n\n#[cfg(test)]\nimpl Foo {\n    fn test_stuff() {}\n}\n";
+        let stripped = strip_cfg_test(src).unwrap();
+        assert!(stripped.contains("struct Foo"));
+        assert!(!stripped.contains("test_stuff"));
     }
 }

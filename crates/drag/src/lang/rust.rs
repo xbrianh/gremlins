@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -182,12 +183,19 @@ fn run_cargo_modules_dependencies(pkg_name: &str, manifest_path: &Path) -> Resul
 }
 
 /// Produce the dependency-graph edges for a Rust package.
-pub(super) fn rust_dependency_graph(
-    pkg_name: &str,
-    manifest_path: &Path,
-) -> Result<Vec<(String, String)>, String> {
-    let dot = run_cargo_modules_dependencies(pkg_name, manifest_path)?;
-    Ok(parse_dot(&dot))
+///
+/// After parsing the `cargo modules` DOT output, edges whose source module is
+/// a re-export-only facade are dropped.
+pub(super) fn rust_dependency_graph(pkg: &RustPackage) -> Result<Vec<(String, String)>, String> {
+    // `pkg.dir` is the canonicalized directory containing the package's
+    // Cargo.toml. `cargo modules` resolves the workspace by walking up from
+    // that manifest, so the package manifest is a valid anchor even when the
+    // process CWD is outside the workspace.
+    let manifest_path = pkg.dir.join("Cargo.toml");
+    let dot = run_cargo_modules_dependencies(&pkg.pkg_name, &manifest_path)?;
+    let mut edges = parse_dot(&dot);
+    filter_reexport_only_edges(&mut edges, pkg);
+    Ok(edges)
 }
 
 /// Parse DOT output, returning the list of dependency edges.
@@ -215,6 +223,470 @@ fn parse_dot(dot: &str) -> Vec<(String, String)> {
     }
 
     edges
+}
+
+// ---------------------------------------------------------------------------
+// Re-export-only facade heuristic
+// ---------------------------------------------------------------------------
+
+/// Rewire dependency edges that pass through re-export-only facade modules.
+///
+/// A facade module's source file contains only doc comments, `pub use`
+/// statements, `mod` declarations, and stray semicolons. Such modules are
+/// mostly public surface area re-exporting other modules.  Instead of
+/// dropping facade-originating edges (which would undercount transitive
+/// `deps` for every importer), we splice importers directly to the facade's
+/// own dependencies.  Edges into a facade (`importer → facade`) are removed
+/// because the splice replaces them, while a facade's own outgoing edges are
+/// preserved when it has no importers so its footprint is not collapsed.
+fn filter_reexport_only_edges(edges: &mut Vec<(String, String)>, pkg: &RustPackage) {
+    let file_map = module_file_map(pkg);
+    let mut facade_cache: HashMap<String, bool> = HashMap::new();
+
+    let mut is_facade = |m: &str| -> bool {
+        *facade_cache.entry(m.to_string()).or_insert_with(|| {
+            file_map
+                .get(m)
+                .map(|file| is_reexport_only_module(file))
+                .unwrap_or(false)
+        })
+    };
+
+    // Build adjacency for rewiring: importers → facade, facade → exports.
+    let mut importers: HashMap<String, Vec<String>> = HashMap::new();
+    let mut exports: HashMap<String, Vec<String>> = HashMap::new();
+    for (src, dst) in edges.iter() {
+        if is_facade(src) {
+            exports.entry(src.clone()).or_default().push(dst.clone());
+        }
+        if is_facade(dst) {
+            importers.entry(dst.clone()).or_default().push(src.clone());
+        }
+    }
+
+    // Collect rewired edges: for each facade, every (importer → export).
+    let mut splice: Vec<(String, String)> = Vec::new();
+    for facade in exports.keys() {
+        let imps = importers.get(facade);
+        let exps = exports.get(facade);
+        if let (Some(imps), Some(exps)) = (imps, exps) {
+            for s in imps {
+                for d in exps {
+                    if s != d {
+                        splice.push((s.clone(), d.clone()));
+                    }
+                }
+            }
+        }
+    }
+
+    // Strategy:
+    // 1. Keep ALL original edges (don't drop importer→facade edges — the
+    //    facade's own tokens and transitive deps still count toward the
+    //    importer's footprint).
+    // 2. Append splice edges so that re-exports through facades are
+    //    not hidden.  Duplicates are deduped below.
+    let mut kept: Vec<(String, String)> = Vec::with_capacity(edges.len() + splice.len());
+    for (src, dst) in edges.drain(..) {
+        kept.push((src, dst));
+    }
+    kept.extend(splice);
+    // Deduplicate (splice may produce edges that already existed).
+    kept.sort();
+    kept.dedup();
+    *edges = kept;
+}
+
+/// Map every module in the package's `src/` tree to its source file.
+fn module_file_map(pkg: &RustPackage) -> HashMap<String, PathBuf> {
+    let src_dir = pkg.dir.join("src");
+    let mut map = HashMap::new();
+    let files = match super::collect_source_files(&src_dir) {
+        Ok(files) => files,
+        Err(_) => return map,
+    };
+
+    for file in files {
+        if let Ok(rel) = file.strip_prefix(&src_dir) {
+            if let Some(module) = file_rel_to_module(rel, &pkg.target_name, pkg.is_bin) {
+                map.insert(module, file);
+            }
+        }
+    }
+    map
+}
+
+/// Read a module's source and decide whether it is a re-export-only facade.
+fn is_reexport_only_module(file: &Path) -> bool {
+    let src = match std::fs::read_to_string(file) {
+        Ok(src) => src,
+        Err(_) => return false,
+    };
+    let no_comments = strip_all_comments(&src);
+    let no_attrs = strip_attributes(&no_comments);
+    is_reexport_only_body(&no_attrs)
+}
+
+/// Strip all Rust comments — line (`//` including `///` / `//!`) and block
+/// (`/* … */` including `/** … */` / `/*! … */`).
+fn strip_all_comments(src: &str) -> String {
+    let chars: Vec<char> = src.chars().collect();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escape = false;
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        // Handle escapes inside string/char literals
+        if escape {
+            escape = false;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == '\\' && (in_string || in_char) {
+            escape = true;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+
+        // String/char boundaries
+        if ch == '"' && !in_char {
+            in_string = !in_string;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == '\'' && !in_string {
+            in_char = !in_char;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+
+        // Inside literals: copy verbatim
+        if in_string || in_char {
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+
+        // Line comment: // …
+        if chars[i] == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Block comment: /* … */
+        if chars[i] == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i = if i + 1 < chars.len() {
+                i + 2
+            } else {
+                chars.len()
+            };
+            continue;
+        }
+
+        out.push(chars[i]);
+        i += 1;
+    }
+
+    out
+}
+
+/// Strip Rust outer and inner attributes (`#[…]` and `#![…]`), including
+/// nested brackets.
+fn strip_attributes(src: &str) -> String {
+    let chars: Vec<char> = src.chars().collect();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escape = false;
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        if escape {
+            escape = false;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == '\\' && (in_string || in_char) {
+            escape = true;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == '"' && !in_char {
+            in_string = !in_string;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == '\'' && !in_string {
+            in_char = !in_char;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if in_string || in_char {
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+
+        if chars[i] == '#' && i + 1 < chars.len() && chars[i + 1] == '[' {
+            i += 2;
+            let mut depth = 1u32;
+            let mut in_str = false;
+            let mut in_ch = false;
+            let mut esc = false;
+            while i < chars.len() && depth > 0 {
+                let c = chars[i];
+                if esc {
+                    esc = false;
+                    i += 1;
+                    continue;
+                }
+                if c == '\\' && (in_str || in_ch) {
+                    esc = true;
+                    i += 1;
+                    continue;
+                }
+                if c == '"' && !in_ch {
+                    in_str = !in_str;
+                } else if c == '\'' && !in_str {
+                    in_ch = !in_ch;
+                } else if !in_str && !in_ch {
+                    match c {
+                        '[' => depth += 1,
+                        ']' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if chars[i] == '#' && i + 2 < chars.len() && chars[i + 1] == '!' && chars[i + 2] == '[' {
+            i += 3;
+            let mut depth = 1u32;
+            let mut in_str = false;
+            let mut in_ch = false;
+            let mut esc = false;
+            while i < chars.len() && depth > 0 {
+                let c = chars[i];
+                if esc {
+                    esc = false;
+                    i += 1;
+                    continue;
+                }
+                if c == '\\' && (in_str || in_ch) {
+                    esc = true;
+                    i += 1;
+                    continue;
+                }
+                if c == '"' && !in_ch {
+                    in_str = !in_str;
+                } else if c == '\'' && !in_str {
+                    in_ch = !in_ch;
+                } else if !in_str && !in_ch {
+                    match c {
+                        '[' => depth += 1,
+                        ']' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                i += 1;
+            }
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+
+    out
+}
+
+/// Decide whether a comment-and-attribute-free body contains only `pub use`
+/// (including `pub(crate) use`, `pub(super) use`, etc.), private `use`,
+/// `pub mod`, `pub(crate) mod` (and other visibility-restricted `mod` forms),
+/// `mod`, and stray semicolons.  `mod` declarations are only accepted in
+/// semicolon form (`mod foo;`), not block form (`mod foo { … }`).
+fn is_reexport_only_body(mut body: &str) -> bool {
+    loop {
+        body = body.trim_start();
+        if body.is_empty() {
+            return true;
+        }
+
+        if let Some(rest) = body.strip_prefix(';') {
+            body = rest;
+            continue;
+        }
+
+        // pub use, pub(crate) use, pub(super) use, pub(in path) use, …
+        if let Some(after_kw) = strip_pub_use(body) {
+            match skip_to_stmt_end(after_kw) {
+                Some(rest) => {
+                    body = rest;
+                    continue;
+                }
+                None => return false,
+            }
+        }
+
+        // pub mod foo;  (semicolon form only — block form is not a facade)
+        if let Some(after_kw) = strip_keyword(body, "pub mod") {
+            match skip_to_stmt_end(after_kw) {
+                Some(rest) => {
+                    body = rest;
+                    continue;
+                }
+                None => return false,
+            }
+        }
+
+        // pub(crate) mod foo;, pub(super) mod foo;, pub(in path) mod foo;
+        if let Some(after_kw) = strip_pub_mod(body) {
+            match skip_to_stmt_end(after_kw) {
+                Some(rest) => {
+                    body = rest;
+                    continue;
+                }
+                None => return false,
+            }
+        }
+
+        // use ...; (private use)
+        if let Some(after_kw) = strip_keyword(body, "use") {
+            match skip_to_stmt_end(after_kw) {
+                Some(rest) => {
+                    body = rest;
+                    continue;
+                }
+                None => return false,
+            }
+        }
+
+        // mod foo;  (semicolon form only)
+        if let Some(after_kw) = strip_keyword(body, "mod") {
+            match skip_to_stmt_end(after_kw) {
+                Some(rest) => {
+                    body = rest;
+                    continue;
+                }
+                None => return false,
+            }
+        }
+
+        return false;
+    }
+}
+
+/// Strip `pub` optionally followed by `(path)` then the `use` keyword.
+fn strip_pub_use(s: &str) -> Option<&str> {
+    let rest = s.strip_prefix("pub")?;
+    let rest = rest.trim_start();
+
+    // Optionally strip visibility restriction: (crate), (super), (in path), …
+    let rest = if let Some(inner) = rest.strip_prefix('(') {
+        let close = inner.find(')')?;
+        inner[close + 1..].trim_start()
+    } else {
+        rest
+    };
+
+    strip_keyword(rest, "use")
+}
+
+/// Strip `pub` optionally followed by `(path)` then the `mod` keyword.
+fn strip_pub_mod(s: &str) -> Option<&str> {
+    let rest = s.strip_prefix("pub")?;
+    let rest = rest.trim_start();
+    let rest = if let Some(inner) = rest.strip_prefix('(') {
+        let close = inner.find(')')?;
+        inner[close + 1..].trim_start()
+    } else {
+        rest
+    };
+    strip_keyword(rest, "mod")
+}
+
+/// Skip to the end of a statement: find the next `;` at bracket-depth zero
+/// (outside `()`, `[]`, `{}`).  Returns `None` when no such `;` exists
+/// (e.g. `mod foo { … }` with a block body), which signals a non-facade.
+fn skip_to_stmt_end(s: &str) -> Option<&str> {
+    let mut depth_paren = 0u32;
+    let mut depth_bracket = 0u32;
+    let mut depth_brace = 0u32;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escape = false;
+
+    for (i, ch) in s.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' && (in_string || in_char) {
+            escape = true;
+            continue;
+        }
+        if ch == '"' && !in_char {
+            in_string = !in_string;
+            continue;
+        }
+        if ch == '\'' && !in_string {
+            in_char = !in_char;
+            continue;
+        }
+        if in_string || in_char {
+            continue;
+        }
+        match ch {
+            '(' => depth_paren += 1,
+            ')' => {
+                depth_paren = depth_paren.saturating_sub(1);
+            }
+            '[' => depth_bracket += 1,
+            ']' => {
+                depth_bracket = depth_bracket.saturating_sub(1);
+            }
+            '{' => depth_brace += 1,
+            '}' => {
+                depth_brace = depth_brace.saturating_sub(1);
+            }
+            ';' if depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 => {
+                // s[i..] is the rest starting from the char after ';'
+                // i is a byte offset from char_indices
+                return Some(&s[i + ch.len_utf8()..]);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+/// Strip `keyword` from the front of `s`, requiring a word boundary after it.
+fn strip_keyword<'a>(s: &'a str, keyword: &str) -> Option<&'a str> {
+    let rest = s.strip_prefix(keyword)?;
+    match rest.chars().next() {
+        None => Some(rest),
+        Some(c) if c.is_whitespace() || c == ';' => Some(rest),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +741,143 @@ fn file_rel_to_module(rel: &Path, target_name: &str, is_bin: bool) -> Option<Str
     Some(format!("{crate_name}::{module_path}"))
 }
 
+// ---------------------------------------------------------------------------
+// cfg(test)-gated module detection
+// ---------------------------------------------------------------------------
+
+/// Check whether a module source file is gated behind `#[cfg(test)]` in its
+/// parent module.  For example, when `lib.rs` contains
+/// `#[cfg(test)] mod tests;`, the file `src/tests.rs` is only compiled in
+/// test configuration and should be excluded from token counting and scoring.
+pub(crate) fn is_module_file_cfg_test_gated(file: &Path, pkg: &RustPackage) -> bool {
+    let src_dir = pkg.dir.join("src");
+    let rel = match file.strip_prefix(&src_dir) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let rel_str = rel.to_string_lossy();
+
+    // Crate root files cannot be cfg-test-gated.
+    if rel_str == "lib.rs" || rel_str == "main.rs" {
+        return false;
+    }
+
+    // Determine the module name (the ident after `mod` in the parent).
+    let module_name: String = if rel_str.ends_with("/mod.rs") {
+        // src/foo/mod.rs → the module is "foo"
+        match rel
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+        {
+            Some(n) => n.to_string(),
+            None => return false,
+        }
+    } else {
+        // src/foo.rs or src/foo/bar.rs → stem is the module name
+        match rel.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => return false,
+        }
+    };
+
+    // Find the parent module file that contains `mod <name>;`.
+    let parent_file = parent_module_file(rel, &src_dir, pkg.is_bin);
+    let parent_src = match std::fs::read_to_string(&parent_file) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    has_cfg_test_mod_decl(&parent_src, &module_name)
+}
+
+/// Given a file path relative to `src/`, return the absolute path to the
+/// parent module's source file (the one that declares `mod <name>;`).
+fn parent_module_file(rel: &Path, src_dir: &Path, is_bin: bool) -> PathBuf {
+    let rel_str = rel.to_string_lossy();
+
+    if rel_str.ends_with("/mod.rs") {
+        // src/foo/mod.rs → module is foo.
+        // The immediate parent directory IS the module.
+        // The containing module that declares `mod foo;` is the grandparent.
+        match rel.parent().and_then(|p| p.parent()) {
+            Some(grandparent) if !grandparent.as_os_str().is_empty() => {
+                // src/a/foo/mod.rs → containing module is a
+                let gp_str = grandparent.to_string_lossy();
+                let candidate_rs = src_dir.join(format!("{gp_str}.rs"));
+                if candidate_rs.exists() {
+                    candidate_rs
+                } else {
+                    src_dir.join(grandparent).join("mod.rs")
+                }
+            }
+            _ => {
+                // Top-level: src/foo/mod.rs → containing module is lib.rs or main.rs
+                if is_bin {
+                    src_dir.join("main.rs")
+                } else {
+                    src_dir.join("lib.rs")
+                }
+            }
+        }
+    } else {
+        // Regular file: src/foo.rs or src/a/b.rs
+        match rel.parent() {
+            Some(parent_dir) if !parent_dir.as_os_str().is_empty() => {
+                let parent_str = parent_dir.to_string_lossy();
+                let candidate_rs = src_dir.join(format!("{parent_str}.rs"));
+                if candidate_rs.exists() {
+                    candidate_rs
+                } else {
+                    src_dir.join(parent_dir).join("mod.rs")
+                }
+            }
+            _ => {
+                // Top-level: src/foo.rs → parent is lib.rs or main.rs
+                if is_bin {
+                    src_dir.join("main.rs")
+                } else {
+                    src_dir.join("lib.rs")
+                }
+            }
+        }
+    }
+}
+
+/// Check whether `parent_src` contains `#[cfg(… test …)] mod <module_name>;`.
+fn has_cfg_test_mod_decl(parent_src: &str, module_name: &str) -> bool {
+    let no_comments = strip_all_comments(parent_src);
+    let mod_decl = format!("mod {module_name};");
+
+    let mut search_from = 0usize;
+    while let Some(pos) = no_comments[search_from..].find(&mod_decl) {
+        let abs_pos = search_from + pos;
+        let preceding = no_comments[..abs_pos].trim_end();
+
+        if preceding.ends_with(']') {
+            // Look backwards for the matching `#[cfg(`.
+            if let Some(attr_start) = preceding.rfind("#[cfg(") {
+                let candidate = &preceding[attr_start..];
+                // Find the closing `]` of this attribute.
+                if let Some(bracket_end) = candidate.find(']') {
+                    // The text between `]` and `mod <name>;` must be whitespace-only.
+                    // Otherwise the attribute belongs to a different declaration.
+                    let after_attr = &candidate[bracket_end + 1..];
+                    if after_attr.trim().is_empty() {
+                        let attr_body = &candidate[6..bracket_end];
+                        if attr_body.contains("test") {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        search_from = abs_pos + mod_decl.len();
+    }
+
+    false
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,5 +1098,241 @@ mod tests {
             packages.iter().any(|p| p.pkg_name == "mylib"),
             "should contain the 'mylib' package"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // re-export-only facade heuristic
+    // -----------------------------------------------------------------------
+
+    fn test_pkg(dir: &Path) -> RustPackage {
+        RustPackage {
+            dir: dir.to_path_buf(),
+            pkg_name: "crate".to_string(),
+            target_name: "crate".to_string(),
+            is_bin: false,
+        }
+    }
+
+    #[test]
+    fn reexport_only_body_accepts_use_mod_and_semicolons() {
+        assert!(is_reexport_only_body(
+            "pub use crate::a;\nmod b;\n;\npub mod c;"
+        ));
+        assert!(is_reexport_only_body(""));
+        assert!(!is_reexport_only_body("pub fn helper() {}"));
+        assert!(!is_reexport_only_body("const X: usize = 1;"));
+    }
+
+    #[test]
+    fn reexport_only_body_accepts_pub_crate_use() {
+        // pub(crate) use should be recognized as a re-export.
+        assert!(is_reexport_only_body("pub(crate) use crate::a;\n"));
+        assert!(is_reexport_only_body("pub(super) use crate::b;\n"));
+        assert!(is_reexport_only_body("pub(in crate::foo) use crate::c;\n"));
+    }
+
+    #[test]
+    fn reexport_only_body_rejects_mod_with_block_body() {
+        // A `mod foo { … }` block is NOT a facade.
+        assert!(!is_reexport_only_body("mod foo { fn bar() {} }"));
+        assert!(!is_reexport_only_body("pub mod foo { fn bar() {} }"));
+    }
+
+    #[test]
+    fn reexport_only_body_handles_inner_attribute() {
+        // #![…] inner attributes are stripped and should not defeat detection.
+        // (Attributes are already stripped before this function runs;
+        //  verify that the body parser still works on the remaining text.)
+        assert!(is_reexport_only_body("pub use crate::a;\n"));
+    }
+
+    #[test]
+    fn reexport_only_body_handles_regular_line_comment() {
+        // Regular // comments (not doc) are stripped before this function.
+        assert!(is_reexport_only_body("pub use crate::a;\n"));
+    }
+
+    #[test]
+    fn reexport_only_facade_rewires_through_facade() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(src.join("lib.rs"), "pub mod prelude;\npub mod util;\n").expect("write lib.rs");
+        fs::write(
+            src.join("prelude.rs"),
+            "//! Facade.\n\npub use crate::util;\n",
+        )
+        .expect("write prelude.rs");
+        fs::write(src.join("util.rs"), "pub fn helper() {}\n").expect("write util.rs");
+
+        let pkg = test_pkg(tmp.path());
+        // crate (lib.rs) imports prelude, prelude re-exports util.
+        let mut edges = vec![
+            ("crate".to_string(), "crate::prelude".to_string()),
+            ("crate::prelude".to_string(), "crate::util".to_string()),
+        ];
+
+        filter_reexport_only_edges(&mut edges, &pkg);
+
+        // With the new strategy, ALL original edges are kept (including
+        // crate::prelude → crate::util) and the splice additionally adds
+        // crate → crate::util so re-exports through facades aren't hidden.
+        assert_eq!(
+            edges,
+            vec![
+                ("crate".to_string(), "crate::prelude".to_string()),
+                ("crate".to_string(), "crate::util".to_string()),
+                ("crate::prelude".to_string(), "crate::util".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn reexport_only_facade_no_importers_keeps_outgoing_edges() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(src.join("lib.rs"), "pub mod prelude;\npub mod util;\n").expect("write lib.rs");
+        fs::write(
+            src.join("prelude.rs"),
+            "//! Orphan facade (no importers).\npub use crate::util;\n",
+        )
+        .expect("write prelude.rs");
+        fs::write(src.join("util.rs"), "pub fn helper() {}\n").expect("write util.rs");
+
+        let pkg = test_pkg(tmp.path());
+        // Nobody imports prelude; it's a facade with outgoing edges only.
+        let mut edges = vec![("crate::prelude".to_string(), "crate::util".to_string())];
+
+        filter_reexport_only_edges(&mut edges, &pkg);
+
+        // A facade with no importers keeps its own outgoing edges so that its
+        // footprint is not artificially collapsed; with no importers there is
+        // nothing to splice.
+        assert_eq!(
+            edges,
+            vec![("crate::prelude".to_string(), "crate::util".to_string())]
+        );
+    }
+
+    #[test]
+    fn non_facade_keeps_edges() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(src.join("lib.rs"), "pub mod util;\npub mod other;\n").expect("write lib.rs");
+        fs::write(src.join("util.rs"), "pub fn helper() {}\n").expect("write util.rs");
+        fs::write(src.join("other.rs"), "pub fn other() {}\n").expect("write other.rs");
+
+        let pkg = test_pkg(tmp.path());
+        // Neither endpoint is a facade, so the edge is preserved unchanged.
+        let mut edges = vec![("crate::util".to_string(), "crate::other".to_string())];
+        filter_reexport_only_edges(&mut edges, &pkg);
+
+        assert_eq!(
+            edges,
+            vec![("crate::util".to_string(), "crate::other".to_string())]
+        );
+    }
+
+    #[test]
+    fn strip_all_comments_handles_regular_and_doc_comments() {
+        let src = "//! inner\n/// outer\n// regular\n/** block */\n/* regular block */\npub use crate::a;\n";
+        let stripped = strip_all_comments(src);
+        // With all comments gone and attributes gone, body is just the pub use.
+        let no_attrs = strip_attributes(&stripped);
+        assert!(is_reexport_only_body(&no_attrs));
+    }
+
+    #[test]
+    fn strip_attributes_removes_inner_and_outer_attrs() {
+        let src = "#![deny(unsafe_code)]\n#[allow(dead_code)]\npub use crate::a;\n";
+        let no_comments = strip_all_comments(src);
+        let no_attrs = strip_attributes(&no_comments);
+        assert!(is_reexport_only_body(&no_attrs));
+    }
+
+    #[test]
+    fn facade_with_regular_comment_still_recognized() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(
+            src.join("prelude.rs"),
+            "// keep in sync with util.rs\npub use crate::util;\n",
+        )
+        .expect("write prelude.rs");
+
+        assert!(is_reexport_only_module(&src.join("prelude.rs")));
+    }
+
+    #[test]
+    fn facade_with_inner_attribute_still_recognized() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(
+            src.join("prelude.rs"),
+            "#![allow(unused_imports)]\npub use crate::util;\n",
+        )
+        .expect("write prelude.rs");
+
+        assert!(is_reexport_only_module(&src.join("prelude.rs")));
+    }
+
+    #[test]
+    fn non_facade_has_real_code() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(src.join("util.rs"), "pub fn helper() {}\n").expect("write util.rs");
+        assert!(!is_reexport_only_module(&src.join("util.rs")));
+    }
+
+    #[test]
+    fn strip_all_comments_ignores_markers_inside_strings() {
+        let src = "let s = \"http://example.com/*not a comment*/\"; // real comment\n";
+        let stripped = strip_all_comments(src);
+        assert!(stripped.contains("http://example.com/*not a comment*/"));
+        assert!(!stripped.contains("real comment"));
+    }
+
+    #[test]
+    fn strip_all_comments_handles_char_literals() {
+        let src = "let c = '/'; let q = '\"'; // gone\n";
+        let stripped = strip_all_comments(src);
+        assert!(stripped.contains("let c = '/'"));
+        assert!(stripped.contains("'\"'"));
+        assert!(!stripped.contains("gone"));
+    }
+
+    #[test]
+    fn strip_attributes_ignores_hash_bracket_inside_strings() {
+        let src = "let s = \"#[not an attribute]\"; #[allow(dead_code)]\n";
+        let stripped = strip_attributes(src);
+        assert!(stripped.contains("\"#[not an attribute]\""));
+        assert!(!stripped.contains("allow"));
+    }
+
+    #[test]
+    fn skip_to_stmt_end_handles_non_ascii() {
+        // Multibyte characters before the `;` must not cause a byte/char
+        // index mismatch (which previously panicked).
+        assert_eq!(skip_to_stmt_end("use café::thé; rest"), Some(" rest"));
+        assert_eq!(skip_to_stmt_end("let x = 'é'; tail"), Some(" tail"));
+        assert_eq!(skip_to_stmt_end("no semicolon"), None);
+    }
+
+    #[test]
+    fn reexport_only_body_accepts_pub_crate_mod_and_private_use() {
+        assert!(is_reexport_only_body("pub(crate) mod foo;\n"));
+        assert!(is_reexport_only_body("pub(super) mod bar;\n"));
+        assert!(is_reexport_only_body("pub(in crate::a) mod baz;\n"));
+        assert!(is_reexport_only_body("use crate::a;\n"));
+        assert!(is_reexport_only_body(
+            "use crate::a;\npub(crate) mod foo;\nmod bar;\n"
+        ));
+        // Block-form visibility-restricted `mod` is not a facade.
+        assert!(!is_reexport_only_body("pub(crate) mod foo { fn f() {} }"));
     }
 }
