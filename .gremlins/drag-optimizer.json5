@@ -67,6 +67,12 @@
       'printf "%s" {p} > "$GREMLINS_STATE_DIR/artifacts/p.txt"',
       'printf "%s" {skip-maintainability} > "$GREMLINS_STATE_DIR/artifacts/skip_maint.txt"',
       'BASE_REF={base_ref} && SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "${BASE_REF:-HEAD}") && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && printf "%s" "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"',
+      // Build a drag config JSON file from the bundled config with bootstrap
+      // parameter overrides.  gremlins-drag no longer accepts scoring flags
+      // (--estimates-per-survey, --p, --skip-maintainability) on the CLI;
+      // all scoring parameters live in the config file.
+      'sed "s|^[[:space:]]*//.*||" "$GREMLINS_PROJECT_ROOT/crates/drag/config/bundled.json5" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"',
+      "MODEL_VAL=\"{drag-model}\" && ESTIMATES_VAL=\"{estimates-per-survey}\" && P_VAL=\"{p}\" && SKIP_MAINT_VAL=\"{skip-maintainability}\" && [ -z \"$ESTIMATES_VAL\" ] && ESTIMATES_VAL=\"5\" && [ -z \"$P_VAL\" ] && P_VAL=\"2.5\" && jq --arg model \"$MODEL_VAL\" --argjson estimates \"$ESTIMATES_VAL\" --argjson p_val \"$P_VAL\" --arg skip_maint \"$SKIP_MAINT_VAL\" 'if $model != \"\" then .model = $model else . end | .estimates_per_survey = $estimates | .weights.p = $p_val | if $skip_maint != \"\" and $skip_maint != \"false\" then .skip_maintainability = true else . end' \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\" > \"$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json\" && mv \"$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json\" \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\"",
     ],
     cli_out: {
       target: "artifact://target.txt",
@@ -77,7 +83,7 @@
       p: "artifact://p.txt",
       skip_maintainability: "artifact://skip_maint.txt",
     },
-    env: "export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'\nTHE_ENV=\"${GREMLINS_PROJECT_ROOT}/.gremlins/env\"\nif [ -f \"$THE_ENV\" ]; then\n    source \"$THE_ENV\"\nfi\nexport PATH=\"${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}\"\n# Build GREMLINS_DRAG_CLI_CONFIG so that EVERY invocation of gremlins-drag\n# — both the deterministic pipeline stages AND the agent when it\n# self-assesses — uses identical parameters. The env var locks the\n# config: when set, gremlins-drag rejects all CLI arguments.\n#\n# Source values are available as GREMLINS_SOURCE_<KEY> env vars\n# (injected by resolve_env before this script is sourced), so we can\n# compute the config directly without depending on artifact files that\n# launch_cmds hasn't created yet.\nexport GREMLINS_DRAG_CLI_CONFIG=$(jq -cn '\n{\n  path: (env.GREMLINS_SOURCE_TARGET // \"\")\n} |\nif (env.GREMLINS_SOURCE_DRAG_MODEL? // \"\") != \"\" then\n  . + {model: env.GREMLINS_SOURCE_DRAG_MODEL}\nelse . end |\n. + {estimates_per_survey: ((env.GREMLINS_SOURCE_ESTIMATES_PER_SURVEY? // 5) | tonumber)} |\nif (env.GREMLINS_SOURCE_P? // \"\") != \"\" then\n  . + {p: env.GREMLINS_SOURCE_P | tonumber}\nelse . end |\nif (env.GREMLINS_SOURCE_SKIP_MAINTAINABILITY? // \"\") != \"\" and env.GREMLINS_SOURCE_SKIP_MAINTAINABILITY != \"false\" then\n  . + {skip_maintainability: true}\nelse . end\n')\n",
+    env: "export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'\nTHE_ENV=\"${GREMLINS_PROJECT_ROOT}/.gremlins/env\"\nif [ -f \"$THE_ENV\" ]; then\n    source \"$THE_ENV\"\nfi\nexport PATH=\"${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}\"\n# Drag config is built as a JSON file during launch_cmds from the bundled\n# config with bootstrap parameter overrides.  All gremlins-drag invocations\n# reference it via --config, so every invocation — pipeline stages AND\n# agent self-assessments — uses identical scoring parameters.\n",
   },
   stages: [
     // ── baseline ──────────────────────────────────────────────────────────
@@ -85,6 +91,9 @@
       name: "baseline",
       type: "exec",
       interpolation: {
+        inputs: {
+          target: 'content("artifact://target.txt")',
+        },
         outputs: {
           report: "artifact://baseline/report.json",
           drag_best: "artifact://drag_best.txt",
@@ -92,7 +101,7 @@
       },
       options: {
         cmds: [
-          "gremlins-drag > {report}",
+          'gremlins-drag --config "$GREMLINS_STATE_DIR/artifacts/drag_config.json" "{target}" > {report}',
           'cp {report} "$GREMLINS_STATE_DIR/drag_current.json"',
           "cat {report} | jq 'if .packages then [.packages[].drag] | add else [.modules[].drag] | add end' > {drag_best}\n",
           'echo "baseline sum drag = $(cat {drag_best})"',
@@ -104,16 +113,13 @@
       name: "explain",
       type: "exec",
       interpolation: {
-        inputs: {
-          p: 'content("artifact://p.txt")',
-        },
         outputs: {
           explain: "artifact://explain.txt",
         },
       },
       options: {
         cmds: [
-          'P_ARG=""\n[ -n "{p}" ] && P_ARG="--p {p}"\n( unset GREMLINS_DRAG_CLI_CONFIG; gremlins-drag --explain $P_ARG > {explain})\n',
+          'gremlins-drag --config "$GREMLINS_STATE_DIR/artifacts/drag_config.json" --explain > {explain}',
         ],
       },
     },
@@ -232,6 +238,9 @@
           name: "score",
           type: "exec",
           interpolation: {
+            inputs: {
+              target: 'content("artifact://target.txt")',
+            },
             outputs: {
               report: "artifact://{loop_iter}/report.json",
               drag_before: "artifact://{loop_iter}/drag_before.txt",
@@ -240,7 +249,7 @@
           },
           options: {
             cmds: [
-              "gremlins-drag > {report}",
+              'gremlins-drag --config "$GREMLINS_STATE_DIR/artifacts/drag_config.json" "{target}" > {report}',
               'STATE_DIR="$GREMLINS_STATE_DIR"\ndrag_sum() {\n  jq \'if .packages then [.packages[].drag] | add else [.modules[].drag] | add end\' < "$1"\n}\nif [ -f "$STATE_DIR/drag_current.json" ]; then\n  drag_sum "$STATE_DIR/drag_current.json" > {drag_before}\n  cp "$STATE_DIR/drag_current.json" "$STATE_DIR/drag_previous.json"\nelse\n  printf "0" > {drag_before}\nfi\ncp {report} "$STATE_DIR/drag_current.json"\n',
               'STATE_DIR="$GREMLINS_STATE_DIR"\ndrag_sum() {\n  jq \'if .packages then [.packages[].drag] | add else [.modules[].drag] | add end\' < "$1"\n}\nAFTER=$(drag_sum "$STATE_DIR/drag_current.json")\nprintf "%s" "$AFTER" > {drag_after}\nBEST=$(cat "$GREMLINS_STATE_DIR/artifacts/drag_best.txt" 2>/dev/null)\nif ! awk -v a="$AFTER" -v b="$BEST" \'BEGIN { exit (b < a) ? 0 : 1 }\' 2>/dev/null; then\n  BEST="$AFTER"\nfi\nprintf "%s" "$BEST" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"\necho "iteration {loop_iter} drag = $AFTER (best = $BEST)"\n',
             ],

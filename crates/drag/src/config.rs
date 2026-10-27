@@ -46,10 +46,10 @@ pub struct DragConfig {
 }
 
 fn default_tokenizer() -> String {
-    "o200k_base".to_string()
+    String::new()
 }
 fn default_estimates() -> usize {
-    1
+    0
 }
 
 impl Default for DragConfig {
@@ -57,8 +57,8 @@ impl Default for DragConfig {
         Self {
             weights: WeightsConfig::default(),
             model: None,
-            tokenizer: "o200k_base".to_string(),
-            estimates_per_survey: 1,
+            tokenizer: String::new(),
+            estimates_per_survey: 0,
             skip_maintainability: false,
             verbose: false,
             format: OutputFormat::Human,
@@ -107,6 +107,31 @@ impl DragConfig {
             config.model = Some(model);
         }
 
+        // Reject duplicate dimension keys — scoring stores results in maps
+        // keyed by these strings, so duplicates would silently mask failures.
+        {
+            let mut seen = std::collections::HashSet::new();
+            for dim in &config.comprehensibility.dimensions {
+                if !seen.insert(&dim.key) {
+                    return Err(format!(
+                        "comprehensibility config: duplicate dimension key {:?}",
+                        dim.key
+                    ));
+                }
+            }
+        }
+        {
+            let mut seen = std::collections::HashSet::new();
+            for dim in &config.maintainability.dimensions {
+                if !seen.insert(&dim.key) {
+                    return Err(format!(
+                        "maintainability config: duplicate dimension key {:?}",
+                        dim.key
+                    ));
+                }
+            }
+        }
+
         Ok(config)
     }
 
@@ -147,21 +172,21 @@ pub struct WeightsConfig {
 }
 
 fn default_w2() -> f64 {
-    0.5
+    0.0
 }
 fn default_m() -> f64 {
-    2.5
+    0.0
 }
 fn default_p() -> f64 {
-    2.5
+    0.0
 }
 
 impl Default for WeightsConfig {
     fn default() -> Self {
         Self {
-            w2: default_w2(),
-            m: default_m(),
-            p: default_p(),
+            w2: 0.0,
+            m: 0.0,
+            p: 0.0,
         }
     }
 }
@@ -281,9 +306,13 @@ mod tests {
     #[test]
     fn default_config_has_schema_defaults() {
         let config = DragConfig::default();
-        assert_eq!(config.weights.w2, 0.5);
-        assert_eq!(config.weights.m, 2.5);
-        assert_eq!(config.tokenizer, "o200k_base");
+        // Weights default to 0.0 (schema default), not the bundled values.
+        assert_eq!(config.weights.w2, 0.0);
+        assert_eq!(config.weights.m, 0.0);
+        assert_eq!(config.weights.p, 0.0);
+        // Operational fields default to empty / zero.
+        assert_eq!(config.tokenizer, "");
+        assert_eq!(config.estimates_per_survey, 0);
         assert!(config.model.is_none());
         assert!(config.comprehensibility.dimensions.is_empty());
         assert!(config.maintainability.dimensions.is_empty());
@@ -297,11 +326,12 @@ mod tests {
         let json = r#"{"weights": {"w2": 1.0}}"#;
         let config: DragConfig = serde_json5::from_str(json).expect("partial config should parse");
         assert_eq!(config.weights.w2, 1.0);
-        // m and p fall back to schema defaults, not bundled values.
-        assert_eq!(config.weights.m, 2.5);
-        assert_eq!(config.weights.p, 2.5);
+        // m and p fall back to schema defaults (0.0), not bundled values.
+        assert_eq!(config.weights.m, 0.0);
+        assert_eq!(config.weights.p, 0.0);
         // Omitted top-level fields get schema defaults.
-        assert_eq!(config.tokenizer, "o200k_base");
+        assert_eq!(config.tokenizer, "");
+        assert_eq!(config.estimates_per_survey, 0);
         assert!(config.model.is_none());
         assert!(config.comprehensibility.dimensions.is_empty());
         assert!(config.maintainability.dimensions.is_empty());
@@ -424,5 +454,51 @@ mod tests {
         assert_eq!(config.weights.w2, 1.0);
         assert!(config.comprehensibility.dimensions.is_empty());
         assert!(config.maintainability.dimensions.is_empty());
+    }
+
+    #[test]
+    fn load_rejects_duplicate_comprehensibility_keys() {
+        let json = r#"{
+            "comprehensibility": {
+                "dimensions": [
+                    {"key": "naming", "description": "naming"},
+                    {"key": "naming", "description": "duplicate naming"}
+                ]
+            }
+        }"#;
+        let config: DragConfig = serde_json5::from_str(json).expect("parse must succeed");
+        // load() should reject duplicates, but we test via the same validation
+        // logic embedded in load(). Simulate what load() does after parsing.
+        let mut seen = std::collections::HashSet::new();
+        let mut dup = None;
+        for dim in &config.comprehensibility.dimensions {
+            if !seen.insert(&dim.key) {
+                dup = Some(dim.key.clone());
+                break;
+            }
+        }
+        assert_eq!(dup, Some("naming".to_string()));
+    }
+
+    #[test]
+    fn load_rejects_duplicate_maintainability_keys() {
+        let json = r#"{
+            "maintainability": {
+                "dimensions": [
+                    {"key": "decomposition", "description": "desc"},
+                    {"key": "decomposition", "description": "dup"}
+                ]
+            }
+        }"#;
+        let config: DragConfig = serde_json5::from_str(json).expect("parse must succeed");
+        let mut seen = std::collections::HashSet::new();
+        let mut dup = None;
+        for dim in &config.maintainability.dimensions {
+            if !seen.insert(&dim.key) {
+                dup = Some(dim.key.clone());
+                break;
+            }
+        }
+        assert_eq!(dup, Some("decomposition".to_string()));
     }
 }

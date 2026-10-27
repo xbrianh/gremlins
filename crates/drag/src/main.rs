@@ -1351,6 +1351,20 @@ fn print_explain(config: &DragConfig) {
     let comp_dims: &[ComprehensibilityDimensionDef] = &config.comprehensibility.dimensions;
     let n_dims = comp_dims.len();
     println!("## Comprehensibility survey\n");
+    if !config.comprehensibility.preamble.is_empty() {
+        println!("### Preamble\n");
+        for line in config.comprehensibility.preamble.lines() {
+            println!("  {line}");
+        }
+        println!();
+    }
+    if !config.comprehensibility.generic_anchors.is_empty() {
+        println!("### Generic anchors (0–4 scale)\n");
+        for line in config.comprehensibility.generic_anchors.lines() {
+            println!("  {line}");
+        }
+        println!();
+    }
     println!("  Comprehensibility is scored by an LLM survey on {n_dims} dimensions, each");
     println!(
         "  rated 0–4 and normalized over {} points ({n_dims}×4):\n",
@@ -1374,6 +1388,13 @@ fn print_explain(config: &DragConfig) {
 
     let n_maint = config.maintainability.dimensions.len();
     println!("## Package maintainability survey\n");
+    if !config.maintainability.preamble.is_empty() {
+        println!("### Preamble\n");
+        for line in config.maintainability.preamble.lines() {
+            println!("  {line}");
+        }
+        println!();
+    }
     println!("  Package maintainability is scored on {n_maint} dimensions, each 0–4,");
     println!(
         "  normalized over {} points ({n_maint}×4). Only computed when packages are",
