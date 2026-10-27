@@ -460,6 +460,7 @@ async fn run() -> Result<(), String> {
         &maint_scores,
         &pkg_names,
         config.weights.p,
+        config.skip_maintainability,
     );
 
     // 9. Output
@@ -1513,7 +1514,7 @@ fn print_node(node: &DragNode, depth: usize, has_comp: bool, _skip_maint: bool) 
             ..
         } => {
             // elide the common package prefix for display brevity
-            let display = truncate(name, 54 - depth * 2);
+            let display = truncate(name, (54usize).saturating_sub(depth * 2));
             if has_comp {
                 let c = comprehensibility.expect("has_comp guarantees Some");
                 println!(
@@ -1544,7 +1545,7 @@ fn print_node(node: &DragNode, depth: usize, has_comp: bool, _skip_maint: bool) 
         } => {
             // Print container header (skip nameless workspace root).
             if !name.is_empty() {
-                let display = truncate(name, 54 - depth * 2);
+                let display = truncate(name, (54usize).saturating_sub(depth * 2));
                 let w = (55usize).saturating_sub(depth * 2);
                 // Match module column count: 5 cols when has_comp, 4 otherwise.
                 if has_comp {

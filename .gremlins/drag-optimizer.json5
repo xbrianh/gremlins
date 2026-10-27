@@ -103,7 +103,7 @@
         cmds: [
           'gremlins-drag --config "$GREMLINS_STATE_DIR/artifacts/drag_config.json" "{target}" > {report}',
           'cp {report} "$GREMLINS_STATE_DIR/drag_current.json"',
-          "cat {report} | jq 'if .packages then [.packages[].drag] | add else [.modules[].drag] | add end' > {drag_best}\n",
+          "cat {report} | jq '.drag' > {drag_best}\n",
           'echo "baseline sum drag = $(cat {drag_best})"',
         ],
       },
@@ -250,8 +250,8 @@
           options: {
             cmds: [
               'gremlins-drag --config "$GREMLINS_STATE_DIR/artifacts/drag_config.json" "{target}" > {report}',
-              'STATE_DIR="$GREMLINS_STATE_DIR"\ndrag_sum() {\n  jq \'if .packages then [.packages[].drag] | add else [.modules[].drag] | add end\' < "$1"\n}\nif [ -f "$STATE_DIR/drag_current.json" ]; then\n  drag_sum "$STATE_DIR/drag_current.json" > {drag_before}\n  cp "$STATE_DIR/drag_current.json" "$STATE_DIR/drag_previous.json"\nelse\n  printf "0" > {drag_before}\nfi\ncp {report} "$STATE_DIR/drag_current.json"\n',
-              'STATE_DIR="$GREMLINS_STATE_DIR"\ndrag_sum() {\n  jq \'if .packages then [.packages[].drag] | add else [.modules[].drag] | add end\' < "$1"\n}\nAFTER=$(drag_sum "$STATE_DIR/drag_current.json")\nprintf "%s" "$AFTER" > {drag_after}\nBEST=$(cat "$GREMLINS_STATE_DIR/artifacts/drag_best.txt" 2>/dev/null)\nif ! awk -v a="$AFTER" -v b="$BEST" \'BEGIN { exit (b < a) ? 0 : 1 }\' 2>/dev/null; then\n  BEST="$AFTER"\nfi\nprintf "%s" "$BEST" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"\necho "iteration {loop_iter} drag = $AFTER (best = $BEST)"\n',
+              'STATE_DIR="$GREMLINS_STATE_DIR"\ndrag_sum() {\n  jq '.drag' < "$1"\n}\nif [ -f "$STATE_DIR/drag_current.json" ]; then\n  drag_sum "$STATE_DIR/drag_current.json" > {drag_before}\n  cp "$STATE_DIR/drag_current.json" "$STATE_DIR/drag_previous.json"\nelse\n  printf "0" > {drag_before}\nfi\ncp {report} "$STATE_DIR/drag_current.json"\n',
+              'STATE_DIR="$GREMLINS_STATE_DIR"\ndrag_sum() {\n  jq '.drag' < "$1"\n}\nAFTER=$(drag_sum "$STATE_DIR/drag_current.json")\nprintf "%s" "$AFTER" > {drag_after}\nBEST=$(cat "$GREMLINS_STATE_DIR/artifacts/drag_best.txt" 2>/dev/null)\nif ! awk -v a="$AFTER" -v b="$BEST" \'BEGIN { exit (b < a) ? 0 : 1 }\' 2>/dev/null; then\n  BEST="$AFTER"\nfi\nprintf "%s" "$BEST" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"\necho "iteration {loop_iter} drag = $AFTER (best = $BEST)"\n',
             ],
           },
         },
@@ -315,7 +315,7 @@
       },
       options: {
         cmds: [
-          'BEST="{drag_best_val}"\n[ -z "$BEST" ] && BEST="N/A"\nBASE_SUM=$(jq \'if .packages then ([.packages[].drag] | add | . * 100 | round) / 100 else ([.modules[].drag] | add | . * 100 | round) / 100 end\' < {baseline_report})\n{\n  echo "drag-optimizer: reduce drag for {target}"\n  echo ""\n  echo "Baseline drag sum: $BASE_SUM \u2192 Best: $BEST"\n  echo "Target: {target}"\n} > {commit_message}\n',
+          'BEST="{drag_best_val}"\n[ -z "$BEST" ] && BEST="N/A"\nBASE_SUM=$(jq '.drag' < {baseline_report})\n{\n  echo "drag-optimizer: reduce drag for {target}"\n  echo ""\n  echo "Baseline drag sum: $BASE_SUM \u2192 Best: $BEST"\n  echo "Target: {target}"\n} > {commit_message}\n',
         ],
       },
     },
