@@ -73,13 +73,16 @@
       'printf "%s" {p} > "$GREMLINS_STATE_DIR/artifacts/p.txt"',
       'printf "%s" {skip-maintainability} > "$GREMLINS_STATE_DIR/artifacts/skip_maint.txt"',
       'BASE_REF={base_ref} && SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "${BASE_REF:-HEAD}") && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && printf "%s" "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"',
-      // Build a drag config JSON file from the project config with bootstrap
-      // parameter overrides.  gremlins-drag no longer accepts scoring flags
-      // (--estimates-per-survey, --p, --skip-maintainability) on the CLI;
-      // all scoring parameters live in the config file.
-      // Default: .gremlins/drag-config.json; override: --drag-config <path>.
+      // Build the drag config JSON file.  Scoring parameters come from the
+      // project config (or --drag-config override) with bootstrap overrides.
+      // The config file is written to TWO places:
+      //   1. $GREMLINS_STATE_DIR/artifacts/drag_config.json — immutable artifact
+      //   2. $GREMLINS_STATE_DIR/drag_config.json — mutable, pointed to by
+      //      GREMLINS_DRAG_CLI_CONFIG so agents pick it up automatically.
+      // The target is injected as the "path" field so gremlins-drag needs
+      // no positional arguments.
       'CONFIG_SRC="{drag-config}"; if [ -n "$CONFIG_SRC" ] && [ -f "$CONFIG_SRC" ]; then echo "using drag config: $CONFIG_SRC"; sed "s|^[[:space:]]*//.*||" "$CONFIG_SRC" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"; else sed "s|^[[:space:]]*//.*||" "$GREMLINS_PROJECT_ROOT/.gremlins/drag-config.json" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"; fi',
-      "MODEL_VAL=\"{drag-model}\" && ESTIMATES_VAL=\"{estimates-per-survey}\" && P_VAL=\"{p}\" && SKIP_MAINT_VAL=\"{skip-maintainability}\" && [ -z \"$ESTIMATES_VAL\" ] && ESTIMATES_VAL=\"5\" && [ -z \"$P_VAL\" ] && P_VAL=\"2.5\" && jq --arg model \"$MODEL_VAL\" --argjson estimates \"$ESTIMATES_VAL\" --argjson p_val \"$P_VAL\" --arg skip_maint \"$SKIP_MAINT_VAL\" 'if $model != \"\" then .model = $model else . end | .estimates_per_survey = $estimates | .weights.p = $p_val | if $skip_maint != \"\" and $skip_maint != \"false\" then .skip_maintainability = true else . end' \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\" > \"$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json\" && mv \"$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json\" \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\"",
+      "MODEL_VAL=\"{drag-model}\" && ESTIMATES_VAL=\"{estimates-per-survey}\" && P_VAL=\"{p}\" && SKIP_MAINT_VAL=\"{skip-maintainability}\" && [ -z \"$ESTIMATES_VAL\" ] && ESTIMATES_VAL=\"5\" && [ -z \"$P_VAL\" ] && P_VAL=\"2.5\" && jq --arg model \"$MODEL_VAL\" --argjson estimates \"$ESTIMATES_VAL\" --argjson p_val \"$P_VAL\" --arg skip_maint \"$SKIP_MAINT_VAL\" --arg target \"{target}\" 'if $model != \"\" then .model = $model else . end | .estimates_per_survey = $estimates | .weights.p = $p_val | if $skip_maint != \"\" and $skip_maint != \"false\" then .skip_maintainability = true else . end | .path = $target' \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\" > \"$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json\" && mv \"$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json\" \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\" && cp \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\" \"$GREMLINS_STATE_DIR/drag_config.json\"",
     ],
     cli_out: {
       target: "artifact://target.txt",
@@ -90,7 +93,7 @@
       p: "artifact://p.txt",
       skip_maintainability: "artifact://skip_maint.txt",
     },
-    env: "export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'\nTHE_ENV=\"${GREMLINS_PROJECT_ROOT}/.gremlins/env\"\nif [ -f \"$THE_ENV\" ]; then\n    source \"$THE_ENV\"\nfi\nexport PATH=\"${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}\"\n# Drag config is built as a JSON file during launch_cmds from the bundled\n# config with bootstrap parameter overrides.  All gremlins-drag invocations\n# reference it via --config, so every invocation — pipeline stages AND\n# agent self-assessments — uses identical scoring parameters.\n",
+    env: "export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'\nTHE_ENV=\"${GREMLINS_PROJECT_ROOT}/.gremlins/env\"\nif [ -f \"$THE_ENV\" ]; then\n    source \"$THE_ENV\"\nfi\nexport PATH=\"${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}\"\n# Drag config is built as a JSON file during launch_cmds from the bundled\n# config with bootstrap parameter overrides.  All gremlins-drag invocations\n#     env: "export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'\nTHE_ENV=\"${GREMLINS_PROJECT_ROOT}/.gremlins/env\"\nif [ -f \"$THE_ENV\" ]; then\n    source \"$THE_ENV\"\nfi\nexport PATH=\"${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}\"\nexport GREMLINS_DRAG_CLI_CONFIG=\"$GREMLINS_STATE_DIR/drag_config.json\"\n# GREMLINS_DRAG_CLI_CONFIG points to the mutable drag config file, which\n# includes the target path.  All gremlins-drag invocations — pipeline\n# stages AND agent self-assessments — read from this config, so every\n# invocation uses identical scoring parameters and the correct target.\n", — pipeline stages AND\n# agent self-assessments — uses identical scoring parameters.\n",
   },
   stages: [
     // ── baseline ──────────────────────────────────────────────────────────
@@ -110,7 +113,7 @@
       },
       options: {
         cmds: [
-          'gremlins-drag --config "$GREMLINS_STATE_DIR/artifacts/drag_config.json" "{target}" > {report}',
+          'gremlins-drag > {report}',
           'cp {report} "$GREMLINS_STATE_DIR/drag_current.json"',
           "cat {report} | jq '.drag' > {drag_best}\n",
           'echo "baseline sum drag = $(cat {drag_best})"',
@@ -129,7 +132,7 @@
       },
       options: {
         cmds: [
-          'gremlins-drag --config "$GREMLINS_STATE_DIR/artifacts/drag_config.json" --explain > {explain}',
+          'gremlins-drag --explain > {explain}',
         ],
       },
     },
@@ -151,25 +154,27 @@
               context: "artifact://{loop_iter}/drag_context.md",
               iter_start_sha: "artifact://{loop_iter}/iter_start_sha.txt",
               progression_in: "artifact://{loop_iter}/progression_in.json",
-              target: "artifact://{loop_iter}/target.txt",
             },
           },
           options: {
             cmds: [
               'git -C "$GREMLIN_WORKDIR" rev-parse HEAD > "$GREMLINS_STATE_DIR/artifacts/{loop_iter}/iter_start_sha.txt"',
-              // Scoped target — iteration 1 copies the bootstrap target;
-              // subsequent iterations read the previous iteration's
-              // (possibly broadened) target from record-progression.
+              // Update the mutable drag config with this iteration's target.
+              // Iteration 1 reads the bootstrap config; subsequent iterations
+              // read the previous iteration's drag config artifact (which may
+              // have been broadened by record-progression).
               'if [ "{loop_iter}" = "1" ]; then
-  cp "$GREMLINS_STATE_DIR/artifacts/target.txt" {target}
+  PREV_CONFIG="$GREMLINS_STATE_DIR/artifacts/drag_config.json"
 else
   PREV=$(({loop_iter} - 1))
-  if [ -f "$GREMLINS_STATE_DIR/artifacts/$PREV/drag_target.txt" ]; then
-    cp "$GREMLINS_STATE_DIR/artifacts/$PREV/drag_target.txt" {target}
-  else
-    cp "$GREMLINS_STATE_DIR/artifacts/target.txt" {target}
-  fi
+  PREV_CONFIG="$GREMLINS_STATE_DIR/artifacts/$PREV/drag_config.json"
 fi
+if [ ! -f "$PREV_CONFIG" ]; then
+  PREV_CONFIG="$GREMLINS_STATE_DIR/drag_config.json"
+fi
+TARGET=$(jq -r \'.path\' "$PREV_CONFIG")
+jq --arg t "$TARGET" \'.path = $t\' "$GREMLINS_STATE_DIR/drag_config.json" > "$GREMLINS_STATE_DIR/drag_config_tmp.json" && mv "$GREMLINS_STATE_DIR/drag_config_tmp.json" "$GREMLINS_STATE_DIR/drag_config.json"
+echo "prepare-context: target=$TARGET"
 ',
               // Copy the latest cumulative progression into a scoped artifact
               // for this iteration.  Iteration 1 reads the baseline seed;
@@ -191,7 +196,6 @@ fi
           type: "agent",
           interpolation: {
             inputs: {
-              target: 'content("artifact://{loop_iter}/target.txt")',
               drag_context: 'content("artifact://{loop_iter}/drag_context.md")',
               instructions: 'content("artifact://instructions.txt")',
               explain: 'content("artifact://explain.txt")',
@@ -237,7 +241,6 @@ fi
           type: "exec",
           interpolation: {
             inputs: {
-              target: 'content("artifact://{loop_iter}/target.txt")',
             },
             outputs: {
               report: "artifact://{loop_iter}/report.json",
@@ -249,7 +252,7 @@ fi
           },
           options: {
             cmds: [
-              'gremlins-drag --config "$GREMLINS_STATE_DIR/artifacts/drag_config.json" "{target}" > {report}',
+              'gremlins-drag > {report}',
               'STATE_DIR="$GREMLINS_STATE_DIR"\ndrag_sum() {\n  jq '.drag' < "$1"\n}\nif [ -f "$STATE_DIR/drag_current.json" ]; then\n  drag_sum "$STATE_DIR/drag_current.json" > {drag_before}\n  cp "$STATE_DIR/drag_current.json" "$STATE_DIR/drag_previous.json"\nelse\n  printf "0" > {drag_before}\nfi\ncp {report} "$STATE_DIR/drag_current.json"\n',
               'STATE_DIR="$GREMLINS_STATE_DIR"\ndrag_sum() {\n  jq '.drag' < "$1"\n}\nAFTER=$(drag_sum "$STATE_DIR/drag_current.json")\nprintf "%s" "$AFTER" > {drag_after}\nBEST=$(cat "$GREMLINS_STATE_DIR/artifacts/drag_best.txt" 2>/dev/null)\nif ! awk -v a="$AFTER" -v b="$BEST" \'BEGIN { exit (b < a) ? 0 : 1 }\' 2>/dev/null; then\n  BEST="$AFTER"\nfi\nprintf "%s" "$BEST" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"\necho "iteration {loop_iter} drag = $AFTER (best = $BEST)"\n',
               'git -C "$GREMLIN_WORKDIR" rev-parse HEAD | tr -d \'\n\' > {iter_end_sha}',
@@ -268,7 +271,6 @@ fi
           type: "agent",
           interpolation: {
             inputs: {
-              target: 'content("artifact://{loop_iter}/target.txt")',
               plan: 'content("artifact://{loop_iter}/plan.md")',
               drag_before: 'content("artifact://{loop_iter}/drag_before.txt")',
               drag_after: 'content("artifact://{loop_iter}/drag_after.txt")',
@@ -307,21 +309,20 @@ fi
         // When the target broadens (changed files span a wider common root),
         // this stage recomputes ALL prior progression entries by checking out
         // each entry's iter_end_sha and re-running gremlins-drag with the new
-        // target.  This keeps the progression self-consistent — every entry is
-        // measured against the same target scope.  Delegates to the helper
-        // script drag-record-progression.
+        // target.  It also updates the mutable drag config (pointed to by
+        // GREMLINS_DRAG_CLI_CONFIG) and saves a config snapshot artifact.
+        // Delegates to the helper script drag-record-progression.
         {
           name: "record-progression",
           type: "exec",
           interpolation: {
             inputs: {
-              target_val: 'content("artifact://{loop_iter}/target.txt")',
               base_sha_val: 'content("artifact://base_sha")',
               progression_in: "artifact://{loop_iter}/progression_in.json",
             },
             outputs: {
               progression_out: "artifact://{loop_iter}/drag_progression.json",
-              target_out: "artifact://{loop_iter}/drag_target.txt",
+              config_out: "artifact://{loop_iter}/drag_config.json",
             },
           },
           options: {
@@ -329,13 +330,12 @@ fi
               'drag-record-progression \
   "$GREMLIN_WORKDIR" \
   "$GREMLINS_STATE_DIR" \
-  "{target_val}" \
   "{base_sha_val}" \
   "{loop_iter}" \
-  "$GREMLINS_STATE_DIR/artifacts/drag_config.json" \
+  "$GREMLINS_STATE_DIR/drag_config.json" \
   {progression_in} \
   {progression_out} \
-  {target_out}',
+  {config_out}',
             ],
           },
         },
@@ -358,8 +358,9 @@ fi
         cmds: [
           // Find the latest cumulative progression and scoped target.
           // Each iteration writes artifact://{N}/drag_progression.json
-          // and artifact://{N}/drag_target.txt; pick the newest.
-          'LATEST=$(ls -t "$GREMLINS_STATE_DIR/artifacts/"*/drag_progression.json 2>/dev/null | head -1)\nFALLBACK="$GREMLINS_STATE_DIR/artifacts/drag_progression.json"\nPROGRESSION="${LATEST:-$FALLBACK}"\nLATEST_TARGET=$(ls -t "$GREMLINS_STATE_DIR/artifacts/"*/drag_target.txt 2>/dev/null | head -1)\nif [ -n "$LATEST_TARGET" ]; then\n  TARGET=$(tr -d \'\\n\' < "$LATEST_TARGET")\nelse\n  TARGET=$(tr -d \'\\n\' < "$GREMLINS_STATE_DIR/artifacts/target.txt")\nfi\nBEST="{drag_best_val}"\n[ -z "$BEST" ] && BEST="N/A"\nBASE_SUM=$(jq \'.drag\' < {baseline_report})\nITER_COUNT=$(jq \'. | length - 1\' "$PROGRESSION" 2>/dev/null || echo "0")\nTRAJECTORY=$(jq -r \'[.[] | select(.verdict == "reduced" or .verdict == "baseline") | "\\(.iteration): \\(.drag_after)"] | join(" → ")\' "$PROGRESSION" 2>/dev/null)\n{\n  echo "drag-optimizer: reduce drag for $TARGET"\n  echo ""\n  echo "Baseline drag sum: $BASE_SUM → Best: $BEST"\n  echo "Trajectory: $TRAJECTORY"\n  echo "Iterations: $ITER_COUNT"\n  echo "Target: $TARGET"\n} > {commit_message}\n',
+                    // Each iteration writes artifact://{N}/drag_progression.json
+          // and artifact://{N}/drag_config.json; pick the newest.
+          'LATEST=$(ls -t "$GREMLINS_STATE_DIR/artifacts/"*/drag_progression.json 2>/dev/null | head -1)\nFALLBACK="$GREMLINS_STATE_DIR/artifacts/drag_progression.json"\nPROGRESSION="${LATEST:-$FALLBACK}"\nLATEST_CONFIG=$(ls -t "$GREMLINS_STATE_DIR/artifacts/"*/drag_config.json 2>/dev/null | head -1)\nif [ -n "$LATEST_CONFIG" ]; then\n  TARGET=$(jq -r \'.path\' "$LATEST_CONFIG")\nelse\n  TARGET=$(jq -r \'.path\' "$GREMLINS_STATE_DIR/artifacts/drag_config.json")\nfi\nBEST="{drag_best_val}"\n[ -z "$BEST" ] && BEST="N/A"\nBASE_SUM=$(jq \'.drag\' < {baseline_report})\nITER_COUNT=$(jq \'. | length - 1\' "$PROGRESSION" 2>/dev/null || echo "0")\nTRAJECTORY=$(jq -r \'[.[] | select(.verdict == "reduced" or .verdict == "baseline") | "\\(.iteration): \\(.drag_after)"] | join(" → ")\' "$PROGRESSION" 2>/dev/null)\n{\n  echo "drag-optimizer: reduce drag for $TARGET"\n  echo ""\n  echo "Baseline drag sum: $BASE_SUM → Best: $BEST"\n  echo "Trajectory: $TRAJECTORY"\n  echo "Iterations: $ITER_COUNT"\n  echo "Target: $TARGET"\n} > {commit_message}\n',
         ],
       },
     },
