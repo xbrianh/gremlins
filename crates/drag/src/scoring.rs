@@ -1,7 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use serde::Serialize;
-
 // ---------------------------------------------------------------------------
 // Module-level drag formula
 // ---------------------------------------------------------------------------
@@ -74,8 +72,10 @@ pub(crate) fn compute_footprint(
 /// formula).  [`Container`] nodes aggregate descendant drag with a
 /// maintainability multiplier applied exactly once per module — from the
 /// module's immediate container.
-#[derive(Serialize, Clone, Debug)]
-#[serde(tag = "type", rename_all = "lowercase")]
+///
+/// Serialization is handled by [`DragNodeOutput`] in `main.rs`, which
+/// keeps the serde attributes out of this pure-computation module.
+#[derive(Clone, Debug)]
 pub(crate) enum DragNode {
     Module {
         name: String,
@@ -88,9 +88,7 @@ pub(crate) enum DragNode {
     Container {
         name: String,
         /// Only package-level containers carry their own maint score;
-        /// subtree containers return `None` and inherit from their
-        /// nearest package ancestor.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        /// subtree containers are always `None`.
         maint_score: Option<f64>,
         drag: f64,
         children: Vec<DragNode>,
@@ -103,31 +101,25 @@ pub(crate) enum DragNode {
 
 /// Build a drag tree from scored modules.
 ///
-/// `module_pkg` maps each module's path to its package key.  Modules not
-/// associated with any package are placed under a synthetic root.
+/// `module_pkg` maps each (module_path, file) pair to its package key.
+/// Modules not associated with any package are placed under a synthetic
+/// root.
 ///
 /// The tree is walked bottom-up so every container's `drag` field is the
 /// value of the recursive formula.
 pub(crate) fn build_drag_tree(
     modules: &[super::ModuleDrag],
-    module_pkg: &HashMap<String, String>,
+    module_pkg: &HashMap<(String, String), String>,
     pkg_maints: &HashMap<String, f64>,
     pkg_name_for_key: &HashMap<String, String>,
     p: f64,
 ) -> DragNode {
-    // ── 1. Build an intermediate trie from module paths ──────────────
-    let mut root_trie = TrieNode::default();
-
-    for (idx, m) in modules.iter().enumerate() {
-        let segments: Vec<&str> = m.module.split("::").collect();
-        root_trie.insert(&segments, idx);
-    }
-
-    // ── 2. Group by package: each pkg_key → list of module indices ──
-    let mut pkg_module_indices: HashMap<String, Vec<usize>> = HashMap::new();
+    // ── 1. Group by package: each pkg_key → list of module indices ──
+    let mut pkg_module_indices: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     let mut orphan_indices: Vec<usize> = Vec::new();
     for (idx, m) in modules.iter().enumerate() {
-        if let Some(pkg_key) = module_pkg.get(&m.module) {
+        let key = (m.module.clone(), m.file.clone());
+        if let Some(pkg_key) = module_pkg.get(&key) {
             pkg_module_indices
                 .entry(pkg_key.clone())
                 .or_default()
@@ -137,7 +129,7 @@ pub(crate) fn build_drag_tree(
         }
     }
 
-    // ── 3. Build one container per package ──────────────────────────
+    // ── 2. Build one container per package ──────────────────────────
     let mut package_containers: Vec<DragNode> = Vec::new();
 
     for (pkg_key, indices) in &pkg_module_indices {
@@ -145,7 +137,7 @@ pub(crate) fn build_drag_tree(
             .get(pkg_key)
             .cloned()
             .unwrap_or_else(|| pkg_key.clone());
-        let maint = pkg_maints.get(pkg_key).copied();
+        let maint = Some(pkg_maints.get(pkg_key).copied().unwrap_or(0.5));
 
         // Find the longest common prefix among this package's modules.
         let common_prefix = longest_common_module_prefix(
@@ -161,7 +153,8 @@ pub(crate) fn build_drag_tree(
         for &idx in indices {
             let full: Vec<&str> = modules[idx].module.split("::").collect();
             // Strip the common prefix so the trie only contains the
-            // package-internal hierarchy.
+            // package-internal hierarchy. The container name is set
+            // to the common prefix so child names are correct.
             let relative: Vec<&str> = if common_prefix.is_empty() {
                 full
             } else {
@@ -171,32 +164,76 @@ pub(crate) fn build_drag_tree(
             sub_trie.insert(&relative, idx);
         }
 
-        let container = trie_to_drag_node(&sub_trie, modules, pkg_display_name.clone(), maint, p);
+        // Container name is the common prefix (derived from module
+        // paths).  When the common prefix is empty fall back to the
+        // package display name.
+        let container_name = if common_prefix.is_empty() {
+            pkg_display_name.clone()
+        } else {
+            common_prefix.clone()
+        };
 
-        // If the common prefix has multiple segments beyond the package
-        // name, wrap in intermediate containers.  But the package name
-        // itself is already the container name — any deeper hierarchy
-        // was handled by trie_to_drag_node.
+        let maint_mult = match maint {
+            Some(s) => (p * (1.0 - s)).exp(),
+            None => (p * 0.5).exp(),
+        };
+        let mut container = trie_to_drag_node(&sub_trie, modules, container_name, maint_mult, true);
+        // Set maint_score on the package root for serialization.
+        if let DragNode::Container {
+            ref mut maint_score,
+            ..
+        } = container
+        {
+            *maint_score = maint;
+        }
+
+        // If the common prefix has more segments than the package
+        // display name, wrap in intermediate containers.
+        if !common_prefix.is_empty() {
+            let prefix_segments: Vec<&str> = common_prefix.split("::").collect();
+            // Wrap from the deepest level up to the single-segment
+            // package name, skipping the innermost container (already
+            // created by trie_to_drag_node).
+            let mut wrapped = container;
+            for i in (0..prefix_segments.len()).rev() {
+                let parent_name = prefix_segments[..=i].join("::");
+                if parent_name == common_prefix {
+                    continue;
+                }
+                let drag = drag_of(&wrapped);
+                wrapped = DragNode::Container {
+                    name: parent_name,
+                    maint_score: None,
+                    drag,
+                    children: vec![wrapped],
+                };
+            }
+            package_containers.push(wrapped);
+            continue;
+        }
+
         package_containers.push(container);
     }
 
-    // ── 4. Handle orphan modules (no package) ───────────────────────
-    let orphan_nodes: Vec<DragNode> = orphan_indices
-        .iter()
-        .map(|&idx| {
-            let m = &modules[idx];
-            DragNode::Module {
-                name: m.module.clone(),
-                file: m.file.clone(),
-                token_count: m.token_count,
-                footprint: m.footprint,
-                comprehensibility: m.comprehensibility,
-                drag: m.drag,
-            }
-        })
-        .collect();
+    // ── 3. Handle orphan modules (no package) ───────────────────────
+    // Build orphan modules through the same trie logic so ::-delimited
+    // paths produce nested containers.
+    let orphan_nodes = if orphan_indices.is_empty() {
+        Vec::new()
+    } else {
+        let mut orphan_trie = TrieNode::default();
+        for &idx in &orphan_indices {
+            let segments: Vec<&str> = modules[idx].module.split("::").collect();
+            orphan_trie.insert(&segments, idx);
+        }
+        let orphan_root = trie_to_drag_node(&orphan_trie, modules, String::new(), 1.0, false);
+        match orphan_root {
+            DragNode::Container { children, .. } => children,
+            single => vec![single],
+        }
+    };
 
-    // ── 5. Assemble the root ────────────────────────────────────────
+    // ── 4. Assemble the root ────────────────────────────────────────
     let mut all_children: Vec<DragNode> = Vec::new();
     all_children.extend(package_containers);
     all_children.extend(orphan_nodes);
@@ -267,15 +304,18 @@ fn longest_common_module_prefix(paths: &[&str]) -> String {
 /// Recursively convert a trie into a [`DragNode`] tree, computing container
 /// drag bottom-up.
 ///
-/// `maint_score` is the maintainability score this node should apply to its
-/// direct module children.  Leaf modules' `drag` fields must already be
-/// populated before calling this function.
+/// `maint_mult` is the pre-computed maintainability multiplier applied to
+/// this node's direct module children.  Subtree containers inherit the same
+/// multiplier for drag computation but always have `maint_score: None`.
+///
+/// `is_package_root` prevents flattening so a one-module package still
+/// gets a Container wrapper and pays its maintainability penalty.
 fn trie_to_drag_node(
     trie: &TrieNode,
     modules: &[super::ModuleDrag],
     name: String,
-    maint_score: Option<f64>,
-    p: f64,
+    maint_mult: f64,
+    is_package_root: bool,
 ) -> DragNode {
     // Direct module children (leaf modules at this trie node).
     let direct_modules: Vec<DragNode> = trie
@@ -304,29 +344,31 @@ fn trie_to_drag_node(
             } else {
                 format!("{name}::{seg}")
             };
-            // Subtrees inherit this node's maint score.
-            trie_to_drag_node(child_trie, modules, child_name, maint_score, p)
+            // Subtrees inherit the same maint_mult for drag computation
+            // but always serialize `maint_score: None`.
+            trie_to_drag_node(child_trie, modules, child_name, maint_mult, false)
         })
         .collect();
 
-    // If there are no children at all and at most one direct module,
-    // we can flatten: return the module directly (or an empty container).
-    if trie.children.is_empty() && direct_modules.len() <= 1 {
+    // Flatten non-package-root containers with at most one direct
+    // module and no child subtrees.  Package roots always stay as
+    // containers so the maintainability penalty is applied.
+    if !is_package_root && trie.children.is_empty() && direct_modules.len() <= 1 {
         if let Some(m) = direct_modules.into_iter().next() {
             return m;
         }
         // Empty: return a trivial container.
         return DragNode::Container {
             name,
-            maint_score,
+            maint_score: None,
             drag: 0.0,
             children: Vec::new(),
         };
     }
 
     // Compute container drag bottom-up.
-    // Partition children: flattened modules from sub-tries pay maint;
-    // child containers already have maint baked in.
+    // Direct modules pay the maint multiplier; child containers already
+    // have maint baked in from their own trie_to_drag_node call.
     let mut all_children: Vec<DragNode> = Vec::new();
     all_children.extend(direct_modules);
     all_children.extend(child_containers);
@@ -346,20 +388,44 @@ fn trie_to_drag_node(
         })
         .sum();
 
-    let maint_mult = maint_score.map_or(1.0, |s| (p * (1.0 - s)).exp());
     let drag = maint_mult * direct_module_drag_sum + child_container_drag_sum;
 
-    // Sort children so modules come before containers for stable output.
-    all_children.sort_by(|a, b| match (a, b) {
-        (DragNode::Module { name: na, .. }, DragNode::Module { name: nb, .. }) => na.cmp(nb),
-        (DragNode::Module { .. }, DragNode::Container { .. }) => std::cmp::Ordering::Less,
-        (DragNode::Container { .. }, DragNode::Module { .. }) => std::cmp::Ordering::Greater,
-        (DragNode::Container { name: na, .. }, DragNode::Container { name: nb, .. }) => na.cmp(nb),
+    // Sort children: modules first, then containers; within each group
+    // sort by drag descending so the highest-drag items appear first.
+    all_children.sort_by(|a, b| {
+        let a_is_module = matches!(a, DragNode::Module { .. });
+        let b_is_module = matches!(b, DragNode::Module { .. });
+        match (a_is_module, b_is_module) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => {
+                // Both same variant: sort by drag descending.
+                let a_drag = drag_of(a);
+                let b_drag = drag_of(b);
+                b_drag
+                    .partial_cmp(&a_drag)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        // Tie-break by name for determinism.
+                        match (a, b) {
+                            (
+                                DragNode::Module { name: na, .. },
+                                DragNode::Module { name: nb, .. },
+                            ) => na.cmp(nb),
+                            (
+                                DragNode::Container { name: na, .. },
+                                DragNode::Container { name: nb, .. },
+                            ) => na.cmp(nb),
+                            _ => std::cmp::Ordering::Equal,
+                        }
+                    })
+            }
+        }
     });
 
     DragNode::Container {
         name,
-        maint_score,
+        maint_score: None,
         drag,
         children: all_children,
     }
@@ -479,6 +545,17 @@ mod tests {
         }
     }
 
+    /// Helper: build a (module, file) → pkg_key map from a list.
+    fn module_pkg_map(entries: &[(&str, &str)]) -> HashMap<(String, String), String> {
+        entries
+            .iter()
+            .map(|(module, pkg)| {
+                let file = format!("/src/{}.rs", module.replace("::", "/"));
+                ((module.to_string(), file), pkg.to_string())
+            })
+            .collect()
+    }
+
     #[test]
     fn tree_with_maint_1_is_flat_sum() {
         // With maint=1.0, the tree drag equals the sum of module drags
@@ -489,10 +566,12 @@ mod tests {
             mdl("gremlins::clients::provider", 7.0),
             mdl("gremlins::executor::gremlin", 20.0),
         ];
-        let module_pkg: HashMap<String, String> = modules
-            .iter()
-            .map(|m| (m.module.clone(), "gremlins".to_string()))
-            .collect();
+        let module_pkg = module_pkg_map(&[
+            ("gremlins::config", "gremlins"),
+            ("gremlins::clients::client", "gremlins"),
+            ("gremlins::clients::provider", "gremlins"),
+            ("gremlins::executor::gremlin", "gremlins"),
+        ]);
         let mut pkg_maints = HashMap::new();
         pkg_maints.insert("gremlins".to_string(), 1.0);
         let mut pkg_names = HashMap::new();
@@ -519,10 +598,11 @@ mod tests {
             mdl("gremlins::clients::client", 5.0),
             mdl("gremlins::clients::provider", 7.0),
         ];
-        let module_pkg: HashMap<String, String> = modules
-            .iter()
-            .map(|m| (m.module.clone(), "gremlins".to_string()))
-            .collect();
+        let module_pkg = module_pkg_map(&[
+            ("gremlins::config", "gremlins"),
+            ("gremlins::clients::client", "gremlins"),
+            ("gremlins::clients::provider", "gremlins"),
+        ]);
         let mut pkg_maints = HashMap::new();
         pkg_maints.insert("gremlins".to_string(), 0.8);
         let mut pkg_names = HashMap::new();
@@ -564,10 +644,12 @@ mod tests {
             mdl("pkg::a::b::c", 3.0),
             mdl("pkg::a::b::c::d", 4.0),
         ];
-        let module_pkg: HashMap<String, String> = modules
-            .iter()
-            .map(|m| (m.module.clone(), "pkg".to_string()))
-            .collect();
+        let module_pkg = module_pkg_map(&[
+            ("pkg::a", "pkg"),
+            ("pkg::a::b", "pkg"),
+            ("pkg::a::b::c", "pkg"),
+            ("pkg::a::b::c::d", "pkg"),
+        ]);
         let mut pkg_maints = HashMap::new();
         pkg_maints.insert("pkg".to_string(), 0.5);
         let mut pkg_names = HashMap::new();
@@ -605,10 +687,10 @@ mod tests {
             mdl("pkg_a::mod2", 20.0),
             mdl("pkg_b::mod1", 30.0),
         ];
-        let module_pkg: HashMap<String, String> = HashMap::from([
-            ("pkg_a::mod1".to_string(), "pkg_a".to_string()),
-            ("pkg_a::mod2".to_string(), "pkg_a".to_string()),
-            ("pkg_b::mod1".to_string(), "pkg_b".to_string()),
+        let module_pkg = module_pkg_map(&[
+            ("pkg_a::mod1", "pkg_a"),
+            ("pkg_a::mod2", "pkg_a"),
+            ("pkg_b::mod1", "pkg_b"),
         ]);
         let pkg_maints: HashMap<String, f64> =
             HashMap::from([("pkg_a".to_string(), 1.0), ("pkg_b".to_string(), 1.0)]);
@@ -626,7 +708,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_single_module_returns_it_directly() {
+    fn tree_single_module_orphan_returns_it_directly() {
         let modules = vec![mdl("lone_mod", 42.0)];
         let module_pkg = HashMap::new(); // no package
         let pkg_maints = HashMap::new();
@@ -635,6 +717,153 @@ mod tests {
         let tree = build_drag_tree(&modules, &module_pkg, &pkg_maints, &pkg_names, 2.5);
         assert!(matches!(tree, DragNode::Module { .. }));
         assert!((drag_of(&tree) - 42.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn tree_orphan_modules_nested_by_path() {
+        // Orphans with :: should produce nested containers.
+        let modules = vec![mdl("orphan::a", 10.0), mdl("orphan::b::c", 20.0)];
+        let tree = build_drag_tree(
+            &modules,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            2.5,
+        );
+
+        // Should be an "orphan" container with one module and one sub-container.
+        assert!(matches!(tree, DragNode::Container { .. }));
+        if let DragNode::Container { name, children, .. } = &tree {
+            assert_eq!(name, "orphan");
+            assert_eq!(children.len(), 2);
+            let has_module_a = children
+                .iter()
+                .any(|c| matches!(c, DragNode::Module { name, .. } if name == "orphan::a"));
+            assert!(has_module_a);
+            let has_container_b = children
+                .iter()
+                .any(|c| matches!(c, DragNode::Container { name, .. } if name == "orphan::b"));
+            assert!(has_container_b);
+        }
+    }
+
+    #[test]
+    fn tree_single_module_package_applies_maint() {
+        // A one-module package must still get its maint penalty applied.
+        let modules = vec![mdl("tiny_pkg::only_mod", 10.0)];
+        let module_pkg = module_pkg_map(&[("tiny_pkg::only_mod", "tiny_pkg")]);
+        let mut pkg_maints = HashMap::new();
+        pkg_maints.insert("tiny_pkg".to_string(), 0.8);
+        let mut pkg_names = HashMap::new();
+        pkg_names.insert("tiny_pkg".to_string(), "tiny_pkg".to_string());
+
+        let tree = build_drag_tree(&modules, &module_pkg, &pkg_maints, &pkg_names, 2.5);
+
+        // Should be a container (not flattened to module) so maint applies.
+        assert!(matches!(tree, DragNode::Container { .. }));
+        let mult = (2.5 * 0.2_f64).exp(); // exp(p * (1 - maint)) = exp(2.5 * 0.2)
+        let expected = mult * 10.0;
+        assert!(
+            (drag_of(&tree) - expected).abs() < 1e-9,
+            "expected={expected}, got={}",
+            drag_of(&tree)
+        );
+    }
+
+    #[test]
+    fn tree_package_with_long_common_prefix_preserves_names() {
+        // When modules share a prefix longer than the package name,
+        // container names must include the full path.
+        let modules = vec![
+            mdl("pkg::deep::nested::a", 1.0),
+            mdl("pkg::deep::nested::b::c", 2.0),
+        ];
+        let module_pkg = module_pkg_map(&[
+            ("pkg::deep::nested::a", "pkg"),
+            ("pkg::deep::nested::b::c", "pkg"),
+        ]);
+        let mut pkg_maints = HashMap::new();
+        pkg_maints.insert("pkg".to_string(), 1.0);
+        let mut pkg_names = HashMap::new();
+        pkg_names.insert("pkg".to_string(), "pkg".to_string());
+
+        let tree = build_drag_tree(&modules, &module_pkg, &pkg_maints, &pkg_names, 2.5);
+
+        // The top-level container should be "pkg::deep::nested"
+        // (the common prefix), wrapped in "pkg::deep" and "pkg".
+        // Since common_prefix "pkg::deep::nested" is longer than
+        // pkg_display_name "pkg", we get wrapping.
+        if let DragNode::Container { name, children, .. } = &tree {
+            assert_eq!(name, "pkg");
+            // Should have one child: "pkg::deep" container.
+            assert_eq!(children.len(), 1);
+            if let DragNode::Container { name, children, .. } = &children[0] {
+                assert_eq!(name, "pkg::deep");
+                assert_eq!(children.len(), 1);
+                if let DragNode::Container { name, children, .. } = &children[0] {
+                    assert_eq!(name, "pkg::deep::nested");
+                    assert_eq!(children.len(), 2);
+                    let names: Vec<&str> = children
+                        .iter()
+                        .map(|c| match c {
+                            DragNode::Module { name, .. } => name.as_str(),
+                            DragNode::Container { name, .. } => name.as_str(),
+                        })
+                        .collect();
+                    assert!(names.contains(&"pkg::deep::nested::a"));
+                    assert!(names.contains(&"pkg::deep::nested::b"));
+                } else {
+                    panic!("expected container at pkg::deep::nested");
+                }
+            } else {
+                panic!("expected container at pkg::deep");
+            }
+        } else {
+            panic!("expected root container");
+        }
+    }
+
+    #[test]
+    fn tree_module_moved_between_packages_pays_different_penalty() {
+        // Moving a module from pkg_a (maint=0.5) to pkg_b (maint=1.0)
+        // changes which penalty it pays.
+        let modules_a = vec![mdl("pkg_a::mod1", 10.0)];
+        let module_pkg_a = module_pkg_map(&[("pkg_a::mod1", "pkg_a")]);
+        let pkg_maints_a = HashMap::from([("pkg_a".to_string(), 0.5)]);
+        let pkg_names_a = HashMap::from([("pkg_a".to_string(), "pkg_a".to_string())]);
+
+        let tree_a = build_drag_tree(&modules_a, &module_pkg_a, &pkg_maints_a, &pkg_names_a, 2.5);
+        let mult_a = (2.5 * 0.5_f64).exp(); // exp(p * (1-0.5))
+
+        // Same module under pkg_b (maint=1.0).
+        let modules_b = vec![mdl("pkg_b::mod1", 10.0)];
+        let module_pkg_b = module_pkg_map(&[("pkg_b::mod1", "pkg_b")]);
+        let pkg_maints_b = HashMap::from([("pkg_b".to_string(), 1.0)]);
+        let pkg_names_b = HashMap::from([("pkg_b".to_string(), "pkg_b".to_string())]);
+
+        let tree_b = build_drag_tree(&modules_b, &module_pkg_b, &pkg_maints_b, &pkg_names_b, 2.5);
+        let mult_b = (2.5 * 0.0_f64).exp(); // exp(p * (1-1.0)) = exp(0) = 1.0
+
+        assert!((drag_of(&tree_a) - mult_a * 10.0).abs() < 1e-9);
+        assert!((drag_of(&tree_b) - mult_b * 10.0).abs() < 1e-9);
+        // The module under pkg_a (worse maint) should have higher drag.
+        assert!(drag_of(&tree_a) > drag_of(&tree_b));
+    }
+
+    #[test]
+    fn tree_missing_maint_defaults_to_neutral() {
+        // When a package has no maint score (not in pkg_maints),
+        // the fallback multiplier should be exp(p * 0.5), matching
+        // the neutral 0.5 default.
+        let modules = vec![mdl("missing_maint::m", 10.0)];
+        let module_pkg = module_pkg_map(&[("missing_maint::m", "missing_maint")]);
+        let pkg_maints: HashMap<String, f64> = HashMap::new(); // missing!
+        let mut pkg_names = HashMap::new();
+        pkg_names.insert("missing_maint".to_string(), "missing_maint".to_string());
+
+        let tree = build_drag_tree(&modules, &module_pkg, &pkg_maints, &pkg_names, 2.5);
+        let mult = (2.5 * 0.5_f64).exp();
+        assert!((drag_of(&tree) - mult * 10.0).abs() < 1e-9);
     }
 
     #[test]

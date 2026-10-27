@@ -66,7 +66,7 @@ struct DragReport {
     #[serde(flatten)]
     config: ReportConfig,
     #[serde(flatten)]
-    tree: DragNode,
+    tree: DragNodeOutput,
 }
 
 #[derive(Serialize)]
@@ -89,6 +89,64 @@ struct ModuleDrag {
     comprehensibility: Option<f64>,
     /// The drag metric: `(1+footprint)^w2 · exp(m·(1−comp))`.
     drag: f64,
+}
+
+/// Serializable mirror of [`DragNode`] for JSON output.
+///
+/// Lives in `main.rs` alongside other output types so the `scoring`
+/// module stays free of serde attributes.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum DragNodeOutput {
+    Module {
+        name: String,
+        file: String,
+        token_count: usize,
+        footprint: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        comprehensibility: Option<f64>,
+        drag: f64,
+    },
+    Container {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        maint_score: Option<f64>,
+        drag: f64,
+        children: Vec<DragNodeOutput>,
+    },
+}
+
+impl From<&DragNode> for DragNodeOutput {
+    fn from(node: &DragNode) -> Self {
+        match node {
+            DragNode::Module {
+                name,
+                file,
+                token_count,
+                footprint,
+                comprehensibility,
+                drag,
+            } => DragNodeOutput::Module {
+                name: name.clone(),
+                file: file.clone(),
+                token_count: *token_count,
+                footprint: *footprint,
+                comprehensibility: *comprehensibility,
+                drag: *drag,
+            },
+            DragNode::Container {
+                name,
+                maint_score,
+                drag,
+                children,
+            } => DragNodeOutput::Container {
+                name: name.clone(),
+                maint_score: *maint_score,
+                drag: *drag,
+                children: children.iter().map(DragNodeOutput::from).collect(),
+            },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -385,9 +443,9 @@ async fn run() -> Result<(), String> {
     };
 
     // Build module→pkg and pkg_key→pkg_name maps for tree construction.
-    let module_pkg: HashMap<String, String> = target_modules
+    let module_pkg: HashMap<(String, String), String> = target_modules
         .iter()
-        .map(|(m, _f, pkg)| (m.clone(), pkg.clone()))
+        .map(|(m, f, pkg)| ((m.clone(), f.to_string_lossy().into_owned()), pkg.clone()))
         .collect();
 
     let pkg_names: HashMap<String, String> = scoring_packages
@@ -412,7 +470,7 @@ async fn run() -> Result<(), String> {
                 m: config.weights.m,
                 p: config.weights.p,
             },
-            tree,
+            tree: DragNodeOutput::from(&tree),
         };
         println!(
             "{}",
@@ -1411,7 +1469,7 @@ fn print_explain(config: &DragConfig) {
 // ---------------------------------------------------------------------------
 
 fn print_human_table(tree: &DragNode, skip_maint: bool) {
-    // Check if any module has comprehensibility scores.
+    // Only show the "comp" column when EVERY module has a score.
     let has_comp = tree_has_comp(tree);
 
     if has_comp {
@@ -1431,18 +1489,18 @@ fn print_human_table(tree: &DragNode, skip_maint: bool) {
     print_node(tree, 0, has_comp, skip_maint);
 }
 
-/// Check whether any module in the tree has a comprehensibility score.
+/// Check whether every module in the tree has a comprehensibility score.
 fn tree_has_comp(node: &DragNode) -> bool {
     match node {
         DragNode::Module {
             comprehensibility, ..
         } => comprehensibility.is_some(),
-        DragNode::Container { children, .. } => children.iter().any(tree_has_comp),
+        DragNode::Container { children, .. } => children.iter().all(tree_has_comp),
     }
 }
 
 /// Recursively print a drag tree node with indentation.
-fn print_node(node: &DragNode, depth: usize, has_comp: bool, skip_maint: bool) {
+fn print_node(node: &DragNode, depth: usize, has_comp: bool, _skip_maint: bool) {
     let indent = "  ".repeat(depth);
 
     match node {
@@ -1480,37 +1538,16 @@ fn print_node(node: &DragNode, depth: usize, has_comp: bool, skip_maint: bool) {
         }
         DragNode::Container {
             name,
-            maint_score,
             drag,
             children,
+            ..
         } => {
             // Print container header (skip nameless workspace root).
             if !name.is_empty() {
                 let display = truncate(name, 54 - depth * 2);
                 let w = (55usize).saturating_sub(depth * 2);
-                if !skip_maint {
-                    if let Some(ms) = maint_score {
-                        println!(
-                            "{indent}{:<w$} {:>8} {:>10} {:>6.3} {:>14.1}",
-                            display,
-                            "",
-                            "",
-                            ms,
-                            drag,
-                            w = w,
-                        );
-                    } else {
-                        println!(
-                            "{indent}{:<w$} {:>8} {:>10} {:>6} {:>14.1}",
-                            display,
-                            "",
-                            "",
-                            "",
-                            drag,
-                            w = w,
-                        );
-                    }
-                } else {
+                // Match module column count: 5 cols when has_comp, 4 otherwise.
+                if has_comp {
                     println!(
                         "{indent}{:<w$} {:>8} {:>10} {:>6} {:>14.1}",
                         display,
@@ -1520,20 +1557,24 @@ fn print_node(node: &DragNode, depth: usize, has_comp: bool, skip_maint: bool) {
                         drag,
                         w = w,
                     );
+                } else {
+                    println!(
+                        "{indent}{:<w$} {:>8} {:>10} {:>14.1}",
+                        display,
+                        "",
+                        "",
+                        drag,
+                        w = w,
+                    );
                 }
             }
 
-            // Separate modules from containers for stable ordering.
-            let (modules, containers): (Vec<_>, Vec<_>) = children
-                .iter()
-                .partition(|c| matches!(c, DragNode::Module { .. }));
-
-            for child in modules.iter().chain(containers.iter()) {
+            for child in children.iter() {
                 print_node(
                     child,
                     if name.is_empty() { depth } else { depth + 1 },
                     has_comp,
-                    skip_maint,
+                    _skip_maint,
                 );
             }
         }

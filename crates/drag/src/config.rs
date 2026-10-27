@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_json_gets_schema_defaults_not_bundled() {
+    fn partial_json_gets_bundled_defaults() {
         // When a user provides a minimal JSON, omitted fields get schema defaults.
         // Schema defaults now match bundled values (0.5, 2.5, 2.5) so partial
         // overrides don't silently zero the weights.
