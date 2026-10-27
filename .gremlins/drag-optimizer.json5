@@ -109,7 +109,7 @@
           'cp {report} "$GREMLINS_STATE_DIR/drag_current.json"',
           "cat {report} | jq '.drag' > {drag_best}\n",
           'echo "baseline sum drag = $(cat {drag_best})"',
-          'BASE_SHA=$(cat {base_sha}) && DRAG=$(jq '\''.drag'\'' < {report}) && jq -n --arg target "{target}" --arg base_sha "$BASE_SHA" --argjson drag "$DRAG" '\''[{"iteration":"baseline","target":$target,"iter_start_sha":$base_sha,"iter_end_sha":$base_sha,"drag_before":null,"drag_after":$drag,"drag_delta":null,"commits":null,"verdict":"baseline"}]'\'' > {progression} && echo "seeded drag_progression.json (baseline drag=$DRAG)"',
+          'if [ -f {progression} ]; then\n  echo "drag_progression.json already exists; skipping baseline seed"\nelse\n  BASE_SHA=$(cat {base_sha}) && DRAG=$(jq '\''.drag'\'' < {report}) && jq -n --arg target "{target}" --arg base_sha "$BASE_SHA" --argjson drag "$DRAG" '\''[{"iteration":"baseline","target":$target,"iter_start_sha":$base_sha,"iter_end_sha":$base_sha,"drag_before":null,"drag_after":$drag,"drag_delta":null,"commits":null,"verdict":"baseline"}]'\'' > {progression} && echo "seeded drag_progression.json (baseline drag=$DRAG)"\nfi',
         ],
       },
     },
@@ -221,8 +221,8 @@
               'gremlins-drag --config "$GREMLINS_STATE_DIR/artifacts/drag_config.json" "{target}" > {report}',
               'STATE_DIR="$GREMLINS_STATE_DIR"\ndrag_sum() {\n  jq '.drag' < "$1"\n}\nif [ -f "$STATE_DIR/drag_current.json" ]; then\n  drag_sum "$STATE_DIR/drag_current.json" > {drag_before}\n  cp "$STATE_DIR/drag_current.json" "$STATE_DIR/drag_previous.json"\nelse\n  printf "0" > {drag_before}\nfi\ncp {report} "$STATE_DIR/drag_current.json"\n',
               'STATE_DIR="$GREMLINS_STATE_DIR"\ndrag_sum() {\n  jq '.drag' < "$1"\n}\nAFTER=$(drag_sum "$STATE_DIR/drag_current.json")\nprintf "%s" "$AFTER" > {drag_after}\nBEST=$(cat "$GREMLINS_STATE_DIR/artifacts/drag_best.txt" 2>/dev/null)\nif ! awk -v a="$AFTER" -v b="$BEST" \'BEGIN { exit (b < a) ? 0 : 1 }\' 2>/dev/null; then\n  BEST="$AFTER"\nfi\nprintf "%s" "$BEST" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"\necho "iteration {loop_iter} drag = $AFTER (best = $BEST)"\n',
-              'git -C "$GREMLIN_WORKDIR" rev-parse HEAD > {iter_end_sha}',
-              'ITER_START=$(cat "$GREMLINS_STATE_DIR/artifacts/{loop_iter}/iter_start_sha.txt") && COMMITS=$(git -C "$GREMLIN_WORKDIR" rev-list --count "$ITER_START..HEAD" 2>/dev/null || echo "0") && printf "%s" "$COMMITS" > {commit_count}',
+              'git -C "$GREMLIN_WORKDIR" rev-parse HEAD | tr -d '\''\n'\'' > {iter_end_sha}',
+              'ITER_START=$(cat "$GREMLINS_STATE_DIR/artifacts/{loop_iter}/iter_start_sha.txt" 2>/dev/null) || { echo "FATAL: iter_start_sha.txt missing for {loop_iter}" >&2; exit 1; }\nCOMMITS=$(git -C "$GREMLIN_WORKDIR" rev-list --count "$ITER_START..HEAD" 2>/dev/null || echo "0")\nprintf "%s" "$COMMITS" > {commit_count}',
             ],
           },
         },
@@ -262,13 +262,14 @@
           type: "exec",
           interpolation: {
             inputs: {
-              verdict: 'content("artifact://{loop_iter}/drag_reduced.txt")',
+              verdict_path: "artifact://{loop_iter}/drag_reduced.txt",
               iter_start_sha: 'content("artifact://{loop_iter}/iter_start_sha.txt")',
+              progression_path: "artifact://drag_progression.json",
             },
           },
           options: {
             cmds: [
-              'if [ "{verdict}" = "rolled_back" ]; then\n  echo "rolling back iteration {loop_iter} (gaming detected)"\n  git -C "$GREMLIN_WORKDIR" reset --hard {iter_start_sha}\n  if [ -f "$GREMLINS_STATE_DIR/drag_previous.json" ]; then\n    cp "$GREMLINS_STATE_DIR/drag_previous.json" "$GREMLINS_STATE_DIR/drag_current.json"\n    DRAG_BEFORE=$(cat "$GREMLINS_STATE_DIR/artifacts/{loop_iter}/drag_before.txt" 2>/dev/null)\n    printf "%s" "${DRAG_BEFORE:-0}" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"\n    echo "restored drag_best to pre-iteration value"\n  fi\nelif [ "{verdict}" = "reduced" ]; then\n  echo "iteration {loop_iter} is legitimate with drag improvement"\nelse\n  echo "iteration {loop_iter} verdict is unknown: {verdict}"\nfi\n',
+              '# Read and sanitize the verdict. When the evaluate agent writes nothing\n# (no-progress bail), the file does not exist and VERDICT stays empty.\nVERDICT=""\nif [ -f {verdict_path} ]; then\n  VERDICT=$(tr -d '\''\\n'\'' < {verdict_path})\nfi\n\n# Enforce the "no bail until 3 data points" rule.\nif [ -z "$VERDICT" ]; then\n  PROG_COUNT=$(jq '\''length'\'' {progression_path} 2>/dev/null || echo "0")\n  if [ "$PROG_COUNT" -lt 3 ]; then\n    VERDICT="reduced"\n    printf "%s" "reduced" > {verdict_path}\n    echo "fewer than 3 progression entries; forcing reduced to keep going"\n  fi\nfi\n\n# Apply the verdict.\nif [ "$VERDICT" = "rolled_back" ]; then\n  echo "rolling back iteration {loop_iter} (gaming detected)"\n  git -C "$GREMLIN_WORKDIR" reset --hard {iter_start_sha}\n  if [ -f "$GREMLINS_STATE_DIR/drag_previous.json" ]; then\n    cp "$GREMLINS_STATE_DIR/drag_previous.json" "$GREMLINS_STATE_DIR/drag_current.json"\n    DRAG_BEFORE=$(cat "$GREMLINS_STATE_DIR/artifacts/{loop_iter}/drag_before.txt" 2>/dev/null)\n    printf "%s" "${DRAG_BEFORE:-0}" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"\n    echo "restored drag_best to pre-iteration value"\n  fi\nelif [ "$VERDICT" = "reduced" ]; then\n  echo "iteration {loop_iter} is legitimate with drag improvement"\nelse\n  echo "iteration {loop_iter} verdict is unknown or empty: $VERDICT"\nfi\n',
             ],
           },
         },
@@ -278,12 +279,12 @@
           type: "exec",
           interpolation: {
             inputs: {
-              drag_before: 'content("artifact://{loop_iter}/drag_before.txt")',
-              drag_after: 'content("artifact://{loop_iter}/drag_after.txt")',
-              iter_start_sha: 'content("artifact://{loop_iter}/iter_start_sha.txt")',
-              iter_end_sha: 'content("artifact://{loop_iter}/iter_end_sha.txt")',
-              commit_count: 'content("artifact://{loop_iter}/commit_count.txt")',
-              verdict: 'content("artifact://{loop_iter}/drag_reduced.txt")',
+              drag_before_path: "artifact://{loop_iter}/drag_before.txt",
+              drag_after_path: "artifact://{loop_iter}/drag_after.txt",
+              iter_start_sha_path: "artifact://{loop_iter}/iter_start_sha.txt",
+              iter_end_sha_path: "artifact://{loop_iter}/iter_end_sha.txt",
+              commit_count_path: "artifact://{loop_iter}/commit_count.txt",
+              verdict_path: "artifact://{loop_iter}/drag_reduced.txt",
               target: 'content("artifact://target.txt")',
               progression_path: "artifact://drag_progression.json",
             },
@@ -293,7 +294,7 @@
           },
           options: {
             cmds: [
-              'if [ -f {progression_path} ]; then\n  if [ "{verdict}" = "rolled_back" ]; then\n    END_SHA="{iter_start_sha}"\n  else\n    END_SHA="{iter_end_sha}"\n  fi\n  jq --arg target "{target}" \\\n     --arg iter "{loop_iter}" \\\n     --argjson drag_before "{drag_before}" \\\n     --argjson drag_after "{drag_after}" \\\n     --arg iter_start_sha "{iter_start_sha}" \\\n     --arg iter_end_sha "$END_SHA" \\\n     --argjson commits "{commit_count}" \\\n     --arg verdict "{verdict}" \\\n     \'. + [{"iteration":$iter,"target":$target,"iter_start_sha":$iter_start_sha,"iter_end_sha":$iter_end_sha,"drag_before":$drag_before,"drag_after":$drag_after,"drag_delta":($drag_after - $drag_before),"commits":$commits,"verdict":$verdict}]\' \\\n     {progression_path} > {progression}\n  echo "recorded progression entry for iteration {loop_iter} (verdict={verdict})"\nelse\n  echo "drag_progression.json not found; skipping record-progression"\nfi\n',
+              '# Read the existing progression artifact into a shell variable first,\n# then write the updated JSON back — this avoids truncating the file\n# before jq can read it (both {progression_path} and {progression} resolve\n# to the same artifact path).\nif [ ! -f {progression_path} ]; then\n  echo "drag_progression.json not found; skipping record-progression"\n  echo "[]" > {progression}\n  exit 0\nfi\nEXISTING=$(cat {progression_path})\n\n# Sanitize all values read from files — trim trailing newlines and\n# validate numeric fields so --argjson receives clean JSON scalars.\n_drag_before=$(tr -d '\''\\n'\'' < {drag_before_path} 2>/dev/null || echo "0")\n_drag_after=$(tr -d '\''\\n'\'' < {drag_after_path} 2>/dev/null || echo "0")\n_start_sha=$(tr -d '\''\\n'\'' < {iter_start_sha_path} 2>/dev/null || echo "")\n_end_sha=$(tr -d '\''\\n'\'' < {iter_end_sha_path} 2>/dev/null || echo "")\n_commits=$(tr -d '\''\\n'\'' < {commit_count_path} 2>/dev/null || echo "0")\n_verdict=$(tr -d '\''\\n'\'' < {verdict_path} 2>/dev/null || echo "")\n\n# Validate numeric fields — fall back to 0 if they are not numbers.\ncase "$_drag_before" in ''\''|*[!0-9.]*) _drag_before=0 ;; esac\ncase "$_drag_after"  in ''\''|*[!0-9.]*) _drag_after=0  ;; esac\ncase "$_commits"    in ''\''|*[!0-9]*)  _commits=0     ;; esac\n\n# Check for an existing entry with the same iteration to avoid duplicates\n# when the stage is re-run (e.g. pipeline resume).\nif echo "$EXISTING" | jq -e --arg iter "{loop_iter}" '\''map(select(.iteration == $iter)) | length > 0'\'' > /dev/null 2>&1; then\n  echo "entry for iteration {loop_iter} already exists; skipping"\n  exit 0\nfi\n\n# Rolled-back iterations record iter_start_sha as iter_end_sha\n# because the rollback reset HEAD back to the starting commit.\nif [ "$_verdict" = "rolled_back" ]; then\n  _end_sha="$_start_sha"\nfi\n\n# Append the new entry.  Read from the shell variable, write to the\n# output path — no truncation race because we already slurped EXISTING.\necho "$EXISTING" | jq \\\n  --arg target "{target}" \\\n  --arg iter "{loop_iter}" \\\n  --argjson drag_before "$_drag_before" \\\n  --argjson drag_after "$_drag_after" \\\n  --arg iter_start_sha "$_start_sha" \\\n  --arg iter_end_sha "$_end_sha" \\\n  --argjson commits "$_commits" \\\n  --arg verdict "$_verdict" \\\n  '\''. + [{"iteration":$iter,"target":$target,"iter_start_sha":$iter_start_sha,"iter_end_sha":$iter_end_sha,"drag_before":$drag_before,"drag_after":$drag_after,"drag_delta":($drag_after - $drag_before),"commits":$commits,"verdict":$verdict}]'\'' \\\n  > {progression}\n\necho "recorded progression entry for iteration {loop_iter} (verdict=$_verdict)"\n',
             ],
           },
         },
