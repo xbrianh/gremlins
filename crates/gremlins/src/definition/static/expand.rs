@@ -853,20 +853,30 @@ fn validate_call_site_interpolation(
             }
         }
     }
-    // Validate inputs values are mappings (not scalars)
+    // Validate inputs values are mappings (not scalars) and every value is a string
     if let Some(inputs_val) = interp_map.get("inputs").filter(|v| !v.is_null()) {
-        if !inputs_val.is_object() {
-            return Err(SchemaError::Generic(
-                "'interpolation.inputs' must be a mapping".to_string(),
-            ));
+        let inputs_map = inputs_val.as_object().ok_or_else(|| {
+            SchemaError::Generic("'interpolation.inputs' must be a mapping".to_string())
+        })?;
+        for (k, v) in inputs_map {
+            if !v.is_string() {
+                return Err(SchemaError::Generic(format!(
+                    "'interpolation.inputs.{k}' must be a string"
+                )));
+            }
         }
     }
-    // Validate outputs values are mappings (not scalars)
+    // Validate outputs values are mappings (not scalars) and every value is a string
     if let Some(outputs_val) = interp_map.get("outputs").filter(|v| !v.is_null()) {
-        if !outputs_val.is_object() {
-            return Err(SchemaError::Generic(
-                "'interpolation.outputs' must be a mapping".to_string(),
-            ));
+        let outputs_map = outputs_val.as_object().ok_or_else(|| {
+            SchemaError::Generic("'interpolation.outputs' must be a mapping".to_string())
+        })?;
+        for (k, v) in outputs_map {
+            if !v.is_string() {
+                return Err(SchemaError::Generic(format!(
+                    "'interpolation.outputs.{k}' must be a string"
+                )));
+            }
         }
     }
     Ok(())
@@ -2219,6 +2229,76 @@ mod tests {
         let err = expand_stage_def(&call_site, "mydef", &defs).unwrap_err();
         assert!(err.to_string().contains("required option"));
         assert!(err.to_string().contains("plan"));
+    }
+
+    #[test]
+    fn flatten_rejects_non_string_interpolation_input_value() {
+        // Non-string values in interpolation.inputs must be rejected even when
+        // flattening, since the downstream json_string_map validation is bypassed.
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "stages": [
+                    {"name": "s", "type": "agent", "prompt": ["hi\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "name": "cs",
+                "type": "mydef",
+                "interpolation": {
+                    "inputs": {"plan": 123}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let err = expand_stage_def(&call_site, "mydef", &defs).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'interpolation.inputs.plan' must be a string"),
+            "expected string-validation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn flatten_rejects_non_string_interpolation_output_value() {
+        // Non-string values in interpolation.outputs must be rejected even when
+        // flattening, since the downstream json_string_map validation is bypassed.
+        let definition = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "flatten_into_parent": true,
+                "stages": [
+                    {"name": "s", "type": "agent", "prompt": ["hi\n"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let call_site = serde_json::from_str::<serde_json::Value>(
+            r#"{
+                "name": "cs",
+                "type": "mydef",
+                "interpolation": {
+                    "outputs": {"result": true}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert("mydef".to_string(), definition);
+
+        let err = expand_stage_def(&call_site, "mydef", &defs).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("'interpolation.outputs.result' must be a string"),
+            "expected string-validation error, got: {err}"
+        );
     }
 
     #[test]
