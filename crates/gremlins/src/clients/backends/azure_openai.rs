@@ -236,8 +236,18 @@ impl Backend for AzureOpenAiBackend {
             }
         };
 
+        // Keep reasoning items unconditionally: the Responses API validates
+        // `function_call` → `reasoning` id references when reasoning is
+        // enabled, and the flag is inert (no items exist) when it is not.
         self.state
-            .single_attempt(&params.prompt, ctx, cancel, interactive, make_model)
+            .single_attempt(
+                &params.prompt,
+                ctx,
+                cancel,
+                interactive,
+                crate::clients::native::PreserveReasoning::Yes,
+                make_model,
+            )
             .await
     }
 

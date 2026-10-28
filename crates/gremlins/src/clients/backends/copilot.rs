@@ -627,7 +627,14 @@ impl Backend for CopilotBackend {
 
         self.state
             .native
-            .single_attempt(&params.prompt, ctx, cancel, interactive, make_model)
+            .single_attempt(
+                &params.prompt,
+                ctx,
+                cancel,
+                interactive,
+                crate::clients::native::PreserveReasoning::No,
+                make_model,
+            )
             .await
     }
 

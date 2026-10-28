@@ -17,6 +17,28 @@ use crate::clients::model::GremlinsModel;
 use crate::clients::params::ResolvedParams;
 use crate::clients::protocol::CompletedRun;
 
+/// Whether the agent loop should replay structured reasoning items in
+/// persistent turn history.
+///
+/// The Azure OpenAI Responses backend validates `function_call` → `reasoning`
+/// id references and therefore needs the id-bearing items kept in history. All
+/// other backends use the Chat Completions wire format, which has no such
+/// cross-item reference, so their reasoning text can be dropped from replay to
+/// avoid re-billing output-rate tokens as input tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreserveReasoning {
+    /// Omit structured reasoning items from persistent turn history.
+    No,
+    /// Keep structured reasoning items (Azure OpenAI Responses backend).
+    Yes,
+}
+
+impl PreserveReasoning {
+    pub(crate) fn as_bool(self) -> bool {
+        matches!(self, Self::Yes)
+    }
+}
+
 /// Per-backend state shared by every native provider backend.
 ///
 /// `C` is the backend-specific client state (for example an enum of a
@@ -85,6 +107,7 @@ impl<C> NativeRunState<C> {
         ctx: RunContext,
         cancel: Arc<CancelToken>,
         interactive: Option<InteractiveSession>,
+        preserve_reasoning: PreserveReasoning,
         make_model: impl std::future::Future<Output = Result<GremlinsModel, ClientError>>,
     ) -> Result<CompletedRun, ClientError> {
         let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
@@ -104,6 +127,7 @@ impl<C> NativeRunState<C> {
                     classify_error: Some(default_classify as ErrorClassifier),
                     temperature: self.resolved.temperature,
                     max_tokens: self.resolved.max_tokens,
+                    preserve_reasoning_in_history: preserve_reasoning.as_bool(),
                 },
                 interactive,
             )

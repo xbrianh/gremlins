@@ -302,6 +302,7 @@ pub(crate) async fn run_with_agent_loop(
             classify_error,
             temperature,
             max_tokens,
+            preserve_reasoning_in_history: false,
         },
         interactive,
     )

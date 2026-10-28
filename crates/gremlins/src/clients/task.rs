@@ -74,6 +74,7 @@ pub(crate) fn make_task_runner(
     temperature: Option<f64>,
     max_tokens: Option<u64>,
     extra: Option<serde_json::Value>,
+    preserve_reasoning_in_history: bool,
 ) -> tools::TaskFn {
     make_task_runner_at_depth(
         model,
@@ -92,6 +93,7 @@ pub(crate) fn make_task_runner(
         temperature,
         max_tokens,
         extra,
+        preserve_reasoning_in_history,
     )
 }
 
@@ -113,6 +115,7 @@ fn make_task_runner_at_depth(
     temperature: Option<f64>,
     max_tokens: Option<u64>,
     extra: Option<serde_json::Value>,
+    preserve_reasoning_in_history: bool,
 ) -> tools::TaskFn {
     Arc::new(
         move |kind: TaskKind, task: String, parent_history: Option<Vec<Message>>| {
@@ -193,6 +196,7 @@ fn make_task_runner_at_depth(
                     selected_temperature,
                     selected_max_tokens,
                     selected_extra.clone(),
+                    preserve_reasoning_in_history,
                 ));
 
                 let work_root = tools::worktree_root(task_cwd.as_deref());
@@ -228,6 +232,7 @@ fn make_task_runner_at_depth(
                     selected_temperature,
                     selected_max_tokens,
                     selected_extra.clone(),
+                    preserve_reasoning_in_history,
                     prepopulated_messages,
                 )
                 .await;
@@ -504,6 +509,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         // First invocation: depth 0 < 3, should succeed.
@@ -548,6 +554,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         let output = runner(TaskKind::Scout, "x".repeat(10_000), None).await;
@@ -611,6 +618,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         let parent_history = vec![Message::user("earlier parent turn".to_string())];
@@ -712,6 +720,7 @@ mod tests {
             Some(0.1),
             Some(1111),
             Some(parent_extra.clone()),
+            false,
         );
 
         let output = runner(TaskKind::Scout, "go".into(), None).await;
@@ -773,6 +782,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         let output = runner(TaskKind::Scout, "go".into(), None).await;
@@ -812,6 +822,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         let blocked = runner(TaskKind::Scout, "too deep".into(), None).await;
@@ -852,6 +863,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         let handle = tokio::spawn(runner(TaskKind::Scout, "transient".into(), None));
@@ -896,6 +908,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         let handle = tokio::spawn(runner(TaskKind::Scout, "exhaust".into(), None));
@@ -955,6 +968,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         // Ten concurrent siblings at depth 0 — none should be rejected as
@@ -1055,6 +1069,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
             );
             (runner, log_rx)
         }
