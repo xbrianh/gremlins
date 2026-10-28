@@ -2870,7 +2870,7 @@ model-profiles:
     #[test]
     fn test_landscape_stage_profiles_default_off() {
         // No settings.yaml and no env var → defaults to false.
-        let _env = EnvGuard::lock();
+        let _sandbox = Sandbox::new();
         clear_global();
         assert!(!landscape_stage_profiles());
     }

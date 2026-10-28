@@ -10,6 +10,7 @@ pub mod client;
 pub(crate) mod compaction;
 pub mod config;
 pub(crate) mod error;
+pub(crate) mod findings;
 pub(crate) mod format;
 pub mod github_auth;
 pub(crate) mod interactive;

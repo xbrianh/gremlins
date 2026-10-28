@@ -24,6 +24,7 @@ use super::interactive::{
 
 use super::cancel::{default_classify, is_retryable, CancelToken, ErrorClassifier};
 use super::error::ClientError;
+use super::findings::FindingsLedger;
 use super::format::{
     apply_chunk, assistant_tool_message, enrich_log_line, format_tool_call, format_tool_call_parts,
     ledger_key_arg, trunc, truncate_ledger_value,
@@ -943,6 +944,8 @@ struct LoopState {
     total_cache_creation_tokens: Option<u64>,
     total_reasoning_tokens: Option<u64>,
     tool_ledger: ToolLedger,
+    findings_ledger: FindingsLedger,
+    turn_findings_injected: bool,
     interactive_active: bool,
     pending_run_one_turn: bool,
     cmd_rx: Option<mpsc::Receiver<InteractiveCommand>>,
@@ -1069,6 +1072,8 @@ impl LoopState {
             total_cache_creation_tokens: None,
             total_reasoning_tokens: None,
             tool_ledger: ToolLedger::new(),
+            findings_ledger: FindingsLedger::new(),
+            turn_findings_injected: false,
             interactive_active: false,
             pending_run_one_turn: false,
             cmd_rx,
@@ -1225,6 +1230,25 @@ impl LoopState {
             overhead_tokens,
             overhead_bytes,
         );
+
+        // If findings weren't injected this turn but the ledger has entries
+        // and compaction dropped the prior injection from history, force
+        // re-injection so the model doesn't lose its discovered facts.
+        if !nested && !self.turn_findings_injected {
+            let findings_block = self.findings_ledger.format();
+            if !findings_block.is_empty() {
+                let in_request = request_messages
+                    .iter()
+                    .any(|msg| user_message_text(msg).contains("## Findings"))
+                    || user_message_text(&self.next_prompt).contains("## Findings");
+                if !in_request {
+                    let next_text = user_message_text(&self.next_prompt);
+                    let combined = format!("{next_text}\n\n{findings_block}");
+                    self.next_prompt = Message::user(combined);
+                    self.turn_findings_injected = true;
+                }
+            }
+        }
 
         // If the scratchpad wasn't injected this turn (hash unchanged)
         // but compaction dropped the prior injection from history, force
@@ -2012,7 +2036,16 @@ impl LoopState {
         // assistant tool_calls message; the ledger becomes the next turn's prompt,
         // trailing the complete result block instead of splitting it.
         self.history.extend(result_msgs);
-        self.next_prompt = Message::user(self.tool_ledger.format(self.turn_num));
+        let mut prompt = self.tool_ledger.format(self.turn_num);
+        let findings = self.findings_ledger.format();
+        if !findings.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&findings);
+            self.turn_findings_injected = true;
+        } else {
+            self.turn_findings_injected = false;
+        }
+        self.next_prompt = Message::user(prompt);
         self.turn_scratchpad_injected = false;
         self.remaining_turns -= 1;
         Ok(())
@@ -2252,8 +2285,10 @@ impl LoopState {
                 }
                 self.final_text = text.to_string();
             }
+            self.findings_ledger.feed(text);
         } else {
             self.final_text = text.to_string();
+            self.findings_ledger.feed(text);
         }
 
         emit_turn_metrics(
