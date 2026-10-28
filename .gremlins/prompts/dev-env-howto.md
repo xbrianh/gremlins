@@ -47,13 +47,9 @@ explicit `-j` flags are unnecessary but harmless.
 
 ### Check before you think you're done
 
-```bash
-make check      # format + clippy + cargo check (no tests)
-```
-
-`make check` is fine to run locally — it's format + clippy + cargo check with
-no tests. As noted above, leave `make test` to the verify stage. For the code
-you changed, `cargo check` is sufficient to verify compilation, and a targeted
+The verify stage runs `make check && make test` after this stage finishes,
+so do **not** run either yourself. `cargo check` is sufficient to verify
+compilation for the code you changed, and a targeted
 `cargo test -p gremlins --lib -- <test_name>` is fine.
 
 ## Batch replacement over iterative edits

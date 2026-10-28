@@ -1,9 +1,9 @@
 Address the following issues raised by the reviewers.
 
 A dedicated verify stage runs `make check && make test` after this stage
-finishes. Do **not** run `make test` yourself. `make check` is fine to run
-locally. A targeted `cargo test -p gremlins --lib -- <specific_test>` is fine
-for the code you changed.
+finishes. Do **not** run `make test` or `make check` yourself — the verify
+stage handles both. A targeted `cargo test -p gremlins --lib -- <specific_test>`
+or `cargo check` is fine for the code you changed.
 
 ## Plan
 
