@@ -1,6 +1,9 @@
 Address the following issues raised by the reviewers.
 
-Do not worry too much about linting or comprehensive verification - automated quality assurance will catch it all later.
+A dedicated verify stage runs `make check && make test` after this stage
+finishes. Do **not** run `make test` or `make check` yourself. A targeted
+`cargo test -p gremlins --lib -- <specific_test>` is fine for the code you
+changed.
 
 ## Plan
 

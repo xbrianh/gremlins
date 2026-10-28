@@ -4,7 +4,15 @@ A pure Rust workspace. No Python, no PyO3, no native extensions.
 
 ## When in doubt
 
-run `cargo check`. If that passes, run `make test`.
+run `cargo check`. It's the quickest way to verify compilation and is usually
+enough. Don't reach for the full test suite here — the verify stage runs it
+after this stage finishes.
+
+## Avoid repetitive commands
+
+Never re-run the same command unless you've made code changes. An identical
+`cargo check` or `cargo test` without intervening edits will produce the same
+result and just wastes a turn.
 
 ## Makefile recipes
 
@@ -26,37 +34,30 @@ parallelism and ensures consistent flags.
 
 ### Running tests
 
-**Always run the full suite with `make test`.** It runs the `gremlins` crate
-lib tests:
-
-```bash
-make test
-```
-
-The Makefile auto-detects core count, so explicit `-j` flags are unnecessary
-but harmless.
-
-For a single test:
+A dedicated verify stage runs `make check && make test` after this stage
+finishes, so do **not** run the full `make test` suite yourself. For the code
+you changed, run a targeted single test:
 
 ```bash
 cargo test -p gremlins --lib -- <test_name>
 ```
 
-For a full clean rebuild:
-
-```bash
-cargo clean && cargo test -p gremlins --lib
-```
+If you need the full suite, `make test` runs `cargo test -q -p gremlins --lib`,
+but leave that to the verify stage. The Makefile auto-detects core count, so
+explicit `-j` flags are unnecessary but harmless.
 
 ### Check before you think you're done
 
 ```bash
 make check      # format + clippy + cargo check (no tests)
-make test       # full test suite
 ```
 
-`make check` does **not** run tests, so it can pass even when tests would fail.
-Always run `make test` after logic changes.
+`make check` is fine to run locally. It does **not** run tests, so it can pass
+even when tests would fail. A dedicated verify stage runs
+`make check && make test` after this stage finishes, so don't run the full
+`make test` yourself. For the code you changed, `cargo check` is sufficient to
+verify compilation, and a targeted `cargo test -p gremlins --lib --
+<test_name>` is fine.
 
 ## Batch replacement over iterative edits
 
