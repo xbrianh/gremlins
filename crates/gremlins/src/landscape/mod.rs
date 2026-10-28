@@ -6,6 +6,8 @@
 
 mod error;
 pub mod heuristic;
+#[allow(dead_code)]
+pub(crate) mod signals;
 
 pub use error::LandscapeError;
 
