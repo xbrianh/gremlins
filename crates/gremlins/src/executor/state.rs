@@ -100,6 +100,9 @@ pub struct Checkout {
 // StateStore trait — the unified storage backend seam
 // ---------------------------------------------------------------------------
 
+/// Key in the state tree that holds per-stage token usage breakdowns.
+pub(crate) const STAGE_USAGE_KEY: &str = "stage_usage";
+
 /// The set of operations that the executor runtime requires from a storage
 /// backend: state.json reads/writes, blob I/O, and artifact registry
 /// operations.
@@ -149,8 +152,9 @@ pub trait StateStore: Send + Sync + Debug {
     fn accumulate_token_usage(&self, usage: &HashMap<String, i64>);
 
     /// Accumulate token usage delta into the per-stage breakdown for
-    /// `stage_path` (dotted path like `implement.scout-1`). A no-op when
-    /// `usage` is empty.
+    /// `stage_path` (slash-separated path like `implement/scout-1`).
+    /// A no-op when `usage` is empty. This is an internal method not intended
+    /// for external callers.
     fn accumulate_stage_token_usage(&self, stage_path: &str, usage: &HashMap<String, i64>);
 
     /// Create the `finished` marker and patch terminal fields.
@@ -1160,21 +1164,18 @@ impl StateStore for FileSystemStateStore {
         let usage = usage.clone();
         let stage_path = stage_path.to_string();
         let _ = locked_update(&sf, move |data| {
-            let entries = data
-                .get("stage_usage")
-                .and_then(|v| v.as_object().cloned())
-                .unwrap_or_default();
-            let mut existing: Map<String, Value> = entries
-                .get(&stage_path)
-                .and_then(|v| v.as_object().cloned())
-                .unwrap_or_default();
+            let stage_usage = data
+                .entry(STAGE_USAGE_KEY.to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            let entries = stage_usage.as_object_mut().unwrap();
+            let existing = entries
+                .entry(stage_path)
+                .or_insert_with(|| Value::Object(Map::new()));
+            let existing_map = existing.as_object_mut().unwrap();
             for (k, v) in &usage {
-                let cur = existing.get(k).map(as_i64).unwrap_or(0);
-                existing.insert(k.clone(), Value::from(cur + v));
+                let cur = existing_map.get(k).map(as_i64).unwrap_or(0);
+                existing_map.insert(k.clone(), Value::from(cur + v));
             }
-            let mut entries = entries;
-            entries.insert(stage_path, Value::Object(existing));
-            data.insert("stage_usage".into(), Value::Object(entries));
         });
     }
 

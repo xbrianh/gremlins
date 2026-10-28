@@ -1338,13 +1338,19 @@ impl Gremlin {
         if let Some(stage_usage) = self
             .state
             .state_tree()
-            .get("stage_usage")
+            .get(state::STAGE_USAGE_KEY)
             .and_then(|v| v.as_object())
         {
+            if stage_usage.is_empty() {
+                return;
+            }
             let artifact_dir = self.state.state_dir().join("artifacts");
             let path = artifact_dir.join("token_breakdown.jsonl");
+            // Collect and sort for deterministic output.
+            let mut entries: Vec<(&String, &serde_json::Value)> = stage_usage.iter().collect();
+            entries.sort_by_key(|(a, _)| *a);
             let mut output = String::new();
-            for (stage_path, usage_val) in stage_usage {
+            for (stage_path, usage_val) in entries {
                 let Some(usage) = usage_val.as_object() else {
                     continue;
                 };
@@ -1354,11 +1360,24 @@ impl Gremlin {
                     serde_json::Value::String(stage_path.replace('/', ".")),
                 );
                 for (key, value) in usage {
+                    if key == "stage" {
+                        log::warn!(
+                            "token breakdown: stage {stage_path} has reserved key 'stage' — skipping"
+                        );
+                        continue;
+                    }
                     line.insert(key.clone(), value.clone());
                 }
-                if let Ok(json) = serde_json::to_string(&line) {
-                    output.push_str(&json);
-                    output.push('\n');
+                match serde_json::to_string(&line) {
+                    Ok(json) => {
+                        output.push_str(&json);
+                        output.push('\n');
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "token breakdown: failed to serialize entry for {stage_path}: {e}"
+                        );
+                    }
                 }
             }
             if let Err(e) =

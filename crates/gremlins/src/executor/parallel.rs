@@ -28,6 +28,7 @@ use crate::definition::ErrorPolicy;
 use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run::stage_key;
+use crate::executor::state;
 use crate::executor::state::{BlobMode, StateStore};
 use crate::executor::supervisor::{self, LaunchResult, RunState};
 use crate::executor::RunError;
@@ -664,8 +665,8 @@ fn aggregate_child_costs(gremlin: &mut Gremlin, outcome: &ChildOutcome) {
     }
 
     // Per-stage token breakdown.
-    if let Some(stage_usage) = tree.get("stage_usage").and_then(|v| v.as_object()) {
-        let prefix = format!("{}.", outcome.child_name);
+    if let Some(stage_usage) = tree.get(state::STAGE_USAGE_KEY).and_then(|v| v.as_object()) {
+        let prefix = format!("{}/", outcome.child_name);
         for (stage_path, usage_val) in stage_usage {
             if let Some(usage_obj) = usage_val.as_object() {
                 let mut delta = HashMap::new();
