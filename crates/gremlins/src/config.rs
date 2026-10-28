@@ -344,8 +344,8 @@ impl Config {
                     .and_then(|v| v.parse().ok());
                 let landscape_signals = std::env::var("GREMLINS_LANDSCAPE_SIGNALS")
                     .ok()
-                    .and_then(|v| parse_env_bool(&v))
-                    .unwrap_or(false);
+                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_SIGNALS", &v))
+                    .unwrap_or(true);
                 return Ok(Config {
                     default_model: env_default_model(),
                     max_tool_output_bytes,
@@ -545,9 +545,9 @@ impl Config {
             .or_else(|| {
                 std::env::var("GREMLINS_LANDSCAPE_SIGNALS")
                     .ok()
-                    .and_then(|v| parse_env_bool(&v))
+                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_SIGNALS", &v))
             })
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         Ok(Config {
             default_model,
@@ -1247,12 +1247,12 @@ pub(crate) fn max_landscape_tool_tokens() -> Option<u64> {
 }
 
 /// GREMLINS_LANDSCAPE_SIGNALS — enable heuristic landscape signals
-/// (changed files, symbol map, referenced paths). Default false.
+/// (changed files, symbol map, referenced paths). Default true.
 /// Settings.yaml `landscape.signals` takes precedence over the env var.
 pub(crate) fn landscape_signals() -> bool {
     Config::load()
         .map(|c| c.landscape_signals())
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// Parse a boolean from an environment variable value.
@@ -1263,6 +1263,17 @@ fn parse_env_bool(v: &str) -> Option<bool> {
         "0" | "false" => Some(false),
         _ => None,
     }
+}
+
+/// Like [`parse_env_bool`] but logs a warning when the value is unparseable.
+fn parse_env_bool_or_warn(var_name: &str, v: &str) -> Option<bool> {
+    let result = parse_env_bool(v);
+    if result.is_none() {
+        log::warn!(
+            "{var_name} value {v:?} is not a recognised boolean (expected 0/1 or true/false); ignoring"
+        );
+    }
+    result
 }
 
 /// GREMLINS_MAX_TOOL_OUTPUT_BYTES — cap tool output at this many bytes.
