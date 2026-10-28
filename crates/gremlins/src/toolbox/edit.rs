@@ -273,16 +273,14 @@ fn parse_edits(edits_arr: &[serde_json::Value], file_path: &str) -> Result<Vec<E
     Ok(edits)
 }
 
-fn apply_edits(
-    content: &str,
-    edits: &[EditOp],
-    file_path: &str,
-    line_offsets: &[usize],
-) -> Result<String, String> {
-    let content_len = content.len();
-    let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(edits.len());
+fn apply_edits(content: &str, edits: &[EditOp], file_path: &str) -> Result<String, String> {
+    let mut buffer = content.to_string();
 
-    // Validate each edit and resolve its byte range against the original content.
+    // Validate and apply edits sequentially. Each edit sees the accumulated
+    // state of all prior edits in the same batch, enabling chained edits
+    // (edit 1 renames a symbol, edit 2 uses the new name) to work in a
+    // single tool call. The buffer lives only in memory until all edits
+    // succeed — we never leave a partially-edited file on disk.
     for (i, edit) in edits.iter().enumerate() {
         let old_str = &edit.old_str;
         if old_str.is_empty() {
@@ -292,75 +290,101 @@ fn apply_edits(
             ));
         }
 
+        let content_len = buffer.len();
+
+        // Compute line offsets lazily — only when an edit actually uses a
+        // line scope. Unscoped edits never pay the full-file scan, and a
+        // non-unique error recomputes them below when it needs line numbers.
+        let line_offsets = edit.scope_start.map(|_| compute_line_offsets(&buffer));
+
         // When a scope is set, search only the scope byte window so that
         // multiline needles overlapping earlier out-of-scope occurrences
-        // are not shadowed by the global non-overlapping match_indices walk.
-        let scope = edit
-            .scope_start
-            .map(|s| scope_byte_range(line_offsets, content_len, s, edit.scope_end));
+        // are not shadowed by a global walk.
+        let scope = edit.scope_start.map(|s| {
+            scope_byte_range(
+                line_offsets.as_deref().unwrap(),
+                content_len,
+                s,
+                edit.scope_end,
+            )
+        });
         let search_window = match scope {
-            Some((s, e)) => &content[s..e],
-            None => content,
+            Some((s, e)) => &buffer[s..e],
+            None => &buffer,
         };
         let window_offset = scope.map_or(0, |(s, _)| s);
 
-        // Use find + offset-1 check instead of match_indices so we
-        // detect overlapping occurrences.  match_indices skips by match
-        // length, so for `old_str: "foo\nfoo"` in `"foo\nfoo\nfoo\n"`
-        // it reports a single match even though the string appears at
-        // both offset 0 and offset 4 (the two occurrences overlap).
-        let first = match search_window.find(old_str.as_str()) {
-            Some(pos) => pos + window_offset,
-            None => {
-                return Err(edit_not_found_diagnostic(
-                    content,
-                    file_path,
-                    old_str,
-                    i + 1,
-                    edit.scope_start,
-                    edit.scope_end,
-                ))
-            }
-        };
-        // Check for a second occurrence starting just one byte past the
-        // first match, so overlapping duplicates are detected.
-        if let Some(_second) = search_window[first - window_offset + 1..].find(old_str.as_str()) {
-            return Err(format!(
-                "Error: old_string is not unique in {file_path} (edit {})",
-                i + 1
+        // Collect ALL match positions using find + offset-1 advancement
+        // so overlapping occurrences (e.g. `old_str: "foo\nfoo"` in
+        // `"foo\nfoo\nfoo\n"`) are detected.
+        let mut match_positions: Vec<usize> = Vec::new();
+        let mut search_from = 0;
+        while let Some(pos) = search_window[search_from..].find(old_str) {
+            let abs_pos = search_from + pos + window_offset;
+            match_positions.push(abs_pos);
+            search_from += pos + 1; // advance by 1 to detect overlapping matches
+        }
+
+        if match_positions.is_empty() {
+            return Err(edit_not_found_diagnostic(
+                &buffer,
+                file_path,
+                old_str,
+                i + 1,
+                edit.scope_start,
+                edit.scope_end,
             ));
         }
 
-        ranges.push((first, first + old_str.len()));
-    }
+        if match_positions.len() > 1 {
+            // Convert byte positions to 1-based line numbers so the model
+            // can immediately supply start_line/end_line to disambiguate.
+            // Deduplicate so a self-overlapping needle (e.g. "aa" in "aaa")
+            // does not list the same line twice.
+            let line_offsets = line_offsets.unwrap_or_else(|| compute_line_offsets(&buffer));
+            let mut match_lines: Vec<String> = match_positions
+                .iter()
+                .map(|&pos| {
+                    let line_no = match line_offsets.binary_search(&pos) {
+                        Ok(idx) => idx + 1,
+                        Err(idx) => idx,
+                    };
+                    line_no.to_string()
+                })
+                .collect();
+            match_lines.dedup();
 
-    // Validate non-overlapping.
-    for i in 0..ranges.len() {
-        for j in (i + 1)..ranges.len() {
-            if ranges[i].0 < ranges[j].1 && ranges[j].0 < ranges[i].1 {
-                return Err(format!(
-                    "Error: edits {} and {} overlap in {file_path}",
-                    i + 1,
-                    j + 1
-                ));
-            }
+            let scope_label = if edit.scope_start.is_some() {
+                "matches within scope at lines "
+            } else {
+                "matches at lines "
+            };
+
+            let (shown, suffix) = if match_lines.len() > 10 {
+                (
+                    match_lines[..10].join(", "),
+                    format!(" and {} more", match_lines.len() - 10),
+                )
+            } else {
+                (match_lines.join(", "), String::new())
+            };
+
+            return Err(format!(
+                "Error: old_string is not unique in {file_path} (edit {}) — {}{}{}",
+                i + 1,
+                scope_label,
+                shown,
+                suffix
+            ));
         }
+
+        // Single match — apply to the accumulated buffer.
+        let start = match_positions[0];
+        let end = start + old_str.len();
+        buffer.replace_range(start..end, &edit.new_str);
     }
 
-    // Apply in reverse byte-order so earlier offsets stay valid.
-    let mut indexed: Vec<(usize, usize, &str)> = edits
-        .iter()
-        .zip(ranges.iter())
-        .map(|(edit, &(start, end))| (start, end, edit.new_str.as_str()))
-        .collect();
-    indexed.sort_by_key(|a| std::cmp::Reverse(a.0));
-
-    let mut updated = content.to_string();
-    for (start, end, replacement) in &indexed {
-        updated.replace_range(*start..*end, replacement);
-    }
-
-    Ok(updated)
+    Ok(buffer)
 }
 
 pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
@@ -396,11 +420,7 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
         Err(e) => return e,
     };
 
-    // Line offsets translate line-number scope into byte ranges for the scoped
-    // uniqueness check; they no longer drive byte-span computation directly.
-    let line_offsets = compute_line_offsets(&content);
-
-    let updated = match apply_edits(&content, &edits, file_path, &line_offsets) {
+    let updated = match apply_edits(&content, &edits, file_path) {
         Ok(u) => u,
         Err(e) => return e,
     };
@@ -414,10 +434,6 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn offsets(content: &str) -> Vec<usize> {
-        compute_line_offsets(content)
-    }
 
     #[test]
     fn parse_edits_match_mode() {
@@ -547,8 +563,7 @@ mod tests {
             scope_start: None,
             scope_end: None,
         }];
-        let offs = offsets(content);
-        let out = apply_edits(content, &edits, "f.txt", &offs).unwrap();
+        let out = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "foo baz");
     }
 
@@ -561,8 +576,7 @@ mod tests {
             scope_start: None,
             scope_end: None,
         }];
-        let offs = offsets(content);
-        let err = apply_edits(content, &edits, "f.txt", &offs).unwrap_err();
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
         assert!(err.contains("old_string is empty"), "got: {err}");
     }
 
@@ -575,9 +589,89 @@ mod tests {
             scope_start: None,
             scope_end: None,
         }];
-        let offs = offsets(content);
-        let err = apply_edits(content, &edits, "f.txt", &offs).unwrap_err();
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
         assert!(err.contains("not unique"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_match_reports_match_locations_on_not_unique() {
+        // "foo" appears on lines 1, 2, 3, 4, 5; the error should list them.
+        let content = "foo\nfoo\nfoo\nfoo\nfoo\n";
+        let edits = vec![EditOp {
+            old_str: "foo".into(),
+            new_str: "x".into(),
+            scope_start: None,
+            scope_end: None,
+        }];
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
+        assert!(err.contains("not unique"), "got: {err}");
+        assert!(err.contains("matches at lines 1, 2, 3, 4, 5"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_match_reports_scope_location_on_non_unique() {
+        let content = "alpha\nalpha\nalpha\n";
+        let edits = vec![EditOp {
+            old_str: "alpha".into(),
+            new_str: "x".into(),
+            scope_start: Some(1),
+            scope_end: Some(2),
+        }];
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
+        assert!(err.contains("not unique"), "got: {err}");
+        assert!(
+            err.contains("matches within scope at lines 1, 2"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_match_reports_mid_line_match() {
+        // "lph" starts mid-line (byte 1), exercising the Err(idx) => idx
+        // branch of the binary_search line mapping rather than only exact
+        // line-boundary starts.
+        let content = "alpha\nalpha\n";
+        let edits = vec![EditOp {
+            old_str: "lph".into(),
+            new_str: "x".into(),
+            scope_start: None,
+            scope_end: None,
+        }];
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
+        assert!(err.contains("not unique"), "got: {err}");
+        assert!(err.contains("matches at lines 1, 2"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_match_dedups_self_overlapping_line_numbers() {
+        // "aa" in "aaa" matches at bytes 0 and 1, both on line 1. The
+        // deduplicated diagnostic must list line 1 only once.
+        let content = "aaa\n";
+        let edits = vec![EditOp {
+            old_str: "aa".into(),
+            new_str: "x".into(),
+            scope_start: None,
+            scope_end: None,
+        }];
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
+        assert!(err.contains("not unique"), "got: {err}");
+        assert!(err.contains("matches at lines 1"), "got: {err}");
+        assert!(!err.contains("1, 1"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_match_reports_many_matches_with_suffix() {
+        // 12 identical lines; only first 10 line numbers listed plus suffix.
+        let content = "x\n".repeat(12);
+        let edits = vec![EditOp {
+            old_str: "x".into(),
+            new_str: "y".into(),
+            scope_start: None,
+            scope_end: None,
+        }];
+        let err = apply_edits(&content, &edits, "f.txt").unwrap_err();
+        assert!(err.contains("not unique"), "got: {err}");
+        assert!(err.contains("and 2 more"), "got: {err}");
     }
 
     #[test]
@@ -589,8 +683,7 @@ mod tests {
             scope_start: None,
             scope_end: None,
         }];
-        let offs = offsets(content);
-        let err = apply_edits(content, &edits, "f.txt", &offs).unwrap_err();
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
         assert!(err.contains("old_string not found"), "got: {err}");
     }
 
@@ -603,8 +696,7 @@ mod tests {
             scope_start: Some(2),
             scope_end: Some(4),
         }];
-        let offs = offsets(content);
-        let out = apply_edits(content, &edits, "f.txt", &offs).unwrap();
+        let out = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "line1\nline2\nTARGET\nline4\nline5\n");
     }
 
@@ -618,8 +710,7 @@ mod tests {
             scope_start: Some(2),
             scope_end: Some(4),
         }];
-        let offs = offsets(content);
-        let err = apply_edits(content, &edits, "f.txt", &offs).unwrap_err();
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
         assert!(err.contains("old_string not found"), "got: {err}");
         assert!(err.contains("between lines 2-4"), "got: {err}");
     }
@@ -634,8 +725,7 @@ mod tests {
             scope_start: Some(3),
             scope_end: None,
         }];
-        let offs = offsets(content);
-        let out = apply_edits(content, &edits, "f.txt", &offs).unwrap();
+        let out = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "line1\nline2\nTARGET\nline4\n");
     }
 
@@ -648,8 +738,7 @@ mod tests {
             scope_start: Some(2),
             scope_end: Some(100),
         }];
-        let offs = offsets(content);
-        let out = apply_edits(content, &edits, "f.txt", &offs).unwrap();
+        let out = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "line1\nline2\nTARGET\nline4\n");
     }
 
@@ -663,8 +752,7 @@ mod tests {
             scope_start: Some(2),
             scope_end: Some(2),
         }];
-        let offs = offsets(content);
-        let out = apply_edits(content, &edits, "f.txt", &offs).unwrap();
+        let out = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "x\nBAR\nfoo\n");
     }
 
@@ -680,8 +768,7 @@ mod tests {
             scope_start: Some(2),
             scope_end: Some(3),
         }];
-        let offs = offsets(content);
-        let out = apply_edits(content, &edits, "f.txt", &offs).unwrap();
+        let out = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "foo\nBAR\nBAZ\n");
     }
 
@@ -694,13 +781,100 @@ mod tests {
             scope_start: Some(1),
             scope_end: Some(2),
         }];
-        let offs = offsets(content);
-        let err = apply_edits(content, &edits, "f.txt", &offs).unwrap_err();
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
         assert!(err.contains("not unique"), "got: {err}");
     }
 
     #[test]
-    fn apply_edits_rejects_overlap() {
+    fn apply_chained_edits_succeed() {
+        // Edit 1 renames "foo" to "baz", edit 2 modifies a call site
+        // using the new name. Sequential validation lets edit 2 find
+        // "baz" even though it didn't exist in the original content.
+        let content = "fn foo() {}\nfn main() { foo(); }\n";
+        let edits = vec![
+            EditOp {
+                old_str: "fn foo()".into(),
+                new_str: "fn baz()".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+            EditOp {
+                old_str: "foo()".into(),
+                new_str: "baz()".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+        ];
+        let out = apply_edits(content, &edits, "f.txt").unwrap();
+        assert_eq!(out, "fn baz() {}\nfn main() { baz(); }\n");
+    }
+
+    #[test]
+    fn apply_chained_edit_not_found_shows_accumulated_buffer() {
+        // Edit 1 renames the declaration from "foo" to "baz". Edit 2's
+        // needle starts with "fn baz()" — present only in the accumulated
+        // buffer, not the original — so the "did you mean" hint fires and the
+        // divergence report is built from the post-edit-1 buffer.
+        let content = "fn foo() {}\nfn caller() { foo(); }\n";
+        let edits = vec![
+            EditOp {
+                old_str: "fn foo()".into(),
+                new_str: "fn baz()".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+            EditOp {
+                old_str: "fn baz()\n  body".into(),
+                new_str: "fn qux()\n  body".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+        ];
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
+
+        // Should say "not found" because the full multi-line needle does not
+        // exist in the accumulated buffer.
+        assert!(err.contains("old_string not found"), "got: {err}");
+
+        // The hint fires only against the accumulated buffer ("fn baz"), so
+        // its absence in the original content proves the diagnostic is built
+        // from the post-prior-edit state — the original "fn foo" would not
+        // match. Assert positively on the buffer's distinct content.
+        assert!(err.contains("did you mean"), "got: {err}");
+        assert!(
+            err.contains("fn baz() {}"),
+            "hint/divergence should reflect post-edit-1 buffer; got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_chained_disjoint_edits_still_work() {
+        // Disjoint edits on the same file (edit 1 modifies "hello",
+        // edit 2 modifies "goodbye" elsewhere in the file).
+        let content = "let a = \"hello\";\nlet b = \"goodbye\";\n";
+        let edits = vec![
+            EditOp {
+                old_str: "\"hello\"".into(),
+                new_str: "\"hi\"".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+            EditOp {
+                old_str: "\"goodbye\"".into(),
+                new_str: "\"bye\"".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+        ];
+        let out = apply_edits(content, &edits, "f.txt").unwrap();
+        assert_eq!(out, "let a = \"hi\";\nlet b = \"bye\";\n");
+    }
+
+    #[test]
+    fn apply_edits_with_overlap_fails_not_found() {
+        // With sequential validation, edit 1 replaces "234" with "x",
+        // changing the content to "01x56789". Then edit 2 looks for "456"
+        // which no longer exists in the accumulated buffer.
         let content = "0123456789";
         let edits = vec![
             EditOp {
@@ -716,13 +890,12 @@ mod tests {
                 scope_end: None,
             },
         ];
-        let offs = offsets(content);
-        let err = apply_edits(content, &edits, "f.txt", &offs).unwrap_err();
-        assert!(err.contains("overlap"), "got: {err}");
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
+        assert!(err.contains("old_string not found"), "got: {err}");
     }
 
     #[test]
-    fn apply_edits_applies_disjoint_matches_in_reverse_order() {
+    fn apply_edits_applies_disjoint_matches() {
         let content = "a1b2c";
         let edits = vec![
             EditOp {
@@ -738,8 +911,7 @@ mod tests {
                 scope_end: None,
             },
         ];
-        let offs = offsets(content);
-        let out = apply_edits(content, &edits, "f.txt", &offs).unwrap();
+        let out = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "aONEbTWOc");
     }
 
@@ -757,8 +929,7 @@ mod tests {
             scope_start: Some(1),
             scope_end: Some(3),
         }];
-        let offs = offsets(content);
-        let err = apply_edits(content, &edits, "f.txt", &offs).unwrap_err();
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
         assert!(err.contains("not unique"), "got: {err}");
     }
 

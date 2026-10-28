@@ -3694,7 +3694,10 @@ mod tests {
     }
 
     #[test]
-    fn edit_batch_overlap_rejected() {
+    fn edit_batch_overlap_second_not_found() {
+        // Edits apply sequentially: the first replaces "hello", so the
+        // second edit's "hello world" no longer exists in the accumulated
+        // buffer.
         let dir = tmp();
         std::fs::write(dir.join("x.txt"), "hello world\n").unwrap();
         let args = serde_json::json!({
@@ -3706,7 +3709,7 @@ mod tests {
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("overlap"));
+        assert!(result.contains("old_string not found"), "got: {result}");
     }
 
     #[test]
@@ -3792,7 +3795,10 @@ mod tests {
     }
 
     #[test]
-    fn edit_mixed_overlap_rejected() {
+    fn edit_mixed_overlap_second_not_found() {
+        // Edits apply sequentially: the first replaces "234", so the second
+        // edit's "456" (scoped to line 1) no longer exists in the
+        // accumulated buffer.
         let dir = tmp();
         std::fs::write(dir.join("f.txt"), "0123456789\n").unwrap();
         let args = serde_json::json!({
@@ -3804,7 +3810,7 @@ mod tests {
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("overlap"));
+        assert!(result.contains("old_string not found"), "got: {result}");
     }
 
     #[test]
