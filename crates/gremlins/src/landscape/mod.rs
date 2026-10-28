@@ -6,7 +6,6 @@
 
 mod error;
 pub mod heuristic;
-#[allow(dead_code)]
 pub(crate) mod signals;
 
 pub use error::LandscapeError;
@@ -51,6 +50,16 @@ const SKIP_DIR_NAMES: &[&str] = &[
 /// Every other dot-directory is skipped to avoid leaking secrets (`.ssh`,
 /// `.aws`, `.gnupg`) into model prompts.
 const ALLOWLIST_DOT_DIRS: &[&str] = &[".gremlins", ".github", ".cargo-gremlin-target"];
+
+/// Render heuristic signal sections for injection into the landscape block.
+///
+/// Returns `(section_name, rendered_text)` pairs for each non-empty section.
+pub(crate) fn inject_signal_sections(
+    ctx: &signals::SignalContext,
+    outlines: &[FileOutline],
+) -> Vec<(String, String)> {
+    signals::render_signal_sections(ctx, outlines)
+}
 
 /// One discovered structural item and its 1-based line number.
 #[derive(Debug, Clone, PartialEq, Eq)]

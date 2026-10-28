@@ -7,18 +7,21 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::OnceLock;
 
 use regex::Regex;
 
+use crate::clients::tools::{canonicalize_or_ancestor, within_worktree};
+
 /// Context for building heuristic signals from a set of file outlines.
 ///
-/// Carries the workspace root, reserved for path relativization when the
-/// signals are wired into the system-prompt path in a later phase.
+/// Carries the worktree root, used for sandbox containment checks and path
+/// relativization.
 #[derive(Debug, Clone)]
 pub(crate) struct SignalContext {
-    /// Workspace root directory (not yet used — reserved for Phase 1 wiring).
-    pub root: PathBuf,
+    /// Worktree root directory used for sandbox containment checks.
+    pub cwd: PathBuf,
 }
 
 /// A file-path reference discovered in source text.
@@ -68,6 +71,11 @@ pub(crate) struct SignalRendered {
     /// Path candidates found across all scanned files.
     pub path_candidates: Vec<PathCandidate>,
     /// Identifiers found across all scanned files.
+    ///
+    /// Populated by [`build_signals`] and consumed by the identifier-extraction
+    /// tests today; a future phase wires identifier-derived sections into the
+    /// landscape block.
+    #[allow(dead_code)]
     pub identifiers: Vec<Identifier>,
     /// Deduplicated symbol index: each symbol name maps to its first
     /// occurrence in input (outline iteration) order.
@@ -271,6 +279,184 @@ pub(crate) fn build_signals(
     }
 }
 
+// ── Sandbox containment ───────────────────────────────────────────────────
+
+/// Canonicalize `path` and confirm it stays inside `root`.
+///
+/// Returns the canonical path when containment passes, `None` when the
+/// (possibly symlinked) path escapes the workspace root.
+fn contained_path(root: &Path, path: &Path) -> Option<PathBuf> {
+    let canonical = canonicalize_or_ancestor(path);
+    if within_worktree(&canonical, &[root.to_path_buf()], Some(root)) {
+        Some(canonical)
+    } else {
+        None
+    }
+}
+
+// ── Section builders ──────────────────────────────────────────────────────
+
+/// Render the list of files changed relative to `HEAD~10` via `git diff`.
+///
+/// Uses `HEAD~10` as a fixed-depth snapshot of recent changes — deep enough
+/// to capture meaningful context across a typical multi-commit feature branch
+/// but bounded to keep the list concise. Uncommitted / staged changes are not
+/// included; the landscape block is a stage-start snapshot, and uncommitted
+/// work is already visible to the agent via tool calls.
+///
+/// Resolves git-reported paths against the repository root (obtained from
+/// `git rev-parse --show-toplevel`) rather than the gremlin cwd so paths
+/// resolve correctly even when the agent is launched from a subdirectory.
+///
+/// Returns `None` when git is unavailable, the directory is not a
+/// repository, or every reported path either falls outside the sandbox or no
+/// longer exists on disk.
+fn build_changed_files(ctx: &SignalContext) -> Option<String> {
+    // Obtain the git repository root first; `diff --name-only` emits
+    // paths relative to the repo root, not the current directory.
+    let repo_root_output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&ctx.cwd)
+        .output()
+        .ok()?;
+    if !repo_root_output.status.success() {
+        return None;
+    }
+    let repo_root = PathBuf::from(String::from_utf8(repo_root_output.stdout).ok()?.trim());
+
+    let output = Command::new("git")
+        .args(["diff", "--name-only", "HEAD~10"])
+        .current_dir(&ctx.cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let paths: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter_map(|p| {
+            let abs = repo_root.join(p);
+            let canonical = contained_path(&ctx.cwd, &abs)?;
+            // Skip paths that no longer exist (deleted since HEAD~10).
+            if !canonical.is_file() {
+                return None;
+            }
+            Some(p.to_string())
+        })
+        .collect();
+    if paths.is_empty() {
+        return None;
+    }
+    Some(format!("<!-- Changed files -->\n{}\n", paths.join("\n")))
+}
+
+/// Render file paths referenced from source text that resolve to existing
+/// files inside the sandbox.
+///
+/// Paths that escape the sandbox are silently dropped.
+fn build_referenced_paths(ctx: &SignalContext, candidates: &[PathCandidate]) -> Option<String> {
+    let root_canonical = canonicalize_or_ancestor(&ctx.cwd);
+    let mut resolved = std::collections::BTreeSet::new();
+    for c in candidates {
+        // Resolve relative paths from the source file's directory.
+        let resolved_path = if c.is_absolute {
+            PathBuf::from(&c.path)
+        } else {
+            c.source_file
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(&c.path)
+        };
+        let Some(canonical) = contained_path(&ctx.cwd, &resolved_path) else {
+            continue;
+        };
+        // Only include paths that actually exist as files.
+        if canonical.is_file() {
+            if let Ok(rel) = canonical.strip_prefix(&root_canonical) {
+                resolved.insert(format!("./{}", rel.display()));
+            }
+        }
+    }
+    if resolved.is_empty() {
+        return None;
+    }
+    let lines: Vec<_> = resolved.into_iter().collect();
+    Some(format!(
+        "<!-- Referenced files (from source) -->\n{}\n",
+        lines.join("\n")
+    ))
+}
+
+/// Render the deduplicated symbol index, sorted by name and capped to 100
+/// entries to avoid bloating the landscape block.
+fn build_symbol_map(ctx: &SignalContext, symbol_index: &HashMap<String, SymbolEntry>) -> String {
+    let mut entries: Vec<&SymbolEntry> = symbol_index.values().collect();
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    if entries.is_empty() {
+        return String::new();
+    }
+    let root_canonical = canonicalize_or_ancestor(&ctx.cwd);
+    let max_show = 100usize;
+    let lines: Vec<String> = entries
+        .iter()
+        .take(max_show)
+        .map(|e| {
+            let file = canonicalize_or_ancestor(&e.file);
+            let display = file
+                .strip_prefix(&root_canonical)
+                .map(|r| r.display().to_string())
+                .unwrap_or_else(|_| e.file.display().to_string());
+            format!("{}\t{}:{}", e.name, display, e.line)
+        })
+        .collect();
+    let mut out = format!(
+        "<!-- Symbol map (deduplicated, first occurrence) -->\n{}\n",
+        lines.join("\n")
+    );
+    if entries.len() > max_show {
+        out.push_str(&format!(
+            "<!-- ... and {} more -->\n",
+            entries.len() - max_show
+        ));
+    }
+    out
+}
+
+/// Phase 1 entry point: render every signal section that has content.
+///
+/// Each returned element is `(section_name, rendered_text)`; sections that
+/// produce nothing are omitted.
+pub(crate) fn render_signal_sections(
+    ctx: &SignalContext,
+    outlines: &[super::FileOutline],
+) -> Vec<(String, String)> {
+    let signals = build_signals(ctx, outlines);
+    let mut sections = Vec::new();
+
+    // 1. Changed files (via git).
+    if let Some(changed) = build_changed_files(ctx) {
+        sections.push(("Changed files".to_string(), changed));
+    }
+
+    // 2. Symbol map.
+    if !signals.symbol_index.is_empty() {
+        sections.push((
+            "Symbol map".to_string(),
+            build_symbol_map(ctx, &signals.symbol_index),
+        ));
+    }
+
+    // 3. Referenced files.
+    if let Some(referenced) = build_referenced_paths(ctx, &signals.path_candidates) {
+        sections.push(("Referenced files".to_string(), referenced));
+    }
+
+    sections
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -318,7 +504,7 @@ include!(\"./generated.rs\");
         let outline = make_outline(&path, false, vec![]);
 
         let ctx = SignalContext {
-            root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -362,7 +548,7 @@ fn my_function_name() {
         let outline = make_outline(&path, false, vec![]);
 
         let ctx = SignalContext {
-            root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -400,7 +586,7 @@ fn my_function_name() {
         let outline_b = make_outline(&path_b, false, vec![]);
 
         let ctx = SignalContext {
-            root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
         };
         let result = build_signals(&ctx, &[outline_a, outline_b]);
 
@@ -455,7 +641,7 @@ pub fn bar_init() -> BarConfig {
         let outline_bar = make_outline(&path_bar, false, vec![]);
 
         let ctx = SignalContext {
-            root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
         };
         let result = build_signals(&ctx, &[outline_main, outline_bar]);
 
@@ -530,7 +716,7 @@ pub fn bar_init() -> BarConfig {
         let outline = make_outline(&path, true, vec![]); // skipped = true
 
         let ctx = SignalContext {
-            root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -546,7 +732,7 @@ pub fn bar_init() -> BarConfig {
         let outline = make_outline(&path, false, vec![]);
 
         let ctx = SignalContext {
-            root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -572,7 +758,7 @@ cfg!(~/.config/app.toml);
         let outline = make_outline(&path, false, vec![]);
 
         let ctx = SignalContext {
-            root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -613,7 +799,7 @@ let div = a / b;
         let outline = make_outline(&path, false, vec![]);
 
         let ctx = SignalContext {
-            root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -639,7 +825,7 @@ let config = Config::default();
         let outline = make_outline(&path, false, vec![]);
 
         let ctx = SignalContext {
-            root: dir.path().to_path_buf(),
+            cwd: dir.path().to_path_buf(),
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -652,6 +838,39 @@ let config = Config::default();
         assert!(
             bogus.is_empty(),
             "expected single-word capitals to be rejected, got {bogus:?}"
+        );
+    }
+
+    // ── sandbox containment ────────────────────────────────────────────
+
+    #[test]
+    fn referenced_paths_rejects_sandbox_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file that references an absolute path outside the sandbox.
+        let content = "let path = \"/etc/passwd\";\n";
+        let path = write_file(&dir, "src/main.rs", content);
+        let outline = make_outline(&path, false, vec![]);
+
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+        };
+        let result = build_signals(&ctx, &[outline]);
+
+        // /etc/passwd should still be extracted as a path candidate.
+        assert!(
+            result
+                .path_candidates
+                .iter()
+                .any(|c| c.path == "/etc/passwd"),
+            "/etc/passwd should be extracted"
+        );
+
+        // build_referenced_paths must reject /etc/passwd: it resolves outside
+        // the sandbox. When all candidates are rejected, the function returns None.
+        let referenced = build_referenced_paths(&ctx, &result.path_candidates);
+        assert!(
+            referenced.is_none(),
+            "sandbox-escape path should be rejected, got: {referenced:?}"
         );
     }
 }

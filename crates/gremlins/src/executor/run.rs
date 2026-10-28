@@ -4,7 +4,7 @@
 //! [`run_stage`]. Parallel groups delegate to [`run_parallel`].
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
@@ -32,6 +32,7 @@ use crate::executor::supervisor::{emit_event, get_run_map};
 use crate::executor::vars;
 use crate::executor::DaemonEvent;
 use crate::executor::RunError;
+use crate::landscape::FileOutline;
 use crate::landscape::{LandscapeBlock, LandscapeError, LandscapeExplorer};
 use indexmap::IndexMap;
 use rig_core::completion::message::{AssistantContent, UserContent};
@@ -46,16 +47,44 @@ use rig_core::completion::Message;
 /// When the client has the Landscape tool and the formatted block is
 /// nonempty, a usage hint is prepended. Otherwise the raw (possibly empty)
 /// block is returned as-is.
+///
+/// When landscape signals are enabled (`GREMLINS_LANDSCAPE_SIGNALS=1` or
+/// `landscape.signals: true` in settings.yaml), heuristic signal sections
+/// (changed files, symbol map, referenced files) are injected above the
+/// full-tree skeleton. With signals off this block is byte-for-byte
+/// identical to the pre-signals implementation.
 async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -> String {
-    let (mut block, file_count, item_count) = build_landscape_snapshot(
-        gremlin.cwd(),
-        gremlin.runtime_config.log_tx.clone(),
-        has_outline_tool,
-    )
-    .await;
+    let cwd = gremlin.cwd();
+    let log_tx = gremlin.runtime_config.log_tx.clone();
+    let log_warn = |msg: &str| {
+        log::warn!("{msg}");
+        send_log(&log_tx, msg);
+    };
+
+    let outlines = build_outlines(cwd.clone(), log_tx.clone()).await;
+    let landscape = format_outlines(&outlines, &cwd, has_outline_tool, log_warn);
+
+    let (mut block, file_count, item_count) =
+        (landscape.block, landscape.file_count, landscape.item_count);
+
+    // Inject heuristic signal sections when enabled.
+    if crate::config::landscape_signals() && file_count > 0 {
+        let ctx = crate::landscape::signals::SignalContext { cwd: cwd.clone() };
+        let sections = crate::landscape::inject_signal_sections(&ctx, &outlines);
+        // Sections are built in the intended display order; prepending each to
+        // the block requires iterating in reverse so the final order reads
+        // Changed files → Symbol map → Referenced files → skeleton.
+        for (name, section) in sections.iter().rev() {
+            if let Some(tx) = &log_tx {
+                let tokens = crate::landscape::count_tokens(section).unwrap_or(0);
+                let _ = tx.send(format!("[landscape-signals] {name} {tokens} tokens"));
+            }
+            block = format!("{section}\n\n{block}");
+        }
+    }
 
     if file_count > 0 {
-        if let Some(tx) = &gremlin.runtime_config.log_tx {
+        if let Some(tx) = &log_tx {
             let tokens = crate::landscape::count_tokens(&block).unwrap_or(0);
             let _ = tx.send(format!(
                 "[landscape] {file_count} files, {item_count} items, {tokens} tokens"
@@ -82,7 +111,71 @@ fn assemble_system_prompt(base: &str, landscape: Option<&str>) -> String {
         None => base.to_string(),
     }
 }
+/// Build file outlines for a workspace root.
+///
+/// This is the raw-outline half of the landscape block builder, extracted so
+/// callers that need the outlines (e.g. for signal derivation) can obtain them
+/// without a second tree walk.
+async fn build_outlines(
+    cwd: PathBuf,
+    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) -> Vec<FileOutline> {
+    let log_tx2 = log_tx.clone();
+    tokio::task::spawn_blocking(move || match LandscapeExplorer.build(&cwd, usize::MAX) {
+        Ok(outlines) => outlines,
+        Err(LandscapeError::Read(e)) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            let msg = format!("landscape build failed for {}: {error}", cwd.display());
+            log::warn!("{msg}");
+            send_log(&log_tx2, &msg);
+            Vec::new()
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        let msg = format!("landscape build task failed: {error}");
+        log::warn!("{msg}");
+        send_log(&log_tx, &msg);
+        Vec::new()
+    })
+}
+
+/// Format outlines into a [`LandscapeBlock`], logging and downgrading any
+/// formatting error to an empty block.
+fn format_outlines(
+    outlines: &[FileOutline],
+    cwd: &Path,
+    has_outline_tool: bool,
+    log_warn: impl Fn(&str),
+) -> LandscapeBlock {
+    let budget: u64 = crate::config::max_landscape_tokens();
+    match crate::landscape::format_landscape_block(
+        outlines,
+        cwd,
+        usize::try_from(budget).unwrap_or(usize::MAX),
+        has_outline_tool,
+    ) {
+        Ok(block) => block,
+        Err(e) => {
+            let msg = match e {
+                LandscapeError::BudgetExceeded => format!(
+                    "[landscape] block for {} exceeds {budget} token budget; omitting",
+                    cwd.display(),
+                ),
+                other => format!("landscape block formatting failed: {other}"),
+            };
+            log_warn(&msg);
+            LandscapeBlock::empty()
+        }
+    }
+}
+
 /// Build and format a landscape block for one workspace root.
+///
+/// Kept for tests that need the pre-signals block shape; production code goes
+/// through [`landscape_block`], which composes [`build_outlines`] with
+/// [`format_outlines`] and then injects signal sections.
+#[cfg(test)]
 async fn build_landscape_snapshot(
     cwd: PathBuf,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
@@ -92,48 +185,8 @@ async fn build_landscape_snapshot(
         log::warn!("{msg}");
         send_log(&log_tx, msg);
     };
-    let root = cwd.clone();
-    let log_tx2 = log_tx.clone();
-    let outlines =
-        tokio::task::spawn_blocking(move || match LandscapeExplorer.build(&cwd, usize::MAX) {
-            Ok(outlines) => outlines,
-            Err(LandscapeError::Read(e)) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => {
-                let msg = format!("landscape build failed for {}: {error}", cwd.display());
-                log::warn!("{msg}");
-                send_log(&log_tx2, &msg);
-                Vec::new()
-            }
-        })
-        .await
-        .unwrap_or_else(|error| {
-            let msg = format!("landscape build task failed: {error}");
-            log::warn!("{msg}");
-            send_log(&log_tx, &msg);
-            Vec::new()
-        });
-
-    let budget: u64 = crate::config::max_landscape_tokens();
-    let landscape = match crate::landscape::format_landscape_block(
-        &outlines,
-        &root,
-        usize::try_from(budget).unwrap_or(usize::MAX),
-        has_outline_tool,
-    ) {
-        Ok(block) => block,
-        Err(e) => {
-            let msg = match e {
-                LandscapeError::BudgetExceeded => format!(
-                    "[landscape] block for {} exceeds {budget} token budget; omitting",
-                    root.display(),
-                ),
-                other => format!("landscape block formatting failed: {other}"),
-            };
-            log_warn(&msg);
-            LandscapeBlock::empty()
-        }
-    };
-
+    let outlines = build_outlines(cwd.clone(), log_tx.clone()).await;
+    let landscape = format_outlines(&outlines, &cwd, has_outline_tool, log_warn);
     (landscape.block, landscape.file_count, landscape.item_count)
 }
 
@@ -574,6 +627,7 @@ async fn run_agent(
     if !scratchpad_model_path.is_empty() {
         prompt = prompt.replace("{scratchpad_path}", &scratchpad_model_path);
     }
+
     let system_prompt = assemble_system_prompt(&prompt, landscape.as_deref());
 
     let stage_env = gremlin.env.clone();
@@ -3035,5 +3089,37 @@ mod tests {
         let prompt = assemble_system_prompt("base prompt", Some(&block));
         assert!(prompt.starts_with("base prompt\n\n"));
         assert!(prompt.contains(&block));
+    }
+
+    #[tokio::test]
+    async fn build_landscape_snapshot_matches_format_landscape_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("lib.rs"), "pub fn hello() {}\n").unwrap();
+
+        let cwd = dir.path().to_path_buf();
+        let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
+
+        // Build outlines once, then format both ways and compare.
+        let outlines = build_outlines(cwd.clone(), log_tx.clone()).await;
+        let budget: u64 = crate::config::max_landscape_tokens();
+        let expected = crate::landscape::format_landscape_block(
+            &outlines,
+            &cwd,
+            usize::try_from(budget).unwrap_or(usize::MAX),
+            false,
+        )
+        .unwrap();
+
+        // The signals-off path must produce the same skeleton as formatting the
+        // outlines directly (minus the usage hint / log lines).
+        let (block_from_snapshot, _, _) =
+            build_landscape_snapshot(cwd.clone(), log_tx.clone(), false).await;
+
+        assert_eq!(
+            block_from_snapshot, expected.block,
+            "build_landscape_snapshot must match format_landscape_block"
+        );
     }
 }

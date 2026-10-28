@@ -124,6 +124,7 @@ pub struct Config {
     max_prompt_bytes: u64,
     max_landscape_tokens: u64,
     max_landscape_tool_tokens: Option<u64>,
+    landscape_signals: bool,
     backoff: BackoffConfig,
 }
 
@@ -255,6 +256,9 @@ struct LandscapeSection {
     /// Preferred key: `max-tool-tokens` under `landscape:`.
     #[serde(rename = "max-tool-tokens", default)]
     max_tool_tokens: Option<u64>,
+    /// Enable heuristic landscape signals (changed files, symbol map, referenced paths).
+    #[serde(default)]
+    signals: Option<bool>,
 }
 
 /// A single `model-profiles` entry as it appears in `settings.yaml`.
@@ -338,6 +342,10 @@ impl Config {
                 let max_landscape_tool_tokens = std::env::var("GREMLINS_MAX_LANDSCAPE_TOOL_TOKENS")
                     .ok()
                     .and_then(|v| v.parse().ok());
+                let landscape_signals = std::env::var("GREMLINS_LANDSCAPE_SIGNALS")
+                    .ok()
+                    .and_then(|v| parse_env_bool(&v))
+                    .unwrap_or(false);
                 return Ok(Config {
                     default_model: env_default_model(),
                     max_tool_output_bytes,
@@ -348,6 +356,7 @@ impl Config {
                     max_prompt_bytes,
                     max_landscape_tokens,
                     max_landscape_tool_tokens,
+                    landscape_signals,
                     ..Config::default()
                 });
             }
@@ -529,6 +538,17 @@ impl Config {
                     .and_then(|v| v.parse().ok())
             });
 
+        let landscape_signals = cfg_file
+            .landscape
+            .as_ref()
+            .and_then(|l| l.signals)
+            .or_else(|| {
+                std::env::var("GREMLINS_LANDSCAPE_SIGNALS")
+                    .ok()
+                    .and_then(|v| parse_env_bool(&v))
+            })
+            .unwrap_or(false);
+
         Ok(Config {
             default_model,
             tui_model,
@@ -547,6 +567,7 @@ impl Config {
             max_prompt_bytes,
             max_landscape_tokens,
             max_landscape_tool_tokens,
+            landscape_signals,
             backoff,
         })
     }
@@ -618,6 +639,10 @@ impl Config {
 
     pub fn max_landscape_tool_tokens(&self) -> Option<u64> {
         self.max_landscape_tool_tokens
+    }
+
+    pub fn landscape_signals(&self) -> bool {
+        self.landscape_signals
     }
 
     pub fn turn_retry_schedule(&self) -> &[f64] {
@@ -1219,6 +1244,25 @@ pub(crate) fn max_landscape_tool_tokens() -> Option<u64> {
                 .ok()
                 .and_then(|v| v.parse().ok())
         })
+}
+
+/// GREMLINS_LANDSCAPE_SIGNALS — enable heuristic landscape signals
+/// (changed files, symbol map, referenced paths). Default false.
+/// Settings.yaml `landscape.signals` takes precedence over the env var.
+pub(crate) fn landscape_signals() -> bool {
+    Config::load()
+        .map(|c| c.landscape_signals())
+        .unwrap_or(false)
+}
+
+/// Parse a boolean from an environment variable value.
+/// Accepts "1", "true" (case-insensitive) as true; "0", "false" as false.
+fn parse_env_bool(v: &str) -> Option<bool> {
+    match v.to_lowercase().as_str() {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    }
 }
 
 /// GREMLINS_MAX_TOOL_OUTPUT_BYTES — cap tool output at this many bytes.

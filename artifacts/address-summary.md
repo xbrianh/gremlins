@@ -1,51 +1,43 @@
-# Fixes Applied
+# Phase 1 review fixes
 
-## 1. `record()` – hash-mismatch branches were no-ops (lines ~2902-2909, ~2930-2937)
-**Review**: Review 1 #1, #2; Review 2 #4
-**Issue**: Both Read and Grep branches had identical `if`/`else` bodies — same-hash and different-hash both did `existing.count += 1; existing.last_age = age`. The content-hash check was decorative.
-**Fix**: Different-hash path now resets `count = 1` and updates `seq` to the current sequence number, fully replacing the entry. Same-hash path only bumps `count`.
+All three reviews addressed. 9 fixes applied, 2 concerns investigated and confirmed non-issues.
 
-## 2. `record()` – `seq` used as age instead of `turn_num` (line ~2897)
-**Review**: Review 2 #1
-**Issue**: `last_age` was set to `self.seq` (a per-call monotonic counter), so `format(turn_num)` computed ages as `turn_num - call_counter` rather than `current_turn - stored_turn`.
-**Fix**: `record()` now accepts `turn_num: usize`. `last_age` is set to `turn_num`. `seq` is separately tracked for ordering only.
+## Fixes applied
 
-## 3. `record()` – Edit tracked as Write (line ~2951)
-**Review**: Review 2 #5
-**Issue**: `"Write" | "Edit"` arm recorded Edit as `W(age)` and inserted a write entry. Plan says Edit is not tracked.
-**Fix**: Split into separate arms. `"Write"` inserts `writes` entry + invalidates reads/greps/landscape. `"Edit"` only invalidates reads for the file + nukes greps/landscape, without emitting a write entry.
+### 1. `config.rs` — `GREMLINS_LANDSCAPE_SIGNALS=1` didn't parse (Correctness, Review 2 #1)
+`"1".parse::<bool>()` only accepts `"true"`/`"false"`. Added `parse_env_bool()` helper accepting `"1"`/`"0"`/`"true"`/`"false"` (case-insensitive). Applied in both the env-only fallback branch (line ~345) and the settings-file branch (line ~545).
 
-## 4. Call site – failed/denied results recorded (line ~2189)
-**Review**: Review 2 #6
-**Issue**: `record()` ran for every job including those that errored (`"Error: unknown tool"`, `"[exit N]"`, `"[timeout]"`).
-**Fix**: Guard with `tools::result_status(&output) == "ok"` — only successful tool executions are recorded.
+### 2. `signals.rs:build_changed_files` — git paths resolved against wrong root (Correctness, Review 2 #5)
+`git diff --name-only` emits paths relative to the repository root, but the code joined them to `ctx.cwd` — wrong when cwd is a subdirectory. Now runs `git rev-parse --show-toplevel` first and joins paths to the repo root. Also added `canonical.is_file()` guard to skip paths deleted since HEAD~10.
 
-## 5. `format()` – headline age used `max` (oldest read) (line ~3036)
-**Review**: Review 2 #2
-**Issue**: `last_age = last_age.max(age)` selected the oldest (largest) age instead of the most recent (smallest).
-**Fix**: Changed to `full_age = full_age.min(age)`, initialized to `usize::MAX`. Only full-file reads (offset=0, limit=0) contribute to the headline age; partial reads get their own suffix ages.
+### 3. `signals.rs:build_changed_files` — missing doc for `HEAD~10` (Readability, Review 2 #6)
+Added doc comment explaining the fixed-depth snapshot rationale (deep enough for context, bounded for conciseness) and noting that uncommitted changes are excluded because the landscape block is a stage-start snapshot.
 
-## 6. `format()` – `total_count` summed across partial reads (line ~3037)
-**Review**: Review 2 #3
-**Issue**: `total_count += entry.count` summed every partial-read entry into the single headline count.
-**Fix**: Full-file reads contribute to `full_count`; partial reads each get their own count in suffix format (e.g., `.0-100:3t,2×` when count > 1). When only partials exist, they sum their counts into the headline but keep individual suffixes.
+### 4. `signals.rs` — removed `#[allow(dead_code)]` from 5 live functions (Readability, Review 1, Review 2 #3)
+Removed from `contained_path`, `build_changed_files`, `build_referenced_paths`, `build_symbol_map`, `render_signal_sections`. All are transitively live via `render_signal_sections` → `inject_signal_sections` → `landscape_block`. Also removed from the `identifiers` field on `SignalRendered`.
 
-## 7. `format()` – partial-read suffixes in HashMap iteration order (line ~3038-3052)
-**Review**: Review 2 #7
-**Issue**: Partial reads were appended to the output in `HashMap` iteration order, producing non-deterministic output.
-**Fix**: Entries are collected into a `Vec`, sorted by `entry.seq` before emitting suffixes.
+### 5. `signals.rs:render_signal_sections` — removed dead `_prompt` parameter (Readability, Review 1, Review 2 #7)
+Removed `_prompt` from `render_signal_sections` and unwound the call chain: `landscape_block` no longer accepts a `prompt` parameter, and the `run_agent` prompt-resolution reordering was reverted.
 
-## 8. `format()` – grep entries always after file lines (line ~3073-3084)
-**Review**: Review 1 #3
-**Issue**: File lines were emitted first, then grep entries, regardless of first-access seq. The plan required interleaving by first-access order.
-**Fix**: Rewrote `format()` to collect `(first_seq, display_line)` tuples for files, greps, and landscape. All items are sorted by `first_seq` before emission, producing properly interleaved output.
+### 6. `run.rs:build_landscape_snapshot` — `#[allow(dead_code)]` on dead production code (Module boundaries, Review 2 #3, Review 3 #2)
+Moved to `#[cfg(test)]`. No `#[allow(dead_code)]` annotation. Extracted shared `format_outlines` helper that both `landscape_block` and `build_landscape_snapshot` call.
 
-## 9. `tool_ledger_dedup_by_content_hash` test (line ~3447-3450)
-**Review**: Review 1 #6; Review 2 #10
-**Issue**: Weak assertion `out2.contains(",2×") || !out2.contains("×")` trivially passed regardless of hash-mismatch behavior.
-**Fix**: Tightened to `!out2.contains("×")` — when hash differs, the entry is replaced with count=1 (no count suffix).
+### 7. `signals.rs:referenced_paths_rejects_sandbox_escape` — vacuous test assertion (Testing, Review 1, Review 2 #9)
+Changed `if let Some(ref text) = referenced { assert!(!text.contains(...)) }` to explicit `assert!(referenced.is_none(), ...)`. The previous form skipped the assertion entirely when all paths were correctly rejected.
 
-## 10. `tool_ledger_format_ages` test (line ~3529)
-**Review**: Review 2 #11
-**Issue**: Test recorded at seq=0 and asserted `format(5)` → `R(5t)`, encoding the seq-minus-turn bug.
-**Fix**: Now passes `turn_num=0` to `record()` and asserts `format(5)` → `R(5t)` (age = 5-0 = 5), and `format(1)` → `R(1t)` (age = 1-0 = 1). Ages are now true turn-relative values.
+### 8. `run.rs:landscape_block_signals_off_is_identical` — test name misleading (Testing, Review 1)
+Renamed to `build_landscape_snapshot_matches_format_landscape_block` — it validates internal refactoring consistency, not `landscape_block` behavior.
+
+### 9. `mod.rs` — layering: `run.rs` reached directly into `landscape::signals` (Layering, Review 3 #1)
+Added `pub(crate) fn inject_signal_sections(...)` wrapper in `landscape/mod.rs`. `run.rs` now calls that instead of `crate::landscape::signals::render_signal_sections` directly.
+
+### 10. `run.rs:landscape_block` — section order reversed (Readability, Review 2 #10)
+Prepending sections in loop reversed the display order. Now iterates with `.rev()` so the final block reads Changed files → Symbol map → Referenced files → skeleton.
+
+## Non-issues (investigated, no change needed)
+
+### `signals.rs:contained_path` canonical-vs-non-canonical root (Review 2 #4)
+`within_worktree` internally calls `normalize_path` on both the candidate path and each root, which canonicalizes both. The non-canonical `root` passed from `contained_path` is canonicalized internally before comparison — no inconsistency.
+
+### `signals.rs` coupling to `clients::tools` (Review 3 #4)
+The plan explicitly authorizes importing `canonicalize_or_ancestor` and `within_worktree` from `crate::clients::tools` ("No new dependencies. Sandbox primitives...are re-exported or accessible from `clients/tools.rs`"). Extracting these to a shared utility module is deferred to a separate refactoring pass.
