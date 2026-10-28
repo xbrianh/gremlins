@@ -63,6 +63,7 @@ async fn landscape_block(
     has_outline_tool: bool,
     pruned_files: Option<std::collections::HashSet<PathBuf>>,
     has_diff_input: bool,
+    prompt: &str,
 ) -> String {
     let cwd = gremlin.cwd();
     let log_tx = gremlin.runtime_config.log_tx.clone();
@@ -89,6 +90,11 @@ async fn landscape_block(
             cwd: cwd.clone(),
             pruned_files,
             profile,
+            prompt: if prompt.is_empty() {
+                None
+            } else {
+                Some(prompt.to_string())
+            },
         };
         let (sections, skipped, paths) = crate::landscape::inject_signal_sections(&ctx, &outlines);
         if profile == crate::landscape::signals::SignalProfile::DiffFocused {
@@ -122,13 +128,8 @@ async fn landscape_block(
         std::borrow::Cow::Borrowed(&outlines)
     };
 
-    let landscape = format_outlines(&effective_outlines, &cwd, has_outline_tool, log_warn);
-
-    let (mut block, file_count, item_count) =
-        (landscape.block, landscape.file_count, landscape.item_count);
-
-    // Inject heuristic signal sections when enabled.
-    if signals_enabled && file_count > 0 {
+    // Log heuristic signal sections before merging under the budget.
+    if signals_enabled && !signal_sections.is_empty() {
         if pruned_skipped > 0 {
             if let Some(tx) = &log_tx {
                 let _ = tx.send(format!(
@@ -136,19 +137,30 @@ async fn landscape_block(
                 ));
             }
         }
-        // Sections are built in the intended display order; prepending each to
-        // the block requires iterating in reverse so the final order reads
-        // Changed files → Symbol map → Referenced files → skeleton.
-        for (name, section) in signal_sections.iter().rev() {
+        for (name, section) in &signal_sections {
             if let Some(tx) = &log_tx {
                 let tokens = crate::landscape::count_tokens(section).unwrap_or(0);
                 let _ = tx.send(format!("[landscape-signals] {name} {tokens} tokens"));
             }
-            block = format!("{section}\n\n{block}");
         }
     }
 
-    if file_count > 0 {
+    let landscape = if signals_enabled && !signal_sections.is_empty() {
+        format_outlines_with_signals(
+            &effective_outlines,
+            &cwd,
+            has_outline_tool,
+            &signal_sections,
+            log_warn,
+        )
+    } else {
+        format_outlines(&effective_outlines, &cwd, has_outline_tool, log_warn)
+    };
+
+    let (mut block, file_count, item_count) =
+        (landscape.block, landscape.file_count, landscape.item_count);
+
+    if !block.is_empty() {
         if let Some(tx) = &log_tx {
             let tokens = crate::landscape::count_tokens(&block).unwrap_or(0);
             let _ = tx.send(format!(
@@ -314,21 +326,69 @@ async fn build_outlines(
 
 /// Format outlines into a [`LandscapeBlock`], logging and downgrading any
 /// formatting error to an empty block.
+/// Format a plain landscape skeleton (no signal sections) under the token
+/// budget. Delegates to [`format_outlines_with_signals`] with an empty section
+/// list.
 fn format_outlines(
     outlines: &[FileOutline],
     cwd: &Path,
     has_outline_tool: bool,
     log_warn: impl Fn(&str),
 ) -> LandscapeBlock {
+    format_outlines_with_signals(outlines, cwd, has_outline_tool, &[], log_warn)
+}
+
+/// Format signal sections plus the skeleton under the shared landscape token
+/// budget.
+///
+/// On any formatting error the wrapper falls back to emitting the signal
+/// sections alone (when present) so signal content is never discarded.  The
+/// `BudgetExceeded` variant from [`format_landscape_with_signals`] is handled
+/// internally by that function and never reaches this wrapper — the only
+/// errors that propagate are I/O and tokenizer failures.
+fn format_outlines_with_signals(
+    outlines: &[FileOutline],
+    cwd: &Path,
+    has_outline_tool: bool,
+    signal_sections: &[(String, String)],
+    log_warn: impl Fn(&str),
+) -> LandscapeBlock {
     let budget: u64 = crate::config::max_landscape_tokens();
-    match crate::landscape::format_landscape_block(
-        outlines,
-        cwd,
-        usize::try_from(budget).unwrap_or(usize::MAX),
-        has_outline_tool,
-    ) {
+    let max_tokens = usize::try_from(budget).unwrap_or(usize::MAX);
+
+    let result = if signal_sections.is_empty() {
+        crate::landscape::format_landscape_block(outlines, cwd, max_tokens, has_outline_tool)
+    } else {
+        crate::landscape::format_landscape_with_signals(
+            outlines,
+            cwd,
+            max_tokens,
+            has_outline_tool,
+            signal_sections,
+        )
+    };
+
+    match result {
         Ok(block) => block,
         Err(e) => {
+            // On any formatting failure, preserve signal sections if we have
+            // them — the stage has specific focus and losing that context is
+            // worse than a missing skeleton.
+            if !signal_sections.is_empty() {
+                let signals_text = signal_sections
+                    .iter()
+                    .map(|(_, s)| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                log_warn(&format!(
+                    "landscape block formatting failed: {e}; emitting signal sections only"
+                ));
+                return LandscapeBlock {
+                    block: signals_text,
+                    file_count: 0,
+                    item_count: 0,
+                };
+            }
             let msg = match e {
                 LandscapeError::BudgetExceeded => format!(
                     "[landscape] block for {} exceeds {budget} token budget; omitting",
@@ -781,8 +841,22 @@ async fn run_agent(
         }
     }
 
+    // Substitute {scratchpad_path} placeholder in the system prompt with the
+    // concrete absolute scratchpad path for both chat and headless stages.
+    let scratchpad_model_path = prepared
+        .implicit_artifacts
+        .first()
+        .map(|a| a.placeholder_path())
+        .unwrap_or_default();
+    let mut prompt = prepared.system_prompt();
+    if !scratchpad_model_path.is_empty() {
+        prompt = prompt.replace("{scratchpad_path}", &scratchpad_model_path);
+    }
+
     // Landscape is recomputed before every agent stage so the next
-    // agent sees fresh files after any exec stage mutations.
+    // agent sees fresh files after any exec stage mutations. Build it
+    // after the prompt so prompt-derived signal sections can be
+    // produced.
     let landscape = if agent.landscape {
         let has_diff_input = checkout_keys
             .iter()
@@ -795,23 +869,13 @@ async fn run_agent(
                 client.has_tool("Landscape"),
                 pruned,
                 has_diff_input,
+                &prompt,
             )
             .await,
         )
     } else {
         None
     };
-    // Substitute {scratchpad_path} placeholder in the system prompt with the
-    // concrete absolute scratchpad path for both chat and headless stages.
-    let scratchpad_model_path = prepared
-        .implicit_artifacts
-        .first()
-        .map(|a| a.placeholder_path())
-        .unwrap_or_default();
-    let mut prompt = prepared.system_prompt();
-    if !scratchpad_model_path.is_empty() {
-        prompt = prompt.replace("{scratchpad_path}", &scratchpad_model_path);
-    }
 
     let system_prompt = assemble_system_prompt(&prompt, landscape.as_deref());
 

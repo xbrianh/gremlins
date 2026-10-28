@@ -865,6 +865,51 @@ pub(crate) fn format_landscape_block(
     )
 }
 
+/// Format signal sections plus the skeleton under a single shared token
+/// budget. Signal sections are rendered first and count against the budget;
+/// the skeleton receives whatever remains. If the signal sections alone
+/// exceed the budget, the skeleton is dropped entirely and only the signal
+/// sections are returned (the stage has specific focus).
+pub(crate) fn format_landscape_with_signals(
+    outlines: &[FileOutline],
+    root: &Path,
+    max_tokens: usize,
+    has_outline_tool: bool,
+    signal_sections: &[(String, String)],
+) -> Result<LandscapeBlock, LandscapeError> {
+    if signal_sections.is_empty() {
+        return format_landscape_block(outlines, root, max_tokens, has_outline_tool);
+    }
+    let signals_text: String = signal_sections
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let signals_tokens = count_tokens(&signals_text)?;
+    if signals_tokens >= max_tokens {
+        return Ok(LandscapeBlock {
+            block: signals_text,
+            file_count: 0,
+            item_count: 0,
+        });
+    }
+    let remaining = max_tokens - signals_tokens;
+    let mut skeleton = match format_landscape_block(outlines, root, remaining, has_outline_tool) {
+        Ok(block) => block,
+        Err(LandscapeError::BudgetExceeded) => LandscapeBlock::empty(),
+        Err(e) => return Err(e),
+    };
+    if skeleton.block.is_empty() {
+        return Ok(LandscapeBlock {
+            block: signals_text,
+            file_count: 0,
+            item_count: 0,
+        });
+    }
+    skeleton.block = format!("{signals_text}\n\n{}", skeleton.block);
+    Ok(skeleton)
+}
+
 /// Format the captured outlines as a headerless landscape tree for the
 /// `Landscape` tool.
 ///
@@ -2067,5 +2112,127 @@ mod tests {
         assert_eq!(kinds, vec![MOD, FN]);
         assert_eq!(items[0].name, "tests");
         assert_eq!(items[1].name, "real");
+    }
+
+    // ── format_landscape_with_signals budget path ─────────────────────
+
+    #[test]
+    fn format_landscape_with_signals_signals_and_skeleton_under_budget() {
+        let root = Path::new("/repo");
+        let outline = FileOutline {
+            skipped: false,
+            path: root.join("src/main.rs"),
+            items: vec![
+                OutlineItem::new(FN, "main", 1),
+                OutlineItem::new(STRUCT, "App", 2),
+                OutlineItem::new(KEY, "package", 3),
+            ],
+        };
+        let signal_sections = vec![(
+            "Signals".to_string(),
+            "<!-- signal section -->\ncontent here".to_string(),
+        )];
+        // Large budget — both signals and skeleton should appear.
+        let block = format_landscape_with_signals(
+            std::slice::from_ref(&outline),
+            root,
+            10_000,
+            true,
+            &signal_sections,
+        )
+        .unwrap();
+        assert!(
+            block.block.starts_with("<!-- signal section -->"),
+            "block should start with signal section; got: {}",
+            &block.block[..block.block.len().min(80)]
+        );
+        assert!(
+            block.block.contains("1|fn|main"),
+            "block should contain skeleton items; block.len={}",
+            block.block.len()
+        );
+        assert!(block.file_count > 0, "file_count should be > 0");
+    }
+
+    #[test]
+    fn format_landscape_with_signals_signals_exceed_budget_drops_skeleton() {
+        let root = Path::new("/repo");
+        let outline = FileOutline {
+            skipped: false,
+            path: root.join("src/main.rs"),
+            items: vec![OutlineItem::new(FN, "main", 1)],
+        };
+        // A signal section that alone exceeds the tiny budget.
+        let large_signal = "x".repeat(500);
+        let signal_sections = vec![("Big".to_string(), large_signal.clone())];
+        let block = format_landscape_with_signals(
+            std::slice::from_ref(&outline),
+            root,
+            100, // tiny budget — signal alone exceeds it
+            true,
+            &signal_sections,
+        )
+        .unwrap();
+        assert_eq!(block.block, large_signal, "should be signal-only");
+        assert_eq!(block.file_count, 0, "file_count should be 0");
+        assert_eq!(block.item_count, 0, "item_count should be 0");
+    }
+
+    #[test]
+    fn format_landscape_with_signals_empty_sections_delegates() {
+        let root = Path::new("/repo");
+        let outline = FileOutline {
+            skipped: false,
+            path: root.join("src/main.rs"),
+            items: vec![
+                OutlineItem::new(FN, "main", 1),
+                OutlineItem::new(STRUCT, "App", 2),
+                OutlineItem::new(KEY, "package", 3),
+            ],
+        };
+        let empty: Vec<(String, String)> = vec![];
+        let with_signals = format_landscape_with_signals(
+            std::slice::from_ref(&outline),
+            root,
+            usize::MAX,
+            true,
+            &empty,
+        )
+        .unwrap();
+        let without_signals =
+            format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
+        assert_eq!(
+            with_signals.block, without_signals.block,
+            "empty sections should delegate to format_landscape_block"
+        );
+        assert!(!with_signals.block.is_empty(), "block should not be empty");
+    }
+
+    #[test]
+    fn format_landscape_with_signals_skeleton_budget_exceeded_falls_back() {
+        let root = Path::new("/repo");
+        let outline = FileOutline {
+            skipped: false,
+            path: root.join("src/main.rs"),
+            items: vec![OutlineItem::new(FN, "main", 1)],
+        };
+        let signal_sections = vec![("Signals".to_string(), "<!-- small signal -->".to_string())];
+        // Budget large enough for signals but too small for the skeleton
+        // (even at minimum depth the skeleton needs > 70 tokens).
+        let block = format_landscape_with_signals(
+            std::slice::from_ref(&outline),
+            root,
+            70, // signals fit, skeleton doesn't
+            true,
+            &signal_sections,
+        )
+        .unwrap();
+        assert!(
+            block.block.starts_with("<!-- small signal -->"),
+            "should fall back to signal-only; got: {}",
+            &block.block[..block.block.len().min(80)]
+        );
+        assert_eq!(block.file_count, 0);
+        assert_eq!(block.item_count, 0);
     }
 }

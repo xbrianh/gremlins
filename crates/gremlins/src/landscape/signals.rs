@@ -28,6 +28,9 @@ pub(crate) struct SignalContext {
     pub pruned_files: Option<HashSet<PathBuf>>,
     /// Which signal sections to emit, derived from stage artifact inputs.
     pub profile: SignalProfile,
+    /// Stage prompt/plan text used to derive symbol-map candidates.
+    /// `None` (or an empty string) disables the symbol-map section.
+    pub prompt: Option<String>,
 }
 
 /// Which signal sections fire and how the skeleton is scoped.
@@ -450,16 +453,39 @@ fn build_referenced_paths(
     )
 }
 
-/// Render the deduplicated symbol index, sorted by name and capped to 100
-/// entries to avoid bloating the landscape block.
+/// Extract candidate identifiers from a prompt/plan string using the same
+/// three case-convention regexes used for source-file scanning.
+fn extract_prompt_identifiers(prompt: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for re in [snake_case_regex(), camel_case_regex(), shouty_snake_regex()] {
+        for m in re.find_iter(prompt) {
+            names.insert(m.as_str().to_string());
+        }
+    }
+    names
+}
+
+/// Render the symbol map from prompt-derived candidates resolved against the
+/// full symbol index. Entries are sorted by name and capped at 30. When the
+/// prompt is absent or empty the section is omitted entirely.
 fn build_symbol_map(ctx: &SignalContext, symbol_index: &HashMap<String, SymbolEntry>) -> String {
-    let mut entries: Vec<&SymbolEntry> = symbol_index.values().collect();
+    let candidates = match ctx.prompt.as_deref() {
+        Some(p) if !p.trim().is_empty() => extract_prompt_identifiers(p),
+        _ => return String::new(),
+    };
+    if candidates.is_empty() {
+        return String::new();
+    }
+    let mut entries: Vec<&SymbolEntry> = symbol_index
+        .values()
+        .filter(|e| candidates.contains(e.name.as_str()))
+        .collect();
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     if entries.is_empty() {
         return String::new();
     }
     let root_canonical = canonicalize_or_ancestor(&ctx.cwd);
-    let max_show = 100usize;
+    let max_show = 30usize;
     let lines: Vec<String> = entries
         .iter()
         .take(max_show)
@@ -473,7 +499,7 @@ fn build_symbol_map(ctx: &SignalContext, symbol_index: &HashMap<String, SymbolEn
         })
         .collect();
     let mut out = format!(
-        "<!-- Symbol map (deduplicated, first occurrence) -->\n{}\n",
+        "<!-- Symbol map (prompt-derived, first occurrence) -->\n{}\n",
         lines.join("\n")
     );
     if entries.len() > max_show {
@@ -520,7 +546,10 @@ pub(crate) fn render_signal_sections(
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             if !filtered.is_empty() {
-                sections.push(("Symbol map".to_string(), build_symbol_map(ctx, &filtered)));
+                let body = build_symbol_map(ctx, &filtered);
+                if !body.is_empty() {
+                    sections.push(("Symbol map".to_string(), body));
+                }
             }
         }
 
@@ -545,10 +574,10 @@ pub(crate) fn render_signal_sections(
         // Full profile (or DiffFocused with empty diff): emit unscoped
         // symbol map and referenced-files sections.
         if !signals.symbol_index.is_empty() {
-            sections.push((
-                "Symbol map".to_string(),
-                build_symbol_map(ctx, &signals.symbol_index),
-            ));
+            let body = build_symbol_map(ctx, &signals.symbol_index);
+            if !body.is_empty() {
+                sections.push(("Symbol map".to_string(), body));
+            }
         }
 
         let (referenced, n) = build_referenced_paths(ctx, &signals.path_candidates);
@@ -611,6 +640,7 @@ include!(\"./generated.rs\");
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
             profile: SignalProfile::Full,
+            prompt: None,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -657,6 +687,7 @@ fn my_function_name() {
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
             profile: SignalProfile::Full,
+            prompt: None,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -697,6 +728,7 @@ fn my_function_name() {
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
             profile: SignalProfile::Full,
+            prompt: None,
         };
         let result = build_signals(&ctx, &[outline_a, outline_b]);
 
@@ -754,6 +786,7 @@ pub fn bar_init() -> BarConfig {
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
             profile: SignalProfile::Full,
+            prompt: None,
         };
         let result = build_signals(&ctx, &[outline_main, outline_bar]);
 
@@ -831,6 +864,7 @@ pub fn bar_init() -> BarConfig {
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
             profile: SignalProfile::Full,
+            prompt: None,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -849,6 +883,7 @@ pub fn bar_init() -> BarConfig {
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
             profile: SignalProfile::Full,
+            prompt: None,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -877,6 +912,7 @@ cfg!(~/.config/app.toml);
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
             profile: SignalProfile::Full,
+            prompt: None,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -920,6 +956,7 @@ let div = a / b;
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
             profile: SignalProfile::Full,
+            prompt: None,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -948,6 +985,7 @@ let config = Config::default();
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
             profile: SignalProfile::Full,
+            prompt: None,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -977,6 +1015,7 @@ let config = Config::default();
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
             profile: SignalProfile::Full,
+            prompt: None,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -1026,6 +1065,7 @@ let config = Config::default();
             cwd: dir.path().to_path_buf(),
             pruned_files: Some(pruned),
             profile: SignalProfile::Full,
+            prompt: None,
         };
         let (out, skipped) = build_referenced_paths(&ctx, &candidates);
         let out = out.expect("section should remain when some files are unpruned");
@@ -1054,6 +1094,7 @@ let config = Config::default();
             cwd: dir.path().to_path_buf(),
             pruned_files: Some(pruned),
             profile: SignalProfile::Full,
+            prompt: None,
         };
         let (out, skipped) = build_referenced_paths(&ctx, &candidates);
         assert!(skipped > 0, "pruned file should be counted");
@@ -1075,6 +1116,7 @@ let config = Config::default();
             cwd: dir.path().to_path_buf(),
             pruned_files: Some(std::collections::HashSet::new()),
             profile: SignalProfile::Full,
+            prompt: None,
         };
         let (out, skipped) = build_referenced_paths(&ctx, &candidates);
         let out = out.expect("empty prune set should not drop section");
@@ -1098,6 +1140,7 @@ let config = Config::default();
             cwd: dir.path().to_path_buf(),
             pruned_files: Some(pruned),
             profile: SignalProfile::Full,
+            prompt: None,
         };
         let result = build_signals(&ctx, &[outline]);
         assert!(
@@ -1185,6 +1228,7 @@ let config = Config::default();
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
             profile: SignalProfile::Full,
+            prompt: Some("helper_fn".to_string()),
         };
         let (sections, _skipped, _diff) = render_signal_sections(&ctx, &[outline]);
         let names: Vec<&str> = sections.iter().map(|(n, _)| n.as_str()).collect();
@@ -1215,6 +1259,7 @@ let config = Config::default();
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
             profile: SignalProfile::DiffFocused,
+            prompt: None,
         };
         let (sections, _skipped, diff_paths) = render_signal_sections(&ctx, &outlines);
         let names: Vec<&str> = sections.iter().map(|(n, _)| n.as_str()).collect();
@@ -1242,6 +1287,12 @@ let config = Config::default();
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
             profile: SignalProfile::DiffFocused,
+            // Prompt-derived resolution: only identifiers mentioned in the
+            // prompt appear in the symbol map. func_01 is in the diff and
+            // the prompt; func_02 is in the prompt but not in the codebase
+            // (no-op); func_00 is outside the diff range AND not in the
+            // prompt, so it must be excluded from the symbol map.
+            prompt: Some("func_01 func_02".to_string()),
         };
         let (sections, _skipped, diff_paths) = render_signal_sections(&ctx, &outlines);
 
@@ -1274,6 +1325,149 @@ let config = Config::default();
             10,
             "diff should cover 10 files, got {}",
             diff_set.len()
+        );
+    }
+
+    // ── prompt-derived symbol resolution ──────────────────────────────
+
+    #[test]
+    fn prompt_derived_symbol_map_includes_matching_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create files with identifiers in all three casing forms.
+        write_file(
+            &dir,
+            "src/lib.rs",
+            "fn helper_fn() {}\nstruct MyStruct {}\nconst MAX_ITEMS: usize = 10;\n",
+        );
+        let outline = make_outline(&dir.path().join("src/lib.rs"), false, vec![]);
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: None,
+            profile: SignalProfile::Full,
+            prompt: Some("helper_fn MyStruct MAX_ITEMS".to_string()),
+        };
+        let (sections, _skipped, _diff) = render_signal_sections(&ctx, &[outline]);
+        let body = sections
+            .iter()
+            .find(|(n, _)| n == "Symbol map")
+            .map(|(_, b)| b)
+            .expect("symbol map should be emitted");
+        assert!(
+            body.contains("helper_fn"),
+            "symbol map should contain helper_fn; got: {body}"
+        );
+        assert!(
+            body.contains("MyStruct"),
+            "symbol map should contain MyStruct; got: {body}"
+        );
+        assert!(
+            body.contains("MAX_ITEMS"),
+            "symbol map should contain MAX_ITEMS; got: {body}"
+        );
+    }
+
+    #[test]
+    fn prompt_derived_symbol_map_omitted_for_empty_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(&dir, "src/lib.rs", "fn helper_fn() {}\n");
+        let outline = make_outline(&dir.path().join("src/lib.rs"), false, vec![]);
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: None,
+            profile: SignalProfile::Full,
+            prompt: None,
+        };
+        let (sections, _skipped, _diff) = render_signal_sections(&ctx, &[outline]);
+        assert!(
+            !sections.iter().any(|(n, _)| n == "Symbol map"),
+            "empty prompt must not produce symbol map; got sections: {sections:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_derived_symbol_map_omitted_when_no_candidates_match() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(&dir, "src/lib.rs", "fn helper_fn() {}\n");
+        let outline = make_outline(&dir.path().join("src/lib.rs"), false, vec![]);
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: None,
+            profile: SignalProfile::Full,
+            // "Config" is a single-word capital — rejected by camel_case_regex.
+            // "use" is bare lowercase — rejected by snake_case_regex.
+            // Neither matches helper_fn.
+            prompt: Some("Config use something_else".to_string()),
+        };
+        let (sections, _skipped, _diff) = render_signal_sections(&ctx, &[outline]);
+        assert!(
+            !sections.iter().any(|(n, _)| n == "Symbol map"),
+            "no-match prompt must not produce symbol map; got sections: {sections:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_derived_symbol_map_rejects_bare_words_and_single_word_caps() {
+        // The regexes require: an underscore for snake_case/SHOUTY_SNAKE, and
+        // an internal case transition for CamelCase.  Bare lowercase words
+        // ("use", "let") and single-word capitals ("Config") must not
+        // become candidates.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            &dir,
+            "src/lib.rs",
+            "fn use_it() {}\nstruct Config {}\nfn LET_GO() {}\n",
+        );
+        let outline = make_outline(&dir.path().join("src/lib.rs"), false, vec![]);
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: None,
+            profile: SignalProfile::Full,
+            prompt: Some("use let Config".to_string()),
+        };
+        let (sections, _skipped, _diff) = render_signal_sections(&ctx, &[outline]);
+        assert!(
+            !sections.iter().any(|(n, _)| n == "Symbol map"),
+            "bare words must not produce symbol map; got sections: {sections:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_derived_symbol_map_respects_thirty_entry_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create 35 files, each with one identifier, referenced by a single prompt.
+        let mut prompt_parts = Vec::new();
+        for i in 0..35 {
+            let name = format!("src/f{i:02}.rs");
+            prompt_parts.push(format!("fn_{i:02}"));
+            write_file(&dir, &name, &format!("fn fn_{i:02}() {{}}\n"));
+            // Touch so the file exists for make_outline.
+        }
+        let mut outlines: Vec<FileOutline> = Vec::new();
+        for i in 0..35 {
+            let path = dir.path().join(format!("src/f{i:02}.rs"));
+            outlines.push(make_outline(&path, false, vec![]));
+        }
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: None,
+            profile: SignalProfile::Full,
+            prompt: Some(prompt_parts.join(" ")),
+        };
+        let (sections, _skipped, _diff) = render_signal_sections(&ctx, &outlines);
+        let body = sections
+            .iter()
+            .find(|(n, _)| n == "Symbol map")
+            .map(|(_, b)| b)
+            .expect("symbol map should be emitted");
+        // Count how many fn_NN entries appear.
+        let count = body.lines().filter(|l| l.starts_with("fn_")).count();
+        assert_eq!(
+            count, 30,
+            "symbol map should cap at 30 entries, got {count}"
+        );
+        assert!(
+            body.contains("... and 5 more"),
+            "truncation notice should mention 5 more; got: {body}"
         );
     }
 }
