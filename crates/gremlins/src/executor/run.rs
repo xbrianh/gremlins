@@ -873,7 +873,7 @@ async fn run_agent(
                 client.has_tool("Landscape"),
                 pruned,
                 has_diff_input,
-                &prompt,
+                &prepared.prompt,
             )
             .await,
         )
