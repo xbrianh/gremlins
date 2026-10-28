@@ -28,5 +28,6 @@ pub(crate) mod task_kind;
 pub(crate) mod task_models;
 pub(crate) mod token_provider;
 pub(crate) mod token_usage;
+pub(crate) mod tool_ledger;
 pub(crate) mod tool_specs;
 pub(crate) mod tools;
