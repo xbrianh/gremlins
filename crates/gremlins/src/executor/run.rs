@@ -1127,9 +1127,7 @@ async fn run_agent(
                     .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
                 );
                 gremlin.state.accumulate_token_usage(&delta);
-                gremlin
-                    .state
-                    .accumulate_stage_token_usage(&stage_path, &delta);
+                state::emit_stage_token_usage(gremlin.state.store_ref(), &stage_path, &delta);
             }
             // Flush the live scratchpad into the main state store so a
             // cancelled/failed chat turn does not drop in-flight working
@@ -1173,9 +1171,7 @@ async fn run_agent(
             .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
         );
         gremlin.state.accumulate_token_usage(&delta);
-        gremlin
-            .state
-            .accumulate_stage_token_usage(&stage_path, &delta);
+        state::emit_stage_token_usage(gremlin.state.store_ref(), &stage_path, &delta);
     }
 
     if is_chat {
@@ -1683,59 +1679,6 @@ impl Gremlin {
                     last_cached_input_tokens: None,
                 },
             );
-        }
-
-        // ── Emit per-stage token breakdown ─────
-        if let Some(stage_usage) = self
-            .state
-            .state_tree()
-            .get(state::STAGE_USAGE_KEY)
-            .and_then(|v| v.as_object())
-        {
-            if stage_usage.is_empty() {
-                return;
-            }
-            let artifact_dir = self.state.state_dir().join("artifacts");
-            let path = artifact_dir.join("token_breakdown.jsonl");
-            // Collect and sort for deterministic output.
-            let mut entries: Vec<(&String, &serde_json::Value)> = stage_usage.iter().collect();
-            entries.sort_by_key(|(a, _)| *a);
-            let mut output = String::new();
-            for (stage_path, usage_val) in entries {
-                let Some(usage) = usage_val.as_object() else {
-                    continue;
-                };
-                let mut line = serde_json::Map::new();
-                line.insert(
-                    "stage".to_string(),
-                    serde_json::Value::String(stage_path.replace('/', ".")),
-                );
-                for (key, value) in usage {
-                    if key == "stage" {
-                        log::warn!(
-                            "token breakdown: stage {stage_path} has reserved key 'stage' — skipping"
-                        );
-                        continue;
-                    }
-                    line.insert(key.clone(), value.clone());
-                }
-                match serde_json::to_string(&line) {
-                    Ok(json) => {
-                        output.push_str(&json);
-                        output.push('\n');
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "token breakdown: failed to serialize entry for {stage_path}: {e}"
-                        );
-                    }
-                }
-            }
-            if let Err(e) =
-                std::fs::create_dir_all(&artifact_dir).and_then(|_| std::fs::write(&path, &output))
-            {
-                log::warn!("failed to write token breakdown artifact: {e}");
-            }
         }
     }
 }
@@ -3380,5 +3323,53 @@ mod tests {
             block_from_snapshot, expected.block,
             "build_landscape_snapshot must match format_landscape_block"
         );
+    }
+
+    #[test]
+    fn emit_stage_token_usage_writes_valid_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state/g-0001");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("state.json"), r#"{"id": "g"}"#).unwrap();
+        let store = FileSystemStateStore::from_path(state_dir.clone());
+        let store_ref: &dyn StateStore = &store;
+
+        let mut usage = HashMap::new();
+        usage.insert("prompt_tokens".to_string(), 100i64);
+        usage.insert("completion_tokens".to_string(), 50i64);
+
+        // Slash-separated path → dot-separated in JSON
+        state::emit_stage_token_usage(store_ref, "reviews/complexity-review", &usage);
+
+        let raw = std::fs::read_to_string(state_dir.join("token_usage.jsonl")).unwrap();
+        let line = raw.trim();
+        let val: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(val["stage"], "reviews.complexity-review");
+        assert_eq!(val["prompt_tokens"], 100);
+        assert_eq!(val["completion_tokens"], 50);
+    }
+
+    #[test]
+    fn emit_stage_token_usage_skips_reserved_stage_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state/g-0001");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("state.json"), r#"{"id": "g"}"#).unwrap();
+        let store = FileSystemStateStore::from_path(state_dir.clone());
+        let store_ref: &dyn StateStore = &store;
+
+        let mut usage = HashMap::new();
+        usage.insert("prompt_tokens".to_string(), 10i64);
+        usage.insert("stage".to_string(), 999i64); // reserved key
+
+        state::emit_stage_token_usage(store_ref, "reviews/test", &usage);
+
+        let raw = std::fs::read_to_string(state_dir.join("token_usage.jsonl")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+        // The reserved 'stage' key must not overwrite our dot-separated path.
+        assert_eq!(val["stage"], "reviews.test");
+        assert_eq!(val["prompt_tokens"], 10);
+        // The reserved key must not appear as a user field.
+        assert!(val.get("stage") != Some(&serde_json::Value::from(999)));
     }
 }

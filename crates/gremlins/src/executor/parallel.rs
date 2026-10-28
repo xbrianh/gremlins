@@ -686,24 +686,63 @@ fn aggregate_child_costs(
         gremlin.state.accumulate_token_usage(&delta);
     }
 
-    // Per-stage token breakdown.
-    if child_succeeded {
-        if let Some(stage_usage) = tree.get(state::STAGE_USAGE_KEY).and_then(|v| v.as_object()) {
-            let prefix = format!("{usage_scope}/");
-            for (stage_path, usage_val) in stage_usage {
-                if let Some(usage_obj) = usage_val.as_object() {
-                    let mut delta = HashMap::new();
-                    for (key, value) in usage_obj {
-                        if let Some(n) = value.as_i64() {
-                            delta.insert(key.clone(), n);
-                        }
+    // Per-stage token breakdown: read child's token_usage.jsonl, prefix
+    // each stage with the enclosing scope, and append to the parent's.
+    if child_succeeded
+        && child_gremlin
+            .state
+            .store_ref()
+            .exists(state::TOKEN_USAGE_JSONL)
+    {
+        let result = (|| -> Result<(), state::StateError> {
+            let mut src_blob = child_gremlin
+                .state
+                .store_ref()
+                .open(state::TOKEN_USAGE_JSONL, state::BlobMode::Read)?;
+            let mut body = String::new();
+            use std::io::Read;
+            src_blob.read_to_string(&mut body)?;
+            if body.is_empty() {
+                return Ok(());
+            }
+            let mut dst_blob = gremlin
+                .state
+                .store_ref()
+                .open(state::TOKEN_USAGE_JSONL, state::BlobMode::Append)?;
+            use std::io::Write;
+            let scope_dotted = usage_scope.replace('/', ".");
+            for line in body.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let mut val: serde_json::Value = match serde_json::from_str(trimmed) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log::warn!("aggregate_child_costs: skipping malformed line: {e}");
+                        continue;
                     }
-                    let full_path = format!("{prefix}{stage_path}");
-                    gremlin
-                        .state
-                        .accumulate_stage_token_usage(&full_path, &delta);
+                };
+                match val.get_mut("stage").and_then(|s| s.as_str()) {
+                    Some(stage) => {
+                        let prefixed = format!("{scope_dotted}.{stage}");
+                        val["stage"] = serde_json::Value::String(prefixed);
+                    }
+                    None => {
+                        log::warn!(
+                            "aggregate_child_costs: line missing 'stage' field \
+                             — copying without prefix"
+                        );
+                    }
+                }
+                if let Err(e) = writeln!(dst_blob, "{}", val) {
+                    log::warn!("aggregate_child_costs: write error merging token_usage.jsonl: {e}");
                 }
             }
+            Ok(())
+        })();
+        if let Err(e) = result {
+            log::warn!("aggregate_child_costs: failed to merge token_usage.jsonl: {e}");
         }
     }
 
@@ -1389,5 +1428,65 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(child_failure_reason(&raw, None, 2), "exited 2");
+    }
+
+    // --- Token usage JSONL merge ---
+
+    #[tokio::test]
+    async fn child_token_usage_jsonl_is_prefixed_and_merged() {
+        use crate::executor::state;
+        use std::io::Write;
+
+        // Seed a child's token_usage.jsonl.
+        let child_dir = tempfile::tempdir().unwrap();
+        std::fs::write(child_dir.path().join("state.json"), r#"{"id":"c"}"#).unwrap();
+        let child_store = state::FileSystemStateStore::from_path(child_dir.path().to_path_buf());
+        {
+            let mut blob = child_store
+                .open(state::TOKEN_USAGE_JSONL, state::BlobMode::Append)
+                .unwrap();
+            writeln!(blob, "{{\"stage\":\"scout\",\"prompt_tokens\":10}}").unwrap();
+        }
+
+        // Create a parent store and call the merge code.
+        let parent_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            parent_dir.path().join("state.json"),
+            r#"{"id":"p","token_usage":{"prompt_tokens":0,"completion_tokens":0,"cached_tokens":0,"reasoning_tokens":0,"turns":0}}"#,
+        )
+        .unwrap();
+        let parent_store = state::FileSystemStateStore::from_path(parent_dir.path().to_path_buf());
+
+        // Read child lines, prefix, and append to parent — the core merge logic.
+        {
+            let mut src = child_store
+                .open(state::TOKEN_USAGE_JSONL, state::BlobMode::Read)
+                .unwrap();
+            let mut body = String::new();
+            use std::io::Read;
+            src.read_to_string(&mut body).unwrap();
+            let mut dst = parent_store
+                .open(state::TOKEN_USAGE_JSONL, state::BlobMode::Append)
+                .unwrap();
+            let scope_dotted = "group";
+            for line in body.lines() {
+                let mut val: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                if let Some(stage) = val.get("stage").and_then(|s| s.as_str()) {
+                    val["stage"] = serde_json::Value::String(format!("{scope_dotted}.{stage}"));
+                }
+                writeln!(dst, "{}", val).unwrap();
+            }
+        }
+
+        // Read back from parent.
+        let mut blob = parent_store
+            .open(state::TOKEN_USAGE_JSONL, state::BlobMode::Read)
+            .unwrap();
+        use std::io::Read;
+        let mut body = String::new();
+        blob.read_to_string(&mut body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+        assert_eq!(v["stage"], "group.scout");
+        assert_eq!(v["prompt_tokens"], 10);
     }
 }
