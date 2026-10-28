@@ -26,6 +26,21 @@ pub(crate) struct SignalContext {
     /// Set of already-observed file paths to exclude from signal sections.
     /// Absolute canonical paths.
     pub pruned_files: Option<HashSet<PathBuf>>,
+    /// Which signal sections to emit, derived from stage artifact inputs.
+    pub profile: SignalProfile,
+}
+
+/// Which signal sections fire and how the skeleton is scoped.
+///
+/// Derived from the stage's artifact inputs rather than from naming
+/// conventions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SignalProfile {
+    /// All signal sections fire; full-tree skeleton.
+    Full,
+    /// Changed-files section is primary; skeleton and other sections are
+    /// scoped to files appearing in `git diff --name-only`.
+    DiffFocused,
 }
 
 /// A file-path reference discovered in source text.
@@ -315,7 +330,11 @@ fn contained_path(root: &Path, path: &Path) -> Option<PathBuf> {
 /// Returns `None` when git is unavailable, the directory is not a
 /// repository, or every reported path either falls outside the sandbox or no
 /// longer exists on disk.
-fn build_changed_files(ctx: &SignalContext) -> (Option<String>, usize) {
+///
+/// The third return element is the set of canonical paths of the changed
+/// files, used by `DiffFocused` profile to scope the skeleton and other
+/// sections.
+fn build_changed_files(ctx: &SignalContext) -> (Option<String>, Vec<PathBuf>, usize) {
     // Obtain the git repository root first; `diff --name-only` emits
     // paths relative to the repo root, not the current directory.
     let Ok(repo_root_output) = Command::new("git")
@@ -323,13 +342,13 @@ fn build_changed_files(ctx: &SignalContext) -> (Option<String>, usize) {
         .current_dir(&ctx.cwd)
         .output()
     else {
-        return (None, 0);
+        return (None, Vec::new(), 0);
     };
     if !repo_root_output.status.success() {
-        return (None, 0);
+        return (None, Vec::new(), 0);
     }
     let Ok(repo_root) = String::from_utf8(repo_root_output.stdout) else {
-        return (None, 0);
+        return (None, Vec::new(), 0);
     };
     let repo_root = PathBuf::from(repo_root.trim());
 
@@ -338,15 +357,16 @@ fn build_changed_files(ctx: &SignalContext) -> (Option<String>, usize) {
         .current_dir(&ctx.cwd)
         .output()
     else {
-        return (None, 0);
+        return (None, Vec::new(), 0);
     };
     if !output.status.success() {
-        return (None, 0);
+        return (None, Vec::new(), 0);
     }
     let Ok(text) = String::from_utf8(output.stdout) else {
-        return (None, 0);
+        return (None, Vec::new(), 0);
     };
     let mut skipped = 0usize;
+    let mut canonical_paths = Vec::new();
     let paths: Vec<String> = text
         .lines()
         .map(str::trim)
@@ -365,14 +385,16 @@ fn build_changed_files(ctx: &SignalContext) -> (Option<String>, usize) {
                     return None;
                 }
             }
+            canonical_paths.push(canonical);
             Some(p.to_string())
         })
         .collect();
     if paths.is_empty() {
-        return (None, skipped);
+        return (None, Vec::new(), skipped);
     }
     (
         Some(format!("<!-- Changed files -->\n{}\n", paths.join("\n"))),
+        canonical_paths,
         skipped,
     )
 }
@@ -466,38 +488,77 @@ fn build_symbol_map(ctx: &SignalContext, symbol_index: &HashMap<String, SymbolEn
 /// Phase 1 entry point: render every signal section that has content.
 ///
 /// Each returned element is `(section_name, rendered_text)`; sections that
-/// produce nothing are omitted.
+/// produce nothing are omitted. The third return element carries the
+/// canonical paths of changed files when the `DiffFocused` profile is active
+/// — used by the caller to scope the landscape skeleton.
 pub(crate) fn render_signal_sections(
     ctx: &SignalContext,
     outlines: &[super::FileOutline],
-) -> (Vec<(String, String)>, usize) {
+) -> (Vec<(String, String)>, usize, Vec<PathBuf>) {
     let signals = build_signals(ctx, outlines);
     let mut sections = Vec::new();
     let mut total_skipped = 0usize;
 
-    // 1. Changed files (via git).
-    let (changed, n) = build_changed_files(ctx);
+    // Changed files (via git) — always attempt regardless of profile.
+    let (changed, diff_paths, n) = build_changed_files(ctx);
     total_skipped += n;
     if let Some(changed) = changed {
         sections.push(("Changed files".to_string(), changed));
     }
 
-    // 2. Symbol map.
-    if !signals.symbol_index.is_empty() {
-        sections.push((
-            "Symbol map".to_string(),
-            build_symbol_map(ctx, &signals.symbol_index),
-        ));
-    }
+    // When DiffFocused with non-empty diff, scope symbol map and referenced
+    // files to the diff files; otherwise emit the full (unscoped) sections.
+    if ctx.profile == SignalProfile::DiffFocused && !diff_paths.is_empty() {
+        let diff_set: HashSet<&Path> = diff_paths.iter().map(|p| p.as_path()).collect();
 
-    // 3. Referenced files.
-    let (referenced, n) = build_referenced_paths(ctx, &signals.path_candidates);
-    total_skipped += n;
-    if let Some(referenced) = referenced {
-        sections.push(("Referenced files".to_string(), referenced));
-    }
+        // Symbol map: scoped to symbols whose files appear in the diff.
+        if !signals.symbol_index.is_empty() {
+            let filtered: HashMap<String, SymbolEntry> = signals
+                .symbol_index
+                .iter()
+                .filter(|(_, entry)| diff_set.contains(entry.file.as_path()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if !filtered.is_empty() {
+                sections.push(("Symbol map".to_string(), build_symbol_map(ctx, &filtered)));
+            }
+        }
 
-    (sections, total_skipped)
+        // Referenced files: scoped to paths whose source files appear in
+        // the diff.
+        let scoped_candidates: Vec<PathCandidate> = signals
+            .path_candidates
+            .iter()
+            .filter(|c| diff_set.contains(c.source_file.as_path()))
+            .cloned()
+            .collect();
+        if !scoped_candidates.is_empty() {
+            let (referenced, n) = build_referenced_paths(ctx, &scoped_candidates);
+            total_skipped += n;
+            if let Some(referenced) = referenced {
+                sections.push(("Referenced files".to_string(), referenced));
+            }
+        }
+
+        (sections, total_skipped, diff_paths)
+    } else {
+        // Full profile (or DiffFocused with empty diff): emit unscoped
+        // symbol map and referenced-files sections.
+        if !signals.symbol_index.is_empty() {
+            sections.push((
+                "Symbol map".to_string(),
+                build_symbol_map(ctx, &signals.symbol_index),
+            ));
+        }
+
+        let (referenced, n) = build_referenced_paths(ctx, &signals.path_candidates);
+        total_skipped += n;
+        if let Some(referenced) = referenced {
+            sections.push(("Referenced files".to_string(), referenced));
+        }
+
+        (sections, total_skipped, Vec::new())
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -549,6 +610,7 @@ include!(\"./generated.rs\");
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
+            profile: SignalProfile::Full,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -594,6 +656,7 @@ fn my_function_name() {
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
+            profile: SignalProfile::Full,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -633,6 +696,7 @@ fn my_function_name() {
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
+            profile: SignalProfile::Full,
         };
         let result = build_signals(&ctx, &[outline_a, outline_b]);
 
@@ -689,6 +753,7 @@ pub fn bar_init() -> BarConfig {
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
+            profile: SignalProfile::Full,
         };
         let result = build_signals(&ctx, &[outline_main, outline_bar]);
 
@@ -765,6 +830,7 @@ pub fn bar_init() -> BarConfig {
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
+            profile: SignalProfile::Full,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -782,6 +848,7 @@ pub fn bar_init() -> BarConfig {
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
+            profile: SignalProfile::Full,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -809,6 +876,7 @@ cfg!(~/.config/app.toml);
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
+            profile: SignalProfile::Full,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -851,6 +919,7 @@ let div = a / b;
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
+            profile: SignalProfile::Full,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -878,6 +947,7 @@ let config = Config::default();
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
+            profile: SignalProfile::Full,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -906,6 +976,7 @@ let config = Config::default();
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
             pruned_files: None,
+            profile: SignalProfile::Full,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -954,6 +1025,7 @@ let config = Config::default();
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
             pruned_files: Some(pruned),
+            profile: SignalProfile::Full,
         };
         let (out, skipped) = build_referenced_paths(&ctx, &candidates);
         let out = out.expect("section should remain when some files are unpruned");
@@ -981,6 +1053,7 @@ let config = Config::default();
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
             pruned_files: Some(pruned),
+            profile: SignalProfile::Full,
         };
         let (out, skipped) = build_referenced_paths(&ctx, &candidates);
         assert!(skipped > 0, "pruned file should be counted");
@@ -1001,6 +1074,7 @@ let config = Config::default();
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
             pruned_files: Some(std::collections::HashSet::new()),
+            profile: SignalProfile::Full,
         };
         let (out, skipped) = build_referenced_paths(&ctx, &candidates);
         let out = out.expect("empty prune set should not drop section");
@@ -1023,11 +1097,183 @@ let config = Config::default();
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
             pruned_files: Some(pruned),
+            profile: SignalProfile::Full,
         };
         let result = build_signals(&ctx, &[outline]);
         assert!(
             result.symbol_index.contains_key("helper_fn"),
             "symbol map should be unaffected by pruning"
+        );
+    }
+
+    // ── profile tests ────────────────────────────────────────────────
+
+    /// Initialise a git repository with *n* source files across *n* commits
+    /// (one file per commit) so that `HEAD~offset` references a real
+    /// ancestor.  Returns the tempdir or `None` when git is missing.
+    fn setup_git_repo(n: usize) -> Option<tempfile::TempDir> {
+        if !std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        crate::test_support::git(dir.path(), &["init", "-q"]);
+        // First commit: baseline.
+        std::fs::write(dir.path().join("README.md"), "# repo\n").unwrap();
+        crate::test_support::git(dir.path(), &["add", "README.md"]);
+        crate::test_support::git(
+            dir.path(),
+            &[
+                "-c",
+                "user.email=test@test",
+                "-c",
+                "user.name=T",
+                "commit",
+                "-q",
+                "-m",
+                "c0",
+            ],
+        );
+        for i in 0..n {
+            let name = format!("src/file_{i:02}.rs");
+            let dir_path = dir.path().join("src");
+            std::fs::create_dir_all(dir_path).unwrap();
+            std::fs::write(
+                dir.path().join(&name),
+                format!("fn func_{i:02}() {{}}\nuse ./helper_{i:02}.rs;\n"),
+            )
+            .unwrap();
+            crate::test_support::git(dir.path(), &["add", &name]);
+            crate::test_support::git(
+                dir.path(),
+                &[
+                    "-c",
+                    "user.email=test@test",
+                    "-c",
+                    "user.name=T",
+                    "commit",
+                    "-q",
+                    "-m",
+                    &format!("c{i}"),
+                ],
+            );
+        }
+        Some(dir)
+    }
+
+    fn outline_for(dir: &tempfile::TempDir, rel: &str) -> FileOutline {
+        let path = dir.path().join(rel);
+        let canonical = contained_path(dir.path(), &path).expect("must be inside tempdir");
+        make_outline(&canonical, false, vec![])
+    }
+
+    #[test]
+    fn profile_full_emits_symbol_map_and_referenced() {
+        // Full profile fires all sections.  Use a non-git cwd so that
+        // changed-files section is absent (git not available), but the
+        // other two sections still fire when outlines contain signals.
+        let dir = tempfile::tempdir().unwrap();
+        // Create the referenced file too so build_referenced_paths resolves it.
+        write_file(&dir, "src/util.rs", "// empty\n");
+        let path = write_file(&dir, "src/lib.rs", "fn helper_fn() {}\nuse ./util.rs;\n");
+        let outline = make_outline(&path, false, vec![]);
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: None,
+            profile: SignalProfile::Full,
+        };
+        let (sections, _skipped, _diff) = render_signal_sections(&ctx, &[outline]);
+        let names: Vec<&str> = sections.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"Symbol map"),
+            "Full profile should emit symbol map; got {names:?}"
+        );
+        assert!(
+            names.contains(&"Referenced files"),
+            "Full profile should emit referenced paths; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn profile_diff_focused_fires_changed_files() {
+        let dir = match setup_git_repo(11) {
+            Some(d) => d,
+            None => return,
+        };
+        // Create outlines for all files that changed beyond HEAD~10.
+        // setup_git_repo creates file_00..file_10 in src/.
+        let mut outlines = Vec::new();
+        for i in 0..=10 {
+            let rel = format!("src/file_{i:02}.rs");
+            outlines.push(outline_for(&dir, &rel));
+        }
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: None,
+            profile: SignalProfile::DiffFocused,
+        };
+        let (sections, _skipped, diff_paths) = render_signal_sections(&ctx, &outlines);
+        let names: Vec<&str> = sections.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"Changed files"),
+            "DiffFocused profile must emit changed-files section; got {names:?}"
+        );
+        // diff_paths should be non-empty.
+        assert!(!diff_paths.is_empty(), "diff_paths should be non-empty");
+    }
+
+    #[test]
+    fn profile_diff_focused_scopes_symbol_map() {
+        let dir = match setup_git_repo(11) {
+            Some(d) => d,
+            None => return,
+        };
+        // Outline only for files that appear in the diff.
+        let mut outlines = Vec::new();
+        for i in 0..=10 {
+            let rel = format!("src/file_{i:02}.rs");
+            outlines.push(outline_for(&dir, &rel));
+        }
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: None,
+            profile: SignalProfile::DiffFocused,
+        };
+        let (sections, _skipped, diff_paths) = render_signal_sections(&ctx, &outlines);
+
+        // At least one section should be Symbol map (files in diff contain
+        // `fn func_NN` identifiers).
+        let symbol_section = sections
+            .iter()
+            .find(|(n, _)| n == "Symbol map")
+            .map(|(_, body)| body);
+        assert!(
+            symbol_section.is_some(),
+            "DiffFocused should produce symbol map when diff files contain identifiers"
+        );
+        let body = symbol_section.unwrap();
+        // Symbols from diff files appear.
+        // HEAD~10 with n=11 → diff covers file_01 through file_10 (not file_00).
+        assert!(
+            body.contains("func_01"),
+            "symbol map should contain func_01 from diff file; got: {body}"
+        );
+        assert!(
+            !body.contains("func_00"),
+            "symbol map should NOT contain func_00 (outside diff); got: {body}"
+        );
+        // HEAD~10 with n=11 → diff covers 10 files.
+        let diff_set: std::collections::HashSet<&std::path::Path> =
+            diff_paths.iter().map(|p| p.as_path()).collect();
+        assert_eq!(
+            diff_set.len(),
+            10,
+            "diff should cover 10 files, got {}",
+            diff_set.len()
         );
     }
 }

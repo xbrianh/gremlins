@@ -126,6 +126,7 @@ pub struct Config {
     max_landscape_tool_tokens: Option<u64>,
     landscape_signals: bool,
     landscape_tool_ledger_pruning: bool,
+    landscape_stage_profiles: bool,
     backoff: BackoffConfig,
 }
 
@@ -264,6 +265,10 @@ struct LandscapeSection {
     /// the ToolLedger.
     #[serde(rename = "tool-ledger-pruning", default)]
     tool_ledger_pruning: Option<bool>,
+    /// Enable stage profiles — derive signal sections from artifact inputs
+    /// rather than always emitting every section.
+    #[serde(rename = "stage-profiles", default)]
+    stage_profiles: Option<bool>,
 }
 
 /// A single `model-profiles` entry as it appears in `settings.yaml`.
@@ -358,6 +363,10 @@ impl Config {
                             parse_env_bool_or_warn("GREMLINS_LANDSCAPE_TOOL_LEDGER_PRUNING", &v)
                         })
                         .unwrap_or(false);
+                let landscape_stage_profiles = std::env::var("GREMLINS_LANDSCAPE_STAGE_PROFILES")
+                    .ok()
+                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_STAGE_PROFILES", &v))
+                    .unwrap_or(false);
                 return Ok(Config {
                     default_model: env_default_model(),
                     max_tool_output_bytes,
@@ -370,6 +379,7 @@ impl Config {
                     max_landscape_tool_tokens,
                     landscape_signals,
                     landscape_tool_ledger_pruning,
+                    landscape_stage_profiles,
                     ..Config::default()
                 });
             }
@@ -575,6 +585,17 @@ impl Config {
             })
             .unwrap_or(false);
 
+        let landscape_stage_profiles = cfg_file
+            .landscape
+            .as_ref()
+            .and_then(|l| l.stage_profiles)
+            .or_else(|| {
+                std::env::var("GREMLINS_LANDSCAPE_STAGE_PROFILES")
+                    .ok()
+                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_STAGE_PROFILES", &v))
+            })
+            .unwrap_or(false);
+
         Ok(Config {
             default_model,
             tui_model,
@@ -595,6 +616,7 @@ impl Config {
             max_landscape_tool_tokens,
             landscape_signals,
             landscape_tool_ledger_pruning,
+            landscape_stage_profiles,
             backoff,
         })
     }
@@ -674,6 +696,10 @@ impl Config {
 
     pub fn tool_ledger_pruning(&self) -> bool {
         self.landscape_tool_ledger_pruning
+    }
+
+    pub fn landscape_stage_profiles(&self) -> bool {
+        self.landscape_stage_profiles
     }
 
     pub fn turn_retry_schedule(&self) -> &[f64] {
@@ -1284,6 +1310,16 @@ pub(crate) fn landscape_signals() -> bool {
     Config::load()
         .map(|c| c.landscape_signals())
         .unwrap_or(true)
+}
+
+/// GREMLINS_LANDSCAPE_STAGE_PROFILES — enable stage-driven signal profile
+/// selection. When on and the stage has `artifact://diff` input, the
+/// landscape block is scoped to changed files. Default false.
+/// Settings.yaml `landscape.stage-profiles` takes precedence over the env var.
+pub(crate) fn landscape_stage_profiles() -> bool {
+    Config::load()
+        .map(|c| c.landscape_stage_profiles())
+        .unwrap_or(false)
 }
 
 /// Parse a boolean from an environment variable value.
@@ -2793,5 +2829,13 @@ model-profiles:
             cfg.compaction_threshold_tokens_chat(),
             DEFAULT_COMPACTION_THRESHOLD_TOKENS_CHAT
         );
+    }
+
+    #[test]
+    fn test_landscape_stage_profiles_default_off() {
+        // No settings.yaml and no env var → defaults to false.
+        let _env = EnvGuard::lock();
+        clear_global();
+        assert!(!landscape_stage_profiles());
     }
 }

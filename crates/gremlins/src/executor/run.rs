@@ -53,10 +53,16 @@ use rig_core::completion::Message;
 /// (changed files, symbol map, referenced files) are injected above the
 /// full-tree skeleton. With signals off this block is byte-for-byte
 /// identical to the pre-signals implementation.
+///
+/// When stage profiles are enabled (`GREMLINS_LANDSCAPE_STAGE_PROFILES=1`
+/// or `landscape.stage-profiles: true`) and the stage has an `artifact://diff`
+/// input, the skeleton is scoped to diff files and only the changed-files
+/// section fires as primary.
 async fn landscape_block(
     gremlin: &Gremlin,
     has_outline_tool: bool,
     pruned_files: Option<std::collections::HashSet<PathBuf>>,
+    has_diff_input: bool,
 ) -> String {
     let cwd = gremlin.cwd();
     let log_tx = gremlin.runtime_config.log_tx.clone();
@@ -66,18 +72,63 @@ async fn landscape_block(
     };
 
     let outlines = build_outlines(cwd.clone(), log_tx.clone()).await;
-    let landscape = format_outlines(&outlines, &cwd, has_outline_tool, log_warn);
+
+    // Determine the signal profile from artifact inputs.
+    let profile = if crate::config::landscape_stage_profiles() && has_diff_input {
+        crate::landscape::signals::SignalProfile::DiffFocused
+    } else {
+        crate::landscape::signals::SignalProfile::Full
+    };
+
+    let signals_enabled = crate::config::landscape_signals();
+
+    // For DiffFocused profile, we need the diff paths before formatting the
+    // skeleton so we can filter outlines. Build signal sections early.
+    let (signal_sections, pruned_skipped, diff_paths) = if signals_enabled {
+        let ctx = crate::landscape::signals::SignalContext {
+            cwd: cwd.clone(),
+            pruned_files,
+            profile,
+        };
+        let (sections, skipped, paths) = crate::landscape::inject_signal_sections(&ctx, &outlines);
+        if profile == crate::landscape::signals::SignalProfile::DiffFocused {
+            if let Some(tx) = &log_tx {
+                let _ = tx.send("[landscape-signals] profile DiffFocused".to_string());
+            }
+        } else if crate::config::landscape_stage_profiles() {
+            if let Some(tx) = &log_tx {
+                let _ = tx.send("[landscape-signals] profile Full".to_string());
+            }
+        }
+        (sections, skipped, paths)
+    } else {
+        Default::default()
+    };
+
+    // When DiffFocused, filter outlines to just the diff files before
+    // formatting the skeleton.
+    let effective_outlines: std::borrow::Cow<[FileOutline]> = if profile
+        == crate::landscape::signals::SignalProfile::DiffFocused
+        && !diff_paths.is_empty()
+    {
+        let diff_set: std::collections::HashSet<&Path> =
+            diff_paths.iter().map(|p| p.as_path()).collect();
+        let filtered: Vec<FileOutline> = outlines
+            .into_iter()
+            .filter(|o| diff_set.contains(o.path.as_path()))
+            .collect();
+        std::borrow::Cow::Owned(filtered)
+    } else {
+        std::borrow::Cow::Borrowed(&outlines)
+    };
+
+    let landscape = format_outlines(&effective_outlines, &cwd, has_outline_tool, log_warn);
 
     let (mut block, file_count, item_count) =
         (landscape.block, landscape.file_count, landscape.item_count);
 
     // Inject heuristic signal sections when enabled.
-    if crate::config::landscape_signals() && file_count > 0 {
-        let ctx = crate::landscape::signals::SignalContext {
-            cwd: cwd.clone(),
-            pruned_files,
-        };
-        let (sections, pruned_skipped) = crate::landscape::inject_signal_sections(&ctx, &outlines);
+    if signals_enabled && file_count > 0 {
         if pruned_skipped > 0 {
             if let Some(tx) = &log_tx {
                 let _ = tx.send(format!(
@@ -88,7 +139,7 @@ async fn landscape_block(
         // Sections are built in the intended display order; prepending each to
         // the block requires iterating in reverse so the final order reads
         // Changed files → Symbol map → Referenced files → skeleton.
-        for (name, section) in sections.iter().rev() {
+        for (name, section) in signal_sections.iter().rev() {
             if let Some(tx) = &log_tx {
                 let tokens = crate::landscape::count_tokens(section).unwrap_or(0);
                 let _ = tx.send(format!("[landscape-signals] {name} {tokens} tokens"));
@@ -733,9 +784,20 @@ async fn run_agent(
     // Landscape is recomputed before every agent stage so the next
     // agent sees fresh files after any exec stage mutations.
     let landscape = if agent.landscape {
+        let has_diff_input = checkout_keys
+            .iter()
+            .any(|k| k == "artifact://diff" || k.starts_with("artifact://diff/"));
         // Prior stages' observed file paths prune redundant signal sections.
         let pruned = read_pruned_files(gremlin).await;
-        Some(landscape_block(gremlin, client.has_tool("Landscape"), pruned).await)
+        Some(
+            landscape_block(
+                gremlin,
+                client.has_tool("Landscape"),
+                pruned,
+                has_diff_input,
+            )
+            .await,
+        )
     } else {
         None
     };
