@@ -5,8 +5,7 @@ A pure Rust workspace. No Python, no PyO3, no native extensions.
 ## When in doubt
 
 run `cargo check`. It's the quickest way to verify compilation and is usually
-enough. Don't reach for the full test suite here — the verify stage runs it
-after this stage finishes.
+enough. Don't reach for the full test suite here.
 
 ## Avoid repetitive commands
 
@@ -52,12 +51,10 @@ explicit `-j` flags are unnecessary but harmless.
 make check      # format + clippy + cargo check (no tests)
 ```
 
-`make check` is fine to run locally. It does **not** run tests, so it can pass
-even when tests would fail. A dedicated verify stage runs
-`make check && make test` after this stage finishes, so don't run the full
-`make test` yourself. For the code you changed, `cargo check` is sufficient to
-verify compilation, and a targeted `cargo test -p gremlins --lib --
-<test_name>` is fine.
+`make check` is fine to run locally — it's format + clippy + cargo check with
+no tests. As noted above, leave `make test` to the verify stage. For the code
+you changed, `cargo check` is sufficient to verify compilation, and a targeted
+`cargo test -p gremlins --lib -- <test_name>` is fine.
 
 ## Batch replacement over iterative edits
 
