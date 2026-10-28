@@ -1255,7 +1255,9 @@ impl Gremlin {
             self.state.patch(&[], &fields);
 
             let saved_loop_iter = self.loop_iter.clone();
-            self.loop_iter = format!("{}~{}", saved_loop_iter, attempt);
+            if !is_fork {
+                self.loop_iter = format!("{}~{}", saved_loop_iter, attempt);
+            }
 
             send_log(
                 &self.runtime_config.log_tx,
@@ -1706,6 +1708,33 @@ mod tests {
     fn loop_iter_defaults_to_one() {
         let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
         assert_eq!(gremlin.loop_iter, "1");
+    }
+
+    #[tokio::test]
+    async fn fork_loop_iter_resolves_to_inherited_scope() {
+        // A forked gremlin inherits its parent's loop_iter scope. Artifact
+        // URIs containing {loop_iter} must resolve to the inherited value
+        // (e.g. "1"), not the child's attempt-scoped value.
+        let stages = vec![ExecBuilder::new("child-stage")
+            .cmd("echo ok > {result}")
+            .output("result", output("artifact://test-{loop_iter}.txt"))
+            .build()
+            .unwrap()];
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
+
+        // Write parent_id to state so is_fork is true.
+        let mut fields = Map::new();
+        fields.insert("parent_id".into(), Value::String("parent-gr-1234".into()));
+        gremlin.state.patch(&[], &fields);
+
+        gremlin.run(None).await.unwrap();
+
+        // The artifact must be registered with the inherited loop_iter ("1"),
+        // not with the child's attempt suffix (e.g. "1~child-stage-xxxx").
+        assert!(
+            gremlin.state.is_registered("artifact://test-1.txt").await,
+            "forked child must resolve {{loop_iter}} to inherited scope"
+        );
     }
 
     #[test]
