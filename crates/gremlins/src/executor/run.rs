@@ -178,7 +178,7 @@ pub(crate) async fn run_stage(
     stage: &ExecutorStage,
     gremlin: &mut Gremlin,
 ) -> Result<(), RunError> {
-    run_stage_scoped(stage, gremlin, "", "", None, None).await
+    run_stage_scoped(stage, gremlin, "", "", "", None, None).await
 }
 
 /// Run one stage under `scope`.
@@ -188,11 +188,16 @@ pub(crate) async fn run_stage(
 /// top-level stages).  This is separate from `scope`, which is the
 /// execution key used for routing (may contain nested paths or iteration
 /// keys).
+///
+/// `stage_usage_path` is the stable structural path for per-stage token
+/// breakdown — it stays constant across repeated/resumed iterations while
+/// `scope` may vary.
 async fn run_stage_scoped(
     stage: &ExecutorStage,
     gremlin: &mut Gremlin,
     scope: &str,
     display_stage: &str,
+    stage_usage_path: &str,
     enclosing_model: Option<&ModelURI>,
     enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
@@ -246,13 +251,24 @@ async fn run_stage_scoped(
     }
 
     let result = match stage {
-        ExecutorStage::Agent { .. } => run_agent(stage, gremlin, scope, enc_model, enc_tm).await,
+        ExecutorStage::Agent { .. } => {
+            run_agent(stage, gremlin, scope, stage_usage_path, enc_model, enc_tm).await
+        }
         ExecutorStage::Exec { .. } => run_exec(stage, gremlin, enc_model, enc_tm).await,
         ExecutorStage::Sequence(_) => {
-            run_sequence(stage, gremlin, scope, display_stage, enc_model, enc_tm).await
+            run_sequence(
+                stage,
+                gremlin,
+                scope,
+                display_stage,
+                stage_usage_path,
+                enc_model,
+                enc_tm,
+            )
+            .await
         }
         ExecutorStage::Parallel { .. } => {
-            run_parallel(stage, gremlin, scope, enc_model, enc_tm).await
+            run_parallel(stage, gremlin, scope, stage_usage_path, enc_model, enc_tm).await
         }
         ExecutorStage::Done => Ok(()),
     };
@@ -445,6 +461,7 @@ async fn run_agent(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
     scope: &str,
+    stage_usage_path: &str,
     enclosing_model: Option<&ModelURI>,
     enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
@@ -457,7 +474,11 @@ async fn run_agent(
         unreachable!("run_agent is only called for agent stages")
     };
 
-    let stage_path = stage_key(scope, &agent.name);
+    let stage_path = if !stage_usage_path.is_empty() {
+        stage_key(stage_usage_path, &agent.name)
+    } else {
+        stage_key(scope, &agent.name)
+    };
 
     let task_models_by_kind = resolve_task_models(
         gremlin.runtime_config.default_task_models.as_ref(),
@@ -655,8 +676,16 @@ async fn run_agent(
         .map(|_| Arc::new(conversation::ConversationCompactor) as Arc<dyn Compactor>);
 
     // ── Live usage tracker for failure persistence ─────
+    // Stores (combined_usage, stage_local_usage, cost_usd).
+    // `combined_usage` = baseline + current stage (emitted to live UI).
+    // `stage_local_usage` = just the current stage's delta (used on
+    // failure to avoid double-counting the baseline).
     let live_usage = std::sync::Arc::new(std::sync::Mutex::new(
-        None::<(crate::clients::protocol::UsageStats, Option<f64>)>,
+        None::<(
+            crate::clients::protocol::UsageStats,
+            crate::clients::protocol::UsageStats,
+            Option<f64>,
+        )>,
     ));
 
     let params = RunParams {
@@ -708,7 +737,8 @@ async fn run_agent(
                     let usage =
                         crate::executor::supervisor::add_usage_stats(&baseline_usage, &event.usage);
                     let cost_usd = client_for_cost.total_cost_usd();
-                    *live_usage_sink.lock().unwrap() = Some((usage.clone(), cost_usd));
+                    *live_usage_sink.lock().unwrap() =
+                        Some((usage.clone(), event.usage.clone(), cost_usd));
                     crate::executor::supervisor::emit_event(
                         crate::executor::supervisor::DaemonEvent::TokenUsage {
                             id: gremlin_id.clone(),
@@ -772,19 +802,19 @@ async fn run_agent(
             // Persist the live usage counters from partial (failed) agent-loop
             // turns so the Gremlin::finish() snapshot has accurate token
             // totals rather than the previous stage's stale values.
-            if let Some((usage, _cost_usd)) = live_usage.lock().unwrap().take() {
+            if let Some((_combined, stage_local, _cost_usd)) = live_usage.lock().unwrap().take() {
                 let mut delta: HashMap<String, i64> = HashMap::new();
-                delta.insert("turns".to_string(), usage.turns as i64);
+                delta.insert("turns".to_string(), stage_local.turns as i64);
                 delta.extend(
                     [
-                        ("prompt_tokens", usage.prompt_tokens),
-                        ("completion_tokens", usage.completion_tokens),
-                        ("cached_input_tokens", usage.cached_input_tokens),
+                        ("prompt_tokens", stage_local.prompt_tokens),
+                        ("completion_tokens", stage_local.completion_tokens),
+                        ("cached_input_tokens", stage_local.cached_input_tokens),
                         (
                             "cache_creation_input_tokens",
-                            usage.cache_creation_input_tokens,
+                            stage_local.cache_creation_input_tokens,
                         ),
-                        ("reasoning_tokens", usage.reasoning_tokens),
+                        ("reasoning_tokens", stage_local.reasoning_tokens),
                     ]
                     .into_iter()
                     .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
@@ -983,6 +1013,7 @@ async fn run_sequence(
     gremlin: &mut Gremlin,
     scope: &str,
     display_stage: &str,
+    stage_usage_path: &str,
     enclosing_model: Option<&ModelURI>,
     enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
@@ -996,6 +1027,9 @@ async fn run_sequence(
     let enclosing_task_models = merged.as_ref();
 
     let key = stage_key(scope, &seq.name);
+    // Structural path for per-stage token accounting: skips iteration and
+    // attempt suffixes so repeated/resumed executions accumulate together.
+    let usage_path = stage_key(stage_usage_path, &seq.name);
     let max_iterations = seq.max_iterations.max(1);
     let skip_guard = &seq.skip_if_exists;
 
@@ -1027,6 +1061,7 @@ async fn run_sequence(
                 gremlin,
                 &key,
                 effective_display,
+                &usage_path,
                 enclosing_model,
                 enclosing_task_models,
             ))
@@ -1094,6 +1129,7 @@ async fn run_sequence(
                 gremlin,
                 &loop_iter,
                 effective_display,
+                &usage_path,
                 enclosing_model,
                 enclosing_task_models,
             ))
