@@ -53,14 +53,14 @@ const ALLOWLIST_DOT_DIRS: &[&str] = &[".gremlins", ".github", ".cargo-gremlin-ta
 
 /// Render heuristic signal sections for injection into the landscape block.
 ///
-/// Returns `(section_name, rendered_text)` pairs for each non-empty section,
+/// Returns `SignalSection` values for each non-empty section,
 /// together with the count of files skipped due to pruning, and the set of
 /// canonical changed-file paths (used by the `DiffFocused` profile to scope
 /// the skeleton).
 pub(crate) fn inject_signal_sections(
     ctx: &signals::SignalContext,
     outlines: &[FileOutline],
-) -> (Vec<(String, String)>, usize, Vec<PathBuf>) {
+) -> (Vec<signals::SignalSection>, usize, Vec<PathBuf>) {
     signals::render_signal_sections(ctx, outlines)
 }
 
@@ -875,14 +875,14 @@ pub(crate) fn format_landscape_with_signals(
     root: &Path,
     max_tokens: usize,
     has_outline_tool: bool,
-    signal_sections: &[(String, String)],
+    signal_sections: &[signals::SignalSection],
 ) -> Result<LandscapeBlock, LandscapeError> {
     if signal_sections.is_empty() {
         return format_landscape_block(outlines, root, max_tokens, has_outline_tool);
     }
     let signals_text: String = signal_sections
         .iter()
-        .map(|(_, text)| text.as_str())
+        .map(|s| s.text.as_str())
         .collect::<Vec<_>>()
         .join("\n\n");
     let signals_tokens = count_tokens(&signals_text)?;
@@ -2128,9 +2128,9 @@ mod tests {
                 OutlineItem::new(KEY, "package", 3),
             ],
         };
-        let signal_sections = vec![(
-            "Signals".to_string(),
-            "<!-- signal section -->\ncontent here".to_string(),
+        let signal_sections = vec![signals::SignalSection::new(
+            "signals",
+            "<!-- signal section -->\ncontent here",
         )];
         // Large budget — both signals and skeleton should appear.
         let block = format_landscape_with_signals(
@@ -2164,7 +2164,7 @@ mod tests {
         };
         // A signal section that alone exceeds the tiny budget.
         let large_signal = "x".repeat(500);
-        let signal_sections = vec![("Big".to_string(), large_signal.clone())];
+        let signal_sections = vec![signals::SignalSection::new("big", large_signal.clone())];
         let block = format_landscape_with_signals(
             std::slice::from_ref(&outline),
             root,
@@ -2190,7 +2190,7 @@ mod tests {
                 OutlineItem::new(KEY, "package", 3),
             ],
         };
-        let empty: Vec<(String, String)> = vec![];
+        let empty: Vec<signals::SignalSection> = vec![];
         let with_signals = format_landscape_with_signals(
             std::slice::from_ref(&outline),
             root,
@@ -2216,7 +2216,10 @@ mod tests {
             path: root.join("src/main.rs"),
             items: vec![OutlineItem::new(FN, "main", 1)],
         };
-        let signal_sections = vec![("Signals".to_string(), "<!-- small signal -->".to_string())];
+        let signal_sections = vec![signals::SignalSection::new(
+            "signals",
+            "<!-- small signal -->".to_string(),
+        )];
         // Budget large enough for signals but too small for the skeleton
         // (even at minimum depth the skeleton needs > 70 tokens).
         let block = format_landscape_with_signals(

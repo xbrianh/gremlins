@@ -127,6 +127,7 @@ pub struct Config {
     landscape_signals: bool,
     landscape_tool_ledger_pruning: bool,
     landscape_stage_profiles: bool,
+    landscape_diff_stat: bool,
     backoff: BackoffConfig,
 }
 
@@ -269,6 +270,10 @@ struct LandscapeSection {
     /// rather than always emitting every section.
     #[serde(rename = "stage-profiles", default)]
     stage_profiles: Option<bool>,
+    /// Emit a per-file `git diff --numstat` summary (added/deleted counts)
+    /// before the changed-files listing when the stage has a diff artifact.
+    #[serde(rename = "diff-stat", default)]
+    diff_stat: Option<bool>,
 }
 
 /// A single `model-profiles` entry as it appears in `settings.yaml`.
@@ -367,6 +372,10 @@ impl Config {
                     .ok()
                     .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_STAGE_PROFILES", &v))
                     .unwrap_or(false);
+                let landscape_diff_stat = std::env::var("GREMLINS_LANDSCAPE_DIFF_STAT")
+                    .ok()
+                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_DIFF_STAT", &v))
+                    .unwrap_or(false);
                 return Ok(Config {
                     default_model: env_default_model(),
                     max_tool_output_bytes,
@@ -380,6 +389,7 @@ impl Config {
                     landscape_signals,
                     landscape_tool_ledger_pruning,
                     landscape_stage_profiles,
+                    landscape_diff_stat,
                     ..Config::default()
                 });
             }
@@ -596,6 +606,17 @@ impl Config {
             })
             .unwrap_or(false);
 
+        let landscape_diff_stat = cfg_file
+            .landscape
+            .as_ref()
+            .and_then(|l| l.diff_stat)
+            .or_else(|| {
+                std::env::var("GREMLINS_LANDSCAPE_DIFF_STAT")
+                    .ok()
+                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_DIFF_STAT", &v))
+            })
+            .unwrap_or(false);
+
         Ok(Config {
             default_model,
             tui_model,
@@ -617,6 +638,7 @@ impl Config {
             landscape_signals,
             landscape_tool_ledger_pruning,
             landscape_stage_profiles,
+            landscape_diff_stat,
             backoff,
         })
     }
@@ -700,6 +722,10 @@ impl Config {
 
     pub fn landscape_stage_profiles(&self) -> bool {
         self.landscape_stage_profiles
+    }
+
+    pub fn landscape_diff_stat(&self) -> bool {
+        self.landscape_diff_stat
     }
 
     pub fn turn_retry_schedule(&self) -> &[f64] {
@@ -1319,6 +1345,16 @@ pub(crate) fn landscape_signals() -> bool {
 pub(crate) fn landscape_stage_profiles() -> bool {
     Config::load()
         .map(|c| c.landscape_stage_profiles())
+        .unwrap_or(false)
+}
+
+/// GREMLINS_LANDSCAPE_DIFF_STAT — emit a per-file added/deleted summary
+/// before the changed-files listing when the stage has an `artifact://diff`
+/// input. Default false. Settings.yaml `landscape.diff-stat` takes precedence
+/// over the env var.
+pub(crate) fn landscape_diff_stat() -> bool {
+    Config::load()
+        .map(|c| c.landscape_diff_stat())
         .unwrap_or(false)
 }
 

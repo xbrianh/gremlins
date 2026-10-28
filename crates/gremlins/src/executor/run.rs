@@ -95,6 +95,7 @@ async fn landscape_block(
             } else {
                 Some(prompt.to_string())
             },
+            diff_stat: crate::config::landscape_diff_stat(),
         };
         let (sections, skipped, paths) = crate::landscape::inject_signal_sections(&ctx, &outlines);
         if profile == crate::landscape::signals::SignalProfile::DiffFocused {
@@ -137,10 +138,13 @@ async fn landscape_block(
                 ));
             }
         }
-        for (name, section) in &signal_sections {
+        for section in &signal_sections {
             if let Some(tx) = &log_tx {
-                let tokens = crate::landscape::count_tokens(section).unwrap_or(0);
-                let _ = tx.send(format!("[landscape-signals] {name} {tokens} tokens"));
+                let tokens = crate::landscape::count_tokens(&section.text).unwrap_or(0);
+                let _ = tx.send(format!(
+                    "[landscape-signals] {} {tokens} tokens",
+                    section.key
+                ));
             }
         }
     }
@@ -350,7 +354,7 @@ fn format_outlines_with_signals(
     outlines: &[FileOutline],
     cwd: &Path,
     has_outline_tool: bool,
-    signal_sections: &[(String, String)],
+    signal_sections: &[crate::landscape::signals::SignalSection],
     log_warn: impl Fn(&str),
 ) -> LandscapeBlock {
     let budget: u64 = crate::config::max_landscape_tokens();
@@ -377,7 +381,7 @@ fn format_outlines_with_signals(
             if !signal_sections.is_empty() {
                 let signals_text = signal_sections
                     .iter()
-                    .map(|(_, s)| s.as_str())
+                    .map(|s| s.text.as_str())
                     .collect::<Vec<_>>()
                     .join("\n\n");
                 log_warn(&format!(

@@ -1,43 +1,49 @@
-# Phase 1 review fixes
-
-All three reviews addressed. 9 fixes applied, 2 concerns investigated and confirmed non-issues.
+# Fix Summary — Diff Stat Summary (Phase 4 Slice 3)
 
 ## Fixes applied
 
-### 1. `config.rs` — `GREMLINS_LANDSCAPE_SIGNALS=1` didn't parse (Correctness, Review 2 #1)
-`"1".parse::<bool>()` only accepts `"true"`/`"false"`. Added `parse_env_bool()` helper accepting `"1"`/`"0"`/`"true"`/`"false"` (case-insensitive). Applied in both the env-only fallback branch (line ~345) and the settings-file branch (line ~545).
+### 1. `crates/gremlins/src/landscape/signals/mod.rs` — Test helper `git_commit_all` (before my turn)
+- **Issue**: Needed a helper to commit all tracked/untracked changes in one shot for test setup.
+- **Fix**: Added `fn git_commit_all(dir, msg)` wrapping `git add -A && git commit -q`.
 
-### 2. `signals.rs:build_changed_files` — git paths resolved against wrong root (Correctness, Review 2 #5)
-`git diff --name-only` emits paths relative to the repository root, but the code joined them to `ctx.cwd` — wrong when cwd is a subdirectory. Now runs `git rev-parse --show-toplevel` first and joins paths to the repo root. Also added `canonical.is_file()` guard to skip paths deleted since HEAD~10.
+### 2. `crates/gremlins/src/landscape/signals/mod.rs` — `is_file()` gate dropped (before my turn)
+- **Category**: Correctness — Review 2, finding 1.
+- **Issue**: `canonical.is_file()` silently dropped fully-deleted files from the stat, defeating the section's purpose of surfacing deletion magnitude.
+- **Fix**: Removed the `is_file()` check; the changed-set membership and containment/pruning already encode the existence policy.
 
-### 3. `signals.rs:build_changed_files` — missing doc for `HEAD~10` (Readability, Review 2 #6)
-Added doc comment explaining the fixed-depth snapshot rationale (deep enough for context, bounded for conciseness) and noting that uncommitted changes are excluded because the landscape block is a stage-start snapshot.
+### 3. `crates/gremlins/src/landscape/signals/mod.rs` — `--no-renames` + quotePath handling (before my turn)
+- **Category**: Correctness — Review 2, finding 3.
+- **Issue**: `git diff --numstat` rename entries (`old => new`) and `core.quotePath`-quoted paths produced wrong display strings.
+- **Fix**: Passed `--no-renames` to git diff; added quote-path unquoting logic.
 
-### 4. `signals.rs` — removed `#[allow(dead_code)]` from 5 live functions (Readability, Review 1, Review 2 #3)
-Removed from `contained_path`, `build_changed_files`, `build_referenced_paths`, `build_symbol_map`, `render_signal_sections`. All are transitively live via `render_signal_sections` → `inject_signal_sections` → `landscape_block`. Also removed from the `identifiers` field on `SignalRendered`.
+### 4. `crates/gremlins/src/landscape/signals/mod.rs` — `SignalSection` key/name split (before my turn)
+- **Category**: Readability — Review 2, finding 4.
+- **Issue**: Section name `"Diff stat"` was used as both display name and log key, coupling the executor to the exact title string.
+- **Fix**: `SignalSection` now carries a stable `key` field (e.g. `"diff-stat"`) alongside the display `name`; the executor logs `section.key` directly.
 
-### 5. `signals.rs:render_signal_sections` — removed dead `_prompt` parameter (Readability, Review 1, Review 2 #7)
-Removed `_prompt` from `render_signal_sections` and unwound the call chain: `landscape_block` no longer accepts a `prompt` parameter, and the `run_agent` prompt-resolution reordering was reverted.
+### 5. `crates/gremlins/src/landscape/signals/mod.rs` + `crates/gremlins/src/executor/run.rs` — Config gate moved to `SignalContext` (before my turn)
+- **Category**: Layering — Structural review.
+- **Issue**: `landscape_diff_stat()` was checked inside `signals/mod.rs`, while sibling gate `landscape_stage_profiles()` was checked in `executor/run.rs` and passed via `SignalContext`.
+- **Fix**: Added `diff_stat: bool` to `SignalContext`; executor sets it from config; `render_signal_sections` uses `ctx.diff_stat`.
 
-### 6. `run.rs:build_landscape_snapshot` — `#[allow(dead_code)]` on dead production code (Module boundaries, Review 2 #3, Review 3 #2)
-Moved to `#[cfg(test)]`. No `#[allow(dead_code)]` annotation. Extracted shared `format_outlines` helper that both `landscape_block` and `build_landscape_snapshot` call.
+### 6. `crates/gremlins/src/landscape/signals/mod.rs` — Perl regex fix for `SignalContext { … }` in tests
+- **Category**: Build correctness.
+- **Issue**: Prior perl substitution (`prompt: Some([^)]+),`) failed on `prompt: Some("…".to_string()),` because the nested `)` from `to_string()` tripped the negated character class. Six test `SignalContext` literals were missing `diff_stat: false`.
+- **Fix**: Rewrote regex to use non-greedy `.+?` and re-ran substitution; all 20+ `SignalContext` literals now carry `diff_stat`.
 
-### 7. `signals.rs:referenced_paths_rejects_sandbox_escape` — vacuous test assertion (Testing, Review 1, Review 2 #9)
-Changed `if let Some(ref text) = referenced { assert!(!text.contains(...)) }` to explicit `assert!(referenced.is_none(), ...)`. The previous form skipped the assertion entirely when all paths were correctly rejected.
+### 7. `crates/gremlins/src/landscape/signals/mod.rs` — Unused `diff_paths` variables
+- **Category**: Warning cleanup.
+- **Issue**: Two tests (`diff_stat_drops_binary_and_pruned_and_escaped`, `diff_stat_caps_at_30`) captured `diff_paths` from `build_changed_files` but no longer passed it to `build_diff_stat`.
+- **Fix**: Renamed to `_diff_paths` in both tests.
 
-### 8. `run.rs:landscape_block_signals_off_is_identical` — test name misleading (Testing, Review 1)
-Renamed to `build_landscape_snapshot_matches_format_landscape_block` — it validates internal refactoring consistency, not `landscape_block` behavior.
+### 8. `crates/gremlins/src/landscape/signals/mod.rs` — Broken `diff_stat_empty_when_no_git_or_no_changes` test
+- **Category**: Test correctness.
+- **Issue**: The second sub-case asserted `build_diff_stat(&ctx2).is_none()` for a git repo, but `build_diff_stat` no longer accepts a changed-set filter — the gating moved to `render_signal_sections`. The assertion was now false (a real git repo produces stats).
+- **Fix**: Renamed test to `diff_stat_empty_when_no_git`, removed the invalid sub-case. The "empty changed set yields None" semantic is now covered by the new dispatch-level test.
 
-### 9. `mod.rs` — layering: `run.rs` reached directly into `landscape::signals` (Layering, Review 3 #1)
-Added `pub(crate) fn inject_signal_sections(...)` wrapper in `landscape/mod.rs`. `run.rs` now calls that instead of `crate::landscape::signals::render_signal_sections` directly.
-
-### 10. `run.rs:landscape_block` — section order reversed (Readability, Review 2 #10)
-Prepending sections in loop reversed the display order. Now iterates with `.rev()` so the final block reads Changed files → Symbol map → Referenced files → skeleton.
-
-## Non-issues (investigated, no change needed)
-
-### `signals.rs:contained_path` canonical-vs-non-canonical root (Review 2 #4)
-`within_worktree` internally calls `normalize_path` on both the candidate path and each root, which canonicalizes both. The non-canonical `root` passed from `contained_path` is canonicalized internally before comparison — no inconsistency.
-
-### `signals.rs` coupling to `clients::tools` (Review 3 #4)
-The plan explicitly authorizes importing `canonicalize_or_ancestor` and `within_worktree` from `crate::clients::tools` ("No new dependencies. Sandbox primitives...are re-exported or accessible from `clients/tools.rs`"). Extracting these to a shared utility module is deferred to a separate refactoring pass.
+### 9. `crates/gremlins/src/landscape/signals/mod.rs` — Dispatch-level tests (Review 2, finding 5)
+- **Category**: Testing.
+- **Issue**: No test exercised `render_signal_sections` with the diff-stat gate: section ordering, flag-on/flag-off behavior, and prepend-before-changed-files were untested.
+- **Fix**: Added two tests:
+  - `diff_stat_section_prepended_when_enabled`: verifies `"diff-stat"` is the first section and precedes `"changed-files"` when `diff_stat: true`.
+  - `diff_stat_section_absent_when_disabled`: verifies `"diff-stat"` is absent when `diff_stat: false` and present when `diff_stat: true`.

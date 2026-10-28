@@ -15,6 +15,25 @@ use std::process::Command;
 
 use crate::clients::tools::{canonicalize_or_ancestor, within_worktree};
 
+/// One logical signal section with a stable machine key for logging and
+/// the rendered text body.
+#[derive(Debug, Clone)]
+pub(crate) struct SignalSection {
+    /// Stable key for log lines and tests (e.g. `"diff-stat"`).
+    pub key: String,
+    /// Rendered section text, including any HTML-comment header.
+    pub text: String,
+}
+
+impl SignalSection {
+    pub(crate) fn new(key: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            text: text.into(),
+        }
+    }
+}
+
 /// Context for building heuristic signals from a set of file outlines.
 ///
 /// Carries the worktree root, used for sandbox containment checks and path
@@ -31,6 +50,10 @@ pub(crate) struct SignalContext {
     /// Stage prompt/plan text used to derive symbol-map candidates.
     /// `None` (or an empty string) disables the symbol-map section.
     pub prompt: Option<String>,
+    /// Emit a per-file added/deleted summary when the stage has a diff
+    /// artifact.  Controlled by `landscape.diff-stat` / env var, wired
+    /// by the executor so the signals module stays config-agnostic.
+    pub diff_stat: bool,
 }
 
 /// Which signal sections fire and how the skeleton is scoped.
@@ -262,6 +285,142 @@ fn build_changed_files(ctx: &SignalContext) -> (Option<String>, Vec<PathBuf>, us
     )
 }
 
+/// Render a per-file added/deleted summary via `git diff --numstat`.
+///
+/// Complements [`build_changed_files`] by answering "how much changed" for
+/// each path in the name-only list. Paths are resolved against the repo root,
+/// sandbox-contained, and pruned exactly like the changed-files section;
+/// binary entries (`-` added count) and files outside the worktree are
+/// dropped. Entries are sorted by total magnitude descending and
+/// capped at 30 to respect the shared token budget.
+///
+/// Returns `None` when git is unavailable, the directory is not a repo, or
+/// no reported path passes containment.
+fn build_diff_stat(ctx: &SignalContext) -> Option<String> {
+    const MAX_ENTRIES: usize = 30;
+
+    let Ok(repo_root_output) = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&ctx.cwd)
+        .output()
+    else {
+        return None;
+    };
+    if !repo_root_output.status.success() {
+        return None;
+    }
+    let Ok(repo_root) = String::from_utf8(repo_root_output.stdout) else {
+        return None;
+    };
+    let repo_root = PathBuf::from(repo_root.trim());
+    let repo_root_canonical = canonicalize_or_ancestor(&repo_root);
+
+    let Ok(output) = Command::new("git")
+        .args(["diff", "--numstat", "--no-renames", "HEAD~10"])
+        .current_dir(&ctx.cwd)
+        .output()
+    else {
+        return None;
+    };
+    if !output.status.success() {
+        return None;
+    }
+    let Ok(text) = String::from_utf8(output.stdout) else {
+        return None;
+    };
+
+    struct StatEntry {
+        rel: String,
+        added: u64,
+        deleted: u64,
+    }
+
+    let mut entries: Vec<StatEntry> = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let (Some(added), Some(deleted), Some(raw_path)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        // Binary entries report "-" for both counts; drop them rather than
+        // guessing at line counts.
+        let (Ok(added), Ok(deleted)) = (added.parse::<u64>(), deleted.parse::<u64>()) else {
+            continue;
+        };
+        // --no-renames guarantees every line is a plain path (no `=>` brace
+        // form), but `core.quotePath` can still quote non-ASCII characters.
+        // Trim to strip possible trailing newline artifacts.
+        let clean = raw_path.trim();
+        // If the path is quoted (starts with '"'), unquote it.
+        let clean = if clean.starts_with('"') && clean.len() > 1 {
+            // Simple unescaping: strip surrounding quotes and unescape
+            // the limited set git uses (\a \b \f \n \r \t \v \\ \").
+            let inner = &clean[1..clean.len() - 1];
+            let mut out = String::with_capacity(inner.len());
+            let mut chars = inner.chars();
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    match chars.next() {
+                        Some('a') => out.push('\x07'),
+                        Some('b') => out.push('\x08'),
+                        Some('f') => out.push('\x0C'),
+                        Some('n') => out.push('\n'),
+                        Some('r') => out.push('\r'),
+                        Some('t') => out.push('\t'),
+                        Some('v') => out.push('\x0B'),
+                        Some(other) => out.push(other),
+                        None => out.push('\\'),
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        } else {
+            clean.to_string()
+        };
+        let abs = repo_root.join(&clean);
+        let Some(canonical) = contained_path(&ctx.cwd, &abs) else {
+            continue;
+        };
+        // Don't gate on is_file() — fully-deleted files still show their
+        // deletion magnitude. The path passes containment (it was inside the
+        // sandbox) so it's safe to report.
+        if let Some(ref pruned) = ctx.pruned_files {
+            if pruned.contains(&canonical) {
+                continue;
+            }
+        }
+        let rel = canonical
+            .strip_prefix(&repo_root_canonical)
+            .map(|r| r.display().to_string())
+            .unwrap_or_else(|_| clean);
+        entries.push(StatEntry {
+            rel,
+            added,
+            deleted,
+        });
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    entries.sort_by(|a, b| {
+        let total_a = a.added + a.deleted;
+        let total_b = b.added + b.deleted;
+        total_b.cmp(&total_a).then_with(|| a.rel.cmp(&b.rel))
+    });
+
+    let lines: Vec<String> = entries
+        .iter()
+        .take(MAX_ENTRIES)
+        .map(|e| format!("{}\t+{}/-{}", e.rel, e.added, e.deleted))
+        .collect();
+    Some(format!("<!-- Diff stat -->\n{}\n", lines.join("\n")))
+}
+
 /// Render file paths referenced from source text that resolve to existing
 /// files inside the sandbox.
 ///
@@ -384,7 +543,7 @@ fn build_symbol_map(ctx: &SignalContext, symbol_index: &HashMap<String, SymbolEn
 pub(crate) fn render_signal_sections(
     ctx: &SignalContext,
     outlines: &[super::FileOutline],
-) -> (Vec<(String, String)>, usize, Vec<PathBuf>) {
+) -> (Vec<SignalSection>, usize, Vec<PathBuf>) {
     let signals = build_signals(ctx, outlines);
     let mut sections = Vec::new();
     let mut total_skipped = 0usize;
@@ -393,7 +552,14 @@ pub(crate) fn render_signal_sections(
     let (changed, diff_paths, n) = build_changed_files(ctx);
     total_skipped += n;
     if let Some(changed) = changed {
-        sections.push(("Changed files".to_string(), changed));
+        sections.push(SignalSection::new("changed-files", changed));
+    }
+
+    // Diff stat summary — prepend when enabled and changed files exist.
+    if ctx.diff_stat && !diff_paths.is_empty() {
+        if let Some(stat) = build_diff_stat(ctx) {
+            sections.insert(0, SignalSection::new("diff-stat", stat));
+        }
     }
 
     // When DiffFocused with non-empty diff, scope symbol map and referenced
@@ -412,7 +578,7 @@ pub(crate) fn render_signal_sections(
             if !filtered.is_empty() {
                 let body = build_symbol_map(ctx, &filtered);
                 if !body.is_empty() {
-                    sections.push(("Symbol map".to_string(), body));
+                    sections.push(SignalSection::new("symbol-map", body));
                 }
             }
         }
@@ -429,7 +595,7 @@ pub(crate) fn render_signal_sections(
             let (referenced, n) = build_referenced_paths(ctx, &scoped_candidates);
             total_skipped += n;
             if let Some(referenced) = referenced {
-                sections.push(("Referenced files".to_string(), referenced));
+                sections.push(SignalSection::new("referenced-files", referenced));
             }
         }
 
@@ -440,14 +606,14 @@ pub(crate) fn render_signal_sections(
         if !signals.symbol_index.is_empty() {
             let body = build_symbol_map(ctx, &signals.symbol_index);
             if !body.is_empty() {
-                sections.push(("Symbol map".to_string(), body));
+                sections.push(SignalSection::new("symbol-map", body));
             }
         }
 
         let (referenced, n) = build_referenced_paths(ctx, &signals.path_candidates);
         total_skipped += n;
         if let Some(referenced) = referenced {
-            sections.push(("Referenced files".to_string(), referenced));
+            sections.push(SignalSection::new("referenced-files", referenced));
         }
 
         (sections, total_skipped, Vec::new())
@@ -505,6 +671,7 @@ include!(\"./generated.rs\");
             pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
+            diff_stat: false,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -552,6 +719,7 @@ fn my_function_name() {
             pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
+            diff_stat: false,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -593,6 +761,7 @@ fn my_function_name() {
             pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
+            diff_stat: false,
         };
         let result = build_signals(&ctx, &[outline_a, outline_b]);
 
@@ -651,6 +820,7 @@ pub fn bar_init() -> BarConfig {
             pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
+            diff_stat: false,
         };
         let result = build_signals(&ctx, &[outline_main, outline_bar]);
 
@@ -729,6 +899,7 @@ pub fn bar_init() -> BarConfig {
             pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
+            diff_stat: false,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -748,6 +919,7 @@ pub fn bar_init() -> BarConfig {
             pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
+            diff_stat: false,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -777,6 +949,7 @@ cfg!(~/.config/app.toml);
             pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
+            diff_stat: false,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -821,6 +994,7 @@ let div = a / b;
             pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
+            diff_stat: false,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -850,6 +1024,7 @@ let config = Config::default();
             pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
+            diff_stat: false,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -880,6 +1055,7 @@ let config = Config::default();
             pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
+            diff_stat: false,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -930,6 +1106,7 @@ let config = Config::default();
             pruned_files: Some(pruned),
             profile: SignalProfile::Full,
             prompt: None,
+            diff_stat: false,
         };
         let (out, skipped) = build_referenced_paths(&ctx, &candidates);
         let out = out.expect("section should remain when some files are unpruned");
@@ -959,6 +1136,7 @@ let config = Config::default();
             pruned_files: Some(pruned),
             profile: SignalProfile::Full,
             prompt: None,
+            diff_stat: false,
         };
         let (out, skipped) = build_referenced_paths(&ctx, &candidates);
         assert!(skipped > 0, "pruned file should be counted");
@@ -981,6 +1159,7 @@ let config = Config::default();
             pruned_files: Some(std::collections::HashSet::new()),
             profile: SignalProfile::Full,
             prompt: None,
+            diff_stat: false,
         };
         let (out, skipped) = build_referenced_paths(&ctx, &candidates);
         let out = out.expect("empty prune set should not drop section");
@@ -1005,6 +1184,7 @@ let config = Config::default();
             pruned_files: Some(pruned),
             profile: SignalProfile::Full,
             prompt: None,
+            diff_stat: false,
         };
         let result = build_signals(&ctx, &[outline]);
         assert!(
@@ -1072,6 +1252,24 @@ let config = Config::default();
         Some(dir)
     }
 
+    /// Commit every tracked/untracked change in one shot.
+    fn git_commit_all(dir: &tempfile::TempDir, msg: &str) {
+        crate::test_support::git(dir.path(), &["add", "-A"]);
+        crate::test_support::git(
+            dir.path(),
+            &[
+                "-c",
+                "user.email=test@test",
+                "-c",
+                "user.name=T",
+                "commit",
+                "-q",
+                "-m",
+                msg,
+            ],
+        );
+    }
+
     fn outline_for(dir: &tempfile::TempDir, rel: &str) -> FileOutline {
         let path = dir.path().join(rel);
         let canonical = contained_path(dir.path(), &path).expect("must be inside tempdir");
@@ -1093,16 +1291,17 @@ let config = Config::default();
             pruned_files: None,
             profile: SignalProfile::Full,
             prompt: Some("helper_fn".to_string()),
+            diff_stat: false,
         };
         let (sections, _skipped, _diff) = render_signal_sections(&ctx, &[outline]);
-        let names: Vec<&str> = sections.iter().map(|(n, _)| n.as_str()).collect();
+        let keys: Vec<&str> = sections.iter().map(|s| s.key.as_str()).collect();
         assert!(
-            names.contains(&"Symbol map"),
-            "Full profile should emit symbol map; got {names:?}"
+            keys.contains(&"symbol-map"),
+            "Full profile should emit symbol map; got {keys:?}"
         );
         assert!(
-            names.contains(&"Referenced files"),
-            "Full profile should emit referenced paths; got {names:?}"
+            keys.contains(&"referenced-files"),
+            "Full profile should emit referenced paths; got {keys:?}"
         );
     }
 
@@ -1124,12 +1323,13 @@ let config = Config::default();
             pruned_files: None,
             profile: SignalProfile::DiffFocused,
             prompt: None,
+            diff_stat: false,
         };
         let (sections, _skipped, diff_paths) = render_signal_sections(&ctx, &outlines);
-        let names: Vec<&str> = sections.iter().map(|(n, _)| n.as_str()).collect();
+        let keys: Vec<&str> = sections.iter().map(|s| s.key.as_str()).collect();
         assert!(
-            names.contains(&"Changed files"),
-            "DiffFocused profile must emit changed-files section; got {names:?}"
+            keys.contains(&"changed-files"),
+            "DiffFocused profile must emit changed-files section; got {keys:?}"
         );
         // diff_paths should be non-empty.
         assert!(!diff_paths.is_empty(), "diff_paths should be non-empty");
@@ -1157,6 +1357,7 @@ let config = Config::default();
             // (no-op); func_00 is outside the diff range AND not in the
             // prompt, so it must be excluded from the symbol map.
             prompt: Some("func_01 func_02".to_string()),
+            diff_stat: false,
         };
         let (sections, _skipped, diff_paths) = render_signal_sections(&ctx, &outlines);
 
@@ -1164,8 +1365,8 @@ let config = Config::default();
         // `fn func_NN` identifiers).
         let symbol_section = sections
             .iter()
-            .find(|(n, _)| n == "Symbol map")
-            .map(|(_, body)| body);
+            .find(|s| s.key == "symbol-map")
+            .map(|s| &s.text);
         assert!(
             symbol_section.is_some(),
             "DiffFocused should produce symbol map when diff files contain identifiers"
@@ -1192,6 +1393,228 @@ let config = Config::default();
         );
     }
 
+    // ── diff stat ──────────────────────────────────────────────────
+
+    #[test]
+    fn diff_stat_parses_numstat_and_sorts_desc() {
+        let dir = match setup_git_repo(11) {
+            Some(d) => d,
+            None => return,
+        };
+        // Add uncommitted lines to two files so they dwarf the others in the
+        // working-tree diff that `git diff --numstat HEAD~10` reports.
+        let big = dir.path().join("src/file_01.rs");
+        let mut big_content = std::fs::read_to_string(&big).unwrap();
+        for i in 0..100 {
+            big_content.push_str(&format!("fn extra_{i}() {{}}\n"));
+        }
+        std::fs::write(&big, big_content).unwrap();
+
+        let small = dir.path().join("src/file_02.rs");
+        let mut small_content = std::fs::read_to_string(&small).unwrap();
+        for i in 0..5 {
+            small_content.push_str(&format!("fn extra_{i}() {{}}\n"));
+        }
+        std::fs::write(&small, small_content).unwrap();
+
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: None,
+            profile: SignalProfile::Full,
+            prompt: None,
+            diff_stat: false,
+        };
+        let (_, diff_paths, _) = build_changed_files(&ctx);
+        assert!(!diff_paths.is_empty(), "expected changed files");
+        let stat = build_diff_stat(&ctx).expect("diff stat should exist");
+        let lines: Vec<&str> = stat.lines().collect();
+        assert_eq!(lines[0], "<!-- Diff stat -->");
+        // file_01 gained 100 lines on top of its 2 committed lines → +102.
+        assert!(
+            lines[1].starts_with("src/file_01.rs\t+102/-0"),
+            "largest file must sort first; got {:?}",
+            lines[1]
+        );
+        // file_02 gained 5 lines → +7; sorts below file_01.
+        assert!(
+            lines[2].starts_with("src/file_02.rs\t+7/-0"),
+            "second entry must be file_02; got {:?}",
+            lines[2]
+        );
+    }
+
+    #[test]
+    fn diff_stat_drops_binary_and_pruned_and_escaped() {
+        let dir = match setup_git_repo(11) {
+            Some(d) => d,
+            None => return,
+        };
+        // Binary file: non-UTF8 bytes → numstat reports "-" and we drop it.
+        std::fs::write(dir.path().join("src/binary.bin"), [0u8, 1, 2, 0xff]).unwrap();
+        git_commit_all(&dir, "binary");
+        // Text file we will prune via the context.
+        std::fs::write(dir.path().join("src/pruned.rs"), "fn pruned() {}\n").unwrap();
+        git_commit_all(&dir, "pruned");
+        // Symlink whose target escapes the worktree.
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret\n").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            dir.path().join("src/escape.rs"),
+        )
+        .unwrap();
+        git_commit_all(&dir, "escape");
+
+        let pruned_canon = contained_path(dir.path(), &dir.path().join("src/pruned.rs")).unwrap();
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: Some(std::collections::HashSet::from([pruned_canon])),
+            profile: SignalProfile::Full,
+            prompt: None,
+            diff_stat: false,
+        };
+        let (_, _diff_paths, _) = build_changed_files(&ctx);
+        let stat = build_diff_stat(&ctx).expect("stat should exist");
+        assert!(
+            !stat.contains("binary.bin"),
+            "binary entry must be dropped; got: {stat}"
+        );
+        assert!(
+            !stat.contains("pruned.rs"),
+            "pruned entry must be dropped; got: {stat}"
+        );
+        assert!(
+            !stat.contains("escape.rs"),
+            "escaping entry must be dropped; got: {stat}"
+        );
+        // A normal text file still appears.
+        assert!(
+            stat.contains("file_10.rs"),
+            "normal file must still appear; got: {stat}"
+        );
+    }
+
+    #[test]
+    fn diff_stat_caps_at_30() {
+        let dir = match setup_git_repo(11) {
+            Some(d) => d,
+            None => return,
+        };
+        // Add 40 files in a single commit so the HEAD~10 diff exceeds the cap.
+        for i in 0..40 {
+            let rel = format!("src/extra_{i:02}.rs");
+            std::fs::write(dir.path().join(&rel), format!("fn extra_{i}() {{}}\n")).unwrap();
+        }
+        git_commit_all(&dir, "bulk");
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: None,
+            profile: SignalProfile::Full,
+            prompt: None,
+            diff_stat: false,
+        };
+        let (_, _diff_paths, _) = build_changed_files(&ctx);
+        let stat = build_diff_stat(&ctx).expect("stat should exist");
+        let lines: Vec<&str> = stat.lines().collect();
+        // Header line + at most 30 entry lines.
+        assert!(
+            lines.len() == 31,
+            "diff stat must cap at 30 entries; got {} entries",
+            lines.len() - 1
+        );
+    }
+
+    #[test]
+    fn diff_stat_empty_when_no_git() {
+        // Non-git directory: build_diff_stat returns None.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(&dir, "src/lib.rs", "fn f() {}\n");
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: None,
+            profile: SignalProfile::Full,
+            prompt: None,
+            diff_stat: false,
+        };
+        assert!(
+            build_diff_stat(&ctx).is_none(),
+            "non-git cwd must yield no diff stat"
+        );
+    }
+
+    // ── diff-stat dispatch (render_signal_sections) ─────────────────
+
+    #[test]
+    fn diff_stat_section_prepended_when_enabled() {
+        let dir = match setup_git_repo(11) {
+            Some(d) => d,
+            None => return,
+        };
+        // Add uncommitted changes so the diff is non-empty.
+        std::fs::write(dir.path().join("src/file_01.rs"), "fn extra() {}\n").unwrap();
+        let outlines: Vec<crate::landscape::FileOutline> = vec![];
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: None,
+            profile: SignalProfile::Full,
+            prompt: None,
+            diff_stat: true,
+        };
+        let (sections, _skipped, _paths) = render_signal_sections(&ctx, &outlines);
+        let keys: Vec<&str> = sections.iter().map(|s| s.key.as_str()).collect();
+        assert!(
+            keys.first() == Some(&"diff-stat"),
+            "diff-stat must be first section; got {keys:?}"
+        );
+        assert!(
+            keys.contains(&"changed-files"),
+            "changed-files must follow diff-stat; got {keys:?}"
+        );
+        // The diff-stat section comes before changed-files.
+        let diff_pos = keys.iter().position(|&k| k == "diff-stat").unwrap();
+        let changed_pos = keys.iter().position(|&k| k == "changed-files").unwrap();
+        assert!(
+            diff_pos < changed_pos,
+            "diff-stat must precede changed-files"
+        );
+    }
+
+    #[test]
+    fn diff_stat_section_absent_when_disabled() {
+        let dir = match setup_git_repo(11) {
+            Some(d) => d,
+            None => return,
+        };
+        std::fs::write(dir.path().join("src/file_01.rs"), "fn extra() {}\n").unwrap();
+        let outlines: Vec<crate::landscape::FileOutline> = vec![];
+
+        // diff_stat: false → section must be absent.
+        let ctx_off = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: None,
+            profile: SignalProfile::Full,
+            prompt: None,
+            diff_stat: false,
+        };
+        let (sections_off, _, _) = render_signal_sections(&ctx_off, &outlines);
+        assert!(
+            !sections_off.iter().any(|s| s.key == "diff-stat"),
+            "diff-stat must be absent when flag is off"
+        );
+
+        // diff_stat: true → section must appear.
+        let ctx_on = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: None,
+            profile: SignalProfile::Full,
+            prompt: None,
+            diff_stat: true,
+        };
+        let (sections_on, _, _) = render_signal_sections(&ctx_on, &outlines);
+        let has_diff_stat = sections_on.iter().any(|s| s.key == "diff-stat");
+        assert!(has_diff_stat, "diff-stat must appear when flag is on");
+    }
+
     // ── prompt-derived symbol resolution ──────────────────────────────
 
     #[test]
@@ -1209,12 +1632,13 @@ let config = Config::default();
             pruned_files: None,
             profile: SignalProfile::Full,
             prompt: Some("helper_fn MyStruct MAX_ITEMS".to_string()),
+            diff_stat: false,
         };
         let (sections, _skipped, _diff) = render_signal_sections(&ctx, &[outline]);
         let body = sections
             .iter()
-            .find(|(n, _)| n == "Symbol map")
-            .map(|(_, b)| b)
+            .find(|s| s.key == "symbol-map")
+            .map(|s| &s.text)
             .expect("symbol map should be emitted");
         assert!(
             body.contains("helper_fn"),
@@ -1240,10 +1664,11 @@ let config = Config::default();
             pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
+            diff_stat: false,
         };
         let (sections, _skipped, _diff) = render_signal_sections(&ctx, &[outline]);
         assert!(
-            !sections.iter().any(|(n, _)| n == "Symbol map"),
+            !sections.iter().any(|s| s.key == "symbol-map"),
             "empty prompt must not produce symbol map; got sections: {sections:?}"
         );
     }
@@ -1261,10 +1686,11 @@ let config = Config::default();
             // "use" is bare lowercase — rejected by snake_case_regex.
             // Neither matches helper_fn.
             prompt: Some("Config use something_else".to_string()),
+            diff_stat: false,
         };
         let (sections, _skipped, _diff) = render_signal_sections(&ctx, &[outline]);
         assert!(
-            !sections.iter().any(|(n, _)| n == "Symbol map"),
+            !sections.iter().any(|s| s.key == "symbol-map"),
             "no-match prompt must not produce symbol map; got sections: {sections:?}"
         );
     }
@@ -1287,10 +1713,11 @@ let config = Config::default();
             pruned_files: None,
             profile: SignalProfile::Full,
             prompt: Some("use let Config".to_string()),
+            diff_stat: false,
         };
         let (sections, _skipped, _diff) = render_signal_sections(&ctx, &[outline]);
         assert!(
-            !sections.iter().any(|(n, _)| n == "Symbol map"),
+            !sections.iter().any(|s| s.key == "symbol-map"),
             "bare words must not produce symbol map; got sections: {sections:?}"
         );
     }
@@ -1316,12 +1743,13 @@ let config = Config::default();
             pruned_files: None,
             profile: SignalProfile::Full,
             prompt: Some(prompt_parts.join(" ")),
+            diff_stat: false,
         };
         let (sections, _skipped, _diff) = render_signal_sections(&ctx, &outlines);
         let body = sections
             .iter()
-            .find(|(n, _)| n == "Symbol map")
-            .map(|(_, b)| b)
+            .find(|s| s.key == "symbol-map")
+            .map(|s| &s.text)
             .expect("symbol map should be emitted");
         // Count how many fn_NN entries appear.
         let count = body.lines().filter(|l| l.starts_with("fn_")).count();
