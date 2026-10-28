@@ -100,6 +100,9 @@ pub struct Checkout {
 // StateStore trait — the unified storage backend seam
 // ---------------------------------------------------------------------------
 
+/// Key in the state tree that holds per-stage token usage breakdowns.
+pub(crate) const STAGE_USAGE_KEY: &str = "stage_usage";
+
 /// The set of operations that the executor runtime requires from a storage
 /// backend: state.json reads/writes, blob I/O, and artifact registry
 /// operations.
@@ -147,6 +150,12 @@ pub trait StateStore: Send + Sync + Debug {
     fn record_stage_error(&self, class: &str, detail: &str);
 
     fn accumulate_token_usage(&self, usage: &HashMap<String, i64>);
+
+    /// Accumulate token usage delta into the per-stage breakdown for
+    /// `stage_path` (slash-separated path like `implement/scout-1`).
+    /// A no-op when `usage` is empty. This is an internal method not intended
+    /// for external callers.
+    fn accumulate_stage_token_usage(&self, stage_path: &str, usage: &HashMap<String, i64>);
 
     /// Create the `finished` marker and patch terminal fields.
     fn write_terminal_state(&self, exit_code: i32);
@@ -1144,6 +1153,32 @@ impl StateStore for FileSystemStateStore {
         });
     }
 
+    fn accumulate_stage_token_usage(&self, stage_path: &str, usage: &HashMap<String, i64>) {
+        if usage.is_empty() {
+            return;
+        }
+        let sf = self.state_file();
+        if !sf.exists() {
+            return;
+        }
+        let usage = usage.clone();
+        let stage_path = stage_path.to_string();
+        let _ = locked_update(&sf, move |data| {
+            let stage_usage = data
+                .entry(STAGE_USAGE_KEY.to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            let entries = stage_usage.as_object_mut().unwrap();
+            let existing = entries
+                .entry(stage_path)
+                .or_insert_with(|| Value::Object(Map::new()));
+            let existing_map = existing.as_object_mut().unwrap();
+            for (k, v) in &usage {
+                let cur = existing_map.get(k).map(as_i64).unwrap_or(0);
+                existing_map.insert(k.clone(), Value::from(cur + v));
+            }
+        });
+    }
+
     fn stage_error(&self) -> Option<Map<String, Value>> {
         let sf = self.state_file();
         if !sf.exists() {
@@ -1639,6 +1674,7 @@ impl StateStore for ScopedFileSystemStateStore {
     delegate!(inner, fn patch(&self, delete: &[String], fields: &Map<String, Value>));
     delegate!(inner, fn record_stage_error(&self, class: &str, detail: &str));
     delegate!(inner, fn accumulate_token_usage(&self, usage: &HashMap<String, i64>));
+    delegate!(inner, fn accumulate_stage_token_usage(&self, stage_path: &str, usage: &HashMap<String, i64>));
     delegate!(inner, fn write_terminal_state(&self, exit_code: i32));
     delegate!(inner, fn add_subprocess_cost(&self, amount: f64));
     delegate!(inner, fn patch_parallel_attempt(&self, child_key: &str, attempt: &str));
@@ -1806,6 +1842,7 @@ impl StateData {
     delegate!(pub store, fn patch(&self, delete: &[String], fields: &Map<String, Value>));
     delegate!(pub store, fn record_stage_error(&self, class: &str, detail: &str));
     delegate!(pub store, fn accumulate_token_usage(&self, usage: &HashMap<String, i64>));
+    delegate!(pub(crate) store, fn accumulate_stage_token_usage(&self, stage_path: &str, usage: &HashMap<String, i64>));
     delegate!(pub store, fn state_tree(&self) -> Map<String, Value>);
     delegate!(pub store, fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError>);
     pub(crate) fn open_blob(
@@ -3341,6 +3378,13 @@ mod tests {
                 unimplemented!()
             }
             fn accumulate_token_usage(&self, _usage: &HashMap<String, i64>) {
+                unimplemented!()
+            }
+            fn accumulate_stage_token_usage(
+                &self,
+                _stage_path: &str,
+                _usage: &HashMap<String, i64>,
+            ) {
                 unimplemented!()
             }
             fn write_terminal_state(&self, _exit_code: i32) {
