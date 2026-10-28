@@ -2,16 +2,16 @@
 //!
 //! This module scans source files for structural signals that complement the
 //! outline: file-path references, identifiers in Rust's three case conventions,
-//! and a deduplicated symbol index keyed by first occurrence. Everything here
-//! is regex-based; no native parsing dependencies.
+//! and a deduplicated symbol index keyed by first occurrence. The per-line
+//! regex extraction lives in [`heuristic`]; this module handles coordination,
+//! rendering, and sandbox containment.
+
+pub(crate) mod heuristic;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
-
-use regex::Regex;
 
 use crate::clients::tools::{canonicalize_or_ancestor, within_worktree};
 
@@ -104,146 +104,6 @@ pub(crate) struct SignalRendered {
     pub symbol_index: HashMap<String, SymbolEntry>,
 }
 
-// ── Regex patterns (compiled once) ────────────────────────────────────────
-
-fn path_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        // Matches common file-path patterns:
-        //   - Absolute: /foo/bar.rs, /etc/config
-        //   - Relative: ./foo.rs, ../bar/baz, foo/bar.rs
-        //   - Also catches tilde-prefixed paths (~/foo) and Windows-style
-        //     absolute paths (C:\foo, \\server\share).
-        Regex::new(
-            r#"(?x)
-            (?P<abs>
-                (?:/[a-zA-Z0-9_.\-][a-zA-Z0-9_.\-\+/]*)   # Unix absolute path
-              |
-                (?:[A-Za-z]:\\[a-zA-Z0-9_.\-\+\\]*)        # Windows drive-absolute
-              |
-                (?:\\\\[a-zA-Z0-9_.\-]+\\[a-zA-Z0-9_.\-\+\\]*)  # UNC path
-              |
-                (?:~/[a-zA-Z0-9_.\-][a-zA-Z0-9_.\-\+/]*)   # Tilde-home path
-            )
-            |
-            (?P<rel>
-                (?:\.{1,2}/[a-zA-Z0-9_.\-][a-zA-Z0-9_.\-\+/]*)  # ./ or ../ relative
-            )
-            |
-            (?P<bare>
-                (?:[a-zA-Z][a-zA-Z0-9_\-]*/[a-zA-Z0-9_.\-\+/]*)   # bare relative (no ./ prefix)
-            )
-            "#,
-        )
-        .expect("valid path regex")
-    })
-}
-
-fn snake_case_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        // Lowercase word(s) separated by underscores: `foo_bar`, `foo_bar_baz`.
-        // Must contain at least one underscore to distinguish from plain lowercase words.
-        Regex::new(r"\b([a-z][a-z0-9]*_[a-z0-9_]*[a-z0-9])\b").expect("valid snake_case regex")
-    })
-}
-
-fn camel_case_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        // Capitalised words with an internal case transition: `FooBar`, `MyStruct`.
-        // Requires an initial uppercase, at least one lowercase‑then‑uppercase
-        // transition, so single‑word capitals (`Config`, `Path`) are excluded.
-        Regex::new(r"\b([A-Z][a-zA-Z0-9]*[a-z][A-Z][a-zA-Z0-9]*)\b").expect("valid CamelCase regex")
-    })
-}
-
-fn shouty_snake_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        // All-uppercase words separated by underscores: `MAX_SIZE`, `DEFAULT_TIMEOUT_MS`.
-        // Must contain at least one underscore to distinguish from plain acronyms.
-        Regex::new(r"\b([A-Z][A-Z0-9]*_[A-Z0-9_]*[A-Z0-9])\b").expect("valid SHOUTY_SNAKE regex")
-    })
-}
-
-// ── Extraction helpers ────────────────────────────────────────────────────
-
-/// Scan a single line of source text for path candidates.
-fn extract_path_candidates(
-    line: &str,
-    line_number: usize,
-    source_file: &Path,
-) -> Vec<PathCandidate> {
-    let re = path_regex();
-    let mut candidates = Vec::new();
-    for caps in re.captures_iter(line) {
-        let raw = if let Some(m) = caps.name("abs") {
-            (m.as_str(), true)
-        } else if let Some(m) = caps.name("rel") {
-            (m.as_str(), false)
-        } else if let Some(m) = caps.name("bare") {
-            (m.as_str(), false)
-        } else {
-            continue;
-        };
-        // Strip trailing punctuation that often follows paths in prose:
-        // periods, commas, semicolons, colons, and closing brackets.
-        let path = raw
-            .0
-            .trim_end_matches(['.', ',', ';', ':', ')', ']'])
-            .to_string();
-        // Don't emit an empty or single-segment result after trimming.
-        if path.is_empty() || (!path.contains('/') && !path.contains('\\')) {
-            continue;
-        }
-        candidates.push(PathCandidate {
-            path,
-            is_absolute: raw.1,
-            source_file: source_file.to_path_buf(),
-            line: line_number,
-        });
-    }
-    candidates
-}
-
-/// Scan a single line of source text for identifiers in all three forms.
-fn extract_identifiers(line: &str, line_number: usize, source_file: &Path) -> Vec<Identifier> {
-    let mut identifiers = Vec::new();
-
-    for caps in snake_case_regex().captures_iter(line) {
-        let name = caps.get(1).unwrap().as_str().to_string();
-        identifiers.push(Identifier {
-            name,
-            form: IdentifierForm::SnakeCase,
-            source_file: source_file.to_path_buf(),
-            line: line_number,
-        });
-    }
-
-    for caps in camel_case_regex().captures_iter(line) {
-        let name = caps.get(1).unwrap().as_str().to_string();
-        identifiers.push(Identifier {
-            name,
-            form: IdentifierForm::CamelCase,
-            source_file: source_file.to_path_buf(),
-            line: line_number,
-        });
-    }
-
-    for caps in shouty_snake_regex().captures_iter(line) {
-        let name = caps.get(1).unwrap().as_str().to_string();
-        identifiers.push(Identifier {
-            name,
-            form: IdentifierForm::ShoutySnake,
-            source_file: source_file.to_path_buf(),
-            line: line_number,
-        });
-    }
-
-    identifiers
-}
-
 // ── Public API ────────────────────────────────────────────────────────────
 
 /// Build heuristic signals by scanning the content of every file in the
@@ -276,11 +136,11 @@ pub(crate) fn build_signals(
             let line_number = idx + 1;
 
             // Extract path candidates.
-            let paths = extract_path_candidates(line, line_number, &outline.path);
+            let paths = heuristic::extract_path_candidates(line, line_number, &outline.path);
             path_candidates.extend(paths);
 
             // Extract identifiers.
-            let idents = extract_identifiers(line, line_number, &outline.path);
+            let idents = heuristic::extract_identifiers(line, line_number, &outline.path);
             for ident in &idents {
                 symbol_index
                     .entry(ident.name.clone())
@@ -457,7 +317,11 @@ fn build_referenced_paths(
 /// three case-convention regexes used for source-file scanning.
 fn extract_prompt_identifiers(prompt: &str) -> HashSet<String> {
     let mut names = HashSet::new();
-    for re in [snake_case_regex(), camel_case_regex(), shouty_snake_regex()] {
+    for re in [
+        heuristic::snake_case_regex(),
+        heuristic::camel_case_regex(),
+        heuristic::shouty_snake_regex(),
+    ] {
         for m in re.find_iter(prompt) {
             names.insert(m.as_str().to_string());
         }
