@@ -2428,11 +2428,7 @@ impl LoopState {
                     captured,
                     usage,
                     Some(messages),
-                    if nested {
-                        Some(self.tool_ledger.file_observations())
-                    } else {
-                        None
-                    },
+                    Some(self.tool_ledger.file_observations()),
                 ))));
             }
             _ => {}
@@ -2570,11 +2566,7 @@ impl LoopState {
             captured,
             usage,
             Some(messages),
-            if nested {
-                Some(self.tool_ledger.file_observations())
-            } else {
-                None
-            },
+            Some(self.tool_ledger.file_observations()),
         )))
     }
 

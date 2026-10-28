@@ -53,7 +53,11 @@ use rig_core::completion::Message;
 /// (changed files, symbol map, referenced files) are injected above the
 /// full-tree skeleton. With signals off this block is byte-for-byte
 /// identical to the pre-signals implementation.
-async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -> String {
+async fn landscape_block(
+    gremlin: &Gremlin,
+    has_outline_tool: bool,
+    pruned_files: Option<std::collections::HashSet<PathBuf>>,
+) -> String {
     let cwd = gremlin.cwd();
     let log_tx = gremlin.runtime_config.log_tx.clone();
     let log_warn = |msg: &str| {
@@ -69,8 +73,18 @@ async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -> String {
 
     // Inject heuristic signal sections when enabled.
     if crate::config::landscape_signals() && file_count > 0 {
-        let ctx = crate::landscape::signals::SignalContext { cwd: cwd.clone() };
-        let sections = crate::landscape::inject_signal_sections(&ctx, &outlines);
+        let ctx = crate::landscape::signals::SignalContext {
+            cwd: cwd.clone(),
+            pruned_files,
+        };
+        let (sections, pruned_skipped) = crate::landscape::inject_signal_sections(&ctx, &outlines);
+        if pruned_skipped > 0 {
+            if let Some(tx) = &log_tx {
+                let _ = tx.send(format!(
+                    "[landscape-signals] pruning {pruned_skipped} files"
+                ));
+            }
+        }
         // Sections are built in the intended display order; prepending each to
         // the block requires iterating in reverse so the final order reads
         // Changed files → Symbol map → Referenced files → skeleton.
@@ -99,6 +113,113 @@ async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -> String {
     }
 
     block
+}
+
+/// URI of the cross-stage observed-file-path snapshot used to prune redundant
+/// landscape signal sections.
+const LEDGER_SNAPSHOT_URI: &str = "artifact://_signals/ledger_snapshot.json";
+
+/// Whether cross-stage ToolLedger landscape pruning is active. Requires both
+/// the pruning opt-in and landscape signals to be enabled.
+fn ledger_pruning_enabled() -> bool {
+    let cfg = crate::config::Config::load().unwrap_or_default();
+    cfg.tool_ledger_pruning() && cfg.landscape_signals()
+}
+
+/// Read the set of file paths observed by prior stages, for pruning redundant
+/// landscape signal sections. Returns `None` when pruning is disabled or no
+/// paths have been recorded yet.
+async fn read_pruned_files(gremlin: &Gremlin) -> Option<std::collections::HashSet<PathBuf>> {
+    if !ledger_pruning_enabled() {
+        return None;
+    }
+    let log_tx = gremlin.runtime_config.log_tx.clone();
+    let json = match gremlin.state.content(LEDGER_SNAPSHOT_URI, None).await {
+        Ok(json) => json,
+        Err(_) => return None,
+    };
+    let paths: Vec<String> = match serde_json::from_str(&json) {
+        Ok(paths) => paths,
+        Err(e) => {
+            log::warn!("[ledger-pruning] failed to parse {LEDGER_SNAPSHOT_URI}: {e}");
+            send_log(
+                &log_tx,
+                format!("[ledger-pruning] failed to parse snapshot: {e}"),
+            );
+            return None;
+        }
+    };
+    if paths.is_empty() {
+        return None;
+    }
+    Some(paths.into_iter().map(PathBuf::from).collect())
+}
+
+/// Merge this stage's observed file paths into the accumulated cross-stage
+/// snapshot so later stages can prune redundant landscape signal sections.
+///
+/// Paths are stored as absolute canonical paths (via `canonicalize_or_ancestor`)
+/// so they match the canonical form the signal pruning filter compares against.
+/// No-op unless both landscape signals and ToolLedger pruning are enabled.
+async fn persist_observed_paths(
+    gremlin: &Gremlin,
+    observations: &crate::clients::protocol::FileObservations,
+) {
+    if !ledger_pruning_enabled() {
+        return;
+    }
+    let log_tx = gremlin.runtime_config.log_tx.clone();
+    let cwd = gremlin.cwd();
+    // Seed from the accumulated set written by prior stages.
+    let mut all_paths: std::collections::HashSet<String> =
+        match gremlin.state.content(LEDGER_SNAPSHOT_URI, None).await {
+            Ok(json) => match serde_json::from_str::<Vec<String>>(&json) {
+                Ok(paths) => paths.into_iter().collect(),
+                Err(e) => {
+                    log::warn!("[ledger-pruning] failed to parse existing snapshot: {e}");
+                    send_log(
+                        &log_tx,
+                        format!("[ledger-pruning] failed to parse existing snapshot: {e}"),
+                    );
+                    std::collections::HashSet::new()
+                }
+            },
+            Err(_) => std::collections::HashSet::new(),
+        };
+    for item in &observations.items {
+        let raw = PathBuf::from(&item.path);
+        let abs = if raw.is_absolute() {
+            raw
+        } else {
+            cwd.join(&raw)
+        };
+        all_paths.insert(
+            crate::clients::tools::canonicalize_or_ancestor(&abs)
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    let paths: Vec<String> = all_paths.into_iter().collect();
+    if let Ok(json) = serde_json::to_string(&paths) {
+        match Uri::parse(LEDGER_SNAPSHOT_URI) {
+            Ok(uri) => {
+                if let Err(e) = gremlin.state.write_into_registry(&uri, &json).await {
+                    log::warn!("[ledger-pruning] failed to write snapshot: {e}");
+                    send_log(
+                        &log_tx,
+                        format!("[ledger-pruning] failed to write snapshot: {e}"),
+                    );
+                }
+            }
+            Err(e) => {
+                log::warn!("[ledger-pruning] invalid snapshot URI {LEDGER_SNAPSHOT_URI}: {e}");
+                send_log(
+                    &log_tx,
+                    format!("[ledger-pruning] invalid snapshot URI {LEDGER_SNAPSHOT_URI}: {e}"),
+                );
+            }
+        }
+    }
 }
 
 /// Build a system prompt by optionally appending a landscape block.
@@ -612,7 +733,9 @@ async fn run_agent(
     // Landscape is recomputed before every agent stage so the next
     // agent sees fresh files after any exec stage mutations.
     let landscape = if agent.landscape {
-        Some(landscape_block(gremlin, client.has_tool("Landscape")).await)
+        // Prior stages' observed file paths prune redundant signal sections.
+        let pruned = read_pruned_files(gremlin).await;
+        Some(landscape_block(gremlin, client.has_tool("Landscape"), pruned).await)
     } else {
         None
     };
@@ -947,6 +1070,12 @@ async fn run_agent(
     commit_agent(&prepared, local_registry.as_ref())
         .await
         .map_err(|error| agent_commit_err(error, &prepared.name))?;
+
+    // Persist this stage's observed file paths so later stages can prune
+    // redundant landscape signal sections.
+    if let Some(ref observations) = completed.file_observations {
+        persist_observed_paths(gremlin, observations).await;
+    }
 
     // Merge the localized registry back into the main registry.
     gremlin

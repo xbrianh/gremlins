@@ -52,10 +52,9 @@ pub struct CompletedRun {
     /// backend captures it. Used by the chat gremlin to persist full model
     /// context between stages via `artifact://conversation.json`.
     pub messages: Option<Vec<Message>>,
-    /// Nested-loop file observations (Read/Grep/Landscape + mutation paths).
-    /// Populated for nested agent loops (Task workers) so the parent can
-    /// deduplicate Scout observations against its own ToolLedger.
-    /// The top-level chat loop leaves this `None`.
+    /// File observations (Read/Grep/Landscape + mutation paths) collected
+    /// during the agent stage. Populated for all agent loops so that
+    /// cross-stage landscape pruning can skip already-explored files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_observations: Option<FileObservations>,
 }

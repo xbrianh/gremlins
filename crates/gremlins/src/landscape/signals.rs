@@ -6,6 +6,7 @@
 //! is regex-based; no native parsing dependencies.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -22,6 +23,9 @@ use crate::clients::tools::{canonicalize_or_ancestor, within_worktree};
 pub(crate) struct SignalContext {
     /// Worktree root directory used for sandbox containment checks.
     pub cwd: PathBuf,
+    /// Set of already-observed file paths to exclude from signal sections.
+    /// Absolute canonical paths.
+    pub pruned_files: Option<HashSet<PathBuf>>,
 }
 
 /// A file-path reference discovered in source text.
@@ -311,28 +315,38 @@ fn contained_path(root: &Path, path: &Path) -> Option<PathBuf> {
 /// Returns `None` when git is unavailable, the directory is not a
 /// repository, or every reported path either falls outside the sandbox or no
 /// longer exists on disk.
-fn build_changed_files(ctx: &SignalContext) -> Option<String> {
+fn build_changed_files(ctx: &SignalContext) -> (Option<String>, usize) {
     // Obtain the git repository root first; `diff --name-only` emits
     // paths relative to the repo root, not the current directory.
-    let repo_root_output = Command::new("git")
+    let Ok(repo_root_output) = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(&ctx.cwd)
         .output()
-        .ok()?;
+    else {
+        return (None, 0);
+    };
     if !repo_root_output.status.success() {
-        return None;
+        return (None, 0);
     }
-    let repo_root = PathBuf::from(String::from_utf8(repo_root_output.stdout).ok()?.trim());
+    let Ok(repo_root) = String::from_utf8(repo_root_output.stdout) else {
+        return (None, 0);
+    };
+    let repo_root = PathBuf::from(repo_root.trim());
 
-    let output = Command::new("git")
+    let Ok(output) = Command::new("git")
         .args(["diff", "--name-only", "HEAD~10"])
         .current_dir(&ctx.cwd)
         .output()
-        .ok()?;
+    else {
+        return (None, 0);
+    };
     if !output.status.success() {
-        return None;
+        return (None, 0);
     }
-    let text = String::from_utf8(output.stdout).ok()?;
+    let Ok(text) = String::from_utf8(output.stdout) else {
+        return (None, 0);
+    };
+    let mut skipped = 0usize;
     let paths: Vec<String> = text
         .lines()
         .map(str::trim)
@@ -344,22 +358,36 @@ fn build_changed_files(ctx: &SignalContext) -> Option<String> {
             if !canonical.is_file() {
                 return None;
             }
+            // Skip paths already observed by a prior stage.
+            if let Some(ref pruned) = ctx.pruned_files {
+                if pruned.contains(&canonical) {
+                    skipped += 1;
+                    return None;
+                }
+            }
             Some(p.to_string())
         })
         .collect();
     if paths.is_empty() {
-        return None;
+        return (None, skipped);
     }
-    Some(format!("<!-- Changed files -->\n{}\n", paths.join("\n")))
+    (
+        Some(format!("<!-- Changed files -->\n{}\n", paths.join("\n"))),
+        skipped,
+    )
 }
 
 /// Render file paths referenced from source text that resolve to existing
 /// files inside the sandbox.
 ///
 /// Paths that escape the sandbox are silently dropped.
-fn build_referenced_paths(ctx: &SignalContext, candidates: &[PathCandidate]) -> Option<String> {
+fn build_referenced_paths(
+    ctx: &SignalContext,
+    candidates: &[PathCandidate],
+) -> (Option<String>, usize) {
     let root_canonical = canonicalize_or_ancestor(&ctx.cwd);
     let mut resolved = std::collections::BTreeSet::new();
+    let mut skipped = 0usize;
     for c in candidates {
         // Resolve relative paths from the source file's directory.
         let resolved_path = if c.is_absolute {
@@ -375,19 +403,29 @@ fn build_referenced_paths(ctx: &SignalContext, candidates: &[PathCandidate]) -> 
         };
         // Only include paths that actually exist as files.
         if canonical.is_file() {
+            // Skip paths already observed by a prior stage.
+            if let Some(ref pruned) = ctx.pruned_files {
+                if pruned.contains(&canonical) {
+                    skipped += 1;
+                    continue;
+                }
+            }
             if let Ok(rel) = canonical.strip_prefix(&root_canonical) {
                 resolved.insert(format!("./{}", rel.display()));
             }
         }
     }
     if resolved.is_empty() {
-        return None;
+        return (None, skipped);
     }
     let lines: Vec<_> = resolved.into_iter().collect();
-    Some(format!(
-        "<!-- Referenced files (from source) -->\n{}\n",
-        lines.join("\n")
-    ))
+    (
+        Some(format!(
+            "<!-- Referenced files (from source) -->\n{}\n",
+            lines.join("\n")
+        )),
+        skipped,
+    )
 }
 
 /// Render the deduplicated symbol index, sorted by name and capped to 100
@@ -432,12 +470,15 @@ fn build_symbol_map(ctx: &SignalContext, symbol_index: &HashMap<String, SymbolEn
 pub(crate) fn render_signal_sections(
     ctx: &SignalContext,
     outlines: &[super::FileOutline],
-) -> Vec<(String, String)> {
+) -> (Vec<(String, String)>, usize) {
     let signals = build_signals(ctx, outlines);
     let mut sections = Vec::new();
+    let mut total_skipped = 0usize;
 
     // 1. Changed files (via git).
-    if let Some(changed) = build_changed_files(ctx) {
+    let (changed, n) = build_changed_files(ctx);
+    total_skipped += n;
+    if let Some(changed) = changed {
         sections.push(("Changed files".to_string(), changed));
     }
 
@@ -450,11 +491,13 @@ pub(crate) fn render_signal_sections(
     }
 
     // 3. Referenced files.
-    if let Some(referenced) = build_referenced_paths(ctx, &signals.path_candidates) {
+    let (referenced, n) = build_referenced_paths(ctx, &signals.path_candidates);
+    total_skipped += n;
+    if let Some(referenced) = referenced {
         sections.push(("Referenced files".to_string(), referenced));
     }
 
-    sections
+    (sections, total_skipped)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -505,6 +548,7 @@ include!(\"./generated.rs\");
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
+            pruned_files: None,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -549,6 +593,7 @@ fn my_function_name() {
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
+            pruned_files: None,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -587,6 +632,7 @@ fn my_function_name() {
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
+            pruned_files: None,
         };
         let result = build_signals(&ctx, &[outline_a, outline_b]);
 
@@ -642,6 +688,7 @@ pub fn bar_init() -> BarConfig {
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
+            pruned_files: None,
         };
         let result = build_signals(&ctx, &[outline_main, outline_bar]);
 
@@ -717,6 +764,7 @@ pub fn bar_init() -> BarConfig {
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
+            pruned_files: None,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -733,6 +781,7 @@ pub fn bar_init() -> BarConfig {
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
+            pruned_files: None,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -759,6 +808,7 @@ cfg!(~/.config/app.toml);
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
+            pruned_files: None,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -800,6 +850,7 @@ let div = a / b;
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
+            pruned_files: None,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -826,6 +877,7 @@ let config = Config::default();
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
+            pruned_files: None,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -853,6 +905,7 @@ let config = Config::default();
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
+            pruned_files: None,
         };
         let result = build_signals(&ctx, &[outline]);
 
@@ -867,10 +920,114 @@ let config = Config::default();
 
         // build_referenced_paths must reject /etc/passwd: it resolves outside
         // the sandbox. When all candidates are rejected, the function returns None.
-        let referenced = build_referenced_paths(&ctx, &result.path_candidates);
+        let (referenced, _) = build_referenced_paths(&ctx, &result.path_candidates);
         assert!(
             referenced.is_none(),
             "sandbox-escape path should be rejected, got: {referenced:?}"
+        );
+    }
+
+    // ── pruning ────────────────────────────────────────────────────────
+
+    #[test]
+    fn pruned_files_mixed_keep_purge_referenced_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_file(&dir, "a.rs", "// a\n");
+        let _b = write_file(&dir, "b.rs", "// b\n");
+        let source = dir.path().join("main.rs");
+        let candidates = vec![
+            PathCandidate {
+                path: "a.rs".into(),
+                is_absolute: false,
+                source_file: source.clone(),
+                line: 1,
+            },
+            PathCandidate {
+                path: "b.rs".into(),
+                is_absolute: false,
+                source_file: source.clone(),
+                line: 2,
+            },
+        ];
+        let a_canon = contained_path(dir.path(), &a).unwrap();
+        let pruned = std::collections::HashSet::from([a_canon]);
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: Some(pruned),
+        };
+        let (out, skipped) = build_referenced_paths(&ctx, &candidates);
+        let out = out.expect("section should remain when some files are unpruned");
+        assert!(skipped > 0, "pruned file should be counted as skipped");
+        assert!(
+            !out.contains("./a.rs"),
+            "pruned file should not appear: {out}"
+        );
+        assert!(out.contains("./b.rs"), "unpruned file should appear: {out}");
+    }
+
+    #[test]
+    fn pruned_files_fully_pruned_section_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_file(&dir, "a.rs", "// a\n");
+        let source = dir.path().join("main.rs");
+        let candidates = vec![PathCandidate {
+            path: "a.rs".into(),
+            is_absolute: false,
+            source_file: source,
+            line: 1,
+        }];
+        let a_canon = contained_path(dir.path(), &a).unwrap();
+        let pruned = std::collections::HashSet::from([a_canon]);
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: Some(pruned),
+        };
+        let (out, skipped) = build_referenced_paths(&ctx, &candidates);
+        assert!(skipped > 0, "pruned file should be counted");
+        assert!(out.is_none(), "entirely pruned section should return None");
+    }
+
+    #[test]
+    fn pruned_files_empty_set_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let _a = write_file(&dir, "a.rs", "// a\n");
+        let source = dir.path().join("main.rs");
+        let candidates = vec![PathCandidate {
+            path: "a.rs".into(),
+            is_absolute: false,
+            source_file: source,
+            line: 1,
+        }];
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: Some(std::collections::HashSet::new()),
+        };
+        let (out, skipped) = build_referenced_paths(&ctx, &candidates);
+        let out = out.expect("empty prune set should not drop section");
+        assert_eq!(skipped, 0, "empty prune set should skip nothing");
+        assert!(
+            out.contains("./a.rs"),
+            "file should appear with empty prune set: {out}"
+        );
+    }
+
+    #[test]
+    fn pruned_files_symbol_map_unaffected() {
+        // Even when every file in the outline is pruned, the symbol map
+        // (which is structural, not file-level content) is still emitted.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(&dir, "lib.rs", "fn helper_fn() {}\n");
+        let outline = make_outline(&path, false, vec![]);
+        let file_canon = contained_path(dir.path(), &path).unwrap();
+        let pruned = std::collections::HashSet::from([file_canon]);
+        let ctx = SignalContext {
+            cwd: dir.path().to_path_buf(),
+            pruned_files: Some(pruned),
+        };
+        let result = build_signals(&ctx, &[outline]);
+        assert!(
+            result.symbol_index.contains_key("helper_fn"),
+            "symbol map should be unaffected by pruning"
         );
     }
 }

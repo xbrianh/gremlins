@@ -53,11 +53,12 @@ const ALLOWLIST_DOT_DIRS: &[&str] = &[".gremlins", ".github", ".cargo-gremlin-ta
 
 /// Render heuristic signal sections for injection into the landscape block.
 ///
-/// Returns `(section_name, rendered_text)` pairs for each non-empty section.
+/// Returns `(section_name, rendered_text)` pairs for each non-empty section,
+/// together with the count of files skipped due to pruning.
 pub(crate) fn inject_signal_sections(
     ctx: &signals::SignalContext,
     outlines: &[FileOutline],
-) -> Vec<(String, String)> {
+) -> (Vec<(String, String)>, usize) {
     signals::render_signal_sections(ctx, outlines)
 }
 
