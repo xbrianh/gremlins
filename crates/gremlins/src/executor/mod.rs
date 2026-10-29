@@ -18,7 +18,7 @@ use crate::clients::backend::ClientError;
 use crate::executor::state::StateError;
 
 /// Cached log‑level threshold, read once from `GREMLINS_LOG_LEVEL`.
-fn log_level_threshold() -> LevelFilter {
+pub(crate) fn log_level_threshold() -> LevelFilter {
     static THRESHOLD: OnceLock<LevelFilter> = OnceLock::new();
     *THRESHOLD.get_or_init(|| {
         std::env::var("GREMLINS_LOG_LEVEL")

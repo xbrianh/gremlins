@@ -888,6 +888,7 @@ async fn run_agent(
             .first()
             .map(|a| a.model_path.clone()),
         landscape_data,
+        prompt_debug_store: Some(gremlin.state.store_handle()),
     };
 
     let effective_model = params

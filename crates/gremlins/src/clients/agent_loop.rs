@@ -15,6 +15,8 @@ use rig_core::operation::Completion;
 use rig_core::streaming::{Item, StreamEvent, Streamed};
 use tokio::sync::{mpsc, Semaphore};
 
+use crate::executor::state::{now_stamp_millis, BlobMode, StateStore};
+
 use super::backend::RunParams;
 use super::compaction;
 use super::compaction::CompactionOpts;
@@ -60,6 +62,37 @@ fn send_log(
     msg: &str,
 ) {
     crate::executor::send_log(tx, level, format!("{prefix}{msg}"));
+}
+
+/// Dump the full serialized [`CompletionRequest`] to a `prompt_{timestamp}.txt`
+/// file in the state directory, but only when `GREMLINS_LOG_LEVEL=DEBUG` and
+/// a [`StateStore`] is configured.
+fn dump_prompt_if_debug(
+    store: &Option<Arc<dyn StateStore + Send + Sync>>,
+    request: &CompletionRequest,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    if crate::executor::log_level_threshold() > log::LevelFilter::Debug {
+        return;
+    }
+    // Build a sortable timestamp: YYYYMMDDTHHMMSS.sssZ → YYYYMMDDTHH-MM-SS.sssZ
+    let ts = now_stamp_millis();
+    let ts_clean = ts
+        .trim_matches(|c: char| c == '[' || c == ']')
+        .replace(':', "-");
+    let name = format!("prompt_{ts_clean}.txt");
+    match store.open(&name, BlobMode::Write) {
+        Ok(mut blob) => {
+            let json = serde_json::to_string_pretty(request).unwrap_or_default();
+            let _ = std::io::Write::write_all(&mut blob, json.as_bytes());
+            let _ = std::io::Write::write_all(&mut blob, b"\n");
+        }
+        Err(e) => {
+            log::warn!("dump_prompt_if_debug: failed to open {name}: {e}");
+        }
+    }
 }
 
 fn cancelled_error(message: impl Into<String>, history: &[Message]) -> ClientError {
@@ -300,6 +333,10 @@ struct LoopState {
     reminder_budget: usize,
     completion_nudge_budget: usize,
     preserve_reasoning_in_history: bool,
+    /// When set and `GREMLINS_LOG_LEVEL=DEBUG`, every model call dumps the
+    /// full serialized [`CompletionRequest`] to a `prompt_{timestamp}.txt`
+    /// file in the state directory.
+    prompt_debug_store: Option<Arc<dyn StateStore + Send + Sync>>,
 }
 
 /// Accumulated state from one model completion stream.
@@ -378,6 +415,7 @@ impl LoopState {
         preserve_reasoning_in_history: bool,
         landscape_data: Option<crate::landscape::LandscapeData>,
         log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+        prompt_debug_store: Option<Arc<dyn StateStore + Send + Sync>>,
     ) -> Self {
         // Destructure the interactive session into its components so we can
         // thread them independently through the loop.
@@ -442,6 +480,7 @@ impl LoopState {
             reminder_budget,
             completion_nudge_budget,
             preserve_reasoning_in_history,
+            prompt_debug_store,
         }
     }
 
@@ -474,6 +513,10 @@ impl LoopState {
             scratchpad_root,
             nested,
         );
+
+        // Dump the full prompt to the state directory when
+        // GREMLINS_LOG_LEVEL=DEBUG and a debug store is configured.
+        dump_prompt_if_debug(&self.prompt_debug_store, &builder);
 
         // Phase 2: launch the model stream, handling pre-stream errors and
         // retry inline (each path returns early).
@@ -2207,6 +2250,7 @@ pub(crate) async fn run_agent_loop(
     );
     tool_ctx.task_fn = Some(runner);
 
+    let prompt_debug_store = ctx.params.prompt_debug_store.clone();
     run_agent_loop_core(
         &model,
         prompt,
@@ -2235,6 +2279,7 @@ pub(crate) async fn run_agent_loop(
         ctx.scratchpad_path.clone(),
         ctx.scratchpad_root.clone(),
         ctx.landscape_data.clone(),
+        prompt_debug_store,
     )
     .await
 }
@@ -2322,6 +2367,7 @@ pub(crate) async fn run_agent_loop_nested(
         None,
         None,
         prepopulated_messages,
+        None,
         None,
         None,
         None,
@@ -2685,6 +2731,7 @@ async fn run_agent_loop_core(
     scratchpad_path: Option<PathBuf>,
     scratchpad_root: Option<PathBuf>,
     landscape_data: Option<crate::landscape::LandscapeData>,
+    prompt_debug_store: Option<Arc<dyn StateStore + Send + Sync>>,
 ) -> Result<CompletedRun, ClientError> {
     let mut state = LoopState::new(
         system_prompt,
@@ -2699,6 +2746,7 @@ async fn run_agent_loop_core(
         opts.preserve_reasoning_in_history,
         landscape_data,
         log_tx.clone(),
+        prompt_debug_store,
     );
     let loop_start = Instant::now();
     let turn_retry_backoff = crate::config::turn_retry_backoff();
@@ -3794,6 +3842,7 @@ mod tests {
                 token_usage_sink: TokenUsageSink(None),
                 scratchpad_path: None,
                 landscape_data: None,
+                prompt_debug_store: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
@@ -7046,6 +7095,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -7164,6 +7214,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -7269,6 +7320,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -7356,6 +7408,7 @@ mod tests {
                 None,
                 TokenUsageSink(None),
                 Some(session),
+                None,
                 None,
                 None,
                 None,
@@ -7528,6 +7581,7 @@ mod tests {
             None,
             None,
             None,
+        None,
         )
         .await
         .unwrap();
@@ -7617,6 +7671,7 @@ mod tests {
             None,
             None,
             None,
+        None,
         )
         .await
         .unwrap();

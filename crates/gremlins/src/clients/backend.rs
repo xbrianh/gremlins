@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::executor::state::StateStore;
+
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use rig_core::completion::Message;
@@ -84,6 +86,10 @@ pub struct RunParams {
     /// [`super::landscape_context::LandscapeContext`] before the first turn; the
     /// landscape is delivered via the `LandscapeContext` transcript block.
     pub(crate) landscape_data: Option<crate::landscape::LandscapeData>,
+    /// When `GREMLINS_LOG_LEVEL=DEBUG` and this is `Some`, every model call
+    /// dumps the full serialized prompt to a `prompt_{timestamp}.txt` file
+    /// in the state directory via the [`StateStore`] blob interface.
+    pub prompt_debug_store: Option<Arc<dyn StateStore + Send + Sync>>,
 }
 
 impl Clone for RunParams {
@@ -118,6 +124,7 @@ impl Clone for RunParams {
             token_usage_sink: self.token_usage_sink.clone(),
             scratchpad_path: self.scratchpad_path.clone(),
             landscape_data: self.landscape_data.clone(),
+            prompt_debug_store: self.prompt_debug_store.clone(),
         }
     }
 }
