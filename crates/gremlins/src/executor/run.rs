@@ -643,7 +643,7 @@ async fn run_agent(
     // landscape). When landscape is enabled, compute the full-tree outlines and
     // signal sections and bundle them into the data. The system prompt is just
     // the base prompt without any landscape block.
-    let landscape_data: Option<crate::landscape::LandscapeData> = if agent.landscape {
+    let mut landscape_data: Option<crate::landscape::LandscapeData> = if agent.landscape {
         let cwd2 = gremlin.cwd();
         let log_tx2 = gremlin.runtime_config.log_tx.clone();
         let outlines = build_outlines(cwd2.clone(), log_tx2.clone()).await;
@@ -821,6 +821,113 @@ async fn run_agent(
         )>,
     ));
 
+    // ── Build inversion-of-control plug ─────
+    // Wires cross-package dependencies (log, scratchpad, prompt-debug,
+    // token-usage, model contexts) into the agent loop without the loop
+    // importing `crate::executor` or `crate::landscape`.
+    let mut plug = crate::clients::plug::LoopPlug::new();
+    {
+        let log_tx = gremlin.runtime_config.log_tx.clone();
+        plug.register_logger(move |level, msg| {
+            crate::executor::send_log(&log_tx, level, msg);
+        });
+    }
+    if let Some(sp) = prepared
+        .implicit_artifacts
+        .first()
+        .map(|a| a.model_path.clone())
+    {
+        let root = sp
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| gremlin.cwd());
+        plug.register_scratchpad_reader(move || {
+            crate::executor::agent_runner::read_scratchpad_contained(&sp, &root).ok()
+        });
+    }
+    {
+        let store = gremlin.state.store_handle();
+        plug.register_prompt_debug(move |request| {
+            if crate::executor::log_level_threshold() > log::LevelFilter::Debug {
+                return;
+            }
+            let ts = crate::executor::state::now_stamp_millis();
+            let ts_clean = ts
+                .trim_matches(|c: char| c == '[' || c == ']')
+                .replace(':', "-");
+            let name = format!("prompt_{ts_clean}.txt");
+            match store.open(&name, crate::executor::state::BlobMode::Write) {
+                Ok(mut blob) => {
+                    let json = serde_json::to_string_pretty(request).unwrap_or_default();
+                    let _ = std::io::Write::write_all(&mut blob, json.as_bytes());
+                    let _ = std::io::Write::write_all(&mut blob, b"\n");
+                }
+                Err(e) => {
+                    log::warn!("dump_prompt_if_debug: failed to open {name}: {e}");
+                }
+            }
+        });
+    }
+    {
+        let gremlin_id = gremlin.id.to_string();
+        let client_for_cost = client.clone();
+        let baseline_usage = crate::executor::supervisor::usage_stats_from_state(
+            gremlin.state.read_field("token_usage").as_ref(),
+        );
+        let live_usage_tracker = live_usage.clone();
+        plug.register_token_usage(
+            move |totals, last_prompt_tokens, last_cached_input_tokens| {
+                let usage = crate::executor::supervisor::add_usage_stats(&baseline_usage, &totals);
+                let cost_usd = client_for_cost.total_cost_usd();
+                *live_usage_tracker.lock().unwrap() =
+                    Some((usage.clone(), totals.clone(), cost_usd));
+                crate::executor::supervisor::emit_event(
+                    crate::executor::supervisor::DaemonEvent::TokenUsage {
+                        id: gremlin_id.clone(),
+                        usage,
+                        cost_usd,
+                        last_prompt_tokens,
+                        last_cached_input_tokens,
+                    },
+                );
+            },
+        );
+    }
+    // Build model contexts from landscape data: SignalMapContext + LandscapeContext.
+    // Signal sections and symbol index are taken out of the LandscapeData and
+    // handed to the SignalMapContext; the remaining data (outlines, root) goes to
+    // the LandscapeContext which will seed its file-entries index from outlines.
+    {
+        let mut contexts: Vec<Box<dyn crate::clients::model_context::MutableModelContext>> =
+            Vec::new();
+        if let Some(ref mut ld) = landscape_data {
+            let signal_sections = std::mem::take(&mut ld.signal_sections);
+            let symbol_index = std::mem::take(&mut ld.symbol_index);
+            let cwd = ld.root.clone();
+            let has_signals = !signal_sections.is_empty() || !symbol_index.is_empty();
+            if has_signals {
+                let prompt = prepared.user_prompt();
+                contexts.push(Box::new(
+                    crate::clients::signal_context::SignalMapContext::new(
+                        signal_sections,
+                        Some(prompt),
+                        cwd.clone(),
+                        symbol_index,
+                    ),
+                ));
+            }
+        }
+        if let Some(ld) = landscape_data.take() {
+            contexts.push(Box::new(
+                crate::clients::landscape_context::LandscapeContext::new(
+                    ld,
+                    gremlin.runtime_config.log_tx.clone(),
+                ),
+            ));
+        }
+        plug.register_contexts(contexts);
+    }
+
     let params = RunParams {
         prompt: prepared.user_prompt(),
         label: prepared.name.clone(),
@@ -858,38 +965,11 @@ async fn run_agent(
         skills_available: gremlin.discovered_skills.is_some(),
         discovered_skills: gremlin.discovered_skills.clone(),
         active_skills: gremlin.active_skills.clone(),
-        token_usage_sink: {
-            let gremlin_id = gremlin.id.to_string();
-            let client_for_cost = client.clone();
-            let baseline_usage = crate::executor::supervisor::usage_stats_from_state(
-                gremlin.state.read_field("token_usage").as_ref(),
-            );
-            let live_usage_sink = live_usage.clone();
-            crate::clients::token_usage::TokenUsageSink(Some(std::sync::Arc::new(
-                move |event: crate::clients::token_usage::TokenUsageEvent| {
-                    let usage =
-                        crate::executor::supervisor::add_usage_stats(&baseline_usage, &event.usage);
-                    let cost_usd = client_for_cost.total_cost_usd();
-                    *live_usage_sink.lock().unwrap() =
-                        Some((usage.clone(), event.usage.clone(), cost_usd));
-                    crate::executor::supervisor::emit_event(
-                        crate::executor::supervisor::DaemonEvent::TokenUsage {
-                            id: gremlin_id.clone(),
-                            usage,
-                            cost_usd,
-                            last_prompt_tokens: event.last_prompt_tokens,
-                            last_cached_input_tokens: event.last_cached_input_tokens,
-                        },
-                    );
-                },
-            )))
-        },
-        scratchpad_path: prepared
-            .implicit_artifacts
-            .first()
-            .map(|a| a.model_path.clone()),
-        landscape_data,
-        prompt_debug_store: Some(gremlin.state.store_handle()),
+        token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
+        scratchpad_path: None,
+        landscape_data: None,
+        prompt_debug_store: None,
+        plug: Some(plug),
     };
 
     let effective_model = params

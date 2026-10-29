@@ -7,7 +7,7 @@ use std::any::Any;
 /// and never produce durable history — only ephemeral transcript blocks that
 /// `compose_model_transcript` weaves into the outgoing request.
 #[allow(dead_code)]
-pub(crate) trait MutableModelContext: Any + Send {
+pub(crate) trait MutableModelContext: Any + Send + Sync {
     /// Whether this context propagates into nested Task (Fork/Scout/Implement)
     /// loops. `ToolLedger` propagates; futures like `FindingsLedger` may not.
     fn propagates_to_task(&self) -> bool;

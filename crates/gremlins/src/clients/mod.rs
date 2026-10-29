@@ -21,6 +21,7 @@ pub(crate) mod model_context;
 pub(crate) mod native;
 pub mod openai_protocol;
 pub mod params;
+pub(crate) mod plug;
 pub mod protocol;
 pub(crate) mod shell_parse;
 pub(crate) mod signal_context;

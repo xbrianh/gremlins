@@ -70,7 +70,6 @@ pub(crate) fn make_task_runner(
     idle_timeout: f64,
     max_turns: usize,
     completion_nudge_budget: usize,
-    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     temperature: Option<f64>,
     max_tokens: Option<u64>,
     extra: Option<serde_json::Value>,
@@ -89,7 +88,6 @@ pub(crate) fn make_task_runner(
         0,
         String::new(),
         completion_nudge_budget,
-        log_tx,
         temperature,
         max_tokens,
         extra,
@@ -111,7 +109,6 @@ fn make_task_runner_at_depth(
     depth: u32,
     id_chain: String,
     completion_nudge_budget: usize,
-    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     temperature: Option<f64>,
     max_tokens: Option<u64>,
     extra: Option<serde_json::Value>,
@@ -129,7 +126,6 @@ fn make_task_runner_at_depth(
             let extra = extra.clone();
 
             let task_cwd = ctx.cwd.clone();
-            let log_tx = log_tx.clone();
 
             Box::pin(async move {
                 if depth >= MAX_DEPTH {
@@ -192,7 +188,6 @@ fn make_task_runner_at_depth(
                     depth + 1,
                     new_chain.clone(),
                     completion_nudge_budget,
-                    log_tx.clone(),
                     selected_temperature,
                     selected_max_tokens,
                     selected_extra.clone(),
@@ -228,7 +223,6 @@ fn make_task_runner_at_depth(
                     idle_timeout,
                     max_turns,
                     completion_nudge_budget,
-                    log_tx.clone(),
                     selected_temperature,
                     selected_max_tokens,
                     selected_extra.clone(),
@@ -480,6 +474,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         }
     }
 
@@ -505,7 +500,6 @@ mod tests {
             5.0,
             10,
             0,
-            None,
             None,
             None,
             None,
@@ -550,7 +544,6 @@ mod tests {
             5.0,
             10,
             0,
-            None,
             None,
             None,
             None,
@@ -614,7 +607,6 @@ mod tests {
             5.0,
             10,
             0,
-            None,
             None,
             None,
             None,
@@ -717,8 +709,7 @@ mod tests {
             10,
             0,
             None,
-            Some(0.1),
-            Some(1111),
+            None,
             Some(parent_extra.clone()),
             false,
         );
@@ -781,7 +772,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             false,
         );
 
@@ -818,7 +808,6 @@ mod tests {
             MAX_DEPTH,
             String::new(),
             0,
-            None,
             None,
             None,
             None,
@@ -859,7 +848,6 @@ mod tests {
             5.0,
             10,
             0,
-            None,
             None,
             None,
             None,
@@ -904,7 +892,6 @@ mod tests {
             5.0,
             10,
             0,
-            None,
             None,
             None,
             None,
@@ -964,7 +951,6 @@ mod tests {
             0.2,
             10,
             0,
-            None,
             None,
             None,
             None,
@@ -1054,18 +1040,19 @@ mod tests {
             turns: Vec<Vec<rig_core::test_utils::MockStreamEvent>>,
         ) -> (tools::TaskFn, tokio::sync::mpsc::UnboundedReceiver<String>) {
             let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut ctx = depth_test_ctx();
+            ctx.log_tx = Some(log_tx);
             let runner = make_task_runner(
                 gm(rig_core::test_utils::MockCompletionModel::from_stream_turns(turns).erase()),
                 None,
                 None,
                 crate::clients::cancel::CancelToken::new(),
-                depth_test_ctx(),
+                ctx,
                 TEST_BASE.to_string(),
                 "model".into(),
                 5.0,
                 10,
                 0,
-                Some(log_tx),
                 None,
                 None,
                 None,

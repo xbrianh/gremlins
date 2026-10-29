@@ -113,6 +113,10 @@ pub(crate) struct AgentLoopRuntime {
     /// Discovered skills for this session. Session-bound so concurrent chat
     /// sessions resolve their own project's skills instead of a shared slot.
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
+    /// Optional log channel for nested agent loops. When set,
+    /// `run_agent_loop_nested` logs "task: begin" and turn-level events
+    /// through this sender instead of using a no-op logger.
+    pub(crate) log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 impl AgentLoopRuntime {
     /// Send one completed live-output line for the tool call identified by
@@ -984,6 +988,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         }
     }
 
@@ -1572,6 +1577,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let args = serde_json::json!({"command": "pwd; ls"}).to_string();
         let output = bash_invoke(&c, &args, "tool-test-id").await;
@@ -1612,6 +1618,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let expected = canonicalize_or_ancestor(&dir);
         let args = serde_json::json!({"command": "pwd"}).to_string();
@@ -1650,6 +1657,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let expected = canonicalize_or_ancestor(&project);
         // Ensure the daemon cwd is genuinely different from project root.
@@ -2094,6 +2102,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let out = invoke("tool-test-id", "Mischief", &c, "{}").await;
         assert!(
@@ -2125,6 +2134,7 @@ mod tests {
             active_skills: Some(Arc::new(std::sync::Mutex::new(vec![]))),
             skills_available: true,
             discovered_skills: None,
+            log_tx: None,
         };
         let out = invoke("tool-test-id", "Mischief", &c, "{}").await;
         assert!(
@@ -3075,6 +3085,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let write_args =
             serde_json::json!({"file_path": target.to_str().unwrap(), "content": "nope"})
@@ -4040,6 +4051,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -4073,6 +4085,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -4104,6 +4117,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": ""}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -4142,6 +4156,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let args = serde_json::json!({"kind": "Bogus", "prompt": "go"}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -4175,6 +4190,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
         assert_eq!(
@@ -4649,6 +4665,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
@@ -4684,6 +4701,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         }
     }
 

@@ -13,6 +13,7 @@ pub(crate) use super::compaction::{CompactionOpts, Compactor};
 use super::interactive::{InteractiveSession, StreamEventSender};
 use super::model::GremlinsModel;
 use super::params::ResolvedParams;
+pub(crate) use super::plug::LoopPlug;
 use super::protocol::CompletedRun;
 use super::task_models::TaskModelSelector;
 
@@ -90,6 +91,10 @@ pub struct RunParams {
     /// dumps the full serialized prompt to a `prompt_{timestamp}.txt` file
     /// in the state directory via the [`StateStore`] blob interface.
     pub prompt_debug_store: Option<Arc<dyn StateStore + Send + Sync>>,
+    /// Inversion-of-control plug that carries cross-package dependencies
+    /// (log, scratchpad, prompt-debug, token-usage, contexts) into the
+    /// agent loop. `None` defaults to a no-op plug.
+    pub plug: Option<LoopPlug>,
 }
 
 impl Clone for RunParams {
@@ -125,6 +130,7 @@ impl Clone for RunParams {
             scratchpad_path: self.scratchpad_path.clone(),
             landscape_data: self.landscape_data.clone(),
             prompt_debug_store: self.prompt_debug_store.clone(),
+            plug: self.plug.clone(),
         }
     }
 }

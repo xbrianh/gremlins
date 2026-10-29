@@ -407,8 +407,9 @@ impl Config {
                     landscape_diff_stat,
                     landscape_decay_turns: parse_env_u64("GREMLINS_LANDSCAPE_DECAY_TURNS")
                         .unwrap_or(DEFAULT_LANDSCAPE_DECAY_TURNS),
-                    landscape_reconcile_threshold_tokens:
-                        parse_env_u64("GREMLINS_LANDSCAPE_RECONCILE_THRESHOLD_TOKENS"),
+                    landscape_reconcile_threshold_tokens: parse_env_u64(
+                        "GREMLINS_LANDSCAPE_RECONCILE_THRESHOLD_TOKENS",
+                    ),
                     ..Config::default()
                 });
             }

@@ -88,12 +88,11 @@ impl LandscapeContext {
         // Reconcile threshold: explicit config value, or default to 30% of
         // max_tokens.  When 0, reconcile every turn (same behaviour as
         // before deferred reconciliation existed).
-        let reconcile_threshold =
-            match crate::config::landscape_reconcile_threshold_tokens() {
-                Some(0) => 0,
-                Some(n) => usize::try_from(n).unwrap_or(usize::MAX),
-                None => max_tokens.saturating_mul(3) / 10,
-            };
+        let reconcile_threshold = match crate::config::landscape_reconcile_threshold_tokens() {
+            Some(0) => 0,
+            Some(n) => usize::try_from(n).unwrap_or(usize::MAX),
+            None => max_tokens.saturating_mul(3) / 10,
+        };
 
         // Render the initial stable landscape from the seeded data.
         let stable_landscape = if landscape_enabled {
@@ -246,9 +245,7 @@ impl LandscapeContext {
 
         for path in &self.dirty {
             if let Some(entry) = self.data.file_entries.get(path) {
-                delta_data
-                    .file_entries
-                    .insert(path.clone(), entry.clone());
+                delta_data.file_entries.insert(path.clone(), entry.clone());
             }
         }
 
@@ -256,8 +253,7 @@ impl LandscapeContext {
             return String::new();
         }
 
-        let rendered =
-            crate::landscape::format_landscape_data(&delta_data, self.max_tokens);
+        let rendered = crate::landscape::format_landscape_data(&delta_data, self.max_tokens);
         if rendered.is_empty() {
             return String::new();
         }
@@ -415,12 +411,11 @@ impl super::model_context::MutableModelContext for LandscapeContext {
 
             // If the child has already reconciled (or has more recent data),
             // rebuild our stable landscape to match.  This avoids serving a
-            // stale system message after a join.
+            // stale system message after a join.  Clear pending deltas too
+            // so the model doesn't see the same updates twice (once folded
+            // into the stable system prompt, once as a pending delta).
             if !other_ctx.stable_landscape.is_empty() {
-                // Rebuild from our merged data — the child's stable_landscape
-                // may be based on a different root or token budget.
-                self.stable_landscape =
-                    crate::landscape::format_landscape_data(&self.data, self.max_tokens);
+                self.reconcile();
             }
 
             self.log_stats();

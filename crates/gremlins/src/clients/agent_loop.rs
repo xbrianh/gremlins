@@ -1,7 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,8 +14,6 @@ use rig_core::error::ProviderError;
 use rig_core::operation::Completion;
 use rig_core::streaming::{Item, StreamEvent, Streamed};
 use tokio::sync::{mpsc, Semaphore};
-
-use crate::executor::state::{now_stamp_millis, BlobMode, StateStore};
 
 use super::backend::RunParams;
 use super::compaction;
@@ -33,8 +31,8 @@ use super::format::{
 };
 use super::model::{GremlinsModel, GremlinsModelError};
 use super::model_context::{compose_model_transcript, MutableModelContext};
+use super::plug::LoopPlug;
 use super::protocol::{add_opt, CompletedRun, FileObservations, TurnStats, UsageStats};
-use super::token_usage::{TokenUsageEvent, TokenUsageSink};
 use super::tool_ledger::{fold_scout_output, scout_written_paths, ToolLedger};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 
@@ -55,46 +53,6 @@ use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 // Supporting types: ToolJob, StreamAccumulator, ToolLedger, StreamTurnOutcome,
 // LoopOpts, InteractiveSession, TurnFlow, etc.
 // ────────────────────────────────────────────────────────────────────────────
-fn send_log(
-    tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    prefix: &str,
-    level: log::Level,
-    msg: &str,
-) {
-    crate::executor::send_log(tx, level, format!("{prefix}{msg}"));
-}
-
-/// Dump the full serialized [`CompletionRequest`] to a `prompt_{timestamp}.txt`
-/// file in the state directory, but only when `GREMLINS_LOG_LEVEL=DEBUG` and
-/// a [`StateStore`] is configured.
-fn dump_prompt_if_debug(
-    store: &Option<Arc<dyn StateStore + Send + Sync>>,
-    request: &CompletionRequest,
-) {
-    let Some(store) = store else {
-        return;
-    };
-    if crate::executor::log_level_threshold() > log::LevelFilter::Debug {
-        return;
-    }
-    // Build a sortable timestamp: YYYYMMDDTHHMMSS.sssZ → YYYYMMDDTHH-MM-SS.sssZ
-    let ts = now_stamp_millis();
-    let ts_clean = ts
-        .trim_matches(|c: char| c == '[' || c == ']')
-        .replace(':', "-");
-    let name = format!("prompt_{ts_clean}.txt");
-    match store.open(&name, BlobMode::Write) {
-        Ok(mut blob) => {
-            let json = serde_json::to_string_pretty(request).unwrap_or_default();
-            let _ = std::io::Write::write_all(&mut blob, json.as_bytes());
-            let _ = std::io::Write::write_all(&mut blob, b"\n");
-        }
-        Err(e) => {
-            log::warn!("dump_prompt_if_debug: failed to open {name}: {e}");
-        }
-    }
-}
-
 fn cancelled_error(message: impl Into<String>, history: &[Message]) -> ClientError {
     ClientError::Cancelled {
         message: message.into(),
@@ -216,17 +174,9 @@ pub(crate) struct RunContext {
     pub(crate) prepopulated_messages: Option<Vec<Message>>,
     /// Chat-only soft compaction settings (mirrors `RunParams`).
     pub(crate) compaction_opts: Option<CompactionOpts>,
-    /// Path to the persistent stage scratchpad file for per-turn re-injection.
-    pub(crate) scratchpad_path: Option<PathBuf>,
-    /// The allowed root for containment-checked scratchpad reads.
-    pub(crate) scratchpad_root: Option<PathBuf>,
-    /// Stage-start landscape data payload. `Some` carries precomputed
-    /// per-file outlines plus signal sections; `None` when landscape is
-    /// disabled for this stage. Passed through to [`LoopState::new`] which
-    /// creates a [`landscape_context::LandscapeContext`] before the first turn.
-    ///
-    /// The living index is keyed by full file path.
-    pub(crate) landscape_data: Option<crate::landscape::LandscapeData>,
+    /// Inversion-of-control plug carrying cross-package dependencies.
+    /// Defaults to a no-op plug when `None`.
+    pub(crate) plug: LoopPlug,
 }
 
 impl RunContext {
@@ -240,11 +190,6 @@ impl RunContext {
             format!("[{}] ", params.label)
         };
         let compaction_opts = params.compaction_opts;
-        let scratchpad_root = params
-            .scratchpad_path
-            .as_ref()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .or_else(|| params.cwd.clone());
         Self {
             idle_timeout,
             prefix,
@@ -254,9 +199,7 @@ impl RunContext {
             stream_events: params.stream_events.clone(),
             prepopulated_messages: params.prepopulated_messages.clone(),
             compaction_opts,
-            scratchpad_path: params.scratchpad_path.clone(),
-            scratchpad_root,
-            landscape_data: params.landscape_data.clone(),
+            plug: params.plug.clone().unwrap_or_else(LoopPlug::new),
             params,
         }
     }
@@ -333,10 +276,8 @@ struct LoopState {
     reminder_budget: usize,
     completion_nudge_budget: usize,
     preserve_reasoning_in_history: bool,
-    /// When set and `GREMLINS_LOG_LEVEL=DEBUG`, every model call dumps the
-    /// full serialized [`CompletionRequest`] to a `prompt_{timestamp}.txt`
-    /// file in the state directory.
-    prompt_debug_store: Option<Arc<dyn StateStore + Send + Sync>>,
+    /// Inversion-of-control plug carrying log/scratchpad/debug/token-usage/contexts.
+    plug: LoopPlug,
 }
 
 /// Accumulated state from one model completion stream.
@@ -413,9 +354,7 @@ impl LoopState {
         max_turns: usize,
         prefix: &str,
         preserve_reasoning_in_history: bool,
-        landscape_data: Option<crate::landscape::LandscapeData>,
-        log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
-        prompt_debug_store: Option<Arc<dyn StateStore + Send + Sync>>,
+        plug: &LoopPlug,
     ) -> Self {
         // Destructure the interactive session into its components so we can
         // thread them independently through the loop.
@@ -461,26 +400,8 @@ impl LoopState {
                 ledger.capture_turn_transcript(0);
                 let mut contexts: Vec<Box<dyn MutableModelContext>> =
                     vec![Box::new(ledger) as Box<dyn MutableModelContext>];
-                if let Some(mut ld) = landscape_data {
-                    // Strip signal sections — they live in their own
-                    // SignalMapContext and render only into the prompt tail.
-                    let signal_sections = std::mem::take(&mut ld.signal_sections);
-                    let symbol_index = std::mem::take(&mut ld.symbol_index);
-                    let cwd = ld.root.clone();
-                    let has_signals = !signal_sections.is_empty() || !symbol_index.is_empty();
-                    if has_signals {
-                        contexts.push(Box::new(
-                            crate::clients::signal_context::SignalMapContext::new(
-                                signal_sections,
-                                Some(prompt.to_string()),
-                                cwd,
-                                symbol_index,
-                            ),
-                        ) as Box<dyn MutableModelContext>);
-                    }
-                    contexts.push(Box::new(
-                        crate::clients::landscape_context::LandscapeContext::new(ld, log_tx),
-                    ) as Box<dyn MutableModelContext>);
+                for ctx in &plug.contexts {
+                    contexts.push(ctx.clone_box());
                 }
                 contexts
             },
@@ -496,7 +417,7 @@ impl LoopState {
             reminder_budget,
             completion_nudge_budget,
             preserve_reasoning_in_history,
-            prompt_debug_store,
+            plug: plug.clone(),
         }
     }
 
@@ -511,28 +432,18 @@ impl LoopState {
         prefix: &str,
         idle_timeout: f64,
         nested: bool,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
         compaction_opts: Option<CompactionOpts>,
         compactor: Option<Arc<dyn compaction::Compactor>>,
-        scratchpad_path: Option<&Path>,
-        scratchpad_root: Option<&Path>,
         turn_retry_backoff: &[f64],
         timeout_retry_backoff: &[f64],
     ) -> Result<StreamTurnOutcome, ClientError> {
         // Phase 1: assemble the request (messages, scratchpad, gen params).
-        let builder = self.prepare_stream_request(
-            tool_defs,
-            opts,
-            compaction_opts,
-            compactor,
-            scratchpad_path,
-            scratchpad_root,
-            nested,
-        );
+        let builder =
+            self.prepare_stream_request(tool_defs, opts, compaction_opts, compactor, nested);
 
         // Dump the full prompt to the state directory when
         // GREMLINS_LOG_LEVEL=DEBUG and a debug store is configured.
-        dump_prompt_if_debug(&self.prompt_debug_store, &builder);
+        self.plug.dump_prompt_debug(&builder);
 
         // Phase 2: launch the model stream, handling pre-stream errors and
         // retry inline (each path returns early).
@@ -542,12 +453,10 @@ impl LoopState {
                 log::info!(
                     "agent_loop: prompt too large on turn {}: {} bytes exceeds configured limit of {} bytes", self.turn_num, actual, limit
                 );
-                send_log(
-                    log_tx,
-                    prefix,
-                        log::Level::Info,
+                self.plug.log(
+                    log::Level::Info,
                     &format!(
-                        "error: prompt size {actual} bytes exceeds configured limit of {limit} bytes"
+                        "{prefix}error: prompt size {actual} bytes exceeds configured limit of {limit} bytes"
                     ),
                 );
                 return Err(ClientError::PromptTooLarge { limit, actual });
@@ -564,22 +473,18 @@ impl LoopState {
                     log::info!(
                         "agent_loop: retryable stream error on turn {} (attempt {}), backing off {wait}s: {e}", self.turn_num, self.turn_retries
                     );
-                    send_log(
-                        log_tx,
-                        prefix,
+                    self.plug.log(
                         log::Level::Info,
-                        &format!("retry: transient error, backing off {wait}s"),
+                        &format!("{prefix}retry: transient error, backing off {wait}s"),
                     );
                     if retry_backoff(cancel, wait).await {
                         log::info!(
                             "agent_loop: cancelled during retry backoff (label={})",
                             prefix
                         );
-                        send_log(
-                            log_tx,
-                            prefix,
+                        self.plug.log(
                             log::Level::Info,
-                            "exit: cancelled during retry backoff",
+                            &format!("{prefix}exit: cancelled during retry backoff"),
                         );
                         return Err(cancelled_error("cancelled", &self.history));
                     }
@@ -611,7 +516,6 @@ impl LoopState {
                 prefix,
                 idle_timeout,
                 nested,
-                log_tx,
                 timeout_retry_backoff,
                 turn_retry_backoff,
             )
@@ -631,8 +535,6 @@ impl LoopState {
         opts: &LoopOpts<'_>,
         compaction_opts: Option<CompactionOpts>,
         compactor: Option<Arc<dyn compaction::Compactor>>,
-        scratchpad_path: Option<&Path>,
-        scratchpad_root: Option<&Path>,
         nested: bool,
     ) -> CompletionRequest {
         let next_prompt_text = user_message_text(&self.next_prompt);
@@ -679,29 +581,29 @@ impl LoopState {
         // but compaction dropped the prior injection from history, force
         // re-injection so the model doesn't lose its working memory.
         if !nested && !self.turn_scratchpad_injected {
-            if let Some(sp) = scratchpad_path {
-                let root = scratchpad_root.unwrap_or_else(|| Path::new("."));
-                if let Ok(content) =
-                    crate::executor::agent_runner::read_scratchpad_contained(sp, root)
-                {
-                    if !content.trim().is_empty() {
-                        let in_request = request_messages
-                            .iter()
-                            .any(|msg| user_message_text(msg).contains("## Scratchpad"))
-                            || user_message_text(&self.next_prompt).contains("## Scratchpad");
-                        if !in_request {
-                            let mut hasher = DefaultHasher::new();
-                            content.hash(&mut hasher);
-                            self.last_scratchpad_hash = Some(hasher.finish());
-                            let next_text = user_message_text(&self.next_prompt);
-                            let combined = format!(
-                                "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
-                            );
-                            self.next_prompt = Message::user(combined);
-                            self.turn_scratchpad_injected = true;
-                        }
+            if let Some(content) = self.plug.read_scratchpad() {
+                if !content.trim().is_empty() {
+                    let in_request = request_messages
+                        .iter()
+                        .any(|msg| user_message_text(msg).contains("## Scratchpad"))
+                        || user_message_text(&self.next_prompt).contains("## Scratchpad");
+                    if !in_request {
+                        let mut hasher = DefaultHasher::new();
+                        content.hash(&mut hasher);
+                        self.last_scratchpad_hash = Some(hasher.finish());
+                        let next_text = user_message_text(&self.next_prompt);
+                        let combined = format!(
+                            "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
+                        );
+                        self.next_prompt = Message::user(combined);
+                        self.turn_scratchpad_injected = true;
                     }
+                } else {
+                    self.last_scratchpad_hash = None;
                 }
+                // Note: when read_scratchpad() returns None, leave
+                // last_scratchpad_hash unchanged so a transient read
+                // failure won't cause redundant re-injection.
             }
         }
 
@@ -766,7 +668,6 @@ impl LoopState {
         prefix: &str,
         idle_timeout: f64,
         nested: bool,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
         timeout_retry_backoff: &[f64],
         turn_retry_backoff: &[f64],
     ) -> Result<StreamAccumulator, ClientError> {
@@ -797,7 +698,7 @@ impl LoopState {
             let item = tokio::select! {
                 _ = cancel.cancelled() => {
                     log::info!("agent_loop: cancelled mid-stream (label={})", prefix);
-                    send_log(log_tx, prefix, log::Level::Info, "exit: cancelled mid-stream");
+                    self.plug.log(log::Level::Info, &format!("{prefix}exit: cancelled mid-stream"));
                     drop(response);
                     return Err(cancelled_error("cancelled", &stream_snapshot));
                 }
@@ -806,7 +707,7 @@ impl LoopState {
                     // interactive mode. The turn will be re-executed after
                     // the debug session ends.
                     log::info!("agent_loop: paused mid-stream (label={})", prefix);
-                    send_log(log_tx, prefix, log::Level::Info, "pause: entering interactive mode (mid-stream)");
+                    self.plug.log(log::Level::Info, &format!("{prefix}pause: entering interactive mode (mid-stream)"));
                     drop(response);
                     paused_mid_stream = true;
                     if let Some(ref p) = self.pause {
@@ -855,7 +756,7 @@ impl LoopState {
                             }
                             Err(e) => {
                                 log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                                send_log(log_tx, prefix, log::Level::Info, "exit: operator bailed");
+                                self.plug.log(log::Level::Info, &format!("{prefix}exit: operator bailed"));
                                 return Err(e);
                             }
                         }
@@ -878,11 +779,9 @@ impl LoopState {
                             self.turn_num,
                             self.timeout_retries
                         );
-                        send_log(
-                            log_tx,
-                            prefix,
+                        self.plug.log(
                             log::Level::Info,
-                            &format!("retry: idle timeout, backing off {wait}s"),
+                            &format!("{prefix}retry: idle timeout, backing off {wait}s"),
                         );
                         drop(response);
                         retry_timeout_turn = true;
@@ -891,11 +790,9 @@ impl LoopState {
                                 "agent_loop: cancelled during timeout backoff (label={})",
                                 prefix
                             );
-                            send_log(
-                                log_tx,
-                                prefix,
+                            self.plug.log(
                                 log::Level::Info,
-                                "exit: cancelled during timeout backoff",
+                                &format!("{prefix}exit: cancelled during timeout backoff"),
                             );
                             return Err(cancelled_error("cancelled", &self.history));
                         }
@@ -922,11 +819,9 @@ impl LoopState {
                         log::info!(
                             "agent_loop: retryable mid-stream error on turn {} (attempt {}), backing off {wait}s: {e}", self.turn_num, self.turn_retries
                         );
-                        send_log(
-                            log_tx,
-                            prefix,
+                        self.plug.log(
                             log::Level::Info,
-                            &format!("retry: transient error, backing off {wait}s"),
+                            &format!("{prefix}retry: transient error, backing off {wait}s"),
                         );
                         drop(response);
                         retry_turn = true;
@@ -935,11 +830,9 @@ impl LoopState {
                                 "agent_loop: cancelled during retry backoff (label={})",
                                 prefix
                             );
-                            send_log(
-                                log_tx,
-                                prefix,
+                            self.plug.log(
                                 log::Level::Info,
-                                "exit: cancelled during retry backoff",
+                                &format!("{prefix}exit: cancelled during retry backoff"),
                             );
                             return Err(cancelled_error("cancelled", &self.history));
                         }
@@ -1110,10 +1003,7 @@ impl LoopState {
         tool_ctx: &AgentLoopRuntime,
         model: &GremlinsModel,
         prefix: &str,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
-        _token_usage_sink: &TokenUsageSink,
         cancel: &CancelToken,
-        _gremlin_id: Option<&str>,
         raw: &mut Option<std::fs::File>,
         captured: &mut Option<Vec<serde_json::Value>>,
         nested: bool,
@@ -1130,19 +1020,11 @@ impl LoopState {
             .then(|| self.history[..self.history.len() - 1].to_vec());
 
         // Phase 1: collect + validate tool calls into owned jobs.
-        let jobs = self.collect_tool_jobs(tool_calls, prefix, log_tx, nested, raw, captured);
+        let jobs = self.collect_tool_jobs(tool_calls, prefix, nested, raw, captured);
 
         // Phase 2: concurrent execution (cancel/pause aware).
         let results = match self
-            .dispatch_tool_jobs(
-                &jobs,
-                tool_ctx,
-                model,
-                prefix,
-                log_tx,
-                cancel,
-                fork_parent_history,
-            )
+            .dispatch_tool_jobs(&jobs, tool_ctx, model, prefix, cancel, fork_parent_history)
             .await?
         {
             ToolDispatchOutcome::Completed(results) => results,
@@ -1152,7 +1034,7 @@ impl LoopState {
 
         // Phase 3: emit results, update ledger + history.
         self.emit_tool_results(
-            jobs, results, tool_ctx, prefix, log_tx, nested, raw, captured, cancel,
+            jobs, results, tool_ctx, prefix, nested, raw, captured, cancel,
         )
         .await?;
 
@@ -1166,7 +1048,6 @@ impl LoopState {
         &mut self,
         tool_calls: &[ToolCall],
         prefix: &str,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
         nested: bool,
         raw: &mut Option<std::fs::File>,
         captured: &mut Option<Vec<serde_json::Value>>,
@@ -1184,7 +1065,8 @@ impl LoopState {
                     200
                 )
             );
-            send_log(log_tx, prefix, log::Level::Info, &tool_msg);
+            self.plug
+                .log(log::Level::Info, &format!("{prefix}{tool_msg}"));
             if !nested {
                 let id_str = tc.id.to_string();
                 let tool_evt =
@@ -1230,7 +1112,6 @@ impl LoopState {
         tool_ctx: &AgentLoopRuntime,
         model: &GremlinsModel,
         prefix: &str,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
         cancel: &CancelToken,
         fork_parent_history: Option<Vec<Message>>,
     ) -> Result<ToolDispatchOutcome, ClientError> {
@@ -1298,7 +1179,7 @@ impl LoopState {
                 // re-insert the chat gremlin without waiting for every tool
                 // to complete.
                 log::info!("agent_loop: cancelled mid-tool (label={})", prefix);
-                send_log(log_tx, prefix, log::Level::Info, "exit: cancelled mid-tool");
+                self.plug.log(log::Level::Info, &format!("{prefix}exit: cancelled mid-tool"));
                 discard_tool_output(&mut self.live_output_rx);
                 return Err(cancelled_error("cancelled", &self.history));
             }
@@ -1307,7 +1188,7 @@ impl LoopState {
                 // (cancels pending tool futures). Completed tool side effects
                 // (files written, bash commands run) are not unwound.
                 log::info!("agent_loop: paused mid-tool (label={})", prefix);
-                send_log(log_tx, prefix, log::Level::Info, "pause: entering interactive mode (mid-tool)");
+                self.plug.log(log::Level::Info, &format!("{prefix}pause: entering interactive mode (mid-tool)"));
                 discard_tool_output(&mut self.live_output_rx);
                 if let Some(ref p) = self.pause {
                     p.reset();
@@ -1359,7 +1240,7 @@ impl LoopState {
                         }
                         Err(e) => {
                             log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                            send_log(log_tx, prefix, log::Level::Info, "exit: operator bailed");
+                            self.plug.log(log::Level::Info, &format!("{prefix}exit: operator bailed"));
                             return Err(e);
                         }
                     }
@@ -1381,7 +1262,6 @@ impl LoopState {
         results: Vec<String>,
         tool_ctx: &AgentLoopRuntime,
         prefix: &str,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
         nested: bool,
         raw: &mut Option<std::fs::File>,
         captured: &mut Option<Vec<serde_json::Value>>,
@@ -1414,7 +1294,8 @@ impl LoopState {
         let mut result_msgs = Vec::new();
         for (job, output) in jobs.into_iter().zip(results) {
             let result_msg = format!("result: {}", trunc(&output, 200));
-            send_log(log_tx, prefix, log::Level::Info, &result_msg);
+            self.plug
+                .log(log::Level::Info, &format!("{prefix}{result_msg}"));
             if !nested {
                 let result_evt = tool_result_event(&job.id, &output);
                 write_raw(raw, &result_evt);
@@ -1523,7 +1404,6 @@ impl LoopState {
         &mut self,
         model: &GremlinsModel,
         prefix: &str,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<InteractiveBoundary, ClientError> {
         if self.cmd_rx.is_some() && self.evt_tx.is_some() && self.pause.is_some() {
             if self.pending_run_one_turn {
@@ -1562,7 +1442,8 @@ impl LoopState {
                     }
                     Err(e) => {
                         log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                        send_log(log_tx, prefix, log::Level::Info, "exit: operator bailed");
+                        self.plug
+                            .log(log::Level::Info, &format!("{prefix}exit: operator bailed"));
                         return Err(e);
                     }
                 }
@@ -1572,11 +1453,9 @@ impl LoopState {
                     "agent_loop: pause token detected at turn boundary (label={})",
                     prefix
                 );
-                send_log(
-                    log_tx,
-                    prefix,
+                self.plug.log(
                     log::Level::Info,
-                    "pause: entering interactive mode (turn boundary)",
+                    &format!("{prefix}pause: entering interactive mode (turn boundary)"),
                 );
                 if let Some(ref p) = self.pause {
                     p.reset();
@@ -1618,7 +1497,8 @@ impl LoopState {
                     }
                     Err(e) => {
                         log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                        send_log(log_tx, prefix, log::Level::Info, "exit: operator bailed");
+                        self.plug
+                            .log(log::Level::Info, &format!("{prefix}exit: operator bailed"));
                         return Err(e);
                     }
                 }
@@ -1630,38 +1510,32 @@ impl LoopState {
     /// Inject the persistent scratchpad into the next user prompt when its
     /// content hash changed since the last turn. No-op for nested (Task)
     /// loops, which are stateless helpers.
-    fn inject_scratchpad(
-        &mut self,
-        scratchpad_path: Option<&Path>,
-        scratchpad_root: Option<&Path>,
-        nested: bool,
-    ) {
+    fn inject_scratchpad(&mut self, nested: bool) {
         if !nested && !self.turn_scratchpad_injected {
-            if let Some(scratchpad_path) = scratchpad_path {
-                let root = scratchpad_root.unwrap_or_else(|| Path::new("."));
-                if let Ok(content) =
-                    crate::executor::agent_runner::read_scratchpad_contained(scratchpad_path, root)
-                {
-                    if !content.trim().is_empty() {
-                        let mut hasher = DefaultHasher::new();
-                        content.hash(&mut hasher);
-                        let current_hash = hasher.finish();
-                        if self.last_scratchpad_hash != Some(current_hash) {
-                            self.last_scratchpad_hash = Some(current_hash);
-                            let next_text = user_message_text(&self.next_prompt);
-                            let combined = format!(
-                                "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
-                            );
-                            self.next_prompt = Message::user(combined);
-                            self.turn_scratchpad_injected = true;
-                        }
-                    } else {
-                        // Scratchpad was cleared — reset so a later rewrite
-                        // of the same content won't be skipped.
-                        self.last_scratchpad_hash = None;
+            if let Some(content) = self.plug.read_scratchpad() {
+                if !content.trim().is_empty() {
+                    let mut hasher = DefaultHasher::new();
+                    content.hash(&mut hasher);
+                    let current_hash = hasher.finish();
+                    if self.last_scratchpad_hash != Some(current_hash) {
+                        self.last_scratchpad_hash = Some(current_hash);
+                        let next_text = user_message_text(&self.next_prompt);
+                        let combined = format!(
+                            "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
+                        );
+                        self.next_prompt = Message::user(combined);
+                        self.turn_scratchpad_injected = true;
                     }
+                } else {
+                    // Scratchpad was cleared — reset so a later rewrite
+                    // of the same content won't be skipped.
+                    self.last_scratchpad_hash = None;
                 }
             }
+            // Note: when read_scratchpad() returns None (no path configured,
+            // or a transient read error mapped through .ok()), we intentionally
+            // leave last_scratchpad_hash unchanged so a transient failure
+            // won't cause a redundant re-injection next turn.
         }
     }
 
@@ -1709,7 +1583,6 @@ impl LoopState {
         raw: &mut Option<std::fs::File>,
         captured: &mut Option<Vec<serde_json::Value>>,
         prefix: &str,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<(), ClientError> {
         // Emit TurnComplete via tool_ctx.telemetry.stream_events, before
         // text/tool_calls are consumed by the rest of the turn processing.
@@ -1738,11 +1611,11 @@ impl LoopState {
 
         if !reasoning.is_empty() {
             let msg = format!("think: {}", trunc(reasoning, 200));
-            send_log(log_tx, prefix, log::Level::Info, &msg);
+            self.plug.log(log::Level::Info, &format!("{prefix}{msg}"));
         }
         if !text.is_empty() {
             let msg = format!("text: {}", trunc(text, 200));
-            send_log(log_tx, prefix, log::Level::Info, &msg);
+            self.plug.log(log::Level::Info, &format!("{prefix}{msg}"));
         }
         if !nested {
             if !text.is_empty() {
@@ -1768,7 +1641,7 @@ impl LoopState {
             text,
             tool_calls,
             turn_usage,
-            log_tx,
+            &self.plug,
         );
         Ok(())
     }
@@ -1787,7 +1660,6 @@ impl LoopState {
         captured: &mut Option<Vec<serde_json::Value>>,
         loop_start: Instant,
         prefix: &str,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<DoneDecision, ClientError> {
         // Solo Done is the only valid completion signal. Mixed Done + other
         // tool calls is incoherent and rejected wholesale so the model retries
@@ -1839,11 +1711,9 @@ impl LoopState {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                send_log(
-                    log_tx,
-                    prefix,
+                self.plug.log(
                     log::Level::Info,
-                    &format!("tool: Done {}", trunc(&done_summary, 200)),
+                    &format!("{prefix}tool: Done {}", trunc(&done_summary, 200)),
                 );
                 if !nested && !expected_artifact_paths.is_empty() {
                     let missing = missing_artifacts(expected_artifact_paths);
@@ -1890,7 +1760,7 @@ impl LoopState {
                     self.total_reasoning_tokens,
                 );
                 if !nested {
-                    emit_final(prefix, self.turns, "", log_tx);
+                    emit_final(prefix, self.turns, "", &self.plug);
                     emit_summary(
                         prefix,
                         self.turn_num,
@@ -1900,7 +1770,7 @@ impl LoopState {
                         self.total_cached_tokens,
                         self.total_cache_creation_tokens,
                         self.total_reasoning_tokens,
-                        log_tx,
+                        &self.plug,
                     );
                 }
                 // Emit Done via stream_events. Nested loops skip this — only
@@ -1966,7 +1836,6 @@ impl LoopState {
         raw: &mut Option<std::fs::File>,
         captured: &mut Option<Vec<serde_json::Value>>,
         prefix: &str,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> EmptyTurnAction {
         // In interactive mode, empty turns are expected — the operator is
         // driving the conversation. Don't nudge or remind.
@@ -2072,7 +1941,7 @@ impl LoopState {
             self.total_reasoning_tokens,
         );
         if !nested {
-            emit_final(prefix, self.turns, " (exhausted)", log_tx);
+            emit_final(prefix, self.turns, " (exhausted)", &self.plug);
             emit_summary(
                 prefix,
                 self.turn_num,
@@ -2082,7 +1951,7 @@ impl LoopState {
                 self.total_cached_tokens,
                 self.total_cache_creation_tokens,
                 self.total_reasoning_tokens,
-                log_tx,
+                &self.plug,
             );
         }
         let mut messages = self.history.clone();
@@ -2177,14 +2046,13 @@ pub(crate) async fn run_agent_loop(
         cwd_display,
         trunc(reasoning_effort.unwrap_or("default"), 50)
     );
-    send_log(&ctx.params.log_tx, &prefix, log::Level::Info, &log_line);
+    ctx.plug
+        .log(log::Level::Info, &format!("{prefix}{log_line}"));
 
     if cwd.is_none() {
-        send_log(
-            &ctx.params.log_tx,
-            &prefix,
+        ctx.plug.log(
             log::Level::Info,
-            "warning: no cwd set for worktree enforcement",
+            &format!("{prefix}warning: no cwd set for worktree enforcement"),
         );
     }
 
@@ -2256,6 +2124,7 @@ pub(crate) async fn run_agent_loop(
         active_skills: ctx.params.active_skills.clone(),
         skills_available: ctx.params.skills_available,
         discovered_skills: ctx.params.discovered_skills.clone(),
+        log_tx: ctx.params.log_tx.clone(),
     };
     let tool_defs = tools::tool_definitions(opts.tool_filter, ctx.params.skills_available);
 
@@ -2271,7 +2140,6 @@ pub(crate) async fn run_agent_loop(
         idle_timeout,
         max_turns,
         ctx.completion_nudge_budget,
-        ctx.params.log_tx.clone(),
         opts.temperature,
         opts.max_tokens,
         opts.extra.clone(),
@@ -2279,7 +2147,6 @@ pub(crate) async fn run_agent_loop(
     );
     tool_ctx.task_fn = Some(runner);
 
-    let prompt_debug_store = ctx.params.prompt_debug_store.clone();
     run_agent_loop_core(
         &model,
         prompt,
@@ -2297,18 +2164,12 @@ pub(crate) async fn run_agent_loop(
         &ctx.expected_artifact_paths,
         ctx.reminder_budget,
         ctx.completion_nudge_budget,
-        &ctx.params.log_tx,
-        ctx.params.gremlin_id.clone(),
-        ctx.params.token_usage_sink.clone(),
+        &ctx.plug,
         interactive,
         tool_output_rx,
         ctx.prepopulated_messages.clone(),
         ctx.compaction_opts,
         ctx.params.compactor.clone(),
-        ctx.scratchpad_path.clone(),
-        ctx.scratchpad_root.clone(),
-        ctx.landscape_data.clone(),
-        prompt_debug_store,
     )
     .await
 }
@@ -2330,16 +2191,12 @@ pub(crate) async fn run_agent_loop_nested(
     idle_timeout: f64,
     max_turns: usize,
     completion_nudge_budget: usize,
-    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     temperature: Option<f64>,
     max_tokens: Option<u64>,
     extra: Option<serde_json::Value>,
     preserve_reasoning_in_history: bool,
     prepopulated_messages: Option<Vec<Message>>,
 ) -> Result<CompletedRun, ClientError> {
-    if let Some(ref tx) = log_tx {
-        let _ = tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
-    }
     let opts = LoopOpts {
         extra,
         tool_filter,
@@ -2373,6 +2230,19 @@ pub(crate) async fn run_agent_loop_nested(
     } else {
         format!("{id_chain}.")
     };
+    // Forward nested-loop log lines to the optional channel so callers
+    // (tests, debug tooling) can observe task begin/turn events without
+    // subscribing to the process-wide logger.
+    let mut plug = LoopPlug::new();
+    if let Some(log_tx) = nested_tool_ctx.log_tx.clone() {
+        plug.register_logger(move |_level, msg| {
+            let _ = log_tx.send(msg.to_string());
+        });
+    }
+    plug.log(
+        log::Level::Info,
+        &format!("{prefix}task: begin (max_turns={max_turns})"),
+    );
     let result = run_agent_loop_core(
         &model,
         prompt,
@@ -2390,23 +2260,15 @@ pub(crate) async fn run_agent_loop_nested(
         &[],
         0,
         completion_nudge_budget,
-        &log_tx,
-        None,
-        TokenUsageSink(None),
+        &plug,
         None,
         None,
         prepopulated_messages,
         None,
         None,
-        None,
-        None,
-        None,
-        None,
     )
     .await;
-    if let Some(ref tx) = log_tx {
-        let _ = tx.send(format!("{prefix}task: end"));
-    }
+    plug.log(log::Level::Info, &format!("{prefix}task: end"));
     result
 }
 
@@ -2749,18 +2611,12 @@ async fn run_agent_loop_core(
     expected_artifact_paths: &[PathBuf],
     reminder_budget: usize,
     completion_nudge_budget: usize,
-    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    gremlin_id: Option<String>,
-    token_usage_sink: TokenUsageSink,
+    plug: &LoopPlug,
     interactive: Option<InteractiveSession>,
     tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
     prepopulated_messages: Option<Vec<Message>>,
     compaction_opts: Option<CompactionOpts>,
     compactor: Option<Arc<dyn compaction::Compactor>>,
-    scratchpad_path: Option<PathBuf>,
-    scratchpad_root: Option<PathBuf>,
-    landscape_data: Option<crate::landscape::LandscapeData>,
-    prompt_debug_store: Option<Arc<dyn StateStore + Send + Sync>>,
 ) -> Result<CompletedRun, ClientError> {
     let mut state = LoopState::new(
         system_prompt,
@@ -2773,9 +2629,7 @@ async fn run_agent_loop_core(
         max_turns,
         prefix,
         opts.preserve_reasoning_in_history,
-        landscape_data,
-        log_tx.clone(),
-        prompt_debug_store,
+        plug,
     );
     let loop_start = Instant::now();
     let turn_retry_backoff = crate::config::turn_retry_backoff();
@@ -2783,16 +2637,14 @@ async fn run_agent_loop_core(
     while state.remaining_turns > 0 {
         if cancel.is_cancelled() {
             log::info!("agent_loop: cancelled before turn (label={})", prefix);
-            send_log(
-                log_tx,
-                prefix,
+            plug.log(
                 log::Level::Info,
-                "exit: cancelled before turn",
+                &format!("{prefix}exit: cancelled before turn"),
             );
             return Err(cancelled_error("cancelled", &state.history));
         }
 
-        match state.await_interactive_turn(model, prefix, log_tx).await? {
+        match state.await_interactive_turn(model, prefix).await? {
             InteractiveBoundary::ContinueLoop => continue,
             InteractiveBoundary::RunTurn => {}
         }
@@ -2803,11 +2655,7 @@ async fn run_agent_loop_core(
 
         // Inject the persistent scratchpad on every turn of the main
         // (non-nested) loop. See [`LoopState::inject_scratchpad`].
-        state.inject_scratchpad(
-            scratchpad_path.as_deref(),
-            scratchpad_root.as_deref(),
-            nested,
-        );
+        state.inject_scratchpad(nested);
 
         let outcome = state
             .stream_turn(
@@ -2819,11 +2667,8 @@ async fn run_agent_loop_core(
                 prefix,
                 idle_timeout,
                 nested,
-                log_tx,
                 compaction_opts,
                 compactor.clone(),
-                scratchpad_path.as_deref(),
-                scratchpad_root.as_deref(),
                 &turn_retry_backoff,
                 &timeout_retry_backoff,
             )
@@ -2870,24 +2715,14 @@ async fn run_agent_loop_core(
         let turn_stats = turn_stats(state.turn_num, turn_usage.as_ref());
         let totals = state.fold_turn_usage(turn_usage.as_ref());
 
-        // ── Emit cumulative token usage via injected sink ─────
-        if let Some(ref id) = gremlin_id {
-            if let Some(ref sink) = token_usage_sink.0 {
-                let (last_prompt, last_cached) = turn_stats
-                    .as_ref()
-                    .map(|ts| (ts.prompt_tokens, ts.cached_input_tokens))
-                    .unwrap_or((None, None));
-                sink(TokenUsageEvent {
-                    id: id.clone(),
-                    usage: totals.clone(),
-                    cost_usd: None,
-                    last_prompt_tokens: last_prompt,
-                    last_cached_input_tokens: last_cached,
-                });
-            }
-        }
+        // ── Emit cumulative token usage via plug ─────
+        let (last_prompt, last_cached) = turn_stats
+            .as_ref()
+            .map(|ts| (ts.prompt_tokens, ts.cached_input_tokens))
+            .unwrap_or((None, None));
+        plug.emit_token_usage(totals.clone(), last_prompt, last_cached);
 
-        emit_turn_stats(prefix, state.turn_num, turn_stats.as_ref(), &totals, log_tx);
+        emit_turn_stats(prefix, state.turn_num, turn_stats.as_ref(), &totals, plug);
 
         state
             .emit_turn_artifacts(
@@ -2906,7 +2741,6 @@ async fn run_agent_loop_core(
                 raw,
                 captured,
                 prefix,
-                log_tx,
             )
             .await?;
 
@@ -2926,7 +2760,6 @@ async fn run_agent_loop_core(
                 captured,
                 loop_start,
                 prefix,
-                log_tx,
             )
             .await?
         {
@@ -2952,7 +2785,6 @@ async fn run_agent_loop_core(
                 raw,
                 captured,
                 prefix,
-                log_tx,
             ) {
                 EmptyTurnAction::ContinueLoop => continue,
                 EmptyTurnAction::ReturnRun(run) => return Ok(*run),
@@ -2967,10 +2799,7 @@ async fn run_agent_loop_core(
                 tool_ctx,
                 model,
                 prefix,
-                log_tx,
-                &token_usage_sink,
                 cancel,
-                gremlin_id.as_deref(),
                 raw,
                 captured,
                 nested,
@@ -2986,7 +2815,7 @@ async fn run_agent_loop_core(
         } else {
             ""
         };
-        emit_final(prefix, state.turns, suffix, log_tx);
+        emit_final(prefix, state.turns, suffix, plug);
         emit_summary(
             prefix,
             state.turn_num,
@@ -2996,28 +2825,24 @@ async fn run_agent_loop_core(
             state.total_cached_tokens,
             state.total_cache_creation_tokens,
             state.total_reasoning_tokens,
-            log_tx,
+            plug,
         );
     }
 
     if state.timed_out {
         log::info!("agent_loop: exit (stream idle timeout, label={})", prefix);
-        send_log(
-            log_tx,
-            prefix,
+        plug.log(
             log::Level::Info,
-            "exit: stream idle timeout",
+            &format!("{prefix}exit: stream idle timeout"),
         );
         if state.exhausted_timeout_retries {
             log::error!(
                 "agent_loop: exhausted turn-level timeout retries, giving up (label={})",
                 prefix
             );
-            send_log(
-                log_tx,
-                prefix,
+            plug.log(
                 log::Level::Info,
-                "exit: exhausted turn-level timeout retries",
+                &format!("{prefix}exit: exhausted turn-level timeout retries"),
             );
             return Err(ClientError::RetryExhausted {
                 message: "exhausted turn-level timeout retries".into(),
@@ -3029,18 +2854,16 @@ async fn run_agent_loop_core(
     }
     if let Some(err) = state.stream_error {
         log::info!("agent_loop: exit (stream error, label={})", prefix);
-        send_log(log_tx, prefix, log::Level::Info, "exit: stream error");
+        plug.log(log::Level::Info, &format!("{prefix}exit: stream error"));
         if state.exhausted_turn_retries {
             log::error!(
                 "agent_loop: exhausted turn-level retries ({} attempts), giving up (label={}): {err}",
                 turn_retry_backoff.len() + 1,
                 prefix
             );
-            send_log(
-                log_tx,
-                prefix,
+            plug.log(
                 log::Level::Info,
-                "exit: exhausted turn-level retries",
+                &format!("{prefix}exit: exhausted turn-level retries"),
             );
             return Err(ClientError::RetryExhausted {
                 message: format!(
@@ -3053,11 +2876,9 @@ async fn run_agent_loop_core(
         return Err(classify(err));
     }
     log::info!("agent_loop: exit (exceeded max turns, label={})", prefix);
-    send_log(
-        log_tx,
-        prefix,
+    plug.log(
         log::Level::Info,
-        &format!("exit: exceeded max turns ({max_turns})"),
+        &format!("{prefix}exit: exceeded max turns ({max_turns})"),
     );
     Err(ClientError::Runtime {
         message: format!("exceeded max turns ({max_turns})"),
@@ -3116,7 +2937,7 @@ fn emit_turn_stats(
     turn: usize,
     stats: Option<&TurnStats>,
     totals: &UsageStats,
-    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    plug: &LoopPlug,
 ) {
     let payload = serde_json::json!({
         "type": "turn_stats",
@@ -3124,7 +2945,7 @@ fn emit_turn_stats(
         "stats": stats,
         "totals": totals,
     });
-    send_log(log_tx, prefix, log::Level::Info, &payload.to_string());
+    plug.log(log::Level::Info, &format!("{prefix}{payload}"));
 }
 
 /// Emit per-turn telemetry: timing, token counts, cache hit ratio, reasoning ratio.
@@ -3139,7 +2960,7 @@ fn emit_turn_metrics(
     text: &str,
     tool_calls: &[ToolCall],
     usage: Option<&Usage>,
-    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    plug: &LoopPlug,
 ) {
     if !crate::config::telemetry_enabled() {
         return;
@@ -3195,7 +3016,7 @@ fn emit_turn_metrics(
         reasoning_tok,
         reasoning_byte_ratio,
     );
-    send_log(log_tx, prefix, log::Level::Info, &msg);
+    plug.log(log::Level::Info, &format!("{prefix}{msg}"));
 }
 
 /// Emit stage-end telemetry summary (always emitted, not gated by GREMLINS_TELEMETRY).
@@ -3209,7 +3030,7 @@ fn emit_summary(
     total_cached: Option<u64>,
     total_cache_creation: Option<u64>,
     total_reasoning: Option<u64>,
-    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    plug: &LoopPlug,
 ) {
     let wall = loop_start.elapsed();
     let total_prompt_u = total_prompt.unwrap_or(0);
@@ -3256,17 +3077,12 @@ fn emit_summary(
         total_cache_creation.unwrap_or(0),
         reasoning_pct,
     );
-    send_log(log_tx, prefix, log::Level::Info, &msg);
+    plug.log(log::Level::Info, &format!("{prefix}{msg}"));
 }
 
-pub(crate) fn emit_final(
-    prefix: &str,
-    turns: usize,
-    suffix: &str,
-    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
-) {
+pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str, plug: &LoopPlug) {
     let msg = format!("final: turns={turns} cost=not-reported{suffix}");
-    send_log(log_tx, prefix, log::Level::Info, &msg);
+    plug.log(log::Level::Info, &format!("{prefix}{msg}"));
 }
 
 #[cfg(test)]
@@ -3868,10 +3684,11 @@ mod tests {
                 discovered_skills: None,
                 compactor: None,
                 active_skills: None,
-                token_usage_sink: TokenUsageSink(None),
+                token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
                 scratchpad_path: None,
                 landscape_data: None,
                 prompt_debug_store: None,
+                plug: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
@@ -3881,9 +3698,7 @@ mod tests {
             stream_events: None,
             prepopulated_messages: None,
             compaction_opts: None,
-            scratchpad_path: None,
-            scratchpad_root: None,
-            landscape_data: None,
+            plug: LoopPlug::new(),
         }
     }
 
@@ -5845,32 +5660,24 @@ mod tests {
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
         let key = ledger_key_arg(&serde_json::json!({"file_path": f.to_str().unwrap()}));
         assert!(key.contains("x.txt"), "ledger must name the file: {key}");
-        // The [seen] block now travels through compose_model_transcript
-        // into User messages, not the system prompt.  It appears in both
-        // the bootstrap (turn 0 seed) and the prompt tail (turn N with
-        // file entries); find the *last* one — the tail.
+        // The [seen] block now travels through the system prompt as trusted
+        // content — the first message in chat_history.
         assert!(history.len() >= 3, "unexpected history: {history:#?}");
-        let user_msg_with_seen = history.iter().rev().find(|m| {
-            matches!(m, Message::User { content } if content.iter().any(|c| {
-                matches!(c, UserContent::Text(t) if t.text.contains("[seen]"))
-            }))
-        });
-        let seen_text = match user_msg_with_seen {
-            Some(Message::User { content }) => {
-                content.iter().find_map(|c| match c {
-                    UserContent::Text(t) if t.text.contains("[seen]") => Some(&t.text),
-                    _ => None,
-                }).unwrap()
-            }
-            _ => panic!("no user message contains [seen] block: {history:#?}"),
+        let sys_msg = match history.first() {
+            Some(Message::System { content }) => content,
+            other => panic!("system prompt must lead the history, got: {other:?}"),
         };
         assert!(
-            seen_text.contains(&key),
-            "ledger must name the file: {seen_text}"
+            sys_msg.contains("[seen]"),
+            "ledger must be in the system prompt: {sys_msg}"
         );
         assert!(
-            seen_text.contains("R("),
-            "ledger must show Read indicator: {seen_text}"
+            sys_msg.contains(&key),
+            "ledger must name the file: {sys_msg}"
+        );
+        assert!(
+            sys_msg.contains("R("),
+            "ledger must show Read indicator: {sys_msg}"
         );
         // The history must contain a tool result.
         let has_result = history.iter().any(|m| {
@@ -5939,32 +5746,20 @@ mod tests {
 
         let reqs = model.requests();
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
-        // The [seen] block now travels through compose_model_transcript
-        // into User messages, not the system prompt.  It appears in both
-        // the bootstrap (turn 0 seed) and the prompt tail (turn N with
-        // file entries); find the *last* one — the tail.
+        // The [seen] block now travels through the system prompt as trusted
+        // content — the first message in chat_history.
         assert!(history.len() >= 4, "unexpected history: {history:#?}");
-        let user_msg_with_seen = history.iter().rev().find(|m| {
-            matches!(m, Message::User { content } if content.iter().any(|c| {
-                matches!(c, UserContent::Text(t) if t.text.contains("[seen]"))
-            }))
-        });
-        let seen_text = match user_msg_with_seen {
-            Some(Message::User { content }) => {
-                content.iter().find_map(|c| match c {
-                    UserContent::Text(t) if t.text.contains("[seen]") => Some(&t.text),
-                    _ => None,
-                }).unwrap()
-            }
-            _ => panic!("no user message contains [seen] block: {history:#?}"),
+        let sys_msg = match history.first() {
+            Some(Message::System { content }) => content,
+            other => panic!("system prompt must lead the history, got: {other:?}"),
         };
         assert!(
-            seen_text.contains("a.txt") && seen_text.contains("b.txt"),
-            "ledger must list both actions: {seen_text}"
+            sys_msg.contains("a.txt") && sys_msg.contains("b.txt"),
+            "ledger must list both actions: {sys_msg}"
         );
         assert!(
-            seen_text.contains("[seen]"),
-            "transcript block must contain [seen]"
+            sys_msg.contains("[seen]"),
+            "system prompt must contain [seen] block"
         );
     }
 
@@ -7075,6 +6870,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         }
     }
 
@@ -7131,14 +6927,8 @@ mod tests {
                 &[],
                 0,
                 0,
-                &None,
-                None,
-                TokenUsageSink(None),
+                &LoopPlug::new(),
                 Some(session),
-                None,
-                None,
-                None,
-                None,
                 None,
                 None,
                 None,
@@ -7250,14 +7040,8 @@ mod tests {
                 &[],
                 0,
                 0,
-                &None,
-                None,
-                TokenUsageSink(None),
+                &LoopPlug::new(),
                 Some(session),
-                None,
-                None,
-                None,
-                None,
                 None,
                 None,
                 None,
@@ -7356,14 +7140,8 @@ mod tests {
                 &[],
                 0,
                 0,
-                &None,
-                None,
-                TokenUsageSink(None),
+                &LoopPlug::new(),
                 Some(session),
-                None,
-                None,
-                None,
-                None,
                 None,
                 None,
                 None,
@@ -7451,14 +7229,8 @@ mod tests {
                 &[],
                 0,
                 0,
-                &None,
-                None,
-                TokenUsageSink(None),
+                &LoopPlug::new(),
                 Some(session),
-                None,
-                None,
-                None,
-                None,
                 None,
                 None,
                 None,
@@ -7598,7 +7370,10 @@ mod tests {
         let cancel = CancelToken::new();
         let opts = loop_opts(None);
         let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let log_slot = Some(log_tx);
+        let mut plug = LoopPlug::new();
+        plug.register_logger(move |_level, msg| {
+            let _ = log_tx.send(msg.to_string());
+        });
 
         let result = run_agent_loop_core(
             &model,
@@ -7617,13 +7392,7 @@ mod tests {
             &[],
             0,
             0,
-            &log_slot,
-            None,
-            TokenUsageSink(None),
-            None,
-            None,
-            None,
-            None,
+            &plug,
             None,
             None,
             None,
@@ -7707,13 +7476,7 @@ mod tests {
             &[],
             0,
             0,
-            &None,
-            None,
-            TokenUsageSink(None),
-            None,
-            None,
-            None,
-            None,
+            &LoopPlug::new(),
             None,
             None,
             None,
