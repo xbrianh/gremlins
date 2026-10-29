@@ -377,6 +377,7 @@ impl LoopState {
         prefix: &str,
         preserve_reasoning_in_history: bool,
         landscape_data: Option<crate::landscape::LandscapeData>,
+        log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Self {
         // Destructure the interactive session into its components so we can
         // thread them independently through the loop.
@@ -424,7 +425,7 @@ impl LoopState {
                     vec![Box::new(ledger) as Box<dyn MutableModelContext>];
                 if let Some(ld) = landscape_data {
                     contexts.push(Box::new(
-                        crate::clients::landscape_context::LandscapeContext::new(ld),
+                        crate::clients::landscape_context::LandscapeContext::new(ld, log_tx),
                     ) as Box<dyn MutableModelContext>);
                 }
                 contexts
@@ -2675,6 +2676,7 @@ async fn run_agent_loop_core(
         prefix,
         opts.preserve_reasoning_in_history,
         landscape_data,
+        log_tx.clone(),
     );
     let loop_start = Instant::now();
     let turn_retry_backoff = crate::config::turn_retry_backoff();

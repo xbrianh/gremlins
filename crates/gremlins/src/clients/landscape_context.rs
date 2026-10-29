@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::executor::send_log;
 use crate::landscape::{LandscapeData, LandscapeExplorer};
 
 /// Mutable model context that maintains a living landscape of the worktree.
@@ -29,6 +30,8 @@ pub(crate) struct LandscapeContext {
     /// are no-ops and transcripts are always empty.  Remains false even after
     /// every directory entry is decay-pruned, so re-touches can re-explore.
     landscape_enabled: bool,
+    /// Per-gremlin log channel for landscape statistics.
+    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 impl LandscapeContext {
@@ -37,7 +40,10 @@ impl LandscapeContext {
     /// Calls [`LandscapeData::seed`] to populate the initial directory entries.
     /// When `data` is empty (no outlines, no signal sections), no seeding is
     /// performed and all transcripts will be empty.
-    pub(crate) fn new(mut data: LandscapeData) -> Self {
+    pub(crate) fn new(
+        mut data: LandscapeData,
+        log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> Self {
         let landscape_enabled = !data.is_empty();
         if landscape_enabled {
             data.seed();
@@ -53,6 +59,7 @@ impl LandscapeContext {
             max_tokens,
             decay_turns,
             landscape_enabled,
+            log_tx,
         };
         // Seed turn 0 so the transcript length invariant holds before the
         // first finalize_turn call (mirrors ToolLedger seeding).
@@ -162,18 +169,9 @@ impl LandscapeContext {
             .map(|e| e.outline_items.iter().map(|(_, items)| items.len()).sum::<usize>())
             .sum();
 
-        log::info!(
-            "landscape context updated: {dir_count} directories, {file_count} files, {item_count} outline items"
-        );
-
-        let mut dirs: Vec<&std::path::PathBuf> = self.data.directory_entries.keys().collect();
-        dirs.sort();
-        log::debug!(
-            "landscape context directories:\n{}",
-            dirs.iter()
-                .map(|d| format!("  {}", d.display()))
-                .collect::<Vec<_>>()
-                .join("\n")
+        send_log(
+            &self.log_tx,
+            format!("landscape context updated: {dir_count} directories, {file_count} files, {item_count} outline items"),
         );
     }
 
