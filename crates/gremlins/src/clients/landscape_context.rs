@@ -57,6 +57,7 @@ impl LandscapeContext {
         // Seed turn 0 so the transcript length invariant holds before the
         // first finalize_turn call (mirrors ToolLedger seeding).
         ctx.capture_turn_transcript(0);
+        ctx.log_stats();
         ctx
     }
 
@@ -106,7 +107,26 @@ impl LandscapeContext {
                 if file_path.is_empty() {
                     None
                 } else {
-                    Some(PathBuf::from(file_path))
+                    // The Landscape tool resolves `file_path` against the
+                    // worktree root and accepts either a directory or a file.
+                    // Mirror that here: touch the directory itself, or the
+                    // file's parent directory, so the living landscape cache
+                    // is refreshed for exactly the location the tool explored.
+                    let path = Path::new(file_path);
+                    let resolved = if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        self.data.root.join(path)
+                    };
+                    if resolved.is_dir() {
+                        Some(resolved)
+                    } else {
+                        resolved
+                            .parent()
+                            .filter(|parent| !parent.as_os_str().is_empty())
+                            .map(|parent| parent.to_path_buf())
+                            .or_else(|| Some(self.data.root.clone()))
+                    }
                 }
             }
             _ => None,
@@ -116,8 +136,45 @@ impl LandscapeContext {
             if !dir.as_os_str().is_empty() {
                 let explorer = LandscapeExplorer;
                 self.data.touch_dir(dir, &explorer, turn);
+                self.log_stats();
             }
         }
+    }
+
+    /// Emit landscape statistics at info level, plus the full directory list
+    /// at debug level.
+    fn log_stats(&self) {
+        if !self.landscape_enabled {
+            return;
+        }
+
+        let dir_count = self.data.directory_entries.len();
+        let file_count: usize = self
+            .data
+            .directory_entries
+            .values()
+            .map(|e| e.sorted_files.len())
+            .sum();
+        let item_count: usize = self
+            .data
+            .directory_entries
+            .values()
+            .map(|e| e.outline_items.iter().map(|(_, items)| items.len()).sum::<usize>())
+            .sum();
+
+        log::info!(
+            "landscape context updated: {dir_count} directories, {file_count} files, {item_count} outline items"
+        );
+
+        let mut dirs: Vec<&std::path::PathBuf> = self.data.directory_entries.keys().collect();
+        dirs.sort();
+        log::debug!(
+            "landscape context directories:\n{}",
+            dirs.iter()
+                .map(|d| format!("  {}", d.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 
     /// Capture the current formatted landscape state as a turn transcript block.
@@ -201,6 +258,7 @@ impl super::model_context::MutableModelContext for LandscapeContext {
                     self.turn_transcripts[parent_idx] = theirs.clone();
                 }
             }
+            self.log_stats();
         }
     }
 }
