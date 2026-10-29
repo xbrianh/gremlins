@@ -79,6 +79,18 @@ fn snippet_around(s: &str, byte_index: usize, radius: usize) -> String {
     String::from_utf8_lossy(&bytes[start..end]).into_owned()
 }
 
+/// Trim a line to `max_chars` characters for compact diagnostics, appending
+/// an ellipsis when truncated.
+fn clip_line(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max_chars).collect();
+        out.push('…');
+        out
+    }
+}
+
 /// Walk `old_str` and the file content byte-by-byte from `content_start` and
 /// report the first point where they diverge.
 ///
@@ -340,19 +352,33 @@ fn apply_edits(content: &str, edits: &[EditOp], file_path: &str) -> Result<Strin
             // Convert byte positions to 1-based line numbers so the model
             // can immediately supply start_line/end_line to disambiguate.
             // Deduplicate so a self-overlapping needle (e.g. "aa" in "aaa")
-            // does not list the same line twice.
+            // does not list the same line twice. Each reported line also
+            // carries a trimmed snippet so the model can pick the right
+            // occurrence without a follow-up Read — a bare `}` or a block
+            // ending in `}` is otherwise ambiguous.
             let line_offsets = line_offsets.unwrap_or_else(|| compute_line_offsets(&buffer));
-            let mut match_lines: Vec<String> = match_positions
-                .iter()
-                .map(|&pos| {
-                    let line_no = match line_offsets.binary_search(&pos) {
-                        Ok(idx) => idx + 1,
-                        Err(idx) => idx,
-                    };
-                    line_no.to_string()
-                })
-                .collect();
-            match_lines.dedup();
+            let mut entries: Vec<(String, String)> = Vec::new();
+            for &pos in &match_positions {
+                let line_no = match line_offsets.binary_search(&pos) {
+                    Ok(idx) => idx + 1,
+                    Err(idx) => idx,
+                };
+                let line_no_str = line_no.to_string();
+                if entries
+                    .last()
+                    .map(|(n, _)| n == &line_no_str)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let start = line_offsets.get(line_no - 1).copied().unwrap_or(0);
+                let end = line_offsets
+                    .get(line_no)
+                    .copied()
+                    .unwrap_or(buffer.len());
+                let line = buffer[start..end].trim_end_matches(&['\r', '\n'][..]);
+                entries.push((line_no_str, clip_line(line, 120)));
+            }
 
             let scope_label = if edit.scope_start.is_some() {
                 "matches within scope at lines "
@@ -360,21 +386,31 @@ fn apply_edits(content: &str, edits: &[EditOp], file_path: &str) -> Result<Strin
                 "matches at lines "
             };
 
-            let (shown, suffix) = if match_lines.len() > 10 {
-                (
-                    match_lines[..10].join(", "),
-                    format!(" and {} more", match_lines.len() - 10),
-                )
+            let total = entries.len();
+            let shown_count = total.min(10);
+            let lines_shown = entries[..shown_count]
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let suffix = if total > 10 {
+                format!(" and {} more", total - 10)
             } else {
-                (match_lines.join(", "), String::new())
+                String::new()
             };
+            let context = entries[..shown_count]
+                .iter()
+                .map(|(n, snippet)| format!("  line {n}: {snippet:?}"))
+                .collect::<Vec<_>>()
+                .join("\n");
 
             return Err(format!(
-                "Error: old_string is not unique in {file_path} (edit {}) — {}{}{}",
+                "Error: old_string is not unique in {file_path} (edit {}) — {}{}{}{}",
                 i + 1,
                 scope_label,
-                shown,
-                suffix
+                lines_shown,
+                suffix,
+                context
             ));
         }
 
@@ -606,6 +642,24 @@ mod tests {
         let err = apply_edits(content, &edits, "f.txt").unwrap_err();
         assert!(err.contains("not unique"), "got: {err}");
         assert!(err.contains("matches at lines 1, 2, 3, 4, 5"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_match_reports_snippets_on_not_unique() {
+        // A bare `}` style needle matches multiple lines; the error should
+        // include a trimmed snippet per match so the model can disambiguate
+        // without a follow-up Read.
+        let content = "fn a() {\n  {}\n}\nfn b() {\n  {}\n}\n";
+        let edits = vec![EditOp {
+            old_str: "}".into(),
+            new_str: "}".into(),
+            scope_start: None,
+            scope_end: None,
+        }];
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
+        assert!(err.contains("not unique"), "got: {err}");
+        assert!(err.contains("line 3:"), "got: {err}");
+        assert!(err.contains("line 6:"), "got: {err}");
     }
 
     #[test]
