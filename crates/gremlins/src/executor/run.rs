@@ -694,7 +694,7 @@ async fn run_agent(
             root: cwd2.clone(),
             outlines: effective_outlines,
             signal_sections,
-            directory_entries: Default::default(),
+            file_entries: Default::default(),
         };
         Some(seed)
     } else {

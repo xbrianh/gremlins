@@ -6,14 +6,14 @@ use crate::landscape::{LandscapeData, LandscapeExplorer};
 /// Mutable model context that maintains a living landscape of the worktree.
 ///
 /// Owns a [`LandscapeData`] holding the full-tree outlines and signal sections
-/// from stage start, plus per-directory cached file listings that are refreshed
-/// on tool touches and pruned by turn decay.
+/// from stage start, plus a per-file cache that is refreshed on tool touches
+/// and pruned by turn decay.
 ///
-/// On each tool observation (Read/Grep/Landscape/Write/Edit/Glob), the tool's
-/// parent directory is re-explored on disk so the landscape always reflects
-/// current file state. Directories untouched for more than `decay_turns`
-/// turns are pruned at [`finalize_turn`]. When `decay_turns` is 0 pruning
-/// is disabled entirely.
+/// On each tool observation (Read/Grep/Landscape/Write/Edit/Glob), the touched
+/// file (or directory) is re-explored on disk so the landscape always reflects
+/// current file state. Files untouched for more than `decay_turns` turns are
+/// pruned at [`finalize_turn`]. When `decay_turns` is 0 pruning is disabled
+/// entirely.
 #[derive(Clone)]
 pub(crate) struct LandscapeContext {
     /// The living landscape data.
@@ -22,13 +22,13 @@ pub(crate) struct LandscapeContext {
     turn_transcripts: Vec<String>,
     /// Token budget for landscape rendering.
     max_tokens: usize,
-    /// Turn-decay window: directories untouched for more turns than this are pruned.
+    /// Turn-decay window: files untouched for more turns than this are pruned.
     /// When `0`, pruning is disabled.
     decay_turns: usize,
     /// Whether landscape was ever enabled for this stage.
     /// Set from `data.is_empty()` at construction — when false, all observations
     /// are no-ops and transcripts are always empty.  Remains false even after
-    /// every directory entry is decay-pruned, so re-touches can re-explore.
+    /// every file entry is decay-pruned, so re-touches can re-explore.
     landscape_enabled: bool,
     /// Per-gremlin log channel for landscape statistics.
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
@@ -37,7 +37,7 @@ pub(crate) struct LandscapeContext {
 impl LandscapeContext {
     /// Create a new LandscapeContext from the stage-start landscape data.
     ///
-    /// Calls [`LandscapeData::seed`] to populate the initial directory entries.
+    /// Calls [`LandscapeData::seed`] to populate the initial file entries.
     /// When `data` is empty (no outlines, no signal sections), no seeding is
     /// performed and all transcripts will be empty.
     pub(crate) fn new(
@@ -68,11 +68,11 @@ impl LandscapeContext {
         ctx
     }
 
-    /// Observe a tool call, touching the appropriate directory.
+    /// Observe a tool call, touching the appropriate file or directory.
     ///
-    /// Read/Grep/Landscape/Write/Edit/Glob all touch the tool's immediate
-    /// parent directory. The directory is re-explored on disk via
-    /// `LandscapeExplorer`.
+    /// Read/Write/Edit/Landscape touch the specific file (re-outlining it via
+    /// `LandscapeExplorer`); Grep/Glob/Landscape-on-a-directory touch the
+    /// directory (re-exploring its direct children).
     fn observe_tool(&mut self, turn: usize, tool: &str, args_json: &str) {
         // When landscape was never enabled, every observation is a no-op.
         if !self.landscape_enabled {
@@ -82,92 +82,82 @@ impl LandscapeContext {
         let args: serde_json::Value =
             serde_json::from_str(args_json).unwrap_or(serde_json::Value::Null);
 
-        let dir: Option<PathBuf> = match tool {
-            "Read" | "Write" | "Edit" => {
-                let file_path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-                if file_path.is_empty() {
-                    None
+        let raw = |key: &str| -> Option<String> {
+            args.get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty())
+        };
+
+        // Each entry is `(touch_as_file, path)`. Paths are resolved against
+        // the worktree root so file_entries keys stay absolute and comparable.
+        let target: Option<(bool, PathBuf)> = match tool {
+            "Read" | "Write" | "Edit" => raw("file_path").map(|p| (true, self.resolve_path(&p))),
+            "Grep" | "Glob" => raw("path").map(|p| {
+                let resolved = self.resolve_path(&p);
+                if resolved.is_dir() {
+                    (false, resolved)
                 } else {
-                    Path::new(file_path).parent().map(|p| p.to_path_buf())
+                    (false, self.parent_or_root(&resolved))
                 }
-            }
-            "Grep" | "Glob" => {
-                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                if path.is_empty() {
-                    None
+            }),
+            "Landscape" => raw("file_path").map(|p| {
+                let resolved = self.resolve_path(&p);
+                if resolved.is_dir() {
+                    (false, resolved)
                 } else {
-                    let p = Path::new(path);
-                    if p.is_dir() {
-                        Some(p.to_path_buf())
-                    } else {
-                        // `p.parent()` returns `Some("")` for `"."` on Unix —
-                        // fall back to `"."` so the root directory is touched.
-                        p.parent()
-                            .filter(|parent| !parent.as_os_str().is_empty())
-                            .map(|parent| parent.to_path_buf())
-                            .or_else(|| Some(PathBuf::from(".")))
-                    }
+                    (true, resolved)
                 }
-            }
-            "Landscape" => {
-                let file_path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-                if file_path.is_empty() {
-                    None
-                } else {
-                    // The Landscape tool resolves `file_path` against the
-                    // worktree root and accepts either a directory or a file.
-                    // Mirror that here: touch the directory itself, or the
-                    // file's parent directory, so the living landscape cache
-                    // is refreshed for exactly the location the tool explored.
-                    let path = Path::new(file_path);
-                    let resolved = if path.is_absolute() {
-                        path.to_path_buf()
-                    } else {
-                        self.data.root.join(path)
-                    };
-                    if resolved.is_dir() {
-                        Some(resolved)
-                    } else {
-                        resolved
-                            .parent()
-                            .filter(|parent| !parent.as_os_str().is_empty())
-                            .map(|parent| parent.to_path_buf())
-                            .or_else(|| Some(self.data.root.clone()))
-                    }
-                }
-            }
+            }),
             _ => None,
         };
 
-        if let Some(ref dir) = dir {
-            if !dir.as_os_str().is_empty() {
+        if let Some((touch_as_file, path)) = target {
+            if !path.as_os_str().is_empty() {
                 let explorer = LandscapeExplorer;
-                self.data.touch_dir(dir, &explorer, turn);
+                if touch_as_file {
+                    self.data.touch_file(&path, &explorer, turn);
+                } else {
+                    self.data.touch_dir(&path, &explorer, turn);
+                }
                 self.log_stats();
             }
         }
     }
 
-    /// Emit landscape statistics at info level, plus the full directory list
-    /// at debug level.
+    /// Resolve a raw tool path against the worktree root.
+    fn resolve_path(&self, p: &str) -> PathBuf {
+        let path = Path::new(p);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.data.root.join(path)
+        }
+    }
+
+    /// Return `path`'s parent, falling back to the worktree root.
+    fn parent_or_root(&self, path: &Path) -> PathBuf {
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or_else(|| self.data.root.clone())
+    }
+
+    /// Emit landscape statistics.
     fn log_stats(&self) {
         if !self.landscape_enabled {
             return;
         }
 
-        let dir_count = self.data.directory_entries.len();
-        let file_count: usize = self
+        let dir_count = self
             .data
-            .directory_entries
-            .values()
-            .map(|e| e.sorted_files.len())
-            .sum();
-        let item_count: usize = self
-            .data
-            .directory_entries
-            .values()
-            .map(|e| e.outline_items.iter().map(|(_, items)| items.len()).sum::<usize>())
-            .sum();
+            .file_entries
+            .keys()
+            .filter_map(|p| p.parent())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let file_count = self.data.file_entries.len();
+        let item_count: usize = self.data.file_entries.values().map(|e| e.items.len()).sum();
 
         send_log(
             &self.log_tx,
@@ -180,7 +170,8 @@ impl LandscapeContext {
         while self.turn_transcripts.len() <= turn_num {
             self.turn_transcripts.push(String::new());
         }
-        let rendered = if self.data.directory_entries.is_empty() {
+        let rendered = if self.data.file_entries.is_empty() && self.data.signal_sections.is_empty()
+        {
             String::new()
         } else {
             crate::landscape::format_landscape_data(&self.data, self.max_tokens)
@@ -230,19 +221,19 @@ impl super::model_context::MutableModelContext for LandscapeContext {
 
     fn join(&mut self, other: &dyn super::model_context::MutableModelContext) {
         if let Some(other_ctx) = other.as_any().downcast_ref::<LandscapeContext>() {
-            // Merge directory entries: re-stamp child entries with the
-            // parent's current turn so they share the parent's decay
-            // clock rather than the child's independent turn space.
+            // Merge file entries: re-stamp child entries with the parent's
+            // current turn so they share the parent's decay clock rather than
+            // the child's independent turn space.
             let current_turn = self.turn_transcripts.len().saturating_sub(1);
-            for (dir, entry) in &other_ctx.data.directory_entries {
-                let should_insert = match self.data.directory_entries.get(dir) {
+            for (path, entry) in &other_ctx.data.file_entries {
+                let should_insert = match self.data.file_entries.get(path) {
                     Some(existing) => existing.last_touched_turn < entry.last_touched_turn,
                     None => true,
                 };
                 if should_insert {
                     let mut new_entry = entry.clone();
                     new_entry.last_touched_turn = current_turn;
-                    self.data.directory_entries.insert(dir.clone(), new_entry);
+                    self.data.file_entries.insert(path.clone(), new_entry);
                 }
             }
             // Append child transcripts at the parent's current turn index

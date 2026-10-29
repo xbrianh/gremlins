@@ -185,14 +185,11 @@ pub(crate) struct RunContext {
     /// The allowed root for containment-checked scratchpad reads.
     pub(crate) scratchpad_root: Option<PathBuf>,
     /// Stage-start landscape data payload. `Some` carries precomputed
-    /// per-file outlines, grouped by directory, plus signal sections;
-    /// `None` when landscape is disabled for this stage. Passed through to
-    /// [`LoopState::new`] which creates a
-    /// [`landscape_context::LandscapeContext`] before the first turn.
+    /// per-file outlines plus signal sections; `None` when landscape is
+    /// disabled for this stage. Passed through to [`LoopState::new`] which
+    /// creates a [`landscape_context::LandscapeContext`] before the first turn.
     ///
-    /// Each entry is `(directory, sorted_file_names, per_file_items,
-    /// optional_prefix_content)`, where `per_file_items` maps a file base
-    /// name to that file's outline items.
+    /// The living index is keyed by full file path.
     pub(crate) landscape_data: Option<crate::landscape::LandscapeData>,
 }
 
