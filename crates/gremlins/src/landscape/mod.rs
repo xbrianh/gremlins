@@ -702,8 +702,7 @@ pub struct LandscapeData {
     pub(crate) signal_sections: Vec<signals::SignalSection>,
     /// Deduplicated symbol index for the living symbol map.
     /// Keyed by identifier name, maps to its first file:line occurrence.
-    pub(crate) symbol_index:
-        std::collections::HashMap<String, signals::SymbolEntry>,
+    pub(crate) symbol_index: std::collections::HashMap<String, signals::SymbolEntry>,
     /// Per-file cache: keyed by full file path.
     pub(crate) file_entries: std::collections::HashMap<std::path::PathBuf, LandscapeFileEntry>,
 }

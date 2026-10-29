@@ -420,7 +420,10 @@ pub(crate) fn extract_prompt_identifiers(prompt: &str) -> HashSet<String> {
 /// Render the symbol map from prompt-derived candidates resolved against the
 /// full symbol index. Entries are sorted by name and capped at 30. When the
 /// prompt is absent or empty the section is omitted entirely.
-pub(crate) fn build_symbol_map(ctx: &SignalContext, symbol_index: &HashMap<String, SymbolEntry>) -> String {
+pub(crate) fn build_symbol_map(
+    ctx: &SignalContext,
+    symbol_index: &HashMap<String, SymbolEntry>,
+) -> String {
     let candidates = match ctx.prompt.as_deref() {
         Some(p) if !p.trim().is_empty() => extract_prompt_identifiers(p),
         _ => return String::new(),
@@ -472,7 +475,12 @@ pub(crate) fn build_symbol_map(ctx: &SignalContext, symbol_index: &HashMap<Strin
 pub(crate) fn render_signal_sections(
     ctx: &SignalContext,
     outlines: &[super::FileOutline],
-) -> (Vec<SignalSection>, usize, Vec<PathBuf>, HashMap<String, SymbolEntry>) {
+) -> (
+    Vec<SignalSection>,
+    usize,
+    Vec<PathBuf>,
+    HashMap<String, SymbolEntry>,
+) {
     let signals = build_signals(ctx, outlines);
     let mut sections = Vec::new();
     let mut total_skipped = 0usize;

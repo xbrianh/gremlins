@@ -467,8 +467,7 @@ impl LoopState {
                     let signal_sections = std::mem::take(&mut ld.signal_sections);
                     let symbol_index = std::mem::take(&mut ld.symbol_index);
                     let cwd = ld.root.clone();
-                    let has_signals = !signal_sections.is_empty()
-                        || !symbol_index.is_empty();
+                    let has_signals = !signal_sections.is_empty() || !symbol_index.is_empty();
                     if has_signals {
                         contexts.push(Box::new(
                             crate::clients::signal_context::SignalMapContext::new(
@@ -732,9 +731,7 @@ impl LoopState {
             (true, None) => None,
             (true, Some(sys)) => Some(sys.clone()),
             (false, None) => Some(context_system_msgs.join("\n\n")),
-            (false, Some(sys)) => {
-                Some(format!("{}\n\n{}", context_system_msgs.join("\n\n"), sys))
-            }
+            (false, Some(sys)) => Some(format!("{}\n\n{}", context_system_msgs.join("\n\n"), sys)),
         };
 
         let mut builder = CompletionRequest::new(final_prompt)
@@ -5448,14 +5445,11 @@ mod tests {
         );
         // Empty ledger produces no system message — the system prompt
         // is absent or does not contain [seen].
-        match history.first() {
-            Some(Message::System { content }) => {
-                assert!(
-                    !content.contains("[seen]"),
-                    "empty ledger must not produce [seen] block"
-                );
-            }
-            _ => {} // No system prompt at all is also fine.
+        if let Some(Message::System { content }) = history.first() {
+            assert!(
+                !content.contains("[seen]"),
+                "empty ledger must not produce [seen] block"
+            );
         }
     }
 
@@ -7614,7 +7608,7 @@ mod tests {
             None,
             None,
             None,
-        None,
+            None,
         )
         .await
         .unwrap();
@@ -7704,7 +7698,7 @@ mod tests {
             None,
             None,
             None,
-        None,
+            None,
         )
         .await
         .unwrap();

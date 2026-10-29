@@ -65,10 +65,7 @@ impl SignalMapContext {
     /// Build the full rendered text: static sections + live symbol map.
     fn render(&self) -> String {
         let symbol_map = self.render_symbol_map();
-        match (
-            self.static_sections_text.is_empty(),
-            symbol_map.is_empty(),
-        ) {
+        match (self.static_sections_text.is_empty(), symbol_map.is_empty()) {
             (true, true) => String::new(),
             (true, false) => symbol_map,
             (false, true) => self.static_sections_text.clone(),
@@ -117,9 +114,7 @@ impl SignalMapContext {
         while self.turn_transcripts.len() <= turn {
             self.turn_transcripts.push(None);
         }
-        for entry in &mut self.turn_transcripts {
-            *entry = None;
-        }
+        self.turn_transcripts.fill(None);
         let rendered = self.render();
         if !rendered.is_empty() {
             self.turn_transcripts[turn] = Some(rendered);

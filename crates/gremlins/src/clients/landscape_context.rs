@@ -226,7 +226,10 @@ impl super::model_context::MutableModelContext for LandscapeContext {
         if self.data.file_entries.is_empty() && self.data.signal_sections.is_empty() {
             None
         } else {
-            Some(crate::landscape::format_landscape_data(&self.data, self.max_tokens))
+            Some(crate::landscape::format_landscape_data(
+                &self.data,
+                self.max_tokens,
+            ))
         }
     }
 

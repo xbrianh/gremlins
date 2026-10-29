@@ -507,17 +507,14 @@ impl super::model_context::MutableModelContext for ToolLedger {
     }
 
     fn transcript(&self) -> Vec<Option<String>> {
-        vec![None; self.turn_transcripts.len()]
+        self.turn_transcripts
+            .iter()
+            .map(|s| if s.is_empty() { None } else { Some(s.clone()) })
+            .collect()
     }
 
     fn system_message(&self) -> Option<String> {
-        let turn = self.turn_transcripts.len().saturating_sub(1);
-        let formatted = self.format(turn);
-        if formatted == "[seen]\n(none)" {
-            None
-        } else {
-            Some(formatted)
-        }
+        None
     }
 
     fn join(&mut self, other: &dyn super::model_context::MutableModelContext) {
