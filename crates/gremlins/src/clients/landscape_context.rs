@@ -219,10 +219,15 @@ impl super::model_context::MutableModelContext for LandscapeContext {
     }
 
     fn transcript(&self) -> Vec<Option<String>> {
-        self.turn_transcripts
-            .iter()
-            .map(|s| if s.is_empty() { None } else { Some(s.clone()) })
-            .collect()
+        vec![None; self.turn_transcripts.len()]
+    }
+
+    fn system_message(&self) -> Option<String> {
+        if self.data.file_entries.is_empty() && self.data.signal_sections.is_empty() {
+            None
+        } else {
+            Some(crate::landscape::format_landscape_data(&self.data, self.max_tokens))
+        }
     }
 
     fn join(&mut self, other: &dyn super::model_context::MutableModelContext) {

@@ -166,7 +166,16 @@ impl super::model_context::MutableModelContext for SignalMapContext {
     }
 
     fn transcript(&self) -> Vec<Option<String>> {
-        self.turn_transcripts.clone()
+        vec![None; self.turn_transcripts.len()]
+    }
+
+    fn system_message(&self) -> Option<String> {
+        let rendered = self.render();
+        if rendered.is_empty() {
+            None
+        } else {
+            Some(rendered)
+        }
     }
 
     fn join(&mut self, _other: &dyn super::model_context::MutableModelContext) {

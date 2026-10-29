@@ -707,9 +707,6 @@ impl LoopState {
         }
 
         // Compose per-turn context transcripts into the request messages.
-        // Context blocks (e.g. the [seen] ledger) are merged into user
-        // messages at the appropriate turn boundaries.  The final index
-        // becomes the prompt tail.
         let composed = compose_model_transcript(
             &self.stage_prompt,
             &request_messages,
@@ -722,10 +719,28 @@ impl LoopState {
             .map(|(last, rest)| (rest.to_vec(), last.clone()))
             .unwrap_or_else(|| (vec![], self.next_prompt.clone()));
 
+        // Assemble system messages from contexts — trusted, always-accurate
+        // content that belongs in the system prompt rather than in user
+        // message transcript blocks.
+        let context_system_msgs: Vec<String> = self
+            .contexts
+            .iter()
+            .filter_map(|ctx| ctx.system_message())
+            .collect();
+
+        let combined_system = match (context_system_msgs.is_empty(), self.system_prompt.as_ref()) {
+            (true, None) => None,
+            (true, Some(sys)) => Some(sys.clone()),
+            (false, None) => Some(context_system_msgs.join("\n\n")),
+            (false, Some(sys)) => {
+                Some(format!("{}\n\n{}", context_system_msgs.join("\n\n"), sys))
+            }
+        };
+
         let mut builder = CompletionRequest::new(final_prompt)
             .messages(history_msgs)
             .tools(tool_defs.to_vec());
-        if let Some(ref sys) = self.system_prompt {
+        if let Some(ref sys) = combined_system {
             builder = builder.preamble(sys.clone());
         }
         if let Some(params) = opts.extra.clone() {
@@ -5424,15 +5439,24 @@ mod tests {
             .unwrap();
         assert!(content.contains("unknown tool"));
         let reqs = model.requests();
-        let ledger = format!("{:?}", reqs[1].chat_history);
+        let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
+        // Denied calls appear in history as tool results.
+        let history_debug = format!("{:?}", history);
         assert!(
-            ledger.contains("Write"),
-            "denied call must appear in the ledger: {ledger}"
+            history_debug.contains("Write"),
+            "denied call must appear in the ledger: {history_debug}"
         );
-        assert!(
-            ledger.contains("[seen]"),
-            "ledger must use [seen] format: {ledger}"
-        );
+        // Empty ledger produces no system message — the system prompt
+        // is absent or does not contain [seen].
+        match history.first() {
+            Some(Message::System { content }) => {
+                assert!(
+                    !content.contains("[seen]"),
+                    "empty ledger must not produce [seen] block"
+                );
+            }
+            _ => {} // No system prompt at all is also fine.
+        }
     }
 
     #[tokio::test]
@@ -5827,23 +5851,24 @@ mod tests {
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
         let key = ledger_key_arg(&serde_json::json!({"file_path": f.to_str().unwrap()}));
         assert!(key.contains("x.txt"), "ledger must name the file: {key}");
-        // The [seen] block now travels through the prompt tail (the last
-        // message in chat_history). Earlier user messages also have context
-        // blocks prepended by compose_model_transcript.
+        // The [seen] block now travels through the system prompt as trusted
+        // content — the first message in chat_history.
         assert!(history.len() >= 3, "unexpected history: {history:#?}");
-        // Verify the [seen] ledger is in the prompt (last message).
-        let prompt_text = user_message_text(history.last().unwrap());
+        let sys_msg = match history.first() {
+            Some(Message::System { content }) => content,
+            other => panic!("system prompt must lead the history, got: {other:?}"),
+        };
         assert!(
-            prompt_text.contains("[seen]"),
-            "ledger must be a [seen] user message in the prompt tail: {prompt_text}"
+            sys_msg.contains("[seen]"),
+            "ledger must be in the system prompt: {sys_msg}"
         );
         assert!(
-            prompt_text.contains(&key),
-            "ledger must name the file: {prompt_text}"
+            sys_msg.contains(&key),
+            "ledger must name the file: {sys_msg}"
         );
         assert!(
-            prompt_text.contains("R("),
-            "ledger must show Read indicator: {prompt_text}"
+            sys_msg.contains("R("),
+            "ledger must show Read indicator: {sys_msg}"
         );
         // The history must contain a tool result.
         let has_result = history.iter().any(|m| {
@@ -5912,29 +5937,20 @@ mod tests {
 
         let reqs = model.requests();
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
-        // The [seen] block is now merged into user messages by
-        // compose_model_transcript.  Verify key structural elements.
+        // The [seen] block now travels through the system prompt as trusted
+        // content — the first message in chat_history.
         assert!(history.len() >= 4, "unexpected history: {history:#?}");
-        let all_text: Vec<String> = history
-            .iter()
-            .filter_map(|m| {
-                let t = user_message_text(m);
-                if t.is_empty() {
-                    None
-                } else {
-                    Some(t)
-                }
-            })
-            .collect();
-        // The last user text (prompt tail) must be the [seen] block.
-        let ledger = all_text.last().expect("must have ledger text");
+        let sys_msg = match history.first() {
+            Some(Message::System { content }) => content,
+            other => panic!("system prompt must lead the history, got: {other:?}"),
+        };
         assert!(
-            ledger.contains("a.txt") && ledger.contains("b.txt"),
-            "ledger must list both actions: {ledger}"
+            sys_msg.contains("a.txt") && sys_msg.contains("b.txt"),
+            "ledger must list both actions: {sys_msg}"
         );
         assert!(
-            ledger.contains("[seen]"),
-            "prompt must contain [seen] block"
+            sys_msg.contains("[seen]"),
+            "system prompt must contain [seen] block"
         );
     }
 

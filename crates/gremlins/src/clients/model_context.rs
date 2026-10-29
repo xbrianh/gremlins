@@ -38,6 +38,16 @@ pub(crate) trait MutableModelContext: Any + Send {
     /// `turn + 1` (the current turn number plus one for the seeded index).
     fn transcript(&self) -> Vec<Option<String>>;
 
+    /// Return the current context content as a system-prompt block.
+    ///
+    /// This content is trusted — it is always accurate and should be
+    /// treated as ground truth by the model.  It replaces per-turn
+    /// transcript blocks for contexts that have moved their content
+    /// into the system prompt.
+    fn system_message(&self) -> Option<String> {
+        None
+    }
+
     /// Merge another context of the same concrete type into `self`.
     ///
     /// Used after a parallel fork to reconcile observations from sibling
