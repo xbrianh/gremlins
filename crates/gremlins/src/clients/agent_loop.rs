@@ -5845,24 +5845,32 @@ mod tests {
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
         let key = ledger_key_arg(&serde_json::json!({"file_path": f.to_str().unwrap()}));
         assert!(key.contains("x.txt"), "ledger must name the file: {key}");
-        // The [seen] block now travels through the system prompt as trusted
-        // content — the first message in chat_history.
+        // The [seen] block now travels through compose_model_transcript
+        // into User messages, not the system prompt.  It appears in both
+        // the bootstrap (turn 0 seed) and the prompt tail (turn N with
+        // file entries); find the *last* one — the tail.
         assert!(history.len() >= 3, "unexpected history: {history:#?}");
-        let sys_msg = match history.first() {
-            Some(Message::System { content }) => content,
-            other => panic!("system prompt must lead the history, got: {other:?}"),
+        let user_msg_with_seen = history.iter().rev().find(|m| {
+            matches!(m, Message::User { content } if content.iter().any(|c| {
+                matches!(c, UserContent::Text(t) if t.text.contains("[seen]"))
+            }))
+        });
+        let seen_text = match user_msg_with_seen {
+            Some(Message::User { content }) => {
+                content.iter().find_map(|c| match c {
+                    UserContent::Text(t) if t.text.contains("[seen]") => Some(&t.text),
+                    _ => None,
+                }).unwrap()
+            }
+            _ => panic!("no user message contains [seen] block: {history:#?}"),
         };
         assert!(
-            sys_msg.contains("[seen]"),
-            "ledger must be in the system prompt: {sys_msg}"
+            seen_text.contains(&key),
+            "ledger must name the file: {seen_text}"
         );
         assert!(
-            sys_msg.contains(&key),
-            "ledger must name the file: {sys_msg}"
-        );
-        assert!(
-            sys_msg.contains("R("),
-            "ledger must show Read indicator: {sys_msg}"
+            seen_text.contains("R("),
+            "ledger must show Read indicator: {seen_text}"
         );
         // The history must contain a tool result.
         let has_result = history.iter().any(|m| {
@@ -5931,20 +5939,32 @@ mod tests {
 
         let reqs = model.requests();
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
-        // The [seen] block now travels through the system prompt as trusted
-        // content — the first message in chat_history.
+        // The [seen] block now travels through compose_model_transcript
+        // into User messages, not the system prompt.  It appears in both
+        // the bootstrap (turn 0 seed) and the prompt tail (turn N with
+        // file entries); find the *last* one — the tail.
         assert!(history.len() >= 4, "unexpected history: {history:#?}");
-        let sys_msg = match history.first() {
-            Some(Message::System { content }) => content,
-            other => panic!("system prompt must lead the history, got: {other:?}"),
+        let user_msg_with_seen = history.iter().rev().find(|m| {
+            matches!(m, Message::User { content } if content.iter().any(|c| {
+                matches!(c, UserContent::Text(t) if t.text.contains("[seen]"))
+            }))
+        });
+        let seen_text = match user_msg_with_seen {
+            Some(Message::User { content }) => {
+                content.iter().find_map(|c| match c {
+                    UserContent::Text(t) if t.text.contains("[seen]") => Some(&t.text),
+                    _ => None,
+                }).unwrap()
+            }
+            _ => panic!("no user message contains [seen] block: {history:#?}"),
         };
         assert!(
-            sys_msg.contains("a.txt") && sys_msg.contains("b.txt"),
-            "ledger must list both actions: {sys_msg}"
+            seen_text.contains("a.txt") && seen_text.contains("b.txt"),
+            "ledger must list both actions: {seen_text}"
         );
         assert!(
-            sys_msg.contains("[seen]"),
-            "system prompt must contain [seen] block"
+            seen_text.contains("[seen]"),
+            "transcript block must contain [seen]"
         );
     }
 

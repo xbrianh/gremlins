@@ -129,6 +129,7 @@ pub struct Config {
     landscape_stage_profiles: bool,
     landscape_diff_stat: bool,
     landscape_decay_turns: u64,
+    landscape_reconcile_threshold_tokens: Option<u64>,
     backoff: BackoffConfig,
 }
 
@@ -282,6 +283,12 @@ struct LandscapeSection {
     /// are pruned from subsequent prompts. Default 5.
     #[serde(rename = "decay-turns", default)]
     decay_turns: Option<u64>,
+    /// Deferred reconciliation threshold in tokens. When accumulated delta
+    /// tokens exceed this value, the landscape system message is rebuilt and
+    /// deltas are cleared. Default: `max-tokens` * 0.3. Set to 0 to reconcile
+    /// every turn (same behavior as before this option existed).
+    #[serde(rename = "reconcile-threshold-tokens", default)]
+    reconcile_threshold_tokens: Option<u64>,
 }
 
 /// A single `model-profiles` entry as it appears in `settings.yaml`.
@@ -400,6 +407,8 @@ impl Config {
                     landscape_diff_stat,
                     landscape_decay_turns: parse_env_u64("GREMLINS_LANDSCAPE_DECAY_TURNS")
                         .unwrap_or(DEFAULT_LANDSCAPE_DECAY_TURNS),
+                    landscape_reconcile_threshold_tokens:
+                        parse_env_u64("GREMLINS_LANDSCAPE_RECONCILE_THRESHOLD_TOKENS"),
                     ..Config::default()
                 });
             }
@@ -634,6 +643,12 @@ impl Config {
             .or_else(|| parse_env_u64("GREMLINS_LANDSCAPE_DECAY_TURNS"))
             .unwrap_or(DEFAULT_LANDSCAPE_DECAY_TURNS);
 
+        let landscape_reconcile_threshold_tokens = cfg_file
+            .landscape
+            .as_ref()
+            .and_then(|l| l.reconcile_threshold_tokens)
+            .or_else(|| parse_env_u64("GREMLINS_LANDSCAPE_RECONCILE_THRESHOLD_TOKENS"));
+
         Ok(Config {
             default_model,
             tui_model,
@@ -657,6 +672,7 @@ impl Config {
             landscape_stage_profiles,
             landscape_diff_stat,
             landscape_decay_turns,
+            landscape_reconcile_threshold_tokens,
             backoff,
         })
     }
@@ -748,6 +764,10 @@ impl Config {
 
     pub fn landscape_decay_turns(&self) -> u64 {
         self.landscape_decay_turns
+    }
+
+    pub fn landscape_reconcile_threshold_tokens(&self) -> Option<u64> {
+        self.landscape_reconcile_threshold_tokens
     }
 
     pub fn turn_retry_schedule(&self) -> &[f64] {
@@ -1388,6 +1408,16 @@ pub(crate) fn landscape_decay_turns() -> u64 {
         .map(|c| c.landscape_decay_turns())
         .or_else(|| parse_env_u64("GREMLINS_LANDSCAPE_DECAY_TURNS"))
         .unwrap_or(DEFAULT_LANDSCAPE_DECAY_TURNS)
+}
+
+/// GREMLINS_LANDSCAPE_RECONCILE_THRESHOLD_TOKENS — accumulated delta tokens
+/// threshold at which the landscape system message is rebuilt and deltas
+/// cleared. No default: `None` means use `max_landscape_tokens * 0.3`.
+/// Settings.yaml `landscape.reconcile-threshold-tokens` takes precedence.
+pub(crate) fn landscape_reconcile_threshold_tokens() -> Option<u64> {
+    get_global()
+        .and_then(|c| c.landscape_reconcile_threshold_tokens())
+        .or_else(|| parse_env_u64("GREMLINS_LANDSCAPE_RECONCILE_THRESHOLD_TOKENS"))
 }
 
 /// Read an environment variable and parse it as u64.
