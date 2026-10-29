@@ -78,6 +78,12 @@ pub struct RunParams {
     /// `.gremlins/implicit/_scratchpad.md` in the checkout artifact dir).    /// When `Some`, the agent loop reads and re-injects scratchpad content
     /// on each turn. `None` disables the per-turn injection.
     pub scratchpad_path: Option<PathBuf>,
+    /// Stage-start landscape seed: precomputed per-file outlines bundled with
+    /// signal sections. `None` when the stage has landscape disabled. The
+    /// agent loop feeds this into [`super::tool_ledger::ToolLedger::seed`]
+    /// before the first turn so the first `[seen]` block carries the full
+    /// world map.
+    pub(crate) landscape_seed: Option<crate::landscape::LandscapeSeed>,
 }
 
 impl Clone for RunParams {
@@ -111,6 +117,7 @@ impl Clone for RunParams {
             compactor: self.compactor.clone(),
             token_usage_sink: self.token_usage_sink.clone(),
             scratchpad_path: self.scratchpad_path.clone(),
+            landscape_seed: self.landscape_seed.clone(),
         }
     }
 }

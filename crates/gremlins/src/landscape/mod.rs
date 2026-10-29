@@ -672,6 +672,22 @@ fn render_key_parts(
     Some(parts)
 }
 
+/// Seed data for the living landscape in the ToolLedger.
+///
+/// Carries the full-tree outlines and signal sections computed at stage
+/// start so the agent loop's `ToolLedger::seed` can populate the directory
+/// cache before the first turn.
+#[derive(Clone, Debug)]
+pub struct LandscapeSeed {
+    /// The worktree root directory. Signal prefix content is attached to
+    /// this directory's cache entry.
+    pub(crate) root: std::path::PathBuf,
+    /// Full-tree per-file outlines.
+    pub(crate) outlines: Vec<FileOutline>,
+    /// Pre-computed signal sections (changed-files, diff-stat, symbol-map).
+    pub(crate) signal_sections: Vec<signals::SignalSection>,
+}
+
 /// A formatted landscape block plus the number of files and items actually
 /// retained inside it.
 ///
@@ -680,6 +696,7 @@ fn render_key_parts(
 pub(crate) struct LandscapeBlock {
     pub(crate) block: String,
     pub(crate) file_count: usize,
+    #[allow(dead_code)]
     pub(crate) item_count: usize,
 }
 
@@ -848,6 +865,7 @@ fn format_at_depth_inner(
 /// An empty landscape (no recognized files, no outlineable items, or no
 /// file with at least three items) formats to an empty block with zero counts
 /// so callers can skip the block entirely.
+#[allow(dead_code)]
 pub(crate) fn format_landscape_block(
     outlines: &[FileOutline],
     root: &Path,
@@ -870,6 +888,7 @@ pub(crate) fn format_landscape_block(
 /// the skeleton receives whatever remains. If the signal sections alone
 /// exceed the budget, the skeleton is dropped entirely and only the signal
 /// sections are returned (the stage has specific focus).
+#[allow(dead_code)]
 pub(crate) fn format_landscape_with_signals(
     outlines: &[FileOutline],
     root: &Path,

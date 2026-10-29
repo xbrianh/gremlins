@@ -1,10 +1,10 @@
 //! Heuristic signal extraction from file content.
 //!
 //! This module scans source files for structural signals that complement the
-//! outline: file-path references, identifiers in Rust's three case conventions,
-//! and a deduplicated symbol index keyed by first occurrence. The per-line
-//! regex extraction lives in [`heuristic`]; this module handles coordination,
-//! rendering, and sandbox containment.
+//! outline: identifiers in Rust's three case conventions, and a deduplicated
+//! symbol index keyed by first occurrence. The per-line regex extraction lives
+//! in [`heuristic`]; this module handles coordination, rendering, and sandbox
+//! containment.
 
 pub(crate) mod heuristic;
 
@@ -20,6 +20,7 @@ use crate::clients::tools::{canonicalize_or_ancestor, within_worktree};
 #[derive(Debug, Clone)]
 pub(crate) struct SignalSection {
     /// Stable key for log lines and tests (e.g. `"diff-stat"`).
+    #[allow(dead_code)]
     pub key: String,
     /// Rendered section text, including any HTML-comment header.
     pub text: String,
@@ -69,19 +70,6 @@ pub(crate) enum SignalProfile {
     DiffFocused,
 }
 
-/// A file-path reference discovered in source text.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PathCandidate {
-    /// The raw path string as it appeared in the source.
-    pub path: String,
-    /// Whether the path is absolute (`/`, drive‑root, UNC, or tilde‑home).
-    pub is_absolute: bool,
-    /// The file in which this path reference was found.
-    pub source_file: PathBuf,
-    /// 1-based line number.
-    pub line: usize,
-}
-
 /// The casing convention of an extracted identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IdentifierForm {
@@ -113,8 +101,6 @@ pub(crate) struct SymbolEntry {
 /// The rendered output of signal extraction.
 #[derive(Debug, Clone)]
 pub(crate) struct SignalRendered {
-    /// Path candidates found across all scanned files.
-    pub path_candidates: Vec<PathCandidate>,
     /// Identifiers found across all scanned files.
     ///
     /// Populated by [`build_signals`] and consumed by the identifier-extraction
@@ -140,7 +126,6 @@ pub(crate) fn build_signals(
     _ctx: &SignalContext,
     outlines: &[super::FileOutline],
 ) -> SignalRendered {
-    let mut path_candidates: Vec<PathCandidate> = Vec::new();
     let mut identifiers: Vec<Identifier> = Vec::new();
     let mut symbol_index: HashMap<String, SymbolEntry> = HashMap::new();
 
@@ -158,10 +143,6 @@ pub(crate) fn build_signals(
         for (idx, line) in content.lines().enumerate() {
             let line_number = idx + 1;
 
-            // Extract path candidates.
-            let paths = heuristic::extract_path_candidates(line, line_number, &outline.path);
-            path_candidates.extend(paths);
-
             // Extract identifiers.
             let idents = heuristic::extract_identifiers(line, line_number, &outline.path);
             for ident in &idents {
@@ -178,7 +159,6 @@ pub(crate) fn build_signals(
     }
 
     SignalRendered {
-        path_candidates,
         identifiers,
         symbol_index,
     }
@@ -421,57 +401,6 @@ fn build_diff_stat(ctx: &SignalContext) -> Option<String> {
     Some(format!("<!-- Diff stat -->\n{}\n", lines.join("\n")))
 }
 
-/// Render file paths referenced from source text that resolve to existing
-/// files inside the sandbox.
-///
-/// Paths that escape the sandbox are silently dropped.
-fn build_referenced_paths(
-    ctx: &SignalContext,
-    candidates: &[PathCandidate],
-) -> (Option<String>, usize) {
-    let root_canonical = canonicalize_or_ancestor(&ctx.cwd);
-    let mut resolved = std::collections::BTreeSet::new();
-    let mut skipped = 0usize;
-    for c in candidates {
-        // Resolve relative paths from the source file's directory.
-        let resolved_path = if c.is_absolute {
-            PathBuf::from(&c.path)
-        } else {
-            c.source_file
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(&c.path)
-        };
-        let Some(canonical) = contained_path(&ctx.cwd, &resolved_path) else {
-            continue;
-        };
-        // Only include paths that actually exist as files.
-        if canonical.is_file() {
-            // Skip paths already observed by a prior stage.
-            if let Some(ref pruned) = ctx.pruned_files {
-                if pruned.contains(&canonical) {
-                    skipped += 1;
-                    continue;
-                }
-            }
-            if let Ok(rel) = canonical.strip_prefix(&root_canonical) {
-                resolved.insert(format!("./{}", rel.display()));
-            }
-        }
-    }
-    if resolved.is_empty() {
-        return (None, skipped);
-    }
-    let lines: Vec<_> = resolved.into_iter().collect();
-    (
-        Some(format!(
-            "<!-- Referenced files (from source) -->\n{}\n",
-            lines.join("\n")
-        )),
-        skipped,
-    )
-}
-
 /// Extract candidate identifiers from a prompt/plan string using the same
 /// three case-convention regexes used for source-file scanning.
 fn extract_prompt_identifiers(prompt: &str) -> HashSet<String> {
@@ -562,8 +491,8 @@ pub(crate) fn render_signal_sections(
         }
     }
 
-    // When DiffFocused with non-empty diff, scope symbol map and referenced
-    // files to the diff files; otherwise emit the full (unscoped) sections.
+    // When DiffFocused with non-empty diff, scope the symbol map to the
+    // diff files; otherwise emit the full (unscoped) section.
     if ctx.profile == SignalProfile::DiffFocused && !diff_paths.is_empty() {
         let diff_set: HashSet<&Path> = diff_paths.iter().map(|p| p.as_path()).collect();
 
@@ -583,37 +512,15 @@ pub(crate) fn render_signal_sections(
             }
         }
 
-        // Referenced files: scoped to paths whose source files appear in
-        // the diff.
-        let scoped_candidates: Vec<PathCandidate> = signals
-            .path_candidates
-            .iter()
-            .filter(|c| diff_set.contains(c.source_file.as_path()))
-            .cloned()
-            .collect();
-        if !scoped_candidates.is_empty() {
-            let (referenced, n) = build_referenced_paths(ctx, &scoped_candidates);
-            total_skipped += n;
-            if let Some(referenced) = referenced {
-                sections.push(SignalSection::new("referenced-files", referenced));
-            }
-        }
-
         (sections, total_skipped, diff_paths)
     } else {
-        // Full profile (or DiffFocused with empty diff): emit unscoped
-        // symbol map and referenced-files sections.
+        // Full profile (or DiffFocused with empty diff): emit the unscoped
+        // symbol map section.
         if !signals.symbol_index.is_empty() {
             let body = build_symbol_map(ctx, &signals.symbol_index);
             if !body.is_empty() {
                 sections.push(SignalSection::new("symbol-map", body));
             }
-        }
-
-        let (referenced, n) = build_referenced_paths(ctx, &signals.path_candidates);
-        total_skipped += n;
-        if let Some(referenced) = referenced {
-            sections.push(SignalSection::new("referenced-files", referenced));
         }
 
         (sections, total_skipped, Vec::new())
@@ -644,60 +551,6 @@ mod tests {
             items,
             skipped,
         }
-    }
-
-    // ── path_candidates_find_relative_and_absolute ─────────────────────
-
-    #[test]
-    fn path_candidates_find_relative_and_absolute() {
-        let dir = tempfile::tempdir().unwrap();
-        let content = "\
-// Absolute paths
-use /etc/config;
-// Relative paths
-mod foo;
-// Bare relative
-mod bar/baz;
-// ./ prefix
-include!(\"./generated.rs\");
-// ../ prefix
-#[path = \"../shared/lib.rs\"]
-";
-        let path = write_file(&dir, "src/main.rs", content);
-        let outline = make_outline(&path, false, vec![]);
-
-        let ctx = SignalContext {
-            cwd: dir.path().to_path_buf(),
-            pruned_files: None,
-            profile: SignalProfile::Full,
-            prompt: None,
-            diff_stat: false,
-        };
-        let result = build_signals(&ctx, &[outline]);
-
-        // Absolute paths
-        assert!(result
-            .path_candidates
-            .iter()
-            .any(|c| c.path == "/etc/config" && c.is_absolute));
-
-        // Relative: bare form
-        assert!(result
-            .path_candidates
-            .iter()
-            .any(|c| c.path == "bar/baz" && !c.is_absolute));
-
-        // Relative: ./ form
-        assert!(result
-            .path_candidates
-            .iter()
-            .any(|c| c.path == "./generated.rs" && !c.is_absolute));
-
-        // Relative: ../ form
-        assert!(result
-            .path_candidates
-            .iter()
-            .any(|c| c.path == "../shared/lib.rs" && !c.is_absolute));
     }
 
     // ── identifier_extraction_finds_all_three_forms ────────────────────
@@ -824,20 +677,6 @@ pub fn bar_init() -> BarConfig {
         };
         let result = build_signals(&ctx, &[outline_main, outline_bar]);
 
-        // ── Path candidates ──────────────────────────────────────────
-
-        // Absolute
-        assert!(result
-            .path_candidates
-            .iter()
-            .any(|c| c.path == "/etc/app/config.json" && c.is_absolute));
-
-        // Relative
-        assert!(result
-            .path_candidates
-            .iter()
-            .any(|c| c.path == "./config.toml" && !c.is_absolute));
-
         // ── Identifiers: all three forms ─────────────────────────────
 
         // Snake
@@ -903,7 +742,6 @@ pub fn bar_init() -> BarConfig {
         };
         let result = build_signals(&ctx, &[outline]);
 
-        assert!(result.path_candidates.is_empty());
         assert!(result.identifiers.is_empty());
         assert!(result.symbol_index.is_empty());
     }
@@ -923,90 +761,11 @@ pub fn bar_init() -> BarConfig {
         };
         let result = build_signals(&ctx, &[outline]);
 
-        assert!(result.path_candidates.is_empty());
         assert!(result.identifiers.is_empty());
         assert!(result.symbol_index.is_empty());
     }
 
-    // ── Windows, UNC, and tilde paths ─────────────────────────────────
-
-    #[test]
-    fn path_candidates_detect_windows_unc_and_tilde() {
-        let dir = tempfile::tempdir().unwrap();
-        let content = "\
-// Windows drive-absolute
-use C:\\foo\\bar.rs;
-// UNC path
-use \\\\server\\share\\baz.rs;
-// Tilde-home
-cfg!(~/.config/app.toml);
-";
-        let path = write_file(&dir, "src/win.rs", content);
-        let outline = make_outline(&path, false, vec![]);
-
-        let ctx = SignalContext {
-            cwd: dir.path().to_path_buf(),
-            pruned_files: None,
-            profile: SignalProfile::Full,
-            prompt: None,
-            diff_stat: false,
-        };
-        let result = build_signals(&ctx, &[outline]);
-
-        // Windows drive-absolute
-        assert!(result
-            .path_candidates
-            .iter()
-            .any(|c| c.path == "C:\\foo\\bar.rs" && c.is_absolute));
-
-        // UNC
-        assert!(result
-            .path_candidates
-            .iter()
-            .any(|c| c.path == "\\\\server\\share\\baz.rs" && c.is_absolute));
-
-        // Tilde-home
-        assert!(result
-            .path_candidates
-            .iter()
-            .any(|c| c.path == "~/.config/app.toml" && c.is_absolute));
-    }
-
     // ── negative tests: patterns that should NOT be extracted ─────────
-
-    #[test]
-    fn path_candidates_reject_prose_false_positives() {
-        let dir = tempfile::tempdir().unwrap();
-        // `and/or` and similar word/word sequences are intentionally
-        // accepted — they are indistinguishable from real bare relative
-        // paths without deeper context. Digits-only segments like `1/2`
-        // are rejected because the first segment must start with a letter.
-        let content = "\
-let ratio = 1/2;
-let phrase = and/or;
-let div = a / b;
-";
-        let path = write_file(&dir, "src/prose.rs", content);
-        let outline = make_outline(&path, false, vec![]);
-
-        let ctx = SignalContext {
-            cwd: dir.path().to_path_buf(),
-            pruned_files: None,
-            profile: SignalProfile::Full,
-            prompt: None,
-            diff_stat: false,
-        };
-        let result = build_signals(&ctx, &[outline]);
-
-        // Digits-only first segment (`1/2`) must be rejected.
-        assert!(result.path_candidates.iter().all(|c| c.path != "1/2"));
-
-        // Spaced slashes (`a / b`) must not be captured.
-        assert!(result.path_candidates.iter().all(|c| c.path != "a/b"));
-
-        // `and/or` is accepted — documented false positive.
-        assert!(result.path_candidates.iter().any(|c| c.path == "and/or"));
-    }
 
     #[test]
     fn camel_case_rejects_single_word_capitals() {
@@ -1040,135 +799,7 @@ let config = Config::default();
         );
     }
 
-    // ── sandbox containment ────────────────────────────────────────────
-
-    #[test]
-    fn referenced_paths_rejects_sandbox_escape() {
-        let dir = tempfile::tempdir().unwrap();
-        // A file that references an absolute path outside the sandbox.
-        let content = "let path = \"/etc/passwd\";\n";
-        let path = write_file(&dir, "src/main.rs", content);
-        let outline = make_outline(&path, false, vec![]);
-
-        let ctx = SignalContext {
-            cwd: dir.path().to_path_buf(),
-            pruned_files: None,
-            profile: SignalProfile::Full,
-            prompt: None,
-            diff_stat: false,
-        };
-        let result = build_signals(&ctx, &[outline]);
-
-        // /etc/passwd should still be extracted as a path candidate.
-        assert!(
-            result
-                .path_candidates
-                .iter()
-                .any(|c| c.path == "/etc/passwd"),
-            "/etc/passwd should be extracted"
-        );
-
-        // build_referenced_paths must reject /etc/passwd: it resolves outside
-        // the sandbox. When all candidates are rejected, the function returns None.
-        let (referenced, _) = build_referenced_paths(&ctx, &result.path_candidates);
-        assert!(
-            referenced.is_none(),
-            "sandbox-escape path should be rejected, got: {referenced:?}"
-        );
-    }
-
     // ── pruning ────────────────────────────────────────────────────────
-
-    #[test]
-    fn pruned_files_mixed_keep_purge_referenced_paths() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = write_file(&dir, "a.rs", "// a\n");
-        let _b = write_file(&dir, "b.rs", "// b\n");
-        let source = dir.path().join("main.rs");
-        let candidates = vec![
-            PathCandidate {
-                path: "a.rs".into(),
-                is_absolute: false,
-                source_file: source.clone(),
-                line: 1,
-            },
-            PathCandidate {
-                path: "b.rs".into(),
-                is_absolute: false,
-                source_file: source.clone(),
-                line: 2,
-            },
-        ];
-        let a_canon = contained_path(dir.path(), &a).unwrap();
-        let pruned = std::collections::HashSet::from([a_canon]);
-        let ctx = SignalContext {
-            cwd: dir.path().to_path_buf(),
-            pruned_files: Some(pruned),
-            profile: SignalProfile::Full,
-            prompt: None,
-            diff_stat: false,
-        };
-        let (out, skipped) = build_referenced_paths(&ctx, &candidates);
-        let out = out.expect("section should remain when some files are unpruned");
-        assert!(skipped > 0, "pruned file should be counted as skipped");
-        assert!(
-            !out.contains("./a.rs"),
-            "pruned file should not appear: {out}"
-        );
-        assert!(out.contains("./b.rs"), "unpruned file should appear: {out}");
-    }
-
-    #[test]
-    fn pruned_files_fully_pruned_section_dropped() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = write_file(&dir, "a.rs", "// a\n");
-        let source = dir.path().join("main.rs");
-        let candidates = vec![PathCandidate {
-            path: "a.rs".into(),
-            is_absolute: false,
-            source_file: source,
-            line: 1,
-        }];
-        let a_canon = contained_path(dir.path(), &a).unwrap();
-        let pruned = std::collections::HashSet::from([a_canon]);
-        let ctx = SignalContext {
-            cwd: dir.path().to_path_buf(),
-            pruned_files: Some(pruned),
-            profile: SignalProfile::Full,
-            prompt: None,
-            diff_stat: false,
-        };
-        let (out, skipped) = build_referenced_paths(&ctx, &candidates);
-        assert!(skipped > 0, "pruned file should be counted");
-        assert!(out.is_none(), "entirely pruned section should return None");
-    }
-
-    #[test]
-    fn pruned_files_empty_set_is_noop() {
-        let dir = tempfile::tempdir().unwrap();
-        let _a = write_file(&dir, "a.rs", "// a\n");
-        let source = dir.path().join("main.rs");
-        let candidates = vec![PathCandidate {
-            path: "a.rs".into(),
-            is_absolute: false,
-            source_file: source,
-            line: 1,
-        }];
-        let ctx = SignalContext {
-            cwd: dir.path().to_path_buf(),
-            pruned_files: Some(std::collections::HashSet::new()),
-            profile: SignalProfile::Full,
-            prompt: None,
-            diff_stat: false,
-        };
-        let (out, skipped) = build_referenced_paths(&ctx, &candidates);
-        let out = out.expect("empty prune set should not drop section");
-        assert_eq!(skipped, 0, "empty prune set should skip nothing");
-        assert!(
-            out.contains("./a.rs"),
-            "file should appear with empty prune set: {out}"
-        );
-    }
 
     #[test]
     fn pruned_files_symbol_map_unaffected() {
@@ -1277,13 +908,11 @@ let config = Config::default();
     }
 
     #[test]
-    fn profile_full_emits_symbol_map_and_referenced() {
-        // Full profile fires all sections.  Use a non-git cwd so that
-        // changed-files section is absent (git not available), but the
-        // other two sections still fire when outlines contain signals.
+    fn profile_full_emits_symbol_map() {
+        // Full profile fires the symbol-map section.  Use a non-git cwd so
+        // that the changed-files section is absent, but the symbol map still
+        // fires when outlines contain identifiers matched by the prompt.
         let dir = tempfile::tempdir().unwrap();
-        // Create the referenced file too so build_referenced_paths resolves it.
-        write_file(&dir, "src/util.rs", "// empty\n");
         let path = write_file(&dir, "src/lib.rs", "fn helper_fn() {}\nuse ./util.rs;\n");
         let outline = make_outline(&path, false, vec![]);
         let ctx = SignalContext {
@@ -1298,10 +927,6 @@ let config = Config::default();
         assert!(
             keys.contains(&"symbol-map"),
             "Full profile should emit symbol map; got {keys:?}"
-        );
-        assert!(
-            keys.contains(&"referenced-files"),
-            "Full profile should emit referenced paths; got {keys:?}"
         );
     }
 

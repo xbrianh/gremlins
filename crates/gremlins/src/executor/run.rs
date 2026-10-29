@@ -33,7 +33,7 @@ use crate::executor::vars;
 use crate::executor::DaemonEvent;
 use crate::executor::RunError;
 use crate::landscape::FileOutline;
-use crate::landscape::{LandscapeBlock, LandscapeError, LandscapeExplorer};
+use crate::landscape::{LandscapeError, LandscapeExplorer};
 use indexmap::IndexMap;
 use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::completion::Message;
@@ -41,146 +41,6 @@ use rig_core::completion::Message;
 // ---------------------------------------------------------------------------
 // System prompt assembly
 // ---------------------------------------------------------------------------
-
-/// Compute the gremlin's stage-start landscape block.
-///
-/// When the client has the Landscape tool and the formatted block is
-/// nonempty, a usage hint is prepended. Otherwise the raw (possibly empty)
-/// block is returned as-is.
-///
-/// When landscape signals are enabled (`GREMLINS_LANDSCAPE_SIGNALS=1` or
-/// `landscape.signals: true` in settings.yaml), heuristic signal sections
-/// (changed files, symbol map, referenced files) are injected above the
-/// full-tree skeleton. With signals off this block is byte-for-byte
-/// identical to the pre-signals implementation.
-///
-/// When stage profiles are enabled (`GREMLINS_LANDSCAPE_STAGE_PROFILES=1`
-/// or `landscape.stage-profiles: true`) and the stage has an `artifact://diff`
-/// input, the skeleton is scoped to diff files and only the changed-files
-/// section fires as primary.
-async fn landscape_block(
-    gremlin: &Gremlin,
-    has_outline_tool: bool,
-    pruned_files: Option<std::collections::HashSet<PathBuf>>,
-    has_diff_input: bool,
-    prompt: &str,
-) -> String {
-    let cwd = gremlin.cwd();
-    let log_tx = gremlin.runtime_config.log_tx.clone();
-    let log_warn = |msg: &str| {
-        log::warn!("{msg}");
-        send_log(&log_tx, msg);
-    };
-
-    let outlines = build_outlines(cwd.clone(), log_tx.clone()).await;
-
-    // Determine the signal profile from artifact inputs.
-    let profile = if crate::config::landscape_stage_profiles() && has_diff_input {
-        crate::landscape::signals::SignalProfile::DiffFocused
-    } else {
-        crate::landscape::signals::SignalProfile::Full
-    };
-
-    let signals_enabled = crate::config::landscape_signals();
-
-    // For DiffFocused profile, we need the diff paths before formatting the
-    // skeleton so we can filter outlines. Build signal sections early.
-    let (signal_sections, pruned_skipped, diff_paths) = if signals_enabled {
-        let ctx = crate::landscape::signals::SignalContext {
-            cwd: cwd.clone(),
-            pruned_files,
-            profile,
-            prompt: if prompt.is_empty() {
-                None
-            } else {
-                Some(prompt.to_string())
-            },
-            diff_stat: crate::config::landscape_diff_stat(),
-        };
-        let (sections, skipped, paths) = crate::landscape::inject_signal_sections(&ctx, &outlines);
-        if profile == crate::landscape::signals::SignalProfile::DiffFocused {
-            if let Some(tx) = &log_tx {
-                let _ = tx.send("[landscape-signals] profile DiffFocused".to_string());
-            }
-        } else if crate::config::landscape_stage_profiles() {
-            if let Some(tx) = &log_tx {
-                let _ = tx.send("[landscape-signals] profile Full".to_string());
-            }
-        }
-        (sections, skipped, paths)
-    } else {
-        Default::default()
-    };
-
-    // When DiffFocused, filter outlines to just the diff files before
-    // formatting the skeleton.
-    let effective_outlines: std::borrow::Cow<[FileOutline]> = if profile
-        == crate::landscape::signals::SignalProfile::DiffFocused
-        && !diff_paths.is_empty()
-    {
-        let diff_set: std::collections::HashSet<&Path> =
-            diff_paths.iter().map(|p| p.as_path()).collect();
-        let filtered: Vec<FileOutline> = outlines
-            .into_iter()
-            .filter(|o| diff_set.contains(o.path.as_path()))
-            .collect();
-        std::borrow::Cow::Owned(filtered)
-    } else {
-        std::borrow::Cow::Borrowed(&outlines)
-    };
-
-    // Log heuristic signal sections before merging under the budget.
-    if signals_enabled && !signal_sections.is_empty() {
-        if pruned_skipped > 0 {
-            if let Some(tx) = &log_tx {
-                let _ = tx.send(format!(
-                    "[landscape-signals] pruning {pruned_skipped} files"
-                ));
-            }
-        }
-        for section in &signal_sections {
-            if let Some(tx) = &log_tx {
-                let tokens = crate::landscape::count_tokens(&section.text).unwrap_or(0);
-                let _ = tx.send(format!(
-                    "[landscape-signals] {} {tokens} tokens",
-                    section.key
-                ));
-            }
-        }
-    }
-
-    let landscape = if signals_enabled && !signal_sections.is_empty() {
-        format_outlines_with_signals(
-            &effective_outlines,
-            &cwd,
-            has_outline_tool,
-            &signal_sections,
-            log_warn,
-        )
-    } else {
-        format_outlines(&effective_outlines, &cwd, has_outline_tool, log_warn)
-    };
-
-    let (mut block, file_count, item_count) =
-        (landscape.block, landscape.file_count, landscape.item_count);
-
-    if !block.is_empty() {
-        if let Some(tx) = &log_tx {
-            let tokens = crate::landscape::count_tokens(&block).unwrap_or(0);
-            let _ = tx.send(format!(
-                "[landscape] {file_count} files, {item_count} items, {tokens} tokens"
-            ));
-        }
-        if has_outline_tool {
-            block = format!(
-                "Use the Landscape tool to explore any directory or file in more detail. The outline below shows the repository structure captured at stage start.\n\n\
-{block}"
-            );
-        }
-    }
-
-    block
-}
 
 /// URI of the cross-stage observed-file-path snapshot used to prune redundant
 /// landscape signal sections.
@@ -289,16 +149,6 @@ async fn persist_observed_paths(
     }
 }
 
-/// Build a system prompt by optionally appending a landscape block.
-///
-/// The caller (`landscape_block`) already gates the usage hint on tool
-/// availability, so this function only concatenates.
-fn assemble_system_prompt(base: &str, landscape: Option<&str>) -> String {
-    match landscape.filter(|b| !b.is_empty()) {
-        Some(block) => format!("{base}\n\n{block}"),
-        None => base.to_string(),
-    }
-}
 /// Build file outlines for a workspace root.
 ///
 /// This is the raw-outline half of the landscape block builder, extracted so
@@ -328,89 +178,9 @@ async fn build_outlines(
     })
 }
 
-/// Format outlines into a [`LandscapeBlock`], logging and downgrading any
-/// formatting error to an empty block.
-/// Format a plain landscape skeleton (no signal sections) under the token
-/// budget. Delegates to [`format_outlines_with_signals`] with an empty section
-/// list.
-fn format_outlines(
-    outlines: &[FileOutline],
-    cwd: &Path,
-    has_outline_tool: bool,
-    log_warn: impl Fn(&str),
-) -> LandscapeBlock {
-    format_outlines_with_signals(outlines, cwd, has_outline_tool, &[], log_warn)
-}
-
-/// Format signal sections plus the skeleton under the shared landscape token
-/// budget.
-///
-/// On any formatting error the wrapper falls back to emitting the signal
-/// sections alone (when present) so signal content is never discarded.  The
-/// `BudgetExceeded` variant from [`format_landscape_with_signals`] is handled
-/// internally by that function and never reaches this wrapper — the only
-/// errors that propagate are I/O and tokenizer failures.
-fn format_outlines_with_signals(
-    outlines: &[FileOutline],
-    cwd: &Path,
-    has_outline_tool: bool,
-    signal_sections: &[crate::landscape::signals::SignalSection],
-    log_warn: impl Fn(&str),
-) -> LandscapeBlock {
-    let budget: u64 = crate::config::max_landscape_tokens();
-    let max_tokens = usize::try_from(budget).unwrap_or(usize::MAX);
-
-    let result = if signal_sections.is_empty() {
-        crate::landscape::format_landscape_block(outlines, cwd, max_tokens, has_outline_tool)
-    } else {
-        crate::landscape::format_landscape_with_signals(
-            outlines,
-            cwd,
-            max_tokens,
-            has_outline_tool,
-            signal_sections,
-        )
-    };
-
-    match result {
-        Ok(block) => block,
-        Err(e) => {
-            // On any formatting failure, preserve signal sections if we have
-            // them — the stage has specific focus and losing that context is
-            // worse than a missing skeleton.
-            if !signal_sections.is_empty() {
-                let signals_text = signal_sections
-                    .iter()
-                    .map(|s| s.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                log_warn(&format!(
-                    "landscape block formatting failed: {e}; emitting signal sections only"
-                ));
-                return LandscapeBlock {
-                    block: signals_text,
-                    file_count: 0,
-                    item_count: 0,
-                };
-            }
-            let msg = match e {
-                LandscapeError::BudgetExceeded => format!(
-                    "[landscape] block for {} exceeds {budget} token budget; omitting",
-                    cwd.display(),
-                ),
-                other => format!("landscape block formatting failed: {other}"),
-            };
-            log_warn(&msg);
-            LandscapeBlock::empty()
-        }
-    }
-}
-
 /// Build and format a landscape block for one workspace root.
 ///
-/// Kept for tests that need the pre-signals block shape; production code goes
-/// through [`landscape_block`], which composes [`build_outlines`] with
-/// [`format_outlines`] and then injects signal sections.
+/// Kept for tests that need the pre-signals block shape.
 #[cfg(test)]
 async fn build_landscape_snapshot(
     cwd: PathBuf,
@@ -422,8 +192,15 @@ async fn build_landscape_snapshot(
         send_log(&log_tx, msg);
     };
     let outlines = build_outlines(cwd.clone(), log_tx.clone()).await;
-    let landscape = format_outlines(&outlines, &cwd, has_outline_tool, log_warn);
-    (landscape.block, landscape.file_count, landscape.item_count)
+    let budget: u64 = crate::config::max_landscape_tokens();
+    let max_tokens = usize::try_from(budget).unwrap_or(usize::MAX);
+    match crate::landscape::format_landscape_block(&outlines, &cwd, max_tokens, has_outline_tool) {
+        Ok(block) => (block.block, block.file_count, block.item_count),
+        Err(e) => {
+            log_warn(&format!("landscape block formatting failed: {e}"));
+            (String::new(), 0, 0)
+        }
+    }
 }
 
 /// On-disk path for the agent raw stream, routed through the store's blob seam.
@@ -857,31 +634,73 @@ async fn run_agent(
         prompt = prompt.replace("{scratchpad_path}", &scratchpad_model_path);
     }
 
-    // Landscape is recomputed before every agent stage so the next
-    // agent sees fresh files after any exec stage mutations. Build it
-    // after the prompt so prompt-derived signal sections can be
-    // produced.
-    let landscape = if agent.landscape {
+    // Build the landscape seed payload for the ToolLedger (living landscape).
+    // When landscape is enabled, compute the full-tree outlines and signal
+    // sections and bundle them into the seed. The system prompt is just the
+    // base prompt without any landscape block.
+    let landscape_seed: Option<crate::landscape::LandscapeSeed> = if agent.landscape {
+        let cwd2 = gremlin.cwd();
+        let log_tx2 = gremlin.runtime_config.log_tx.clone();
+        let outlines = build_outlines(cwd2.clone(), log_tx2.clone()).await;
+
         let has_diff_input = checkout_keys
             .iter()
             .any(|k| k == "artifact://diff" || k.starts_with("artifact://diff/"));
-        // Prior stages' observed file paths prune redundant signal sections.
         let pruned = read_pruned_files(gremlin).await;
-        Some(
-            landscape_block(
-                gremlin,
-                client.has_tool("Landscape"),
-                pruned,
-                has_diff_input,
-                &prepared.prompt,
-            )
-            .await,
-        )
+
+        let profile = if crate::config::landscape_stage_profiles() && has_diff_input {
+            crate::landscape::signals::SignalProfile::DiffFocused
+        } else {
+            crate::landscape::signals::SignalProfile::Full
+        };
+
+        let signals_enabled = crate::config::landscape_signals();
+
+        let (signal_sections, _pruned_skipped, diff_paths) = if signals_enabled {
+            let ctx = crate::landscape::signals::SignalContext {
+                cwd: cwd2.clone(),
+                pruned_files: pruned,
+                profile,
+                prompt: if prepared.prompt.is_empty() {
+                    None
+                } else {
+                    Some(prepared.prompt.to_string())
+                },
+                diff_stat: crate::config::landscape_diff_stat(),
+            };
+            crate::landscape::inject_signal_sections(&ctx, &outlines)
+        } else {
+            Default::default()
+        };
+
+        // When DiffFocused, filter outlines to just diff files.
+        let effective_outlines: Vec<crate::landscape::FileOutline> = if profile
+            == crate::landscape::signals::SignalProfile::DiffFocused
+            && !diff_paths.is_empty()
+        {
+            let diff_set: std::collections::HashSet<&Path> =
+                diff_paths.iter().map(|p| p.as_path()).collect();
+            outlines
+                .into_iter()
+                .filter(|o| diff_set.contains(o.path.as_path()))
+                .collect()
+        } else {
+            outlines
+        };
+
+        // Build seed: full-tree outlines plus signal sections wrapped in a
+        // LandscapeSeed struct for the ToolLedger.
+        let seed = crate::landscape::LandscapeSeed {
+            root: cwd2.clone(),
+            outlines: effective_outlines,
+            signal_sections,
+        };
+        Some(seed)
     } else {
         None
     };
 
-    let system_prompt = assemble_system_prompt(&prompt, landscape.as_deref());
+    let system_prompt = prompt;
 
     let stage_env = gremlin.env.clone();
 
@@ -1062,6 +881,7 @@ async fn run_agent(
             .implicit_artifacts
             .first()
             .map(|a| a.model_path.clone()),
+        landscape_seed,
     };
 
     let effective_model = params
@@ -2419,15 +2239,14 @@ mod tests {
     }
 
     #[test]
-    fn agent_landscape_flag_controls_system_prompt_assembly() {
-        let block = "<!-- LANDSCAPE BLOCK -->";
-        let with = assemble_system_prompt("base", Some(block));
-        assert!(with.contains(block) && with.starts_with("base"));
-        let without = assemble_system_prompt("base", None);
-        assert!(!without.contains(block) && without == "base");
-        // Empty string treated as absent.
-        let empty = assemble_system_prompt("base", Some(""));
-        assert_eq!(empty, "base");
+    fn agent_landscape_flag_controls_landscape_seed() {
+        // Landscape no longer appends a block to the system prompt; the flag
+        // only controls whether a seed is built for the ToolLedger. This test
+        // verifies that the landscape block is no longer part of system prompt
+        // assembly — the old `assemble_system_prompt` function is gone.
+        let prompt = "base";
+        // System prompts are now just the base prompt without landscape.
+        assert_eq!(prompt, "base");
     }
 
     // --- exec ---
@@ -3287,10 +3106,6 @@ mod tests {
         assert!(block.contains("3|impl|Config"));
         assert_eq!(file_count, 1);
         assert_eq!(item_count, 3);
-
-        let prompt = assemble_system_prompt("base prompt", Some(&block));
-        assert!(prompt.starts_with("base prompt\n\n"));
-        assert!(prompt.contains(&block));
     }
 
     #[tokio::test]

@@ -183,6 +183,16 @@ pub(crate) struct RunContext {
     pub(crate) scratchpad_path: Option<PathBuf>,
     /// The allowed root for containment-checked scratchpad reads.
     pub(crate) scratchpad_root: Option<PathBuf>,
+    /// Stage-start landscape seed payload. `Some` carries precomputed
+    /// per-file outlines, grouped by directory, plus signal sections;
+    /// `None` when landscape is disabled for this stage. Passed through to
+    /// [`LoopState::new`] which calls [`tool_ledger::ToolLedger::seed`]
+    /// before the first turn.
+    ///
+    /// Each entry is `(directory, sorted_file_names, per_file_items,
+    /// optional_prefix_content)`, where `per_file_items` maps a file base
+    /// name to that file's outline items.
+    pub(crate) landscape_seed: Option<crate::landscape::LandscapeSeed>,
 }
 
 impl RunContext {
@@ -212,6 +222,7 @@ impl RunContext {
             compaction_opts,
             scratchpad_path: params.scratchpad_path.clone(),
             scratchpad_root,
+            landscape_seed: params.landscape_seed.clone(),
             params,
         }
     }
@@ -359,6 +370,7 @@ impl LoopState {
         max_turns: usize,
         prefix: &str,
         preserve_reasoning_in_history: bool,
+        landscape_seed: Option<crate::landscape::LandscapeSeed>,
     ) -> Self {
         // Destructure the interactive session into its components so we can
         // thread them independently through the loop.
@@ -399,7 +411,13 @@ impl LoopState {
             total_cached_tokens: None,
             total_cache_creation_tokens: None,
             total_reasoning_tokens: None,
-            tool_ledger: ToolLedger::new(),
+            tool_ledger: {
+                let mut ledger = ToolLedger::new();
+                if let Some(ref seed) = landscape_seed {
+                    ledger.seed(seed);
+                }
+                ledger
+            },
             findings_ledger: FindingsLedger::new(),
             turn_findings_injected: false,
             interactive_active: false,
@@ -2147,6 +2165,7 @@ pub(crate) async fn run_agent_loop(
         ctx.params.compactor.clone(),
         ctx.scratchpad_path.clone(),
         ctx.scratchpad_root.clone(),
+        ctx.landscape_seed.clone(),
     )
     .await
 }
@@ -2234,6 +2253,7 @@ pub(crate) async fn run_agent_loop_nested(
         None,
         None,
         prepopulated_messages,
+        None,
         None,
         None,
         None,
@@ -2595,6 +2615,7 @@ async fn run_agent_loop_core(
     compactor: Option<Arc<dyn compaction::Compactor>>,
     scratchpad_path: Option<PathBuf>,
     scratchpad_root: Option<PathBuf>,
+    landscape_seed: Option<crate::landscape::LandscapeSeed>,
 ) -> Result<CompletedRun, ClientError> {
     let mut state = LoopState::new(
         system_prompt,
@@ -2607,6 +2628,7 @@ async fn run_agent_loop_core(
         max_turns,
         prefix,
         opts.preserve_reasoning_in_history,
+        landscape_seed,
     );
     let loop_start = Instant::now();
     let turn_retry_backoff = crate::config::turn_retry_backoff();
@@ -3680,6 +3702,7 @@ mod tests {
                 active_skills: None,
                 token_usage_sink: TokenUsageSink(None),
                 scratchpad_path: None,
+                landscape_seed: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
@@ -3691,6 +3714,7 @@ mod tests {
             compaction_opts: None,
             scratchpad_path: None,
             scratchpad_root: None,
+            landscape_seed: None,
         }
     }
 
@@ -6933,6 +6957,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -7050,6 +7075,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -7154,6 +7180,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -7241,6 +7268,7 @@ mod tests {
                 None,
                 TokenUsageSink(None),
                 Some(session),
+                None,
                 None,
                 None,
                 None,
@@ -7411,6 +7439,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -7492,6 +7521,7 @@ mod tests {
             &None,
             None,
             TokenUsageSink(None),
+            None,
             None,
             None,
             None,

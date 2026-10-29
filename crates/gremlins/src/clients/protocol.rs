@@ -76,7 +76,7 @@ pub fn add_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 /// One file observation captured from a worker agent's Read, Grep, or Landscape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileObservation {
-    /// Tool name: "Read", "Grep", or "Landscape".
+    /// Tool name: "Read", "Grep", "DirLs", or "Landscape".
     pub tool: String,
     /// File path for Read; search path for Grep; directory for Landscape.
     pub path: String,

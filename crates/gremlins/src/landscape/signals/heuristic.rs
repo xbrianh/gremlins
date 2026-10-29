@@ -15,42 +15,9 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use super::{Identifier, IdentifierForm, PathCandidate};
+use super::{Identifier, IdentifierForm};
 
 // ── Regex patterns (compiled once) ────────────────────────────────────────
-
-pub(crate) fn path_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        // Matches common file-path patterns:
-        //   - Absolute: /foo/bar.rs, /etc/config
-        //   - Relative: ./foo.rs, ../bar/baz, foo/bar.rs
-        //   - Also catches tilde-prefixed paths (~/foo) and Windows-style
-        //     absolute paths (C:\foo, \\server\share).
-        Regex::new(
-            r#"(?x)
-            (?P<abs>
-                (?:/[a-zA-Z0-9_.\-][a-zA-Z0-9_.\-\+/]*)   # Unix absolute path
-              |
-                (?:[A-Za-z]:\\[a-zA-Z0-9_.\-\+\\]*)        # Windows drive-absolute
-              |
-                (?:\\\\[a-zA-Z0-9_.\-]+\\[a-zA-Z0-9_.\-\+\\]*)  # UNC path
-              |
-                (?:~/[a-zA-Z0-9_.\-][a-zA-Z0-9_.\-\+/]*)   # Tilde-home path
-            )
-            |
-            (?P<rel>
-                (?:\.{1,2}/[a-zA-Z0-9_.\-][a-zA-Z0-9_.\-\+/]*)  # ./ or ../ relative
-            )
-            |
-            (?P<bare>
-                (?:[a-zA-Z][a-zA-Z0-9_\-]*/[a-zA-Z0-9_.\-\+/]*)   # bare relative (no ./ prefix)
-            )
-            "#,
-        )
-        .expect("valid path regex")
-    })
-}
 
 pub(crate) fn snake_case_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -81,44 +48,6 @@ pub(crate) fn shouty_snake_regex() -> &'static Regex {
 }
 
 // ── Extraction helpers ────────────────────────────────────────────────────
-
-/// Scan a single line of source text for path candidates.
-pub(crate) fn extract_path_candidates(
-    line: &str,
-    line_number: usize,
-    source_file: &Path,
-) -> Vec<PathCandidate> {
-    let re = path_regex();
-    let mut candidates = Vec::new();
-    for caps in re.captures_iter(line) {
-        let raw = if let Some(m) = caps.name("abs") {
-            (m.as_str(), true)
-        } else if let Some(m) = caps.name("rel") {
-            (m.as_str(), false)
-        } else if let Some(m) = caps.name("bare") {
-            (m.as_str(), false)
-        } else {
-            continue;
-        };
-        // Strip trailing punctuation that often follows paths in prose:
-        // periods, commas, semicolons, colons, and closing brackets.
-        let path = raw
-            .0
-            .trim_end_matches(['.', ',', ';', ':', ')', ']'])
-            .to_string();
-        // Don't emit an empty or single-segment result after trimming.
-        if path.is_empty() || (!path.contains('/') && !path.contains('\\')) {
-            continue;
-        }
-        candidates.push(PathCandidate {
-            path,
-            is_absolute: raw.1,
-            source_file: source_file.to_path_buf(),
-            line: line_number,
-        });
-    }
-    candidates
-}
 
 /// Scan a single line of source text for identifiers in all three forms.
 pub(crate) fn extract_identifiers(
