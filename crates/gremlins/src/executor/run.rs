@@ -634,11 +634,11 @@ async fn run_agent(
         prompt = prompt.replace("{scratchpad_path}", &scratchpad_model_path);
     }
 
-    // Build the landscape seed payload for the ToolLedger (living landscape).
-    // When landscape is enabled, compute the full-tree outlines and signal
-    // sections and bundle them into the seed. The system prompt is just the
-    // base prompt without any landscape block.
-    let landscape_seed: Option<crate::landscape::LandscapeSeed> = if agent.landscape {
+    // Build the landscape data payload for the LandscapeContext (living
+    // landscape). When landscape is enabled, compute the full-tree outlines and
+    // signal sections and bundle them into the data. The system prompt is just
+    // the base prompt without any landscape block.
+    let landscape_data: Option<crate::landscape::LandscapeData> = if agent.landscape {
         let cwd2 = gremlin.cwd();
         let log_tx2 = gremlin.runtime_config.log_tx.clone();
         let outlines = build_outlines(cwd2.clone(), log_tx2.clone()).await;
@@ -688,12 +688,13 @@ async fn run_agent(
             outlines
         };
 
-        // Build seed: full-tree outlines plus signal sections wrapped in a
-        // LandscapeSeed struct for the ToolLedger.
-        let seed = crate::landscape::LandscapeSeed {
+        // Build data: full-tree outlines plus signal sections wrapped in a
+        // LandscapeData struct for the LandscapeContext.
+        let seed = crate::landscape::LandscapeData {
             root: cwd2.clone(),
             outlines: effective_outlines,
             signal_sections,
+            directory_entries: Default::default(),
         };
         Some(seed)
     } else {
@@ -881,7 +882,7 @@ async fn run_agent(
             .implicit_artifacts
             .first()
             .map(|a| a.model_path.clone()),
-        landscape_seed,
+        landscape_data,
     };
 
     let effective_model = params
@@ -2239,9 +2240,9 @@ mod tests {
     }
 
     #[test]
-    fn agent_landscape_flag_controls_landscape_seed() {
+    fn agent_landscape_flag_controls_landscape_data() {
         // Landscape no longer appends a block to the system prompt; the flag
-        // only controls whether a seed is built for the ToolLedger. This test
+        // only controls whether data is built for the LandscapeContext. This test
         // verifies that the landscape block is no longer part of system prompt
         // assembly — the old `assemble_system_prompt` function is gone.
         let prompt = "base";

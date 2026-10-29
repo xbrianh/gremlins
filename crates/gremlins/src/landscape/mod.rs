@@ -672,20 +672,196 @@ fn render_key_parts(
     Some(parts)
 }
 
-/// Seed data for the living landscape in the ToolLedger.
+/// Per-directory cache entry in the living landscape.
+#[derive(Clone, Debug)]
+pub(crate) struct LandscapeDirEntry {
+    /// Last turn this directory was touched (observed via Read/Grep/Write/Edit/Landscape/Glob).
+    pub(crate) last_touched_turn: usize,
+    /// Sorted file names (basename only) in this directory.
+    pub(crate) sorted_files: Vec<String>,
+    /// Full outline items when available (from seed or re-exploration).
+    pub(crate) outline_items: Vec<(String, Vec<OutlineItem>)>,
+    /// Optional prefix content rendered above the directory (signal sections).
+    pub(crate) prefix_content: Option<String>,
+}
+
+/// Living, mutable landscape data owned by LandscapeContext.
 ///
 /// Carries the full-tree outlines and signal sections computed at stage
-/// start so the agent loop's `ToolLedger::seed` can populate the directory
-/// cache before the first turn.
+/// start, plus a per-directory working set that is refreshed on tool touches
+/// and pruned by turn decay.
 #[derive(Clone, Debug)]
-pub struct LandscapeSeed {
-    /// The worktree root directory. Signal prefix content is attached to
-    /// this directory's cache entry.
+pub struct LandscapeData {
+    /// The worktree root directory.
     pub(crate) root: std::path::PathBuf,
-    /// Full-tree per-file outlines.
+    /// Full-tree per-file outlines from stage start.
     pub(crate) outlines: Vec<FileOutline>,
     /// Pre-computed signal sections (changed-files, diff-stat, symbol-map).
     pub(crate) signal_sections: Vec<signals::SignalSection>,
+    /// Per-directory cache: keyed by parent-directory path.
+    pub(crate) directory_entries: std::collections::HashMap<std::path::PathBuf, LandscapeDirEntry>,
+}
+
+impl LandscapeData {
+    /// Seed directory entries from the stage-start outlines and signal sections.
+    ///
+    /// Groups `self.outlines` by parent directory, populates each entry with
+    /// file names and outline items. Signal sections are rendered as prefix
+    /// content on the root directory's entry.
+    ///
+    /// Idempotent: calling it again replaces all entries.
+    pub fn seed(&mut self) {
+        self.directory_entries.clear();
+
+        let prefix = if self.signal_sections.is_empty() {
+            None
+        } else {
+            Some(
+                self.signal_sections
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            )
+        };
+
+        // Group outlines by parent directory.
+        let mut dir_files: std::collections::HashMap<
+            std::path::PathBuf,
+            Vec<(String, Vec<OutlineItem>)>,
+        > = std::collections::HashMap::new();
+        for outline in &self.outlines {
+            if let Some(parent) = outline.path.parent() {
+                let parent = parent.to_path_buf();
+                let name = outline
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                dir_files
+                    .entry(parent)
+                    .or_default()
+                    .push((name, outline.items.clone()));
+            }
+        }
+
+        // Create entries for directories that have files.
+        for (dir, mut files) in dir_files {
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            let sorted_files: Vec<String> = files.iter().map(|f| f.0.clone()).collect();
+            let prefix_content = if dir.as_path() == self.root.as_path() {
+                prefix.clone()
+            } else {
+                None
+            };
+            self.directory_entries.insert(
+                dir.clone(),
+                LandscapeDirEntry {
+                    last_touched_turn: 0,
+                    sorted_files,
+                    outline_items: files,
+                    prefix_content,
+                },
+            );
+        }
+
+        // If signal sections exist but no outlines (or root dir not covered),
+        // ensure root has a prefix-only entry.
+        if prefix.is_some() && !self.directory_entries.contains_key(&self.root) {
+            self.directory_entries.insert(
+                self.root.clone(),
+                LandscapeDirEntry {
+                    last_touched_turn: 0,
+                    sorted_files: Vec::new(),
+                    outline_items: Vec::new(),
+                    prefix_content: prefix.clone(),
+                },
+            );
+        }
+    }
+
+    /// Touch a directory: re-explore it via `LandscapeExplorer` and update
+    /// the cache entry with fresh file names and outline items.
+    ///
+    /// If the directory isn't yet cached, a new entry is created.
+    /// `turn` is the current turn number.
+    pub fn touch_dir(&mut self, dir: &std::path::Path, explorer: &LandscapeExplorer, turn: usize) {
+        // Re-explore the directory to get fresh outlines.
+        let (sorted_files, outline_items) = match explorer.build(dir, 0) {
+            Ok(outlines) => {
+                let mut files: Vec<(String, Vec<OutlineItem>)> = outlines
+                    .iter()
+                    .map(|o| {
+                        let name = o
+                            .path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        (name, o.items.clone())
+                    })
+                    .collect();
+                files.sort_by(|a, b| a.0.cmp(&b.0));
+                let sorted_files: Vec<String> = files.iter().map(|f| f.0.clone()).collect();
+                (sorted_files, files)
+            }
+            Err(_) => {
+                // Read error: bump the existing entry's timestamp so an
+                // actively-touched directory is never decay-pruned even when
+                // re-exploration keeps failing. If there is no existing entry
+                // we create an empty one (retry on a later touch).
+                if let Some(existing) = self.directory_entries.get_mut(dir) {
+                    existing.last_touched_turn = turn;
+                    return;
+                }
+                (Vec::new(), Vec::new())
+            }
+        };
+
+        // Re-derive prefix_content: prefer the existing entry's value, then
+        // rebuild from signal_sections when the touched directory is the
+        // project root (so signal sections survive root-entry decay).
+        let prefix_content = self
+            .directory_entries
+            .get(dir)
+            .and_then(|e| e.prefix_content.clone())
+            .or_else(|| {
+                if dir == self.root.as_path() && !self.signal_sections.is_empty() {
+                    Some(
+                        self.signal_sections
+                            .iter()
+                            .map(|s| s.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n\n"),
+                    )
+                } else {
+                    None
+                }
+            });
+
+        self.directory_entries.insert(
+            dir.to_path_buf(),
+            LandscapeDirEntry {
+                last_touched_turn: turn,
+                sorted_files,
+                outline_items,
+                prefix_content,
+            },
+        );
+    }
+
+    /// Prune directories whose last touch is more than `n` turns ago.
+    /// Returns the number of directories pruned.
+    pub fn prune_decayed(&mut self, turn: usize, n: usize) -> usize {
+        let before = self.directory_entries.len();
+        self.directory_entries
+            .retain(|_dir, entry| turn.saturating_sub(entry.last_touched_turn) <= n);
+        before - self.directory_entries.len()
+    }
+
+    /// True when there is no landscape data at all (no outlines, no signal sections).
+    pub fn is_empty(&self) -> bool {
+        self.outlines.is_empty() && self.signal_sections.is_empty()
+    }
 }
 
 /// A formatted landscape block plus the number of files and items actually
@@ -1121,6 +1297,108 @@ pub(crate) fn count_tokens(text: &str) -> Result<usize, LandscapeError> {
         .as_ref()
         .map_err(|e| LandscapeError::Tokenizer(e.clone()))?;
     Ok(bpe.encode_with_special_tokens(text).len())
+}
+
+/// Format the living landscape data as a compact index block, interleaving
+/// directory entries with outline items within a token budget.
+///
+/// Returns the formatted text. Empty when `data` has no entries.
+pub(crate) fn format_landscape_data(data: &LandscapeData, max_tokens: usize) -> String {
+    if data.directory_entries.is_empty() {
+        return String::new();
+    }
+
+    let mut items: Vec<String> = Vec::new();
+    let mut budget = max_tokens;
+
+    // Sort directories by path for stable output.
+    let mut dirs: Vec<&std::path::PathBuf> = data.directory_entries.keys().collect();
+    dirs.sort();
+
+    for dir in dirs {
+        let entry = &data.directory_entries[dir];
+        let display_dir = dir.to_string_lossy();
+
+        // Add prefix content if present and within budget.
+        if let Some(ref prefix) = entry.prefix_content {
+            let tok = count_tokens(prefix).unwrap_or(prefix.len());
+            if tok <= budget {
+                budget = budget.saturating_sub(tok);
+                items.push(prefix.clone());
+            }
+        }
+
+        // Build item-lookup map for this directory.
+        let item_map: std::collections::HashMap<&str, &[OutlineItem]> = entry
+            .outline_items
+            .iter()
+            .map(|(n, o)| (n.as_str(), o.as_slice()))
+            .collect();
+
+        let mut file_lines: Vec<String> = Vec::new();
+        let max_files = 40; // same as old max_files_per_dir
+
+        for name in entry.sorted_files.iter().take(max_files) {
+            let mut file_line = name.clone();
+            if let Some(outline) = item_map.get(name.as_str()) {
+                if !outline.is_empty() {
+                    let item_str = format_outline_items(outline);
+                    file_line.push(' ');
+                    file_line.push_str(&item_str);
+                }
+            }
+            file_lines.push(file_line);
+        }
+
+        if entry.sorted_files.len() > max_files {
+            file_lines.push(format!(
+                "... and {} more",
+                entry.sorted_files.len() - max_files
+            ));
+        }
+
+        if !file_lines.is_empty() {
+            let header = format!("{display_dir}/");
+            let header_tok = count_tokens(&header).unwrap_or(header.len());
+            let file_tokens: usize = file_lines
+                .iter()
+                .map(|l| count_tokens(l).unwrap_or(l.len()))
+                .sum();
+            let total_tok = header_tok + file_tokens;
+            if total_tok <= budget {
+                budget = budget.saturating_sub(total_tok);
+                items.push(header);
+                for fl in &file_lines {
+                    items.push(format!("  {fl}"));
+                }
+            } else if header_tok <= budget {
+                budget = budget.saturating_sub(header_tok);
+                items.push(header);
+                let mut emitted = 0usize;
+                for fl in &file_lines {
+                    let fl_tok = count_tokens(fl).unwrap_or(fl.len());
+                    if fl_tok <= budget {
+                        budget = budget.saturating_sub(fl_tok);
+                        items.push(format!("  {fl}"));
+                        emitted += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if emitted < file_lines.len() {
+                    items.push("  ...".to_string());
+                }
+            }
+        }
+    }
+
+    if items.is_empty() {
+        String::new()
+    } else {
+        let mut out = String::from("### Project landscape\n\n");
+        out.push_str(&items.join("\n"));
+        out
+    }
 }
 
 #[cfg(test)]

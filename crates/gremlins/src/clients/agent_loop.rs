@@ -184,16 +184,16 @@ pub(crate) struct RunContext {
     pub(crate) scratchpad_path: Option<PathBuf>,
     /// The allowed root for containment-checked scratchpad reads.
     pub(crate) scratchpad_root: Option<PathBuf>,
-    /// Stage-start landscape seed payload. `Some` carries precomputed
+    /// Stage-start landscape data payload. `Some` carries precomputed
     /// per-file outlines, grouped by directory, plus signal sections;
     /// `None` when landscape is disabled for this stage. Passed through to
-    /// [`LoopState::new`] which calls [`tool_ledger::ToolLedger::seed`]
-    /// before the first turn.
+    /// [`LoopState::new`] which creates a
+    /// [`landscape_context::LandscapeContext`] before the first turn.
     ///
     /// Each entry is `(directory, sorted_file_names, per_file_items,
     /// optional_prefix_content)`, where `per_file_items` maps a file base
     /// name to that file's outline items.
-    pub(crate) landscape_seed: Option<crate::landscape::LandscapeSeed>,
+    pub(crate) landscape_data: Option<crate::landscape::LandscapeData>,
 }
 
 impl RunContext {
@@ -223,7 +223,7 @@ impl RunContext {
             compaction_opts,
             scratchpad_path: params.scratchpad_path.clone(),
             scratchpad_root,
-            landscape_seed: params.landscape_seed.clone(),
+            landscape_data: params.landscape_data.clone(),
             params,
         }
     }
@@ -376,7 +376,7 @@ impl LoopState {
         max_turns: usize,
         prefix: &str,
         preserve_reasoning_in_history: bool,
-        landscape_seed: Option<crate::landscape::LandscapeSeed>,
+        landscape_data: Option<crate::landscape::LandscapeData>,
     ) -> Self {
         // Destructure the interactive session into its components so we can
         // thread them independently through the loop.
@@ -419,11 +419,15 @@ impl LoopState {
             total_reasoning_tokens: None,
             contexts: {
                 let mut ledger = ToolLedger::new();
-                if let Some(ref seed) = landscape_seed {
-                    ledger.seed(seed);
-                }
                 ledger.capture_turn_transcript(0);
-                vec![Box::new(ledger) as Box<dyn MutableModelContext>]
+                let mut contexts: Vec<Box<dyn MutableModelContext>> =
+                    vec![Box::new(ledger) as Box<dyn MutableModelContext>];
+                if let Some(ld) = landscape_data {
+                    contexts.push(Box::new(
+                        crate::clients::landscape_context::LandscapeContext::new(ld),
+                    ) as Box<dyn MutableModelContext>);
+                }
+                contexts
             },
             findings_ledger: FindingsLedger::new(),
             turn_findings_injected: false,
@@ -2207,7 +2211,7 @@ pub(crate) async fn run_agent_loop(
         ctx.params.compactor.clone(),
         ctx.scratchpad_path.clone(),
         ctx.scratchpad_root.clone(),
-        ctx.landscape_seed.clone(),
+        ctx.landscape_data.clone(),
     )
     .await
 }
@@ -2657,7 +2661,7 @@ async fn run_agent_loop_core(
     compactor: Option<Arc<dyn compaction::Compactor>>,
     scratchpad_path: Option<PathBuf>,
     scratchpad_root: Option<PathBuf>,
-    landscape_seed: Option<crate::landscape::LandscapeSeed>,
+    landscape_data: Option<crate::landscape::LandscapeData>,
 ) -> Result<CompletedRun, ClientError> {
     let mut state = LoopState::new(
         system_prompt,
@@ -2670,7 +2674,7 @@ async fn run_agent_loop_core(
         max_turns,
         prefix,
         opts.preserve_reasoning_in_history,
-        landscape_seed,
+        landscape_data,
     );
     let loop_start = Instant::now();
     let turn_retry_backoff = crate::config::turn_retry_backoff();
@@ -3744,7 +3748,7 @@ mod tests {
                 active_skills: None,
                 token_usage_sink: TokenUsageSink(None),
                 scratchpad_path: None,
-                landscape_seed: None,
+                landscape_data: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
@@ -3756,7 +3760,7 @@ mod tests {
             compaction_opts: None,
             scratchpad_path: None,
             scratchpad_root: None,
-            landscape_seed: None,
+            landscape_data: None,
         }
     }
 

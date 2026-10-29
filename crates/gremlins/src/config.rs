@@ -128,6 +128,7 @@ pub struct Config {
     landscape_tool_ledger_pruning: bool,
     landscape_stage_profiles: bool,
     landscape_diff_stat: bool,
+    landscape_decay_turns: u64,
     backoff: BackoffConfig,
 }
 
@@ -250,6 +251,9 @@ struct BackoffSection {
 }
 
 /// The `landscape` section of settings.yaml.
+/// Default turn-decay window for the living landscape cache.
+const DEFAULT_LANDSCAPE_DECAY_TURNS: u64 = 5;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LandscapeSection {
@@ -274,6 +278,10 @@ struct LandscapeSection {
     /// before the changed-files listing when the stage has a diff artifact.
     #[serde(rename = "diff-stat", default)]
     diff_stat: Option<bool>,
+    /// Turn-decay window: directories untouched for more than this many turns
+    /// are pruned from subsequent prompts. Default 5.
+    #[serde(rename = "decay-turns", default)]
+    decay_turns: Option<u64>,
 }
 
 /// A single `model-profiles` entry as it appears in `settings.yaml`.
@@ -390,6 +398,8 @@ impl Config {
                     landscape_tool_ledger_pruning,
                     landscape_stage_profiles,
                     landscape_diff_stat,
+                    landscape_decay_turns: parse_env_u64("GREMLINS_LANDSCAPE_DECAY_TURNS")
+                        .unwrap_or(DEFAULT_LANDSCAPE_DECAY_TURNS),
                     ..Config::default()
                 });
             }
@@ -617,6 +627,13 @@ impl Config {
             })
             .unwrap_or(false);
 
+        let landscape_decay_turns = cfg_file
+            .landscape
+            .as_ref()
+            .and_then(|l| l.decay_turns)
+            .or_else(|| parse_env_u64("GREMLINS_LANDSCAPE_DECAY_TURNS"))
+            .unwrap_or(DEFAULT_LANDSCAPE_DECAY_TURNS);
+
         Ok(Config {
             default_model,
             tui_model,
@@ -639,6 +656,7 @@ impl Config {
             landscape_tool_ledger_pruning,
             landscape_stage_profiles,
             landscape_diff_stat,
+            landscape_decay_turns,
             backoff,
         })
     }
@@ -726,6 +744,10 @@ impl Config {
 
     pub fn landscape_diff_stat(&self) -> bool {
         self.landscape_diff_stat
+    }
+
+    pub fn landscape_decay_turns(&self) -> u64 {
+        self.landscape_decay_turns
     }
 
     pub fn turn_retry_schedule(&self) -> &[f64] {
@@ -1356,6 +1378,21 @@ pub(crate) fn landscape_diff_stat() -> bool {
     Config::load()
         .map(|c| c.landscape_diff_stat())
         .unwrap_or(false)
+}
+
+/// GREMLINS_LANDSCAPE_DECAY_TURNS — directories untouched for more than this
+/// many turns are pruned from the landscape. Default 5.
+/// Settings.yaml `landscape.decay-turns` takes precedence over the env var.
+pub(crate) fn landscape_decay_turns() -> u64 {
+    get_global()
+        .map(|c| c.landscape_decay_turns())
+        .or_else(|| parse_env_u64("GREMLINS_LANDSCAPE_DECAY_TURNS"))
+        .unwrap_or(DEFAULT_LANDSCAPE_DECAY_TURNS)
+}
+
+/// Read an environment variable and parse it as u64.
+fn parse_env_u64(var: &str) -> Option<u64> {
+    std::env::var(var).ok().and_then(|v| v.parse().ok())
 }
 
 /// Parse a boolean from an environment variable value.
