@@ -166,10 +166,15 @@ impl LandscapeContext {
         );
     }
 
-    /// Capture the current formatted landscape state as a turn transcript block.
+    /// Capture the current formatted landscape state as a turn transcript
+    /// block, making it the sole index that carries landscape content.
     fn capture_turn_transcript(&mut self, turn_num: usize) {
         while self.turn_transcripts.len() <= turn_num {
             self.turn_transcripts.push(String::new());
+        }
+        // Clear all prior entries — only the tail carries landscape.
+        for entry in &mut self.turn_transcripts {
+            *entry = String::new();
         }
         let rendered = if self.data.file_entries.is_empty() && self.data.signal_sections.is_empty()
         {

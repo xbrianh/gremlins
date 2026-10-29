@@ -403,7 +403,7 @@ fn build_diff_stat(ctx: &SignalContext) -> Option<String> {
 
 /// Extract candidate identifiers from a prompt/plan string using the same
 /// three case-convention regexes used for source-file scanning.
-fn extract_prompt_identifiers(prompt: &str) -> HashSet<String> {
+pub(crate) fn extract_prompt_identifiers(prompt: &str) -> HashSet<String> {
     let mut names = HashSet::new();
     for re in [
         heuristic::snake_case_regex(),
@@ -420,7 +420,7 @@ fn extract_prompt_identifiers(prompt: &str) -> HashSet<String> {
 /// Render the symbol map from prompt-derived candidates resolved against the
 /// full symbol index. Entries are sorted by name and capped at 30. When the
 /// prompt is absent or empty the section is omitted entirely.
-fn build_symbol_map(ctx: &SignalContext, symbol_index: &HashMap<String, SymbolEntry>) -> String {
+pub(crate) fn build_symbol_map(ctx: &SignalContext, symbol_index: &HashMap<String, SymbolEntry>) -> String {
     let candidates = match ctx.prompt.as_deref() {
         Some(p) if !p.trim().is_empty() => extract_prompt_identifiers(p),
         _ => return String::new(),
@@ -472,7 +472,7 @@ fn build_symbol_map(ctx: &SignalContext, symbol_index: &HashMap<String, SymbolEn
 pub(crate) fn render_signal_sections(
     ctx: &SignalContext,
     outlines: &[super::FileOutline],
-) -> (Vec<SignalSection>, usize, Vec<PathBuf>) {
+) -> (Vec<SignalSection>, usize, Vec<PathBuf>, HashMap<String, SymbolEntry>) {
     let signals = build_signals(ctx, outlines);
     let mut sections = Vec::new();
     let mut total_skipped = 0usize;
@@ -512,7 +512,7 @@ pub(crate) fn render_signal_sections(
             }
         }
 
-        (sections, total_skipped, diff_paths)
+        (sections, total_skipped, diff_paths, signals.symbol_index)
     } else {
         // Full profile (or DiffFocused with empty diff): emit the unscoped
         // symbol map section.
@@ -523,7 +523,7 @@ pub(crate) fn render_signal_sections(
             }
         }
 
-        (sections, total_skipped, Vec::new())
+        (sections, total_skipped, Vec::new(), signals.symbol_index)
     }
 }
 
@@ -922,7 +922,7 @@ let config = Config::default();
             prompt: Some("helper_fn".to_string()),
             diff_stat: false,
         };
-        let (sections, _skipped, _diff) = render_signal_sections(&ctx, &[outline]);
+        let (sections, _skipped, _diff, _) = render_signal_sections(&ctx, &[outline]);
         let keys: Vec<&str> = sections.iter().map(|s| s.key.as_str()).collect();
         assert!(
             keys.contains(&"symbol-map"),
@@ -950,7 +950,7 @@ let config = Config::default();
             prompt: None,
             diff_stat: false,
         };
-        let (sections, _skipped, diff_paths) = render_signal_sections(&ctx, &outlines);
+        let (sections, _skipped, diff_paths, _) = render_signal_sections(&ctx, &outlines);
         let keys: Vec<&str> = sections.iter().map(|s| s.key.as_str()).collect();
         assert!(
             keys.contains(&"changed-files"),
@@ -984,7 +984,7 @@ let config = Config::default();
             prompt: Some("func_01 func_02".to_string()),
             diff_stat: false,
         };
-        let (sections, _skipped, diff_paths) = render_signal_sections(&ctx, &outlines);
+        let (sections, _skipped, diff_paths, _) = render_signal_sections(&ctx, &outlines);
 
         // At least one section should be Symbol map (files in diff contain
         // `fn func_NN` identifiers).
@@ -1185,7 +1185,7 @@ let config = Config::default();
             prompt: None,
             diff_stat: true,
         };
-        let (sections, _skipped, _paths) = render_signal_sections(&ctx, &outlines);
+        let (sections, _skipped, _paths, _) = render_signal_sections(&ctx, &outlines);
         let keys: Vec<&str> = sections.iter().map(|s| s.key.as_str()).collect();
         assert!(
             keys.first() == Some(&"diff-stat"),
@@ -1221,7 +1221,7 @@ let config = Config::default();
             prompt: None,
             diff_stat: false,
         };
-        let (sections_off, _, _) = render_signal_sections(&ctx_off, &outlines);
+        let (sections_off, _, _, _) = render_signal_sections(&ctx_off, &outlines);
         assert!(
             !sections_off.iter().any(|s| s.key == "diff-stat"),
             "diff-stat must be absent when flag is off"
@@ -1235,7 +1235,7 @@ let config = Config::default();
             prompt: None,
             diff_stat: true,
         };
-        let (sections_on, _, _) = render_signal_sections(&ctx_on, &outlines);
+        let (sections_on, _, _, _) = render_signal_sections(&ctx_on, &outlines);
         let has_diff_stat = sections_on.iter().any(|s| s.key == "diff-stat");
         assert!(has_diff_stat, "diff-stat must appear when flag is on");
     }
@@ -1259,7 +1259,7 @@ let config = Config::default();
             prompt: Some("helper_fn MyStruct MAX_ITEMS".to_string()),
             diff_stat: false,
         };
-        let (sections, _skipped, _diff) = render_signal_sections(&ctx, &[outline]);
+        let (sections, _skipped, _diff, _) = render_signal_sections(&ctx, &[outline]);
         let body = sections
             .iter()
             .find(|s| s.key == "symbol-map")
@@ -1291,7 +1291,7 @@ let config = Config::default();
             prompt: None,
             diff_stat: false,
         };
-        let (sections, _skipped, _diff) = render_signal_sections(&ctx, &[outline]);
+        let (sections, _skipped, _diff, _) = render_signal_sections(&ctx, &[outline]);
         assert!(
             !sections.iter().any(|s| s.key == "symbol-map"),
             "empty prompt must not produce symbol map; got sections: {sections:?}"
@@ -1313,7 +1313,7 @@ let config = Config::default();
             prompt: Some("Config use something_else".to_string()),
             diff_stat: false,
         };
-        let (sections, _skipped, _diff) = render_signal_sections(&ctx, &[outline]);
+        let (sections, _skipped, _diff, _) = render_signal_sections(&ctx, &[outline]);
         assert!(
             !sections.iter().any(|s| s.key == "symbol-map"),
             "no-match prompt must not produce symbol map; got sections: {sections:?}"
@@ -1340,7 +1340,7 @@ let config = Config::default();
             prompt: Some("use let Config".to_string()),
             diff_stat: false,
         };
-        let (sections, _skipped, _diff) = render_signal_sections(&ctx, &[outline]);
+        let (sections, _skipped, _diff, _) = render_signal_sections(&ctx, &[outline]);
         assert!(
             !sections.iter().any(|s| s.key == "symbol-map"),
             "bare words must not produce symbol map; got sections: {sections:?}"
@@ -1370,7 +1370,7 @@ let config = Config::default();
             prompt: Some(prompt_parts.join(" ")),
             diff_stat: false,
         };
-        let (sections, _skipped, _diff) = render_signal_sections(&ctx, &outlines);
+        let (sections, _skipped, _diff, _) = render_signal_sections(&ctx, &outlines);
         let body = sections
             .iter()
             .find(|s| s.key == "symbol-map")

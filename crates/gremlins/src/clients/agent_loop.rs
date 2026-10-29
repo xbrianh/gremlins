@@ -461,7 +461,24 @@ impl LoopState {
                 ledger.capture_turn_transcript(0);
                 let mut contexts: Vec<Box<dyn MutableModelContext>> =
                     vec![Box::new(ledger) as Box<dyn MutableModelContext>];
-                if let Some(ld) = landscape_data {
+                if let Some(mut ld) = landscape_data {
+                    // Strip signal sections — they live in their own
+                    // SignalMapContext and render only into the prompt tail.
+                    let signal_sections = std::mem::take(&mut ld.signal_sections);
+                    let symbol_index = std::mem::take(&mut ld.symbol_index);
+                    let cwd = ld.root.clone();
+                    let has_signals = !signal_sections.is_empty()
+                        || !symbol_index.is_empty();
+                    if has_signals {
+                        contexts.push(Box::new(
+                            crate::clients::signal_context::SignalMapContext::new(
+                                signal_sections,
+                                Some(prompt.to_string()),
+                                cwd,
+                                symbol_index,
+                            ),
+                        ) as Box<dyn MutableModelContext>);
+                    }
                     contexts.push(Box::new(
                         crate::clients::landscape_context::LandscapeContext::new(ld, log_tx),
                     ) as Box<dyn MutableModelContext>);

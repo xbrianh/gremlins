@@ -661,7 +661,7 @@ async fn run_agent(
 
         let signals_enabled = crate::config::landscape_signals();
 
-        let (signal_sections, _pruned_skipped, diff_paths) = if signals_enabled {
+        let (signal_sections, _pruned_skipped, diff_paths, symbol_index) = if signals_enabled {
             let ctx = crate::landscape::signals::SignalContext {
                 cwd: cwd2.clone(),
                 pruned_files: pruned,
@@ -699,6 +699,7 @@ async fn run_agent(
             root: cwd2.clone(),
             outlines: effective_outlines,
             signal_sections,
+            symbol_index,
             file_entries: Default::default(),
         };
         Some(seed)

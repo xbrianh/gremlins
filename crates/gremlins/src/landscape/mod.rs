@@ -60,7 +60,12 @@ const ALLOWLIST_DOT_DIRS: &[&str] = &[".gremlins", ".github", ".cargo-gremlin-ta
 pub(crate) fn inject_signal_sections(
     ctx: &signals::SignalContext,
     outlines: &[FileOutline],
-) -> (Vec<signals::SignalSection>, usize, Vec<PathBuf>) {
+) -> (
+    Vec<signals::SignalSection>,
+    usize,
+    Vec<PathBuf>,
+    std::collections::HashMap<String, signals::SymbolEntry>,
+) {
     signals::render_signal_sections(ctx, outlines)
 }
 
@@ -695,6 +700,10 @@ pub struct LandscapeData {
     pub(crate) outlines: Vec<FileOutline>,
     /// Pre-computed signal sections (changed-files, diff-stat, symbol-map).
     pub(crate) signal_sections: Vec<signals::SignalSection>,
+    /// Deduplicated symbol index for the living symbol map.
+    /// Keyed by identifier name, maps to its first file:line occurrence.
+    pub(crate) symbol_index:
+        std::collections::HashMap<String, signals::SymbolEntry>,
     /// Per-file cache: keyed by full file path.
     pub(crate) file_entries: std::collections::HashMap<std::path::PathBuf, LandscapeFileEntry>,
 }
@@ -2502,6 +2511,7 @@ mod tests {
                 },
             ],
             signal_sections: vec![],
+            symbol_index: Default::default(),
             file_entries: Default::default(),
         };
 
@@ -2526,6 +2536,7 @@ mod tests {
             root: dir.path().to_path_buf(),
             outlines: vec![],
             signal_sections: vec![],
+            symbol_index: Default::default(),
             file_entries: Default::default(),
         };
 
@@ -2548,6 +2559,7 @@ mod tests {
             root: dir.path().to_path_buf(),
             outlines: vec![],
             signal_sections: vec![],
+            symbol_index: Default::default(),
             file_entries: Default::default(),
         };
 
@@ -2573,6 +2585,7 @@ mod tests {
                 "signals",
                 "<!-- signals -->".to_string(),
             )],
+            symbol_index: Default::default(),
             file_entries: {
                 let mut m = std::collections::HashMap::new();
                 m.insert(
