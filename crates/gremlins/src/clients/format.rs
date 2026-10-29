@@ -312,6 +312,7 @@ pub(crate) fn enrich_log_line(name: &str, args: &serde_json::Value) -> String {
 }
 
 /// Compact label for a tool call in the per-turn action ledger.
+#[allow(dead_code)]
 pub(crate) fn ledger_key_arg(args: &serde_json::Value) -> String {
     if let Some(obj) = args.as_object() {
         for k in [

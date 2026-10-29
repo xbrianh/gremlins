@@ -67,6 +67,7 @@ struct DirectoryLandscapeEntry {
     prefix_content: Option<String>,
 }
 
+#[derive(Clone)]
 pub(crate) struct ToolLedger {
     /// Key: (file_path, offset, limit).  Offset and limit are zero when
     /// the model reads the whole file.
@@ -81,6 +82,9 @@ pub(crate) struct ToolLedger {
     seq: usize,
     /// File paths mutated by Write or Edit, for parent-ledger invalidation.
     mutations: Vec<String>,
+    /// Mutations recorded during the current turn (since last finalize_turn).
+    /// Processed by finalize_turn and cleared afterward.
+    pending_mutations: Vec<String>,
     /// Worker observations that could not be fully injected into this loop's
     /// message history, but must still propagate up when this loop itself is a
     /// nested Scout. Kept separate from the seen maps so a later Scout is not
@@ -95,6 +99,9 @@ pub(crate) struct ToolLedger {
     max_files_per_dir: usize,
     /// Maximum token budget for landscape rendering (from config).
     max_landscape_tokens: usize,
+    /// Per-turn transcript blocks, captured at finalize_turn time.
+    /// Index i is turn i. Used by the MutableModelContext::transcript method.
+    turn_transcripts: Vec<String>,
 }
 
 impl ToolLedger {
@@ -106,11 +113,13 @@ impl ToolLedger {
             directory_landscapes: std::collections::HashMap::new(),
             seq: 0,
             mutations: Vec::new(),
+            pending_mutations: Vec::new(),
             omitted: Vec::new(),
             saved_root_prefix: None,
             max_files_per_dir: 40,
             max_landscape_tokens: usize::try_from(crate::config::max_landscape_tokens())
                 .unwrap_or(usize::MAX),
+            turn_transcripts: Vec::new(),
         }
     }
 
@@ -321,14 +330,7 @@ impl ToolLedger {
     /// Record a tool execution.  Write/Edit do NOT invalidate here;
     /// caller must call `invalidate_after_write` after all observations
     /// for the turn are recorded (see Comment 1 — Phase 2 concurrency).
-    pub(crate) fn record(
-        &mut self,
-        name: &str,
-        _key: &str,
-        output: &str,
-        args_json: &str,
-        turn_num: usize,
-    ) {
+    pub(crate) fn record(&mut self, name: &str, output: &str, args_json: &str, turn_num: usize) {
         let args: serde_json::Value =
             serde_json::from_str(args_json).unwrap_or(serde_json::Value::Null);
 
@@ -425,12 +427,14 @@ impl ToolLedger {
                 let seq = self.seq;
                 self.writes
                     .insert(file_path.clone(), LedgerWriteEntry { age, seq });
-                self.mutations.push(file_path);
+                self.mutations.push(file_path.clone());
+                self.pending_mutations.push(file_path);
             }
             "Edit" => {
                 let file_path = Self::parse_str(&args, "file_path").to_string();
                 if !file_path.is_empty() {
-                    self.mutations.push(file_path);
+                    self.mutations.push(file_path.clone());
+                    self.pending_mutations.push(file_path);
                 }
             }
             "Landscape" => {
@@ -1097,6 +1101,129 @@ impl ToolLedger {
         self.seq += 1;
         self.omitted.push((self.seq, obs.clone()));
     }
+
+    /// Queue file paths written by a Scout Task for deferred invalidation.
+    ///
+    /// Scout write paths participate in the same end-of-batch invalidation
+    /// as direct Write/Edit calls, preventing stale reads across concurrent
+    /// tool batches.  Caller must invoke `finalize_turn` to apply them.
+    pub(crate) fn queue_scout_writes(&mut self, paths: &[String]) {
+        for fp in paths {
+            self.pending_mutations.push(fp.clone());
+            if !self.mutations.contains(fp) {
+                self.mutations.push(fp.clone());
+            }
+        }
+    }
+
+    /// Capture the current formatted ledger state as a turn transcript block.
+    /// Called at the end of each turn (by finalize_turn) and after seeding.
+    pub(crate) fn capture_turn_transcript(&mut self, turn_num: usize) {
+        // Ensure the vec has enough capacity.
+        while self.turn_transcripts.len() <= turn_num {
+            self.turn_transcripts.push(String::new());
+        }
+        self.turn_transcripts[turn_num] = self.format(turn_num);
+    }
+}
+
+// ── MutableModelContext impl ───────────────────────────────────────────────
+
+impl super::model_context::MutableModelContext for ToolLedger {
+    fn propagates_to_task(&self) -> bool {
+        true
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn clone_box(&self) -> Box<dyn super::model_context::MutableModelContext> {
+        Box::new(self.clone())
+    }
+
+    fn observe(&mut self, turn: usize, tool: &str, args: &str, output: &str) {
+        self.record(tool, output, args, turn);
+    }
+
+    fn finalize_turn(&mut self, turn: usize) {
+        // Apply deferred invalidations for paths written/edited this turn.
+        let pending: Vec<String> = std::mem::take(&mut self.pending_mutations);
+        for fp in &pending {
+            self.invalidate_after_write(fp);
+        }
+        // Capture the transcript for this turn.
+        self.capture_turn_transcript(turn);
+    }
+
+    fn transcript(&self) -> Vec<Option<String>> {
+        self.turn_transcripts
+            .iter()
+            .map(|s| if s.is_empty() { None } else { Some(s.clone()) })
+            .collect()
+    }
+
+    fn join(&mut self, other: &dyn super::model_context::MutableModelContext) {
+        if let Some(other_ledger) = other.as_any().downcast_ref::<ToolLedger>() {
+            // Merge reads: take the newer entry (by seq).
+            for (key, entry) in &other_ledger.reads {
+                match self.reads.get(key) {
+                    Some(existing) if existing.seq >= entry.seq => {}
+                    _ => {
+                        self.reads.insert(key.clone(), entry.clone());
+                    }
+                }
+            }
+            // Merge greps.
+            for (key, entry) in &other_ledger.greps {
+                match self.greps.get(key) {
+                    Some(existing) if existing.seq >= entry.seq => {}
+                    _ => {
+                        self.greps.insert(key.clone(), entry.clone());
+                    }
+                }
+            }
+            // Merge writes.
+            for (key, entry) in &other_ledger.writes {
+                match self.writes.get(key) {
+                    Some(existing) if existing.seq >= entry.seq => {}
+                    _ => {
+                        self.writes.insert(key.clone(), entry.clone());
+                    }
+                }
+            }
+            // Merge directory landscapes.
+            for (dir, entry) in &other_ledger.directory_landscapes {
+                match self.directory_landscapes.get(dir) {
+                    Some(existing) if existing.seq >= entry.seq => {}
+                    _ => {
+                        self.directory_landscapes.insert(dir.clone(), entry.clone());
+                    }
+                }
+            }
+            // Merge mutations.
+            for p in &other_ledger.mutations {
+                if !self.mutations.contains(p) {
+                    self.mutations.push(p.clone());
+                }
+            }
+            // Take the higher sequence number.
+            self.seq = self.seq.max(other_ledger.seq);
+            // Merge turn transcripts: pad ours to match, then overwrite empties.
+            while self.turn_transcripts.len() < other_ledger.turn_transcripts.len() {
+                self.turn_transcripts.push(String::new());
+            }
+            for (i, theirs) in other_ledger.turn_transcripts.iter().enumerate() {
+                if !theirs.is_empty() && self.turn_transcripts[i].is_empty() {
+                    self.turn_transcripts[i] = theirs.clone();
+                }
+            }
+        }
+    }
 }
 
 /// Fold a Scout Task result's embedded file observations into a readable
@@ -1322,7 +1449,7 @@ fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clients::format::{key_arg, ledger_key_arg};
+    use crate::clients::format::ledger_key_arg;
     use crate::test_support::EnvGuard;
 
     fn make_read_obs(path: &str, output: &str, offset: u64, limit: u64) -> FileObservation {
@@ -1342,12 +1469,10 @@ mod tests {
     fn tool_ledger_accumulates_reads() {
         let mut tl = ToolLedger::new();
         let args = serde_json::json!({"file_path": "/tmp/a.rs"}).to_string();
-        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/a.rs"}));
-        tl.record("Read", &key, "content1", &args, 0);
-        tl.record("Read", &key, "content1", &args, 0);
+        tl.record("Read", "content1", &args, 0);
+        tl.record("Read", "content1", &args, 0);
         let args2 = serde_json::json!({"file_path": "/tmp/b.rs"}).to_string();
-        let key2 = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/b.rs"}));
-        tl.record("Read", &key2, "content2", &args2, 0);
+        tl.record("Read", "content2", &args2, 0);
         // Two files, each read; turn 0 for all.
         let out = tl.format(0);
         assert!(out.contains("/tmp/a.rs"), "{out}");
@@ -1359,10 +1484,9 @@ mod tests {
     fn tool_ledger_dedup_by_content_hash() {
         let mut tl = ToolLedger::new();
         let args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
-        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Read", &key, "same", &args, 0);
-        tl.record("Read", &key, "same", &args, 0);
-        tl.record("Read", &key, "same", &args, 0);
+        tl.record("Read", "same", &args, 0);
+        tl.record("Read", "same", &args, 0);
+        tl.record("Read", "same", &args, 0);
         let out = tl.format(0);
         assert!(
             out.contains(",3×"),
@@ -1371,8 +1495,8 @@ mod tests {
 
         // Different content replaces.
         let mut tl2 = ToolLedger::new();
-        tl2.record("Read", &key, "first", &args, 0);
-        tl2.record("Read", &key, "second", &args, 0);
+        tl2.record("Read", "first", &args, 0);
+        tl2.record("Read", "second", &args, 0);
         let out2 = tl2.format(0);
         assert!(!out2.contains("×"), "different hash still counts: {out2}");
     }
@@ -1381,9 +1505,8 @@ mod tests {
     fn tool_ledger_write_invalidates_read() {
         let mut tl = ToolLedger::new();
         let args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
-        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Read", &key, "content", &args, 0);
-        tl.record("Write", &key, "written", &args, 0);
+        tl.record("Read", "content", &args, 0);
+        tl.record("Write", "written", &args, 0);
         // Invalidation is deferred — caller must apply after the batch.
         tl.invalidate_after_write("/tmp/x.rs");
         let out = tl.format(0);
@@ -1395,11 +1518,9 @@ mod tests {
     fn tool_ledger_write_invalidates_greps() {
         let mut tl = ToolLedger::new();
         let grep_args = serde_json::json!({"pattern": "fn main", "path": "/tmp"}).to_string();
-        let grep_key = ledger_key_arg(&serde_json::json!({"pattern": "fn main"}));
-        tl.record("Grep", &grep_key, "results", &grep_args, 0);
+        tl.record("Grep", "results", &grep_args, 0);
         let write_args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
-        let write_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Write", &write_key, "written", &write_args, 0);
+        tl.record("Write", "written", &write_args, 0);
         tl.invalidate_after_write("/tmp/x.rs");
         let out = tl.format(0);
         assert!(!out.contains("G("), "greps should be invalidated: {out}");
@@ -1413,11 +1534,9 @@ mod tests {
     fn tool_ledger_write_invalidates_landscape() {
         let mut tl = ToolLedger::new();
         let ls_args = serde_json::json!({"file_path": "/tmp"}).to_string();
-        let ls_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp"}));
-        tl.record("Landscape", &ls_key, "tree", &ls_args, 0);
+        tl.record("Landscape", "tree", &ls_args, 0);
         let write_args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
-        let write_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Write", &write_key, "written", &write_args, 0);
+        tl.record("Write", "written", &write_args, 0);
         tl.invalidate_after_write("/tmp/x.rs");
         let out = tl.format(0);
         assert!(
@@ -1436,11 +1555,10 @@ mod tests {
         let mut tl = ToolLedger::new();
         let args1 =
             serde_json::json!({"file_path": "/tmp/x.rs", "offset": 0, "limit": 100}).to_string();
-        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Read", &key, "chunk1", &args1, 0);
+        tl.record("Read", "chunk1", &args1, 0);
         let args2 =
             serde_json::json!({"file_path": "/tmp/x.rs", "offset": 200, "limit": 300}).to_string();
-        tl.record("Read", &key, "chunk2", &args2, 0);
+        tl.record("Read", "chunk2", &args2, 0);
         let out = tl.format(0);
         assert!(
             out.contains("0-100"),
@@ -1460,8 +1578,7 @@ mod tests {
     fn tool_ledger_format_ages() {
         let mut tl = ToolLedger::new();
         let args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
-        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Read", &key, "content", &args, 0);
+        tl.record("Read", "content", &args, 0);
         let out = tl.format(5);
         assert!(out.contains("R(5t"), "age should be 5: {out}");
         let out2 = tl.format(1);
@@ -1478,12 +1595,10 @@ mod tests {
         // after the whole batch.
         let mut tl = ToolLedger::new();
         let w_args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
-        let w_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
         let r_args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
-        let r_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
         // Record Write, then Read (simulating request order).
-        tl.record("Write", &w_key, "written", &w_args, 0);
-        tl.record("Read", &r_key, "stale-content", &r_args, 0);
+        tl.record("Write", "written", &w_args, 0);
+        tl.record("Read", "stale-content", &r_args, 0);
         // No invalidation yet — Read is still present.
         let pre = tl.format(0);
         assert!(
@@ -1510,9 +1625,8 @@ mod tests {
             serde_json::json!({"file_path": "/tmp/z.rs", "offset": 0, "limit": 100}).to_string();
         let a2 =
             serde_json::json!({"file_path": "/tmp/z.rs", "offset": 200, "limit": 100}).to_string();
-        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/z.rs"}));
-        tl.record("Read", &key, "chunk1", &a1, 0);
-        tl.record("Read", &key, "chunk2", &a2, 0);
+        tl.record("Read", "chunk1", &a1, 0);
+        tl.record("Read", "chunk2", &a2, 0);
         let out = tl.format(0);
         assert!(out.contains("/tmp/z.rs R(0t"), "headline present: {out}");
         assert!(
@@ -1535,14 +1649,14 @@ mod tests {
         let tail = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT.rs"; // 39 chars
         let path_a = format!("{head}_aaaa_{tail}");
         let path_b = format!("{head}_bbbb_{tail}");
-        let args_a = serde_json::json!({"file_path": &path_a}).to_string();
-        let args_b = serde_json::json!({"file_path": &path_b}).to_string();
         let key_a = ledger_key_arg(&serde_json::json!({"file_path": &path_a}));
         let key_b = ledger_key_arg(&serde_json::json!({"file_path": &path_b}));
+        let args_a = serde_json::json!({"file_path": &path_a}).to_string();
+        let args_b = serde_json::json!({"file_path": &path_b}).to_string();
         // Both display keys are identical after truncation.
         assert_eq!(key_a, key_b, "display keys collide by design");
-        tl.record("Read", &key_a, "ca", &args_a, 0);
-        tl.record("Read", &key_b, "cb", &args_b, 0);
+        tl.record("Read", "ca", &args_a, 0);
+        tl.record("Read", "cb", &args_b, 0);
         // Two distinct entries in storage.
         assert_eq!(tl.reads.len(), 2, "storage keys must not collide");
     }
@@ -1552,11 +1666,9 @@ mod tests {
         // Edit nukes reads for the target file but does not add a W.
         let mut tl = ToolLedger::new();
         let r_args = serde_json::json!({"file_path": "/tmp/e.rs"}).to_string();
-        let r_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/e.rs"}));
-        tl.record("Read", &r_key, "before", &r_args, 0);
+        tl.record("Read", "before", &r_args, 0);
         let e_args = serde_json::json!({"file_path": "/tmp/e.rs"}).to_string();
-        let e_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/e.rs"}));
-        tl.record("Edit", &e_key, "", &e_args, 0);
+        tl.record("Edit", "", &e_args, 0);
         tl.invalidate_after_write("/tmp/e.rs");
         let out = tl.format(0);
         assert!(!out.contains("R("), "read nuked by Edit: {out}");
@@ -1574,13 +1686,7 @@ mod tests {
         let args_json =
             serde_json::json!({"file_path": "/tmp/foo.rs", "offset": 0, "limit": 0}).to_string();
         // Simulate parent already having read /tmp/foo.rs
-        ledger.record(
-            "Read",
-            &key_arg(&serde_json::json!({"file_path": "/tmp/foo.rs"})),
-            "content A",
-            &args_json,
-            1,
-        );
+        ledger.record("Read", "content A", &args_json, 1);
 
         let obs = FileObservations {
             items: vec![make_read_obs("/tmp/foo.rs", "content A", 0, 0)],
@@ -1632,13 +1738,7 @@ mod tests {
         // Parent previously read the file; worker then wrote it.
         let args_json =
             serde_json::json!({"file_path": "/tmp/shared.rs", "offset": 0, "limit": 0}).to_string();
-        ledger.record(
-            "Read",
-            &key_arg(&serde_json::json!({"file_path": "/tmp/shared.rs"})),
-            "stale content",
-            &args_json,
-            1,
-        );
+        ledger.record("Read", "stale content", &args_json, 1);
 
         let obs = FileObservations {
             items: vec![make_read_obs("/tmp/other.rs", "other", 0, 0)],
@@ -1703,13 +1803,7 @@ mod tests {
         // Parent already read old.rs; the Scout reports it again plus new.rs.
         let old_args =
             serde_json::json!({"file_path": "/tmp/old.rs", "offset": 0, "limit": 0}).to_string();
-        ledger.record(
-            "Read",
-            &key_arg(&serde_json::json!({"file_path": "/tmp/old.rs"})),
-            "old",
-            &old_args,
-            1,
-        );
+        ledger.record("Read", "old", &old_args, 1);
 
         let obs = FileObservations {
             items: vec![
@@ -1815,9 +1909,9 @@ mod tests {
 
         // Read(A), Read(B), Read(A) — display order is A → B, but snapshot
         // order must reflect last-access, so A comes after B (most recent).
-        ledger.record("Read", "/tmp/a.rs", "content-a", &a_args, 0);
-        ledger.record("Read", "/tmp/b.rs", "content-b", &b_args, 0);
-        ledger.record("Read", "/tmp/a.rs", "content-a", &a_args, 0);
+        ledger.record("Read", "content-a", &a_args, 0);
+        ledger.record("Read", "content-b", &b_args, 0);
+        ledger.record("Read", "content-a", &a_args, 0);
 
         let snapshot = ledger.file_observations();
         let a_pos = snapshot
@@ -1851,7 +1945,7 @@ mod tests {
         let mut ledger = ToolLedger::new();
 
         let args_json = serde_json::json!({"pattern": "fn", "path": "/tmp"}).to_string();
-        ledger.record("Grep", "fn", "hits: A", &args_json, 0);
+        ledger.record("Grep", "hits: A", &args_json, 0);
 
         // Same pattern/path but different output — must NOT be a duplicate.
         let fresh = FileObservation {

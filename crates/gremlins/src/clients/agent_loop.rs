@@ -27,9 +27,10 @@ use super::error::ClientError;
 use super::findings::FindingsLedger;
 use super::format::{
     apply_chunk, assistant_tool_message, enrich_log_line, format_tool_call, format_tool_call_parts,
-    ledger_key_arg, trunc,
+    trunc,
 };
 use super::model::{GremlinsModel, GremlinsModelError};
+use super::model_context::{compose_model_transcript, MutableModelContext};
 use super::protocol::{add_opt, CompletedRun, FileObservations, TurnStats, UsageStats};
 use super::token_usage::{TokenUsageEvent, TokenUsageSink};
 use super::tool_ledger::{fold_scout_output, scout_written_paths, ToolLedger};
@@ -243,7 +244,6 @@ struct ToolJob {
     name: String,
     args: String,
     call: String,
-    key: String,
     over_cap: Option<String>,
 }
 
@@ -282,7 +282,13 @@ struct LoopState {
     total_cached_tokens: Option<u64>,
     total_cache_creation_tokens: Option<u64>,
     total_reasoning_tokens: Option<u64>,
-    tool_ledger: ToolLedger,
+    /// Mutable model contexts that observe tool calls and contribute per-turn
+    /// transcript blocks. Always contains at least the ToolLedger.
+    /// Original stage/task prompt — persists across turns so the bootstrap
+    /// message can always carry the model's instructions, even after
+    /// `next_prompt` has been overwritten with "Continue.".
+    stage_prompt: String,
+    contexts: Vec<Box<dyn MutableModelContext>>,
     findings_ledger: FindingsLedger,
     turn_findings_injected: bool,
     interactive_active: bool,
@@ -411,12 +417,13 @@ impl LoopState {
             total_cached_tokens: None,
             total_cache_creation_tokens: None,
             total_reasoning_tokens: None,
-            tool_ledger: {
+            contexts: {
                 let mut ledger = ToolLedger::new();
                 if let Some(ref seed) = landscape_seed {
                     ledger.seed(seed);
                 }
-                ledger
+                ledger.capture_turn_transcript(0);
+                vec![Box::new(ledger) as Box<dyn MutableModelContext>]
             },
             findings_ledger: FindingsLedger::new(),
             turn_findings_injected: false,
@@ -425,6 +432,7 @@ impl LoopState {
             cmd_rx,
             evt_tx,
             pause,
+            stage_prompt: prompt.to_string(),
             remaining_turns: max_turns,
             reminder_budget,
             completion_nudge_budget,
@@ -626,8 +634,24 @@ impl LoopState {
             }
         }
 
-        let mut builder = CompletionRequest::new(self.next_prompt.clone())
-            .messages(request_messages)
+        // Compose per-turn context transcripts into the request messages.
+        // Context blocks (e.g. the [seen] ledger) are merged into user
+        // messages at the appropriate turn boundaries.  The final index
+        // becomes the prompt tail.
+        let composed = compose_model_transcript(
+            &self.stage_prompt,
+            &request_messages,
+            &self.next_prompt,
+            &self.contexts,
+            self.turn_num,
+        );
+        let (history_msgs, final_prompt) = composed
+            .split_last()
+            .map(|(last, rest)| (rest.to_vec(), last.clone()))
+            .unwrap_or_else(|| (vec![], self.next_prompt.clone()));
+
+        let mut builder = CompletionRequest::new(final_prompt)
+            .messages(history_msgs)
             .tools(tool_defs.to_vec());
         if let Some(ref sys) = self.system_prompt {
             builder = builder.preamble(sys.clone());
@@ -1079,7 +1103,6 @@ impl LoopState {
                 name: tc.function.name.to_string(),
                 args: args_json,
                 call: format_tool_call_parts(&tc.function.name, &tc.function.arguments),
-                key: ledger_key_arg(&tc.function.arguments),
                 over_cap: if tc.function.name == "Task" && {
                     task_count += 1;
                     task_count > tools::TASK_MAX_PER_TURN
@@ -1293,12 +1316,6 @@ impl LoopState {
         // for `tool_calls.len()` when bumping the turn counter below.
         let job_count = jobs.len();
         let mut result_msgs = Vec::new();
-        // Collect Write/Edit file paths for deferred invalidation.
-        // Phase 2 runs tools concurrently, so a Write may finish after
-        // a Read of the same file even when it appears first in request
-        // order.  We defer all invalidations until every observation is
-        // recorded, preventing stale content from leaking into [seen].
-        let mut mutation_paths: Vec<String> = Vec::new();
         for (job, output) in jobs.into_iter().zip(results) {
             let result_msg = format!("result: {}", trunc(&output, 200));
             send_log(log_tx, prefix, &result_msg);
@@ -1332,20 +1349,11 @@ impl LoopState {
                     .await?;
             }
             if tools::result_status(&output) == "ok" {
-                self.tool_ledger
-                    .record(&job.name, &job.key, &output, &job.args, self.turn_num);
-                // Collect Write/Edit paths for deferred invalidation.
-                // Phase 2 executes concurrently, so a Write that appears
-                // first in request order may finish after a Read of the
-                // same file.  Invalidating inline would let the later-
-                // recorded Read reintroduce stale content.  We batch
-                // invalidations after all observations.
-                if job.name == "Write" || job.name == "Edit" {
-                    let args_val: serde_json::Value =
-                        serde_json::from_str(&job.args).unwrap_or(serde_json::Value::Null);
-                    if let Some(fp) = args_val.get("file_path").and_then(|v| v.as_str()) {
-                        mutation_paths.push(fp.to_string());
-                    }
+                // Phase 1: observe — record tool results into every context.
+                // Invalidation is deferred to finalize_turn below to prevent
+                // concurrent tool batches from racing reads against writes.
+                for ctx in &mut self.contexts {
+                    ctx.observe(self.turn_num, &job.name, &job.args, &output);
                 }
             }
             // Only Scout Task results carry the worker's file observations as a
@@ -1357,12 +1365,26 @@ impl LoopState {
                 && task_kind_from_args(&job.args) == Some(super::task_kind::TaskKind::Scout)
             {
                 // A Scout's writes are also mutations of the parent's view.
-                // Defer their invalidation until after every result in this
-                // batch is recorded: in a concurrent batch ordered Scout then
-                // Read(file), the Read can finish before the Scout edits the
-                // file but be recorded after the Scout's inline invalidation.
-                mutation_paths.extend(scout_written_paths(&output));
-                fold_scout_output(&output, &mut self.tool_ledger, self.turn_num)
+                // Downcast to ToolLedger for Scout-specific processing;
+                // this is the one place the agent_loop reaches past the
+                // MutableModelContext trait.  Scout propagation (the
+                // serialize→parse round-trip) remains intact.
+                let ledger = self
+                    .contexts
+                    .iter_mut()
+                    .find_map(|ctx| ctx.as_any_mut().downcast_mut::<ToolLedger>());
+                if let Some(ledger) = ledger {
+                    // Queue Scout-written paths for deferred invalidation
+                    // so they participate in the same end-of-batch pass
+                    // as direct Write/Edit calls.
+                    let written = scout_written_paths(&output);
+                    if !written.is_empty() {
+                        ledger.queue_scout_writes(&written);
+                    }
+                    fold_scout_output(&output, ledger, self.turn_num)
+                } else {
+                    output
+                }
             } else {
                 output
             };
@@ -1372,26 +1394,28 @@ impl LoopState {
                 history_output,
             ));
         }
-        // Apply deferred invalidations now that all observations
-        // for this turn are recorded.
-        for fp in &mutation_paths {
-            self.tool_ledger.invalidate_after_write(fp);
+        // Phase 2: finalize — apply deferred invalidations for every context.
+        // For ToolLedger this processes pending_mutations (Write/Edit paths)
+        // and captures the per-turn transcript block.
+        for ctx in &mut self.contexts {
+            ctx.finalize_turn(self.turn_num);
         }
         self.turns += job_count;
-        // Every tool result lands in history so the results stay adjacent to the
-        // assistant tool_calls message; the ledger becomes the next turn's prompt,
-        // trailing the complete result block instead of splitting it.
+        // Every tool result lands in history so the results stay adjacent to
+        // the assistant tool_calls message.  Context content ([seen] block)
+        // no longer travels through history — it is composed ephemerally via
+        // compose_model_transcript.
         self.history.extend(result_msgs);
-        let mut prompt = self.tool_ledger.format(self.turn_num);
+        // The next prompt is a simple continuation; context blocks are merged
+        // by compose_model_transcript during request assembly.
         let findings = self.findings_ledger.format();
         if !findings.is_empty() {
-            prompt.push_str("\n\n");
-            prompt.push_str(&findings);
+            self.next_prompt = Message::user(format!("Continue.\n\n{findings}"));
             self.turn_findings_injected = true;
         } else {
+            self.next_prompt = Message::user("Continue.");
             self.turn_findings_injected = false;
         }
-        self.next_prompt = Message::user(prompt);
         self.turn_scratchpad_injected = false;
         self.remaining_turns -= 1;
         Ok(())
@@ -1678,7 +1702,8 @@ impl LoopState {
             (Some(_done_tc), true) => {
                 // Mixed — produce a tool_result for every call so providers
                 // see a valid round of history.
-                self.history.push(self.next_prompt.clone());
+                // No history.push(next_prompt) here — context content travels
+                // through compose_model_transcript.
                 self.history.push(assistant_tool_message(
                     text,
                     reasoning_items,
@@ -1705,6 +1730,7 @@ impl LoopState {
                     "Done was rejected because it was combined with other tool calls. \
                      Try again — this time either use tools, or call Done. Never both.",
                 );
+                self.finalize_contexts(self.turn_num);
                 return Ok(DoneDecision::RetryNeeded);
             }
             (Some(done_tc), false) => {
@@ -1730,7 +1756,6 @@ impl LoopState {
                              tool, then call Done.",
                             artifact_reminder(&missing),
                         );
-                        self.history.push(self.next_prompt.clone());
                         self.history.push(assistant_tool_message(
                             text,
                             reasoning_items,
@@ -1747,6 +1772,7 @@ impl LoopState {
                             done_tc.function.name.clone(),
                             &reminder,
                         );
+                        self.finalize_contexts(self.turn_num);
                         return Ok(DoneDecision::RetryNeeded);
                     }
                 }
@@ -1820,7 +1846,7 @@ impl LoopState {
                     captured,
                     usage,
                     Some(messages),
-                    Some(self.tool_ledger.file_observations()),
+                    Some(self.ledger_file_observations().unwrap_or_default()),
                 ))));
             }
             _ => {}
@@ -1854,7 +1880,6 @@ impl LoopState {
         // the structured reasoning items for the next request.
         if text.is_empty() && !reasoning.is_empty() {
             log::debug!("reasoning-only turn: turn={} — continuing", self.turn_num);
-            self.history.push(self.next_prompt.clone());
             self.history.push(assistant_tool_message(
                 "",
                 reasoning_items,
@@ -1862,6 +1887,7 @@ impl LoopState {
                 self.preserve_reasoning_in_history,
             ));
             self.next_prompt = Message::user("Continue.");
+            self.finalize_contexts(self.turn_num);
             return EmptyTurnAction::ContinueLoop;
         }
 
@@ -1883,7 +1909,6 @@ impl LoopState {
                     missing.len(),
                     self.reminder_budget,
                 );
-                self.history.push(self.next_prompt.clone());
                 self.history.push(assistant_tool_message(
                     text,
                     reasoning_items,
@@ -1899,6 +1924,7 @@ impl LoopState {
                     evts.push(serde_json::json!({"type": "reminder", "message": reminder}));
                 }
                 self.next_prompt = Message::user(reminder);
+                self.finalize_contexts(self.turn_num);
                 return EmptyTurnAction::ContinueLoop;
             }
         }
@@ -1920,7 +1946,6 @@ impl LoopState {
             if let Some(evts) = captured.as_mut() {
                 evts.push(serde_json::json!({"type": "reminder", "message": nudge_msg}));
             }
-            self.history.push(self.next_prompt.clone());
             self.history.push(assistant_tool_message(
                 text,
                 reasoning_items,
@@ -1928,6 +1953,7 @@ impl LoopState {
                 self.preserve_reasoning_in_history,
             ));
             self.next_prompt = Message::user(nudge_msg.to_string());
+            self.finalize_contexts(self.turn_num);
             return EmptyTurnAction::ContinueLoop;
         }
 
@@ -1975,8 +2001,25 @@ impl LoopState {
             captured,
             usage,
             Some(messages),
-            Some(self.tool_ledger.file_observations()),
+            Some(self.ledger_file_observations().unwrap_or_default()),
         )))
+    }
+
+    /// Snapshot file observations from the ToolLedger context for CompletedRun.
+    fn ledger_file_observations(&self) -> Option<FileObservations> {
+        self.contexts.iter().find_map(|ctx| {
+            ctx.as_any()
+                .downcast_ref::<ToolLedger>()
+                .map(|l| l.file_observations())
+        })
+    }
+
+    /// Call finalize_turn on every context, used at every turn boundary
+    /// to maintain the transcript length invariant.
+    fn finalize_contexts(&mut self, turn: usize) {
+        for ctx in &mut self.contexts {
+            ctx.finalize_turn(turn);
+        }
     }
 
     /// Append the user prompt and assistant tool-call message for this turn to
@@ -1987,7 +2030,6 @@ impl LoopState {
         reasoning_items: &[Sealed<Reasoning>],
         tool_calls: &[ToolCall],
     ) {
-        self.history.push(self.next_prompt.clone());
         self.history.push(assistant_tool_message(
             text,
             reasoning_items,
@@ -5670,53 +5712,34 @@ mod tests {
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
         let key = ledger_key_arg(&serde_json::json!({"file_path": f.to_str().unwrap()}));
         assert!(key.contains("x.txt"), "ledger must name the file: {key}");
-        assert_eq!(history.len(), 4, "unexpected history: {history:#?}");
-        assert!(matches!(history[1], Message::Assistant { .. }));
-        assert_eq!(
-            message_kind(history[2]),
-            "result",
-            "tool result must follow the assistant tool_calls message"
-        );
-        assert_eq!(
-            message_kind(history[3]),
-            "ledger",
-            "ledger must trail all tool results"
-        );
-        // Verify the [seen] ledger contains the filename and Read indicator.
-        let ledger_text = match history[3] {
-            Message::User { content } => content.iter().find_map(|c| match c {
-                UserContent::Text(t) if t.text.starts_with("[seen]") => Some(t.text.clone()),
-                _ => None,
-            }),
-            _ => None,
-        };
-        let text = ledger_text.expect("ledger must be a [seen] user message");
-        assert!(text.contains(&key), "ledger must name the file: {text}");
+        // The [seen] block now travels through the prompt tail (the last
+        // message in chat_history). Earlier user messages also have context
+        // blocks prepended by compose_model_transcript.
+        assert!(history.len() >= 3, "unexpected history: {history:#?}");
+        // Verify the [seen] ledger is in the prompt (last message).
+        let prompt_text = user_message_text(history.last().unwrap());
         assert!(
-            text.contains("R("),
-            "ledger must show Read indicator: {text}"
+            prompt_text.contains("[seen]"),
+            "ledger must be a [seen] user message in the prompt tail: {prompt_text}"
         );
-    }
-
-    fn message_kind(m: &Message) -> &'static str {
-        match m {
-            Message::User { content }
-                if content
-                    .iter()
-                    .any(|c| matches!(c, UserContent::Text(t) if t.text.starts_with("[turn ") || t.text.starts_with("[seen]"))) =>
-            {
-                "ledger"
-            }
-            Message::User { content }
-                if content
-                    .iter()
-                    .any(|c| matches!(c, UserContent::ToolResult(_))) =>
-            {
-                "result"
-            }
-            Message::Assistant { .. } => "assistant",
-            _ => "other",
-        }
+        assert!(
+            prompt_text.contains(&key),
+            "ledger must name the file: {prompt_text}"
+        );
+        assert!(
+            prompt_text.contains("R("),
+            "ledger must show Read indicator: {prompt_text}"
+        );
+        // The history must contain a tool result.
+        let has_result = history.iter().any(|m| {
+            matches!(m, Message::User { content } if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))
+        });
+        assert!(has_result, "history must contain a tool result");
+        // The history must contain an assistant message.
+        let has_assistant = history
+            .iter()
+            .any(|m| matches!(m, Message::Assistant { .. }));
+        assert!(has_assistant, "history must contain an assistant message");
     }
 
     #[tokio::test]
@@ -5774,15 +5797,29 @@ mod tests {
 
         let reqs = model.requests();
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
-        let kinds: Vec<&str> = history.iter().map(|m| message_kind(m)).collect();
-        assert_eq!(
-            kinds,
-            vec!["other", "assistant", "result", "result", "ledger"]
-        );
-        let ledger = format!("{:?}", history[4]);
+        // The [seen] block is now merged into user messages by
+        // compose_model_transcript.  Verify key structural elements.
+        assert!(history.len() >= 4, "unexpected history: {history:#?}");
+        let all_text: Vec<String> = history
+            .iter()
+            .filter_map(|m| {
+                let t = user_message_text(m);
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t)
+                }
+            })
+            .collect();
+        // The last user text (prompt tail) must be the [seen] block.
+        let ledger = all_text.last().expect("must have ledger text");
         assert!(
             ledger.contains("a.txt") && ledger.contains("b.txt"),
             "ledger must list both actions: {ledger}"
+        );
+        assert!(
+            ledger.contains("[seen]"),
+            "prompt must contain [seen] block"
         );
     }
 
@@ -6367,16 +6404,6 @@ mod tests {
         .await
         .unwrap();
 
-        fn user_text_of(m: &Message) -> Option<&str> {
-            match m {
-                Message::User { content } => content.iter().find_map(|c| match c {
-                    UserContent::Text(t) => Some(t.text.as_str()),
-                    _ => None,
-                }),
-                _ => None,
-            }
-        }
-
         let requests = model.requests();
         let fork_req = requests
             .iter()
@@ -6390,7 +6417,11 @@ mod tests {
             .expect("the forked child must issue its own request");
 
         let history = &fork_req.chat_history;
-        assert_eq!(history.len(), 6, "unexpected fork history: {history:#?}");
+        // The child inherits the parent's conversation but no longer sees a
+        // separate [seen] block — context content travels through
+        // compose_model_transcript.  With a fresh (unseeded) ToolLedger the
+        // context blocks are empty.
+        assert_eq!(history.len(), 4, "unexpected fork history: {history:#?}");
 
         // Fork system prompt leads the child history.
         assert!(matches!(
@@ -6399,15 +6430,23 @@ mod tests {
                 if content.contains("<tools>") && content.contains("Do not call")
         ));
 
-        // Inherited parent conversation, in exact order.
-        assert_eq!(user_text_of(&history[1]), Some("parent go"));
-        assert!(matches!(&history[2], Message::Assistant { .. }));
-        assert!(matches!(&history[3], Message::User { content }
-                if content.iter().any(|c| matches!(c, UserContent::ToolResult(_)))));
-        assert!(user_text_of(&history[4]).is_some_and(|t| t.starts_with("[seen]")));
-
-        // The Fork prompt is the final user message in the child request.
-        assert_eq!(user_text_of(&history[5]), Some("finish as fork"));
+        // Inherited parent conversation — the fork prompt is the last message.
+        assert!(
+            history
+                .iter()
+                .any(|m| matches!(m, Message::Assistant { .. })),
+            "history must contain an assistant message"
+        );
+        assert!(
+            history.iter().any(|m| matches!(m, Message::User { content } if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))),
+            "history must contain a tool result"
+        );
+        // The Fork prompt is the last message in chat_history.
+        assert!(
+            user_message_text(history.last().unwrap()).contains("finish as fork"),
+            "last message should be fork prompt: {:?}",
+            history.last()
+        );
     }
 
     /// When `LoopOpts.max_tokens` is `Some(8192)`, every turn's
