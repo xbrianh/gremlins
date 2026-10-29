@@ -53,10 +53,13 @@ use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 // Supporting types: ToolJob, StreamAccumulator, ToolLedger, StreamTurnOutcome,
 // LoopOpts, InteractiveSession, TurnFlow, etc.
 // ────────────────────────────────────────────────────────────────────────────
-fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
-    if let Some(tx) = tx {
-        let _ = tx.send(format!("{prefix}{msg}"));
-    }
+fn send_log(
+    tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    prefix: &str,
+    level: log::Level,
+    msg: &str,
+) {
+    crate::executor::send_log(tx, level, format!("{prefix}{msg}"));
 }
 
 fn cancelled_error(message: impl Into<String>, history: &[Message]) -> ClientError {
@@ -483,6 +486,7 @@ impl LoopState {
                 send_log(
                     log_tx,
                     prefix,
+                        log::Level::Info,
                     &format!(
                         "error: prompt size {actual} bytes exceeds configured limit of {limit} bytes"
                     ),
@@ -504,6 +508,7 @@ impl LoopState {
                     send_log(
                         log_tx,
                         prefix,
+                        log::Level::Info,
                         &format!("retry: transient error, backing off {wait}s"),
                     );
                     if retry_backoff(cancel, wait).await {
@@ -511,7 +516,12 @@ impl LoopState {
                             "agent_loop: cancelled during retry backoff (label={})",
                             prefix
                         );
-                        send_log(log_tx, prefix, "exit: cancelled during retry backoff");
+                        send_log(
+                            log_tx,
+                            prefix,
+                            log::Level::Info,
+                            "exit: cancelled during retry backoff",
+                        );
                         return Err(cancelled_error("cancelled", &self.history));
                     }
                     // Preserve the pending one-turn state only when
@@ -715,7 +725,7 @@ impl LoopState {
             let item = tokio::select! {
                 _ = cancel.cancelled() => {
                     log::info!("agent_loop: cancelled mid-stream (label={})", prefix);
-                    send_log(log_tx, prefix, "exit: cancelled mid-stream");
+                    send_log(log_tx, prefix, log::Level::Info, "exit: cancelled mid-stream");
                     drop(response);
                     return Err(cancelled_error("cancelled", &stream_snapshot));
                 }
@@ -724,7 +734,7 @@ impl LoopState {
                     // interactive mode. The turn will be re-executed after
                     // the debug session ends.
                     log::info!("agent_loop: paused mid-stream (label={})", prefix);
-                    send_log(log_tx, prefix, "pause: entering interactive mode (mid-stream)");
+                    send_log(log_tx, prefix, log::Level::Info, "pause: entering interactive mode (mid-stream)");
                     drop(response);
                     paused_mid_stream = true;
                     if let Some(ref p) = self.pause {
@@ -773,7 +783,7 @@ impl LoopState {
                             }
                             Err(e) => {
                                 log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                                send_log(log_tx, prefix, "exit: operator bailed");
+                                send_log(log_tx, prefix, log::Level::Info, "exit: operator bailed");
                                 return Err(e);
                             }
                         }
@@ -799,6 +809,7 @@ impl LoopState {
                         send_log(
                             log_tx,
                             prefix,
+                            log::Level::Info,
                             &format!("retry: idle timeout, backing off {wait}s"),
                         );
                         drop(response);
@@ -808,7 +819,12 @@ impl LoopState {
                                 "agent_loop: cancelled during timeout backoff (label={})",
                                 prefix
                             );
-                            send_log(log_tx, prefix, "exit: cancelled during timeout backoff");
+                            send_log(
+                                log_tx,
+                                prefix,
+                                log::Level::Info,
+                                "exit: cancelled during timeout backoff",
+                            );
                             return Err(cancelled_error("cancelled", &self.history));
                         }
                         break;
@@ -837,6 +853,7 @@ impl LoopState {
                         send_log(
                             log_tx,
                             prefix,
+                            log::Level::Info,
                             &format!("retry: transient error, backing off {wait}s"),
                         );
                         drop(response);
@@ -846,7 +863,12 @@ impl LoopState {
                                 "agent_loop: cancelled during retry backoff (label={})",
                                 prefix
                             );
-                            send_log(log_tx, prefix, "exit: cancelled during retry backoff");
+                            send_log(
+                                log_tx,
+                                prefix,
+                                log::Level::Info,
+                                "exit: cancelled during retry backoff",
+                            );
                             return Err(cancelled_error("cancelled", &self.history));
                         }
                         break;
@@ -1090,7 +1112,7 @@ impl LoopState {
                     200
                 )
             );
-            send_log(log_tx, prefix, &tool_msg);
+            send_log(log_tx, prefix, log::Level::Info, &tool_msg);
             if !nested {
                 let id_str = tc.id.to_string();
                 let tool_evt =
@@ -1204,7 +1226,7 @@ impl LoopState {
                 // re-insert the chat gremlin without waiting for every tool
                 // to complete.
                 log::info!("agent_loop: cancelled mid-tool (label={})", prefix);
-                send_log(log_tx, prefix, "exit: cancelled mid-tool");
+                send_log(log_tx, prefix, log::Level::Info, "exit: cancelled mid-tool");
                 discard_tool_output(&mut self.live_output_rx);
                 return Err(cancelled_error("cancelled", &self.history));
             }
@@ -1213,7 +1235,7 @@ impl LoopState {
                 // (cancels pending tool futures). Completed tool side effects
                 // (files written, bash commands run) are not unwound.
                 log::info!("agent_loop: paused mid-tool (label={})", prefix);
-                send_log(log_tx, prefix, "pause: entering interactive mode (mid-tool)");
+                send_log(log_tx, prefix, log::Level::Info, "pause: entering interactive mode (mid-tool)");
                 discard_tool_output(&mut self.live_output_rx);
                 if let Some(ref p) = self.pause {
                     p.reset();
@@ -1265,7 +1287,7 @@ impl LoopState {
                         }
                         Err(e) => {
                             log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                            send_log(log_tx, prefix, "exit: operator bailed");
+                            send_log(log_tx, prefix, log::Level::Info, "exit: operator bailed");
                             return Err(e);
                         }
                     }
@@ -1320,7 +1342,7 @@ impl LoopState {
         let mut result_msgs = Vec::new();
         for (job, output) in jobs.into_iter().zip(results) {
             let result_msg = format!("result: {}", trunc(&output, 200));
-            send_log(log_tx, prefix, &result_msg);
+            send_log(log_tx, prefix, log::Level::Info, &result_msg);
             if !nested {
                 let result_evt = tool_result_event(&job.id, &output);
                 write_raw(raw, &result_evt);
@@ -1468,7 +1490,7 @@ impl LoopState {
                     }
                     Err(e) => {
                         log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                        send_log(log_tx, prefix, "exit: operator bailed");
+                        send_log(log_tx, prefix, log::Level::Info, "exit: operator bailed");
                         return Err(e);
                     }
                 }
@@ -1481,6 +1503,7 @@ impl LoopState {
                 send_log(
                     log_tx,
                     prefix,
+                    log::Level::Info,
                     "pause: entering interactive mode (turn boundary)",
                 );
                 if let Some(ref p) = self.pause {
@@ -1523,7 +1546,7 @@ impl LoopState {
                     }
                     Err(e) => {
                         log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                        send_log(log_tx, prefix, "exit: operator bailed");
+                        send_log(log_tx, prefix, log::Level::Info, "exit: operator bailed");
                         return Err(e);
                     }
                 }
@@ -1643,11 +1666,11 @@ impl LoopState {
 
         if !reasoning.is_empty() {
             let msg = format!("think: {}", trunc(reasoning, 200));
-            send_log(log_tx, prefix, &msg);
+            send_log(log_tx, prefix, log::Level::Info, &msg);
         }
         if !text.is_empty() {
             let msg = format!("text: {}", trunc(text, 200));
-            send_log(log_tx, prefix, &msg);
+            send_log(log_tx, prefix, log::Level::Info, &msg);
         }
         if !nested {
             if !text.is_empty() {
@@ -1747,6 +1770,7 @@ impl LoopState {
                 send_log(
                     log_tx,
                     prefix,
+                    log::Level::Info,
                     &format!("tool: Done {}", trunc(&done_summary, 200)),
                 );
                 if !nested && !expected_artifact_paths.is_empty() {
@@ -2081,12 +2105,13 @@ pub(crate) async fn run_agent_loop(
         cwd_display,
         trunc(reasoning_effort.unwrap_or("default"), 50)
     );
-    send_log(&ctx.params.log_tx, &prefix, &log_line);
+    send_log(&ctx.params.log_tx, &prefix, log::Level::Info, &log_line);
 
     if cwd.is_none() {
         send_log(
             &ctx.params.log_tx,
             &prefix,
+            log::Level::Info,
             "warning: no cwd set for worktree enforcement",
         );
     }
@@ -2681,7 +2706,12 @@ async fn run_agent_loop_core(
     while state.remaining_turns > 0 {
         if cancel.is_cancelled() {
             log::info!("agent_loop: cancelled before turn (label={})", prefix);
-            send_log(log_tx, prefix, "exit: cancelled before turn");
+            send_log(
+                log_tx,
+                prefix,
+                log::Level::Info,
+                "exit: cancelled before turn",
+            );
             return Err(cancelled_error("cancelled", &state.history));
         }
 
@@ -2895,13 +2925,23 @@ async fn run_agent_loop_core(
 
     if state.timed_out {
         log::info!("agent_loop: exit (stream idle timeout, label={})", prefix);
-        send_log(log_tx, prefix, "exit: stream idle timeout");
+        send_log(
+            log_tx,
+            prefix,
+            log::Level::Info,
+            "exit: stream idle timeout",
+        );
         if state.exhausted_timeout_retries {
             log::error!(
                 "agent_loop: exhausted turn-level timeout retries, giving up (label={})",
                 prefix
             );
-            send_log(log_tx, prefix, "exit: exhausted turn-level timeout retries");
+            send_log(
+                log_tx,
+                prefix,
+                log::Level::Info,
+                "exit: exhausted turn-level timeout retries",
+            );
             return Err(ClientError::RetryExhausted {
                 message: "exhausted turn-level timeout retries".into(),
             });
@@ -2912,14 +2952,19 @@ async fn run_agent_loop_core(
     }
     if let Some(err) = state.stream_error {
         log::info!("agent_loop: exit (stream error, label={})", prefix);
-        send_log(log_tx, prefix, "exit: stream error");
+        send_log(log_tx, prefix, log::Level::Info, "exit: stream error");
         if state.exhausted_turn_retries {
             log::error!(
                 "agent_loop: exhausted turn-level retries ({} attempts), giving up (label={}): {err}",
                 turn_retry_backoff.len() + 1,
                 prefix
             );
-            send_log(log_tx, prefix, "exit: exhausted turn-level retries");
+            send_log(
+                log_tx,
+                prefix,
+                log::Level::Info,
+                "exit: exhausted turn-level retries",
+            );
             return Err(ClientError::RetryExhausted {
                 message: format!(
                     "exhausted turn-level retries ({} attempts): {err}",
@@ -2934,6 +2979,7 @@ async fn run_agent_loop_core(
     send_log(
         log_tx,
         prefix,
+        log::Level::Info,
         &format!("exit: exceeded max turns ({max_turns})"),
     );
     Err(ClientError::Runtime {
@@ -3001,7 +3047,7 @@ fn emit_turn_stats(
         "stats": stats,
         "totals": totals,
     });
-    send_log(log_tx, prefix, &payload.to_string());
+    send_log(log_tx, prefix, log::Level::Info, &payload.to_string());
 }
 
 /// Emit per-turn telemetry: timing, token counts, cache hit ratio, reasoning ratio.
@@ -3072,7 +3118,7 @@ fn emit_turn_metrics(
         reasoning_tok,
         reasoning_byte_ratio,
     );
-    send_log(log_tx, prefix, &msg);
+    send_log(log_tx, prefix, log::Level::Info, &msg);
 }
 
 /// Emit stage-end telemetry summary (always emitted, not gated by GREMLINS_TELEMETRY).
@@ -3133,7 +3179,7 @@ fn emit_summary(
         total_cache_creation.unwrap_or(0),
         reasoning_pct,
     );
-    send_log(log_tx, prefix, &msg);
+    send_log(log_tx, prefix, log::Level::Info, &msg);
 }
 
 pub(crate) fn emit_final(
@@ -3143,7 +3189,7 @@ pub(crate) fn emit_final(
     log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) {
     let msg = format!("final: turns={turns} cost=not-reported{suffix}");
-    send_log(log_tx, prefix, &msg);
+    send_log(log_tx, prefix, log::Level::Info, &msg);
 }
 
 #[cfg(test)]

@@ -100,7 +100,7 @@ pub async fn run_bootstrap(
 
     match result {
         Ok(r) if r.rc == 0 => {
-            send_log(log_tx, "bootstrap ok");
+            send_log(log_tx, log::Level::Info, "bootstrap ok");
             log::info!("bootstrap ok");
             Ok(())
         }
@@ -110,7 +110,7 @@ pub async fn run_bootstrap(
                 r.rc,
                 truncate(&r.output, 2000)
             );
-            send_log(log_tx, &msg);
+            send_log(log_tx, log::Level::Error, &msg);
             log::error!("{msg}");
             Err(RunError::BootstrapFailed {
                 exit_code: r.rc,
@@ -120,7 +120,7 @@ pub async fn run_bootstrap(
         Err(ProcError::CalledProcessError(rc, stdout, stderr)) => {
             let detail = failure_detail(&stdout, &stderr);
             let msg = format!("bootstrap failed (exit {rc}): {}", truncate(&detail, 2000));
-            send_log(log_tx, &msg);
+            send_log(log_tx, log::Level::Error, &msg);
             log::error!("{msg}");
             Err(RunError::BootstrapFailed {
                 exit_code: rc,
@@ -347,7 +347,7 @@ pub async fn run_definition_bootstrap(
     // execute here.
     if !skip_launch && !bootstrap.launch_cmds.is_empty() {
         let msg = format!("running {} launch command(s)", bootstrap.launch_cmds.len());
-        send_log(&log_tx, &msg);
+        send_log(&log_tx, log::Level::Info, &msg);
         log::info!("{msg}");
 
         // Every declared source key gets a value, even an absent one, so an
@@ -365,7 +365,7 @@ pub async fn run_definition_bootstrap(
             match parse_gremlins_command(command) {
                 Some((cmd_name, args)) => {
                     let msg = format!("launch DSL: {}({})", cmd_name, args.join(", "));
-                    send_log(&log_tx, &msg);
+                    send_log(&log_tx, log::Level::Info, &msg);
                     log::info!("{msg}");
                     run_dsl_command(&cmd_name, &args, gremlin).await?;
                 }
@@ -394,7 +394,7 @@ pub async fn run_definition_bootstrap(
 
     if !skip_launch && !bootstrap.cli_out.is_empty() {
         let msg = format!("running {} cli_out binding(s)", bootstrap.cli_out.len());
-        send_log(&log_tx, &msg);
+        send_log(&log_tx, log::Level::Info, &msg);
         log::info!("{msg}");
         run_cli_out(gremlin, &bootstrap.cli_out).await?;
     }

@@ -161,6 +161,7 @@ impl LandscapeContext {
 
         send_log(
             &self.log_tx,
+            log::Level::Debug,
             format!("landscape context updated: {dir_count} directories, {file_count} files, {item_count} outline items"),
         );
     }

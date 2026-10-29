@@ -71,6 +71,7 @@ async fn read_pruned_files(gremlin: &Gremlin) -> Option<std::collections::HashSe
             log::warn!("[ledger-pruning] failed to parse {LEDGER_SNAPSHOT_URI}: {e}");
             send_log(
                 &log_tx,
+                log::Level::Info,
                 format!("[ledger-pruning] failed to parse snapshot: {e}"),
             );
             return None;
@@ -106,6 +107,7 @@ async fn persist_observed_paths(
                     log::warn!("[ledger-pruning] failed to parse existing snapshot: {e}");
                     send_log(
                         &log_tx,
+                        log::Level::Info,
                         format!("[ledger-pruning] failed to parse existing snapshot: {e}"),
                     );
                     std::collections::HashSet::new()
@@ -134,6 +136,7 @@ async fn persist_observed_paths(
                     log::warn!("[ledger-pruning] failed to write snapshot: {e}");
                     send_log(
                         &log_tx,
+                        log::Level::Info,
                         format!("[ledger-pruning] failed to write snapshot: {e}"),
                     );
                 }
@@ -142,6 +145,7 @@ async fn persist_observed_paths(
                 log::warn!("[ledger-pruning] invalid snapshot URI {LEDGER_SNAPSHOT_URI}: {e}");
                 send_log(
                     &log_tx,
+                    log::Level::Info,
                     format!("[ledger-pruning] invalid snapshot URI {LEDGER_SNAPSHOT_URI}: {e}"),
                 );
             }
@@ -165,7 +169,7 @@ async fn build_outlines(
         Err(error) => {
             let msg = format!("landscape build failed for {}: {error}", cwd.display());
             log::warn!("{msg}");
-            send_log(&log_tx2, &msg);
+            send_log(&log_tx2, log::Level::Info, &msg);
             Vec::new()
         }
     })
@@ -173,7 +177,7 @@ async fn build_outlines(
     .unwrap_or_else(|error| {
         let msg = format!("landscape build task failed: {error}");
         log::warn!("{msg}");
-        send_log(&log_tx, &msg);
+        send_log(&log_tx, log::Level::Info, &msg);
         Vec::new()
     })
 }
@@ -189,7 +193,7 @@ async fn build_landscape_snapshot(
 ) -> (String, usize, usize) {
     let log_warn = |msg: &str| {
         log::warn!("{msg}");
-        send_log(&log_tx, msg);
+        send_log(&log_tx, log::Level::Warn, msg);
     };
     let outlines = build_outlines(cwd.clone(), log_tx.clone()).await;
     let budget: u64 = crate::config::max_landscape_tokens();
@@ -274,6 +278,7 @@ async fn run_stage_scoped(
     let enc_model = enclosing_model.or(m.as_ref());
     send_log(
         &gremlin.runtime_config.log_tx,
+        log::Level::Info,
         format!(
             "stage '{}': entering (type={})",
             stage.name(),
@@ -892,6 +897,7 @@ async fn run_agent(
     let effective_model: &str = &effective_model;
     send_log(
         &gremlin.runtime_config.log_tx,
+        log::Level::Info,
         format!(
             "[{name}][{model}] agent: preparing",
             name = agent.name,
@@ -966,6 +972,7 @@ async fn run_agent(
 
     send_log(
         &gremlin.runtime_config.log_tx,
+        log::Level::Info,
         format!(
             "[{name}][{model}] agent: completed (turns={turns})",
             name = prepared.name,
@@ -1059,6 +1066,7 @@ async fn run_exec(
 
     send_log(
         &gremlin.runtime_config.log_tx,
+        log::Level::Info,
         format!("[{}] exec: preparing", exec.name),
     );
 
@@ -1103,6 +1111,7 @@ async fn run_exec(
     if !prepared.cmds.is_empty() {
         send_log(
             &gremlin.runtime_config.log_tx,
+            log::Level::Info,
             format!(
                 "[{}] exec: running {} command(s)",
                 prepared.name,
@@ -1181,6 +1190,7 @@ async fn run_sequence(
         {
             send_log(
                 &gremlin.runtime_config.log_tx,
+                log::Level::Info,
                 format!("sequence '{}': skipped (artifact exists)", seq.name),
             );
             return Ok(());
@@ -1227,6 +1237,7 @@ async fn run_sequence(
         {
             send_log(
                 &gremlin.runtime_config.log_tx,
+                log::Level::Info,
                 format!(
                     "sequence '{}': {}",
                     seq.name,
@@ -1247,6 +1258,7 @@ async fn run_sequence(
 
         send_log(
             &gremlin.runtime_config.log_tx,
+            log::Level::Info,
             format!(
                 "sequence '{}': iteration {iteration}/{max_iterations} starting",
                 seq.name
@@ -1267,6 +1279,7 @@ async fn run_sequence(
             {
                 send_log(
                     &gremlin.runtime_config.log_tx,
+                    log::Level::Info,
                     format!("sequence '{}': child stage failed: {}", seq.name, error),
                 );
                 outcome = Err(error);
@@ -1285,6 +1298,7 @@ async fn run_sequence(
         {
             send_log(
                 &gremlin.runtime_config.log_tx,
+                log::Level::Info,
                 format!("sequence '{}': stopped (artifact produced)", seq.name),
             );
             stopped = true;
@@ -1327,7 +1341,11 @@ impl Gremlin {
             || (!is_fork && (!bootstrap.launch_cmds.is_empty() || !bootstrap.cli_out.is_empty()));
         if self.workdir.is_some() && resume_from.is_none() && has_bootstrap {
             if let Err(error) = run_definition_bootstrap(self, is_fork).await {
-                send_log(&self.runtime_config.log_tx, "bootstrap failed");
+                send_log(
+                    &self.runtime_config.log_tx,
+                    log::Level::Info,
+                    "bootstrap failed",
+                );
                 self.state.record_stage_error(
                     "other",
                     &truncate(&format!("bootstrap failed: {error}"), 200),
@@ -1359,7 +1377,7 @@ impl Gremlin {
 
             if let Some(ref ct) = self.cancel_token {
                 if ct.is_cancelled() {
-                    send_log(&self.runtime_config.log_tx, "cancelled");
+                    send_log(&self.runtime_config.log_tx, log::Level::Info, "cancelled");
                     self.finish(-1);
                     return Ok(-1);
                 }
@@ -1391,6 +1409,7 @@ impl Gremlin {
 
             send_log(
                 &self.runtime_config.log_tx,
+                log::Level::Info,
                 format!(
                     "stage '{}': starting (type={})",
                     stage.name(),
@@ -1412,6 +1431,7 @@ impl Gremlin {
                 Err(RunError::Bail { reason }) => {
                     send_log(
                         &self.runtime_config.log_tx,
+                        log::Level::Info,
                         format!("stage '{}': bailed: {}", stage.name(), reason),
                     );
                     emit_event(DaemonEvent::Bail {
@@ -1426,6 +1446,7 @@ impl Gremlin {
                 Err(error) => {
                     send_log(
                         &self.runtime_config.log_tx,
+                        log::Level::Info,
                         format!("stage '{}': error: {}", stage.name(), error),
                     );
                     self.state.record_stage_error(
@@ -1451,6 +1472,7 @@ impl Gremlin {
         send_stage_boundary(&self.runtime_config.stage_stream_tx, "", "other");
         send_log(
             &self.runtime_config.log_tx,
+            log::Level::Info,
             format!("finished (exit_code={exit_code})"),
         );
         self.client.reap_all(self.id.as_str());

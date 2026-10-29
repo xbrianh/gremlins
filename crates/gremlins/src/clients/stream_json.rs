@@ -64,7 +64,7 @@ pub(crate) fn emit_event(
                     "{}using client model={} cwd={} reasoning_effort={}",
                     prefix, model, cwd, "default"
                 );
-                send_log(log_tx, &msg);
+                send_log(log_tx, log::Level::Info, &msg);
                 log::info!("{msg}");
             }
         }
@@ -79,20 +79,20 @@ pub(crate) fn emit_event(
                         Some("text") => {
                             let text = c.get("text").and_then(|v| v.as_str()).unwrap_or("");
                             let msg = format!("{}text: {}", prefix, trunc(text, 200));
-                            send_log(log_tx, &msg);
+                            send_log(log_tx, log::Level::Info, &msg);
                             log::info!("{msg}");
                         }
                         Some("thinking") => {
                             let thinking = c.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
                             let msg = format!("{}think: {}", prefix, trunc(thinking, 200));
-                            send_log(log_tx, &msg);
+                            send_log(log_tx, log::Level::Info, &msg);
                             log::info!("{msg}");
                         }
                         Some("tool_use") => {
                             let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("?");
                             let arg = tool_arg(c);
                             let msg = format!("{}tool: {} {}", prefix, name, trunc(&arg, 200));
-                            send_log(log_tx, &msg);
+                            send_log(log_tx, log::Level::Info, &msg);
                             log::info!("{msg}");
                         }
                         _ => {}
@@ -112,11 +112,11 @@ pub(crate) fn emit_event(
                         let body = tool_result_body(c.get("content").unwrap_or(&Value::Null));
                         if is_error {
                             let msg = format!("{}result ERROR: {}", prefix, trunc(&body, 200));
-                            send_log(log_tx, &msg);
+                            send_log(log_tx, log::Level::Warn, &msg);
                             log::warn!("{msg}");
                         } else {
                             let msg = format!("{}result: {}", prefix, trunc(&body, 200));
-                            send_log(log_tx, &msg);
+                            send_log(log_tx, log::Level::Info, &msg);
                             log::info!("{msg}");
                         }
                     }
@@ -135,17 +135,15 @@ pub(crate) fn emit_event(
                 .and_then(|v| v.as_i64())
                 .map_or("?".to_string(), |t| t.to_string());
             let msg = format!("{prefix}final: subtype={subtype} turns={turns} cost={cost_str}");
-            send_log(log_tx, &msg);
+            send_log(log_tx, log::Level::Info, &msg);
             log::info!("{msg}");
         }
         _ => {}
     }
 }
 
-fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, msg: &str) {
-    if let Some(tx) = tx {
-        let _ = tx.send(msg.to_string());
-    }
+fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, level: log::Level, msg: &str) {
+    crate::executor::send_log(tx, level, msg);
 }
 
 fn tool_arg(c: &Value) -> String {
