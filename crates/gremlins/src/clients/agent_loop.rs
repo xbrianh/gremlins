@@ -1309,7 +1309,6 @@ impl LoopState {
         // for `tool_calls.len()` when bumping the turn counter below.
         let job_count = jobs.len();
         let mut result_msgs = Vec::new();
-        let mut joined_observations: Vec<String> = Vec::new();
         for (job, (output, child_contexts)) in jobs.into_iter().zip(results) {
             let result_msg = format!("result: {}", trunc(&output, 200));
             self.plug
@@ -1357,6 +1356,12 @@ impl LoopState {
             } else {
                 Vec::new()
             };
+            // Newly joined Read/Grep outputs are not part of the compact
+            // `[seen]` transcript, so drain them here. They are attached to
+            // this Task's tool result (durable history) rather than only the
+            // ephemeral next_prompt, so later turns retain the Scout's evidence
+            // even after the ledger has marked the files as read.
+            let mut task_observations: Vec<String> = Vec::new();
             // Join child contexts back into parent.  Match by concrete
             // child context joins only the parent context of the same
             // type, etc. — no silent cross-type no-op calls.
@@ -1369,13 +1374,10 @@ impl LoopState {
                         }
                     }
                 }
-                // Newly joined Read/Grep outputs are not part of the compact
-                // `[seen]` transcript, so drain them here and surface them to
-                // the parent model in the next prompt tail.
                 for parent_ctx in &mut self.contexts {
                     let text = parent_ctx.new_observations_text();
                     if !text.is_empty() {
-                        joined_observations.push(text);
+                        task_observations.push(text);
                     }
                 }
             }
@@ -1386,11 +1388,15 @@ impl LoopState {
                 acc.push_str(s);
                 acc
             });
-            let tool_output = if annotated.is_empty() {
+            let mut tool_output = if annotated.is_empty() {
                 output
             } else {
                 format!("{annotated}\n{output}")
             };
+            if !task_observations.is_empty() {
+                tool_output.push_str("\n\n");
+                tool_output.push_str(&task_observations.join("\n\n"));
+            }
             result_msgs.push(Message::tool_result(
                 CallId::from_wire(job.id.clone()),
                 ToolName::new(job.name.clone()).expect("tool name must not be empty"),
@@ -1410,14 +1416,10 @@ impl LoopState {
         // compose_model_transcript.
         self.history.extend(result_msgs);
         // The next prompt is a simple continuation; context blocks are merged
-        // by compose_model_transcript during request assembly.
-        let joined = joined_observations.join("\n\n");
+        // by compose_model_transcript during request assembly. Joined child
+        // observations ride the Task tool result in history, not this prompt.
         let findings = self.findings_ledger.format();
-        let mut next_text = if joined.is_empty() {
-            "Continue.".to_string()
-        } else {
-            format!("Continue.\n\n{joined}")
-        };
+        let mut next_text = "Continue.".to_string();
         if !findings.is_empty() {
             next_text = format!("{next_text}\n\n{findings}");
             self.turn_findings_injected = true;
@@ -6338,6 +6340,120 @@ mod tests {
         assert!(
             task_result.contains("# Scout"),
             "task result should carry its kind header, got: {task_result}"
+        );
+    }
+
+    /// Regression: a Scout child that reads a file must have those contents
+    /// attached to the Task tool result in the parent's durable history, not
+    /// only the ephemeral next_prompt. After a further tool round the evidence
+    /// must still be present even though the ledger marks the file as read.
+    #[tokio::test]
+    async fn scout_read_observations_ride_the_task_tool_result() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("note.txt");
+        std::fs::write(&note, "evidence-from-child").unwrap();
+
+        let task_call = MockStreamEvent::tool_call(
+            "t1",
+            "Task",
+            serde_json::json!({ "kind": "Scout", "prompt": "inspect note.txt" }),
+        );
+        let done_call = |id: &str, summary: &str| {
+            MockStreamEvent::tool_call(id, "Done", serde_json::json!({ "summary": summary }))
+        };
+
+        // Parent: delegate, then finish.
+        let parent = MockCompletionModel::from_stream_turns([
+            vec![
+                task_call,
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                done_call("d1", "outer done"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        // Child (Scout): Read the file, then finish.
+        let child = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call(
+                    "r1",
+                    "Read",
+                    serde_json::json!({ "file_path": note.to_str().unwrap() }),
+                ),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                MockStreamEvent::text("scout result"),
+                done_call("d2", "scout result"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+
+        let child_handle = child.clone();
+        let factory: super::super::task::TaskModelFactory = Arc::new(move |_spec: &str| {
+            Ok(super::super::task::TaskModel {
+                model: gm(child_handle.clone().erase()),
+                temperature: None,
+                max_tokens: None,
+                extra: None,
+                preserve_reasoning: None,
+            })
+        });
+        let selector = super::super::task::TaskModelSelector::new(
+            HashMap::from([(crate::task_kind::TaskKind::Scout, "openai/mini".to_string())]),
+            factory,
+        )
+        .expect("configured");
+        let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        ctx.params.task_models = Some(selector);
+
+        run_agent_loop(
+            gm(parent.clone().erase()),
+            "go",
+            ctx,
+            CancelToken::new(),
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // The parent's second request must carry the child's Read evidence
+        // inside the Task tool result (durable history).
+        let reqs = parent.requests();
+        let parent_history = &reqs.last().unwrap().chat_history;
+        let task_result = parent_history
+            .iter()
+            .flat_map(|m| match m {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::ToolResult(r) => Some(
+                            r.content
+                                .iter()
+                                .filter_map(|rc| match rc {
+                                    rig_core::completion::message::ToolResultContent::Text(t) => {
+                                        Some(t.text.clone())
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<String>(),
+                        ),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => vec![],
+            })
+            .find(|t| t.contains("scout result"))
+            .expect("task result must reach the parent history");
+        assert!(
+            task_result.contains("evidence-from-child"),
+            "joined Read observations must ride the Task tool result, got: {task_result}"
         );
     }
 
