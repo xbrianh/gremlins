@@ -1,13 +1,20 @@
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use crate::landscape::{LandscapeData, LandscapeExplorer};
+
+/// Number of past turns whose `[seen]` paths are remembered so the same path is
+/// never landscaped again for at least this many turns after its first appearance.
+const SEEN_WINDOW_TURNS: usize = 11;
 
 /// Mutable model context that carries a frozen seed landscape of the worktree.
 ///
 /// The landscape is rendered into the system prompt via [`system_message`] once
 /// at construction and never updated — it is a frozen seed that may become stale.
-/// No live state is maintained; tool observations are no-ops.
-#[derive(Clone)]
+/// Cross-turn dedup is performed so a path that received a `[seen]` block is
+/// skipped for the next `SEEN_WINDOW_TURNS` turns.  Outlines are always
+/// recomputed from disk — no content caching.
 pub(crate) struct LandscapeContext {
     /// Worktree root.
     root: PathBuf,
@@ -19,6 +26,55 @@ pub(crate) struct LandscapeContext {
     /// Whether landscape was ever enabled for this stage.
     /// When false, all observations are no-ops and transcripts are always empty.
     landscape_enabled: bool,
+
+    /// Accumulating paths for the current turn plus ring-buffer of completed
+    /// turns.  `tool_result_extra` checks *all* sets before producing output.
+    seen: Mutex<SeenState>,
+}
+
+/// Per-turn tracking of landscaped paths.
+#[derive(Clone)]
+struct SeenState {
+    /// Paths already given a `[seen]` block in the current turn.
+    current: HashSet<PathBuf>,
+
+    /// Completed turn sets; newest at the back, oldest at the front.
+    /// Capacity is `SEEN_WINDOW_TURNS - 1` (the current set counts too).
+    past: VecDeque<HashSet<PathBuf>>,
+}
+
+impl SeenState {
+    fn new() -> Self {
+        Self {
+            current: HashSet::new(),
+            past: VecDeque::with_capacity(SEEN_WINDOW_TURNS - 1),
+        }
+    }
+
+    fn contains(&self, path: &Path) -> bool {
+        self.current.contains(path) || self.past.iter().any(|s| s.contains(path))
+    }
+
+    fn insert(&mut self, path: PathBuf) {
+        self.current.insert(path);
+    }
+
+    /// Save the current turn's set into the ring and start a fresh current set.
+    fn rotate(&mut self) {
+        let prev = std::mem::take(&mut self.current);
+        if !prev.is_empty() {
+            self.past.push_back(prev);
+            // Keep at most SEEN_WINDOW_TURNS - 1 past sets (plus current = N).
+            while self.past.len() >= SEEN_WINDOW_TURNS {
+                self.past.pop_front();
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.current.clear();
+        self.past.clear();
+    }
 }
 
 impl LandscapeContext {
@@ -49,10 +105,12 @@ impl LandscapeContext {
             root,
             seed_landscape,
             landscape_enabled,
+            seen: Mutex::new(SeenState::new()),
         }
     }
 
-    /// No-op: no live state to maintain.
+    /// No-op: dedup is handled entirely in `tool_result_extra` using
+    /// interior mutability so the read-only signature works.
     fn observe_tool(&mut self, _turn: usize, _tool: &str, _args_json: &str) {}
 
     /// Resolve a raw tool path against the worktree root.
@@ -64,7 +122,18 @@ impl LandscapeContext {
             self.root.join(path)
         }
     }
+}
 
+/// Manual Clone: Mutex<SeenState> is not Clone, so we start fresh.
+impl Clone for LandscapeContext {
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            seed_landscape: self.seed_landscape.clone(),
+            landscape_enabled: self.landscape_enabled,
+            seen: Mutex::new(SeenState::new()),
+        }
+    }
 }
 
 impl crate::clients::model_context::MutableModelContext for LandscapeContext {
@@ -122,6 +191,15 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
             return None;
         }
 
+        // Skip if this path was landscaped in any of the last SEEN_WINDOW_TURNS
+        // turns (including the current one).
+        {
+            let seen = self.seen.lock().unwrap();
+            if seen.contains(&path) {
+                return None;
+            }
+        }
+
         // For directories: list on disk and outline each file fresh.
         if path.is_dir() {
             let mut lines: Vec<String> = Vec::new();
@@ -150,8 +228,9 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
                 return None;
             }
             lines.sort();
-            let dir_label = path.to_string_lossy();
+            let dir_label = path.to_string_lossy().into_owned();
             let listing = lines.join("\n  ");
+            self.seen.lock().unwrap().insert(path);
             return Some(format!("[seen]\n{dir_label}/\n  {listing}"));
         }
 
@@ -166,11 +245,12 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
         let items_str = crate::landscape::format_outline_items(&items);
+        self.seen.lock().unwrap().insert(path);
         Some(format!("[seen]\n{name} {items_str}"))
     }
 
     fn finalize_turn(&mut self, _turn: usize) {
-        // No-op: no per-turn state to clear.
+        self.seen.lock().unwrap().rotate();
     }
 
     fn transcript(&self) -> Vec<Option<String>> {
@@ -197,5 +277,7 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
         // No-op: no live state to merge.
     }
 
-    fn clear_transcript(&mut self) {}
+    fn clear_transcript(&mut self) {
+        self.seen.lock().unwrap().clear();
+    }
 }
