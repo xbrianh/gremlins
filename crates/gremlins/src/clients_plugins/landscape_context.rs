@@ -119,9 +119,9 @@ impl LandscapeContext {
 
     /// Observe a tool call, touching the appropriate file or directory.
     ///
-    /// Read/Write/Edit/Landscape touch the specific file (re-outlining it via
-    /// `LandscapeExplorer`); Grep/Glob/Landscape-on-a-directory touch the
-    /// directory (re-exploring its direct children).
+    /// Read/Write/Edit/Grep/Glob/Landscape all supply a path argument.
+    /// We resolve the path, then operate on the file if it's a file (or
+    /// doesn't exist yet), or landscape the directory if it's a directory.
     fn observe_tool(&mut self, turn: usize, tool: &str, args_json: &str) {
         // When landscape was never enabled, every observation is a no-op.
         if !self.landscape_enabled {
@@ -138,45 +138,29 @@ impl LandscapeContext {
                 .filter(|s| !s.is_empty())
         };
 
-        // Each entry is `(touch_as_file, path)`. Paths are resolved against
-        // the worktree root so file_entries keys stay absolute and comparable.
-        let target: Option<(bool, PathBuf)> = match tool {
-            "Read" | "Write" | "Edit" => raw("file_path").map(|p| (true, self.resolve_path(&p))),
-            "Grep" | "Glob" => raw("path").map(|p| {
-                let resolved = self.resolve_path(&p);
-                if resolved.is_dir() {
-                    (false, resolved)
-                } else {
-                    (false, self.parent_or_root(&resolved))
-                }
-            }),
-            "Landscape" => raw("file_path").map(|p| {
-                let resolved = self.resolve_path(&p);
-                if resolved.is_dir() {
-                    (false, resolved)
-                } else {
-                    (true, resolved)
-                }
-            }),
+        // Extract the relevant path argument based on the tool.
+        let path_str = match tool {
+            "Read" | "Write" | "Edit" | "Landscape" => raw("file_path"),
+            "Grep" | "Glob" => raw("path"),
             _ => None,
         };
 
-        if let Some((touch_as_file, path)) = target {
+        if let Some(path_str) = path_str {
+            let path = self.resolve_path(&path_str);
             if !path.as_os_str().is_empty() {
                 let explorer = LandscapeExplorer;
-                if touch_as_file {
-                    self.data.touch_file(&path, &explorer, turn);
-                    self.dirty.insert(path);
-                } else {
+                if path.is_dir() {
                     self.data.touch_dir(&path, &explorer, turn);
                     // Mark all files currently in this directory as dirty
                     // so the delta captures the full updated listing.
-                    let dir = path.as_path();
                     for file_path in self.data.file_entries.keys() {
-                        if file_path.parent() == Some(dir) {
+                        if file_path.parent() == Some(path.as_path()) {
                             self.dirty.insert(file_path.clone());
                         }
                     }
+                } else {
+                    self.data.touch_file(&path, &explorer, turn);
+                    self.dirty.insert(path);
                 }
                 self.log_stats();
             }
@@ -193,13 +177,6 @@ impl LandscapeContext {
         }
     }
 
-    /// Return `path`'s parent, falling back to the worktree root.
-    fn parent_or_root(&self, path: &Path) -> PathBuf {
-        path.parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .map(|parent| parent.to_path_buf())
-            .unwrap_or_else(|| self.data.root.clone())
-    }
 
     /// Emit landscape statistics.
     fn log_stats(&self) {
