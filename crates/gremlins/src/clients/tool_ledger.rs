@@ -428,6 +428,12 @@ impl super::model_context::MutableModelContext for ToolLedger {
             .collect()
     }
 
+    fn file_observations(&self) -> Option<FileObservations> {
+        // Delegates to the inherent method (same name, different return type
+        // — inherent methods take priority, so this resolves correctly).
+        Some(self.file_observations())
+    }
+
     fn system_message(&self) -> Option<String> {
         // [seen] now travels via transcript() as per-turn user-message
         // blocks, keeping the system prompt (cached prefix) stable.

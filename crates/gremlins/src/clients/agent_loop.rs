@@ -33,7 +33,6 @@ use super::model::{GremlinsModel, GremlinsModelError};
 use super::model_context::{compose_model_transcript, MutableModelContext};
 use super::plug::LoopPlug;
 use super::protocol::{add_opt, CompletedRun, FileObservations, TurnStats, UsageStats};
-use super::tool_ledger::ToolLedger;
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 
 // ── Architecture ────────────────────────────────────────────────────────────
@@ -50,7 +49,7 @@ use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 //         ├─ dispatch_tool_jobs               // concurrent execute with cancel
 //         └─ emit_tool_results                // ledger, history, mutation flush
 //
-// Supporting types: ToolJob, StreamAccumulator, ToolLedger, StreamTurnOutcome,
+// Supporting types: ToolJob, StreamAccumulator, StreamTurnOutcome,
 // LoopOpts, InteractiveSession, TurnFlow, etc.
 // ────────────────────────────────────────────────────────────────────────────
 fn cancelled_error(message: impl Into<String>, history: &[Message]) -> ClientError {
@@ -256,7 +255,7 @@ struct LoopState {
     total_cache_creation_tokens: Option<u64>,
     total_reasoning_tokens: Option<u64>,
     /// Mutable model contexts that observe tool calls and contribute per-turn
-    /// transcript blocks. Always contains at least the ToolLedger.
+    /// transcript blocks.
     /// Original stage/task prompt — persists across turns so the bootstrap
     /// message can always carry the model's instructions, even after
     /// `next_prompt` has been overwritten with "Continue.".
@@ -393,10 +392,7 @@ impl LoopState {
             total_cache_creation_tokens: None,
             total_reasoning_tokens: None,
             contexts: {
-                let mut ledger = ToolLedger::new();
-                ledger.capture_turn_transcript(0);
-                let mut contexts: Vec<Box<dyn MutableModelContext>> =
-                    vec![Box::new(ledger) as Box<dyn MutableModelContext>];
+                let mut contexts: Vec<Box<dyn MutableModelContext>> = Vec::new();
                 for ctx in &plug.contexts {
                     contexts.push(ctx.clone_box());
                 }
@@ -1355,8 +1351,8 @@ impl LoopState {
                 }
             }
             // Join child contexts back into parent.  Match by concrete
-            // type (TypeId) so a child ToolLedger joins only the parent
-            // ToolLedger, etc. — no silent cross-type no-op calls.
+            // child context joins only the parent context of the same
+            // type, etc. — no silent cross-type no-op calls.
             if job.name == "Task" && !child_contexts.is_empty() {
                 for child_ctx in &child_contexts {
                     let child_tid = child_ctx.as_any().type_id();
@@ -1374,7 +1370,7 @@ impl LoopState {
             ));
         }
         // Phase 2: finalize — apply deferred invalidations for every context.
-        // For ToolLedger this processes pending_mutations (Write/Edit paths)
+        // For ledger contexts this processes pending_mutations (Write/Edit paths)
         // and captures the per-turn transcript block.
         for ctx in &mut self.contexts {
             ctx.finalize_turn(self.turn_num);
@@ -1816,7 +1812,7 @@ impl LoopState {
                     captured,
                     usage,
                     Some(messages),
-                    Some(self.ledger_file_observations().unwrap_or_default()),
+                    Some(self.context_file_observations().unwrap_or_default()),
                     self.contexts.iter().map(|c| c.clone_box()).collect(),
                 ))));
             }
@@ -1971,18 +1967,14 @@ impl LoopState {
             captured,
             usage,
             Some(messages),
-            Some(self.ledger_file_observations().unwrap_or_default()),
+            Some(self.context_file_observations().unwrap_or_default()),
             self.contexts.iter().map(|c| c.clone_box()).collect(),
         )))
     }
 
-    /// Snapshot file observations from the ToolLedger context for CompletedRun.
-    fn ledger_file_observations(&self) -> Option<FileObservations> {
-        self.contexts.iter().find_map(|ctx| {
-            ctx.as_any()
-                .downcast_ref::<ToolLedger>()
-                .map(|l| l.file_observations())
-        })
+    /// Snapshot file observations from contexts for CompletedRun.
+    fn context_file_observations(&self) -> Option<FileObservations> {
+        self.contexts.iter().find_map(|ctx| ctx.file_observations())
     }
 
     /// Call finalize_turn on every context, used at every turn boundary
@@ -3107,6 +3099,7 @@ mod tests {
     use super::*;
     use crate::clients::format::{key_arg, ledger_key_arg};
     use crate::clients::interactive::InteractiveChannels;
+    use crate::clients::tool_ledger::ToolLedger;
     use http::StatusCode;
     use rig_core::driver::DynModel;
     use rig_core::message::{Issuer, Reasoning, ReasoningContent, ToolFunction, UserContent};
@@ -3713,7 +3706,14 @@ mod tests {
             stream_events: None,
             prepopulated_messages: None,
             compaction_opts: None,
-            plug: LoopPlug::new(),
+            plug: {
+                // Seed a ToolLedger so tests that assert on ledger behavior work.
+                let mut plug = LoopPlug::new();
+                let mut ledger = ToolLedger::new();
+                ledger.capture_turn_transcript(0);
+                plug.register_contexts(vec![Box::new(ledger) as Box<dyn MutableModelContext>]);
+                plug
+            },
         }
     }
 
@@ -5676,7 +5676,7 @@ mod tests {
         let key = ledger_key_arg(&serde_json::json!({"file_path": f.to_str().unwrap()}));
         assert!(key.contains("x.txt"), "ledger must name the file: {key}");
         // The [seen] block travels through user-message transcript blocks
-        // (ToolLedger::system_message() returns None to keep the system
+        // (The ledger's system_message() returns None to keep the system
         // prompt cache-stable).
         assert!(history.len() >= 3, "unexpected history: {history:#?}");
         let seen_msg = history
@@ -5770,7 +5770,7 @@ mod tests {
         let reqs = model.requests();
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
         // The [seen] block travels through user-message transcript blocks
-        // (ToolLedger::system_message() returns None to keep the system
+        // (The ledger's system_message() returns None to keep the system
         // prompt cache-stable).
         assert!(history.len() >= 4, "unexpected history: {history:#?}");
         let seen_msg = history
@@ -6387,8 +6387,8 @@ mod tests {
         let history = &fork_req.chat_history;
         // The child inherits the parent's conversation but no longer sees a
         // separate [seen] block — context content travels through
-        // compose_model_transcript.  With a fresh (unseeded) ToolLedger the
-        // context blocks are empty.
+        // compose_model_transcript.  The inherited ledger is cleared via
+        // clear_transcript so the context blocks are empty.
         assert_eq!(history.len(), 4, "unexpected fork history: {history:#?}");
 
         // Fork system prompt leads the child history.

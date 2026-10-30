@@ -1,5 +1,7 @@
 use std::any::Any;
 
+use super::protocol::FileObservations;
+
 /// A per-turn mutable context attached to the agent loop.
 ///
 /// Contexts observe tool calls and produce per-turn transcript blocks that are
@@ -45,6 +47,13 @@ pub trait MutableModelContext: Any + Send + Sync {
     /// transcript blocks for contexts that have moved their content
     /// into the system prompt.
     fn system_message(&self) -> Option<String> {
+        None
+    }
+
+    /// Return file observations (Read/Grep + mutation paths) for cross-stage
+    /// pruning and reporting. `ToolLedger` overrides this; other contexts
+    /// return `None`.
+    fn file_observations(&self) -> Option<FileObservations> {
         None
     }
 
