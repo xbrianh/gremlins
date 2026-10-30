@@ -1158,30 +1158,29 @@ impl LoopState {
             std::future::pending::<()>().await;
         };
         let sem = Arc::new(Semaphore::new(tools::MAX_CONCURRENT_TOOLS));
+        let parent_contexts: Vec<Box<dyn MutableModelContext>> =
+            self.contexts.iter().map(|c| c.clone_box()).collect();
         let exec_fut = join_all(jobs.iter().map(|j| {
             let ctx = &ctx;
             let sem = sem.clone();
+            // Only Landscape and Task tools need parent contexts (Landscape for
+            // serve_tool dispatch, Task for child-loop context propagation).
+            // All other tools pass an empty vec to avoid unnecessary cloning.
+            let contexts = if j.name == "Task" {
+                j.task_parent_contexts.clone()
+            } else if j.name == "Landscape" {
+                parent_contexts.clone()
+            } else {
+                Vec::new()
+            };
             async move {
                 if let Some(msg) = &j.over_cap {
                     (msg.clone(), Vec::new())
                 } else {
                     let _permit = sem.acquire_owned().await;
-                    if j.name == "Task" && !j.task_parent_contexts.is_empty() {
-                        let outcome = tools::invoke_with_contexts(
-                            &j.id,
-                            &j.name,
-                            ctx,
-                            &j.args,
-                            j.task_parent_contexts.clone(),
-                        )
-                        .await;
-                        (outcome.output, outcome.contexts)
-                    } else {
-                        (
-                            tools::invoke(&j.id, &j.name, ctx, &j.args).await,
-                            Vec::new(),
-                        )
-                    }
+                    let outcome =
+                        tools::invoke_with_contexts(&j.id, &j.name, ctx, &j.args, contexts).await;
+                    (outcome.output, outcome.contexts)
                 }
             }
         }));
@@ -1342,8 +1341,8 @@ impl LoopState {
                     )
                     .await?;
             }
-            let extra: Vec<Option<String>>;
-            if tools::result_status(&output) == "ok" {
+
+            let extra: Vec<Option<String>> = if tools::result_status(&output) == "ok" {
                 // Phase 1: observe — record tool results into every context.
                 // Invalidation is deferred to finalize_turn below to prevent
                 // concurrent tool batches from racing reads against writes.
@@ -1352,10 +1351,10 @@ impl LoopState {
                     ctx.observe_tool(self.turn_num, &job.name, &job.args, &output);
                     v.push(ctx.tool_result_extra(self.turn_num, &job.name, &job.args, &output));
                 }
-                extra = v;
+                v
             } else {
-                extra = Vec::new();
-            }
+                Vec::new()
+            };
             // Join child contexts back into parent.  Match by concrete
             // child context joins only the parent context of the same
             // type, etc. — no silent cross-type no-op calls.
@@ -1369,16 +1368,13 @@ impl LoopState {
                     }
                 }
             }
-            let annotated = extra
-                .iter()
-                .flatten()
-                .fold(String::new(), |mut acc, s| {
-                    if !acc.is_empty() {
-                        acc.push('\n');
-                    }
-                    acc.push_str(s);
-                    acc
-                });
+            let annotated = extra.iter().flatten().fold(String::new(), |mut acc, s| {
+                if !acc.is_empty() {
+                    acc.push('\n');
+                }
+                acc.push_str(s);
+                acc
+            });
             let tool_output = if annotated.is_empty() {
                 output
             } else {

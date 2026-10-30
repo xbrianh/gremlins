@@ -5,13 +5,10 @@
 //! here is deliberately regex/line oriented; no native parsing dependencies.
 
 mod error;
-mod explorer_fn;
 pub mod heuristic;
 pub(crate) mod signals;
 
 pub use error::LandscapeError;
-pub(crate) use explorer_fn::LandscapeExplorerFn;
-
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
@@ -233,55 +230,7 @@ impl LandscapeExplorer {
     }
 }
 
-// ── LandscapeExplorerFn adapter (for toolbox) ─────────────────────────────
-
-impl LandscapeExplorerFn for LandscapeExplorer {
-    fn explore_directory(
-        &self,
-        path: &Path,
-        depth_limit: usize,
-        token_budget: Option<usize>,
-    ) -> Result<String, String> {
-        let build = self
-            .build_with_failures(path, depth_limit)
-            .map_err(|e| format!("Error: {e}"))?;
-
-        if build.outlines.is_empty() && build.failures.is_empty() {
-            return Ok(String::new());
-        }
-
-        match format_landscape_block_tool(&build, path, token_budget) {
-            Ok(block) => Ok(block.block),
-            Err(LandscapeError::BudgetExceeded) => Err("Error: budget exceeded".into()),
-            Err(LandscapeError::Tokenizer(e)) => Err(format!("Error: tokenizer error: {e}")),
-            Err(LandscapeError::Read(e)) => Err(format!("Error: {e}")),
-            Err(LandscapeError::Utf8(e)) => Err(format!("Error: file is not valid UTF-8: {e}")),
-        }
-    }
-
-    fn explore_file(&self, path: &Path) -> Result<String, String> {
-        match self.outline_file(path, false) {
-            Ok(items) => {
-                if items.is_empty() {
-                    let ext = path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| e.to_ascii_lowercase())
-                        .unwrap_or_default();
-                    if heuristic::recognizes(&ext) {
-                        return Ok("(no outline items)".into());
-                    }
-                    return Ok(path.display().to_string());
-                }
-                Ok(format_outline_items(&items))
-            }
-            Err(LandscapeError::Utf8(e)) => Err(format!("Error: file is not valid UTF-8: {e}")),
-            Err(LandscapeError::Read(e)) => Err(format!("Error: {e}")),
-            Err(LandscapeError::BudgetExceeded) => Err("Error: budget exceeded".into()),
-            Err(LandscapeError::Tokenizer(e)) => Err(format!("Error: tokenizer init failed: {e}")),
-        }
-    }
-}
+// ── walk helpers ───────────────────────────────────────────────────────────
 
 /// Walk the directory tree, collecting every file whose size is within
 /// `MAX_OUTLINE_BYTES`. Extension filtering happens later in
@@ -726,17 +675,16 @@ impl LandscapeData {
     pub fn touch_file(&mut self, path: &std::path::Path, explorer: &LandscapeExplorer) {
         match explorer.outline_file(path, true) {
             Ok(items) => {
-                self.file_entries.insert(path.to_path_buf(), LandscapeFileEntry { items });
+                self.file_entries
+                    .insert(path.to_path_buf(), LandscapeFileEntry { items });
             }
             Err(_) => {
                 // Read/parse error: keep the existing entry (if any) so a
                 // later touch can retry. If there is no existing entry we
                 // insert an empty one.
                 if !self.file_entries.contains_key(path) {
-                    self.file_entries.insert(
-                        path.to_path_buf(),
-                        LandscapeFileEntry { items: Vec::new() },
-                    );
+                    self.file_entries
+                        .insert(path.to_path_buf(), LandscapeFileEntry { items: Vec::new() });
                 }
             }
         }
@@ -756,7 +704,9 @@ impl LandscapeData {
                 for outline in outlines {
                     self.file_entries.insert(
                         outline.path.clone(),
-                        LandscapeFileEntry { items: outline.items },
+                        LandscapeFileEntry {
+                            items: outline.items,
+                        },
                     );
                 }
             }
@@ -2576,5 +2526,74 @@ mod tests {
             out.contains("/repo/src/\n  lib.rs 1|fn|lib"),
             "got: {out:?}"
         );
+    }
+
+    // ── token budget fallback for format_landscape_block_tool ──────────
+
+    #[test]
+    fn tool_token_budget_direct_zero_caps_output() {
+        // Passing Some(0) as token_budget directly → BudgetExceeded.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.rs"),
+            "fn main() {}\nstruct S;\nimpl S {}",
+        )
+        .unwrap();
+        let build = LandscapeExplorer
+            .build_with_failures(dir.path(), usize::MAX)
+            .unwrap();
+        let result = format_landscape_block_tool(&build, dir.path(), Some(0));
+        assert!(
+            matches!(result, Err(LandscapeError::BudgetExceeded)),
+            "expected BudgetExceeded"
+        );
+    }
+
+    #[test]
+    fn tool_token_budget_no_config_no_token_budget_is_unlimited() {
+        // No config → no fallback cap → full-depth output with no error.
+        let _sandbox = crate::test_support::Sandbox::new();
+        crate::config::clear_global();
+        crate::config::init_global().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn main() {}").unwrap();
+        let build = LandscapeExplorer
+            .build_with_failures(dir.path(), usize::MAX)
+            .unwrap();
+        let result = format_landscape_block_tool(&build, dir.path(), None);
+        assert!(result.is_ok(), "should not be capped");
+        assert!(
+            !result.unwrap().block.is_empty(),
+            "output should not be empty"
+        );
+    }
+
+    #[test]
+    fn tool_token_budget_model_token_budget_overrides_config() {
+        // Config has max-tool-tokens: 0 (would cap), but caller passes
+        // an explicit token_budget → models budget wins, no cap error.
+        let _sandbox = crate::test_support::Sandbox::with_config(Some(
+            r#"{"landscape": {"max-tool-tokens": 0}}"#,
+        ));
+        crate::config::clear_global();
+        crate::config::init_global().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.rs"),
+            "fn main() {}\nstruct S;\nimpl S {}",
+        )
+        .unwrap();
+        let build = LandscapeExplorer
+            .build_with_failures(dir.path(), usize::MAX)
+            .unwrap();
+        let result = format_landscape_block_tool(&build, dir.path(), Some(usize::MAX));
+        assert!(result.is_ok(), "caller budget should override config");
+        assert!(
+            !result.unwrap().block.is_empty(),
+            "output should not be empty"
+        );
+        crate::config::clear_global();
     }
 }

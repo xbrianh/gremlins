@@ -1358,12 +1358,6 @@ pub(crate) fn landscape_diff_stat() -> bool {
         .unwrap_or(false)
 }
 
-/// Read an environment variable and parse it as u64.
-#[cfg(test)]
-fn parse_env_u64(var: &str) -> Option<u64> {
-    std::env::var(var).ok().and_then(|v| v.parse().ok())
-}
-
 /// Parse a boolean from an environment variable value.
 /// Accepts "1", "true" (case-insensitive) as true; "0", "false" as false.
 fn parse_env_bool(v: &str) -> Option<bool> {

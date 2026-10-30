@@ -923,9 +923,7 @@ async fn run_agent(
             }
         }
         if let Some(ld) = landscape_data.take() {
-            contexts.push(Box::new(LandscapeContext::new(
-                ld,
-            )));
+            contexts.push(Box::new(LandscapeContext::new(ld)));
         }
         plug.register_contexts(contexts);
     }

@@ -23,6 +23,18 @@ pub trait MutableModelContext: Any + Send + Sync {
     /// Clone this context into a new heap allocation.
     fn clone_box(&self) -> Box<dyn MutableModelContext>;
 
+    /// Serve a tool result directly from this context, short-circuiting the
+    /// normal handler dispatch. Called after arg validation and sandbox
+    /// checking but before the `match name { ... }` dispatch in
+    /// [`invoke_with_contexts`].
+    ///
+    /// Returns `Some(output)` when this context handles the tool; `None`
+    /// falls through to the normal handler. Read-only (`&self`) — context
+    /// state mutation happens separately through [`observe_tool`].
+    fn serve_tool(&self, _name: &str, _args: &serde_json::Value) -> Option<String> {
+        None
+    }
+
     /// Record a successful tool call observation for the given turn.
     ///
     /// Called once per tool after the tool returns `"ok"`.  Must be

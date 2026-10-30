@@ -591,6 +591,44 @@ pub(crate) async fn invoke_with_contexts(
             contexts: Vec::new(),
         };
     }
+
+    // Let active contexts serve the tool result before falling through to
+    // the handler registry. This is a read-only pull path — context state
+    // is mutated separately through observe_tool() in emit_tool_results.
+    for ctxc in &parent_contexts {
+        // Landscape exploration uses rayon for parallel directory walks —
+        // offload to a blocking thread so tokio workers stay responsive.
+        let maybe_output: Option<String> = if name == "Landscape" {
+            let args_owned = args.clone();
+            let ctx_owned = ctxc.clone_box();
+            let name_owned = name.to_string();
+            match tokio::task::spawn_blocking(move || {
+                ctx_owned.serve_tool(&name_owned, &args_owned)
+            })
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => Some(format!("Error: {e}")),
+            }
+        } else {
+            ctxc.serve_tool(name, &args)
+        };
+        if let Some(output) = maybe_output {
+            let output = cap_output(name, output);
+            audit(
+                ctx.audit_log.as_deref(),
+                ctx.audit_lock.as_deref(),
+                name,
+                &ka,
+                result_status(&output),
+            );
+            return TaskOutcome {
+                output,
+                contexts: Vec::new(),
+            };
+        }
+    }
+
     let mut outcome = match name {
         "Task" => {
             if let Some(f) = &ctx.task_fn {
@@ -675,17 +713,22 @@ pub(crate) async fn invoke_with_contexts(
         &ka,
         result_status(&outcome.output),
     );
-    // Cap output for tools that can produce unbounded results.
-    // Task and Done are excluded: Task manages its own context, Done is tiny.
-    // Edit and Write always return tiny results.
-    // WebSearch handles its own truncation in websearch_invoke_with_cap.
+    outcome.output = cap_output(name, outcome.output);
+    outcome
+}
+
+/// Cap output for tools that can produce unbounded results.
+/// Task and Done are excluded: Task manages its own context, Done is tiny.
+/// Edit and Write always return tiny results.
+/// WebSearch handles its own truncation in websearch_invoke_with_cap.
+fn cap_output(name: &str, output: String) -> String {
     let cap = crate::config::max_tool_output_bytes();
     if cap > 0
         && matches!(
             name,
             "Read" | "Bash" | "Grep" | "Glob" | "Landscape" | "WebSearch"
         )
-        && outcome.output.len() as u64 > cap
+        && output.len() as u64 > cap
     {
         let marker = match name {
             "Read" => format!(
@@ -703,13 +746,12 @@ pub(crate) async fn invoke_with_contexts(
         };
         let marker_len = marker.len() as u64;
         let keep = cap.saturating_sub(marker_len) as usize;
-        let res = &outcome.output;
-        outcome.output = if keep == 0 {
+        if keep == 0 {
             truncate_to_bytes(&marker, cap as usize)
         } else {
             let mut trunc = String::with_capacity(cap as usize);
             let mut used = 0usize;
-            for c in res.chars() {
+            for c in output.chars() {
                 let cl = c.len_utf8();
                 if used + cl > keep {
                     break;
@@ -719,11 +761,14 @@ pub(crate) async fn invoke_with_contexts(
             }
             trunc.push_str(&marker);
             trunc
-        };
+        }
+    } else {
+        output
     }
-    outcome
 }
 
+/// Convenience wrapper for tests that don't need parent contexts.
+#[cfg(test)]
 pub(crate) async fn invoke(
     id: &str,
     name: &str,
@@ -755,14 +800,12 @@ fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
 mod tests {
     use super::*;
     use crate::core::paths::*;
-    use crate::landscape::LandscapeExplorer;
     use crate::test_support::EnvGuard;
     use crate::toolbox::{
         bash::bash_invoke,
         edit::{edit_invoke, edit_sync},
         glob::glob_invoke,
         grep::grep_invoke,
-        landscape::{landscape_invoke, landscape_sync},
         read::read_invoke,
         skills::load_skill_invoke,
         websearch::{websearch_invoke, websearch_invoke_with_cap},
@@ -907,334 +950,6 @@ mod tests {
         std::fs::write(dir.join("empty.txt"), "").unwrap();
         let args = serde_json::json!({"file_path": "empty.txt"}).to_string();
         assert_eq!(read_invoke(&c, &args).await, "");
-    }
-
-    #[tokio::test]
-    async fn landscape_renders_rust_items() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::write(
-            dir.join("lib.rs"),
-            "fn main() {}\nstruct Foo;\nimpl Foo {}\ntrait Shape {}\npub enum Color {}\n",
-        )
-        .unwrap();
-        let args = serde_json::json!({"file_path": "lib.rs"}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(out.contains("fn") && out.contains("main"), "got: {out:?}");
-        assert!(
-            out.contains("struct") && out.contains("Foo"),
-            "got: {out:?}"
-        );
-        assert!(out.contains("impl"), "got: {out:?}");
-        assert!(
-            out.contains("1|fn|main"),
-            "items must use line|kind|name format: {out:?}"
-        );
-        assert!(
-            out.contains("2|struct|Foo") && out.contains("3|impl|Foo"),
-            "items must be space-separated on one line: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_renders_markdown_headings() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::write(dir.join("README.md"), "# Title\n\n## Subtitle\n").unwrap();
-        let args = serde_json::json!({"file_path": "README.md"}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        // .md is no longer a recognized extension; the tool shows the
-        // filename instead of "(no outline items)".
-        assert!(out.contains("README.md"), "got: {out:?}");
-        assert!(!out.contains("heading"), "got: {out:?}");
-    }
-
-    #[tokio::test]
-    async fn landscape_missing_file_is_error() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        let args = serde_json::json!({"file_path": "missing.rs"}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(out.starts_with("Error:"), "got: {out:?}");
-    }
-
-    #[tokio::test]
-    async fn landscape_outside_sandbox_is_denied() {
-        let dir = tmp();
-        let outside = tmp();
-        let c = ctx(&dir);
-        std::fs::write(outside.join("outside.rs"), "fn outside() {}\n").unwrap();
-        let args = serde_json::json!({"file_path": outside.join("outside.rs").to_str().unwrap()})
-            .to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(out.contains("outside sandbox"), "got: {out:?}");
-    }
-
-    #[tokio::test]
-    async fn landscape_directory_lists_files_with_items() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::create_dir(dir.join("sub")).unwrap();
-        std::fs::write(dir.join("sub/lib.rs"), "fn a() {}\nstruct B;\nimpl B {}\n").unwrap();
-        std::fs::write(dir.join("sub/notes.txt"), "hello").unwrap();
-        let args = serde_json::json!({"file_path": ".", "depth": 2, "token_budget": 1_000_000})
-            .to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            out.contains("sub/") && out.contains("lib.rs:"),
-            "dir listing missing lib.rs tree entry: {out:?}"
-        );
-        assert!(
-            !out.contains("sub/lib.rs") && out.contains("notes.txt:"),
-            "directory output must use block tree headers and list unrecognized files: {out:?}"
-        );
-        assert!(
-            out.contains("1|fn|a") && out.contains("2|struct|B"),
-            "items not rendered in line|kind|name format: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_directory_skips_hidden_and_vendor() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::create_dir(dir.join(".git")).unwrap();
-        std::fs::create_dir(dir.join("target")).unwrap();
-        std::fs::create_dir(dir.join("src")).unwrap();
-        std::fs::write(dir.join(".git/config"), "x").unwrap();
-        std::fs::write(dir.join("target/out"), "x").unwrap();
-        std::fs::write(dir.join("src/lib.rs"), "fn a() {}\nstruct B;\nimpl B {}\n").unwrap();
-        let args = serde_json::json!({"file_path": ".", "depth": 2, "token_budget": 1_000_000})
-            .to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(!out.contains(".git"), "must skip .git: {out:?}");
-        assert!(!out.contains("target"), "must skip target: {out:?}");
-        assert!(
-            out.contains("src/") && out.contains("lib.rs:"),
-            "should include src/lib.rs tree entry: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_depth_limit_is_honored() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::create_dir_all(dir.join("a/b/c")).unwrap();
-        std::fs::write(
-            dir.join("a/b/c/deep.rs"),
-            "fn deep() {}\nstruct D;\nimpl D {}\n",
-        )
-        .unwrap();
-        std::fs::write(dir.join("a/top.rs"), "fn top() {}\nstruct T;\nimpl T {}\n").unwrap();
-        // depth=1: only a/ itself plus one level → a/top.rs visible, a/b/ skipped
-        let args = serde_json::json!({"file_path": ".", "depth": 1, "token_budget": 1_000_000})
-            .to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            out.contains("a/") && out.contains("top.rs:"),
-            "depth 1 should include a/top.rs: {out:?}"
-        );
-        assert!(
-            !out.contains("deep"),
-            "depth 1 must not reach a/b/c/deep.rs: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_empty_directory() {
-        let dir = tmp();
-        let sub = dir.join("empty");
-        std::fs::create_dir(&sub).unwrap();
-        let c = ctx(&dir);
-        let args = serde_json::json!({"file_path": "empty", "token_budget": 1_000_000}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert_eq!(out, "(empty directory)");
-    }
-
-    #[tokio::test]
-    async fn landscape_directory_with_only_small_files_lists_them() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        let sub = dir.join("shallow");
-        std::fs::create_dir(&sub).unwrap();
-        // Two recognized files, each with fewer than 3 outline items.
-        // Tool mode must still list them (and their items) rather than
-        // applying the injected-block three-item cutoff.
-        std::fs::write(sub.join("a.rs"), "fn a() {}\nstruct A;\n").unwrap();
-        std::fs::write(sub.join("b.rs"), "fn b() {}\n").unwrap();
-        let args =
-            serde_json::json!({"file_path": "shallow", "token_budget": 1_000_000}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            out.contains("a.rs:") && out.contains("1|fn|a") && out.contains("2|struct|A"),
-            "small recognized file with two items must be listed: {out:?}"
-        );
-        assert!(
-            out.contains("b.rs:") && out.contains("1|fn|b"),
-            "small recognized file with one item must be listed: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_directory_with_only_unrecognized_files() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        let sub = dir.join("plans");
-        std::fs::create_dir(&sub).unwrap();
-        std::fs::write(
-            sub.join("fix-ls-stage-regression.md"),
-            "# Plan\n\nDo the thing.",
-        )
-        .unwrap();
-        std::fs::write(sub.join("notes.txt"), "some random notes").unwrap();
-        let args = serde_json::json!({"file_path": "plans", "token_budget": 1_000_000}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            out.contains("fix-ls-stage-regression.md:"),
-            "unrecognized .md file must appear as tree entry: {out:?}"
-        );
-        assert!(
-            out.contains("notes.txt:"),
-            "unrecognized .txt file must appear as tree entry: {out:?}"
-        );
-        assert!(
-            !out.contains("(empty directory)"),
-            "must not report empty for non-empty dir: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_refuses_symlink_root() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::create_dir(dir.join("real")).unwrap();
-        std::fs::write(dir.join("real/lib.rs"), "fn f() {}\n").unwrap();
-        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
-        let args = serde_json::json!({"file_path": "link"}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            out.contains("does not follow symlinks"),
-            "symlink root must be refused: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_bad_depth_is_rejected() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        let args = serde_json::json!({"file_path": ".", "depth": "two"}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            out.starts_with("Error:") && out.contains("depth"),
-            "bad depth must be rejected: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_bad_token_budget_is_rejected() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        let args = serde_json::json!({"file_path": ".", "token_budget": "two"}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            out.starts_with("Error:") && out.contains("token_budget"),
-            "bad token_budget must be rejected: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_directory_matches_block_format() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::create_dir(dir.join("sub")).unwrap();
-        std::fs::write(dir.join("sub/lib.rs"), "fn a() {}\nstruct B;\nimpl B {}\n").unwrap();
-
-        let build = LandscapeExplorer
-            .build_with_failures(&dir, usize::MAX)
-            .unwrap();
-        let expected =
-            crate::landscape::format_landscape_block_tool(&build, &dir, Some(usize::MAX))
-                .unwrap()
-                .block;
-        assert!(!expected.contains("<!-- BEGIN LANDSCAPE BLOCK -->"));
-        assert!(!expected.contains("repository metadata"));
-
-        let args = serde_json::json!({"file_path": ".", "depth": 2, "token_budget": 1_000_000})
-            .to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert_eq!(
-            out, expected,
-            "tool directory output must match the block format"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_token_budget_limits_directory_output() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::create_dir_all(dir.join("src/nested")).unwrap();
-
-        let mut top = String::new();
-        let mut mid = String::new();
-        let mut deep = String::new();
-        for i in 0..20 {
-            top.push_str(&format!("fn top_{i:02}() {{}}\n"));
-            mid.push_str(&format!("fn mid_{i:02}() {{}}\n"));
-            deep.push_str(&format!("fn deep_{i:02}() {{}}\n"));
-        }
-        std::fs::write(dir.join("top.rs"), top).unwrap();
-        std::fs::write(dir.join("src/mid.rs"), mid).unwrap();
-        std::fs::write(dir.join("src/nested/deep.rs"), deep).unwrap();
-
-        let build = LandscapeExplorer
-            .build_with_failures(&dir, usize::MAX)
-            .unwrap();
-        let full = crate::landscape::format_landscape_block_tool(&build, &dir, Some(usize::MAX))
-            .unwrap()
-            .block;
-        let full_tokens = crate::landscape::count_tokens(&full).unwrap();
-        assert!(full_tokens > 1);
-        let budget = full_tokens - 1;
-
-        let args = serde_json::json!({"file_path": ".", "token_budget": budget}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            crate::landscape::count_tokens(&out).unwrap() <= budget,
-            "tool output must respect token_budget: {out:?}"
-        );
-        assert!(out.contains("top.rs:"), "shallow file kept: {out:?}");
-        assert!(out.contains("mid.rs:"), "depth-limited file kept: {out:?}");
-        assert!(
-            !out.contains("deep.rs:"),
-            "deepest file must be trimmed by token_budget: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_unreadable_file_is_annotated() {
-        // Create a real file inside a subdirectory with outlineable extension
-        // but revoke read permission so the block pipeline cannot parse it.
-        // `build_with_failures` surfaces the path as an inline annotation.
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::create_dir(dir.join("sub")).unwrap();
-        let broken = dir.join("sub/broken.rs");
-        std::fs::write(&broken, "fn x() {}\nstruct X;\nimpl X {}\n").unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o000);
-            std::fs::set_permissions(&broken, perms).unwrap();
-        }
-        // Pass an explicit token_budget so the test never consults the
-        // global config (which can race with other tests that call
-        // init_global() in parallel).
-        let args =
-            serde_json::json!({"file_path": ".", "depth": 2, "token_budget": 100_000}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            out.contains("broken.rs") && out.contains("(unreadable)"),
-            "unreadable file must be annotated: {out:?}"
-        );
     }
 
     #[tokio::test]
@@ -4369,36 +4084,6 @@ mod tests {
             "oversized Read must be truncated, not discarded, got: {result}"
         );
     }
-
-    #[tokio::test]
-    async fn invoke_caps_oversized_landscape_result() {
-        let _env = crate::test_support::EnvGuard::lock();
-        let dir = tmp();
-        let c = ctx(&dir);
-        // Generate a Rust file with many long-named functions so the landscape
-        // output comfortably exceeds a 200-byte cap.
-        let mut src = String::new();
-        for i in 0..20 {
-            src.push_str(&format!("fn very_long_function_name_{i:03}() {{}}\n"));
-        }
-        std::fs::write(dir.join("big.rs"), &src).unwrap();
-        let args = serde_json::json!({"file_path": "big.rs"}).to_string();
-        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "200");
-        let result = invoke("tool-test-id", "Landscape", &c, &args).await;
-        assert!(
-            result.contains("[...truncated at 200 bytes...]"),
-            "oversized Landscape must carry a truncation marker, got: {result}"
-        );
-        assert!(
-            (result.len() as u64) <= 200,
-            "truncated result must fit within cap, got len {}: {result}",
-            result.len()
-        );
-        assert!(
-            !result.contains("Tool output exceeded the limit"),
-            "oversized Landscape must be truncated, not discarded, got: {result}"
-        );
-    }
     #[tokio::test]
     async fn invoke_truncation_preserves_content_prefix() {
         let _env = crate::test_support::EnvGuard::lock();
@@ -4677,71 +4362,5 @@ mod tests {
         // never "allow all".
         let err = bash_check(&[], "cat /etc/passwd", Some(&dir)).unwrap();
         assert!(err.contains("invalid sandbox root"), "got: {err}");
-    }
-
-    // --- landscape_sync token_budget fallback ------------------------------
-
-    #[test]
-    fn landscape_sync_config_token_budget_fallback_caps_output() {
-        // Config has max-tool-tokens: 0 → landscape_sync without
-        // token_budget falls back to the config value and hits the cap.
-        let _sandbox = crate::test_support::Sandbox::with_config(Some(
-            r#"{"landscape": {"max-tool-tokens": 0}}"#,
-        ));
-        crate::config::clear_global();
-        crate::config::init_global().unwrap();
-
-        let dir = tmp();
-        std::fs::write(dir.join("a.rs"), "fn main() {}").unwrap();
-
-        let result = landscape_sync(Some(&dir), None, r#"{"file_path": "."}"#);
-        assert!(
-            result.contains("Error: budget exceeded"),
-            "expected budget-exceeded, got: {result}"
-        );
-        crate::config::clear_global();
-    }
-
-    #[test]
-    fn landscape_sync_no_config_no_token_budget_is_unlimited() {
-        // No config → no fallback cap → full-depth output with no error.
-        let _sandbox = crate::test_support::Sandbox::new();
-        crate::config::clear_global();
-        crate::config::init_global().unwrap();
-
-        let dir = tmp();
-        std::fs::write(dir.join("a.rs"), "fn main() {}").unwrap();
-
-        let result = landscape_sync(Some(&dir), None, r#"{"file_path": "."}"#);
-        assert!(
-            !result.contains("Error: budget exceeded"),
-            "should not be capped, got: {result}"
-        );
-        assert!(!result.is_empty(), "output should not be empty");
-    }
-
-    #[test]
-    fn landscape_sync_model_token_budget_overrides_config() {
-        // Config has max-tool-tokens: 0 (would cap), but the model passes
-        // an explicit token_budget → model's value wins, no cap error.
-        let _sandbox = crate::test_support::Sandbox::with_config(Some(
-            r#"{"landscape": {"max-tool-tokens": 0}}"#,
-        ));
-        crate::config::clear_global();
-        crate::config::init_global().unwrap();
-
-        let dir = tmp();
-        std::fs::write(dir.join("a.rs"), "fn main() {}").unwrap();
-
-        let result = landscape_sync(
-            Some(&dir),
-            None,
-            r#"{"file_path": ".", "token_budget": 999999}"#,
-        );
-        assert!(
-            !result.contains("Error: budget exceeded"),
-            "model budget should override config, got: {result}"
-        );
-        assert!(!result.is_empty(), "output should not be empty");
     }
 }

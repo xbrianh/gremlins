@@ -2,7 +2,9 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::landscape::{LandscapeData, LandscapeExplorer};
+use crate::landscape::{
+    format_landscape_block_tool, format_outline_items, LandscapeData, LandscapeExplorer,
+};
 
 /// Number of past turns whose `[seen]` paths are remembered so the same path is
 /// never landscaped again for at least this many turns after its first appearance.
@@ -153,6 +155,104 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
         Box::new(self.clone())
     }
 
+    fn serve_tool(&self, name: &str, args: &serde_json::Value) -> Option<String> {
+        if !self.landscape_enabled || name != "Landscape" {
+            return None;
+        }
+
+        let file_path = args.get("file_path")?.as_str()?;
+        let path = self.resolve_path(file_path);
+
+        // Reject non-integer depth/token_budget explicitly so a float (which
+        // `as_u64` silently drops) cannot degrade into an unlimited walk.
+        let depth: Option<usize> = match args.get("depth") {
+            None => None,
+            Some(v) => match v.as_u64() {
+                Some(n) => Some(n as usize),
+                None => return Some("Error: 'depth' must be a non-negative integer".into()),
+            },
+        };
+
+        let token_budget: Option<usize> = match args.get("token_budget").filter(|v| !v.is_null()) {
+            None => crate::config::max_landscape_tool_tokens().map(|n| n as usize),
+            Some(v) => match v.as_u64() {
+                Some(n) => Some(n as usize),
+                None => return Some("Error: 'token_budget' must be a non-negative integer".into()),
+            },
+        };
+
+        // Reject a symlink root so the directory walk does not follow it.
+        // Also surface a missing/unreadable path as an explicit error so the
+        // model sees a clear diagnostic instead of the stub's misleading
+        // "Landscape is unavailable (no landscape context active)" message.
+        let meta = match path.symlink_metadata() {
+            Ok(m) => m,
+            Err(e) => return Some(format!("Error: {e}")),
+        };
+        if meta.is_symlink() {
+            return Some(format!(
+                "Error: Landscape does not follow symlinks: {}",
+                path.display()
+            ));
+        }
+
+        if meta.is_dir() {
+            let depth_limit = depth.unwrap_or(usize::MAX);
+            let build = match LandscapeExplorer.build_with_failures(&path, depth_limit) {
+                Ok(b) => b,
+                Err(e) => return Some(format!("Error: {e}")),
+            };
+
+            if build.outlines.is_empty() && build.failures.is_empty() {
+                return Some("(empty directory)".into());
+            }
+
+            match format_landscape_block_tool(&build, &path, token_budget) {
+                Ok(block) => {
+                    if block.block.is_empty() {
+                        Some("(empty directory)".into())
+                    } else {
+                        Some(block.block)
+                    }
+                }
+                Err(crate::landscape::LandscapeError::BudgetExceeded) => {
+                    Some("Error: budget exceeded".into())
+                }
+                Err(e) => Some(format!("Error: {e}")),
+            }
+        } else {
+            match LandscapeExplorer.outline_file(&path, false) {
+                Ok(items) => {
+                    if items.is_empty() {
+                        use crate::landscape::heuristic;
+                        let ext = path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .map(|e| e.to_ascii_lowercase())
+                            .unwrap_or_default();
+                        if heuristic::recognizes(&ext) {
+                            Some("(no outline items)".into())
+                        } else {
+                            Some(path.display().to_string())
+                        }
+                    } else {
+                        Some(format_outline_items(&items))
+                    }
+                }
+                Err(crate::landscape::LandscapeError::Utf8(e)) => {
+                    Some(format!("Error: file is not valid UTF-8: {e}"))
+                }
+                Err(crate::landscape::LandscapeError::Read(e)) => Some(format!("Error: {e}")),
+                Err(crate::landscape::LandscapeError::BudgetExceeded) => {
+                    Some("Error: budget exceeded".into())
+                }
+                Err(crate::landscape::LandscapeError::Tokenizer(e)) => {
+                    Some(format!("Error: tokenizer init failed: {e}"))
+                }
+            }
+        }
+    }
+
     fn observe_tool(&mut self, turn: usize, tool: &str, args: &str, _output: &str) {
         self.observe_tool(turn, tool, args);
     }
@@ -215,9 +315,7 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
                                     .unwrap_or_default();
                                 let mut line = name;
                                 line.push(' ');
-                                line.push_str(
-                                    &crate::landscape::format_outline_items(&items),
-                                );
+                                line.push_str(&crate::landscape::format_outline_items(&items));
                                 lines.push(line);
                             }
                         }
