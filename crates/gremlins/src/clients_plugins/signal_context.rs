@@ -22,6 +22,10 @@ pub(crate) struct SignalMapContext {
     /// Live symbol index: identifier name → first `file:line` occurrence.
     /// Mutated on Write/Edit by re-scanning the touched file.
     symbol_index: HashMap<String, SymbolEntry>,
+    /// Signal profile used at construction time (Full or DiffFocused).
+    /// The live symbol map rendering must match this so symbols from
+    /// unchanged files are not restored after a DiffFocused seed.
+    profile: signals::SignalProfile,
     /// Per-turn transcript blocks.  Only the most recent turn carries
     /// `Some(rendered)`; all prior turns are `None`.
     turn_transcripts: Vec<Option<String>>,
@@ -33,6 +37,7 @@ impl SignalMapContext {
         prompt: Option<String>,
         cwd: PathBuf,
         symbol_index: HashMap<String, SymbolEntry>,
+        profile: signals::SignalProfile,
     ) -> Self {
         let static_sections_text = signal_sections
             .iter()
@@ -46,6 +51,7 @@ impl SignalMapContext {
             prompt,
             cwd,
             symbol_index,
+            profile,
             turn_transcripts: vec![None],
         }
     }
@@ -55,7 +61,7 @@ impl SignalMapContext {
         let ctx = signals::SignalContext {
             cwd: self.cwd.clone(),
             pruned_files: None,
-            profile: signals::SignalProfile::Full,
+            profile: self.profile,
             prompt: self.prompt.clone(),
             diff_stat: false,
         };

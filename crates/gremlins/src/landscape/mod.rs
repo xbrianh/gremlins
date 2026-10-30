@@ -1200,7 +1200,7 @@ pub(crate) fn format_landscape_data(data: &LandscapeData, max_tokens: usize) -> 
 
     for (dir, mut files) in grouped {
         files.sort_by(|a, b| a.0.cmp(b.0));
-        let display_dir = dir.to_string_lossy();
+        let display_dir = escape_landscape_delimiters(&dir.to_string_lossy());
 
         let mut file_lines: Vec<String> = Vec::new();
         let max_files = 40; // same as old max_files_per_dir
@@ -1210,7 +1210,8 @@ pub(crate) fn format_landscape_data(data: &LandscapeData, max_tokens: usize) -> 
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let mut file_line = name;
+            let escaped_name = escape_landscape_delimiters(&name);
+            let mut file_line = escaped_name;
             if !entry.items.is_empty() {
                 let item_str = format_outline_items(&entry.items);
                 file_line.push(' ');

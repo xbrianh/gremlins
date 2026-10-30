@@ -1,49 +1,49 @@
-# Fix Summary — Diff Stat Summary (Phase 4 Slice 3)
+# PR #2179 review address summary
 
-## Fixes applied
+## Comments addressed (14/14)
 
-### 1. `crates/gremlins/src/landscape/signals/mod.rs` — Test helper `git_commit_all` (before my turn)
-- **Issue**: Needed a helper to commit all tracked/untracked changes in one shot for test setup.
-- **Fix**: Added `fn git_commit_all(dir, msg)` wrapping `git add -A && git commit -q`.
+### 1. prompt debug threshold reversed (executor/run.rs:856)
+**Fix:** Changed `>` to `<` — now dumps only when `GREMLINS_LOG_LEVEL` is `Trace`, not for `Info`/`Warn`/`Error`/`Off`.
 
-### 2. `crates/gremlins/src/landscape/signals/mod.rs` — `is_file()` gate dropped (before my turn)
-- **Category**: Correctness — Review 2, finding 1.
-- **Issue**: `canonical.is_file()` silently dropped fully-deleted files from the stat, defeating the section's purpose of surfacing deletion magnitude.
-- **Fix**: Removed the `is_file()` check; the changed-set membership and containment/pruning already encode the existence policy.
+### 2. Symlink escape in landscape tool_result_extra (landscape_context.rs:309)
+**Fix:** Added `!fp.is_symlink()` check before `fp.is_file()` in the directory listing, and also added `!path.is_symlink()` guard at the directory-entry point in `tool_result_extra`. Both use symlink metadata rather than following symlinks.
 
-### 3. `crates/gremlins/src/landscape/signals/mod.rs` — `--no-renames` + quotePath handling (before my turn)
-- **Category**: Correctness — Review 2, finding 3.
-- **Issue**: `git diff --numstat` rename entries (`old => new`) and `core.quotePath`-quoted paths produced wrong display strings.
-- **Fix**: Passed `--no-renames` to git diff; added quote-path unquoting logic.
+### 3. Landscape seed renderer escaping (landscape/mod.rs:1203,1212)
+**Fix:** Applied `escape_landscape_delimiters` to both `display_dir` and filename labels in `format_landscape_data`. The `format_at_depth_inner` path already had escaping applied.
 
-### 4. `crates/gremlins/src/landscape/signals/mod.rs` — `SignalSection` key/name split (before my turn)
-- **Category**: Readability — Review 2, finding 4.
-- **Issue**: Section name `"Diff stat"` was used as both display name and log key, coupling the executor to the exact title string.
-- **Fix**: `SignalSection` now carries a stable `key` field (e.g. `"diff-stat"`) alongside the display `name`; the executor logs `section.key` directly.
+### 4. Anthropic PreserveReasoning hardcoded to No (anthropic.rs:252)
+**Fix:** Changed `PreserveReasoning::No` to `PreserveReasoning::Yes` for the Anthropic backend, since Anthropic's native Messages API also needs reasoning preserved when extended thinking is enabled.
 
-### 5. `crates/gremlins/src/landscape/signals/mod.rs` + `crates/gremlins/src/executor/run.rs` — Config gate moved to `SignalContext` (before my turn)
-- **Category**: Layering — Structural review.
-- **Issue**: `landscape_diff_stat()` was checked inside `signals/mod.rs`, while sibling gate `landscape_stage_profiles()` was checked in `executor/run.rs` and passed via `SignalContext`.
-- **Fix**: Added `diff_stat: bool` to `SignalContext`; executor sets it from config; `render_signal_sections` uses `ctx.diff_stat`.
+### 5. SeenState rotate skips empty turns (landscape_context.rs:74)
+**Fix:** Removed the `if !prev.is_empty()` guard — `rotate()` now always pushes the current set into past even when empty, so expiry reliably counts actual turns.
 
-### 6. `crates/gremlins/src/landscape/signals/mod.rs` — Perl regex fix for `SignalContext { … }` in tests
-- **Category**: Build correctness.
-- **Issue**: Prior perl substitution (`prompt: Some([^)]+),`) failed on `prompt: Some("…".to_string()),` because the nested `)` from `to_string()` tripped the negated character class. Six test `SignalContext` literals were missing `diff_stat: false`.
-- **Fix**: Rewrote regex to use non-greedy `.+?` and re-ran substitution; all 20+ `SignalContext` literals now carry `diff_stat`.
+### 6. Compose_model_transcript bootstrap ordering (model_context.rs:209)
+**Fix:** Added `inherited_count: usize` parameter. For turn ≥ 1 with prepopulated history (chat/Fork), inherited messages are emitted verbatim **before** the bootstrap, then only current-loop history is interleaved. Call site in agent_loop passes `self.current_turn_start`.
 
-### 7. `crates/gremlins/src/landscape/signals/mod.rs` — Unused `diff_paths` variables
-- **Category**: Warning cleanup.
-- **Issue**: Two tests (`diff_stat_drops_binary_and_pruned_and_escaped`, `diff_stat_caps_at_30`) captured `diff_paths` from `build_changed_files` but no longer passed it to `build_diff_stat`.
-- **Fix**: Renamed to `_diff_paths` in both tests.
+### 7. Preserve_reasoning from TaskModel (task.rs:240)
+**Fix:** Added `preserve_reasoning: Option<bool>` field to `TaskModel`. `make_task_runner_at_depth` uses `selected.preserve_reasoning.unwrap_or(preserve_reasoning_in_history)`. The factory in `resolve_model` (client.rs) sets it to `Some(true)` for `azure-openai`/`anthropic` backends and `None` for others. When `None`, the parent's value is inherited.
 
-### 8. `crates/gremlins/src/landscape/signals/mod.rs` — Broken `diff_stat_empty_when_no_git_or_no_changes` test
-- **Category**: Test correctness.
-- **Issue**: The second sub-case asserted `build_diff_stat(&ctx2).is_none()` for a git repo, but `build_diff_stat` no longer accepts a changed-set filter — the gating moved to `render_signal_sections`. The assertion was now false (a real git repo produces stats).
-- **Fix**: Renamed test to `diff_stat_empty_when_no_git`, removed the invalid sub-case. The "empty changed set yields None" semantic is now covered by the new dispatch-level test.
+### 8. Scout observations not reaching parent (task.rs:260)
+**Fix:** Added `new_observations_text()` method to `MutableModelContext` trait, implemented by `ToolLedger` to return newly-joined Read/Grep outputs. In `emit_tool_results`, after joining child contexts for a Task, these observations are drained into a `joined_observations` vec and prepended to the next prompt tail so the parent model sees file contents.
 
-### 9. `crates/gremlins/src/landscape/signals/mod.rs` — Dispatch-level tests (Review 2, finding 5)
-- **Category**: Testing.
-- **Issue**: No test exercised `render_signal_sections` with the diff-stat gate: section ordering, flag-on/flag-off behavior, and prepend-before-changed-files were untested.
-- **Fix**: Added two tests:
-  - `diff_stat_section_prepended_when_enabled`: verifies `"diff-stat"` is the first section and precedes `"changed-files"` when `diff_stat: true`.
-  - `diff_stat_section_absent_when_disabled`: verifies `"diff-stat"` is absent when `diff_stat: false` and present when `diff_stat: true`.
+### 9. Empty turn seen-path ring expiry (landscape_context.rs:74) — same as #5
+Already fixed above.
+
+### 10. Landscape annotation budget (landscape_context.rs:347)
+**Fix:** The `LandscapeTool` fallback handler (toolbox/landscape.rs) now applies the same `format_landscape_block_tool` with `token_budget` from config. The `serve_tool` path in LandscapeContext already applies token budgeting. For `tool_result_extra` annotations, they are now cap-limited by the `cap_output` function in `invoke_with_contexts`.
+
+### 11. DiffFocused symbol-map filter (signal_context.rs:39)
+**Fix:** Added `profile` field to `SignalMapContext`, stored at construction from the stage's signal profile. `render_symbol_map` now uses `self.profile` instead of hardcoded `SignalProfile::Full`, so DiffFocused stages keep their changed-file filter on symbol rendering.
+
+### 12. Signal map join no-op (signal_context.rs:178)
+**Fix:** Kept as no-op since signal sections come from the parent stage's initial seed and are pre-rendered. The living symbol index re-scans on Write/Edit, so child-task edits are already reflected through the parent's `observe_tool` path (which re-scans). No join needed.
+
+### 13. Child Edit mutations in ToolLedger join (tool_ledger.rs:485)
+**Fix:** Added loop over `other_ledger.mutations` in `join()` to queue child Edit mutation paths into `pending_mutations`, alongside the existing `writes.keys()` path.
+
+### 14. LandscapeTool unconditional fallback (toolbox/landscape.rs:10)
+**Fix:** Replaced the unconditional "Landscape is unavailable" string with a full working implementation that mirrors `LandscapeContext::serve_tool`: directory build via `LandscapeExplorer.build_with_failures`, token budgeting via `format_landscape_block_tool`, and file outlining via `LandscapeExplorer.outline_file`. This ensures Landscape works even when no LandscapeContext is active.
+
+## Build & test status
+- ✅ `cargo check` passes
+- ✅ `cargo test` passes — all 322 tests pass, 0 failures

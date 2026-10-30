@@ -99,6 +99,14 @@ pub trait MutableModelContext: Any + Send + Sync {
     fn join(&mut self, _other: &dyn MutableModelContext) {
         // Default: no-op.  Concrete contexts that need merging override this.
     }
+
+    /// Text for observations that arrived via [`join`] since the last call.
+    /// The agent loop drains this after a Task child's contexts are merged
+    /// back into the parent so newly discovered file contents reach the
+    /// parent model. Default: empty.
+    fn new_observations_text(&mut self) -> String {
+        String::new()
+    }
 }
 
 // `Box<dyn MutableModelContext>` participates in `#[derive(Clone)]` structs
@@ -161,17 +169,22 @@ pub(crate) fn zip_context_transcripts(
 /// `next_prompt` is the harness's next user message (the stage prompt on
 /// turn 0, then `"Continue."` or a findings/nudge variant).
 ///
+/// `inherited_count` is the number of history messages that predate this loop
+/// (fork/chat continuation). Those are emitted verbatim before the bootstrap
+/// so older user prompts stay ahead of the current instruction.
+///
 /// The algorithm for turn 0:
 ///   1. Emit all history messages unchanged.
 ///   2. Emit User(next_prompt + context[0]) as the prompt tail.
 ///
 /// For turn ≥ 1:
-///   1. Emit User(stage_prompt + context[0]) as the bootstrap.
-///   2. Walk history in (assistant, results*) pairs indexed by pair_idx.
-///      After each pair, if pair_idx + 1 < turn and context[pair_idx+1]
-///      is non-empty, emit a synthesized User(context[pair_idx+1] +
-///      "Continue.") as the inter-turn prompt.
-///   3. Emit User(next_prompt + context[turn]) as the prompt tail.
+///   1. Emit the first `inherited_count` history messages unchanged.
+///   2. Emit User(stage_prompt + context[0]) as the bootstrap.
+///   3. Walk the remaining history in (assistant, results*) pairs indexed by
+///      pair_idx. After each pair, if pair_idx + 1 < turn and
+///      context[pair_idx+1] is non-empty, emit a synthesized
+///      User(context[pair_idx+1] + "Continue.") as the inter-turn prompt.
+///   4. Emit User(next_prompt + context[turn]) as the prompt tail.
 ///
 /// Returns the composed messages ready for the model request.
 pub(crate) fn compose_model_transcript(
@@ -180,6 +193,7 @@ pub(crate) fn compose_model_transcript(
     next_prompt: &rig_core::completion::Message,
     contexts: &[Box<dyn MutableModelContext>],
     turn: usize,
+    inherited_count: usize,
 ) -> Vec<rig_core::completion::Message> {
     let expected = turn + 1;
     let blocks_by_turn = zip_context_transcripts(contexts, expected);
@@ -202,7 +216,14 @@ pub(crate) fn compose_model_transcript(
     let mut out: Vec<rig_core::completion::Message> =
         Vec::with_capacity(history.len() + expected + 1);
 
-    // 1. Bootstrap: stage_prompt + context[0].
+    // 1. Inherited (pre-loop) history stays ahead of the bootstrap so its
+    //    earlier user prompts are not reordered after the current stage prompt.
+    let inherited_end = inherited_count.min(history.len());
+    for msg in &history[..inherited_end] {
+        out.push(msg.clone());
+    }
+
+    // 2. Bootstrap: stage_prompt + context[0].
     let bootstrap = if blocks_by_turn[0].is_empty() {
         rig_core::completion::Message::user(stage_prompt.to_string())
     } else {
@@ -211,8 +232,8 @@ pub(crate) fn compose_model_transcript(
     };
     out.push(bootstrap);
 
-    // 2. Walk history in (assistant, results*) pairs.
-    let mut idx = 0;
+    // 3. Walk this loop's history in (assistant, results*) pairs.
+    let mut idx = inherited_end;
     let mut pair_idx: usize = 0;
     while idx < history.len() {
         match &history[idx] {
@@ -241,7 +262,7 @@ pub(crate) fn compose_model_transcript(
         }
     }
 
-    // 3. Prompt tail.
+    // 4. Prompt tail.
     let final_prompt = if blocks_by_turn[turn].is_empty() {
         next_prompt.clone()
     } else {

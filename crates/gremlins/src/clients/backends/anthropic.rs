@@ -249,7 +249,7 @@ impl Backend for AnthropicBackend {
                 ctx,
                 cancel,
                 interactive,
-                crate::clients::native::PreserveReasoning::No,
+                crate::clients::native::PreserveReasoning::Yes,
                 make_model,
             )
             .await

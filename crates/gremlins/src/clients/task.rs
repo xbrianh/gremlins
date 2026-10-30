@@ -147,12 +147,21 @@ fn make_task_runner_at_depth(
                     temperature,
                     max_tokens,
                     extra: extra.clone(),
+                    preserve_reasoning: None,
                 };
                 let selection = if kind == TaskKind::Fork {
                     Ok((parent_selection.clone(), None))
                 } else {
                     match &task_model_selector {
-                        Some(selector) => selector.model_for(kind, &parent_selection),
+                        Some(selector) => selector
+                            .model_for(kind, &parent_selection)
+                            .map(|(mut selected, spec)| {
+                                if selected.preserve_reasoning.is_none() {
+                                    selected.preserve_reasoning =
+                                        Some(preserve_reasoning_in_history);
+                                }
+                                (selected, spec)
+                            }),
                         None => Ok((parent_selection.clone(), None)),
                     }
                 };
@@ -169,6 +178,9 @@ fn make_task_runner_at_depth(
                 let selected_temperature = selected.temperature;
                 let selected_max_tokens = selected.max_tokens;
                 let selected_extra = selected.extra.clone();
+                let child_preserve_reasoning = selected
+                    .preserve_reasoning
+                    .unwrap_or(preserve_reasoning_in_history);
                 // Use the model's own id() when available; fall back to the
                 // parent model name so that log lines always identify the
                 // actual model sent to the API.
@@ -202,7 +214,7 @@ fn make_task_runner_at_depth(
                     selected_temperature,
                     selected_max_tokens,
                     selected_extra.clone(),
-                    preserve_reasoning_in_history,
+                    child_preserve_reasoning,
                 ));
 
                 let work_root = crate::core::paths::worktree_root(task_cwd.as_deref());
@@ -237,7 +249,7 @@ fn make_task_runner_at_depth(
                     selected_temperature,
                     selected_max_tokens,
                     selected_extra.clone(),
-                    preserve_reasoning_in_history,
+                    child_preserve_reasoning,
                     prepopulated_messages,
                     parent_contexts,
                 )
@@ -293,6 +305,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             extra: None,
+            preserve_reasoning: None,
         }
     }
 
@@ -344,6 +357,7 @@ mod tests {
             temperature: Some(0.2),
             max_tokens: Some(123),
             extra: Some(serde_json::json!({ "parallel_tool_calls": true })),
+            preserve_reasoning: None,
         };
         let factory: TaskModelFactory = Arc::new(move |spec: &str| {
             assert_eq!(spec, "openai/mini");
@@ -706,6 +720,7 @@ mod tests {
                 temperature: Some(0.7),
                 max_tokens: Some(8192),
                 extra: Some(target_extra_for_factory.clone()),
+                preserve_reasoning: None,
             })
         });
         let selector = TaskModelSelector::new(

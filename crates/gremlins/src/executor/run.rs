@@ -648,6 +648,7 @@ async fn run_agent(
     // landscape). When landscape is enabled, compute the full-tree outlines and
     // signal sections and bundle them into the data. The system prompt is just
     // the base prompt without any landscape block.
+    let profile;
     let mut landscape_data: Option<crate::landscape::LandscapeData> = if agent.landscape {
         let cwd2 = gremlin.cwd();
         let log_tx2 = gremlin.runtime_config.log_tx.clone();
@@ -658,7 +659,7 @@ async fn run_agent(
             .any(|k| k == "artifact://diff" || k.starts_with("artifact://diff/"));
         let pruned = read_pruned_files(gremlin).await;
 
-        let profile = if crate::config::landscape_stage_profiles() && has_diff_input {
+        profile = if crate::config::landscape_stage_profiles() && has_diff_input {
             crate::landscape::signals::SignalProfile::DiffFocused
         } else {
             crate::landscape::signals::SignalProfile::Full
@@ -709,6 +710,7 @@ async fn run_agent(
         };
         Some(seed)
     } else {
+        profile = crate::landscape::signals::SignalProfile::Full;
         None
     };
 
@@ -853,7 +855,7 @@ async fn run_agent(
     {
         let store = gremlin.state.store_handle();
         plug.register_prompt_debug(move |request| {
-            if crate::executor::log_level_threshold() > log::LevelFilter::Debug {
+            if crate::executor::log_level_threshold() < log::LevelFilter::Debug {
                 return;
             }
             let ts = crate::executor::state::now_stamp_millis();
@@ -919,6 +921,7 @@ async fn run_agent(
                     Some(prompt),
                     cwd.clone(),
                     symbol_index,
+                    profile,
                 )));
             }
         }

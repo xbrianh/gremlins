@@ -607,6 +607,7 @@ impl LoopState {
             &self.next_prompt,
             &self.contexts,
             self.turn_num,
+            self.current_turn_start,
         );
         let (history_msgs, final_prompt) = composed
             .split_last()
@@ -1308,6 +1309,7 @@ impl LoopState {
         // for `tool_calls.len()` when bumping the turn counter below.
         let job_count = jobs.len();
         let mut result_msgs = Vec::new();
+        let mut joined_observations: Vec<String> = Vec::new();
         for (job, (output, child_contexts)) in jobs.into_iter().zip(results) {
             let result_msg = format!("result: {}", trunc(&output, 200));
             self.plug
@@ -1367,6 +1369,15 @@ impl LoopState {
                         }
                     }
                 }
+                // Newly joined Read/Grep outputs are not part of the compact
+                // `[seen]` transcript, so drain them here and surface them to
+                // the parent model in the next prompt tail.
+                for parent_ctx in &mut self.contexts {
+                    let text = parent_ctx.new_observations_text();
+                    if !text.is_empty() {
+                        joined_observations.push(text);
+                    }
+                }
             }
             let annotated = extra.iter().flatten().fold(String::new(), |mut acc, s| {
                 if !acc.is_empty() {
@@ -1400,14 +1411,20 @@ impl LoopState {
         self.history.extend(result_msgs);
         // The next prompt is a simple continuation; context blocks are merged
         // by compose_model_transcript during request assembly.
+        let joined = joined_observations.join("\n\n");
         let findings = self.findings_ledger.format();
+        let mut next_text = if joined.is_empty() {
+            "Continue.".to_string()
+        } else {
+            format!("Continue.\n\n{joined}")
+        };
         if !findings.is_empty() {
-            self.next_prompt = Message::user(format!("Continue.\n\n{findings}"));
+            next_text = format!("{next_text}\n\n{findings}");
             self.turn_findings_injected = true;
         } else {
-            self.next_prompt = Message::user("Continue.");
             self.turn_findings_injected = false;
         }
+        self.next_prompt = Message::user(next_text);
         self.turn_scratchpad_injected = false;
         self.remaining_turns -= 1;
         Ok(())
@@ -6262,6 +6279,7 @@ mod tests {
                 temperature: None,
                 max_tokens: None,
                 extra: None,
+                preserve_reasoning: None,
             })
         });
 
@@ -6569,6 +6587,7 @@ mod tests {
                 temperature: None,
                 max_tokens: Some(8192),
                 extra: None,
+                preserve_reasoning: None,
             })
         });
 
@@ -6784,6 +6803,7 @@ mod tests {
                 temperature: None,
                 max_tokens: None,
                 extra: None,
+                preserve_reasoning: None,
             })
         });
 

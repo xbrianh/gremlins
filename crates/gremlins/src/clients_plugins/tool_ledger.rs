@@ -62,6 +62,9 @@ pub(crate) struct ToolLedger {
     /// Mutations recorded during the current turn (since last finalize_turn).
     /// Processed by finalize_turn and cleared afterward.
     pending_mutations: Vec<String>,
+    /// Read/Grep outputs merged from child contexts this turn, for model-visible
+    /// replay at the join site. Cleared when read or at finalize_turn.
+    new_observations: Vec<String>,
     /// Per-turn transcript blocks, captured at finalize_turn time.
     /// Index i is turn i. Used by the MutableModelContext::transcript method.
     turn_transcripts: Vec<String>,
@@ -76,6 +79,7 @@ impl ToolLedger {
             seq: 0,
             mutations: Vec::new(),
             pending_mutations: Vec::new(),
+            new_observations: Vec::new(),
             turn_transcripts: Vec::new(),
         }
     }
@@ -377,6 +381,17 @@ impl ToolLedger {
         }
     }
 
+    /// Text for observations merged into this ledger since the last call.
+    /// The agent loop reads this once after a Task child's contexts are joined
+    /// back into the parent, then prepends it to the next prompt so the newly
+    /// discovered file contents reach the parent model.
+    pub(crate) fn new_observations_text(&mut self) -> String {
+        if self.new_observations.is_empty() {
+            return String::new();
+        }
+        std::mem::take(&mut self.new_observations).join("\n\n")
+    }
+
     /// Capture the current formatted ledger state as a turn transcript block.
     /// Called at the end of each turn (by finalize_turn) and after seeding.
     pub(crate) fn capture_turn_transcript(&mut self, turn_num: usize) {
@@ -417,6 +432,9 @@ impl crate::clients::model_context::MutableModelContext for ToolLedger {
         for fp in &pending {
             self.invalidate_after_write(fp);
         }
+        // Drop any un-drained join observations; they are only relevant for
+        // the prompt tail of the turn they were joined on.
+        self.new_observations.clear();
         // Capture the transcript for this turn.
         self.capture_turn_transcript(turn);
     }
@@ -448,6 +466,16 @@ impl crate::clients::model_context::MutableModelContext for ToolLedger {
                     Some(existing) if existing.seq >= entry.seq => {}
                     _ => {
                         self.reads.insert(key.clone(), entry.clone());
+                        let (path, offset, limit) = key;
+                        let head = if *offset == 0 && *limit == 0 {
+                            format!("Read: {}", path)
+                        } else {
+                            format!("Read: {} (offset {}, limit {})", path, offset, limit)
+                        };
+                        self.new_observations.push(format!(
+                            "{head}\n{}",
+                            &entry.output
+                        ));
                     }
                 }
             }
@@ -457,6 +485,17 @@ impl crate::clients::model_context::MutableModelContext for ToolLedger {
                     Some(existing) if existing.seq >= entry.seq => {}
                     _ => {
                         self.greps.insert(key.clone(), entry.clone());
+                        let (pattern, path) = key;
+                        let scope = if path.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" in {path}")
+                        };
+                        self.new_observations.push(format!(
+                            "Grep: \"{}\"{scope}\n{}",
+                            truncate_ledger_value(pattern),
+                            &entry.output
+                        ));
                     }
                 }
             }
@@ -484,6 +523,13 @@ impl crate::clients::model_context::MutableModelContext for ToolLedger {
                     self.pending_mutations.push(fp.clone());
                 }
             }
+            // Edits do not create a write entry, so their mutation paths must
+            // also be queued for the same deferred invalidation.
+            for fp in &other_ledger.mutations {
+                if !self.pending_mutations.contains(fp) {
+                    self.pending_mutations.push(fp.clone());
+                }
+            }
             // Take the higher sequence number.
             self.seq = self.seq.max(other_ledger.seq);
             // Merge turn transcripts: pad ours to match, then overwrite empties.
@@ -501,6 +547,10 @@ impl crate::clients::model_context::MutableModelContext for ToolLedger {
     fn clear_transcript(&mut self) {
         self.turn_transcripts.clear();
         self.turn_transcripts.push(String::new());
+    }
+
+    fn new_observations_text(&mut self) -> String {
+        self.new_observations_text()
     }
 }
 

@@ -62,14 +62,14 @@ impl SeenState {
     }
 
     /// Save the current turn's set into the ring and start a fresh current set.
+    /// Always rotates even when the current set is empty, so expiry measures
+    /// actual turns rather than indefinitely suppressing paths.
     fn rotate(&mut self) {
         let prev = std::mem::take(&mut self.current);
-        if !prev.is_empty() {
-            self.past.push_back(prev);
-            // Keep at most SEEN_WINDOW_TURNS - 1 past sets (plus current = N).
-            while self.past.len() >= SEEN_WINDOW_TURNS {
-                self.past.pop_front();
-            }
+        self.past.push_back(prev);
+        // Keep at most SEEN_WINDOW_TURNS - 1 past sets (plus current = N).
+        while self.past.len() >= SEEN_WINDOW_TURNS {
+            self.past.pop_front();
         }
     }
 
@@ -301,12 +301,15 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
         }
 
         // For directories: list on disk and outline each file fresh.
-        if path.is_dir() {
+        // symlink_metadata guards against symlink escapes.
+        if path.is_dir() && !path.is_symlink() {
             let mut lines: Vec<String> = Vec::new();
             if let Ok(entries) = std::fs::read_dir(&path) {
                 for entry in entries.flatten() {
                     let fp = entry.path();
-                    if fp.is_file() {
+                    // Use symlink_metadata to avoid following symlinks out of
+                    // the sandbox; is_file() follows symlinks.
+                    if !fp.is_symlink() && fp.is_file() {
                         if let Ok(items) = LandscapeExplorer.outline_file(&fp, false) {
                             if !items.is_empty() {
                                 let name = fp
