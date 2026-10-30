@@ -407,7 +407,7 @@ impl crate::clients::model_context::MutableModelContext for ToolLedger {
         Box::new(self.clone())
     }
 
-    fn observe(&mut self, turn: usize, tool: &str, args: &str, output: &str) {
+    fn observe_tool(&mut self, turn: usize, tool: &str, args: &str, output: &str) {
         self.record(tool, output, args, turn);
     }
 

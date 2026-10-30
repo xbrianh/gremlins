@@ -139,7 +139,7 @@ impl crate::clients::model_context::MutableModelContext for SignalMapContext {
         Box::new(self.clone())
     }
 
-    fn observe(&mut self, _turn: usize, tool: &str, args: &str, _output: &str) {
+    fn observe_tool(&mut self, _turn: usize, tool: &str, args: &str, _output: &str) {
         match tool {
             "Write" | "Edit" => {
                 let args_val: serde_json::Value =

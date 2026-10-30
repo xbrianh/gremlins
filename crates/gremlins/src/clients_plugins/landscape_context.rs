@@ -283,7 +283,7 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
         Box::new(self.clone())
     }
 
-    fn observe(&mut self, turn: usize, tool: &str, args: &str, _output: &str) {
+    fn observe_tool(&mut self, turn: usize, tool: &str, args: &str, _output: &str) {
         self.observe_tool(turn, tool, args);
     }
 

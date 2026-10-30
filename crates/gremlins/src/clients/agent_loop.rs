@@ -1342,13 +1342,19 @@ impl LoopState {
                     )
                     .await?;
             }
+            let extra: Vec<Option<String>>;
             if tools::result_status(&output) == "ok" {
                 // Phase 1: observe — record tool results into every context.
                 // Invalidation is deferred to finalize_turn below to prevent
                 // concurrent tool batches from racing reads against writes.
+                let mut v = Vec::with_capacity(self.contexts.len());
                 for ctx in &mut self.contexts {
-                    ctx.observe(self.turn_num, &job.name, &job.args, &output);
+                    ctx.observe_tool(self.turn_num, &job.name, &job.args, &output);
+                    v.push(ctx.tool_result_extra(self.turn_num, &job.name, &job.args, &output));
                 }
+                extra = v;
+            } else {
+                extra = Vec::new();
             }
             // Join child contexts back into parent.  Match by concrete
             // child context joins only the parent context of the same
@@ -1363,10 +1369,25 @@ impl LoopState {
                     }
                 }
             }
+            let annotated = extra
+                .iter()
+                .flatten()
+                .fold(String::new(), |mut acc, s| {
+                    if !acc.is_empty() {
+                        acc.push('\n');
+                    }
+                    acc.push_str(s);
+                    acc
+                });
+            let tool_output = if annotated.is_empty() {
+                output
+            } else {
+                format!("{annotated}\n{output}")
+            };
             result_msgs.push(Message::tool_result(
                 CallId::from_wire(job.id.clone()),
                 ToolName::new(job.name.clone()).expect("tool name must not be empty"),
-                output,
+                tool_output,
             ));
         }
         // Phase 2: finalize — apply deferred invalidations for every context.

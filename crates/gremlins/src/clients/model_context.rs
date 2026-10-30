@@ -27,7 +27,22 @@ pub trait MutableModelContext: Any + Send + Sync {
     ///
     /// Called once per tool after the tool returns `"ok"`.  Must be
     /// idempotent across replayed turns.
-    fn observe(&mut self, turn: usize, tool: &str, args: &str, output: &str);
+    fn observe_tool(&mut self, turn: usize, tool: &str, args: &str, output: &str);
+
+    /// Return optional text to annotate this tool's result message in
+    /// history, for inline visibility alongside the raw tool output.
+    ///
+    /// Called immediately after `observe_tool` for the same tool.
+    /// Read-only.  Default: `None`.
+    fn tool_result_extra(
+        &self,
+        _turn: usize,
+        _tool: &str,
+        _args: &str,
+        _output: &str,
+    ) -> Option<String> {
+        None
+    }
 
     /// Finalize the turn — apply any deferred mutations or invalidation
     /// that must wait until all concurrent tool batches complete.
