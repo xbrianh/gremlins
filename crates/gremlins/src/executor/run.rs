@@ -39,7 +39,9 @@ use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::completion::Message;
 
 use crate::clients::model_context::MutableModelContext;
-use crate::clients::tool_ledger::ToolLedger;
+use crate::clients_plugins::{
+    landscape_context::LandscapeContext, signal_context::SignalMapContext, tool_ledger::ToolLedger,
+};
 
 // ---------------------------------------------------------------------------
 // System prompt assembly
@@ -912,23 +914,19 @@ async fn run_agent(
             let has_signals = !signal_sections.is_empty() || !symbol_index.is_empty();
             if has_signals {
                 let prompt = prepared.user_prompt();
-                contexts.push(Box::new(
-                    crate::clients::signal_context::SignalMapContext::new(
-                        signal_sections,
-                        Some(prompt),
-                        cwd.clone(),
-                        symbol_index,
-                    ),
-                ));
+                contexts.push(Box::new(SignalMapContext::new(
+                    signal_sections,
+                    Some(prompt),
+                    cwd.clone(),
+                    symbol_index,
+                )));
             }
         }
         if let Some(ld) = landscape_data.take() {
-            contexts.push(Box::new(
-                crate::clients::landscape_context::LandscapeContext::new(
-                    ld,
-                    gremlin.runtime_config.log_tx.clone(),
-                ),
-            ));
+            contexts.push(Box::new(LandscapeContext::new(
+                ld,
+                gremlin.runtime_config.log_tx.clone(),
+            )));
         }
         plug.register_contexts(contexts);
     }

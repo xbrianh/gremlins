@@ -289,7 +289,7 @@ impl LandscapeContext {
     }
 }
 
-impl super::model_context::MutableModelContext for LandscapeContext {
+impl crate::clients::model_context::MutableModelContext for LandscapeContext {
     fn propagates_to_task(&self) -> bool {
         true
     }
@@ -302,7 +302,7 @@ impl super::model_context::MutableModelContext for LandscapeContext {
         self
     }
 
-    fn clone_box(&self) -> Box<dyn super::model_context::MutableModelContext> {
+    fn clone_box(&self) -> Box<dyn crate::clients::model_context::MutableModelContext> {
         Box::new(self.clone())
     }
 
@@ -379,7 +379,7 @@ impl super::model_context::MutableModelContext for LandscapeContext {
         }
     }
 
-    fn join(&mut self, other: &dyn super::model_context::MutableModelContext) {
+    fn join(&mut self, other: &dyn crate::clients::model_context::MutableModelContext) {
         if let Some(other_ctx) = other.as_any().downcast_ref::<LandscapeContext>() {
             // Merge file entries: re-stamp child entries with the parent's
             // current turn so they share the parent's decay clock rather than

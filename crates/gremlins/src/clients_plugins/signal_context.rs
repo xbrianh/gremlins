@@ -122,7 +122,7 @@ impl SignalMapContext {
     }
 }
 
-impl super::model_context::MutableModelContext for SignalMapContext {
+impl crate::clients::model_context::MutableModelContext for SignalMapContext {
     fn propagates_to_task(&self) -> bool {
         true
     }
@@ -135,7 +135,7 @@ impl super::model_context::MutableModelContext for SignalMapContext {
         self
     }
 
-    fn clone_box(&self) -> Box<dyn super::model_context::MutableModelContext> {
+    fn clone_box(&self) -> Box<dyn crate::clients::model_context::MutableModelContext> {
         Box::new(self.clone())
     }
 
@@ -173,7 +173,7 @@ impl super::model_context::MutableModelContext for SignalMapContext {
         }
     }
 
-    fn join(&mut self, _other: &dyn super::model_context::MutableModelContext) {
+    fn join(&mut self, _other: &dyn crate::clients::model_context::MutableModelContext) {
         // No-op: signal sections come from the parent stage.
     }
 

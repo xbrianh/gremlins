@@ -3099,7 +3099,7 @@ mod tests {
     use super::*;
     use crate::clients::format::{key_arg, ledger_key_arg};
     use crate::clients::interactive::InteractiveChannels;
-    use crate::clients::tool_ledger::ToolLedger;
+    use crate::clients_plugins::tool_ledger::ToolLedger;
     use http::StatusCode;
     use rig_core::driver::DynModel;
     use rig_core::message::{Issuer, Reasoning, ReasoningContent, ToolFunction, UserContent};

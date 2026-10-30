@@ -3,6 +3,7 @@
 pub mod artifacts;
 pub mod builders;
 pub mod clients;
+pub(crate) mod clients_plugins;
 pub mod config;
 pub mod core;
 pub mod definition;

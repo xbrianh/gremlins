@@ -1,8 +1,8 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use super::format::truncate_ledger_value;
-use super::protocol::{FileObservation, FileObservations};
+use crate::clients::format::truncate_ledger_value;
+use crate::clients::protocol::{FileObservation, FileObservations};
 
 /// Deduplication tracker for tool observations across turns.
 ///
@@ -11,7 +11,7 @@ use super::protocol::{FileObservation, FileObservations};
 /// content and can invalidate stale observations after writes.
 ///
 /// Directory landscape rendering moved to
-/// [`super::landscape_context::LandscapeContext`]; this struct is now a
+/// [`crate::clients_plugins::landscape_context::LandscapeContext`]; this struct is now a
 /// pure read/grep/write/edit dedup index.
 #[derive(Clone)]
 struct LedgerReadEntry {
@@ -203,7 +203,7 @@ impl ToolLedger {
     /// Apply write/edit invalidation for a file path.  Nukes Read entries
     /// for that file and clears all Greps (any write can invalidate a grep
     /// result).  The landscape cache is managed independently by
-    /// [`super::landscape_context::LandscapeContext`].
+    /// [`crate::clients_plugins::landscape_context::LandscapeContext`].
     pub(crate) fn invalidate_after_write(&mut self, file_path: &str) {
         self.reads.retain(|(fp, _, _), _| fp != file_path);
         self.greps.clear();
@@ -390,7 +390,7 @@ impl ToolLedger {
 
 // ── MutableModelContext impl ───────────────────────────────────────────────
 
-impl super::model_context::MutableModelContext for ToolLedger {
+impl crate::clients::model_context::MutableModelContext for ToolLedger {
     fn propagates_to_task(&self) -> bool {
         true
     }
@@ -403,7 +403,7 @@ impl super::model_context::MutableModelContext for ToolLedger {
         self
     }
 
-    fn clone_box(&self) -> Box<dyn super::model_context::MutableModelContext> {
+    fn clone_box(&self) -> Box<dyn crate::clients::model_context::MutableModelContext> {
         Box::new(self.clone())
     }
 
@@ -440,7 +440,7 @@ impl super::model_context::MutableModelContext for ToolLedger {
         None
     }
 
-    fn join(&mut self, other: &dyn super::model_context::MutableModelContext) {
+    fn join(&mut self, other: &dyn crate::clients::model_context::MutableModelContext) {
         if let Some(other_ledger) = other.as_any().downcast_ref::<ToolLedger>() {
             // Merge reads: take the newer entry (by seq).
             for (key, entry) in &other_ledger.reads {
