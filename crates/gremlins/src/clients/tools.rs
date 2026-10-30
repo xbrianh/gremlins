@@ -969,7 +969,7 @@ mod tests {
             "edits": [{"old_string": "foo", "new_string": "baz"}]
         })
         .to_string();
-        assert_eq!(edit_invoke(&c, &ok).await, "OK");
+        assert!(edit_invoke(&c, &ok).await.contains("Applied 1 edit"));
         assert_eq!(
             std::fs::read_to_string(dir.join("b.txt")).unwrap(),
             "baz bar"
@@ -3260,10 +3260,8 @@ mod tests {
             ]
         })
         .to_string();
-        assert_eq!(
-            edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args),
-            "OK"
-        );
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.starts_with("Applied 3 edits"), "got: {result}");
         assert_eq!(
             std::fs::read_to_string(dir.join("x.txt")).unwrap(),
             "A\nbeta\nC\nD\n"
@@ -3319,10 +3317,9 @@ mod tests {
             "edits": [{"old_string": "alpha", "new_string": "ALPHA", "start_line": 3, "end_line": 3}]
         })
         .to_string();
-        assert_eq!(
-            edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args),
-            "OK"
-        );
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.starts_with("Applied 1 edit"), "got: {result}");
+        assert!(result.contains("ALPHA"), "got: {result}");
         assert_eq!(
             std::fs::read_to_string(dir.join("f.txt")).unwrap(),
             "alpha\nbeta\nALPHA\ngamma\n"
@@ -3338,10 +3335,9 @@ mod tests {
             "edits": [{"old_string": "target", "new_string": "TARGET", "start_line": 2, "end_line": 100}]
         })
         .to_string();
-        assert_eq!(
-            edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args),
-            "OK"
-        );
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.starts_with("Applied 1 edit"), "got: {result}");
+        assert!(result.contains("TARGET"), "got: {result}");
         assert_eq!(
             std::fs::read_to_string(dir.join("f.txt")).unwrap(),
             "line1\nTARGET\nline3\n"
@@ -3361,10 +3357,8 @@ mod tests {
             ]
         })
         .to_string();
-        assert_eq!(
-            edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args),
-            "OK"
-        );
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.starts_with("Applied 2 edits"), "got: {result}");
         assert_eq!(
             std::fs::read_to_string(dir.join("f.txt")).unwrap(),
             "A\nbeta\nG\ndelta\n"
@@ -3431,12 +3425,8 @@ mod tests {
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert_eq!(result, "OK", "got: {result}");
+        assert!(result.starts_with("Applied 1 edit"), "got: {result}");
         assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "x\n");
-    }
-
-    #[test]
-    fn edit_scope_start_gt_end_clamped() {
         // start_line > end_line within a scope is accepted; scope_byte_range
         // clamps, producing a not-found diagnostic when the match falls
         // outside the clamped range.
@@ -3478,7 +3468,7 @@ mod tests {
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert_eq!(result, "OK", "got: {result}");
+        assert!(result.starts_with("Applied 1 edit"), "got: {result}");
         assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "x\n");
     }
 
@@ -3507,10 +3497,9 @@ mod tests {
             "edits": [{"old_string": "target", "new_string": "TARGET", "start_line": 3}]
         })
         .to_string();
-        assert_eq!(
-            edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args),
-            "OK"
-        );
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.starts_with("Applied 1 edit"), "got: {result}");
+        assert!(result.contains("TARGET"), "got: {result}");
         assert_eq!(
             std::fs::read_to_string(dir.join("f.txt")).unwrap(),
             "target\nline2\nTARGET\n"
@@ -3527,10 +3516,9 @@ mod tests {
             "edits": [{"old_string": "dup", "new_string": "DUP", "start_line": 1, "end_line": 1}]
         })
         .to_string();
-        assert_eq!(
-            edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args),
-            "OK"
-        );
+        let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+        assert!(result.starts_with("Applied 1 edit"), "got: {result}");
+        assert!(result.contains("DUP"), "got: {result}");
         assert_eq!(
             std::fs::read_to_string(dir.join("f.txt")).unwrap(),
             "DUP\nother\ndup\n"
@@ -3590,11 +3578,9 @@ mod tests {
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert_eq!(result, "OK", "got: {result}");
+        assert!(result.starts_with("Applied 1 edit"), "got: {result}");
         assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "x\n");
     }
-
-    // --- Part 3: Task tests ---
 
     #[tokio::test]
     async fn task_no_callback_returns_error() {
