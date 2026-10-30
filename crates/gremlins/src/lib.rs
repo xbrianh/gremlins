@@ -3,6 +3,7 @@
 pub mod artifacts;
 pub mod builders;
 pub mod clients;
+pub(crate) mod clients_plugins;
 pub mod config;
 pub mod core;
 pub mod definition;
@@ -13,6 +14,7 @@ pub mod prelude;
 pub mod schemas;
 pub mod skills;
 pub mod stage_spec;
+pub(crate) mod task_kind;
 pub(crate) mod toolbox;
 
 /// Build version shared by CLI and daemon.

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
@@ -7,11 +7,15 @@ use super::interactive::StreamEventSender;
 use super::shell_parse::{
     shell_tokenize, split_commands, strip_heredocs, strip_subshells, ShellToken, SubCommandSep,
 };
-use super::task_kind::TaskKind;
 pub(crate) use super::tool_specs::{
     always_available, chat_only_always_available, tool_definitions, validate_tool_args,
     MAX_CONCURRENT_TOOLS, TASK_MAX_PER_TURN,
 };
+use crate::core::paths::{
+    canonicalize_or_ancestor, enforce, expand_user, normalize_path, project_root, resolve,
+    roots_suffix, within_worktree, within_worktree_lexical,
+};
+use crate::task_kind::TaskKind;
 // Re-export result_status so agent_loop's `tools::result_status` calls keep working.
 pub(crate) use super::compaction::result_status;
 
@@ -26,11 +30,29 @@ pub(crate) fn preview_str(s: &str, max_chars: usize) -> String {
     }
 }
 
-type TaskFuture = Pin<Box<dyn std::future::Future<Output = String> + Send>>;
+type TaskFuture = Pin<Box<dyn std::future::Future<Output = TaskOutcome> + Send>>;
+
+/// Output of a Task tool invocation: prose text + the child loop's final
+/// mutable model contexts for fork + join propagation.
+pub(crate) struct TaskOutcome {
+    /// The prose output (text result) from the child agent loop.
+    pub output: String,
+    /// Mutable model contexts carried back from the child loop after `join`.
+    pub contexts: Vec<Box<dyn super::model_context::MutableModelContext>>,
+}
 
 /// Callback that `invoke` calls for Task tool invocations.
+///
+/// The fourth parameter carries the parent's live contexts (filtered by
+/// `propagates_to_task`, cloned at call time) so the child loop can seed
+/// its own `LoopPlug` with a copy of the parent's state.
 pub(crate) type TaskFn = Arc<
-    dyn Fn(TaskKind, String, Option<Vec<rig_core::completion::Message>>) -> TaskFuture
+    dyn Fn(
+            TaskKind,
+            String,
+            Option<Vec<rig_core::completion::Message>>,
+            Vec<Box<dyn super::model_context::MutableModelContext>>,
+        ) -> TaskFuture
         + Send
         + Sync,
 >;
@@ -113,6 +135,10 @@ pub(crate) struct AgentLoopRuntime {
     /// Discovered skills for this session. Session-bound so concurrent chat
     /// sessions resolve their own project's skills instead of a shared slot.
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
+    /// Optional log channel for nested agent loops. When set,
+    /// `run_agent_loop_nested` logs "task: begin" and turn-level events
+    /// through this sender instead of using a no-op logger.
+    pub(crate) log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 impl AgentLoopRuntime {
     /// Send one completed live-output line for the tool call identified by
@@ -136,17 +162,6 @@ impl AgentLoopRuntime {
     }
 }
 
-pub(crate) fn project_root() -> PathBuf {
-    crate::config::project_root()
-}
-
-pub(crate) fn worktree_root(cwd: Option<&Path>) -> PathBuf {
-    match cwd {
-        Some(cwd) => canonicalize_or_ancestor(cwd),
-        None => canonicalize_or_ancestor(&project_root()),
-    }
-}
-
 pub(crate) fn audit_log_path(raw_path: &Path) -> PathBuf {
     let stem = raw_path.file_stem().unwrap_or_default();
     let name = format!("{}.audit.jsonl", stem.to_string_lossy());
@@ -154,218 +169,6 @@ pub(crate) fn audit_log_path(raw_path: &Path) -> PathBuf {
         Some(parent) => parent.join(name),
         None => PathBuf::from(name),
     }
-}
-
-pub(crate) fn resolve(file_path: &str, cwd: Option<&Path>) -> PathBuf {
-    let p = PathBuf::from(file_path);
-    if p.is_absolute() {
-        return p;
-    }
-    let base = match cwd {
-        Some(cwd) => canonicalize_or_ancestor(cwd),
-        None => canonicalize_or_ancestor(&project_root()),
-    };
-    base.join(p)
-}
-
-fn normalize_dots(p: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for c in p.components() {
-        match c {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-/// Resolve the real path by canonicalizing the deepest ancestor that exists
-/// on disk, then re-appending the non-existent suffix. Falls back to the
-/// original path if even the filesystem root can't be canonicalized.
-pub(crate) fn canonicalize_or_ancestor(p: &Path) -> PathBuf {
-    match p.canonicalize() {
-        Ok(c) => c,
-        Err(_) => {
-            let mut ancestor = p;
-            loop {
-                match ancestor.canonicalize() {
-                    Ok(c) => {
-                        let suffix = p.strip_prefix(ancestor).unwrap_or(p);
-                        // Resolve dangling symlinks in the suffix.
-                        // canonicalize() walks past symlinks whose target
-                        // doesn't exist yet. A dangling symlink pointing
-                        // outside would pass containment as an ordinary
-                        // name. Check each suffix prefix; if we find a
-                        // symlink, resolve it and recurse so the real
-                        // target is seen by the containment check.
-                        let components: Vec<_> = suffix.components().collect();
-                        let mut probe = c.clone();
-                        for (i, comp) in components.iter().enumerate() {
-                            probe = probe.join(comp);
-                            if probe.is_symlink() {
-                                if let Ok(target) = std::fs::read_link(&probe) {
-                                    let mut resolved = if target.is_absolute() {
-                                        target
-                                    } else {
-                                        probe.parent().unwrap().join(&target)
-                                    };
-                                    for comp in &components[i + 1..] {
-                                        resolved = resolved.join(comp);
-                                    }
-                                    return canonicalize_or_ancestor(&resolved);
-                                }
-                                break;
-                            }
-                        }
-                        return c.join(suffix);
-                    }
-                    Err(_) => match ancestor.parent() {
-                        Some(parent) if !parent.as_os_str().is_empty() => ancestor = parent,
-                        _ => return p.to_path_buf(),
-                    },
-                }
-            }
-        }
-    }
-}
-
-fn normalize_path(p: &Path, cwd: Option<&Path>) -> Option<PathBuf> {
-    let abs = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        let base = match cwd {
-            Some(cwd) => canonicalize_or_ancestor(cwd),
-            None => canonicalize_or_ancestor(&project_root()),
-        };
-        base.join(p)
-    };
-    let canonical = canonicalize_or_ancestor(&abs);
-    // normalize_dots handles `.`/`..` in the non-existent suffix only —
-    // canonicalize_or_ancestor already resolved them in the existing prefix.
-    // Lexical `..` in a not-yet-existent suffix is the safe conservative choice.
-    Some(normalize_dots(&canonical))
-}
-
-pub(crate) fn within_worktree(p: &Path, roots: &[PathBuf], cwd: Option<&Path>) -> bool {
-    let p_norm = match normalize_path(p, cwd) {
-        Some(n) => n,
-        None => return false,
-    };
-    roots.iter().any(|root| match normalize_path(root, cwd) {
-        Some(r) => p_norm.starts_with(&r),
-        None => false,
-    })
-}
-
-fn roots_suffix(roots: &[PathBuf], cwd: Option<&Path>) -> String {
-    // Normalized, to match the paths the containment checks actually compare
-    // against — raw roots read misleadingly under symlinked ancestors
-    // (/var -> /private/var).
-    let mut parts: Vec<String> = roots
-        .iter()
-        .filter_map(|r| normalize_path(r, cwd))
-        .map(|r| r.display().to_string())
-        .collect();
-    parts.sort();
-    parts.dedup();
-    if parts.is_empty() {
-        return String::new();
-    }
-    format!("\n→ sandbox roots: {}", parts.join(", "))
-}
-
-/// Lexical-leaf containment for [`bash_check`] ONLY.
-///
-/// Resolves symlinked ancestor *directories* (so `/var` -> `/private/var` and
-/// any symlinked parent dir are judged by their real location) but does NOT
-/// follow a final-component symlink. A venv interpreter is created as
-/// `.venv/bin/python -> /opt/homebrew/.../python3.14`: the symlink node lives
-/// inside the worktree even though its target does not. Executing it is not a
-/// containment breach — bash can already run out-of-tree binaries via PATH
-/// (git, cargo, ruff, make) and read/write anywhere via `python -c`. Likewise,
-/// this permits leaf-symlink *reads* through bash (e.g. `cat somelink` where
-/// `somelink -> /etc/passwd`) that `bash_check` previously denied. This is
-/// acceptable because the real
-/// data boundary is [`io_enforce`] on the Read/Write/Edit tools, which stays
-/// fully canonical. This check is a usability guardrail: an early, clear denial
-/// for obviously-stray path arguments, not a sandbox.
-///
-/// DO NOT "harden" this to canonicalize the final component. Doing so re-breaks
-/// agent self-verify (`.venv/bin/python` becomes "path outside worktree") — the
-/// exact regression from #1197 that removed `enforce_allows_venv_symlink_in_cwd`
-/// — while adding zero real containment, because execution is not gated here.
-/// See `bash_check_allows_venv_symlink_leaf`.
-fn within_worktree_lexical(p: &Path, canonical_roots: &[PathBuf]) -> bool {
-    let resolved = match (p.parent(), p.file_name()) {
-        (Some(parent), Some(name)) => canonicalize_or_ancestor(parent).join(name),
-        _ => canonicalize_or_ancestor(p),
-    };
-    let norm = normalize_dots(&resolved);
-    canonical_roots.iter().any(|cr| norm.starts_with(cr))
-}
-
-fn expand_user(s: &str) -> String {
-    if s == "~" || s.starts_with("~/") {
-        let home = crate::config::home_dir();
-        let home_str = home.to_string_lossy();
-        // If home resolved to the sentinel fallback (no HOME set, no
-        // platform dir), preserve ~ literally rather than expanding to ".".
-        if home_str.is_empty() || home_str == "." {
-            return s.to_string();
-        }
-        if s == "~" {
-            return home_str.into_owned();
-        }
-        return format!("{home_str}{}", &s[1..]);
-    }
-    s.to_string()
-}
-
-pub(crate) fn enforce(roots: &[PathBuf], pth: &str, cwd: Option<&Path>) -> Option<String> {
-    let p = resolve(pth, cwd);
-    if !within_worktree(&p, roots, cwd) {
-        return Some(format!(
-            "Error: path outside sandbox: {pth}{}",
-            roots_suffix(roots, cwd)
-        ));
-    }
-    None
-}
-
-/// Symlink-aware containment check for file I/O. Uses
-/// [`canonicalize_or_ancestor`] to resolve the real path, including dangling
-/// symlinks that would otherwise escape containment. Returns Some(error) or
-/// None if the path is safe.
-///
-/// Fail-closed by design: a root that cannot be fully canonicalized is
-/// partially resolved via [`canonicalize_or_ancestor`] (existing prefix
-/// canonicalized, non-existent suffix kept lexical) rather than being
-/// dropped. If the path does not fall under any root `allowed` stays false
-/// and the path is denied. This is stricter and safer than the old
-/// single-root behavior, which returned `None` (allow) on canonicalization
-/// failure — a "paranoid, shouldn't happen" branch that was effectively
-/// fail-open.
-pub(crate) fn io_enforce(path: &Path, roots: &[PathBuf]) -> Option<String> {
-    let real = normalize_dots(&canonicalize_or_ancestor(path));
-    let mut allowed = false;
-    for root in roots {
-        let real_root = normalize_dots(&canonicalize_or_ancestor(root));
-        if real.starts_with(&real_root) {
-            allowed = true;
-            break;
-        }
-    }
-    if !allowed {
-        return Some(format!(
-            "Error: path outside sandbox (resolved): {}{}",
-            real.display(),
-            roots_suffix(roots, None)
-        ));
-    }
-    None
 }
 
 /// Returns Some(error) if `cmd` is an `ln` invocation that requests
@@ -719,12 +522,13 @@ fn global_registry() -> &'static ToolRegistry {
     GLOBAL_TOOL_REGISTRY.get_or_init(crate::toolbox::default_registry)
 }
 
-pub(crate) async fn invoke(
+pub(crate) async fn invoke_with_contexts(
     id: &str,
     name: &str,
     ctx: &AgentLoopRuntime,
     args_json: &str,
-) -> String {
+    parent_contexts: Vec<Box<dyn super::model_context::MutableModelContext>>,
+) -> TaskOutcome {
     if let Some(allowed) = &ctx.allowed_tools {
         // Mischief is chat-only; allow it through the gate only when the
         // session is chat. LoadSkill keeps its old bypass: the handler returns
@@ -735,7 +539,10 @@ pub(crate) async fn invoke(
             && !chat_only_always_available(name, chat)
             && !allowed.iter().any(|n| n == name)
         {
-            return format!("Error: unknown tool {name}");
+            return TaskOutcome {
+                output: format!("Error: unknown tool {name}"),
+                contexts: Vec::new(),
+            };
         }
     }
     let ka = audit_key_arg(args_json);
@@ -749,7 +556,10 @@ pub(crate) async fn invoke(
                 &ka,
                 "error",
             );
-            return "Error: invalid arguments".into();
+            return TaskOutcome {
+                output: "Error: invalid arguments".into(),
+                contexts: Vec::new(),
+            };
         }
     };
     // Validate args against the tool's expected schema before dispatching.
@@ -763,7 +573,10 @@ pub(crate) async fn invoke(
             &ka,
             "error",
         );
-        return err;
+        return TaskOutcome {
+            output: err,
+            contexts: Vec::new(),
+        };
     }
     if let Some(err) = check_tool(name, ctx, &args) {
         audit(
@@ -773,34 +586,81 @@ pub(crate) async fn invoke(
             &ka,
             "denied",
         );
-        return err;
+        return TaskOutcome {
+            output: err,
+            contexts: Vec::new(),
+        };
     }
-    let res = match name {
+
+    // Let active contexts serve the tool result before falling through to
+    // the handler registry. This is a read-only pull path — context state
+    // is mutated separately through observe_tool() in emit_tool_results.
+    for ctxc in &parent_contexts {
+        // Landscape exploration uses rayon for parallel directory walks —
+        // offload to a blocking thread so tokio workers stay responsive.
+        let maybe_output: Option<String> = if name == "Landscape" {
+            let args_owned = args.clone();
+            let ctx_owned = ctxc.clone_box();
+            let name_owned = name.to_string();
+            match tokio::task::spawn_blocking(move || {
+                ctx_owned.serve_tool(&name_owned, &args_owned)
+            })
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => Some(format!("Error: {e}")),
+            }
+        } else {
+            ctxc.serve_tool(name, &args)
+        };
+        if let Some(output) = maybe_output {
+            let output = cap_output(name, output);
+            audit(
+                ctx.audit_log.as_deref(),
+                ctx.audit_lock.as_deref(),
+                name,
+                &ka,
+                result_status(&output),
+            );
+            return TaskOutcome {
+                output,
+                contexts: Vec::new(),
+            };
+        }
+    }
+
+    let mut outcome = match name {
         "Task" => {
             if let Some(f) = &ctx.task_fn {
                 let kind_str = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                 let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
                 if prompt.is_empty() {
-                    return "Error: Task prompt is required".to_string();
+                    return TaskOutcome {
+                        output: "Error: Task prompt is required".to_string(),
+                        contexts: Vec::new(),
+                    };
                 }
                 let Some(kind) = TaskKind::parse(kind_str) else {
-                    return format!(
-                        "Error: unknown Task kind {kind_str:?}. Expected one of: {}",
-                        TaskKind::ALL
-                            .iter()
-                            .map(|k| k.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
+                    return TaskOutcome {
+                        output: format!(
+                            "Error: unknown Task kind {kind_str:?}. Expected one of: {}",
+                            TaskKind::ALL
+                                .iter()
+                                .map(|k| k.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        contexts: Vec::new(),
+                    };
                 };
                 let history = if kind == TaskKind::Fork {
                     ctx.parent_history.clone()
                 } else {
                     None
                 };
-                let out = f(kind, prompt.to_string(), history).await;
+                let child_outcome = f(kind, prompt.to_string(), history, parent_contexts).await;
                 // Label the result so concurrent Task outputs can be told apart.
-                let final_output = format!("# {kind}\n\n{out}");
+                let final_output = format!("# {kind}\n\n{}", child_outcome.output);
                 log::info!(
                     "task dispatch complete: kind={kind} prompt_len={p_len} prompt_preview={p_preview:?} output_len={o_len} output_preview={o_preview:?}",
                     p_len = prompt.len(),
@@ -808,21 +668,41 @@ pub(crate) async fn invoke(
                     o_len = final_output.len(),
                     o_preview = preview_str(&final_output, 300),
                 );
-                final_output
+                TaskOutcome {
+                    output: final_output,
+                    contexts: child_outcome.contexts,
+                }
             } else {
-                "Error: Task not available for this backend".to_string()
+                TaskOutcome {
+                    output: "Error: Task not available for this backend".to_string(),
+                    contexts: Vec::new(),
+                }
             }
         }
         "Done" => {
             let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
-            format!("Done. {summary}")
+            TaskOutcome {
+                output: format!("Done. {summary}"),
+                contexts: Vec::new(),
+            }
         }
-        "Mischief" => include_str!("mischief_dsl.md").to_string(),
+        "Mischief" => TaskOutcome {
+            output: include_str!("mischief_dsl.md").to_string(),
+            contexts: Vec::new(),
+        },
         _ => {
             let registry = global_registry();
             match registry.handlers.get(name) {
-                Some(handler) => handler.invoke(id, ctx, args_json).await,
-                None => return format!("Error: unknown tool {name}"),
+                Some(handler) => TaskOutcome {
+                    output: handler.invoke(id, ctx, args_json).await,
+                    contexts: Vec::new(),
+                },
+                None => {
+                    return TaskOutcome {
+                        output: format!("Error: unknown tool {name}"),
+                        contexts: Vec::new(),
+                    }
+                }
             }
         }
     };
@@ -831,19 +711,24 @@ pub(crate) async fn invoke(
         ctx.audit_lock.as_deref(),
         name,
         &ka,
-        result_status(&res),
+        result_status(&outcome.output),
     );
-    // Cap output for tools that can produce unbounded results.
-    // Task and Done are excluded: Task manages its own context, Done is tiny.
-    // Edit and Write always return tiny results.
-    // WebSearch handles its own truncation in websearch_invoke_with_cap.
+    outcome.output = cap_output(name, outcome.output);
+    outcome
+}
+
+/// Cap output for tools that can produce unbounded results.
+/// Task and Done are excluded: Task manages its own context, Done is tiny.
+/// Edit and Write always return tiny results.
+/// WebSearch handles its own truncation in websearch_invoke_with_cap.
+fn cap_output(name: &str, output: String) -> String {
     let cap = crate::config::max_tool_output_bytes();
     if cap > 0
         && matches!(
             name,
             "Read" | "Bash" | "Grep" | "Glob" | "Landscape" | "WebSearch"
         )
-        && res.len() as u64 > cap
+        && output.len() as u64 > cap
     {
         let marker = match name {
             "Read" => format!(
@@ -862,23 +747,37 @@ pub(crate) async fn invoke(
         let marker_len = marker.len() as u64;
         let keep = cap.saturating_sub(marker_len) as usize;
         if keep == 0 {
-            // Marker alone exceeds cap — return a char-boundary prefix.
-            return truncate_to_bytes(&marker, cap as usize);
-        }
-        let mut trunc = String::with_capacity(cap as usize);
-        let mut used = 0usize;
-        for c in res.chars() {
-            let cl = c.len_utf8();
-            if used + cl > keep {
-                break;
+            truncate_to_bytes(&marker, cap as usize)
+        } else {
+            let mut trunc = String::with_capacity(cap as usize);
+            let mut used = 0usize;
+            for c in output.chars() {
+                let cl = c.len_utf8();
+                if used + cl > keep {
+                    break;
+                }
+                trunc.push(c);
+                used += cl;
             }
-            trunc.push(c);
-            used += cl;
+            trunc.push_str(&marker);
+            trunc
         }
-        trunc.push_str(&marker);
-        return trunc;
+    } else {
+        output
     }
-    res
+}
+
+/// Convenience wrapper for tests that don't need parent contexts.
+#[cfg(test)]
+pub(crate) async fn invoke(
+    id: &str,
+    name: &str,
+    ctx: &AgentLoopRuntime,
+    args_json: &str,
+) -> String {
+    invoke_with_contexts(id, name, ctx, args_json, Vec::new())
+        .await
+        .output
 }
 
 /// Return a prefix of `s` that fits within `max_bytes`, at a valid UTF-8
@@ -900,14 +799,13 @@ fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::landscape::LandscapeExplorer;
+    use crate::core::paths::*;
     use crate::test_support::EnvGuard;
     use crate::toolbox::{
         bash::bash_invoke,
         edit::{edit_invoke, edit_sync},
         glob::glob_invoke,
         grep::grep_invoke,
-        landscape::{landscape_invoke, landscape_sync},
         read::read_invoke,
         skills::load_skill_invoke,
         websearch::{websearch_invoke, websearch_invoke_with_cap},
@@ -984,6 +882,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         }
     }
 
@@ -1051,334 +950,6 @@ mod tests {
         std::fs::write(dir.join("empty.txt"), "").unwrap();
         let args = serde_json::json!({"file_path": "empty.txt"}).to_string();
         assert_eq!(read_invoke(&c, &args).await, "");
-    }
-
-    #[tokio::test]
-    async fn landscape_renders_rust_items() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::write(
-            dir.join("lib.rs"),
-            "fn main() {}\nstruct Foo;\nimpl Foo {}\ntrait Shape {}\npub enum Color {}\n",
-        )
-        .unwrap();
-        let args = serde_json::json!({"file_path": "lib.rs"}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(out.contains("fn") && out.contains("main"), "got: {out:?}");
-        assert!(
-            out.contains("struct") && out.contains("Foo"),
-            "got: {out:?}"
-        );
-        assert!(out.contains("impl"), "got: {out:?}");
-        assert!(
-            out.contains("1|fn|main"),
-            "items must use line|kind|name format: {out:?}"
-        );
-        assert!(
-            out.contains("2|struct|Foo") && out.contains("3|impl|Foo"),
-            "items must be space-separated on one line: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_renders_markdown_headings() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::write(dir.join("README.md"), "# Title\n\n## Subtitle\n").unwrap();
-        let args = serde_json::json!({"file_path": "README.md"}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        // .md is no longer a recognized extension; the tool shows the
-        // filename instead of "(no outline items)".
-        assert!(out.contains("README.md"), "got: {out:?}");
-        assert!(!out.contains("heading"), "got: {out:?}");
-    }
-
-    #[tokio::test]
-    async fn landscape_missing_file_is_error() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        let args = serde_json::json!({"file_path": "missing.rs"}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(out.starts_with("Error:"), "got: {out:?}");
-    }
-
-    #[tokio::test]
-    async fn landscape_outside_sandbox_is_denied() {
-        let dir = tmp();
-        let outside = tmp();
-        let c = ctx(&dir);
-        std::fs::write(outside.join("outside.rs"), "fn outside() {}\n").unwrap();
-        let args = serde_json::json!({"file_path": outside.join("outside.rs").to_str().unwrap()})
-            .to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(out.contains("outside sandbox"), "got: {out:?}");
-    }
-
-    #[tokio::test]
-    async fn landscape_directory_lists_files_with_items() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::create_dir(dir.join("sub")).unwrap();
-        std::fs::write(dir.join("sub/lib.rs"), "fn a() {}\nstruct B;\nimpl B {}\n").unwrap();
-        std::fs::write(dir.join("sub/notes.txt"), "hello").unwrap();
-        let args = serde_json::json!({"file_path": ".", "depth": 2, "token_budget": 1_000_000})
-            .to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            out.contains("sub/") && out.contains("lib.rs:"),
-            "dir listing missing lib.rs tree entry: {out:?}"
-        );
-        assert!(
-            !out.contains("sub/lib.rs") && out.contains("notes.txt:"),
-            "directory output must use block tree headers and list unrecognized files: {out:?}"
-        );
-        assert!(
-            out.contains("1|fn|a") && out.contains("2|struct|B"),
-            "items not rendered in line|kind|name format: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_directory_skips_hidden_and_vendor() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::create_dir(dir.join(".git")).unwrap();
-        std::fs::create_dir(dir.join("target")).unwrap();
-        std::fs::create_dir(dir.join("src")).unwrap();
-        std::fs::write(dir.join(".git/config"), "x").unwrap();
-        std::fs::write(dir.join("target/out"), "x").unwrap();
-        std::fs::write(dir.join("src/lib.rs"), "fn a() {}\nstruct B;\nimpl B {}\n").unwrap();
-        let args = serde_json::json!({"file_path": ".", "depth": 2, "token_budget": 1_000_000})
-            .to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(!out.contains(".git"), "must skip .git: {out:?}");
-        assert!(!out.contains("target"), "must skip target: {out:?}");
-        assert!(
-            out.contains("src/") && out.contains("lib.rs:"),
-            "should include src/lib.rs tree entry: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_depth_limit_is_honored() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::create_dir_all(dir.join("a/b/c")).unwrap();
-        std::fs::write(
-            dir.join("a/b/c/deep.rs"),
-            "fn deep() {}\nstruct D;\nimpl D {}\n",
-        )
-        .unwrap();
-        std::fs::write(dir.join("a/top.rs"), "fn top() {}\nstruct T;\nimpl T {}\n").unwrap();
-        // depth=1: only a/ itself plus one level → a/top.rs visible, a/b/ skipped
-        let args = serde_json::json!({"file_path": ".", "depth": 1, "token_budget": 1_000_000})
-            .to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            out.contains("a/") && out.contains("top.rs:"),
-            "depth 1 should include a/top.rs: {out:?}"
-        );
-        assert!(
-            !out.contains("deep"),
-            "depth 1 must not reach a/b/c/deep.rs: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_empty_directory() {
-        let dir = tmp();
-        let sub = dir.join("empty");
-        std::fs::create_dir(&sub).unwrap();
-        let c = ctx(&dir);
-        let args = serde_json::json!({"file_path": "empty", "token_budget": 1_000_000}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert_eq!(out, "(empty directory)");
-    }
-
-    #[tokio::test]
-    async fn landscape_directory_with_only_small_files_lists_them() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        let sub = dir.join("shallow");
-        std::fs::create_dir(&sub).unwrap();
-        // Two recognized files, each with fewer than 3 outline items.
-        // Tool mode must still list them (and their items) rather than
-        // applying the injected-block three-item cutoff.
-        std::fs::write(sub.join("a.rs"), "fn a() {}\nstruct A;\n").unwrap();
-        std::fs::write(sub.join("b.rs"), "fn b() {}\n").unwrap();
-        let args =
-            serde_json::json!({"file_path": "shallow", "token_budget": 1_000_000}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            out.contains("a.rs:") && out.contains("1|fn|a") && out.contains("2|struct|A"),
-            "small recognized file with two items must be listed: {out:?}"
-        );
-        assert!(
-            out.contains("b.rs:") && out.contains("1|fn|b"),
-            "small recognized file with one item must be listed: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_directory_with_only_unrecognized_files() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        let sub = dir.join("plans");
-        std::fs::create_dir(&sub).unwrap();
-        std::fs::write(
-            sub.join("fix-ls-stage-regression.md"),
-            "# Plan\n\nDo the thing.",
-        )
-        .unwrap();
-        std::fs::write(sub.join("notes.txt"), "some random notes").unwrap();
-        let args = serde_json::json!({"file_path": "plans", "token_budget": 1_000_000}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            out.contains("fix-ls-stage-regression.md:"),
-            "unrecognized .md file must appear as tree entry: {out:?}"
-        );
-        assert!(
-            out.contains("notes.txt:"),
-            "unrecognized .txt file must appear as tree entry: {out:?}"
-        );
-        assert!(
-            !out.contains("(empty directory)"),
-            "must not report empty for non-empty dir: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_refuses_symlink_root() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::create_dir(dir.join("real")).unwrap();
-        std::fs::write(dir.join("real/lib.rs"), "fn f() {}\n").unwrap();
-        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
-        let args = serde_json::json!({"file_path": "link"}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            out.contains("does not follow symlinks"),
-            "symlink root must be refused: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_bad_depth_is_rejected() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        let args = serde_json::json!({"file_path": ".", "depth": "two"}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            out.starts_with("Error:") && out.contains("depth"),
-            "bad depth must be rejected: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_bad_token_budget_is_rejected() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        let args = serde_json::json!({"file_path": ".", "token_budget": "two"}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            out.starts_with("Error:") && out.contains("token_budget"),
-            "bad token_budget must be rejected: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_directory_matches_block_format() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::create_dir(dir.join("sub")).unwrap();
-        std::fs::write(dir.join("sub/lib.rs"), "fn a() {}\nstruct B;\nimpl B {}\n").unwrap();
-
-        let build = LandscapeExplorer
-            .build_with_failures(&dir, usize::MAX)
-            .unwrap();
-        let expected =
-            crate::landscape::format_landscape_block_tool(&build, &dir, Some(usize::MAX))
-                .unwrap()
-                .block;
-        assert!(!expected.contains("<!-- BEGIN LANDSCAPE BLOCK -->"));
-        assert!(!expected.contains("repository metadata"));
-
-        let args = serde_json::json!({"file_path": ".", "depth": 2, "token_budget": 1_000_000})
-            .to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert_eq!(
-            out, expected,
-            "tool directory output must match the block format"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_token_budget_limits_directory_output() {
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::create_dir_all(dir.join("src/nested")).unwrap();
-
-        let mut top = String::new();
-        let mut mid = String::new();
-        let mut deep = String::new();
-        for i in 0..20 {
-            top.push_str(&format!("fn top_{i:02}() {{}}\n"));
-            mid.push_str(&format!("fn mid_{i:02}() {{}}\n"));
-            deep.push_str(&format!("fn deep_{i:02}() {{}}\n"));
-        }
-        std::fs::write(dir.join("top.rs"), top).unwrap();
-        std::fs::write(dir.join("src/mid.rs"), mid).unwrap();
-        std::fs::write(dir.join("src/nested/deep.rs"), deep).unwrap();
-
-        let build = LandscapeExplorer
-            .build_with_failures(&dir, usize::MAX)
-            .unwrap();
-        let full = crate::landscape::format_landscape_block_tool(&build, &dir, Some(usize::MAX))
-            .unwrap()
-            .block;
-        let full_tokens = crate::landscape::count_tokens(&full).unwrap();
-        assert!(full_tokens > 1);
-        let budget = full_tokens - 1;
-
-        let args = serde_json::json!({"file_path": ".", "token_budget": budget}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            crate::landscape::count_tokens(&out).unwrap() <= budget,
-            "tool output must respect token_budget: {out:?}"
-        );
-        assert!(out.contains("top.rs:"), "shallow file kept: {out:?}");
-        assert!(out.contains("mid.rs:"), "depth-limited file kept: {out:?}");
-        assert!(
-            !out.contains("deep.rs:"),
-            "deepest file must be trimmed by token_budget: {out:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn landscape_unreadable_file_is_annotated() {
-        // Create a real file inside a subdirectory with outlineable extension
-        // but revoke read permission so the block pipeline cannot parse it.
-        // `build_with_failures` surfaces the path as an inline annotation.
-        let dir = tmp();
-        let c = ctx(&dir);
-        std::fs::create_dir(dir.join("sub")).unwrap();
-        let broken = dir.join("sub/broken.rs");
-        std::fs::write(&broken, "fn x() {}\nstruct X;\nimpl X {}\n").unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o000);
-            std::fs::set_permissions(&broken, perms).unwrap();
-        }
-        // Pass an explicit token_budget so the test never consults the
-        // global config (which can race with other tests that call
-        // init_global() in parallel).
-        let args =
-            serde_json::json!({"file_path": ".", "depth": 2, "token_budget": 100_000}).to_string();
-        let out = landscape_invoke(&c, &args).await;
-        assert!(
-            out.contains("broken.rs") && out.contains("(unreadable)"),
-            "unreadable file must be annotated: {out:?}"
-        );
     }
 
     #[tokio::test]
@@ -1572,6 +1143,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let args = serde_json::json!({"command": "pwd; ls"}).to_string();
         let output = bash_invoke(&c, &args, "tool-test-id").await;
@@ -1612,6 +1184,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let expected = canonicalize_or_ancestor(&dir);
         let args = serde_json::json!({"command": "pwd"}).to_string();
@@ -1650,6 +1223,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let expected = canonicalize_or_ancestor(&project);
         // Ensure the daemon cwd is genuinely different from project root.
@@ -2094,6 +1668,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let out = invoke("tool-test-id", "Mischief", &c, "{}").await;
         assert!(
@@ -2125,6 +1700,7 @@ mod tests {
             active_skills: Some(Arc::new(std::sync::Mutex::new(vec![]))),
             skills_available: true,
             discovered_skills: None,
+            log_tx: None,
         };
         let out = invoke("tool-test-id", "Mischief", &c, "{}").await;
         assert!(
@@ -3075,6 +2651,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let write_args =
             serde_json::json!({"file_path": target.to_str().unwrap(), "content": "nope"})
@@ -3694,7 +3271,10 @@ mod tests {
     }
 
     #[test]
-    fn edit_batch_overlap_rejected() {
+    fn edit_batch_overlap_second_not_found() {
+        // Edits apply sequentially: the first replaces "hello", so the
+        // second edit's "hello world" no longer exists in the accumulated
+        // buffer.
         let dir = tmp();
         std::fs::write(dir.join("x.txt"), "hello world\n").unwrap();
         let args = serde_json::json!({
@@ -3706,7 +3286,7 @@ mod tests {
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("overlap"));
+        assert!(result.contains("old_string not found"), "got: {result}");
     }
 
     #[test]
@@ -3792,7 +3372,10 @@ mod tests {
     }
 
     #[test]
-    fn edit_mixed_overlap_rejected() {
+    fn edit_mixed_overlap_second_not_found() {
+        // Edits apply sequentially: the first replaces "234", so the second
+        // edit's "456" (scoped to line 1) no longer exists in the
+        // accumulated buffer.
         let dir = tmp();
         std::fs::write(dir.join("f.txt"), "0123456789\n").unwrap();
         let args = serde_json::json!({
@@ -3804,7 +3387,7 @@ mod tests {
         })
         .to_string();
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
-        assert!(result.contains("overlap"));
+        assert!(result.contains("old_string not found"), "got: {result}");
     }
 
     #[test]
@@ -4034,6 +3617,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -4045,9 +3629,14 @@ mod tests {
         let dir = tmp();
         let called = Arc::new(std::sync::Mutex::new(false));
         let called2 = called.clone();
-        let task_fn: TaskFn = Arc::new(move |kind, prompt, _history| {
+        let task_fn: TaskFn = Arc::new(move |kind, prompt, _history, _ctx| {
             *called2.lock().unwrap() = true;
-            Box::pin(async move { format!("task result: {kind} / {prompt}") })
+            Box::pin(async move {
+                TaskOutcome {
+                    output: format!("task result: {kind} / {prompt}"),
+                    contexts: Vec::new(),
+                }
+            })
         });
         let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
@@ -4067,6 +3656,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -4077,8 +3667,13 @@ mod tests {
     #[tokio::test]
     async fn task_empty_prompt_returns_error() {
         let dir = tmp();
-        let task_fn: TaskFn = Arc::new(|_kind, _prompt, _history| {
-            Box::pin(async move { "should not be called".to_string() })
+        let task_fn: TaskFn = Arc::new(|_kind, _prompt, _history, _ctx| {
+            Box::pin(async move {
+                TaskOutcome {
+                    output: "should not be called".to_string(),
+                    contexts: Vec::new(),
+                }
+            })
         });
         let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
@@ -4098,6 +3693,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": ""}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -4114,9 +3710,14 @@ mod tests {
         let dir = tmp();
         let called = Arc::new(std::sync::Mutex::new(false));
         let called2 = called.clone();
-        let task_fn: TaskFn = Arc::new(move |_kind, _prompt, _history| {
+        let task_fn: TaskFn = Arc::new(move |_kind, _prompt, _history, _ctx| {
             *called2.lock().unwrap() = true;
-            Box::pin(async move { "should not be called".to_string() })
+            Box::pin(async move {
+                TaskOutcome {
+                    output: "should not be called".to_string(),
+                    contexts: Vec::new(),
+                }
+            })
         });
         let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
@@ -4136,6 +3737,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let args = serde_json::json!({"kind": "Bogus", "prompt": "go"}).to_string();
         let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -4149,8 +3751,14 @@ mod tests {
     #[tokio::test]
     async fn task_result_is_headered_with_kind() {
         let dir = tmp();
-        let task_fn: TaskFn =
-            Arc::new(|_k, _p, _history| Box::pin(async move { "body".to_string() }));
+        let task_fn: TaskFn = Arc::new(|_k, _p, _history, _ctx| {
+            Box::pin(async move {
+                TaskOutcome {
+                    output: "body".to_string(),
+                    contexts: Vec::new(),
+                }
+            })
+        });
         let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
             extra_env: None,
@@ -4169,6 +3777,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
         assert_eq!(
@@ -4475,36 +4084,6 @@ mod tests {
             "oversized Read must be truncated, not discarded, got: {result}"
         );
     }
-
-    #[tokio::test]
-    async fn invoke_caps_oversized_landscape_result() {
-        let _env = crate::test_support::EnvGuard::lock();
-        let dir = tmp();
-        let c = ctx(&dir);
-        // Generate a Rust file with many long-named functions so the landscape
-        // output comfortably exceeds a 200-byte cap.
-        let mut src = String::new();
-        for i in 0..20 {
-            src.push_str(&format!("fn very_long_function_name_{i:03}() {{}}\n"));
-        }
-        std::fs::write(dir.join("big.rs"), &src).unwrap();
-        let args = serde_json::json!({"file_path": "big.rs"}).to_string();
-        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "200");
-        let result = invoke("tool-test-id", "Landscape", &c, &args).await;
-        assert!(
-            result.contains("[...truncated at 200 bytes...]"),
-            "oversized Landscape must carry a truncation marker, got: {result}"
-        );
-        assert!(
-            (result.len() as u64) <= 200,
-            "truncated result must fit within cap, got len {}: {result}",
-            result.len()
-        );
-        assert!(
-            !result.contains("Tool output exceeded the limit"),
-            "oversized Landscape must be truncated, not discarded, got: {result}"
-        );
-    }
     #[tokio::test]
     async fn invoke_truncation_preserves_content_prefix() {
         let _env = crate::test_support::EnvGuard::lock();
@@ -4624,7 +4203,14 @@ mod tests {
     async fn invoke_does_not_cap_task() {
         let _env = crate::test_support::EnvGuard::lock();
         let dir = tmp();
-        let task_fn: TaskFn = Arc::new(|_k, _p, _history| Box::pin(async move { "x".repeat(500) }));
+        let task_fn: TaskFn = Arc::new(|_k, _p, _history, _ctx| {
+            Box::pin(async move {
+                TaskOutcome {
+                    output: "x".repeat(500),
+                    contexts: Vec::new(),
+                }
+            })
+        });
         let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
             extra_env: None,
@@ -4643,6 +4229,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         };
         let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
@@ -4678,6 +4265,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         }
     }
 
@@ -4774,71 +4362,5 @@ mod tests {
         // never "allow all".
         let err = bash_check(&[], "cat /etc/passwd", Some(&dir)).unwrap();
         assert!(err.contains("invalid sandbox root"), "got: {err}");
-    }
-
-    // --- landscape_sync token_budget fallback ------------------------------
-
-    #[test]
-    fn landscape_sync_config_token_budget_fallback_caps_output() {
-        // Config has max-tool-tokens: 0 → landscape_sync without
-        // token_budget falls back to the config value and hits the cap.
-        let _sandbox = crate::test_support::Sandbox::with_config(Some(
-            r#"{"landscape": {"max-tool-tokens": 0}}"#,
-        ));
-        crate::config::clear_global();
-        crate::config::init_global().unwrap();
-
-        let dir = tmp();
-        std::fs::write(dir.join("a.rs"), "fn main() {}").unwrap();
-
-        let result = landscape_sync(Some(&dir), None, r#"{"file_path": "."}"#);
-        assert!(
-            result.contains("Error: budget exceeded"),
-            "expected budget-exceeded, got: {result}"
-        );
-        crate::config::clear_global();
-    }
-
-    #[test]
-    fn landscape_sync_no_config_no_token_budget_is_unlimited() {
-        // No config → no fallback cap → full-depth output with no error.
-        let _sandbox = crate::test_support::Sandbox::new();
-        crate::config::clear_global();
-        crate::config::init_global().unwrap();
-
-        let dir = tmp();
-        std::fs::write(dir.join("a.rs"), "fn main() {}").unwrap();
-
-        let result = landscape_sync(Some(&dir), None, r#"{"file_path": "."}"#);
-        assert!(
-            !result.contains("Error: budget exceeded"),
-            "should not be capped, got: {result}"
-        );
-        assert!(!result.is_empty(), "output should not be empty");
-    }
-
-    #[test]
-    fn landscape_sync_model_token_budget_overrides_config() {
-        // Config has max-tool-tokens: 0 (would cap), but the model passes
-        // an explicit token_budget → model's value wins, no cap error.
-        let _sandbox = crate::test_support::Sandbox::with_config(Some(
-            r#"{"landscape": {"max-tool-tokens": 0}}"#,
-        ));
-        crate::config::clear_global();
-        crate::config::init_global().unwrap();
-
-        let dir = tmp();
-        std::fs::write(dir.join("a.rs"), "fn main() {}").unwrap();
-
-        let result = landscape_sync(
-            Some(&dir),
-            None,
-            r#"{"file_path": ".", "token_budget": 999999}"#,
-        );
-        assert!(
-            !result.contains("Error: budget exceeded"),
-            "model budget should override config, got: {result}"
-        );
-        assert!(!result.is_empty(), "output should not be empty");
     }
 }

@@ -305,11 +305,17 @@ pub(crate) fn resolve_model(spec: &str) -> Result<super::task::TaskModel, String
             client.provider()
         )
     })?;
+    // The Responses backends (Azure OpenAI, Anthropic) replay structured
+    // reasoning items in history; Chat Completions backends do not. Carry that
+    // preference on the selected TaskModel so a cross-provider task override
+    // does not inherit the parent's opposite setting.
+    let preserve_reasoning = matches!(client.provider(), "azure-openai" | "anthropic");
     Ok(super::task::TaskModel {
         model,
         temperature: resolved.temperature,
         max_tokens: resolved.max_tokens,
         extra: resolved.additional_value(),
+        preserve_reasoning: Some(preserve_reasoning),
     })
 }
 

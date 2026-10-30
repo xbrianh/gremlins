@@ -12,7 +12,7 @@
 /// case-sensitive: no case-folding, no suffix matching, no fallback from an
 /// unknown value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TaskKind {
+pub(crate) enum TaskKind {
     Fork,
     Scout,
     Implement,
@@ -20,7 +20,7 @@ pub enum TaskKind {
 
 impl TaskKind {
     /// The canonical string form of this kind.
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             TaskKind::Fork => "Fork",
             TaskKind::Scout => "Scout",
@@ -32,7 +32,7 @@ impl TaskKind {
     ///
     /// Returns `None` for any other value — including case variants, suffixes,
     /// and arbitrary description text.
-    pub fn parse(s: &str) -> Option<TaskKind> {
+    pub(crate) fn parse(s: &str) -> Option<TaskKind> {
         match s {
             "Fork" => Some(TaskKind::Fork),
             "Scout" => Some(TaskKind::Scout),
@@ -44,10 +44,10 @@ impl TaskKind {
     /// The canonical spellings that may be configured through `task-models`.
     /// `Fork` is intentionally excluded: it always inherits the parent model
     /// and is rejected as a configuration key.
-    pub const CONFIGURABLE: [TaskKind; 2] = [TaskKind::Scout, TaskKind::Implement];
+    pub(crate) const CONFIGURABLE: [TaskKind; 2] = [TaskKind::Scout, TaskKind::Implement];
 
     /// The three canonical spellings, in declaration order.
-    pub const ALL: [TaskKind; 3] = [TaskKind::Fork, TaskKind::Scout, TaskKind::Implement];
+    pub(crate) const ALL: [TaskKind; 3] = [TaskKind::Fork, TaskKind::Scout, TaskKind::Implement];
 }
 
 impl std::fmt::Display for TaskKind {

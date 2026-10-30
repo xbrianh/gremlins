@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::model::GremlinsModel;
-use super::task_kind::TaskKind;
+use crate::task_kind::TaskKind;
 
 /// Build a [`TaskModelSelector`] from the raw `task-models` config map and a
 /// provider-agnostic model factory.
@@ -31,6 +31,9 @@ pub(crate) struct TaskModel {
     pub(crate) temperature: Option<f64>,
     pub(crate) max_tokens: Option<u64>,
     pub(crate) extra: Option<serde_json::Value>,
+    /// Override for the child backend's reasoning-replay preference.
+    /// `None` means "inherit the parent's value".
+    pub(crate) preserve_reasoning: Option<bool>,
 }
 
 /// Builds the model named by a matching `task-models` entry, for use by one

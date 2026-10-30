@@ -81,6 +81,51 @@ pub enum BlobMode {
     Append,
 }
 
+/// Name of the append-only JSONL file that records per-stage token usage.
+pub(crate) const TOKEN_USAGE_JSONL: &str = "token_usage.jsonl";
+
+/// Persist a single stage's token usage as a JSONL line in the state directory.
+/// Each line is a JSON object with a `"stage"` key using dot-separated paths
+/// and the token usage fields.
+pub(crate) fn emit_stage_token_usage(
+    store: &dyn StateStore,
+    stage_path: &str,
+    usage: &HashMap<String, i64>,
+) {
+    use std::io::Write;
+
+    if usage.is_empty() {
+        return;
+    }
+    let mut line = serde_json::Map::new();
+    let dotted = stage_path.replace('/', ".");
+    line.insert("stage".to_string(), serde_json::Value::String(dotted));
+    for (k, v) in usage {
+        if k == "stage" {
+            log::warn!("emit_stage_token_usage: usage key 'stage' is reserved — skipping");
+            continue;
+        }
+        line.insert(k.clone(), serde_json::Value::from(*v));
+    }
+    let json = match serde_json::to_string(&line) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("emit_stage_token_usage: serialize error for {stage_path}: {e}");
+            return;
+        }
+    };
+    match store.open(TOKEN_USAGE_JSONL, BlobMode::Append) {
+        Ok(mut blob) => {
+            if let Err(e) = writeln!(blob, "{json}") {
+                log::warn!("emit_stage_token_usage: write error for {stage_path}: {e}");
+            }
+        }
+        Err(e) => {
+            log::warn!("emit_stage_token_usage: failed to open {TOKEN_USAGE_JSONL}: {e}");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Checkout
 // ---------------------------------------------------------------------------
@@ -99,9 +144,6 @@ pub struct Checkout {
 // ---------------------------------------------------------------------------
 // StateStore trait — the unified storage backend seam
 // ---------------------------------------------------------------------------
-
-/// Key in the state tree that holds per-stage token usage breakdowns.
-pub(crate) const STAGE_USAGE_KEY: &str = "stage_usage";
 
 /// The set of operations that the executor runtime requires from a storage
 /// backend: state.json reads/writes, blob I/O, and artifact registry
@@ -150,12 +192,6 @@ pub trait StateStore: Send + Sync + Debug {
     fn record_stage_error(&self, class: &str, detail: &str);
 
     fn accumulate_token_usage(&self, usage: &HashMap<String, i64>);
-
-    /// Accumulate token usage delta into the per-stage breakdown for
-    /// `stage_path` (slash-separated path like `implement/scout-1`).
-    /// A no-op when `usage` is empty. This is an internal method not intended
-    /// for external callers.
-    fn accumulate_stage_token_usage(&self, stage_path: &str, usage: &HashMap<String, i64>);
 
     /// Create the `finished` marker and patch terminal fields.
     fn write_terminal_state(&self, exit_code: i32);
@@ -1153,32 +1189,6 @@ impl StateStore for FileSystemStateStore {
         });
     }
 
-    fn accumulate_stage_token_usage(&self, stage_path: &str, usage: &HashMap<String, i64>) {
-        if usage.is_empty() {
-            return;
-        }
-        let sf = self.state_file();
-        if !sf.exists() {
-            return;
-        }
-        let usage = usage.clone();
-        let stage_path = stage_path.to_string();
-        let _ = locked_update(&sf, move |data| {
-            let stage_usage = data
-                .entry(STAGE_USAGE_KEY.to_string())
-                .or_insert_with(|| Value::Object(Map::new()));
-            let entries = stage_usage.as_object_mut().unwrap();
-            let existing = entries
-                .entry(stage_path)
-                .or_insert_with(|| Value::Object(Map::new()));
-            let existing_map = existing.as_object_mut().unwrap();
-            for (k, v) in &usage {
-                let cur = existing_map.get(k).map(as_i64).unwrap_or(0);
-                existing_map.insert(k.clone(), Value::from(cur + v));
-            }
-        });
-    }
-
     fn stage_error(&self) -> Option<Map<String, Value>> {
         let sf = self.state_file();
         if !sf.exists() {
@@ -1449,6 +1459,18 @@ impl StateStore for FileSystemStateStore {
             dst.write_all(&bytes)?;
         }
 
+        // Carry the per-stage token usage log forward so that `gremlins
+        // analyze` sees the full history across `--stage` resumes.
+        if self.exists(TOKEN_USAGE_JSONL) {
+            let mut src = self.open(TOKEN_USAGE_JSONL, BlobMode::Read)?;
+            let mut bytes = Vec::new();
+            use std::io::Read;
+            src.read_to_end(&mut bytes)?;
+            let mut dst = child_store.open(TOKEN_USAGE_JSONL, BlobMode::Write)?;
+            use std::io::Write;
+            dst.write_all(&bytes)?;
+        }
+
         child_store.write_state(rewind_state)?;
 
         // Atomically publish the completed attempt.
@@ -1674,7 +1696,6 @@ impl StateStore for ScopedFileSystemStateStore {
     delegate!(inner, fn patch(&self, delete: &[String], fields: &Map<String, Value>));
     delegate!(inner, fn record_stage_error(&self, class: &str, detail: &str));
     delegate!(inner, fn accumulate_token_usage(&self, usage: &HashMap<String, i64>));
-    delegate!(inner, fn accumulate_stage_token_usage(&self, stage_path: &str, usage: &HashMap<String, i64>));
     delegate!(inner, fn write_terminal_state(&self, exit_code: i32));
     delegate!(inner, fn add_subprocess_cost(&self, amount: f64));
     delegate!(inner, fn patch_parallel_attempt(&self, child_key: &str, attempt: &str));
@@ -1842,7 +1863,6 @@ impl StateData {
     delegate!(pub store, fn patch(&self, delete: &[String], fields: &Map<String, Value>));
     delegate!(pub store, fn record_stage_error(&self, class: &str, detail: &str));
     delegate!(pub store, fn accumulate_token_usage(&self, usage: &HashMap<String, i64>));
-    delegate!(pub(crate) store, fn accumulate_stage_token_usage(&self, stage_path: &str, usage: &HashMap<String, i64>));
     delegate!(pub store, fn state_tree(&self) -> Map<String, Value>);
     delegate!(pub store, fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError>);
     pub(crate) fn open_blob(
@@ -2827,6 +2847,36 @@ mod tests {
         assert_sync::<StateData>();
     }
 
+    #[test]
+    fn append_then_read_jsonl_roundtrip() {
+        with_sandbox(None, |sandbox| {
+            let _sf = seed(sandbox, "gr-jl");
+            let d = StateData::open("gr-jl").unwrap();
+            // Write two JSONL lines via Append
+            {
+                let mut blob = d.open_blob("token_usage.jsonl", BlobMode::Append).unwrap();
+                use std::io::Write;
+                let _ = writeln!(blob, "{{\"stage\":\"a\",\"prompt_tokens\":10}}");
+                let _ = writeln!(blob, "{{\"stage\":\"b\",\"completion_tokens\":20}}");
+            }
+            // Read back via Read
+            {
+                let mut blob = d.open_blob("token_usage.jsonl", BlobMode::Read).unwrap();
+                use std::io::Read;
+                let mut body = String::new();
+                blob.read_to_string(&mut body).unwrap();
+                let lines: Vec<&str> = body.lines().collect();
+                assert_eq!(lines.len(), 2);
+                let v0: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+                assert_eq!(v0["stage"], "a");
+                assert_eq!(v0["prompt_tokens"], 10);
+                let v1: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+                assert_eq!(v1["stage"], "b");
+                assert_eq!(v1["completion_tokens"], 20);
+            }
+        });
+    }
+
     // -----------------------------------------------------------------------
     // Registry tests (adapted from registry.rs)
     // -----------------------------------------------------------------------
@@ -3378,13 +3428,6 @@ mod tests {
                 unimplemented!()
             }
             fn accumulate_token_usage(&self, _usage: &HashMap<String, i64>) {
-                unimplemented!()
-            }
-            fn accumulate_stage_token_usage(
-                &self,
-                _stage_path: &str,
-                _usage: &HashMap<String, i64>,
-            ) {
                 unimplemented!()
             }
             fn write_terminal_state(&self, _exit_code: i32) {

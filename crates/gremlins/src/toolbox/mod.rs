@@ -1,4 +1,4 @@
-//! Concrete tool handlers dispatched by [`crate::clients::tools::invoke`].
+//! Concrete tool handlers dispatched by [`crate::clients::tools::invoke_with_contexts`].
 //!
 //! The runtime layer in `clients::tools` owns gate/validate/audit/dispatch.
 //! Each tool implementation lives in its own focused module below, so a
@@ -10,7 +10,6 @@ pub(crate) mod edit;
 pub(crate) mod glob;
 pub(crate) mod grep;
 pub(crate) mod landscape;
-pub(crate) mod landscape_fn;
 pub(crate) mod read;
 pub(crate) mod skills;
 pub(crate) mod websearch;

@@ -1,4 +1,4 @@
-use super::task_kind::TaskKind;
+use crate::task_kind::TaskKind;
 use rig_core::completion::ToolDefinition;
 
 /// Maximum number of concurrent tool calls the harness will execute from a
@@ -75,7 +75,7 @@ static TOOL_SPECS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "Edit",
-        description: "Make one or more non-overlapping replacements in a file. Each edit replaces old_string with new_string (requires unique match). Use start_line/end_line to scope the search to a line range when old_string appears multiple times. Edits are validated against the original file content and must not overlap. After a failed edit due to non-uniqueness, re-read only the failing region (with offset/limit), not the whole file. All edits in the array target the same file, specified by the top-level `file_path` parameter — do not nest `file_path` inside individual edit objects.",
+        description: "Make one or more replacements in a file. Edits apply sequentially, so later edits see the results of earlier edits in the same call — useful for chained renames. Each edit replaces old_string with new_string (requires unique match). Use start_line/end_line to scope the search to a line range when old_string appears multiple times (line-number scopes refer to the file state after all prior edits in the same call). After a failed edit due to non-uniqueness, re-read only the failing region (with offset/limit), not the whole file. All edits in the array target the same file, specified by the top-level `file_path` parameter — do not nest `file_path` inside individual edit objects.",
         fields: &[
             FieldSpec { name: "file_path", description: "Path to the file to edit (relative or absolute)", ty: "string", required: true, validated: true },
             // `edits` has no top-level description; its nested item schema is

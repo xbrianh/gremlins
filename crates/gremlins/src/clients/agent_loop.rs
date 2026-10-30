@@ -1,7 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,15 +24,15 @@ use super::interactive::{
 
 use super::cancel::{default_classify, is_retryable, CancelToken, ErrorClassifier};
 use super::error::ClientError;
+use super::findings::FindingsLedger;
 use super::format::{
     apply_chunk, assistant_tool_message, enrich_log_line, format_tool_call, format_tool_call_parts,
-    ledger_key_arg, trunc, truncate_ledger_value,
+    trunc,
 };
 use super::model::{GremlinsModel, GremlinsModelError};
-use super::protocol::{
-    add_opt, CompletedRun, FileObservation, FileObservations, TurnStats, UsageStats,
-};
-use super::token_usage::{TokenUsageEvent, TokenUsageSink};
+use super::model_context::{compose_model_transcript, MutableModelContext};
+use super::plug::LoopPlug;
+use super::protocol::{add_opt, CompletedRun, FileObservations, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 
 // ── Architecture ────────────────────────────────────────────────────────────
@@ -49,686 +49,9 @@ use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 //         ├─ dispatch_tool_jobs               // concurrent execute with cancel
 //         └─ emit_tool_results                // ledger, history, mutation flush
 //
-// Supporting types: ToolJob, StreamAccumulator, ToolLedger, StreamTurnOutcome,
+// Supporting types: ToolJob, StreamAccumulator, StreamTurnOutcome,
 // LoopOpts, InteractiveSession, TurnFlow, etc.
 // ────────────────────────────────────────────────────────────────────────────
-
-/// Deduplication tracker for tool observations across turns.
-///
-/// The agent loop records every Read/Grep/Write/Edit/Landscape observation so
-/// the next turn's compact `[seen]` index can avoid re-reading unchanged
-/// content and can invalidate stale observations after writes.
-#[derive(Clone)]
-struct LedgerReadEntry {
-    last_age: usize,
-    count: usize,
-    content_hash: u64,
-    /// First-access sequence for display ordering in the compact `[seen]` index.
-    seq: usize,
-    /// Last-access sequence for nested-loop snapshot ordering. Re-reads of
-    /// identical content bump this without disturbing the display order above.
-    last_seq: usize,
-    /// Exact tool output, stored for nested-loop observations.
-    output: String,
-}
-
-#[derive(Clone)]
-struct LedgerGrepEntry {
-    last_age: usize,
-    count: usize,
-    content_hash: u64,
-    /// First-access sequence for display ordering in the compact `[seen]` index.
-    seq: usize,
-    /// Last-access sequence for nested-loop snapshot ordering.
-    last_seq: usize,
-    /// Exact tool output, stored for nested-loop observations.
-    output: String,
-}
-
-#[derive(Clone)]
-struct LedgerWriteEntry {
-    age: usize,
-    seq: usize,
-}
-
-#[derive(Clone)]
-struct LedgerLandscapeEntry {
-    age: usize,
-    seq: usize,
-    last_seq: usize,
-    path: String,
-    output: String,
-}
-
-pub(crate) struct ToolLedger {
-    /// Key: (file_path, offset, limit).  Offset and limit are zero when
-    /// the model reads the whole file.
-    reads: std::collections::HashMap<(String, u64, u64), LedgerReadEntry>,
-    /// Key: (pattern, path).  Path is empty string when not specified.
-    greps: std::collections::HashMap<(String, String), LedgerGrepEntry>,
-    /// Key: file_path.
-    writes: std::collections::HashMap<String, LedgerWriteEntry>,
-    /// Single landscape entry.
-    landscape: Option<LedgerLandscapeEntry>,
-    /// Monotonic counter shared by display order and snapshot order.
-    seq: usize,
-    /// File paths mutated by Write or Edit, for parent-ledger invalidation.
-    mutations: Vec<String>,
-    /// Worker observations that could not be fully injected into this loop's
-    /// message history, but must still propagate up when this loop itself is a
-    /// nested Scout. Kept separate from the seen maps so a later Scout is not
-    /// deduplicated against content the parent never fully received.
-    omitted: Vec<(usize, FileObservation)>,
-}
-
-impl ToolLedger {
-    pub(crate) fn new() -> Self {
-        Self {
-            reads: std::collections::HashMap::new(),
-            greps: std::collections::HashMap::new(),
-            writes: std::collections::HashMap::new(),
-            landscape: None,
-            seq: 0,
-            mutations: Vec::new(),
-            omitted: Vec::new(),
-        }
-    }
-
-    /// Hash a string with DefaultHasher (fast, non-cryptographic).
-    fn hash(s: &str) -> u64 {
-        let mut h = DefaultHasher::new();
-        s.hash(&mut h);
-        h.finish()
-    }
-
-    /// Parse a u64 from a JSON value, defaulting to 0.
-    fn parse_u64(args: &serde_json::Value, key: &str) -> u64 {
-        args.get(key).and_then(|v| v.as_u64()).unwrap_or(0)
-    }
-
-    fn parse_str<'a>(args: &'a serde_json::Value, key: &str) -> &'a str {
-        args.get(key).and_then(|v| v.as_str()).unwrap_or("")
-    }
-
-    /// Record a tool execution.  Write/Edit do NOT invalidate here;
-    /// caller must call `invalidate_after_write` after all observations
-    /// for the turn are recorded (see Comment 1 — Phase 2 concurrency).
-    pub(crate) fn record(
-        &mut self,
-        name: &str,
-        _key: &str,
-        output: &str,
-        args_json: &str,
-        turn_num: usize,
-    ) {
-        let args: serde_json::Value =
-            serde_json::from_str(args_json).unwrap_or(serde_json::Value::Null);
-
-        match name {
-            "Read" => {
-                let file_path = Self::parse_str(&args, "file_path").to_string();
-                let offset = Self::parse_u64(&args, "offset");
-                let limit = Self::parse_u64(&args, "limit");
-                let content_hash = Self::hash(output);
-                let age = turn_num;
-                self.seq += 1;
-                let seq = self.seq;
-
-                let entry_key = (file_path, offset, limit);
-                if let Some(existing) = self.reads.get_mut(&entry_key) {
-                    if existing.content_hash == content_hash {
-                        existing.count += 1;
-                        existing.last_age = age;
-                        // Latest-access order advances, but the first-access
-                        // display order (`existing.seq`) stays put.
-                        existing.last_seq = seq;
-                    } else {
-                        // Content changed — replace the entry.
-                        existing.count = 1;
-                        existing.last_age = age;
-                        existing.content_hash = content_hash;
-                        existing.seq = seq;
-                        existing.last_seq = seq;
-                        existing.output = output.to_string();
-                    }
-                } else {
-                    self.reads.insert(
-                        entry_key,
-                        LedgerReadEntry {
-                            last_age: age,
-                            count: 1,
-                            content_hash,
-                            seq,
-                            last_seq: seq,
-                            output: output.to_string(),
-                        },
-                    );
-                }
-            }
-            "Grep" => {
-                let pattern = Self::parse_str(&args, "pattern").to_string();
-                let path = Self::parse_str(&args, "path").to_string();
-                let content_hash = Self::hash(output);
-                let age = turn_num;
-                self.seq += 1;
-                let seq = self.seq;
-
-                let entry_key = (pattern, path);
-                if let Some(existing) = self.greps.get_mut(&entry_key) {
-                    if existing.content_hash == content_hash {
-                        existing.count += 1;
-                        existing.last_age = age;
-                        existing.last_seq = seq;
-                    } else {
-                        // Content changed — replace the entry.
-                        existing.count = 1;
-                        existing.last_age = age;
-                        existing.content_hash = content_hash;
-                        existing.seq = seq;
-                        existing.last_seq = seq;
-                        existing.output = output.to_string();
-                    }
-                } else {
-                    self.greps.insert(
-                        entry_key,
-                        LedgerGrepEntry {
-                            last_age: age,
-                            count: 1,
-                            content_hash,
-                            seq,
-                            last_seq: seq,
-                            output: output.to_string(),
-                        },
-                    );
-                }
-            }
-            "Write" => {
-                let file_path = Self::parse_str(&args, "file_path").to_string();
-                let age = turn_num;
-                self.seq += 1;
-                let seq = self.seq;
-                self.writes
-                    .insert(file_path.clone(), LedgerWriteEntry { age, seq });
-                // Track the mutation so nested-loop observations can invalidate
-                // the parent's stale reads for this file.
-                self.mutations.push(file_path);
-                // Invalidation deferred — caller applies after recording
-                // all observations for the turn.
-            }
-            "Edit" => {
-                let file_path = Self::parse_str(&args, "file_path").to_string();
-                // Edits mutate content too; track for parent-ledger invalidation.
-                if !file_path.is_empty() {
-                    self.mutations.push(file_path);
-                }
-                // Edit is not tracked per plan.  Invalidation is deferred;
-                // caller collects the file_path and applies after the batch.
-            }
-            "Landscape" => {
-                let file_path = Self::parse_str(&args, "file_path").to_string();
-                let age = turn_num;
-                self.seq += 1;
-                let seq = self.seq;
-                self.landscape = Some(LedgerLandscapeEntry {
-                    age,
-                    seq,
-                    last_seq: seq,
-                    path: file_path,
-                    output: output.to_string(),
-                });
-            }
-            _ => {
-                // Bash, Task, Done, Glob, WebSearch, Mischief — not tracked.
-            }
-        }
-    }
-
-    /// Apply write/edit invalidation for a file path.  Nukes Read entries
-    /// for that file, all Greps, and Landscape (they may be stale after a
-    /// write).  Called **after** all observations for a turn are recorded
-    /// so concurrent Read-then-Write batches don't reintroduce stale content.
-    pub(crate) fn invalidate_after_write(&mut self, file_path: &str) {
-        self.reads.retain(|(fp, _, _), _| fp != file_path);
-        self.greps.clear();
-        self.landscape = None;
-    }
-
-    /// Format the accumulated ledger as a compact index.
-    pub(crate) fn format(&self, turn_num: usize) -> String {
-        let age_of = |stored: usize| -> usize { turn_num.saturating_sub(stored) };
-
-        // Build items: (first_seq, display_line) for interleaved output.
-        let mut items: Vec<(usize, String)> = Vec::new();
-
-        // Group reads and writes by file path with first-access seq.
-        let mut file_seqs: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        let mut file_entries: std::collections::HashMap<String, Vec<(&LedgerReadEntry, u64, u64)>> =
-            std::collections::HashMap::new();
-
-        for ((fp, offset, limit), entry) in &self.reads {
-            file_seqs
-                .entry(fp.clone())
-                .and_modify(|s| *s = (*s).min(entry.seq))
-                .or_insert(entry.seq);
-            file_entries
-                .entry(fp.clone())
-                .or_default()
-                .push((entry, *offset, *limit));
-        }
-        for (fp, entry) in &self.writes {
-            file_seqs
-                .entry(fp.clone())
-                .and_modify(|s| *s = (*s).min(entry.seq))
-                .or_insert(entry.seq);
-        }
-
-        let mut keys: Vec<&String> = file_seqs.keys().collect();
-        keys.sort_by_key(|fp| file_seqs[*fp]);
-
-        for fp in &keys {
-            let has_write = self.writes.contains_key(*fp);
-            let write_age = self.writes.get(*fp).map(|e| age_of(e.age));
-            let display_fp = truncate_ledger_value(fp);
-
-            let mut full_count: usize = 0;
-            let mut full_age: usize = usize::MAX;
-            let mut partials: Vec<(u64, u64, usize, usize)> = Vec::new();
-
-            if let Some(entries) = file_entries.get(*fp) {
-                let mut sorted: Vec<_> = entries.iter().collect();
-                sorted.sort_by_key(|(e, _, _)| e.seq);
-                for (entry, offset, limit) in sorted {
-                    let age = age_of(entry.last_age);
-                    if *offset == 0 && *limit == 0 {
-                        full_count += entry.count;
-                        full_age = full_age.min(age);
-                    } else {
-                        partials.push((*offset, *limit, age, entry.count));
-                    }
-                }
-            }
-
-            let mut line = String::new();
-            if full_count > 0 {
-                line.push_str(&format!("{} R({}t", display_fp, full_age));
-                if full_count > 1 {
-                    line.push_str(&format!(",{}×", full_count));
-                }
-                for (offset, limit, age, count) in &partials {
-                    line.push_str(&format!(".{}-{}:{}t", offset, limit, age));
-                    if *count > 1 {
-                        line.push_str(&format!(",{}×", count));
-                    }
-                }
-                line.push(')');
-            } else if !partials.is_empty() {
-                // Only partial reads — no full-file read.  Emit a
-                // headline with the earliest age but omit the aggregate
-                // count (summing across different windows is misleading).
-                let min_age = partials.iter().map(|(_, _, a, _)| *a).min().unwrap();
-                line.push_str(&format!("{} R({}t", display_fp, min_age));
-                for (offset, limit, age, count) in &partials {
-                    line.push_str(&format!(".{}-{}:{}t", offset, limit, age));
-                    if *count > 1 {
-                        line.push_str(&format!(",{}×", count));
-                    }
-                }
-                line.push(')');
-            }
-
-            if has_write {
-                if line.is_empty() {
-                    line.push_str(&display_fp);
-                    line.push(' ');
-                } else {
-                    line.push(' ');
-                }
-                line.push_str(&format!("W({}t)", write_age.unwrap()));
-            }
-
-            if !line.is_empty() {
-                items.push((file_seqs[*fp], line));
-            }
-        }
-
-        // Grep entries.
-        for ((pattern, _path), entry) in &self.greps {
-            let age = age_of(entry.last_age);
-            let display_pattern = truncate_ledger_value(pattern);
-            let mut line = format!("\"{}\" G({}t", display_pattern, age);
-            if entry.count > 1 {
-                line.push_str(&format!(",{}×", entry.count));
-            }
-            line.push(')');
-            items.push((entry.seq, line));
-        }
-
-        // Landscape entry.
-        if let Some(entry) = &self.landscape {
-            items.push((entry.seq, format!("L({}t)", age_of(entry.age))));
-        }
-
-        items.sort_by_key(|(se, _)| *se);
-        let lines: Vec<String> = items.into_iter().map(|(_, l)| l).collect();
-
-        if lines.is_empty() {
-            "[seen]\n(none)".to_string()
-        } else {
-            format!("[seen]\n{}", lines.join("\n"))
-        }
-    }
-
-    /// Build a serializable snapshot of the worker's file observations
-    /// (Read/Grep/Landscape) plus the mutation paths, for reporting up to
-    /// the parent loop of a Scout task. Entries are ordered most-recent-first.
-    ///
-    /// No byte cap is applied here: the parent deduplicates against its own
-    /// ledger first and only then applies the configured output budget, so
-    /// already-seen files cannot crowd out unseen reads.
-    pub(crate) fn file_observations(&self) -> FileObservations {
-        let mut items: Vec<(usize, FileObservation)> = Vec::new();
-
-        for ((path, offset, limit), entry) in &self.reads {
-            items.push((
-                entry.last_seq,
-                FileObservation {
-                    tool: "Read".to_string(),
-                    path: path.clone(),
-                    offset: *offset,
-                    limit: *limit,
-                    pattern: None,
-                    output: entry.output.clone(),
-                },
-            ));
-        }
-        for ((pattern, path), entry) in &self.greps {
-            items.push((
-                entry.last_seq,
-                FileObservation {
-                    tool: "Grep".to_string(),
-                    path: path.clone(),
-                    offset: 0,
-                    limit: 0,
-                    pattern: Some(pattern.clone()),
-                    output: entry.output.clone(),
-                },
-            ));
-        }
-        if let Some(entry) = &self.landscape {
-            items.push((
-                entry.last_seq,
-                FileObservation {
-                    tool: "Landscape".to_string(),
-                    path: entry.path.clone(),
-                    offset: 0,
-                    limit: 0,
-                    pattern: None,
-                    output: entry.output.clone(),
-                },
-            ));
-        }
-        for (seq, obs) in &self.omitted {
-            items.push((*seq, obs.clone()));
-        }
-
-        // Most-recent-first: higher seq == later observation.
-        items.sort_by_key(|a| std::cmp::Reverse(a.0));
-        let items = items.into_iter().map(|(_, item)| item).collect();
-
-        // Mutation paths: dedup, preserving order.
-        let mut written_paths: Vec<String> = Vec::new();
-        for p in &self.mutations {
-            if !written_paths.iter().any(|w| w == p) {
-                written_paths.push(p.clone());
-            }
-        }
-
-        FileObservations {
-            items,
-            truncated: false,
-            written_paths,
-        }
-    }
-
-    /// Whether the ledger already records an observation matching `obs`, so a
-    /// Scout's file read can be deduplicated against the parent's own reads.
-    pub(crate) fn has_observation(&self, obs: &FileObservation) -> bool {
-        match obs.tool.as_str() {
-            "Read" => self
-                .reads
-                .contains_key(&(obs.path.clone(), obs.offset, obs.limit)),
-            "Grep" => {
-                let key = (obs.pattern.clone().unwrap_or_default(), obs.path.clone());
-                // The ledger key deliberately omits glob/context/max_matches;
-                // those change the output, so the stored content hash is the
-                // only reliable signal that a new Grep is truly a duplicate.
-                self.greps
-                    .get(&key)
-                    .is_some_and(|e| e.content_hash == Self::hash(&obs.output))
-            }
-            "Landscape" => self.landscape.as_ref().is_some_and(|e| e.path == obs.path),
-            _ => false,
-        }
-    }
-
-    /// Record a worker's file observation as if this loop had read it, so a
-    /// Scout nested inside a Scout propagates its observations up the chain
-    /// when this loop itself reports to its own parent.
-    pub(crate) fn absorb_observation(&mut self, obs: &FileObservation, turn_num: usize) {
-        self.seq += 1;
-        let seq = self.seq;
-        let content_hash = Self::hash(&obs.output);
-        match obs.tool.as_str() {
-            "Read" => {
-                let key = (obs.path.clone(), obs.offset, obs.limit);
-                self.reads.insert(
-                    key,
-                    LedgerReadEntry {
-                        last_age: turn_num,
-                        count: 1,
-                        content_hash,
-                        seq,
-                        last_seq: seq,
-                        output: obs.output.clone(),
-                    },
-                );
-            }
-            "Grep" => {
-                let key = (obs.pattern.clone().unwrap_or_default(), obs.path.clone());
-                self.greps.insert(
-                    key,
-                    LedgerGrepEntry {
-                        last_age: turn_num,
-                        count: 1,
-                        content_hash,
-                        seq,
-                        last_seq: seq,
-                        output: obs.output.clone(),
-                    },
-                );
-            }
-            "Landscape" => {
-                self.landscape = Some(LedgerLandscapeEntry {
-                    age: turn_num,
-                    seq,
-                    last_seq: seq,
-                    path: obs.path.clone(),
-                    output: obs.output.clone(),
-                });
-            }
-            _ => {}
-        }
-    }
-
-    /// Remember an observation that was too large to deliver fully into this
-    /// loop's message history. It is deliberately kept out of the seen maps so
-    /// a later Scout returning the same file is not deduplicated away, but it
-    /// still participates in [`ToolLedger::file_observations`] so the full
-    /// content propagates up when this loop is itself a nested Scout.
-    pub(crate) fn remember_omitted(&mut self, obs: &FileObservation) {
-        self.seq += 1;
-        self.omitted.push((self.seq, obs.clone()));
-    }
-}
-
-fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, prefix: &str, msg: &str) {
-    if let Some(tx) = tx {
-        let _ = tx.send(format!("{prefix}{msg}"));
-    }
-}
-
-/// Fold a Scout Task result's embedded file observations into a readable
-/// form, deduplicated against the parent's own [`ToolLedger`].
-///
-/// Files the worker wrote invalidate the parent's stale ledger entries; files
-/// the parent has already read are dropped so they are not re-injected into
-/// the message history. A truncation marker is preserved when the worker read
-/// more than the output budget permitted.
-fn fold_scout_output(output: &str, ledger: &mut ToolLedger, turn_num: usize) -> String {
-    let Some((mut obs, prefix, suffix)) = FileObservations::parse_block(output) else {
-        return output.to_string();
-    };
-
-    // A worker's Write/Edit must invalidate the parent's stale copy of any
-    // file it touched, so the parent never serves an outdated read. Record
-    // those paths too, so a Scout nested inside a Scout propagates the
-    // invalidation all the way up the chain.
-    for fp in &obs.written_paths {
-        ledger.invalidate_after_write(fp);
-        if !ledger.mutations.iter().any(|m| m == fp) {
-            ledger.mutations.push(fp.clone());
-        }
-    }
-
-    // Drop observations the parent has already read this run.
-    obs.items.retain(|o| !ledger.has_observation(o));
-
-    if obs.items.is_empty() && !obs.truncated {
-        return format!("{prefix}{suffix}");
-    }
-
-    let max_bytes = crate::config::max_tool_output_bytes() as usize;
-    let budget = if max_bytes == 0 {
-        usize::MAX
-    } else {
-        max_bytes
-    };
-
-    // Reserve room for the fixed wrapper (heading + truncation marker) before
-    // allocating bytes to rendered observations. Without this, a section that
-    // fills the raw budget would push the wrapped block over the configured
-    // tool-output cap. The marker is always reserved because truncation may
-    // only become known while rendering below.
-    let heading = "\n\n## Scout observations\n";
-    let marker =
-        "> Some observations were omitted: the worker read more than the output budget.\n\n";
-    let section_budget = budget.saturating_sub(heading.len() + marker.len());
-
-    let mut truncated = obs.truncated;
-    let mut section = String::new();
-    let mut used = 0usize;
-    let mut delivered: Vec<FileObservation> = Vec::new();
-    let mut omitted: Vec<FileObservation> = Vec::new();
-
-    // Items are most-recent-first; keep the newest observations and a prefix
-    // of any single oversized observation rather than dropping it entirely.
-    for o in &obs.items {
-        let rendered = render_observation(o);
-        if used.saturating_add(rendered.len()) <= section_budget {
-            section.push_str(&rendered);
-            used += rendered.len();
-            delivered.push(o.clone());
-        } else if used < section_budget {
-            let remaining = section_budget - used;
-            section.push_str(&truncate_to_bytes(&rendered, remaining));
-            used = section_budget;
-            truncated = true;
-            // The parent only receives a prefix, so the full observation must
-            // still propagate upward without entering the seen ledger.
-            omitted.push(o.clone());
-        } else {
-            truncated = true;
-            omitted.push(o.clone());
-        }
-    }
-
-    // Only fully delivered observations become "seen" for future dedup.
-    // Omitted ones are remembered separately for recursive propagation.
-    let mut delivered_oldest_first = delivered;
-    delivered_oldest_first.reverse();
-    for o in &delivered_oldest_first {
-        ledger.absorb_observation(o, turn_num);
-    }
-    let mut omitted_oldest_first = omitted;
-    omitted_oldest_first.reverse();
-    for o in &omitted_oldest_first {
-        ledger.remember_omitted(o);
-    }
-
-    let mut out = prefix.to_string();
-    let mut block = String::new();
-    block.push_str(heading);
-    if truncated {
-        block.push_str(marker);
-    }
-    block.push_str(&section);
-    // The fixed wrapper itself can exceed a very small budget; clamp the
-    // complete block so the configured cap is still honored.
-    out.push_str(&truncate_to_bytes(&block, budget));
-    out.push_str(suffix);
-    out
-}
-
-/// Extract the file paths a Scout Task wrote, for the parent's deferred
-/// invalidation pass. A Scout that edits a file is a mutation of the parent's
-/// view just like a direct Write/Edit, so these paths must participate in the
-/// same end-of-batch invalidation that guards against concurrent tool ordering.
-fn scout_written_paths(output: &str) -> Vec<String> {
-    FileObservations::parse_block(output)
-        .map(|(obs, _, _)| obs.written_paths)
-        .unwrap_or_default()
-}
-
-/// Render one worker observation as the markdown section injected into the
-/// parent's message history.
-fn render_observation(o: &FileObservation) -> String {
-    match o.tool.as_str() {
-        "Read" => format!(
-            "### Read: {} (offset {}..{})\n{}\n\n",
-            o.path,
-            o.offset,
-            o.offset.saturating_add(o.limit),
-            o.output
-        ),
-        "Grep" => format!(
-            "### Grep: {} in {}\n{}\n\n",
-            o.pattern.as_deref().unwrap_or(""),
-            o.path,
-            o.output
-        ),
-        "Landscape" if o.path.is_empty() => format!("### Landscape\n{}\n\n", o.output),
-        "Landscape" => format!("### Landscape: {}\n{}\n\n", o.path, o.output),
-        _ => String::new(),
-    }
-}
-
-/// Return a prefix of `s` that fits within `max_bytes` at a UTF-8 character
-/// boundary.
-fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
-    let mut out = String::with_capacity(max_bytes);
-    let mut used = 0usize;
-    for c in s.chars() {
-        let cl = c.len_utf8();
-        if used + cl > max_bytes {
-            break;
-        }
-        out.push(c);
-        used += cl;
-    }
-    out
-}
-
 fn cancelled_error(message: impl Into<String>, history: &[Message]) -> ClientError {
     ClientError::Cancelled {
         message: message.into(),
@@ -818,13 +141,8 @@ fn discard_tool_output(rx: &mut Option<mpsc::Receiver<tools::ToolOutputLine>>) {
 fn task_kind_is_fork(args: &serde_json::Value) -> bool {
     args.get("kind")
         .and_then(|v| v.as_str())
-        .and_then(super::task_kind::TaskKind::parse)
-        == Some(super::task_kind::TaskKind::Fork)
-}
-
-fn task_kind_from_args(args_json: &str) -> Option<super::task_kind::TaskKind> {
-    let args: serde_json::Value = serde_json::from_str(args_json).ok()?;
-    super::task_kind::TaskKind::parse(args.get("kind")?.as_str()?)
+        .and_then(crate::task_kind::TaskKind::parse)
+        == Some(crate::task_kind::TaskKind::Fork)
 }
 
 /// Sleep for the turn-level backoff, aborting early when the cancel token is
@@ -850,10 +168,9 @@ pub(crate) struct RunContext {
     pub(crate) prepopulated_messages: Option<Vec<Message>>,
     /// Chat-only soft compaction settings (mirrors `RunParams`).
     pub(crate) compaction_opts: Option<CompactionOpts>,
-    /// Path to the persistent stage scratchpad file for per-turn re-injection.
-    pub(crate) scratchpad_path: Option<PathBuf>,
-    /// The allowed root for containment-checked scratchpad reads.
-    pub(crate) scratchpad_root: Option<PathBuf>,
+    /// Inversion-of-control plug carrying cross-package dependencies.
+    /// Defaults to a no-op plug when `None`.
+    pub(crate) plug: LoopPlug,
 }
 
 impl RunContext {
@@ -867,11 +184,6 @@ impl RunContext {
             format!("[{}] ", params.label)
         };
         let compaction_opts = params.compaction_opts;
-        let scratchpad_root = params
-            .scratchpad_path
-            .as_ref()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .or_else(|| params.cwd.clone());
         Self {
             idle_timeout,
             prefix,
@@ -881,8 +193,7 @@ impl RunContext {
             stream_events: params.stream_events.clone(),
             prepopulated_messages: params.prepopulated_messages.clone(),
             compaction_opts,
-            scratchpad_path: params.scratchpad_path.clone(),
-            scratchpad_root,
+            plug: params.plug.clone().unwrap_or_else(LoopPlug::new),
             params,
         }
     }
@@ -894,6 +205,7 @@ pub(crate) struct LoopOpts<'a> {
     pub(crate) classify_error: Option<ErrorClassifier>,
     pub(crate) temperature: Option<f64>,
     pub(crate) max_tokens: Option<u64>,
+    pub(crate) preserve_reasoning_in_history: bool,
 }
 
 /// A single tool invocation queued for concurrent execution within a turn.
@@ -902,15 +214,16 @@ struct ToolJob {
     name: String,
     args: String,
     call: String,
-    key: String,
     over_cap: Option<String>,
+    /// Parent contexts cloned for this Task job (only set for "Task" jobs).
+    task_parent_contexts: Vec<Box<dyn MutableModelContext>>,
 }
 
 /// Outcome of one concurrent tool batch dispatched by
 /// [`LoopState::dispatch_tool_jobs`].
 enum ToolDispatchOutcome {
     /// Every tool finished; outputs are aligned with the job list order.
-    Completed(Vec<String>),
+    Completed(Vec<(String, Vec<Box<dyn MutableModelContext>>)>),
     /// The operator entered debug mid-batch: the batch was abandoned, the
     /// turn's history was unwound, and the caller should re-execute the turn.
     ReexecuteTurn,
@@ -941,7 +254,15 @@ struct LoopState {
     total_cached_tokens: Option<u64>,
     total_cache_creation_tokens: Option<u64>,
     total_reasoning_tokens: Option<u64>,
-    tool_ledger: ToolLedger,
+    /// Mutable model contexts that observe tool calls and contribute per-turn
+    /// transcript blocks.
+    /// Original stage/task prompt — persists across turns so the bootstrap
+    /// message can always carry the model's instructions, even after
+    /// `next_prompt` has been overwritten with "Continue.".
+    stage_prompt: String,
+    contexts: Vec<Box<dyn MutableModelContext>>,
+    findings_ledger: FindingsLedger,
+    turn_findings_injected: bool,
     interactive_active: bool,
     pending_run_one_turn: bool,
     cmd_rx: Option<mpsc::Receiver<InteractiveCommand>>,
@@ -950,6 +271,9 @@ struct LoopState {
     remaining_turns: usize,
     reminder_budget: usize,
     completion_nudge_budget: usize,
+    preserve_reasoning_in_history: bool,
+    /// Inversion-of-control plug carrying log/scratchpad/debug/token-usage/contexts.
+    plug: LoopPlug,
 }
 
 /// Accumulated state from one model completion stream.
@@ -1025,6 +349,8 @@ impl LoopState {
         tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
         max_turns: usize,
         prefix: &str,
+        preserve_reasoning_in_history: bool,
+        plug: &LoopPlug,
     ) -> Self {
         // Destructure the interactive session into its components so we can
         // thread them independently through the loop.
@@ -1065,15 +391,26 @@ impl LoopState {
             total_cached_tokens: None,
             total_cache_creation_tokens: None,
             total_reasoning_tokens: None,
-            tool_ledger: ToolLedger::new(),
+            contexts: {
+                let mut contexts: Vec<Box<dyn MutableModelContext>> = Vec::new();
+                for ctx in &plug.contexts {
+                    contexts.push(ctx.clone_box());
+                }
+                contexts
+            },
+            findings_ledger: FindingsLedger::new(),
+            turn_findings_injected: false,
             interactive_active: false,
             pending_run_one_turn: false,
             cmd_rx,
             evt_tx,
             pause,
+            stage_prompt: prompt.to_string(),
             remaining_turns: max_turns,
             reminder_budget,
             completion_nudge_budget,
+            preserve_reasoning_in_history,
+            plug: plug.clone(),
         }
     }
 
@@ -1088,24 +425,18 @@ impl LoopState {
         prefix: &str,
         idle_timeout: f64,
         nested: bool,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
         compaction_opts: Option<CompactionOpts>,
         compactor: Option<Arc<dyn compaction::Compactor>>,
-        scratchpad_path: Option<&Path>,
-        scratchpad_root: Option<&Path>,
         turn_retry_backoff: &[f64],
         timeout_retry_backoff: &[f64],
     ) -> Result<StreamTurnOutcome, ClientError> {
         // Phase 1: assemble the request (messages, scratchpad, gen params).
-        let builder = self.prepare_stream_request(
-            tool_defs,
-            opts,
-            compaction_opts,
-            compactor,
-            scratchpad_path,
-            scratchpad_root,
-            nested,
-        );
+        let builder =
+            self.prepare_stream_request(tool_defs, opts, compaction_opts, compactor, nested);
+
+        // Dump the full prompt to the state directory when
+        // GREMLINS_LOG_LEVEL=DEBUG and a debug store is configured.
+        self.plug.dump_prompt_debug(&builder);
 
         // Phase 2: launch the model stream, handling pre-stream errors and
         // retry inline (each path returns early).
@@ -1115,11 +446,10 @@ impl LoopState {
                 log::info!(
                     "agent_loop: prompt too large on turn {}: {} bytes exceeds configured limit of {} bytes", self.turn_num, actual, limit
                 );
-                send_log(
-                    log_tx,
-                    prefix,
+                self.plug.log(
+                    log::Level::Info,
                     &format!(
-                        "error: prompt size {actual} bytes exceeds configured limit of {limit} bytes"
+                        "{prefix}error: prompt size {actual} bytes exceeds configured limit of {limit} bytes"
                     ),
                 );
                 return Err(ClientError::PromptTooLarge { limit, actual });
@@ -1136,17 +466,19 @@ impl LoopState {
                     log::info!(
                         "agent_loop: retryable stream error on turn {} (attempt {}), backing off {wait}s: {e}", self.turn_num, self.turn_retries
                     );
-                    send_log(
-                        log_tx,
-                        prefix,
-                        &format!("retry: transient error, backing off {wait}s"),
+                    self.plug.log(
+                        log::Level::Info,
+                        &format!("{prefix}retry: transient error, backing off {wait}s"),
                     );
                     if retry_backoff(cancel, wait).await {
                         log::info!(
                             "agent_loop: cancelled during retry backoff (label={})",
                             prefix
                         );
-                        send_log(log_tx, prefix, "exit: cancelled during retry backoff");
+                        self.plug.log(
+                            log::Level::Info,
+                            &format!("{prefix}exit: cancelled during retry backoff"),
+                        );
                         return Err(cancelled_error("cancelled", &self.history));
                     }
                     // Preserve the pending one-turn state only when
@@ -1177,7 +509,6 @@ impl LoopState {
                 prefix,
                 idle_timeout,
                 nested,
-                log_tx,
                 timeout_retry_backoff,
                 turn_retry_backoff,
             )
@@ -1197,8 +528,6 @@ impl LoopState {
         opts: &LoopOpts<'_>,
         compaction_opts: Option<CompactionOpts>,
         compactor: Option<Arc<dyn compaction::Compactor>>,
-        scratchpad_path: Option<&Path>,
-        scratchpad_root: Option<&Path>,
         nested: bool,
     ) -> CompletionRequest {
         let next_prompt_text = user_message_text(&self.next_prompt);
@@ -1222,40 +551,89 @@ impl LoopState {
             overhead_bytes,
         );
 
-        // If the scratchpad wasn't injected this turn (hash unchanged)
-        // but compaction dropped the prior injection from history, force
-        // re-injection so the model doesn't lose its working memory.
-        if !nested && !self.turn_scratchpad_injected {
-            if let Some(sp) = scratchpad_path {
-                let root = scratchpad_root.unwrap_or_else(|| Path::new("."));
-                if let Ok(content) =
-                    crate::executor::agent_runner::read_scratchpad_contained(sp, root)
-                {
-                    if !content.trim().is_empty() {
-                        let in_request = request_messages
-                            .iter()
-                            .any(|msg| user_message_text(msg).contains("## Scratchpad"))
-                            || user_message_text(&self.next_prompt).contains("## Scratchpad");
-                        if !in_request {
-                            let mut hasher = DefaultHasher::new();
-                            content.hash(&mut hasher);
-                            self.last_scratchpad_hash = Some(hasher.finish());
-                            let next_text = user_message_text(&self.next_prompt);
-                            let combined = format!(
-                                "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
-                            );
-                            self.next_prompt = Message::user(combined);
-                            self.turn_scratchpad_injected = true;
-                        }
-                    }
+        // If findings weren't injected this turn but the ledger has entries
+        // and compaction dropped the prior injection from history, force
+        // re-injection so the model doesn't lose its discovered facts.
+        if !nested && !self.turn_findings_injected {
+            let findings_block = self.findings_ledger.format();
+            if !findings_block.is_empty() {
+                let in_request = request_messages
+                    .iter()
+                    .any(|msg| user_message_text(msg).contains("## Findings"))
+                    || user_message_text(&self.next_prompt).contains("## Findings");
+                if !in_request {
+                    let next_text = user_message_text(&self.next_prompt);
+                    let combined = format!("{next_text}\n\n{findings_block}");
+                    self.next_prompt = Message::user(combined);
+                    self.turn_findings_injected = true;
                 }
             }
         }
 
-        let mut builder = CompletionRequest::new(self.next_prompt.clone())
-            .messages(request_messages)
+        // If the scratchpad wasn't injected this turn (hash unchanged)
+        // but compaction dropped the prior injection from history, force
+        // re-injection so the model doesn't lose its working memory.
+        if !nested && !self.turn_scratchpad_injected {
+            if let Some(content) = self.plug.read_scratchpad() {
+                if !content.trim().is_empty() {
+                    let in_request = request_messages
+                        .iter()
+                        .any(|msg| user_message_text(msg).contains("## Scratchpad"))
+                        || user_message_text(&self.next_prompt).contains("## Scratchpad");
+                    if !in_request {
+                        let mut hasher = DefaultHasher::new();
+                        content.hash(&mut hasher);
+                        self.last_scratchpad_hash = Some(hasher.finish());
+                        let next_text = user_message_text(&self.next_prompt);
+                        let combined = format!(
+                            "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
+                        );
+                        self.next_prompt = Message::user(combined);
+                        self.turn_scratchpad_injected = true;
+                    }
+                } else {
+                    self.last_scratchpad_hash = None;
+                }
+                // Note: when read_scratchpad() returns None, leave
+                // last_scratchpad_hash unchanged so a transient read
+                // failure won't cause redundant re-injection.
+            }
+        }
+
+        // Compose per-turn context transcripts into the request messages.
+        let composed = compose_model_transcript(
+            &self.stage_prompt,
+            &request_messages,
+            &self.next_prompt,
+            &self.contexts,
+            self.turn_num,
+            self.current_turn_start,
+        );
+        let (history_msgs, final_prompt) = composed
+            .split_last()
+            .map(|(last, rest)| (rest.to_vec(), last.clone()))
+            .unwrap_or_else(|| (vec![], self.next_prompt.clone()));
+
+        // Assemble system messages from contexts — trusted, always-accurate
+        // content that belongs in the system prompt rather than in user
+        // message transcript blocks.
+        let context_system_msgs: Vec<String> = self
+            .contexts
+            .iter()
+            .filter_map(|ctx| ctx.system_message())
+            .collect();
+
+        let combined_system = match (context_system_msgs.is_empty(), self.system_prompt.as_ref()) {
+            (true, None) => None,
+            (true, Some(sys)) => Some(sys.clone()),
+            (false, None) => Some(context_system_msgs.join("\n\n")),
+            (false, Some(sys)) => Some(format!("{}\n\n{}", context_system_msgs.join("\n\n"), sys)),
+        };
+
+        let mut builder = CompletionRequest::new(final_prompt)
+            .messages(history_msgs)
             .tools(tool_defs.to_vec());
-        if let Some(ref sys) = self.system_prompt {
+        if let Some(ref sys) = combined_system {
             builder = builder.preamble(sys.clone());
         }
         if let Some(params) = opts.extra.clone() {
@@ -1284,7 +662,6 @@ impl LoopState {
         prefix: &str,
         idle_timeout: f64,
         nested: bool,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
         timeout_retry_backoff: &[f64],
         turn_retry_backoff: &[f64],
     ) -> Result<StreamAccumulator, ClientError> {
@@ -1315,7 +692,7 @@ impl LoopState {
             let item = tokio::select! {
                 _ = cancel.cancelled() => {
                     log::info!("agent_loop: cancelled mid-stream (label={})", prefix);
-                    send_log(log_tx, prefix, "exit: cancelled mid-stream");
+                    self.plug.log(log::Level::Info, &format!("{prefix}exit: cancelled mid-stream"));
                     drop(response);
                     return Err(cancelled_error("cancelled", &stream_snapshot));
                 }
@@ -1324,7 +701,7 @@ impl LoopState {
                     // interactive mode. The turn will be re-executed after
                     // the debug session ends.
                     log::info!("agent_loop: paused mid-stream (label={})", prefix);
-                    send_log(log_tx, prefix, "pause: entering interactive mode (mid-stream)");
+                    self.plug.log(log::Level::Info, &format!("{prefix}pause: entering interactive mode (mid-stream)"));
                     drop(response);
                     paused_mid_stream = true;
                     if let Some(ref p) = self.pause {
@@ -1373,7 +750,7 @@ impl LoopState {
                             }
                             Err(e) => {
                                 log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                                send_log(log_tx, prefix, "exit: operator bailed");
+                                self.plug.log(log::Level::Info, &format!("{prefix}exit: operator bailed"));
                                 return Err(e);
                             }
                         }
@@ -1396,10 +773,9 @@ impl LoopState {
                             self.turn_num,
                             self.timeout_retries
                         );
-                        send_log(
-                            log_tx,
-                            prefix,
-                            &format!("retry: idle timeout, backing off {wait}s"),
+                        self.plug.log(
+                            log::Level::Info,
+                            &format!("{prefix}retry: idle timeout, backing off {wait}s"),
                         );
                         drop(response);
                         retry_timeout_turn = true;
@@ -1408,7 +784,10 @@ impl LoopState {
                                 "agent_loop: cancelled during timeout backoff (label={})",
                                 prefix
                             );
-                            send_log(log_tx, prefix, "exit: cancelled during timeout backoff");
+                            self.plug.log(
+                                log::Level::Info,
+                                &format!("{prefix}exit: cancelled during timeout backoff"),
+                            );
                             return Err(cancelled_error("cancelled", &self.history));
                         }
                         break;
@@ -1434,10 +813,9 @@ impl LoopState {
                         log::info!(
                             "agent_loop: retryable mid-stream error on turn {} (attempt {}), backing off {wait}s: {e}", self.turn_num, self.turn_retries
                         );
-                        send_log(
-                            log_tx,
-                            prefix,
-                            &format!("retry: transient error, backing off {wait}s"),
+                        self.plug.log(
+                            log::Level::Info,
+                            &format!("{prefix}retry: transient error, backing off {wait}s"),
                         );
                         drop(response);
                         retry_turn = true;
@@ -1446,7 +824,10 @@ impl LoopState {
                                 "agent_loop: cancelled during retry backoff (label={})",
                                 prefix
                             );
-                            send_log(log_tx, prefix, "exit: cancelled during retry backoff");
+                            self.plug.log(
+                                log::Level::Info,
+                                &format!("{prefix}exit: cancelled during retry backoff"),
+                            );
                             return Err(cancelled_error("cancelled", &self.history));
                         }
                         break;
@@ -1530,6 +911,7 @@ impl LoopState {
                             &text,
                             &reasoning_items,
                             &tool_calls,
+                            true,
                         ));
                     }
                 }
@@ -1615,10 +997,7 @@ impl LoopState {
         tool_ctx: &AgentLoopRuntime,
         model: &GremlinsModel,
         prefix: &str,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
-        _token_usage_sink: &TokenUsageSink,
         cancel: &CancelToken,
-        _gremlin_id: Option<&str>,
         raw: &mut Option<std::fs::File>,
         captured: &mut Option<Vec<serde_json::Value>>,
         nested: bool,
@@ -1635,19 +1014,11 @@ impl LoopState {
             .then(|| self.history[..self.history.len() - 1].to_vec());
 
         // Phase 1: collect + validate tool calls into owned jobs.
-        let jobs = self.collect_tool_jobs(tool_calls, prefix, log_tx, nested, raw, captured);
+        let jobs = self.collect_tool_jobs(tool_calls, prefix, nested, raw, captured);
 
         // Phase 2: concurrent execution (cancel/pause aware).
         let results = match self
-            .dispatch_tool_jobs(
-                &jobs,
-                tool_ctx,
-                model,
-                prefix,
-                log_tx,
-                cancel,
-                fork_parent_history,
-            )
+            .dispatch_tool_jobs(&jobs, tool_ctx, model, prefix, cancel, fork_parent_history)
             .await?
         {
             ToolDispatchOutcome::Completed(results) => results,
@@ -1657,7 +1028,7 @@ impl LoopState {
 
         // Phase 3: emit results, update ledger + history.
         self.emit_tool_results(
-            jobs, results, tool_ctx, prefix, log_tx, nested, raw, captured, cancel,
+            jobs, results, tool_ctx, prefix, nested, raw, captured, cancel,
         )
         .await?;
 
@@ -1671,7 +1042,6 @@ impl LoopState {
         &mut self,
         tool_calls: &[ToolCall],
         prefix: &str,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
         nested: bool,
         raw: &mut Option<std::fs::File>,
         captured: &mut Option<Vec<serde_json::Value>>,
@@ -1689,7 +1059,8 @@ impl LoopState {
                     200
                 )
             );
-            send_log(log_tx, prefix, &tool_msg);
+            self.plug
+                .log(log::Level::Info, &format!("{prefix}{tool_msg}"));
             if !nested {
                 let id_str = tc.id.to_string();
                 let tool_evt =
@@ -1704,7 +1075,6 @@ impl LoopState {
                 name: tc.function.name.to_string(),
                 args: args_json,
                 call: format_tool_call_parts(&tc.function.name, &tc.function.arguments),
-                key: ledger_key_arg(&tc.function.arguments),
                 over_cap: if tc.function.name == "Task" && {
                     task_count += 1;
                     task_count > tools::TASK_MAX_PER_TURN
@@ -1715,6 +1085,15 @@ impl LoopState {
                     ))
                 } else {
                     None
+                },
+                task_parent_contexts: if tc.function.name == "Task" {
+                    self.contexts
+                        .iter()
+                        .filter(|c| c.propagates_to_task())
+                        .map(|c| c.clone_box())
+                        .collect()
+                } else {
+                    Vec::new()
                 },
             });
         }
@@ -1736,7 +1115,6 @@ impl LoopState {
         tool_ctx: &AgentLoopRuntime,
         model: &GremlinsModel,
         prefix: &str,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
         cancel: &CancelToken,
         fork_parent_history: Option<Vec<Message>>,
     ) -> Result<ToolDispatchOutcome, ClientError> {
@@ -1781,15 +1159,29 @@ impl LoopState {
             std::future::pending::<()>().await;
         };
         let sem = Arc::new(Semaphore::new(tools::MAX_CONCURRENT_TOOLS));
+        let parent_contexts: Vec<Box<dyn MutableModelContext>> =
+            self.contexts.iter().map(|c| c.clone_box()).collect();
         let exec_fut = join_all(jobs.iter().map(|j| {
             let ctx = &ctx;
             let sem = sem.clone();
+            // Only Landscape and Task tools need parent contexts (Landscape for
+            // serve_tool dispatch, Task for child-loop context propagation).
+            // All other tools pass an empty vec to avoid unnecessary cloning.
+            let contexts = if j.name == "Task" {
+                j.task_parent_contexts.clone()
+            } else if j.name == "Landscape" {
+                parent_contexts.clone()
+            } else {
+                Vec::new()
+            };
             async move {
                 if let Some(msg) = &j.over_cap {
-                    msg.clone()
+                    (msg.clone(), Vec::new())
                 } else {
                     let _permit = sem.acquire_owned().await;
-                    tools::invoke(&j.id, &j.name, ctx, &j.args).await
+                    let outcome =
+                        tools::invoke_with_contexts(&j.id, &j.name, ctx, &j.args, contexts).await;
+                    (outcome.output, outcome.contexts)
                 }
             }
         }));
@@ -1804,7 +1196,7 @@ impl LoopState {
                 // re-insert the chat gremlin without waiting for every tool
                 // to complete.
                 log::info!("agent_loop: cancelled mid-tool (label={})", prefix);
-                send_log(log_tx, prefix, "exit: cancelled mid-tool");
+                self.plug.log(log::Level::Info, &format!("{prefix}exit: cancelled mid-tool"));
                 discard_tool_output(&mut self.live_output_rx);
                 return Err(cancelled_error("cancelled", &self.history));
             }
@@ -1813,7 +1205,7 @@ impl LoopState {
                 // (cancels pending tool futures). Completed tool side effects
                 // (files written, bash commands run) are not unwound.
                 log::info!("agent_loop: paused mid-tool (label={})", prefix);
-                send_log(log_tx, prefix, "pause: entering interactive mode (mid-tool)");
+                self.plug.log(log::Level::Info, &format!("{prefix}pause: entering interactive mode (mid-tool)"));
                 discard_tool_output(&mut self.live_output_rx);
                 if let Some(ref p) = self.pause {
                     p.reset();
@@ -1865,7 +1257,7 @@ impl LoopState {
                         }
                         Err(e) => {
                             log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                            send_log(log_tx, prefix, "exit: operator bailed");
+                            self.plug.log(log::Level::Info, &format!("{prefix}exit: operator bailed"));
                             return Err(e);
                         }
                     }
@@ -1884,10 +1276,9 @@ impl LoopState {
     async fn emit_tool_results(
         &mut self,
         jobs: Vec<ToolJob>,
-        results: Vec<String>,
+        results: Vec<(String, Vec<Box<dyn MutableModelContext>>)>,
         tool_ctx: &AgentLoopRuntime,
         prefix: &str,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
         nested: bool,
         raw: &mut Option<std::fs::File>,
         captured: &mut Option<Vec<serde_json::Value>>,
@@ -1918,15 +1309,10 @@ impl LoopState {
         // for `tool_calls.len()` when bumping the turn counter below.
         let job_count = jobs.len();
         let mut result_msgs = Vec::new();
-        // Collect Write/Edit file paths for deferred invalidation.
-        // Phase 2 runs tools concurrently, so a Write may finish after
-        // a Read of the same file even when it appears first in request
-        // order.  We defer all invalidations until every observation is
-        // recorded, preventing stale content from leaking into [seen].
-        let mut mutation_paths: Vec<String> = Vec::new();
-        for (job, output) in jobs.into_iter().zip(results) {
+        for (job, (output, child_contexts)) in jobs.into_iter().zip(results) {
             let result_msg = format!("result: {}", trunc(&output, 200));
-            send_log(log_tx, prefix, &result_msg);
+            self.plug
+                .log(log::Level::Info, &format!("{prefix}{result_msg}"));
             if !nested {
                 let result_evt = tool_result_event(&job.id, &output);
                 write_raw(raw, &result_evt);
@@ -1956,58 +1342,91 @@ impl LoopState {
                     )
                     .await?;
             }
-            if tools::result_status(&output) == "ok" {
-                self.tool_ledger
-                    .record(&job.name, &job.key, &output, &job.args, self.turn_num);
-                // Collect Write/Edit paths for deferred invalidation.
-                // Phase 2 executes concurrently, so a Write that appears
-                // first in request order may finish after a Read of the
-                // same file.  Invalidating inline would let the later-
-                // recorded Read reintroduce stale content.  We batch
-                // invalidations after all observations.
-                if job.name == "Write" || job.name == "Edit" {
-                    let args_val: serde_json::Value =
-                        serde_json::from_str(&job.args).unwrap_or(serde_json::Value::Null);
-                    if let Some(fp) = args_val.get("file_path").and_then(|v| v.as_str()) {
-                        mutation_paths.push(fp.to_string());
+
+            let extra: Vec<Option<String>> = if tools::result_status(&output) == "ok" {
+                // Phase 1: observe — record tool results into every context.
+                // Invalidation is deferred to finalize_turn below to prevent
+                // concurrent tool batches from racing reads against writes.
+                let mut v = Vec::with_capacity(self.contexts.len());
+                for ctx in &mut self.contexts {
+                    ctx.observe_tool(self.turn_num, &job.name, &job.args, &output);
+                    v.push(ctx.tool_result_extra(self.turn_num, &job.name, &job.args, &output));
+                }
+                v
+            } else {
+                Vec::new()
+            };
+            // Newly joined Read/Grep outputs are not part of the compact
+            // `[seen]` transcript, so drain them here. They are attached to
+            // this Task's tool result (durable history) rather than only the
+            // ephemeral next_prompt, so later turns retain the Scout's evidence
+            // even after the ledger has marked the files as read.
+            let mut task_observations: Vec<String> = Vec::new();
+            // Join child contexts back into parent.  Match by concrete
+            // child context joins only the parent context of the same
+            // type, etc. — no silent cross-type no-op calls.
+            if job.name == "Task" && !child_contexts.is_empty() {
+                for child_ctx in &child_contexts {
+                    let child_tid = child_ctx.as_any().type_id();
+                    for parent_ctx in &mut self.contexts {
+                        if parent_ctx.as_any().type_id() == child_tid {
+                            parent_ctx.join(child_ctx.as_ref());
+                        }
+                    }
+                }
+                for parent_ctx in &mut self.contexts {
+                    let text = parent_ctx.new_observations_text();
+                    if !text.is_empty() {
+                        task_observations.push(text);
                     }
                 }
             }
-            // Only Scout Task results carry the worker's file observations as a
-            // machine-parseable block. Fold them into readable content and
-            // deduplicate against the parent's own reads before writing them
-            // into history, so already-seen files are not re-injected. Fork
-            // and Implement stay prose-only.
-            let history_output = if job.name == "Task"
-                && task_kind_from_args(&job.args) == Some(super::task_kind::TaskKind::Scout)
-            {
-                // A Scout's writes are also mutations of the parent's view.
-                // Defer their invalidation until after every result in this
-                // batch is recorded: in a concurrent batch ordered Scout then
-                // Read(file), the Read can finish before the Scout edits the
-                // file but be recorded after the Scout's inline invalidation.
-                mutation_paths.extend(scout_written_paths(&output));
-                fold_scout_output(&output, &mut self.tool_ledger, self.turn_num)
-            } else {
+            let annotated = extra.iter().flatten().fold(String::new(), |mut acc, s| {
+                if !acc.is_empty() {
+                    acc.push('\n');
+                }
+                acc.push_str(s);
+                acc
+            });
+            let mut tool_output = if annotated.is_empty() {
                 output
+            } else {
+                format!("{annotated}\n{output}")
             };
+            if !task_observations.is_empty() {
+                tool_output.push_str("\n\n");
+                tool_output.push_str(&task_observations.join("\n\n"));
+            }
             result_msgs.push(Message::tool_result(
                 CallId::from_wire(job.id.clone()),
                 ToolName::new(job.name.clone()).expect("tool name must not be empty"),
-                history_output,
+                tool_output,
             ));
         }
-        // Apply deferred invalidations now that all observations
-        // for this turn are recorded.
-        for fp in &mutation_paths {
-            self.tool_ledger.invalidate_after_write(fp);
+        // Phase 2: finalize — apply deferred invalidations for every context.
+        // For ledger contexts this processes pending_mutations (Write/Edit paths)
+        // and captures the per-turn transcript block.
+        for ctx in &mut self.contexts {
+            ctx.finalize_turn(self.turn_num);
         }
         self.turns += job_count;
-        // Every tool result lands in history so the results stay adjacent to the
-        // assistant tool_calls message; the ledger becomes the next turn's prompt,
-        // trailing the complete result block instead of splitting it.
+        // Every tool result lands in history so the results stay adjacent to
+        // the assistant tool_calls message.  Context content ([seen] block)
+        // no longer travels through history — it is composed ephemerally via
+        // compose_model_transcript.
         self.history.extend(result_msgs);
-        self.next_prompt = Message::user(self.tool_ledger.format(self.turn_num));
+        // The next prompt is a simple continuation; context blocks are merged
+        // by compose_model_transcript during request assembly. Joined child
+        // observations ride the Task tool result in history, not this prompt.
+        let findings = self.findings_ledger.format();
+        let mut next_text = "Continue.".to_string();
+        if !findings.is_empty() {
+            next_text = format!("{next_text}\n\n{findings}");
+            self.turn_findings_injected = true;
+        } else {
+            self.turn_findings_injected = false;
+        }
+        self.next_prompt = Message::user(next_text);
         self.turn_scratchpad_injected = false;
         self.remaining_turns -= 1;
         Ok(())
@@ -2019,7 +1438,6 @@ impl LoopState {
         &mut self,
         model: &GremlinsModel,
         prefix: &str,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<InteractiveBoundary, ClientError> {
         if self.cmd_rx.is_some() && self.evt_tx.is_some() && self.pause.is_some() {
             if self.pending_run_one_turn {
@@ -2058,7 +1476,8 @@ impl LoopState {
                     }
                     Err(e) => {
                         log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                        send_log(log_tx, prefix, "exit: operator bailed");
+                        self.plug
+                            .log(log::Level::Info, &format!("{prefix}exit: operator bailed"));
                         return Err(e);
                     }
                 }
@@ -2068,10 +1487,9 @@ impl LoopState {
                     "agent_loop: pause token detected at turn boundary (label={})",
                     prefix
                 );
-                send_log(
-                    log_tx,
-                    prefix,
-                    "pause: entering interactive mode (turn boundary)",
+                self.plug.log(
+                    log::Level::Info,
+                    &format!("{prefix}pause: entering interactive mode (turn boundary)"),
                 );
                 if let Some(ref p) = self.pause {
                     p.reset();
@@ -2113,7 +1531,8 @@ impl LoopState {
                     }
                     Err(e) => {
                         log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                        send_log(log_tx, prefix, "exit: operator bailed");
+                        self.plug
+                            .log(log::Level::Info, &format!("{prefix}exit: operator bailed"));
                         return Err(e);
                     }
                 }
@@ -2125,38 +1544,32 @@ impl LoopState {
     /// Inject the persistent scratchpad into the next user prompt when its
     /// content hash changed since the last turn. No-op for nested (Task)
     /// loops, which are stateless helpers.
-    fn inject_scratchpad(
-        &mut self,
-        scratchpad_path: Option<&Path>,
-        scratchpad_root: Option<&Path>,
-        nested: bool,
-    ) {
+    fn inject_scratchpad(&mut self, nested: bool) {
         if !nested && !self.turn_scratchpad_injected {
-            if let Some(scratchpad_path) = scratchpad_path {
-                let root = scratchpad_root.unwrap_or_else(|| Path::new("."));
-                if let Ok(content) =
-                    crate::executor::agent_runner::read_scratchpad_contained(scratchpad_path, root)
-                {
-                    if !content.trim().is_empty() {
-                        let mut hasher = DefaultHasher::new();
-                        content.hash(&mut hasher);
-                        let current_hash = hasher.finish();
-                        if self.last_scratchpad_hash != Some(current_hash) {
-                            self.last_scratchpad_hash = Some(current_hash);
-                            let next_text = user_message_text(&self.next_prompt);
-                            let combined = format!(
-                                "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
-                            );
-                            self.next_prompt = Message::user(combined);
-                            self.turn_scratchpad_injected = true;
-                        }
-                    } else {
-                        // Scratchpad was cleared — reset so a later rewrite
-                        // of the same content won't be skipped.
-                        self.last_scratchpad_hash = None;
+            if let Some(content) = self.plug.read_scratchpad() {
+                if !content.trim().is_empty() {
+                    let mut hasher = DefaultHasher::new();
+                    content.hash(&mut hasher);
+                    let current_hash = hasher.finish();
+                    if self.last_scratchpad_hash != Some(current_hash) {
+                        self.last_scratchpad_hash = Some(current_hash);
+                        let next_text = user_message_text(&self.next_prompt);
+                        let combined = format!(
+                            "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
+                        );
+                        self.next_prompt = Message::user(combined);
+                        self.turn_scratchpad_injected = true;
                     }
+                } else {
+                    // Scratchpad was cleared — reset so a later rewrite
+                    // of the same content won't be skipped.
+                    self.last_scratchpad_hash = None;
                 }
             }
+            // Note: when read_scratchpad() returns None (no path configured,
+            // or a transient read error mapped through .ok()), we intentionally
+            // leave last_scratchpad_hash unchanged so a transient failure
+            // won't cause a redundant re-injection next turn.
         }
     }
 
@@ -2204,7 +1617,6 @@ impl LoopState {
         raw: &mut Option<std::fs::File>,
         captured: &mut Option<Vec<serde_json::Value>>,
         prefix: &str,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<(), ClientError> {
         // Emit TurnComplete via tool_ctx.telemetry.stream_events, before
         // text/tool_calls are consumed by the rest of the turn processing.
@@ -2233,11 +1645,11 @@ impl LoopState {
 
         if !reasoning.is_empty() {
             let msg = format!("think: {}", trunc(reasoning, 200));
-            send_log(log_tx, prefix, &msg);
+            self.plug.log(log::Level::Info, &format!("{prefix}{msg}"));
         }
         if !text.is_empty() {
             let msg = format!("text: {}", trunc(text, 200));
-            send_log(log_tx, prefix, &msg);
+            self.plug.log(log::Level::Info, &format!("{prefix}{msg}"));
         }
         if !nested {
             if !text.is_empty() {
@@ -2247,8 +1659,10 @@ impl LoopState {
                 }
                 self.final_text = text.to_string();
             }
+            self.findings_ledger.feed(text);
         } else {
             self.final_text = text.to_string();
+            self.findings_ledger.feed(text);
         }
 
         emit_turn_metrics(
@@ -2261,7 +1675,7 @@ impl LoopState {
             text,
             tool_calls,
             turn_usage,
-            log_tx,
+            &self.plug,
         );
         Ok(())
     }
@@ -2280,7 +1694,6 @@ impl LoopState {
         captured: &mut Option<Vec<serde_json::Value>>,
         loop_start: Instant,
         prefix: &str,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<DoneDecision, ClientError> {
         // Solo Done is the only valid completion signal. Mixed Done + other
         // tool calls is incoherent and rejected wholesale so the model retries
@@ -2292,9 +1705,14 @@ impl LoopState {
             (Some(_done_tc), true) => {
                 // Mixed — produce a tool_result for every call so providers
                 // see a valid round of history.
-                self.history.push(self.next_prompt.clone());
-                self.history
-                    .push(assistant_tool_message(text, reasoning_items, tool_calls));
+                // No history.push(next_prompt) here — context content travels
+                // through compose_model_transcript.
+                self.history.push(assistant_tool_message(
+                    text,
+                    reasoning_items,
+                    tool_calls,
+                    self.preserve_reasoning_in_history,
+                ));
                 for tc in tool_calls {
                     let body = if tc.function.name == "Done" {
                         "Error: Done must be called alone — do not combine Done with \
@@ -2315,6 +1733,7 @@ impl LoopState {
                     "Done was rejected because it was combined with other tool calls. \
                      Try again — this time either use tools, or call Done. Never both.",
                 );
+                self.finalize_contexts(self.turn_num);
                 return Ok(DoneDecision::RetryNeeded);
             }
             (Some(done_tc), false) => {
@@ -2326,10 +1745,9 @@ impl LoopState {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                send_log(
-                    log_tx,
-                    prefix,
-                    &format!("tool: Done {}", trunc(&done_summary, 200)),
+                self.plug.log(
+                    log::Level::Info,
+                    &format!("{prefix}tool: Done {}", trunc(&done_summary, 200)),
                 );
                 if !nested && !expected_artifact_paths.is_empty() {
                     let missing = missing_artifacts(expected_artifact_paths);
@@ -2340,11 +1758,11 @@ impl LoopState {
                              tool, then call Done.",
                             artifact_reminder(&missing),
                         );
-                        self.history.push(self.next_prompt.clone());
                         self.history.push(assistant_tool_message(
                             text,
                             reasoning_items,
                             std::slice::from_ref(done_tc),
+                            self.preserve_reasoning_in_history,
                         ));
                         let rejected_ledger = format!(
                             "[turn {}]: Done {} (rejected)\n\n{}",
@@ -2356,6 +1774,7 @@ impl LoopState {
                             done_tc.function.name.clone(),
                             &reminder,
                         );
+                        self.finalize_contexts(self.turn_num);
                         return Ok(DoneDecision::RetryNeeded);
                     }
                 }
@@ -2375,7 +1794,7 @@ impl LoopState {
                     self.total_reasoning_tokens,
                 );
                 if !nested {
-                    emit_final(prefix, self.turns, "", log_tx);
+                    emit_final(prefix, self.turns, "", &self.plug);
                     emit_summary(
                         prefix,
                         self.turn_num,
@@ -2385,7 +1804,7 @@ impl LoopState {
                         self.total_cached_tokens,
                         self.total_cache_creation_tokens,
                         self.total_reasoning_tokens,
-                        log_tx,
+                        &self.plug,
                     );
                 }
                 // Emit Done via stream_events. Nested loops skip this — only
@@ -2414,6 +1833,7 @@ impl LoopState {
                     text,
                     reasoning_items,
                     std::slice::from_ref(done_tc),
+                    self.preserve_reasoning_in_history,
                 ));
                 let done_ledger = format!("[turn {}]: Done {}", self.turn_num, done_summary);
                 messages.push(compaction::done_user_message(
@@ -2428,11 +1848,8 @@ impl LoopState {
                     captured,
                     usage,
                     Some(messages),
-                    if nested {
-                        Some(self.tool_ledger.file_observations())
-                    } else {
-                        None
-                    },
+                    Some(self.context_file_observations().unwrap_or_default()),
+                    self.contexts.iter().map(|c| c.clone_box()).collect(),
                 ))));
             }
             _ => {}
@@ -2454,7 +1871,6 @@ impl LoopState {
         raw: &mut Option<std::fs::File>,
         captured: &mut Option<Vec<serde_json::Value>>,
         prefix: &str,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> EmptyTurnAction {
         // In interactive mode, empty turns are expected — the operator is
         // driving the conversation. Don't nudge or remind.
@@ -2466,10 +1882,14 @@ impl LoopState {
         // the structured reasoning items for the next request.
         if text.is_empty() && !reasoning.is_empty() {
             log::debug!("reasoning-only turn: turn={} — continuing", self.turn_num);
-            self.history.push(self.next_prompt.clone());
-            self.history
-                .push(assistant_tool_message("", reasoning_items, &[]));
+            self.history.push(assistant_tool_message(
+                "",
+                reasoning_items,
+                &[],
+                self.preserve_reasoning_in_history,
+            ));
             self.next_prompt = Message::user("Continue.");
+            self.finalize_contexts(self.turn_num);
             return EmptyTurnAction::ContinueLoop;
         }
 
@@ -2491,9 +1911,12 @@ impl LoopState {
                     missing.len(),
                     self.reminder_budget,
                 );
-                self.history.push(self.next_prompt.clone());
-                self.history
-                    .push(assistant_tool_message(text, reasoning_items, &[]));
+                self.history.push(assistant_tool_message(
+                    text,
+                    reasoning_items,
+                    &[],
+                    self.preserve_reasoning_in_history,
+                ));
                 let reminder = artifact_reminder(&missing);
                 write_raw(
                     raw,
@@ -2503,6 +1926,7 @@ impl LoopState {
                     evts.push(serde_json::json!({"type": "reminder", "message": reminder}));
                 }
                 self.next_prompt = Message::user(reminder);
+                self.finalize_contexts(self.turn_num);
                 return EmptyTurnAction::ContinueLoop;
             }
         }
@@ -2524,10 +1948,14 @@ impl LoopState {
             if let Some(evts) = captured.as_mut() {
                 evts.push(serde_json::json!({"type": "reminder", "message": nudge_msg}));
             }
-            self.history.push(self.next_prompt.clone());
-            self.history
-                .push(assistant_tool_message(text, reasoning_items, &[]));
+            self.history.push(assistant_tool_message(
+                text,
+                reasoning_items,
+                &[],
+                self.preserve_reasoning_in_history,
+            ));
             self.next_prompt = Message::user(nudge_msg.to_string());
+            self.finalize_contexts(self.turn_num);
             return EmptyTurnAction::ContinueLoop;
         }
 
@@ -2548,7 +1976,7 @@ impl LoopState {
             self.total_reasoning_tokens,
         );
         if !nested {
-            emit_final(prefix, self.turns, " (exhausted)", log_tx);
+            emit_final(prefix, self.turns, " (exhausted)", &self.plug);
             emit_summary(
                 prefix,
                 self.turn_num,
@@ -2558,24 +1986,39 @@ impl LoopState {
                 self.total_cached_tokens,
                 self.total_cache_creation_tokens,
                 self.total_reasoning_tokens,
-                log_tx,
+                &self.plug,
             );
         }
         let mut messages = self.history.clone();
         messages.push(self.next_prompt.clone());
-        messages.push(assistant_tool_message(text, reasoning_items, &[]));
+        messages.push(assistant_tool_message(
+            text,
+            reasoning_items,
+            &[],
+            self.preserve_reasoning_in_history,
+        ));
         EmptyTurnAction::ReturnRun(Box::new(completed_run(
             Some(self.final_text.clone()),
             None,
             captured,
             usage,
             Some(messages),
-            if nested {
-                Some(self.tool_ledger.file_observations())
-            } else {
-                None
-            },
+            Some(self.context_file_observations().unwrap_or_default()),
+            self.contexts.iter().map(|c| c.clone_box()).collect(),
         )))
+    }
+
+    /// Snapshot file observations from contexts for CompletedRun.
+    fn context_file_observations(&self) -> Option<FileObservations> {
+        self.contexts.iter().find_map(|ctx| ctx.file_observations())
+    }
+
+    /// Call finalize_turn on every context, used at every turn boundary
+    /// to maintain the transcript length invariant.
+    fn finalize_contexts(&mut self, turn: usize) {
+        for ctx in &mut self.contexts {
+            ctx.finalize_turn(turn);
+        }
     }
 
     /// Append the user prompt and assistant tool-call message for this turn to
@@ -2586,9 +2029,12 @@ impl LoopState {
         reasoning_items: &[Sealed<Reasoning>],
         tool_calls: &[ToolCall],
     ) {
-        self.history.push(self.next_prompt.clone());
-        self.history
-            .push(assistant_tool_message(text, reasoning_items, tool_calls));
+        self.history.push(assistant_tool_message(
+            text,
+            reasoning_items,
+            tool_calls,
+            self.preserve_reasoning_in_history,
+        ));
     }
 }
 
@@ -2632,13 +2078,13 @@ pub(crate) async fn run_agent_loop(
         cwd_display,
         trunc(reasoning_effort.unwrap_or("default"), 50)
     );
-    send_log(&ctx.params.log_tx, &prefix, &log_line);
+    ctx.plug
+        .log(log::Level::Info, &format!("{prefix}{log_line}"));
 
     if cwd.is_none() {
-        send_log(
-            &ctx.params.log_tx,
-            &prefix,
-            "warning: no cwd set for worktree enforcement",
+        ctx.plug.log(
+            log::Level::Info,
+            &format!("{prefix}warning: no cwd set for worktree enforcement"),
         );
     }
 
@@ -2660,7 +2106,7 @@ pub(crate) async fn run_agent_loop(
         None
     };
 
-    let worktree = tools::worktree_root(cwd.as_deref());
+    let worktree = crate::core::paths::worktree_root(cwd.as_deref());
     let audit_log = raw_path.as_ref().map(|p| tools::audit_log_path(p));
     let max_turns = crate::config::max_agent_turns();
     // When the run requests allow-all, skip building the roots list entirely;
@@ -2670,7 +2116,7 @@ pub(crate) async fn run_agent_loop(
     } else {
         let mut allowed_roots = vec![worktree];
         if let Some(ref artifact_dir) = ctx.params.artifact_dir {
-            allowed_roots.push(tools::canonicalize_or_ancestor(artifact_dir));
+            allowed_roots.push(crate::core::paths::canonicalize_or_ancestor(artifact_dir));
         }
         tools::SandboxMode::Roots(allowed_roots)
     };
@@ -2710,6 +2156,7 @@ pub(crate) async fn run_agent_loop(
         active_skills: ctx.params.active_skills.clone(),
         skills_available: ctx.params.skills_available,
         discovered_skills: ctx.params.discovered_skills.clone(),
+        log_tx: ctx.params.log_tx.clone(),
     };
     let tool_defs = tools::tool_definitions(opts.tool_filter, ctx.params.skills_available);
 
@@ -2725,10 +2172,10 @@ pub(crate) async fn run_agent_loop(
         idle_timeout,
         max_turns,
         ctx.completion_nudge_budget,
-        ctx.params.log_tx.clone(),
         opts.temperature,
         opts.max_tokens,
         opts.extra.clone(),
+        opts.preserve_reasoning_in_history,
     );
     tool_ctx.task_fn = Some(runner);
 
@@ -2749,16 +2196,12 @@ pub(crate) async fn run_agent_loop(
         &ctx.expected_artifact_paths,
         ctx.reminder_budget,
         ctx.completion_nudge_budget,
-        &ctx.params.log_tx,
-        ctx.params.gremlin_id.clone(),
-        ctx.params.token_usage_sink.clone(),
+        &ctx.plug,
         interactive,
         tool_output_rx,
         ctx.prepopulated_messages.clone(),
         ctx.compaction_opts,
         ctx.params.compactor.clone(),
-        ctx.scratchpad_path.clone(),
-        ctx.scratchpad_root.clone(),
     )
     .await
 }
@@ -2780,21 +2223,20 @@ pub(crate) async fn run_agent_loop_nested(
     idle_timeout: f64,
     max_turns: usize,
     completion_nudge_budget: usize,
-    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     temperature: Option<f64>,
     max_tokens: Option<u64>,
     extra: Option<serde_json::Value>,
+    preserve_reasoning_in_history: bool,
     prepopulated_messages: Option<Vec<Message>>,
+    mut parent_contexts: Vec<Box<dyn MutableModelContext>>,
 ) -> Result<CompletedRun, ClientError> {
-    if let Some(ref tx) = log_tx {
-        let _ = tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
-    }
     let opts = LoopOpts {
         extra,
         tool_filter,
         classify_error: None,
         temperature,
         max_tokens,
+        preserve_reasoning_in_history,
     };
     // Nested loops never expose LoadSkill even when the parent has skills.
     let is_chat = false;
@@ -2821,6 +2263,29 @@ pub(crate) async fn run_agent_loop_nested(
     } else {
         format!("{id_chain}.")
     };
+    // Forward nested-loop log lines to the optional channel so callers
+    // (tests, debug tooling) can observe task begin/turn events without
+    // subscribing to the process-wide logger.
+    let mut plug = LoopPlug::new();
+    if !parent_contexts.is_empty() {
+        // Reset transcript state so each seeded context starts fresh
+        // in the child loop. The child's own turns populate new
+        // transcript entries indexed from 0, independent of the
+        // parent's turn numbering.
+        for ctx in &mut parent_contexts {
+            ctx.clear_transcript();
+        }
+        plug.register_contexts(parent_contexts);
+    }
+    if let Some(log_tx) = nested_tool_ctx.log_tx.clone() {
+        plug.register_logger(move |_level, msg| {
+            let _ = log_tx.send(msg.to_string());
+        });
+    }
+    plug.log(
+        log::Level::Info,
+        &format!("{prefix}task: begin (max_turns={max_turns})"),
+    );
     let result = run_agent_loop_core(
         &model,
         prompt,
@@ -2838,21 +2303,15 @@ pub(crate) async fn run_agent_loop_nested(
         &[],
         0,
         completion_nudge_budget,
-        &log_tx,
-        None,
-        TokenUsageSink(None),
+        &plug,
         None,
         None,
         prepopulated_messages,
         None,
         None,
-        None,
-        None,
     )
     .await;
-    if let Some(ref tx) = log_tx {
-        let _ = tx.send(format!("{prefix}task: end"));
-    }
+    plug.log(log::Level::Info, &format!("{prefix}task: end"));
     result
 }
 
@@ -3029,6 +2488,7 @@ fn completed_run(
     usage: UsageStats,
     messages: Option<Vec<Message>>,
     file_observations: Option<FileObservations>,
+    contexts: Vec<Box<dyn MutableModelContext>>,
 ) -> CompletedRun {
     CompletedRun {
         exit_code: 0,
@@ -3039,6 +2499,7 @@ fn completed_run(
         token_usage: Some(usage),
         messages,
         file_observations,
+        contexts,
     }
 }
 
@@ -3195,16 +2656,12 @@ async fn run_agent_loop_core(
     expected_artifact_paths: &[PathBuf],
     reminder_budget: usize,
     completion_nudge_budget: usize,
-    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    gremlin_id: Option<String>,
-    token_usage_sink: TokenUsageSink,
+    plug: &LoopPlug,
     interactive: Option<InteractiveSession>,
     tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
     prepopulated_messages: Option<Vec<Message>>,
     compaction_opts: Option<CompactionOpts>,
     compactor: Option<Arc<dyn compaction::Compactor>>,
-    scratchpad_path: Option<PathBuf>,
-    scratchpad_root: Option<PathBuf>,
 ) -> Result<CompletedRun, ClientError> {
     let mut state = LoopState::new(
         system_prompt,
@@ -3216,6 +2673,8 @@ async fn run_agent_loop_core(
         tool_output_rx,
         max_turns,
         prefix,
+        opts.preserve_reasoning_in_history,
+        plug,
     );
     let loop_start = Instant::now();
     let turn_retry_backoff = crate::config::turn_retry_backoff();
@@ -3223,11 +2682,14 @@ async fn run_agent_loop_core(
     while state.remaining_turns > 0 {
         if cancel.is_cancelled() {
             log::info!("agent_loop: cancelled before turn (label={})", prefix);
-            send_log(log_tx, prefix, "exit: cancelled before turn");
+            plug.log(
+                log::Level::Info,
+                &format!("{prefix}exit: cancelled before turn"),
+            );
             return Err(cancelled_error("cancelled", &state.history));
         }
 
-        match state.await_interactive_turn(model, prefix, log_tx).await? {
+        match state.await_interactive_turn(model, prefix).await? {
             InteractiveBoundary::ContinueLoop => continue,
             InteractiveBoundary::RunTurn => {}
         }
@@ -3238,11 +2700,7 @@ async fn run_agent_loop_core(
 
         // Inject the persistent scratchpad on every turn of the main
         // (non-nested) loop. See [`LoopState::inject_scratchpad`].
-        state.inject_scratchpad(
-            scratchpad_path.as_deref(),
-            scratchpad_root.as_deref(),
-            nested,
-        );
+        state.inject_scratchpad(nested);
 
         let outcome = state
             .stream_turn(
@@ -3254,11 +2712,8 @@ async fn run_agent_loop_core(
                 prefix,
                 idle_timeout,
                 nested,
-                log_tx,
                 compaction_opts,
                 compactor.clone(),
-                scratchpad_path.as_deref(),
-                scratchpad_root.as_deref(),
                 &turn_retry_backoff,
                 &timeout_retry_backoff,
             )
@@ -3305,24 +2760,14 @@ async fn run_agent_loop_core(
         let turn_stats = turn_stats(state.turn_num, turn_usage.as_ref());
         let totals = state.fold_turn_usage(turn_usage.as_ref());
 
-        // ── Emit cumulative token usage via injected sink ─────
-        if let Some(ref id) = gremlin_id {
-            if let Some(ref sink) = token_usage_sink.0 {
-                let (last_prompt, last_cached) = turn_stats
-                    .as_ref()
-                    .map(|ts| (ts.prompt_tokens, ts.cached_input_tokens))
-                    .unwrap_or((None, None));
-                sink(TokenUsageEvent {
-                    id: id.clone(),
-                    usage: totals.clone(),
-                    cost_usd: None,
-                    last_prompt_tokens: last_prompt,
-                    last_cached_input_tokens: last_cached,
-                });
-            }
-        }
+        // ── Emit cumulative token usage via plug ─────
+        let (last_prompt, last_cached) = turn_stats
+            .as_ref()
+            .map(|ts| (ts.prompt_tokens, ts.cached_input_tokens))
+            .unwrap_or((None, None));
+        plug.emit_token_usage(totals.clone(), last_prompt, last_cached);
 
-        emit_turn_stats(prefix, state.turn_num, turn_stats.as_ref(), &totals, log_tx);
+        emit_turn_stats(prefix, state.turn_num, turn_stats.as_ref(), &totals, plug);
 
         state
             .emit_turn_artifacts(
@@ -3341,7 +2786,6 @@ async fn run_agent_loop_core(
                 raw,
                 captured,
                 prefix,
-                log_tx,
             )
             .await?;
 
@@ -3361,7 +2805,6 @@ async fn run_agent_loop_core(
                 captured,
                 loop_start,
                 prefix,
-                log_tx,
             )
             .await?
         {
@@ -3387,7 +2830,6 @@ async fn run_agent_loop_core(
                 raw,
                 captured,
                 prefix,
-                log_tx,
             ) {
                 EmptyTurnAction::ContinueLoop => continue,
                 EmptyTurnAction::ReturnRun(run) => return Ok(*run),
@@ -3402,10 +2844,7 @@ async fn run_agent_loop_core(
                 tool_ctx,
                 model,
                 prefix,
-                log_tx,
-                &token_usage_sink,
                 cancel,
-                gremlin_id.as_deref(),
                 raw,
                 captured,
                 nested,
@@ -3421,7 +2860,7 @@ async fn run_agent_loop_core(
         } else {
             ""
         };
-        emit_final(prefix, state.turns, suffix, log_tx);
+        emit_final(prefix, state.turns, suffix, plug);
         emit_summary(
             prefix,
             state.turn_num,
@@ -3431,19 +2870,25 @@ async fn run_agent_loop_core(
             state.total_cached_tokens,
             state.total_cache_creation_tokens,
             state.total_reasoning_tokens,
-            log_tx,
+            plug,
         );
     }
 
     if state.timed_out {
         log::info!("agent_loop: exit (stream idle timeout, label={})", prefix);
-        send_log(log_tx, prefix, "exit: stream idle timeout");
+        plug.log(
+            log::Level::Info,
+            &format!("{prefix}exit: stream idle timeout"),
+        );
         if state.exhausted_timeout_retries {
             log::error!(
                 "agent_loop: exhausted turn-level timeout retries, giving up (label={})",
                 prefix
             );
-            send_log(log_tx, prefix, "exit: exhausted turn-level timeout retries");
+            plug.log(
+                log::Level::Info,
+                &format!("{prefix}exit: exhausted turn-level timeout retries"),
+            );
             return Err(ClientError::RetryExhausted {
                 message: "exhausted turn-level timeout retries".into(),
             });
@@ -3454,14 +2899,17 @@ async fn run_agent_loop_core(
     }
     if let Some(err) = state.stream_error {
         log::info!("agent_loop: exit (stream error, label={})", prefix);
-        send_log(log_tx, prefix, "exit: stream error");
+        plug.log(log::Level::Info, &format!("{prefix}exit: stream error"));
         if state.exhausted_turn_retries {
             log::error!(
                 "agent_loop: exhausted turn-level retries ({} attempts), giving up (label={}): {err}",
                 turn_retry_backoff.len() + 1,
                 prefix
             );
-            send_log(log_tx, prefix, "exit: exhausted turn-level retries");
+            plug.log(
+                log::Level::Info,
+                &format!("{prefix}exit: exhausted turn-level retries"),
+            );
             return Err(ClientError::RetryExhausted {
                 message: format!(
                     "exhausted turn-level retries ({} attempts): {err}",
@@ -3473,10 +2921,9 @@ async fn run_agent_loop_core(
         return Err(classify(err));
     }
     log::info!("agent_loop: exit (exceeded max turns, label={})", prefix);
-    send_log(
-        log_tx,
-        prefix,
-        &format!("exit: exceeded max turns ({max_turns})"),
+    plug.log(
+        log::Level::Info,
+        &format!("{prefix}exit: exceeded max turns ({max_turns})"),
     );
     Err(ClientError::Runtime {
         message: format!("exceeded max turns ({max_turns})"),
@@ -3535,7 +2982,7 @@ fn emit_turn_stats(
     turn: usize,
     stats: Option<&TurnStats>,
     totals: &UsageStats,
-    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    plug: &LoopPlug,
 ) {
     let payload = serde_json::json!({
         "type": "turn_stats",
@@ -3543,7 +2990,7 @@ fn emit_turn_stats(
         "stats": stats,
         "totals": totals,
     });
-    send_log(log_tx, prefix, &payload.to_string());
+    plug.log(log::Level::Info, &format!("{prefix}{payload}"));
 }
 
 /// Emit per-turn telemetry: timing, token counts, cache hit ratio, reasoning ratio.
@@ -3558,7 +3005,7 @@ fn emit_turn_metrics(
     text: &str,
     tool_calls: &[ToolCall],
     usage: Option<&Usage>,
-    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    plug: &LoopPlug,
 ) {
     if !crate::config::telemetry_enabled() {
         return;
@@ -3614,7 +3061,7 @@ fn emit_turn_metrics(
         reasoning_tok,
         reasoning_byte_ratio,
     );
-    send_log(log_tx, prefix, &msg);
+    plug.log(log::Level::Info, &format!("{prefix}{msg}"));
 }
 
 /// Emit stage-end telemetry summary (always emitted, not gated by GREMLINS_TELEMETRY).
@@ -3628,7 +3075,7 @@ fn emit_summary(
     total_cached: Option<u64>,
     total_cache_creation: Option<u64>,
     total_reasoning: Option<u64>,
-    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    plug: &LoopPlug,
 ) {
     let wall = loop_start.elapsed();
     let total_prompt_u = total_prompt.unwrap_or(0);
@@ -3675,17 +3122,12 @@ fn emit_summary(
         total_cache_creation.unwrap_or(0),
         reasoning_pct,
     );
-    send_log(log_tx, prefix, &msg);
+    plug.log(log::Level::Info, &format!("{prefix}{msg}"));
 }
 
-pub(crate) fn emit_final(
-    prefix: &str,
-    turns: usize,
-    suffix: &str,
-    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
-) {
+pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str, plug: &LoopPlug) {
     let msg = format!("final: turns={turns} cost=not-reported{suffix}");
-    send_log(log_tx, prefix, &msg);
+    plug.log(log::Level::Info, &format!("{prefix}{msg}"));
 }
 
 #[cfg(test)]
@@ -3693,7 +3135,7 @@ mod tests {
     use super::*;
     use crate::clients::format::{key_arg, ledger_key_arg};
     use crate::clients::interactive::InteractiveChannels;
-    use crate::test_support::EnvGuard;
+    use crate::clients_plugins::tool_ledger::ToolLedger;
     use http::StatusCode;
     use rig_core::driver::DynModel;
     use rig_core::message::{Issuer, Reasoning, ReasoningContent, ToolFunction, UserContent};
@@ -3982,228 +3424,6 @@ mod tests {
         );
     }
 
-    // ── ToolLedger unit tests ──────────────────────────────────────
-
-    #[test]
-    fn tool_ledger_accumulates_reads() {
-        let mut tl = ToolLedger::new();
-        let args = serde_json::json!({"file_path": "/tmp/a.rs"}).to_string();
-        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/a.rs"}));
-        tl.record("Read", &key, "content1", &args, 0);
-        tl.record("Read", &key, "content1", &args, 0);
-        let args2 = serde_json::json!({"file_path": "/tmp/b.rs"}).to_string();
-        let key2 = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/b.rs"}));
-        tl.record("Read", &key2, "content2", &args2, 0);
-        // Two files, each read; turn 0 for all.
-        let out = tl.format(0);
-        assert!(out.contains("/tmp/a.rs"), "{out}");
-        assert!(out.contains("/tmp/b.rs"), "{out}");
-        assert!(out.contains(",2×"), "count should be 2 for a.rs: {out}");
-    }
-
-    #[test]
-    fn tool_ledger_dedup_by_content_hash() {
-        let mut tl = ToolLedger::new();
-        let args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
-        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Read", &key, "same", &args, 0);
-        tl.record("Read", &key, "same", &args, 0);
-        tl.record("Read", &key, "same", &args, 0);
-        let out = tl.format(0);
-        assert!(
-            out.contains(",3×"),
-            "same-hash re-reads should bump count: {out}"
-        );
-
-        // Different content replaces.
-        let mut tl2 = ToolLedger::new();
-        tl2.record("Read", &key, "first", &args, 0);
-        tl2.record("Read", &key, "second", &args, 0);
-        let out2 = tl2.format(0);
-        assert!(!out2.contains("×"), "different hash still counts: {out2}");
-    }
-
-    #[test]
-    fn tool_ledger_write_invalidates_read() {
-        let mut tl = ToolLedger::new();
-        let args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
-        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Read", &key, "content", &args, 0);
-        tl.record("Write", &key, "written", &args, 0);
-        // Invalidation is deferred — caller must apply after the batch.
-        tl.invalidate_after_write("/tmp/x.rs");
-        let out = tl.format(0);
-        assert!(out.contains("W("), "should have write: {out}");
-        assert!(!out.contains("R("), "read should be invalidated: {out}");
-    }
-
-    #[test]
-    fn tool_ledger_write_invalidates_greps() {
-        let mut tl = ToolLedger::new();
-        let grep_args = serde_json::json!({"pattern": "fn main", "path": "/tmp"}).to_string();
-        let grep_key = ledger_key_arg(&serde_json::json!({"pattern": "fn main"}));
-        tl.record("Grep", &grep_key, "results", &grep_args, 0);
-        let write_args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
-        let write_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Write", &write_key, "written", &write_args, 0);
-        tl.invalidate_after_write("/tmp/x.rs");
-        let out = tl.format(0);
-        assert!(!out.contains("G("), "greps should be invalidated: {out}");
-        assert!(
-            !out.contains("fn main"),
-            "grep pattern should be gone: {out}"
-        );
-    }
-
-    #[test]
-    fn tool_ledger_write_invalidates_landscape() {
-        let mut tl = ToolLedger::new();
-        let ls_args = serde_json::json!({"file_path": "/tmp"}).to_string();
-        let ls_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp"}));
-        tl.record("Landscape", &ls_key, "tree", &ls_args, 0);
-        let write_args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
-        let write_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Write", &write_key, "written", &write_args, 0);
-        tl.invalidate_after_write("/tmp/x.rs");
-        let out = tl.format(0);
-        assert!(
-            !out.contains("L("),
-            "landscape should be invalidated: {out}"
-        );
-    }
-
-    #[test]
-    fn tool_ledger_partial_reads() {
-        let mut tl = ToolLedger::new();
-        let args1 =
-            serde_json::json!({"file_path": "/tmp/x.rs", "offset": 0, "limit": 100}).to_string();
-        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Read", &key, "chunk1", &args1, 0);
-        let args2 =
-            serde_json::json!({"file_path": "/tmp/x.rs", "offset": 200, "limit": 300}).to_string();
-        tl.record("Read", &key, "chunk2", &args2, 0);
-        let out = tl.format(0);
-        assert!(
-            out.contains("0-100"),
-            "partial reads should show offset-limit: {out}"
-        );
-        assert!(out.contains("200-300"), "second partial: {out}");
-    }
-
-    #[test]
-    fn tool_ledger_format_empty() {
-        let tl = ToolLedger::new();
-        let out = tl.format(0);
-        assert_eq!(out, "[seen]\n(none)");
-    }
-
-    #[test]
-    fn tool_ledger_format_ages() {
-        let mut tl = ToolLedger::new();
-        let args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
-        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        tl.record("Read", &key, "content", &args, 0);
-        let out = tl.format(5);
-        assert!(out.contains("R(5t"), "age should be 5: {out}");
-        let out2 = tl.format(1);
-        assert!(out2.contains("R(1t"), "age should be 1: {out2}");
-    }
-
-    #[test]
-    fn tool_ledger_deferred_invalidation_guards_concurrent_ordering() {
-        // Simulate the Phase 2 concurrency issue: a Write and a Read
-        // of the same file appear in the same batch.  The Read completes
-        // first but appears second in request order.  Without deferred
-        // invalidation, recording Write then Read would let the stale
-        // Read survive.  With deferred invalidation, the Read is nuked
-        // after the whole batch.
-        let mut tl = ToolLedger::new();
-        let w_args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
-        let w_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        let r_args = serde_json::json!({"file_path": "/tmp/x.rs"}).to_string();
-        let r_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x.rs"}));
-        // Record Write, then Read (simulating request order).
-        tl.record("Write", &w_key, "written", &w_args, 0);
-        tl.record("Read", &r_key, "stale-content", &r_args, 0);
-        // No invalidation yet — Read is still present.
-        let pre = tl.format(0);
-        assert!(
-            pre.contains("R("),
-            "Read present before invalidation: {pre}"
-        );
-        // Apply deferred invalidation.
-        tl.invalidate_after_write("/tmp/x.rs");
-        let post = tl.format(0);
-        assert!(
-            !post.contains("R("),
-            "Read nuked after deferred invalidation: {post}"
-        );
-        assert!(post.contains("W("), "Write entry survives: {post}");
-    }
-
-    #[test]
-    fn tool_ledger_partial_only_omits_aggregate_count() {
-        // When only partial reads exist (no full-file read), the
-        // headline omits the aggregate count to avoid misleading
-        // summing across different windows.
-        let mut tl = ToolLedger::new();
-        let a1 =
-            serde_json::json!({"file_path": "/tmp/z.rs", "offset": 0, "limit": 100}).to_string();
-        let a2 =
-            serde_json::json!({"file_path": "/tmp/z.rs", "offset": 200, "limit": 100}).to_string();
-        let key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/z.rs"}));
-        tl.record("Read", &key, "chunk1", &a1, 0);
-        tl.record("Read", &key, "chunk2", &a2, 0);
-        let out = tl.format(0);
-        assert!(out.contains("/tmp/z.rs R(0t"), "headline present: {out}");
-        assert!(
-            !out.contains("/tmp/z.rs R(0t,"),
-            "no aggregate count: {out}"
-        );
-        assert!(out.contains("0-100:0t"), "first partial: {out}");
-        assert!(out.contains("200-100:0t"), "second partial: {out}");
-    }
-
-    #[test]
-    fn tool_ledger_storage_keys_are_untruncated() {
-        // Distinct file paths that would collide under truncation
-        // must remain separate entries in storage.
-        let mut tl = ToolLedger::new();
-        // truncate_ledger_value keeps head-40 + "\u{2026}" + tail-39.
-        // Build two paths that share the same head and tail but
-        // differ in the middle, so display labels collide.
-        let head = "/tmp/HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH"; // 40 chars
-        let tail = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT.rs"; // 39 chars
-        let path_a = format!("{head}_aaaa_{tail}");
-        let path_b = format!("{head}_bbbb_{tail}");
-        let args_a = serde_json::json!({"file_path": &path_a}).to_string();
-        let args_b = serde_json::json!({"file_path": &path_b}).to_string();
-        let key_a = ledger_key_arg(&serde_json::json!({"file_path": &path_a}));
-        let key_b = ledger_key_arg(&serde_json::json!({"file_path": &path_b}));
-        // Both display keys are identical after truncation.
-        assert_eq!(key_a, key_b, "display keys collide by design");
-        tl.record("Read", &key_a, "ca", &args_a, 0);
-        tl.record("Read", &key_b, "cb", &args_b, 0);
-        // Two distinct entries in storage.
-        assert_eq!(tl.reads.len(), 2, "storage keys must not collide");
-    }
-
-    #[test]
-    fn tool_ledger_edit_invalidates_read_without_w_entry() {
-        // Edit nukes reads for the target file but does not add a W.
-        let mut tl = ToolLedger::new();
-        let r_args = serde_json::json!({"file_path": "/tmp/e.rs"}).to_string();
-        let r_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/e.rs"}));
-        tl.record("Read", &r_key, "before", &r_args, 0);
-        let e_args = serde_json::json!({"file_path": "/tmp/e.rs"}).to_string();
-        let e_key = ledger_key_arg(&serde_json::json!({"file_path": "/tmp/e.rs"}));
-        tl.record("Edit", &e_key, "", &e_args, 0);
-        tl.invalidate_after_write("/tmp/e.rs");
-        let out = tl.format(0);
-        assert!(!out.contains("R("), "read nuked by Edit: {out}");
-        assert!(!out.contains("W("), "no W entry for Edit: {out}");
-    }
-
     #[test]
     fn enrich_log_line_secondary_args() {
         // Read with offset and limit.
@@ -4463,6 +3683,18 @@ mod tests {
             classify_error: None,
             temperature: None,
             max_tokens: None,
+            preserve_reasoning_in_history: false,
+        }
+    }
+
+    fn loop_opts_preserve_reasoning(filter: Option<&[String]>) -> LoopOpts<'_> {
+        LoopOpts {
+            extra: None,
+            tool_filter: filter,
+            classify_error: None,
+            temperature: None,
+            max_tokens: None,
+            preserve_reasoning_in_history: true,
         }
     }
 
@@ -4498,8 +3730,9 @@ mod tests {
                 discovered_skills: None,
                 compactor: None,
                 active_skills: None,
-                token_usage_sink: TokenUsageSink(None),
+                token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
                 scratchpad_path: None,
+                plug: None,
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
@@ -4509,8 +3742,14 @@ mod tests {
             stream_events: None,
             prepopulated_messages: None,
             compaction_opts: None,
-            scratchpad_path: None,
-            scratchpad_root: None,
+            plug: {
+                // Seed a ToolLedger so tests that assert on ledger behavior work.
+                let mut plug = LoopPlug::new();
+                let mut ledger = ToolLedger::new();
+                ledger.capture_turn_transcript(0);
+                plug.register_contexts(vec![Box::new(ledger) as Box<dyn MutableModelContext>]);
+                plug
+            },
         }
     }
 
@@ -4521,6 +3760,7 @@ mod tests {
                 &"x".repeat(assistant_text_len),
                 &[],
                 &[],
+                true,
             ));
             history.push(Message::user(format!("[turn {}]: round {index}", index)));
         }
@@ -4538,7 +3778,7 @@ mod tests {
                     serde_json::json!({"command": format!("cargo check {index}")}),
                 ),
             );
-            history.push(assistant_tool_message("", &[], &[call]));
+            history.push(assistant_tool_message("", &[], &[call], true));
             history.push(Message::tool_result(
                 CallId::from_wire(format!("bash_{index}")),
                 ToolName::new("Bash".to_string()).unwrap(),
@@ -4586,7 +3826,7 @@ mod tests {
         // byte-identical and no second compaction pass may run while the view
         // is under threshold.
         for round in 0..5 {
-            history.push(assistant_tool_message("small", &[], &[]));
+            history.push(assistant_tool_message("small", &[], &[], true));
             history.push(Message::user(format!("[turn {}]: small {round}", round)));
             let request = build_request_messages(
                 &history,
@@ -4644,7 +3884,7 @@ mod tests {
                     serde_json::json!({"command": format!("cargo check {index}")}),
                 ),
             );
-            history.push(assistant_tool_message("", &[], &[call]));
+            history.push(assistant_tool_message("", &[], &[call], true));
             history.push(Message::tool_result(
                 CallId::from_wire(format!("bash_{index}")),
                 ToolName::new("Bash".to_string()).unwrap(),
@@ -4758,7 +3998,7 @@ mod tests {
         );
         let history = vec![
             scratchpad_user,
-            assistant_tool_message("", &[], &[call]),
+            assistant_tool_message("", &[], &[call], true),
             Message::tool_result(
                 CallId::from_wire("read_1".to_string()),
                 ToolName::new("Read".to_string()).unwrap(),
@@ -5067,6 +4307,7 @@ mod tests {
             "",
             std::slice::from_ref(&reasoning),
             std::slice::from_ref(&call),
+            true,
         );
 
         let Message::Assistant { content, .. } = message else {
@@ -5094,6 +4335,46 @@ mod tests {
                 assert_eq!(provider.item_id.as_deref(), Some("fc_item"));
             }
             other => panic!("second item must be the tool call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_tool_message_omits_reasoning_items_when_false() {
+        let reasoning = Reasoning {
+            id: Some("rs_skip".to_string()),
+            content: vec![ReasoningContent::Text {
+                text: "should be excluded".to_string(),
+                signature: None,
+            }],
+        }
+        .sealed("openai");
+        let call = ToolCall::from_dual_wire(
+            "fc_item",
+            "call_1",
+            ToolFunction::new(
+                ToolName::new("Read").unwrap(),
+                serde_json::json!({ "file_path": "/tmp/x" }),
+            ),
+        );
+
+        let message = assistant_tool_message(
+            "some text",
+            std::slice::from_ref(&reasoning),
+            std::slice::from_ref(&call),
+            false,
+        );
+
+        let Message::Assistant { content, .. } = message else {
+            panic!("expected an assistant message");
+        };
+        assert_eq!(content.len(), 2, "text and tool call, no reasoning");
+        match &content[0] {
+            AssistantContent::Text(t) => assert_eq!(&t.text, "some text"),
+            other => panic!("first item must be text, got {other:?}"),
+        }
+        match &content[1] {
+            AssistantContent::ToolCall(_) => {}
+            other => panic!("second item must be tool call, got {other:?}"),
         }
     }
 
@@ -5145,7 +4426,7 @@ mod tests {
             "read then finish",
             ctx,
             cancel,
-            loop_opts(None),
+            loop_opts_preserve_reasoning(None),
             None,
         )
         .await
@@ -5192,6 +4473,87 @@ mod tests {
         );
     }
 
+    /// End-to-end: with `preserve_reasoning_in_history = false`, a turn that
+    /// streams a structured `reasoning` item followed by a `function_call`
+    /// referencing it must omit the reasoning item from the replayed history
+    /// while keeping the text and tool calls — the reasoning content is only
+    /// needed in logs/metrics/TUI, not in re-sent input.
+    #[tokio::test]
+    async fn loop_omits_reasoning_item_from_replay_when_flag_false() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-omit-reasoning-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("x.txt");
+        std::fs::write(&f, "content").unwrap();
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::reasoning("thinking")
+                    .with_reasoning_id("rs_skip"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c1",
+                    "Read",
+                    serde_json::json!({ "file_path": f.to_str().unwrap() }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({ "summary": "done" }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+        let result = run_agent_loop(
+            gm(model.clone().erase()),
+            "read then finish",
+            ctx,
+            cancel,
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.exit_code, 0);
+
+        let reqs = model.requests();
+        assert_eq!(reqs.len(), 2);
+        let second = &reqs[1];
+        let assistant = second
+            .chat_history
+            .iter()
+            .find(|m| matches!(m, Message::Assistant { .. }))
+            .expect("second request carries the prior assistant turn");
+        let Message::Assistant { content, .. } = assistant else {
+            unreachable!()
+        };
+
+        // The reasoning item must NOT appear in the replayed history.
+        assert!(
+            !content
+                .iter()
+                .any(|c| matches!(c, AssistantContent::Reasoning(_))),
+            "flag=false must omit reasoning items from replayed history"
+        );
+        // The tool call must still be present.
+        let call = content
+            .iter()
+            .find(|c| matches!(c, AssistantContent::ToolCall(_)));
+        assert!(call.is_some(), "tool call must survive into the replay");
+    }
+
     /// A reasoning-only turn (reasoning deltas but no text and no tool call)
     /// must still record an assistant message carrying the structured
     /// reasoning item before nudging with "Continue.". Dropping it would both
@@ -5236,7 +4598,7 @@ mod tests {
             "think then finish",
             ctx,
             cancel,
-            loop_opts(None),
+            loop_opts_preserve_reasoning(None),
             None,
         )
         .await
@@ -5940,15 +5302,21 @@ mod tests {
             .unwrap();
         assert!(content.contains("unknown tool"));
         let reqs = model.requests();
-        let ledger = format!("{:?}", reqs[1].chat_history);
+        let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
+        // Denied calls appear in history as tool results.
+        let history_debug = format!("{:?}", history);
         assert!(
-            ledger.contains("Write"),
-            "denied call must appear in the ledger: {ledger}"
+            history_debug.contains("Write"),
+            "denied call must appear in the ledger: {history_debug}"
         );
-        assert!(
-            ledger.contains("[seen]"),
-            "ledger must use [seen] format: {ledger}"
-        );
+        // Empty ledger produces no system message — the system prompt
+        // is absent or does not contain [seen].
+        if let Some(Message::System { content }) = history.first() {
+            assert!(
+                !content.contains("[seen]"),
+                "empty ledger must not produce [seen] block"
+            );
+        }
     }
 
     #[tokio::test]
@@ -6343,53 +5711,43 @@ mod tests {
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
         let key = ledger_key_arg(&serde_json::json!({"file_path": f.to_str().unwrap()}));
         assert!(key.contains("x.txt"), "ledger must name the file: {key}");
-        assert_eq!(history.len(), 4, "unexpected history: {history:#?}");
-        assert!(matches!(history[1], Message::Assistant { .. }));
-        assert_eq!(
-            message_kind(history[2]),
-            "result",
-            "tool result must follow the assistant tool_calls message"
-        );
-        assert_eq!(
-            message_kind(history[3]),
-            "ledger",
-            "ledger must trail all tool results"
-        );
-        // Verify the [seen] ledger contains the filename and Read indicator.
-        let ledger_text = match history[3] {
-            Message::User { content } => content.iter().find_map(|c| match c {
-                UserContent::Text(t) if t.text.starts_with("[seen]") => Some(t.text.clone()),
+        // The [seen] block travels through user-message transcript blocks
+        // (The ledger's system_message() returns None to keep the system
+        // prompt cache-stable).
+        assert!(history.len() >= 3, "unexpected history: {history:#?}");
+        let seen_msg = history
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::User { content: _ } => {
+                    let text = user_message_text(m);
+                    if text.contains("[seen]") {
+                        Some(text)
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
-            }),
-            _ => None,
-        };
-        let text = ledger_text.expect("ledger must be a [seen] user message");
-        assert!(text.contains(&key), "ledger must name the file: {text}");
+            })
+            .unwrap_or_else(|| panic!("[seen] block not found in any user message: {history:#?}"));
         assert!(
-            text.contains("R("),
-            "ledger must show Read indicator: {text}"
+            seen_msg.contains(&key),
+            "ledger must name the file: {seen_msg}"
         );
-    }
-
-    fn message_kind(m: &Message) -> &'static str {
-        match m {
-            Message::User { content }
-                if content
-                    .iter()
-                    .any(|c| matches!(c, UserContent::Text(t) if t.text.starts_with("[turn ") || t.text.starts_with("[seen]"))) =>
-            {
-                "ledger"
-            }
-            Message::User { content }
-                if content
-                    .iter()
-                    .any(|c| matches!(c, UserContent::ToolResult(_))) =>
-            {
-                "result"
-            }
-            Message::Assistant { .. } => "assistant",
-            _ => "other",
-        }
+        assert!(
+            seen_msg.contains("R("),
+            "ledger must show Read indicator: {seen_msg}"
+        );
+        // The history must contain a tool result.
+        let has_result = history.iter().any(|m| {
+            matches!(m, Message::User { content } if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))
+        });
+        assert!(has_result, "history must contain a tool result");
+        // The history must contain an assistant message.
+        let has_assistant = history
+            .iter()
+            .any(|m| matches!(m, Message::Assistant { .. }));
+        assert!(has_assistant, "history must contain an assistant message");
     }
 
     #[tokio::test]
@@ -6447,15 +5805,28 @@ mod tests {
 
         let reqs = model.requests();
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
-        let kinds: Vec<&str> = history.iter().map(|m| message_kind(m)).collect();
-        assert_eq!(
-            kinds,
-            vec!["other", "assistant", "result", "result", "ledger"]
-        );
-        let ledger = format!("{:?}", history[4]);
+        // The [seen] block travels through user-message transcript blocks
+        // (The ledger's system_message() returns None to keep the system
+        // prompt cache-stable).
+        assert!(history.len() >= 4, "unexpected history: {history:#?}");
+        let seen_msg = history
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::User { content: _ } => {
+                    let text = user_message_text(m);
+                    if text.contains("[seen]") {
+                        Some(text)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("[seen] block not found in any user message: {history:#?}"));
         assert!(
-            ledger.contains("a.txt") && ledger.contains("b.txt"),
-            "ledger must list both actions: {ledger}"
+            seen_msg.contains("a.txt") && seen_msg.contains("b.txt"),
+            "ledger must list both actions: {seen_msg}"
         );
     }
 
@@ -6910,14 +6281,12 @@ mod tests {
                 temperature: None,
                 max_tokens: None,
                 extra: None,
+                preserve_reasoning: None,
             })
         });
 
         let selector = super::super::task::TaskModelSelector::new(
-            HashMap::from([(
-                super::super::task_kind::TaskKind::Scout,
-                "openai/mini".to_string(),
-            )]),
+            HashMap::from([(crate::task_kind::TaskKind::Scout, "openai/mini".to_string())]),
             factory,
         )
         .expect("a configured task-models map yields a selector");
@@ -6971,6 +6340,120 @@ mod tests {
         assert!(
             task_result.contains("# Scout"),
             "task result should carry its kind header, got: {task_result}"
+        );
+    }
+
+    /// Regression: a Scout child that reads a file must have those contents
+    /// attached to the Task tool result in the parent's durable history, not
+    /// only the ephemeral next_prompt. After a further tool round the evidence
+    /// must still be present even though the ledger marks the file as read.
+    #[tokio::test]
+    async fn scout_read_observations_ride_the_task_tool_result() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("note.txt");
+        std::fs::write(&note, "evidence-from-child").unwrap();
+
+        let task_call = MockStreamEvent::tool_call(
+            "t1",
+            "Task",
+            serde_json::json!({ "kind": "Scout", "prompt": "inspect note.txt" }),
+        );
+        let done_call = |id: &str, summary: &str| {
+            MockStreamEvent::tool_call(id, "Done", serde_json::json!({ "summary": summary }))
+        };
+
+        // Parent: delegate, then finish.
+        let parent = MockCompletionModel::from_stream_turns([
+            vec![
+                task_call,
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                done_call("d1", "outer done"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        // Child (Scout): Read the file, then finish.
+        let child = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call(
+                    "r1",
+                    "Read",
+                    serde_json::json!({ "file_path": note.to_str().unwrap() }),
+                ),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                MockStreamEvent::text("scout result"),
+                done_call("d2", "scout result"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+
+        let child_handle = child.clone();
+        let factory: super::super::task::TaskModelFactory = Arc::new(move |_spec: &str| {
+            Ok(super::super::task::TaskModel {
+                model: gm(child_handle.clone().erase()),
+                temperature: None,
+                max_tokens: None,
+                extra: None,
+                preserve_reasoning: None,
+            })
+        });
+        let selector = super::super::task::TaskModelSelector::new(
+            HashMap::from([(crate::task_kind::TaskKind::Scout, "openai/mini".to_string())]),
+            factory,
+        )
+        .expect("configured");
+        let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        ctx.params.task_models = Some(selector);
+
+        run_agent_loop(
+            gm(parent.clone().erase()),
+            "go",
+            ctx,
+            CancelToken::new(),
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // The parent's second request must carry the child's Read evidence
+        // inside the Task tool result (durable history).
+        let reqs = parent.requests();
+        let parent_history = &reqs.last().unwrap().chat_history;
+        let task_result = parent_history
+            .iter()
+            .flat_map(|m| match m {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::ToolResult(r) => Some(
+                            r.content
+                                .iter()
+                                .filter_map(|rc| match rc {
+                                    rig_core::completion::message::ToolResultContent::Text(t) => {
+                                        Some(t.text.clone())
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<String>(),
+                        ),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => vec![],
+            })
+            .find(|t| t.contains("scout result"))
+            .expect("task result must reach the parent history");
+        assert!(
+            task_result.contains("evidence-from-child"),
+            "joined Read observations must ride the Task tool result, got: {task_result}"
         );
     }
 
@@ -7040,16 +6523,6 @@ mod tests {
         .await
         .unwrap();
 
-        fn user_text_of(m: &Message) -> Option<&str> {
-            match m {
-                Message::User { content } => content.iter().find_map(|c| match c {
-                    UserContent::Text(t) => Some(t.text.as_str()),
-                    _ => None,
-                }),
-                _ => None,
-            }
-        }
-
         let requests = model.requests();
         let fork_req = requests
             .iter()
@@ -7063,7 +6536,11 @@ mod tests {
             .expect("the forked child must issue its own request");
 
         let history = &fork_req.chat_history;
-        assert_eq!(history.len(), 6, "unexpected fork history: {history:#?}");
+        // The child inherits the parent's conversation but no longer sees a
+        // separate [seen] block — context content travels through
+        // compose_model_transcript.  The inherited ledger is cleared via
+        // clear_transcript so the context blocks are empty.
+        assert_eq!(history.len(), 4, "unexpected fork history: {history:#?}");
 
         // Fork system prompt leads the child history.
         assert!(matches!(
@@ -7072,15 +6549,23 @@ mod tests {
                 if content.contains("<tools>") && content.contains("Do not call")
         ));
 
-        // Inherited parent conversation, in exact order.
-        assert_eq!(user_text_of(&history[1]), Some("parent go"));
-        assert!(matches!(&history[2], Message::Assistant { .. }));
-        assert!(matches!(&history[3], Message::User { content }
-                if content.iter().any(|c| matches!(c, UserContent::ToolResult(_)))));
-        assert!(user_text_of(&history[4]).is_some_and(|t| t.starts_with("[seen]")));
-
-        // The Fork prompt is the final user message in the child request.
-        assert_eq!(user_text_of(&history[5]), Some("finish as fork"));
+        // Inherited parent conversation — the fork prompt is the last message.
+        assert!(
+            history
+                .iter()
+                .any(|m| matches!(m, Message::Assistant { .. })),
+            "history must contain an assistant message"
+        );
+        assert!(
+            history.iter().any(|m| matches!(m, Message::User { content } if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))),
+            "history must contain a tool result"
+        );
+        // The Fork prompt is the last message in chat_history.
+        assert!(
+            user_message_text(history.last().unwrap()).contains("finish as fork"),
+            "last message should be fork prompt: {:?}",
+            history.last()
+        );
     }
 
     /// When `LoopOpts.max_tokens` is `Some(8192)`, every turn's
@@ -7218,14 +6703,12 @@ mod tests {
                 temperature: None,
                 max_tokens: Some(8192),
                 extra: None,
+                preserve_reasoning: None,
             })
         });
 
         let selector = super::super::task::TaskModelSelector::new(
-            HashMap::from([(
-                super::super::task_kind::TaskKind::Scout,
-                "openai/mini".to_string(),
-            )]),
+            HashMap::from([(crate::task_kind::TaskKind::Scout, "openai/mini".to_string())]),
             factory,
         )
         .expect("configured");
@@ -7436,14 +6919,12 @@ mod tests {
                 temperature: None,
                 max_tokens: None,
                 extra: None,
+                preserve_reasoning: None,
             })
         });
 
         let selector = super::super::task::TaskModelSelector::new(
-            HashMap::from([(
-                super::super::task_kind::TaskKind::Scout,
-                "openai/mini".to_string(),
-            )]),
+            HashMap::from([(crate::task_kind::TaskKind::Scout, "openai/mini".to_string())]),
             factory,
         )
         .expect("configured");
@@ -7564,6 +7045,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         }
     }
 
@@ -7620,12 +7102,8 @@ mod tests {
                 &[],
                 0,
                 0,
-                &None,
-                None,
-                TokenUsageSink(None),
+                &LoopPlug::new(),
                 Some(session),
-                None,
-                None,
                 None,
                 None,
                 None,
@@ -7737,12 +7215,8 @@ mod tests {
                 &[],
                 0,
                 0,
-                &None,
-                None,
-                TokenUsageSink(None),
+                &LoopPlug::new(),
                 Some(session),
-                None,
-                None,
                 None,
                 None,
                 None,
@@ -7841,12 +7315,8 @@ mod tests {
                 &[],
                 0,
                 0,
-                &None,
-                None,
-                TokenUsageSink(None),
+                &LoopPlug::new(),
                 Some(session),
-                None,
-                None,
                 None,
                 None,
                 None,
@@ -7934,12 +7404,8 @@ mod tests {
                 &[],
                 0,
                 0,
-                &None,
-                None,
-                TokenUsageSink(None),
+                &LoopPlug::new(),
                 Some(session),
-                None,
-                None,
                 None,
                 None,
                 None,
@@ -8079,7 +7545,10 @@ mod tests {
         let cancel = CancelToken::new();
         let opts = loop_opts(None);
         let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let log_slot = Some(log_tx);
+        let mut plug = LoopPlug::new();
+        plug.register_logger(move |_level, msg| {
+            let _ = log_tx.send(msg.to_string());
+        });
 
         let result = run_agent_loop_core(
             &model,
@@ -8098,11 +7567,7 @@ mod tests {
             &[],
             0,
             0,
-            &log_slot,
-            None,
-            TokenUsageSink(None),
-            None,
-            None,
+            &plug,
             None,
             None,
             None,
@@ -8186,11 +7651,7 @@ mod tests {
             &[],
             0,
             0,
-            &None,
-            None,
-            TokenUsageSink(None),
-            None,
-            None,
+            &LoopPlug::new(),
             None,
             None,
             None,
@@ -8362,444 +7823,5 @@ mod tests {
             done_count, 1,
             "Done tool_use must appear exactly once in artifact-exhausted path, got {done_count}"
         );
-    }
-
-    // ---- Scout file-observation end-to-end tests ----
-
-    fn make_read_obs(path: &str, output: &str, offset: u64, limit: u64) -> FileObservation {
-        FileObservation {
-            tool: "Read".into(),
-            path: path.into(),
-            offset,
-            limit,
-            pattern: None,
-            output: output.into(),
-        }
-    }
-
-    #[test]
-    fn fold_scout_dedups_against_parent_reads() {
-        let _env = EnvGuard::lock();
-        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
-
-        let mut ledger = ToolLedger::new();
-        let args_json =
-            serde_json::json!({"file_path": "/tmp/foo.rs", "offset": 0, "limit": 0}).to_string();
-        // Simulate parent already having read /tmp/foo.rs
-        ledger.record(
-            "Read",
-            &key_arg(&serde_json::json!({"file_path": "/tmp/foo.rs"})),
-            "content A",
-            &args_json,
-            1,
-        );
-
-        let obs = FileObservations {
-            items: vec![make_read_obs("/tmp/foo.rs", "content A", 0, 0)],
-            truncated: false,
-            written_paths: vec![],
-        };
-        let scout_output = format!("Done.{}", obs.render_block());
-
-        // fold_scout_output should dedup the already-read file and return
-        // only the "Done." prose.
-        let folded = fold_scout_output(&scout_output, &mut ledger, 2);
-        assert!(
-            !folded.contains("content A"),
-            "already-read file must be deduplicated, got: {folded:?}"
-        );
-        assert!(folded.starts_with("Done."), "prose prefix preserved");
-        assert!(
-            !folded.contains("__SCOUT_OBSERVATIONS__"),
-            "no block markers in output"
-        );
-    }
-
-    #[test]
-    fn fold_scout_passes_through_unread_file() {
-        let _env = EnvGuard::lock();
-        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
-
-        let mut ledger = ToolLedger::new();
-        let obs = FileObservations {
-            items: vec![make_read_obs("/tmp/bar.rs", "bar content", 5, 20)],
-            truncated: false,
-            written_paths: vec![],
-        };
-        let scout_output = format!("Ran scout.{}", obs.render_block());
-        let folded = fold_scout_output(&scout_output, &mut ledger, 1);
-        assert!(
-            folded.contains("bar content"),
-            "unread file must appear in output"
-        );
-        assert!(folded.starts_with("Ran scout."), "prose prefix preserved");
-    }
-
-    #[test]
-    fn fold_scout_invalidates_writes_and_absorbs_into_ledger() {
-        let _env = EnvGuard::lock();
-        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
-
-        let mut ledger = ToolLedger::new();
-        // Parent previously read the file; worker then wrote it.
-        let args_json =
-            serde_json::json!({"file_path": "/tmp/shared.rs", "offset": 0, "limit": 0}).to_string();
-        ledger.record(
-            "Read",
-            &key_arg(&serde_json::json!({"file_path": "/tmp/shared.rs"})),
-            "stale content",
-            &args_json,
-            1,
-        );
-
-        let obs = FileObservations {
-            items: vec![make_read_obs("/tmp/other.rs", "other", 0, 0)],
-            truncated: false,
-            written_paths: vec!["/tmp/shared.rs".into()],
-        };
-        let scout_output = format!("Done.{}", obs.render_block());
-        let folded = fold_scout_output(&scout_output, &mut ledger, 2);
-
-        // The stale read of /tmp/shared.rs should be invalidated.
-        assert!(
-            !ledger.has_observation(&make_read_obs("/tmp/shared.rs", "", 0, 0)),
-            "written file must be invalidated in parent ledger"
-        );
-        // /tmp/other.rs should be absorbed.
-        assert!(
-            ledger.has_observation(&make_read_obs("/tmp/other.rs", "other", 0, 0)),
-            "unread file must be absorbed into parent ledger for propagation"
-        );
-        assert!(
-            folded.contains("other"),
-            "unread file appears in rendered output"
-        );
-    }
-
-    #[test]
-    fn fold_scout_no_block_returns_unchanged() {
-        let _env = EnvGuard::lock();
-        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
-
-        let mut ledger = ToolLedger::new();
-        let output = "plain prose without markers";
-        let folded = fold_scout_output(output, &mut ledger, 1);
-        assert_eq!(folded, output);
-    }
-
-    #[test]
-    fn fold_scout_truncated_preserves_marker() {
-        let _env = EnvGuard::lock();
-        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
-
-        let mut ledger = ToolLedger::new();
-        let obs = FileObservations {
-            items: vec![],
-            truncated: true,
-            written_paths: vec![],
-        };
-        let scout_output = format!("OK.{}", obs.render_block());
-        let folded = fold_scout_output(&scout_output, &mut ledger, 1);
-        assert!(
-            folded.contains("Some observations were omitted"),
-            "truncation marker must appear"
-        );
-    }
-
-    #[test]
-    fn fold_scout_caps_after_dedup_and_keeps_newest() {
-        let _env = EnvGuard::lock();
-        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "154");
-
-        let mut ledger = ToolLedger::new();
-        // Parent already read old.rs; the Scout reports it again plus new.rs.
-        let old_args =
-            serde_json::json!({"file_path": "/tmp/old.rs", "offset": 0, "limit": 0}).to_string();
-        ledger.record(
-            "Read",
-            &key_arg(&serde_json::json!({"file_path": "/tmp/old.rs"})),
-            "old",
-            &old_args,
-            1,
-        );
-
-        let obs = FileObservations {
-            items: vec![
-                make_read_obs("/tmp/new.rs", "new contents", 0, 0),
-                make_read_obs("/tmp/old.rs", "old", 0, 0),
-            ],
-            truncated: false,
-            written_paths: vec![],
-        };
-        let scout_output = format!("Done.{}", obs.render_block());
-        let folded = fold_scout_output(&scout_output, &mut ledger, 2);
-
-        assert!(
-            folded.contains("new contents"),
-            "newest unseen read must survive the cap, got: {folded:?}"
-        );
-        assert!(
-            !folded.contains("### Read: /tmp/old.rs"),
-            "already-seen read must be deduped before the cap is applied, got: {folded:?}"
-        );
-    }
-
-    #[test]
-    fn fold_scout_keeps_prefix_of_oversized_observation() {
-        let _env = EnvGuard::lock();
-        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "126");
-
-        let mut ledger = ToolLedger::new();
-        let obs = FileObservations {
-            items: vec![make_read_obs("/tmp/huge.rs", "0123456789", 0, 0)],
-            truncated: false,
-            written_paths: vec![],
-        };
-        let scout_output = format!("Done.{}", obs.render_block());
-        let folded = fold_scout_output(&scout_output, &mut ledger, 1);
-
-        assert!(
-            folded.contains("### Read: /tmp/huge.rs"),
-            "oversized observation must keep a prefix rather than vanishing, got: {folded:?}"
-        );
-        assert!(
-            folded.contains("Some observations were omitted"),
-            "oversized observation must carry the truncation marker"
-        );
-    }
-
-    #[test]
-    fn fold_scout_absorbs_landscape_and_propagates_writes() {
-        let _env = EnvGuard::lock();
-        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
-
-        let mut ledger = ToolLedger::new();
-        let landscape = FileObservation {
-            tool: "Landscape".into(),
-            path: "/tmp/dir".into(),
-            offset: 0,
-            limit: 0,
-            pattern: None,
-            output: "tree".into(),
-        };
-        let obs = FileObservations {
-            items: vec![
-                make_read_obs("/tmp/child.rs", "child content", 0, 0),
-                landscape,
-            ],
-            truncated: false,
-            written_paths: vec!["/tmp/wrote.rs".into()],
-        };
-        let scout_output = format!("Child.{}", obs.render_block());
-        let folded = fold_scout_output(&scout_output, &mut ledger, 2);
-
-        assert!(folded.contains("child content"));
-        assert!(folded.contains("### Landscape: /tmp/dir"));
-        assert!(ledger.has_observation(&make_read_obs("/tmp/child.rs", "child content", 0, 0)));
-        assert!(ledger.has_observation(&FileObservation {
-            tool: "Landscape".into(),
-            path: "/tmp/dir".into(),
-            offset: 0,
-            limit: 0,
-            pattern: None,
-            output: String::new(),
-        }));
-
-        // The outer ledger must report the nested write upward too.
-        let reported = ledger.file_observations();
-        assert!(reported.written_paths.iter().any(|p| p == "/tmp/wrote.rs"));
-        assert!(reported
-            .items
-            .iter()
-            .any(|o| { o.tool == "Landscape" && o.path == "/tmp/dir" }));
-    }
-
-    #[test]
-    fn tool_ledger_snapshot_orders_by_last_access() {
-        let _env = EnvGuard::lock();
-        let mut ledger = ToolLedger::new();
-
-        let a_args =
-            serde_json::json!({"file_path": "/tmp/a.rs", "offset": 0, "limit": 0}).to_string();
-        let b_args =
-            serde_json::json!({"file_path": "/tmp/b.rs", "offset": 0, "limit": 0}).to_string();
-
-        // Read(A), Read(B), Read(A) — display order is A → B, but snapshot
-        // order must reflect last-access, so A comes after B (most recent).
-        ledger.record("Read", "/tmp/a.rs", "content-a", &a_args, 0);
-        ledger.record("Read", "/tmp/b.rs", "content-b", &b_args, 0);
-        ledger.record("Read", "/tmp/a.rs", "content-a", &a_args, 0);
-
-        let snapshot = ledger.file_observations();
-        let a_pos = snapshot
-            .items
-            .iter()
-            .position(|o| o.path == "/tmp/a.rs")
-            .unwrap();
-        let b_pos = snapshot
-            .items
-            .iter()
-            .position(|o| o.path == "/tmp/b.rs")
-            .unwrap();
-        assert!(
-            a_pos < b_pos,
-            "A re-read last, so it must appear before B in the snapshot"
-        );
-
-        // display `[seen]` output (format) must still sort by first access.
-        let formatted = ledger.format(0);
-        let a_idx = formatted.find("/tmp/a.rs").unwrap();
-        let b_idx = formatted.find("/tmp/b.rs").unwrap();
-        assert!(
-            a_idx < b_idx,
-            "display order unchanged by re-read: A first, then B"
-        );
-    }
-
-    #[test]
-    fn tool_ledger_has_observation_grep_compares_content_hash() {
-        let _env = EnvGuard::lock();
-        let mut ledger = ToolLedger::new();
-
-        let args_json = serde_json::json!({"pattern": "fn", "path": "/tmp"}).to_string();
-        ledger.record("Grep", "fn", "hits: A", &args_json, 0);
-
-        // Same pattern/path but different output — must NOT be a duplicate.
-        let fresh = FileObservation {
-            tool: "Grep".into(),
-            path: "/tmp".into(),
-            offset: 0,
-            limit: 0,
-            pattern: Some("fn".into()),
-            output: "hits: B".into(),
-        };
-        assert!(
-            !ledger.has_observation(&fresh),
-            "different Grep output must not be deduplicated"
-        );
-
-        // Same output — IS a duplicate.
-        let dup = FileObservation {
-            tool: "Grep".into(),
-            path: "/tmp".into(),
-            offset: 0,
-            limit: 0,
-            pattern: Some("fn".into()),
-            output: "hits: A".into(),
-        };
-        assert!(
-            ledger.has_observation(&dup),
-            "identical Grep output must be deduplicated"
-        );
-
-        // Different glob — key is identical, output hash decides.
-        let different_glob = FileObservation {
-            tool: "Grep".into(),
-            path: "/tmp".into(),
-            offset: 0,
-            limit: 0,
-            pattern: Some("fn".into()),
-            output: "hits: C".into(),
-        };
-        assert!(
-            !ledger.has_observation(&different_glob),
-            "Grep with different glob/output must not deduplicate"
-        );
-    }
-
-    #[test]
-    fn fold_scout_marks_only_delivered_as_seen_and_propagates_omitted() {
-        let _env = EnvGuard::lock();
-        // Budget such that only the newest observation (55 bytes rendered) fits;
-        // the older one (45 bytes) is pushed to omitted for propagation.
-        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "159");
-
-        let mut ledger = ToolLedger::new();
-        let newest = make_read_obs("/tmp/newest.rs", "newest content", 0, 0);
-        let older = make_read_obs("/tmp/older.rs", "older", 0, 0);
-        let obs = FileObservations {
-            items: vec![newest.clone(), older.clone()],
-            truncated: false,
-            written_paths: vec![],
-        };
-        let scout_output = format!("Done.{}", obs.render_block());
-        let folded = fold_scout_output(&scout_output, &mut ledger, 1);
-
-        // newest delivered and visible in history.
-        assert!(folded.contains("newest content"));
-        assert!(folded.contains("### Read: /tmp/newest.rs"));
-
-        // older NOT in history, but still in snapshot for propagation.
-        assert!(!folded.contains("older"));
-        let snapshot = ledger.file_observations();
-        assert!(
-            snapshot
-                .items
-                .iter()
-                .any(|o| o.path == "/tmp/older.rs" && o.output == "older"),
-            "omitted observations must still propagate upward"
-        );
-
-        // Only newest is "seen" for dedup.
-        assert!(ledger.has_observation(&newest));
-        assert!(!ledger.has_observation(&older));
-
-        // truncation marker present because render budget was exceeded.
-        assert!(folded.contains("Some observations were omitted"));
-    }
-
-    #[test]
-    fn fold_scout_reserves_wrapper_budget() {
-        let _env = EnvGuard::lock();
-        // Budget exactly covers heading + marker only (24 + 80 = 104 bytes).
-        // No observation content can fit, so the section is empty.
-        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "104");
-
-        let mut ledger = ToolLedger::new();
-        let obs = FileObservations {
-            items: vec![make_read_obs("/tmp/x.rs", "secret", 0, 0)],
-            truncated: false,
-            written_paths: vec![],
-        };
-        let scout_output = format!("Prose.{}", obs.render_block());
-        let folded = fold_scout_output(&scout_output, &mut ledger, 1);
-
-        // The heading is emitted.
-        assert!(folded.contains("## Scout observations"));
-        // The marker is emitted (truncation forced by budget).
-        assert!(folded.contains("Some observations were omitted"));
-        // The observation content itself must NOT leak past the reserved wrapper.
-        assert!(!folded.contains("secret"));
-
-        // Observation propagated upward (via omitted list).
-        let snapshot = ledger.file_observations();
-        assert!(
-            snapshot
-                .items
-                .iter()
-                .any(|o| o.path == "/tmp/x.rs" && o.output == "secret"),
-            "omitted observations must still propagate upward"
-        );
-
-        // But not "seen" — a later Scout returning the same file won't be
-        // deduplicated away against an observation the parent never fully received.
-        assert!(!ledger.has_observation(&make_read_obs("/tmp/x.rs", "secret", 0, 0)));
-    }
-
-    #[test]
-    fn scout_written_paths_extracts_mutation_paths() {
-        let _env = EnvGuard::lock();
-        let obs = FileObservations {
-            items: vec![],
-            truncated: false,
-            written_paths: vec!["/tmp/a.rs".into(), "/tmp/b.rs".into()],
-        };
-        let output = format!("Scout done.{}", obs.render_block());
-
-        let paths = scout_written_paths(&output);
-        assert_eq!(paths, vec!["/tmp/a.rs", "/tmp/b.rs"]);
-
-        // No block → empty.
-        assert!(scout_written_paths("plain text").is_empty());
     }
 }

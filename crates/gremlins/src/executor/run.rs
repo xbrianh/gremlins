@@ -4,7 +4,7 @@
 //! [`run_stage`]. Parallel groups delegate to [`run_parallel`].
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
@@ -13,7 +13,6 @@ use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
 use crate::clients::backend::{ClientError, CompactionOpts, Compactor, RunParams};
 use crate::clients::client::{Client, ModelURI};
-use crate::clients::task_kind::TaskKind;
 use crate::config;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
@@ -32,57 +31,166 @@ use crate::executor::supervisor::{emit_event, get_run_map};
 use crate::executor::vars;
 use crate::executor::DaemonEvent;
 use crate::executor::RunError;
-use crate::landscape::{LandscapeBlock, LandscapeError, LandscapeExplorer};
+use crate::landscape::FileOutline;
+use crate::landscape::{LandscapeError, LandscapeExplorer};
+use crate::task_kind::TaskKind;
 use indexmap::IndexMap;
 use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::completion::Message;
+
+use crate::clients::model_context::MutableModelContext;
+use crate::clients_plugins::{
+    landscape_context::LandscapeContext, signal_context::SignalMapContext, tool_ledger::ToolLedger,
+};
 
 // ---------------------------------------------------------------------------
 // System prompt assembly
 // ---------------------------------------------------------------------------
 
-/// Compute the gremlin's stage-start landscape block.
-///
-/// When the client has the Landscape tool and the formatted block is
-/// nonempty, a usage hint is prepended. Otherwise the raw (possibly empty)
-/// block is returned as-is.
-async fn landscape_block(gremlin: &Gremlin, has_outline_tool: bool) -> String {
-    let (mut block, file_count, item_count) = build_landscape_snapshot(
-        gremlin.cwd(),
-        gremlin.runtime_config.log_tx.clone(),
-        has_outline_tool,
-    )
-    .await;
+/// URI of the cross-stage observed-file-path snapshot used to prune redundant
+/// landscape signal sections.
+const LEDGER_SNAPSHOT_URI: &str = "artifact://_signals/ledger_snapshot.json";
 
-    if file_count > 0 {
-        if let Some(tx) = &gremlin.runtime_config.log_tx {
-            let tokens = crate::landscape::count_tokens(&block).unwrap_or(0);
-            let _ = tx.send(format!(
-                "[landscape] {file_count} files, {item_count} items, {tokens} tokens"
-            ));
-        }
-        if has_outline_tool {
-            block = format!(
-                "Use the Landscape tool to explore any directory or file in more detail. The outline below shows the repository structure captured at stage start.\n\n\
-{block}"
+/// Whether cross-stage ToolLedger landscape pruning is active. Requires both
+/// the pruning opt-in and landscape signals to be enabled.
+fn ledger_pruning_enabled() -> bool {
+    let cfg = crate::config::Config::load().unwrap_or_default();
+    cfg.tool_ledger_pruning() && cfg.landscape_signals()
+}
+
+/// Read the set of file paths observed by prior stages, for pruning redundant
+/// landscape signal sections. Returns `None` when pruning is disabled or no
+/// paths have been recorded yet.
+async fn read_pruned_files(gremlin: &Gremlin) -> Option<std::collections::HashSet<PathBuf>> {
+    if !ledger_pruning_enabled() {
+        return None;
+    }
+    let log_tx = gremlin.runtime_config.log_tx.clone();
+    let json = match gremlin.state.content(LEDGER_SNAPSHOT_URI, None).await {
+        Ok(json) => json,
+        Err(_) => return None,
+    };
+    let paths: Vec<String> = match serde_json::from_str(&json) {
+        Ok(paths) => paths,
+        Err(e) => {
+            log::warn!("[ledger-pruning] failed to parse {LEDGER_SNAPSHOT_URI}: {e}");
+            send_log(
+                &log_tx,
+                log::Level::Info,
+                format!("[ledger-pruning] failed to parse snapshot: {e}"),
             );
+            return None;
+        }
+    };
+    if paths.is_empty() {
+        return None;
+    }
+    Some(paths.into_iter().map(PathBuf::from).collect())
+}
+
+/// Merge this stage's observed file paths into the accumulated cross-stage
+/// snapshot so later stages can prune redundant landscape signal sections.
+///
+/// Paths are stored as absolute canonical paths (via `canonicalize_or_ancestor`)
+/// so they match the canonical form the signal pruning filter compares against.
+/// No-op unless both landscape signals and ToolLedger pruning are enabled.
+async fn persist_observed_paths(
+    gremlin: &Gremlin,
+    observations: &crate::clients::protocol::FileObservations,
+) {
+    if !ledger_pruning_enabled() {
+        return;
+    }
+    let log_tx = gremlin.runtime_config.log_tx.clone();
+    let cwd = gremlin.cwd();
+    // Seed from the accumulated set written by prior stages.
+    let mut all_paths: std::collections::HashSet<String> =
+        match gremlin.state.content(LEDGER_SNAPSHOT_URI, None).await {
+            Ok(json) => match serde_json::from_str::<Vec<String>>(&json) {
+                Ok(paths) => paths.into_iter().collect(),
+                Err(e) => {
+                    log::warn!("[ledger-pruning] failed to parse existing snapshot: {e}");
+                    send_log(
+                        &log_tx,
+                        log::Level::Info,
+                        format!("[ledger-pruning] failed to parse existing snapshot: {e}"),
+                    );
+                    std::collections::HashSet::new()
+                }
+            },
+            Err(_) => std::collections::HashSet::new(),
+        };
+    for item in &observations.items {
+        let raw = PathBuf::from(&item.path);
+        let abs = if raw.is_absolute() {
+            raw
+        } else {
+            cwd.join(&raw)
+        };
+        all_paths.insert(
+            crate::core::paths::canonicalize_or_ancestor(&abs)
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    let paths: Vec<String> = all_paths.into_iter().collect();
+    if let Ok(json) = serde_json::to_string(&paths) {
+        match Uri::parse(LEDGER_SNAPSHOT_URI) {
+            Ok(uri) => {
+                if let Err(e) = gremlin.state.write_into_registry(&uri, &json).await {
+                    log::warn!("[ledger-pruning] failed to write snapshot: {e}");
+                    send_log(
+                        &log_tx,
+                        log::Level::Info,
+                        format!("[ledger-pruning] failed to write snapshot: {e}"),
+                    );
+                }
+            }
+            Err(e) => {
+                log::warn!("[ledger-pruning] invalid snapshot URI {LEDGER_SNAPSHOT_URI}: {e}");
+                send_log(
+                    &log_tx,
+                    log::Level::Info,
+                    format!("[ledger-pruning] invalid snapshot URI {LEDGER_SNAPSHOT_URI}: {e}"),
+                );
+            }
         }
     }
-
-    block
 }
 
-/// Build a system prompt by optionally appending a landscape block.
+/// Build file outlines for a workspace root.
 ///
-/// The caller (`landscape_block`) already gates the usage hint on tool
-/// availability, so this function only concatenates.
-fn assemble_system_prompt(base: &str, landscape: Option<&str>) -> String {
-    match landscape.filter(|b| !b.is_empty()) {
-        Some(block) => format!("{base}\n\n{block}"),
-        None => base.to_string(),
-    }
+/// This is the raw-outline half of the landscape block builder, extracted so
+/// callers that need the outlines (e.g. for signal derivation) can obtain them
+/// without a second tree walk.
+async fn build_outlines(
+    cwd: PathBuf,
+    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) -> Vec<FileOutline> {
+    let log_tx2 = log_tx.clone();
+    tokio::task::spawn_blocking(move || match LandscapeExplorer.build(&cwd, usize::MAX) {
+        Ok(outlines) => outlines,
+        Err(LandscapeError::Read(e)) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            let msg = format!("landscape build failed for {}: {error}", cwd.display());
+            log::warn!("{msg}");
+            send_log(&log_tx2, log::Level::Info, &msg);
+            Vec::new()
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        let msg = format!("landscape build task failed: {error}");
+        log::warn!("{msg}");
+        send_log(&log_tx, log::Level::Info, &msg);
+        Vec::new()
+    })
 }
+
 /// Build and format a landscape block for one workspace root.
+///
+/// Kept for tests that need the pre-signals block shape.
+#[cfg(test)]
 async fn build_landscape_snapshot(
     cwd: PathBuf,
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
@@ -90,51 +198,18 @@ async fn build_landscape_snapshot(
 ) -> (String, usize, usize) {
     let log_warn = |msg: &str| {
         log::warn!("{msg}");
-        send_log(&log_tx, msg);
+        send_log(&log_tx, log::Level::Warn, msg);
     };
-    let root = cwd.clone();
-    let log_tx2 = log_tx.clone();
-    let outlines =
-        tokio::task::spawn_blocking(move || match LandscapeExplorer.build(&cwd, usize::MAX) {
-            Ok(outlines) => outlines,
-            Err(LandscapeError::Read(e)) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => {
-                let msg = format!("landscape build failed for {}: {error}", cwd.display());
-                log::warn!("{msg}");
-                send_log(&log_tx2, &msg);
-                Vec::new()
-            }
-        })
-        .await
-        .unwrap_or_else(|error| {
-            let msg = format!("landscape build task failed: {error}");
-            log::warn!("{msg}");
-            send_log(&log_tx, &msg);
-            Vec::new()
-        });
-
+    let outlines = build_outlines(cwd.clone(), log_tx.clone()).await;
     let budget: u64 = crate::config::max_landscape_tokens();
-    let landscape = match crate::landscape::format_landscape_block(
-        &outlines,
-        &root,
-        usize::try_from(budget).unwrap_or(usize::MAX),
-        has_outline_tool,
-    ) {
-        Ok(block) => block,
+    let max_tokens = usize::try_from(budget).unwrap_or(usize::MAX);
+    match crate::landscape::format_landscape_block(&outlines, &cwd, max_tokens, has_outline_tool) {
+        Ok(block) => (block.block, block.file_count, block.item_count),
         Err(e) => {
-            let msg = match e {
-                LandscapeError::BudgetExceeded => format!(
-                    "[landscape] block for {} exceeds {budget} token budget; omitting",
-                    root.display(),
-                ),
-                other => format!("landscape block formatting failed: {other}"),
-            };
-            log_warn(&msg);
-            LandscapeBlock::empty()
+            log_warn(&format!("landscape block formatting failed: {e}"));
+            (String::new(), 0, 0)
         }
-    };
-
-    (landscape.block, landscape.file_count, landscape.item_count)
+    }
 }
 
 /// On-disk path for the agent raw stream, routed through the store's blob seam.
@@ -208,6 +283,7 @@ async fn run_stage_scoped(
     let enc_model = enclosing_model.or(m.as_ref());
     send_log(
         &gremlin.runtime_config.log_tx,
+        log::Level::Info,
         format!(
             "stage '{}': entering (type={})",
             stage.name(),
@@ -556,13 +632,6 @@ async fn run_agent(
         }
     }
 
-    // Landscape is recomputed before every agent stage so the next
-    // agent sees fresh files after any exec stage mutations.
-    let landscape = if agent.landscape {
-        Some(landscape_block(gremlin, client.has_tool("Landscape")).await)
-    } else {
-        None
-    };
     // Substitute {scratchpad_path} placeholder in the system prompt with the
     // concrete absolute scratchpad path for both chat and headless stages.
     let scratchpad_model_path = prepared
@@ -574,7 +643,78 @@ async fn run_agent(
     if !scratchpad_model_path.is_empty() {
         prompt = prompt.replace("{scratchpad_path}", &scratchpad_model_path);
     }
-    let system_prompt = assemble_system_prompt(&prompt, landscape.as_deref());
+
+    // Build the landscape data payload for the LandscapeContext (living
+    // landscape). When landscape is enabled, compute the full-tree outlines and
+    // signal sections and bundle them into the data. The system prompt is just
+    // the base prompt without any landscape block.
+    let profile;
+    let mut landscape_data: Option<crate::landscape::LandscapeData> = if agent.landscape {
+        let cwd2 = gremlin.cwd();
+        let log_tx2 = gremlin.runtime_config.log_tx.clone();
+        let outlines = build_outlines(cwd2.clone(), log_tx2.clone()).await;
+
+        let has_diff_input = checkout_keys
+            .iter()
+            .any(|k| k == "artifact://diff" || k.starts_with("artifact://diff/"));
+        let pruned = read_pruned_files(gremlin).await;
+
+        profile = if crate::config::landscape_stage_profiles() && has_diff_input {
+            crate::landscape::signals::SignalProfile::DiffFocused
+        } else {
+            crate::landscape::signals::SignalProfile::Full
+        };
+
+        let signals_enabled = crate::config::landscape_signals();
+
+        let (signal_sections, _pruned_skipped, diff_paths, symbol_index) = if signals_enabled {
+            let ctx = crate::landscape::signals::SignalContext {
+                cwd: cwd2.clone(),
+                pruned_files: pruned,
+                profile,
+                prompt: if prepared.prompt.is_empty() {
+                    None
+                } else {
+                    Some(prepared.prompt.to_string())
+                },
+                diff_stat: crate::config::landscape_diff_stat(),
+            };
+            crate::landscape::inject_signal_sections(&ctx, &outlines)
+        } else {
+            Default::default()
+        };
+
+        // When DiffFocused, filter outlines to just diff files.
+        let effective_outlines: Vec<crate::landscape::FileOutline> = if profile
+            == crate::landscape::signals::SignalProfile::DiffFocused
+            && !diff_paths.is_empty()
+        {
+            let diff_set: std::collections::HashSet<&Path> =
+                diff_paths.iter().map(|p| p.as_path()).collect();
+            outlines
+                .into_iter()
+                .filter(|o| diff_set.contains(o.path.as_path()))
+                .collect()
+        } else {
+            outlines
+        };
+
+        // Build data: full-tree outlines plus signal sections wrapped in a
+        // LandscapeData struct for the LandscapeContext.
+        let seed = crate::landscape::LandscapeData {
+            root: cwd2.clone(),
+            outlines: effective_outlines,
+            signal_sections,
+            symbol_index,
+            file_entries: Default::default(),
+        };
+        Some(seed)
+    } else {
+        profile = crate::landscape::signals::SignalProfile::Full;
+        None
+    };
+
+    let system_prompt = prompt;
 
     let stage_env = gremlin.env.clone();
 
@@ -688,6 +828,109 @@ async fn run_agent(
         )>,
     ));
 
+    // ── Build inversion-of-control plug ─────
+    // Wires cross-package dependencies (log, scratchpad, prompt-debug,
+    // token-usage, model contexts) into the agent loop without the loop
+    // importing `crate::executor` or `crate::landscape`.
+    let mut plug = crate::clients::plug::LoopPlug::new();
+    {
+        let log_tx = gremlin.runtime_config.log_tx.clone();
+        plug.register_logger(move |level, msg| {
+            crate::executor::send_log(&log_tx, level, msg);
+        });
+    }
+    if let Some(sp) = prepared
+        .implicit_artifacts
+        .first()
+        .map(|a| a.model_path.clone())
+    {
+        let root = sp
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| gremlin.cwd());
+        plug.register_scratchpad_reader(move || {
+            crate::executor::agent_runner::read_scratchpad_contained(&sp, &root).ok()
+        });
+    }
+    {
+        let store = gremlin.state.store_handle();
+        plug.register_prompt_debug(move |request| {
+            if crate::executor::log_level_threshold() < log::LevelFilter::Debug {
+                return;
+            }
+            let ts = crate::executor::state::now_stamp_millis();
+            let ts_clean = ts
+                .trim_matches(|c: char| c == '[' || c == ']')
+                .replace(':', "-");
+            let name = format!("prompt_{ts_clean}.txt");
+            match store.open(&name, crate::executor::state::BlobMode::Write) {
+                Ok(mut blob) => {
+                    let json = serde_json::to_string_pretty(request).unwrap_or_default();
+                    let _ = std::io::Write::write_all(&mut blob, json.as_bytes());
+                    let _ = std::io::Write::write_all(&mut blob, b"\n");
+                }
+                Err(e) => {
+                    log::warn!("dump_prompt_if_debug: failed to open {name}: {e}");
+                }
+            }
+        });
+    }
+    {
+        let gremlin_id = gremlin.id.to_string();
+        let client_for_cost = client.clone();
+        let baseline_usage = crate::executor::supervisor::usage_stats_from_state(
+            gremlin.state.read_field("token_usage").as_ref(),
+        );
+        let live_usage_tracker = live_usage.clone();
+        plug.register_token_usage(
+            move |totals, last_prompt_tokens, last_cached_input_tokens| {
+                let usage = crate::executor::supervisor::add_usage_stats(&baseline_usage, &totals);
+                let cost_usd = client_for_cost.total_cost_usd();
+                *live_usage_tracker.lock().unwrap() =
+                    Some((usage.clone(), totals.clone(), cost_usd));
+                crate::executor::supervisor::emit_event(
+                    crate::executor::supervisor::DaemonEvent::TokenUsage {
+                        id: gremlin_id.clone(),
+                        usage,
+                        cost_usd,
+                        last_prompt_tokens,
+                        last_cached_input_tokens,
+                    },
+                );
+            },
+        );
+    }
+    // Build model contexts from landscape data: ToolLedger + SignalMapContext + LandscapeContext.
+    // ToolLedger is always created — it tracks reads/writes and produces the [seen] block.
+    // SignalMapContext and LandscapeContext are built from landscape data when available.
+    {
+        let mut contexts: Vec<Box<dyn MutableModelContext>> = Vec::new();
+        // ToolLedger always goes first — it's the primary per-turn observation context.
+        let mut ledger = ToolLedger::new();
+        ledger.capture_turn_transcript(0);
+        contexts.push(Box::new(ledger) as Box<dyn MutableModelContext>);
+        if let Some(ref mut ld) = landscape_data {
+            let signal_sections = std::mem::take(&mut ld.signal_sections);
+            let symbol_index = std::mem::take(&mut ld.symbol_index);
+            let cwd = ld.root.clone();
+            let has_signals = !signal_sections.is_empty() || !symbol_index.is_empty();
+            if has_signals {
+                let prompt = prepared.user_prompt();
+                contexts.push(Box::new(SignalMapContext::new(
+                    signal_sections,
+                    Some(prompt),
+                    cwd.clone(),
+                    symbol_index,
+                    profile,
+                )));
+            }
+        }
+        if let Some(ld) = landscape_data.take() {
+            contexts.push(Box::new(LandscapeContext::new(ld)));
+        }
+        plug.register_contexts(contexts);
+    }
+
     let params = RunParams {
         prompt: prepared.user_prompt(),
         label: prepared.name.clone(),
@@ -725,36 +968,9 @@ async fn run_agent(
         skills_available: gremlin.discovered_skills.is_some(),
         discovered_skills: gremlin.discovered_skills.clone(),
         active_skills: gremlin.active_skills.clone(),
-        token_usage_sink: {
-            let gremlin_id = gremlin.id.to_string();
-            let client_for_cost = client.clone();
-            let baseline_usage = crate::executor::supervisor::usage_stats_from_state(
-                gremlin.state.read_field("token_usage").as_ref(),
-            );
-            let live_usage_sink = live_usage.clone();
-            crate::clients::token_usage::TokenUsageSink(Some(std::sync::Arc::new(
-                move |event: crate::clients::token_usage::TokenUsageEvent| {
-                    let usage =
-                        crate::executor::supervisor::add_usage_stats(&baseline_usage, &event.usage);
-                    let cost_usd = client_for_cost.total_cost_usd();
-                    *live_usage_sink.lock().unwrap() =
-                        Some((usage.clone(), event.usage.clone(), cost_usd));
-                    crate::executor::supervisor::emit_event(
-                        crate::executor::supervisor::DaemonEvent::TokenUsage {
-                            id: gremlin_id.clone(),
-                            usage,
-                            cost_usd,
-                            last_prompt_tokens: event.last_prompt_tokens,
-                            last_cached_input_tokens: event.last_cached_input_tokens,
-                        },
-                    );
-                },
-            )))
-        },
-        scratchpad_path: prepared
-            .implicit_artifacts
-            .first()
-            .map(|a| a.model_path.clone()),
+        token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
+        scratchpad_path: None,
+        plug: Some(plug),
     };
 
     let effective_model = params
@@ -764,6 +980,7 @@ async fn run_agent(
     let effective_model: &str = &effective_model;
     send_log(
         &gremlin.runtime_config.log_tx,
+        log::Level::Info,
         format!(
             "[{name}][{model}] agent: preparing",
             name = agent.name,
@@ -820,9 +1037,7 @@ async fn run_agent(
                     .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
                 );
                 gremlin.state.accumulate_token_usage(&delta);
-                gremlin
-                    .state
-                    .accumulate_stage_token_usage(&stage_path, &delta);
+                state::emit_stage_token_usage(gremlin.state.store_ref(), &stage_path, &delta);
             }
             // Flush the live scratchpad into the main state store so a
             // cancelled/failed chat turn does not drop in-flight working
@@ -840,6 +1055,7 @@ async fn run_agent(
 
     send_log(
         &gremlin.runtime_config.log_tx,
+        log::Level::Info,
         format!(
             "[{name}][{model}] agent: completed (turns={turns})",
             name = prepared.name,
@@ -866,9 +1082,7 @@ async fn run_agent(
             .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
         );
         gremlin.state.accumulate_token_usage(&delta);
-        gremlin
-            .state
-            .accumulate_stage_token_usage(&stage_path, &delta);
+        state::emit_stage_token_usage(gremlin.state.store_ref(), &stage_path, &delta);
     }
 
     if is_chat {
@@ -893,6 +1107,12 @@ async fn run_agent(
     commit_agent(&prepared, local_registry.as_ref())
         .await
         .map_err(|error| agent_commit_err(error, &prepared.name))?;
+
+    // Persist this stage's observed file paths so later stages can prune
+    // redundant landscape signal sections.
+    if let Some(ref observations) = completed.file_observations {
+        persist_observed_paths(gremlin, observations).await;
+    }
 
     // Merge the localized registry back into the main registry.
     gremlin
@@ -929,6 +1149,7 @@ async fn run_exec(
 
     send_log(
         &gremlin.runtime_config.log_tx,
+        log::Level::Info,
         format!("[{}] exec: preparing", exec.name),
     );
 
@@ -973,6 +1194,7 @@ async fn run_exec(
     if !prepared.cmds.is_empty() {
         send_log(
             &gremlin.runtime_config.log_tx,
+            log::Level::Info,
             format!(
                 "[{}] exec: running {} command(s)",
                 prepared.name,
@@ -1051,6 +1273,7 @@ async fn run_sequence(
         {
             send_log(
                 &gremlin.runtime_config.log_tx,
+                log::Level::Info,
                 format!("sequence '{}': skipped (artifact exists)", seq.name),
             );
             return Ok(());
@@ -1097,6 +1320,7 @@ async fn run_sequence(
         {
             send_log(
                 &gremlin.runtime_config.log_tx,
+                log::Level::Info,
                 format!(
                     "sequence '{}': {}",
                     seq.name,
@@ -1117,6 +1341,7 @@ async fn run_sequence(
 
         send_log(
             &gremlin.runtime_config.log_tx,
+            log::Level::Info,
             format!(
                 "sequence '{}': iteration {iteration}/{max_iterations} starting",
                 seq.name
@@ -1137,6 +1362,7 @@ async fn run_sequence(
             {
                 send_log(
                     &gremlin.runtime_config.log_tx,
+                    log::Level::Info,
                     format!("sequence '{}': child stage failed: {}", seq.name, error),
                 );
                 outcome = Err(error);
@@ -1155,6 +1381,7 @@ async fn run_sequence(
         {
             send_log(
                 &gremlin.runtime_config.log_tx,
+                log::Level::Info,
                 format!("sequence '{}': stopped (artifact produced)", seq.name),
             );
             stopped = true;
@@ -1197,7 +1424,11 @@ impl Gremlin {
             || (!is_fork && (!bootstrap.launch_cmds.is_empty() || !bootstrap.cli_out.is_empty()));
         if self.workdir.is_some() && resume_from.is_none() && has_bootstrap {
             if let Err(error) = run_definition_bootstrap(self, is_fork).await {
-                send_log(&self.runtime_config.log_tx, "bootstrap failed");
+                send_log(
+                    &self.runtime_config.log_tx,
+                    log::Level::Info,
+                    "bootstrap failed",
+                );
                 self.state.record_stage_error(
                     "other",
                     &truncate(&format!("bootstrap failed: {error}"), 200),
@@ -1229,7 +1460,7 @@ impl Gremlin {
 
             if let Some(ref ct) = self.cancel_token {
                 if ct.is_cancelled() {
-                    send_log(&self.runtime_config.log_tx, "cancelled");
+                    send_log(&self.runtime_config.log_tx, log::Level::Info, "cancelled");
                     self.finish(-1);
                     return Ok(-1);
                 }
@@ -1261,6 +1492,7 @@ impl Gremlin {
 
             send_log(
                 &self.runtime_config.log_tx,
+                log::Level::Info,
                 format!(
                     "stage '{}': starting (type={})",
                     stage.name(),
@@ -1282,6 +1514,7 @@ impl Gremlin {
                 Err(RunError::Bail { reason }) => {
                     send_log(
                         &self.runtime_config.log_tx,
+                        log::Level::Info,
                         format!("stage '{}': bailed: {}", stage.name(), reason),
                     );
                     emit_event(DaemonEvent::Bail {
@@ -1296,6 +1529,7 @@ impl Gremlin {
                 Err(error) => {
                     send_log(
                         &self.runtime_config.log_tx,
+                        log::Level::Info,
                         format!("stage '{}': error: {}", stage.name(), error),
                     );
                     self.state.record_stage_error(
@@ -1321,6 +1555,7 @@ impl Gremlin {
         send_stage_boundary(&self.runtime_config.stage_stream_tx, "", "other");
         send_log(
             &self.runtime_config.log_tx,
+            log::Level::Info,
             format!("finished (exit_code={exit_code})"),
         );
         self.client.reap_all(self.id.as_str());
@@ -1370,59 +1605,6 @@ impl Gremlin {
                     last_cached_input_tokens: None,
                 },
             );
-        }
-
-        // ── Emit per-stage token breakdown ─────
-        if let Some(stage_usage) = self
-            .state
-            .state_tree()
-            .get(state::STAGE_USAGE_KEY)
-            .and_then(|v| v.as_object())
-        {
-            if stage_usage.is_empty() {
-                return;
-            }
-            let artifact_dir = self.state.state_dir().join("artifacts");
-            let path = artifact_dir.join("token_breakdown.jsonl");
-            // Collect and sort for deterministic output.
-            let mut entries: Vec<(&String, &serde_json::Value)> = stage_usage.iter().collect();
-            entries.sort_by_key(|(a, _)| *a);
-            let mut output = String::new();
-            for (stage_path, usage_val) in entries {
-                let Some(usage) = usage_val.as_object() else {
-                    continue;
-                };
-                let mut line = serde_json::Map::new();
-                line.insert(
-                    "stage".to_string(),
-                    serde_json::Value::String(stage_path.replace('/', ".")),
-                );
-                for (key, value) in usage {
-                    if key == "stage" {
-                        log::warn!(
-                            "token breakdown: stage {stage_path} has reserved key 'stage' — skipping"
-                        );
-                        continue;
-                    }
-                    line.insert(key.clone(), value.clone());
-                }
-                match serde_json::to_string(&line) {
-                    Ok(json) => {
-                        output.push_str(&json);
-                        output.push('\n');
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "token breakdown: failed to serialize entry for {stage_path}: {e}"
-                        );
-                    }
-                }
-            }
-            if let Err(e) =
-                std::fs::create_dir_all(&artifact_dir).and_then(|_| std::fs::write(&path, &output))
-            {
-                log::warn!("failed to write token breakdown artifact: {e}");
-            }
         }
     }
 }
@@ -1757,7 +1939,7 @@ mod tests {
                 content: "you are a chat assistant".to_string(),
             },
             Message::user("hello".to_string()),
-            crate::clients::format::assistant_tool_message("hi there", &[], &[]),
+            crate::clients::format::assistant_tool_message("hi there", &[], &[], true),
             Message::tool_result(
                 CallId::from_wire("call_1".to_string()),
                 ToolName::new("Read".to_string()).unwrap(),
@@ -2163,15 +2345,14 @@ mod tests {
     }
 
     #[test]
-    fn agent_landscape_flag_controls_system_prompt_assembly() {
-        let block = "<!-- LANDSCAPE BLOCK -->";
-        let with = assemble_system_prompt("base", Some(block));
-        assert!(with.contains(block) && with.starts_with("base"));
-        let without = assemble_system_prompt("base", None);
-        assert!(!without.contains(block) && without == "base");
-        // Empty string treated as absent.
-        let empty = assemble_system_prompt("base", Some(""));
-        assert_eq!(empty, "base");
+    fn agent_landscape_flag_controls_landscape_data() {
+        // Landscape no longer appends a block to the system prompt; the flag
+        // only controls whether data is built for the LandscapeContext. This test
+        // verifies that the landscape block is no longer part of system prompt
+        // assembly — the old `assemble_system_prompt` function is gone.
+        let prompt = "base";
+        // System prompts are now just the base prompt without landscape.
+        assert_eq!(prompt, "base");
     }
 
     // --- exec ---
@@ -3031,9 +3212,85 @@ mod tests {
         assert!(block.contains("3|impl|Config"));
         assert_eq!(file_count, 1);
         assert_eq!(item_count, 3);
+    }
 
-        let prompt = assemble_system_prompt("base prompt", Some(&block));
-        assert!(prompt.starts_with("base prompt\n\n"));
-        assert!(prompt.contains(&block));
+    #[tokio::test]
+    async fn build_landscape_snapshot_matches_format_landscape_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("lib.rs"), "pub fn hello() {}\n").unwrap();
+
+        let cwd = dir.path().to_path_buf();
+        let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
+
+        // Build outlines once, then format both ways and compare.
+        let outlines = build_outlines(cwd.clone(), log_tx.clone()).await;
+        let budget: u64 = crate::config::max_landscape_tokens();
+        let expected = crate::landscape::format_landscape_block(
+            &outlines,
+            &cwd,
+            usize::try_from(budget).unwrap_or(usize::MAX),
+            false,
+        )
+        .unwrap();
+
+        // The signals-off path must produce the same skeleton as formatting the
+        // outlines directly (minus the usage hint / log lines).
+        let (block_from_snapshot, _, _) =
+            build_landscape_snapshot(cwd.clone(), log_tx.clone(), false).await;
+
+        assert_eq!(
+            block_from_snapshot, expected.block,
+            "build_landscape_snapshot must match format_landscape_block"
+        );
+    }
+
+    #[test]
+    fn emit_stage_token_usage_writes_valid_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state/g-0001");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("state.json"), r#"{"id": "g"}"#).unwrap();
+        let store = FileSystemStateStore::from_path(state_dir.clone());
+        let store_ref: &dyn StateStore = &store;
+
+        let mut usage = HashMap::new();
+        usage.insert("prompt_tokens".to_string(), 100i64);
+        usage.insert("completion_tokens".to_string(), 50i64);
+
+        // Slash-separated path → dot-separated in JSON
+        state::emit_stage_token_usage(store_ref, "reviews/complexity-review", &usage);
+
+        let raw = std::fs::read_to_string(state_dir.join("token_usage.jsonl")).unwrap();
+        let line = raw.trim();
+        let val: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(val["stage"], "reviews.complexity-review");
+        assert_eq!(val["prompt_tokens"], 100);
+        assert_eq!(val["completion_tokens"], 50);
+    }
+
+    #[test]
+    fn emit_stage_token_usage_skips_reserved_stage_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state/g-0001");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("state.json"), r#"{"id": "g"}"#).unwrap();
+        let store = FileSystemStateStore::from_path(state_dir.clone());
+        let store_ref: &dyn StateStore = &store;
+
+        let mut usage = HashMap::new();
+        usage.insert("prompt_tokens".to_string(), 10i64);
+        usage.insert("stage".to_string(), 999i64); // reserved key
+
+        state::emit_stage_token_usage(store_ref, "reviews/test", &usage);
+
+        let raw = std::fs::read_to_string(state_dir.join("token_usage.jsonl")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+        // The reserved 'stage' key must not overwrite our dot-separated path.
+        assert_eq!(val["stage"], "reviews.test");
+        assert_eq!(val["prompt_tokens"], 10);
+        // The reserved key must not appear as a user field.
+        assert!(val.get("stage") != Some(&serde_json::Value::from(999)));
     }
 }

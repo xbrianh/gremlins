@@ -3,9 +3,8 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use regex::Regex;
 
-use crate::clients::tools::{
-    blocking_string, io_enforce, parse_args, req_str, resolve, AgentLoopRuntime, ToolHandler,
-};
+use crate::clients::tools::{blocking_string, parse_args, req_str, AgentLoopRuntime, ToolHandler};
+use crate::core::paths::{io_enforce, resolve};
 
 const GREP_MAX_LINES: usize = 2000;
 const SKIP_DIRS: &[&str] = &["__pycache__", "node_modules", "target"];

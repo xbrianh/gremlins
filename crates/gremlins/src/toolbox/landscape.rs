@@ -1,43 +1,27 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 
-use super::landscape_fn::LandscapeExplorerFn;
-use crate::clients::tools::{
-    blocking_string, io_enforce, parse_args, req_str, resolve, AgentLoopRuntime, ToolHandler,
-};
+use crate::clients::tools::{blocking_string, parse_args, req_str, AgentLoopRuntime, ToolHandler};
+use crate::core::paths::{io_enforce, resolve};
+use crate::landscape::{format_landscape_block_tool, format_outline_items, LandscapeExplorer};
 
 pub(crate) struct LandscapeTool;
-
-/// Module-level explorer, initialized lazily on first use. The `LandscapeTool`
-/// handler reads it on every invocation — the concrete implementation lives in
-/// `crate::landscape`.
-static EXPLORER: OnceLock<Arc<dyn LandscapeExplorerFn>> = OnceLock::new();
-
-fn get_explorer() -> &'static Arc<dyn LandscapeExplorerFn> {
-    EXPLORER.get_or_init(|| Arc::new(crate::landscape::LandscapeExplorer))
-}
 
 #[async_trait]
 impl ToolHandler for LandscapeTool {
     async fn invoke(&self, _id: &str, ctx: &AgentLoopRuntime, args_json: &str) -> String {
-        landscape_invoke(ctx, args_json).await
+        // This registry handler only runs when no LandscapeContext served the
+        // call. Provide the same directory/file outline behavior as the context
+        // so Landscape keeps working even for a stage without that context.
+        let cwd = ctx.cwd.clone();
+        let roots = ctx.sandbox.roots().map(|r| r.to_vec());
+        let args_json = args_json.to_string();
+        blocking_string(move || landscape_sync(cwd.as_deref(), roots.as_deref(), &args_json)).await
     }
 }
 
-pub(crate) async fn landscape_invoke(ctx: &AgentLoopRuntime, args_json: &str) -> String {
-    let cwd = ctx.cwd.clone();
-    let roots = ctx.sandbox.roots().map(|r| r.to_vec());
-    let args_json = args_json.to_string();
-    blocking_string(move || landscape_sync(cwd.as_deref(), roots.as_deref(), &args_json)).await
-}
-
-pub(crate) fn landscape_sync(
-    cwd: Option<&Path>,
-    roots: Option<&[PathBuf]>,
-    args_json: &str,
-) -> String {
+fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
         Err(e) => return e,
@@ -53,30 +37,22 @@ pub(crate) fn landscape_sync(
         }
     }
 
-    let depth: Option<usize> = if args.get("depth").is_some() {
-        let n = match args.get("depth").and_then(|v| v.as_u64()) {
-            Some(n) => n as usize,
-            None => return "Error: 'depth' must be a non-negative integer".to_string(),
-        };
-        Some(n)
-    } else {
-        None
+    let depth: Option<usize> = match args.get("depth") {
+        None => None,
+        Some(v) => match v.as_u64() {
+            Some(n) => Some(n as usize),
+            None => return "Error: 'depth' must be a non-negative integer".into(),
+        },
     };
 
-    let token_budget: Option<usize> =
-        if let Some(v) = args.get("token_budget").filter(|v| !v.is_null()) {
-            match v.as_u64() {
-                Some(n) => Some(n as usize),
-                None => {
-                    return "Error: 'token_budget' must be a non-negative integer".to_string();
-                }
-            }
-        } else {
-            // Model omitted token_budget — fall back to config / env var.
-            crate::config::max_landscape_tool_tokens().map(|n| n as usize)
-        };
+    let token_budget: Option<usize> = match args.get("token_budget").filter(|v| !v.is_null()) {
+        None => crate::config::max_landscape_tool_tokens().map(|n| n as usize),
+        Some(v) => match v.as_u64() {
+            Some(n) => Some(n as usize),
+            None => return "Error: 'token_budget' must be a non-negative integer".into(),
+        },
+    };
 
-    // Reject a symlink root so the directory walk does not follow it.
     let meta = match path.symlink_metadata() {
         Ok(m) => m,
         Err(e) => return format!("Error: {e}"),
@@ -88,24 +64,47 @@ pub(crate) fn landscape_sync(
         );
     }
 
-    let explorer = get_explorer();
-
     if meta.is_dir() {
-        let depth_limit = depth.unwrap_or(usize::MAX);
-        match explorer.explore_directory(&path, depth_limit, token_budget) {
+        let build = match LandscapeExplorer.build_with_failures(&path, depth.unwrap_or(usize::MAX))
+        {
+            Ok(b) => b,
+            Err(e) => return format!("Error: {e}"),
+        };
+        if build.outlines.is_empty() && build.failures.is_empty() {
+            return "(empty directory)".into();
+        }
+        match format_landscape_block_tool(&build, &path, token_budget) {
             Ok(block) => {
-                if block.is_empty() {
-                    "(empty directory)".to_string()
+                if block.block.is_empty() {
+                    "(empty directory)".into()
                 } else {
-                    block
+                    block.block
                 }
             }
-            Err(e) => e,
+            Err(crate::landscape::LandscapeError::BudgetExceeded) => {
+                "Error: budget exceeded".into()
+            }
+            Err(e) => format!("Error: {e}"),
         }
     } else {
-        match explorer.explore_file(&path) {
-            Ok(outline) => outline,
-            Err(e) => e,
+        match LandscapeExplorer.outline_file(&path, false) {
+            Ok(items) => {
+                if items.is_empty() {
+                    path.display().to_string()
+                } else {
+                    format_outline_items(&items)
+                }
+            }
+            Err(crate::landscape::LandscapeError::Utf8(e)) => {
+                format!("Error: file is not valid UTF-8: {e}")
+            }
+            Err(crate::landscape::LandscapeError::Read(e)) => format!("Error: {e}"),
+            Err(crate::landscape::LandscapeError::BudgetExceeded) => {
+                "Error: budget exceeded".into()
+            }
+            Err(crate::landscape::LandscapeError::Tokenizer(e)) => {
+                format!("Error: tokenizer init failed: {e}")
+            }
         }
     }
 }

@@ -119,14 +119,23 @@ pub(crate) fn assistant_tool_message(
     text: &str,
     reasoning_items: &[Sealed<Reasoning>],
     tool_calls: &[ToolCall],
+    include_reasoning_items: bool,
 ) -> Message {
     let mut contents = Vec::new();
-    contents.extend(
-        reasoning_items
-            .iter()
-            .cloned()
-            .map(AssistantContent::Reasoning),
-    );
+    // Omit structured reasoning items from persistent history unless the
+    // backend needs them (Azure Responses `function_call` → `reasoning` id
+    // linkage) or the message would otherwise be empty. A reasoning-only turn
+    // has no text and no tool calls, so dropping its reasoning items would
+    // force the empty-text fallback below and produce a degenerate assistant
+    // turn in history.
+    if include_reasoning_items || (text.is_empty() && tool_calls.is_empty()) {
+        contents.extend(
+            reasoning_items
+                .iter()
+                .cloned()
+                .map(AssistantContent::Reasoning),
+        );
+    }
     if !text.is_empty() {
         contents.push(AssistantContent::text(text.to_string()));
     }
@@ -303,6 +312,7 @@ pub(crate) fn enrich_log_line(name: &str, args: &serde_json::Value) -> String {
 }
 
 /// Compact label for a tool call in the per-turn action ledger.
+#[allow(dead_code)]
 pub(crate) fn ledger_key_arg(args: &serde_json::Value) -> String {
     if let Some(obj) = args.as_object() {
         for k in [

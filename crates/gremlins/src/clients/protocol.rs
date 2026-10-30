@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::model_context::MutableModelContext;
 use rig_core::completion::Message;
 
 /// Aggregated token usage summary from an agent run.
@@ -38,7 +39,7 @@ pub struct TurnStats {
     pub reasoning_tokens: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CompletedRun {
     pub exit_code: i32,
     pub text_result: Option<String>,
@@ -52,12 +53,34 @@ pub struct CompletedRun {
     /// backend captures it. Used by the chat gremlin to persist full model
     /// context between stages via `artifact://conversation.json`.
     pub messages: Option<Vec<Message>>,
-    /// Nested-loop file observations (Read/Grep/Landscape + mutation paths).
-    /// Populated for nested agent loops (Task workers) so the parent can
-    /// deduplicate Scout observations against its own ToolLedger.
-    /// The top-level chat loop leaves this `None`.
+    /// File observations (Read/Grep/Landscape + mutation paths) collected
+    /// during the agent stage. Populated for all agent loops so that
+    /// cross-stage landscape pruning can skip already-explored files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_observations: Option<FileObservations>,
+    /// Mutable model contexts (ToolLedger, LandscapeContext, SignalMapContext)
+    /// carried back from the child loop for fork + join propagation.
+    /// Never serialized; consumed by the parent loop after `join`.
+    #[serde(skip)]
+    pub contexts: Vec<Box<dyn MutableModelContext>>,
+}
+
+// Manual Clone impl needed because `Box<dyn MutableModelContext>` doesn't
+// auto-derive Clone — we use the trait's `clone_box()` method.
+impl Clone for CompletedRun {
+    fn clone(&self) -> Self {
+        Self {
+            exit_code: self.exit_code,
+            text_result: self.text_result.clone(),
+            summary: self.summary.clone(),
+            events: self.events.clone(),
+            cost_usd: self.cost_usd,
+            token_usage: self.token_usage.clone(),
+            messages: self.messages.clone(),
+            file_observations: self.file_observations.clone(),
+            contexts: self.contexts.iter().map(|c| c.clone_box()).collect(),
+        }
+    }
 }
 
 /// Sum two optional token counters.
@@ -77,7 +100,7 @@ pub fn add_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 /// One file observation captured from a worker agent's Read, Grep, or Landscape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileObservation {
-    /// Tool name: "Read", "Grep", or "Landscape".
+    /// Tool name: "Read", "Grep", "DirLs", or "Landscape".
     pub tool: String,
     /// File path for Read; search path for Grep; directory for Landscape.
     pub path: String,
@@ -109,30 +132,6 @@ impl FileObservations {
     /// mutation paths, and no truncation marker.
     pub fn is_empty(&self) -> bool {
         self.items.is_empty() && self.written_paths.is_empty() && !self.truncated
-    }
-
-    /// Render observations as a machine-parseable block for embedding in
-    /// the Task tool output. The block is a JSON line between guard markers.
-    pub fn render_block(&self) -> String {
-        let json = serde_json::to_string(self)
-            .unwrap_or_else(|_| r#"{"items":[],"truncated":false,"written_paths":[]}"#.to_string());
-        format!("\n\n__SCOUT_OBSERVATIONS__\n{json}\n__END_SCOUT_OBSERVATIONS__")
-    }
-
-    /// Try to extract a `FileObservations` block from `text`. Returns the
-    /// parsed observations, the prefix (everything before the block), and the
-    /// suffix (everything after the block) when found, or `None` when no block
-    /// is present.
-    pub fn parse_block(text: &str) -> Option<(FileObservations, &str, &str)> {
-        let start_marker = "\n\n__SCOUT_OBSERVATIONS__\n";
-        let end_marker = "\n__END_SCOUT_OBSERVATIONS__";
-        let start = text.find(start_marker)?;
-        let json_start = start + start_marker.len();
-        let json_end = text[json_start..].find(end_marker)?;
-        let json = &text[json_start..json_start + json_end];
-        let obs: FileObservations = serde_json::from_str(json).ok()?;
-        let end = json_start + json_end + end_marker.len();
-        Some((obs, &text[..start], &text[end..]))
     }
 }
 
@@ -174,73 +173,6 @@ mod tests {
         assert_eq!(decoded.cache_creation_input_tokens, None);
         assert_eq!(decoded.reasoning_tokens, Some(2));
         assert_eq!(decoded.turns, 4);
-    }
-
-    #[test]
-    fn file_observations_render_parse_roundtrip() {
-        let obs = FileObservations {
-            items: vec![
-                FileObservation {
-                    tool: "Read".into(),
-                    path: "/tmp/foo.rs".into(),
-                    offset: 10,
-                    limit: 40,
-                    pattern: None,
-                    output: "line 11 content\nline 12\n".into(),
-                },
-                FileObservation {
-                    tool: "Grep".into(),
-                    path: "/tmp/bar".into(),
-                    offset: 0,
-                    limit: 0,
-                    pattern: Some("needle".into()),
-                    output: "bar.rs:42:match".into(),
-                },
-            ],
-            truncated: false,
-            written_paths: vec!["src/lib.rs".into()],
-        };
-
-        let block = obs.render_block();
-        let (parsed, prefix, suffix) = FileObservations::parse_block(&block).unwrap();
-        assert_eq!(prefix, "");
-        assert_eq!(suffix, "");
-        assert_eq!(parsed, obs);
-    }
-
-    #[test]
-    fn parse_block_missing_returns_none() {
-        assert!(FileObservations::parse_block("just prose, no markers").is_none());
-    }
-
-    #[test]
-    fn parse_block_with_prose_prefix() {
-        let obs = FileObservations {
-            items: vec![],
-            truncated: false,
-            written_paths: vec![],
-        };
-        let block = obs.render_block();
-        let text = format!("Done summary here.{block}");
-        let (parsed, prefix, suffix) = FileObservations::parse_block(&text).unwrap();
-        assert_eq!(prefix, "Done summary here.");
-        assert_eq!(suffix, "");
-        assert!(parsed.is_empty());
-    }
-
-    #[test]
-    fn parse_block_with_suffix() {
-        let obs = FileObservations {
-            items: vec![],
-            truncated: false,
-            written_paths: vec![],
-        };
-        let block = obs.render_block();
-        let text = format!("before{block}after");
-        let (parsed, prefix, suffix) = FileObservations::parse_block(&text).unwrap();
-        assert_eq!(prefix, "before");
-        assert_eq!(suffix, "after");
-        assert!(parsed.is_empty());
     }
 
     #[test]

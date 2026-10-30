@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use tokio::process::{ChildStderr, ChildStdout, Command};
 
 use crate::clients::format::format_tool_call_parts;
-use crate::clients::tools::{parse_args, project_root, req_str, AgentLoopRuntime, ToolHandler};
+use crate::clients::tools::{parse_args, req_str, AgentLoopRuntime, ToolHandler};
+use crate::core::paths::project_root;
 
 const BASH_TIMEOUT_SECS: u64 = 120;
 

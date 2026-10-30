@@ -20,7 +20,7 @@ use std::sync::{Mutex, MutexGuard};
 use crate::config;
 
 /// Environment variables the path resolvers read directly.
-const OVERRIDES: [&str; 23] = [
+const OVERRIDES: &[&str] = &[
     "GREMLINS_SANDBOX_ROOT",
     "GREMLINS_PROJECT_ROOT",
     "GREMLINS_OVERLAY_DIR",
@@ -44,6 +44,11 @@ const OVERRIDES: [&str; 23] = [
     "GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT",
     "GREMLINS_REASONING_EFFORT",
     "GREMLINS_MAX_LANDSCAPE_TOOL_TOKENS",
+    "GREMLINS_LANDSCAPE_SIGNALS",
+    "GREMLINS_LANDSCAPE_TOOL_LEDGER_PRUNING",
+    "GREMLINS_LANDSCAPE_STAGE_PROFILES",
+    "GREMLINS_LANDSCAPE_DIFF_STAT",
+    "GREMLINS_MAX_LANDSCAPE_TOKENS",
 ];
 
 /// Holds the process-state lock and undoes the environment changes its holder

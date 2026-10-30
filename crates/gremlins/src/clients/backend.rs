@@ -11,6 +11,7 @@ pub(crate) use super::compaction::{CompactionOpts, Compactor};
 use super::interactive::{InteractiveSession, StreamEventSender};
 use super::model::GremlinsModel;
 use super::params::ResolvedParams;
+pub(crate) use super::plug::LoopPlug;
 use super::protocol::CompletedRun;
 use super::task_models::TaskModelSelector;
 
@@ -75,9 +76,14 @@ pub struct RunParams {
     /// The executor layer wires this to the daemon event broadcast.
     pub token_usage_sink: crate::clients::token_usage::TokenUsageSink,
     /// Path to the persistent stage scratchpad file (under
-    /// `.gremlins/implicit/_scratchpad.md` in the checkout artifact dir).    /// When `Some`, the agent loop reads and re-injects scratchpad content
+    /// `.gremlins/implicit/_scratchpad.md` in the checkout artifact dir).
+    /// When `Some`, the agent loop reads and re-injects scratchpad content
     /// on each turn. `None` disables the per-turn injection.
     pub scratchpad_path: Option<PathBuf>,
+    /// Inversion-of-control plug that carries cross-package dependencies
+    /// (log, scratchpad, prompt-debug, token-usage, contexts) into the
+    /// agent loop. `None` defaults to a no-op plug.
+    pub plug: Option<LoopPlug>,
 }
 
 impl Clone for RunParams {
@@ -111,6 +117,7 @@ impl Clone for RunParams {
             compactor: self.compactor.clone(),
             token_usage_sink: self.token_usage_sink.clone(),
             scratchpad_path: self.scratchpad_path.clone(),
+            plug: self.plug.clone(),
         }
     }
 }

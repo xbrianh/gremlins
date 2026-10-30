@@ -4,8 +4,8 @@ use std::sync::Arc;
 use rig_core::completion::Message;
 
 use super::model::GremlinsModel;
-use super::task_kind::TaskKind;
 use super::tools::{self, AgentLoopRuntime};
+use crate::task_kind::TaskKind;
 
 pub(crate) use super::task_models::*;
 
@@ -70,10 +70,10 @@ pub(crate) fn make_task_runner(
     idle_timeout: f64,
     max_turns: usize,
     completion_nudge_budget: usize,
-    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     temperature: Option<f64>,
     max_tokens: Option<u64>,
     extra: Option<serde_json::Value>,
+    preserve_reasoning_in_history: bool,
 ) -> tools::TaskFn {
     make_task_runner_at_depth(
         model,
@@ -88,10 +88,10 @@ pub(crate) fn make_task_runner(
         0,
         String::new(),
         completion_nudge_budget,
-        log_tx,
         temperature,
         max_tokens,
         extra,
+        preserve_reasoning_in_history,
     )
 }
 
@@ -109,13 +109,16 @@ fn make_task_runner_at_depth(
     depth: u32,
     id_chain: String,
     completion_nudge_budget: usize,
-    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     temperature: Option<f64>,
     max_tokens: Option<u64>,
     extra: Option<serde_json::Value>,
+    preserve_reasoning_in_history: bool,
 ) -> tools::TaskFn {
     Arc::new(
-        move |kind: TaskKind, task: String, parent_history: Option<Vec<Message>>| {
+        move |kind: TaskKind,
+              task: String,
+              parent_history: Option<Vec<Message>>,
+              parent_contexts: Vec<Box<dyn super::model_context::MutableModelContext>>| {
             let model = model.clone();
             let task_model_selector = task_model_selector.clone();
             let tool_filter = tool_filter.clone();
@@ -126,11 +129,13 @@ fn make_task_runner_at_depth(
             let extra = extra.clone();
 
             let task_cwd = ctx.cwd.clone();
-            let log_tx = log_tx.clone();
 
             Box::pin(async move {
                 if depth >= MAX_DEPTH {
-                    return format!("Error: task max depth ({MAX_DEPTH}) exceeded");
+                    return tools::TaskOutcome {
+                        output: format!("Error: task max depth ({MAX_DEPTH}) exceeded"),
+                        contexts: Vec::new(),
+                    };
                 }
 
                 // A selector, when configured, may swap in a different model
@@ -142,23 +147,40 @@ fn make_task_runner_at_depth(
                     temperature,
                     max_tokens,
                     extra: extra.clone(),
+                    preserve_reasoning: None,
                 };
                 let selection = if kind == TaskKind::Fork {
                     Ok((parent_selection.clone(), None))
                 } else {
                     match &task_model_selector {
-                        Some(selector) => selector.model_for(kind, &parent_selection),
+                        Some(selector) => selector.model_for(kind, &parent_selection).map(
+                            |(mut selected, spec)| {
+                                if selected.preserve_reasoning.is_none() {
+                                    selected.preserve_reasoning =
+                                        Some(preserve_reasoning_in_history);
+                                }
+                                (selected, spec)
+                            },
+                        ),
                         None => Ok((parent_selection.clone(), None)),
                     }
                 };
                 let (selected, _selected_spec) = match selection {
                     Ok(selection) => selection,
-                    Err(reason) => return format!("Task error: {reason}"),
+                    Err(reason) => {
+                        return tools::TaskOutcome {
+                            output: format!("Task error: {reason}"),
+                            contexts: Vec::new(),
+                        };
+                    }
                 };
                 let selected_model = selected.model.clone();
                 let selected_temperature = selected.temperature;
                 let selected_max_tokens = selected.max_tokens;
                 let selected_extra = selected.extra.clone();
+                let child_preserve_reasoning = selected
+                    .preserve_reasoning
+                    .unwrap_or(preserve_reasoning_in_history);
                 // Use the model's own id() when available; fall back to the
                 // parent model name so that log lines always identify the
                 // actual model sent to the API.
@@ -189,13 +211,13 @@ fn make_task_runner_at_depth(
                     depth + 1,
                     new_chain.clone(),
                     completion_nudge_budget,
-                    log_tx.clone(),
                     selected_temperature,
                     selected_max_tokens,
                     selected_extra.clone(),
+                    child_preserve_reasoning,
                 ));
 
-                let work_root = tools::worktree_root(task_cwd.as_deref());
+                let work_root = crate::core::paths::worktree_root(task_cwd.as_deref());
                 let system_prompt = if kind == TaskKind::Fork {
                     Some(crate::clients::system_prompts::fork_system_prompt(
                         &work_root,
@@ -224,28 +246,18 @@ fn make_task_runner_at_depth(
                     idle_timeout,
                     max_turns,
                     completion_nudge_budget,
-                    log_tx.clone(),
                     selected_temperature,
                     selected_max_tokens,
                     selected_extra.clone(),
+                    child_preserve_reasoning,
                     prepopulated_messages,
+                    parent_contexts,
                 )
                 .await;
 
                 match result {
                     Ok(completed) => {
-                        let mut out = completed.text_result.unwrap_or_default();
-                        // Scout carries its file observations (Read/Grep/Landscape
-                        // plus mutation paths) up to the parent as structured data
-                        // appended to the prose, so the parent can act on the exact
-                        // bytes without re-reading. Fork and Implement stay prose-only.
-                        if kind == TaskKind::Scout {
-                            if let Some(obs) = completed.file_observations {
-                                if !obs.is_empty() {
-                                    out.push_str(&obs.render_block());
-                                }
-                            }
-                        }
+                        let out = completed.text_result.unwrap_or_default();
                         log::info!(
                             "task complete: kind={kind} prompt_len={p_len} prompt_preview={p_preview:?} output_len={o_len} output_preview={o_preview:?} has_done_header={has_done} has_md_header={has_md}",
                             p_len = task.len(),
@@ -255,9 +267,15 @@ fn make_task_runner_at_depth(
                             has_done = out.starts_with("Done."),
                             has_md = out.starts_with("# "),
                         );
-                        out
+                        tools::TaskOutcome {
+                            output: out,
+                            contexts: completed.contexts,
+                        }
                     }
-                    Err(e) => format!("Task error: {e}"),
+                    Err(e) => tools::TaskOutcome {
+                        output: format!("Task error: {e}"),
+                        contexts: Vec::new(),
+                    },
                 }
             })
         },
@@ -287,6 +305,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             extra: None,
+            preserve_reasoning: None,
         }
     }
 
@@ -338,6 +357,7 @@ mod tests {
             temperature: Some(0.2),
             max_tokens: Some(123),
             extra: Some(serde_json::json!({ "parallel_tool_calls": true })),
+            preserve_reasoning: None,
         };
         let factory: TaskModelFactory = Arc::new(move |spec: &str| {
             assert_eq!(spec, "openai/mini");
@@ -475,6 +495,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            log_tx: None,
         }
     }
 
@@ -503,14 +524,15 @@ mod tests {
             None,
             None,
             None,
-            None,
+            false,
         );
 
         // First invocation: depth 0 < 3, should succeed.
-        let output = runner(TaskKind::Scout, "first call".into(), None).await;
+        let output = runner(TaskKind::Scout, "first call".into(), None, Vec::new()).await;
         assert!(
-            !output.contains("max depth"),
-            "depth 0 should not hit guard, got: {output}"
+            !output.output.contains("max depth"),
+            "depth 0 should not hit guard, got: {}",
+            output.output
         );
 
         // The task harness prompt must reach the model as a leading system message.
@@ -547,17 +569,21 @@ mod tests {
             None,
             None,
             None,
-            None,
+            false,
         );
 
-        let output = runner(TaskKind::Scout, "x".repeat(10_000), None).await;
+        let output = runner(TaskKind::Scout, "x".repeat(10_000), None, Vec::new()).await;
         assert!(
-            output.starts_with("Task error: prompt size "),
-            "oversized task prompt must surface as a Task error string, got: {output}"
+            output.output.starts_with("Task error: prompt size "),
+            "oversized task prompt must surface as a Task error string, got: {}",
+            output.output
         );
         assert!(
-            output.contains("exceeds configured limit of 16 bytes"),
-            "oversized task prompt must report limit and actual size, got: {output}"
+            output
+                .output
+                .contains("exceeds configured limit of 16 bytes"),
+            "oversized task prompt must report limit and actual size, got: {}",
+            output.output
         );
         assert!(
             inner.requests().is_empty(),
@@ -610,13 +636,19 @@ mod tests {
             None,
             None,
             None,
-            None,
+            false,
         );
 
         let parent_history = vec![Message::user("earlier parent turn".to_string())];
-        let output = runner(TaskKind::Fork, "child task".into(), Some(parent_history)).await;
+        let output = runner(
+            TaskKind::Fork,
+            "child task".into(),
+            Some(parent_history),
+            Vec::new(),
+        )
+        .await;
 
-        assert_eq!(output, "fork reply");
+        assert_eq!(output.output, "fork reply");
         // Fork must bypass task-models entirely, even when another kind is
         // configured with an override.
         assert!(
@@ -688,6 +720,7 @@ mod tests {
                 temperature: Some(0.7),
                 max_tokens: Some(8192),
                 extra: Some(target_extra_for_factory.clone()),
+                preserve_reasoning: None,
             })
         });
         let selector = TaskModelSelector::new(
@@ -709,13 +742,17 @@ mod tests {
             10,
             0,
             None,
-            Some(0.1),
-            Some(1111),
+            None,
             Some(parent_extra.clone()),
+            false,
         );
 
-        let output = runner(TaskKind::Scout, "go".into(), None).await;
-        assert!(!output.contains("Task error"), "unexpected error: {output}");
+        let output = runner(TaskKind::Scout, "go".into(), None, Vec::new()).await;
+        assert!(
+            !output.output.contains("Task error"),
+            "unexpected error: {}",
+            output.output
+        );
 
         for req in child.requests() {
             assert_eq!(
@@ -772,17 +809,21 @@ mod tests {
             None,
             None,
             None,
-            None,
+            false,
         );
 
-        let output = runner(TaskKind::Scout, "go".into(), None).await;
+        let output = runner(TaskKind::Scout, "go".into(), None, Vec::new()).await;
         assert!(
-            output.starts_with("Task error: backend build failed"),
-            "backend build failure must surface as a Task error string, got: {output}"
+            output
+                .output
+                .starts_with("Task error: backend build failed"),
+            "backend build failure must surface as a Task error string, got: {}",
+            output.output
         );
         assert!(
-            output.contains("missing credential"),
-            "the reason must be included in the Task error, got: {output}"
+            output.output.contains("missing credential"),
+            "the reason must be included in the Task error, got: {}",
+            output.output
         );
         assert!(
             parent.requests().is_empty(),
@@ -811,13 +852,14 @@ mod tests {
             None,
             None,
             None,
-            None,
+            false,
         );
 
-        let blocked = runner(TaskKind::Scout, "too deep".into(), None).await;
+        let blocked = runner(TaskKind::Scout, "too deep".into(), None, Vec::new()).await;
         assert!(
-            blocked.contains("max depth (3) exceeded"),
-            "call at MAX_DEPTH should be rejected, got: {blocked}"
+            blocked.output.contains("max depth (3) exceeded"),
+            "call at MAX_DEPTH should be rejected, got: {}",
+            blocked.output
         );
     }
 
@@ -851,17 +893,23 @@ mod tests {
             None,
             None,
             None,
-            None,
+            false,
         );
 
-        let handle = tokio::spawn(runner(TaskKind::Scout, "transient".into(), None));
+        let handle = tokio::spawn(runner(
+            TaskKind::Scout,
+            "transient".into(),
+            None,
+            Vec::new(),
+        ));
         tokio::time::advance(std::time::Duration::from_secs(60)).await;
         let output = handle.await.unwrap();
         assert!(
-            !output.contains("Task error"),
-            "transient error must be retried, got: {output}"
+            !output.output.contains("Task error"),
+            "transient error must be retried, got: {}",
+            output.output
         );
-        assert_eq!(output, "recovered");
+        assert_eq!(output.output, "recovered");
     }
 
     /// When every attempt fails retryably, the Task still returns a string
@@ -895,15 +943,16 @@ mod tests {
             None,
             None,
             None,
-            None,
+            false,
         );
 
-        let handle = tokio::spawn(runner(TaskKind::Scout, "exhaust".into(), None));
+        let handle = tokio::spawn(runner(TaskKind::Scout, "exhaust".into(), None, Vec::new()));
         tokio::time::advance(std::time::Duration::from_secs(200)).await;
         let output = handle.await.unwrap();
         assert!(
-            output.starts_with("Task error: "),
-            "exhausted retries must remain in the tool result, got: {output}"
+            output.output.starts_with("Task error: "),
+            "exhausted retries must remain in the tool result, got: {}",
+            output.output
         );
         // Inner loop: 5 turn-level retries (6 attempts) before giving up.
         assert_eq!(
@@ -954,19 +1003,27 @@ mod tests {
             None,
             None,
             None,
-            None,
+            false,
         );
 
         // Ten concurrent siblings at depth 0 — none should be rejected as
         // "max depth" even though they overlap in time.
         let handles: Vec<_> = (0..10)
-            .map(|i| tokio::spawn(runner.clone()(TaskKind::Scout, format!("call {i}"), None)))
+            .map(|i| {
+                tokio::spawn(runner.clone()(
+                    TaskKind::Scout,
+                    format!("call {i}"),
+                    None,
+                    Vec::new(),
+                ))
+            })
             .collect();
         for h in handles {
             let out = h.await.unwrap();
             assert!(
-                !out.contains("max depth"),
-                "sibling at depth 0 must not hit the recursion guard, got: {out}"
+                !out.output.contains("max depth"),
+                "sibling at depth 0 must not hit the recursion guard, got: {}",
+                out.output
             );
         }
     }
@@ -1040,21 +1097,23 @@ mod tests {
             turns: Vec<Vec<rig_core::test_utils::MockStreamEvent>>,
         ) -> (tools::TaskFn, tokio::sync::mpsc::UnboundedReceiver<String>) {
             let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut ctx = depth_test_ctx();
+            ctx.log_tx = Some(log_tx);
             let runner = make_task_runner(
                 gm(rig_core::test_utils::MockCompletionModel::from_stream_turns(turns).erase()),
                 None,
                 None,
                 crate::clients::cancel::CancelToken::new(),
-                depth_test_ctx(),
+                ctx,
                 TEST_BASE.to_string(),
                 "model".into(),
                 5.0,
                 10,
                 0,
-                Some(log_tx),
                 None,
                 None,
                 None,
+                false,
             );
             (runner, log_rx)
         }
@@ -1071,7 +1130,7 @@ mod tests {
         #[test]
         fn task_prefix_wraps_a_single_segment_at_depth_one() {
             let (runner, mut log_rx) = runner_with_turns(vec![turn_text("only")]);
-            block_on(runner(TaskKind::Scout, "task".into(), None));
+            block_on(runner(TaskKind::Scout, "task".into(), None, Vec::new()));
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 1, "get {segments:?} from {lines:?}");
@@ -1092,7 +1151,7 @@ mod tests {
         fn nested_task_prefix_appends_to_the_parent_chain() {
             let (runner, mut log_rx) =
                 runner_with_turns(vec![turn_task_call(), turn_text("leaf"), turn_text("done")]);
-            block_on(runner(TaskKind::Scout, "task".into(), None));
+            block_on(runner(TaskKind::Scout, "task".into(), None, Vec::new()));
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 2, "got {segments:?} from {lines:?}");
@@ -1114,8 +1173,8 @@ mod tests {
         fn sibling_invocations_get_distinct_segments() {
             let (runner, mut log_rx) = runner_with_turns(vec![turn_text("a"), turn_text("b")]);
             block_on(async {
-                runner(TaskKind::Scout, "one".into(), None).await;
-                runner(TaskKind::Scout, "two".into(), None).await;
+                runner(TaskKind::Scout, "one".into(), None, Vec::new()).await;
+                runner(TaskKind::Scout, "two".into(), None, Vec::new()).await;
             });
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));

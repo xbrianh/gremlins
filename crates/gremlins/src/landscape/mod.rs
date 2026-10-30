@@ -6,14 +6,12 @@
 
 mod error;
 pub mod heuristic;
+pub(crate) mod signals;
 
 pub use error::LandscapeError;
-
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
-
-use crate::toolbox::landscape_fn::LandscapeExplorerFn;
 
 pub const FN: &str = "fn";
 pub const STRUCT: &str = "struct";
@@ -49,6 +47,24 @@ const SKIP_DIR_NAMES: &[&str] = &[
 /// Every other dot-directory is skipped to avoid leaking secrets (`.ssh`,
 /// `.aws`, `.gnupg`) into model prompts.
 const ALLOWLIST_DOT_DIRS: &[&str] = &[".gremlins", ".github", ".cargo-gremlin-target"];
+
+/// Render heuristic signal sections for injection into the landscape block.
+///
+/// Returns `SignalSection` values for each non-empty section,
+/// together with the count of files skipped due to pruning, and the set of
+/// canonical changed-file paths (used by the `DiffFocused` profile to scope
+/// the skeleton).
+pub(crate) fn inject_signal_sections(
+    ctx: &signals::SignalContext,
+    outlines: &[FileOutline],
+) -> (
+    Vec<signals::SignalSection>,
+    usize,
+    Vec<PathBuf>,
+    std::collections::HashMap<String, signals::SymbolEntry>,
+) {
+    signals::render_signal_sections(ctx, outlines)
+}
 
 /// One discovered structural item and its 1-based line number.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,55 +230,7 @@ impl LandscapeExplorer {
     }
 }
 
-// ── LandscapeExplorerFn adapter (for toolbox) ─────────────────────────────
-
-impl LandscapeExplorerFn for LandscapeExplorer {
-    fn explore_directory(
-        &self,
-        path: &Path,
-        depth_limit: usize,
-        token_budget: Option<usize>,
-    ) -> Result<String, String> {
-        let build = self
-            .build_with_failures(path, depth_limit)
-            .map_err(|e| format!("Error: {e}"))?;
-
-        if build.outlines.is_empty() && build.failures.is_empty() {
-            return Ok(String::new());
-        }
-
-        match format_landscape_block_tool(&build, path, token_budget) {
-            Ok(block) => Ok(block.block),
-            Err(LandscapeError::BudgetExceeded) => Err("Error: budget exceeded".into()),
-            Err(LandscapeError::Tokenizer(e)) => Err(format!("Error: tokenizer error: {e}")),
-            Err(LandscapeError::Read(e)) => Err(format!("Error: {e}")),
-            Err(LandscapeError::Utf8(e)) => Err(format!("Error: file is not valid UTF-8: {e}")),
-        }
-    }
-
-    fn explore_file(&self, path: &Path) -> Result<String, String> {
-        match self.outline_file(path, false) {
-            Ok(items) => {
-                if items.is_empty() {
-                    let ext = path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| e.to_ascii_lowercase())
-                        .unwrap_or_default();
-                    if heuristic::recognizes(&ext) {
-                        return Ok("(no outline items)".into());
-                    }
-                    return Ok(path.display().to_string());
-                }
-                Ok(format_outline_items(&items))
-            }
-            Err(LandscapeError::Utf8(e)) => Err(format!("Error: file is not valid UTF-8: {e}")),
-            Err(LandscapeError::Read(e)) => Err(format!("Error: {e}")),
-            Err(LandscapeError::BudgetExceeded) => Err("Error: budget exceeded".into()),
-            Err(LandscapeError::Tokenizer(e)) => Err(format!("Error: tokenizer init failed: {e}")),
-        }
-    }
-}
+// ── walk helpers ───────────────────────────────────────────────────────────
 
 /// Walk the directory tree, collecting every file whose size is within
 /// `MAX_OUTLINE_BYTES`. Extension filtering happens later in
@@ -658,6 +626,102 @@ fn render_key_parts(
     Some(parts)
 }
 
+/// Per-file cache entry in the living landscape.
+#[derive(Clone, Debug)]
+pub(crate) struct LandscapeFileEntry {
+    /// Outline items discovered for this file (empty when skipped or when no
+    /// items were found).
+    pub(crate) items: Vec<OutlineItem>,
+}
+
+/// Living, mutable landscape data owned by LandscapeContext.
+///
+/// Carries the full-tree outlines and signal sections computed at stage
+/// start, plus a per-file working set that is refreshed on tool touches and
+/// pruned by turn decay.
+#[derive(Clone, Debug)]
+pub struct LandscapeData {
+    /// The worktree root directory.
+    pub(crate) root: std::path::PathBuf,
+    /// Full-tree per-file outlines from stage start.
+    pub(crate) outlines: Vec<FileOutline>,
+    /// Pre-computed signal sections (changed-files, diff-stat, symbol-map).
+    pub(crate) signal_sections: Vec<signals::SignalSection>,
+    /// Deduplicated symbol index for the living symbol map.
+    /// Keyed by identifier name, maps to its first file:line occurrence.
+    pub(crate) symbol_index: std::collections::HashMap<String, signals::SymbolEntry>,
+    /// Per-file cache: keyed by full file path.
+    pub(crate) file_entries: std::collections::HashMap<std::path::PathBuf, LandscapeFileEntry>,
+}
+
+impl LandscapeData {
+    /// Seed file entries from the stage-start outlines.
+    ///
+    /// Idempotent: calling it again replaces all entries.
+    pub fn seed(&mut self) {
+        self.file_entries.clear();
+        for outline in &self.outlines {
+            self.file_entries.insert(
+                outline.path.clone(),
+                LandscapeFileEntry {
+                    items: outline.items.clone(),
+                },
+            );
+        }
+    }
+
+    /// Touch a single file: re-outline it and update (or insert) its cache
+    /// entry.
+    pub fn touch_file(&mut self, path: &std::path::Path, explorer: &LandscapeExplorer) {
+        match explorer.outline_file(path, true) {
+            Ok(items) => {
+                self.file_entries
+                    .insert(path.to_path_buf(), LandscapeFileEntry { items });
+            }
+            Err(_) => {
+                // Read/parse error: keep the existing entry (if any) so a
+                // later touch can retry. If there is no existing entry we
+                // insert an empty one.
+                if !self.file_entries.contains_key(path) {
+                    self.file_entries
+                        .insert(path.to_path_buf(), LandscapeFileEntry { items: Vec::new() });
+                }
+            }
+        }
+    }
+
+    /// Touch a directory: re-explore its direct children and refresh the cache
+    /// entries for the files directly inside it.
+    ///
+    /// Files no longer present on disk are removed from the cache.
+    pub fn touch_dir(&mut self, dir: &std::path::Path, explorer: &LandscapeExplorer) {
+        match explorer.build(dir, 0) {
+            Ok(outlines) => {
+                // Drop stale entries for this directory's direct children so
+                // deleted files disappear immediately, then insert fresh ones.
+                self.file_entries
+                    .retain(|path, _| path.parent() != Some(dir));
+                for outline in outlines {
+                    self.file_entries.insert(
+                        outline.path.clone(),
+                        LandscapeFileEntry {
+                            items: outline.items,
+                        },
+                    );
+                }
+            }
+            Err(_) => {
+                // Read error: keep existing entries so a later touch can retry.
+            }
+        }
+    }
+
+    /// True when there is no landscape data at all (no outlines, no signal sections).
+    pub fn is_empty(&self) -> bool {
+        self.outlines.is_empty() && self.signal_sections.is_empty()
+    }
+}
+
 /// A formatted landscape block plus the number of files and items actually
 /// retained inside it.
 ///
@@ -666,6 +730,7 @@ fn render_key_parts(
 pub(crate) struct LandscapeBlock {
     pub(crate) block: String,
     pub(crate) file_count: usize,
+    #[allow(dead_code)]
     pub(crate) item_count: usize,
 }
 
@@ -834,6 +899,7 @@ fn format_at_depth_inner(
 /// An empty landscape (no recognized files, no outlineable items, or no
 /// file with at least three items) formats to an empty block with zero counts
 /// so callers can skip the block entirely.
+#[allow(dead_code)]
 pub(crate) fn format_landscape_block(
     outlines: &[FileOutline],
     root: &Path,
@@ -849,6 +915,52 @@ pub(crate) fn format_landscape_block(
         &[],
         has_outline_tool,
     )
+}
+
+/// Format signal sections plus the skeleton under a single shared token
+/// budget. Signal sections are rendered first and count against the budget;
+/// the skeleton receives whatever remains. If the signal sections alone
+/// exceed the budget, the skeleton is dropped entirely and only the signal
+/// sections are returned (the stage has specific focus).
+#[allow(dead_code)]
+pub(crate) fn format_landscape_with_signals(
+    outlines: &[FileOutline],
+    root: &Path,
+    max_tokens: usize,
+    has_outline_tool: bool,
+    signal_sections: &[signals::SignalSection],
+) -> Result<LandscapeBlock, LandscapeError> {
+    if signal_sections.is_empty() {
+        return format_landscape_block(outlines, root, max_tokens, has_outline_tool);
+    }
+    let signals_text: String = signal_sections
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let signals_tokens = count_tokens(&signals_text)?;
+    if signals_tokens >= max_tokens {
+        return Ok(LandscapeBlock {
+            block: signals_text,
+            file_count: 0,
+            item_count: 0,
+        });
+    }
+    let remaining = max_tokens - signals_tokens;
+    let mut skeleton = match format_landscape_block(outlines, root, remaining, has_outline_tool) {
+        Ok(block) => block,
+        Err(LandscapeError::BudgetExceeded) => LandscapeBlock::empty(),
+        Err(e) => return Err(e),
+    };
+    if skeleton.block.is_empty() {
+        return Ok(LandscapeBlock {
+            block: signals_text,
+            file_count: 0,
+            item_count: 0,
+        });
+    }
+    skeleton.block = format!("{signals_text}\n\n{}", skeleton.block);
+    Ok(skeleton)
 }
 
 /// Format the captured outlines as a headerless landscape tree for the
@@ -1043,6 +1155,117 @@ pub(crate) fn count_tokens(text: &str) -> Result<usize, LandscapeError> {
         .as_ref()
         .map_err(|e| LandscapeError::Tokenizer(e.clone()))?;
     Ok(bpe.encode_with_special_tokens(text).len())
+}
+
+/// Format the living landscape data as a compact index block, interleaving
+/// signal sections with per-directory file listings within a token budget.
+///
+/// Returns the formatted text. Empty when `data` has no entries.
+pub(crate) fn format_landscape_data(data: &LandscapeData, max_tokens: usize) -> String {
+    if data.file_entries.is_empty() && data.signal_sections.is_empty() {
+        return String::new();
+    }
+
+    let mut items: Vec<String> = Vec::new();
+    let mut budget = max_tokens;
+
+    // Signal sections render above the file listings.
+    if !data.signal_sections.is_empty() {
+        let prefix = data
+            .signal_sections
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let tok = count_tokens(&prefix).unwrap_or(prefix.len());
+        if tok <= budget {
+            budget = budget.saturating_sub(tok);
+            items.push(prefix);
+        }
+    }
+
+    // Group file entries by parent directory for stable, readable output.
+    let mut grouped: std::collections::BTreeMap<
+        &std::path::Path,
+        Vec<(&std::path::Path, &LandscapeFileEntry)>,
+    > = std::collections::BTreeMap::new();
+    for (path, entry) in &data.file_entries {
+        if let Some(parent) = path.parent() {
+            grouped
+                .entry(parent)
+                .or_default()
+                .push((path.as_path(), entry));
+        }
+    }
+
+    for (dir, mut files) in grouped {
+        files.sort_by(|a, b| a.0.cmp(b.0));
+        let display_dir = escape_landscape_delimiters(&dir.to_string_lossy());
+
+        let mut file_lines: Vec<String> = Vec::new();
+        let max_files = 40; // same as old max_files_per_dir
+
+        for (path, entry) in files.iter().take(max_files) {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let escaped_name = escape_landscape_delimiters(&name);
+            let mut file_line = escaped_name;
+            if !entry.items.is_empty() {
+                let item_str = format_outline_items(&entry.items);
+                file_line.push(' ');
+                file_line.push_str(&item_str);
+            }
+            file_lines.push(file_line);
+        }
+
+        if files.len() > max_files {
+            file_lines.push(format!("... and {} more", files.len() - max_files));
+        }
+
+        if !file_lines.is_empty() {
+            let header = format!("{display_dir}/");
+            let header_tok = count_tokens(&header).unwrap_or(header.len());
+            let file_tokens: usize = file_lines
+                .iter()
+                .map(|l| count_tokens(l).unwrap_or(l.len()))
+                .sum();
+            let total_tok = header_tok + file_tokens;
+            if total_tok <= budget {
+                budget = budget.saturating_sub(total_tok);
+                items.push(header);
+                for fl in &file_lines {
+                    items.push(format!("  {fl}"));
+                }
+            } else if header_tok <= budget {
+                budget = budget.saturating_sub(header_tok);
+                items.push(header);
+                let mut emitted = 0usize;
+                for fl in &file_lines {
+                    let fl_tok = count_tokens(fl).unwrap_or(fl.len());
+                    if fl_tok <= budget {
+                        budget = budget.saturating_sub(fl_tok);
+                        items.push(format!("  {fl}"));
+                        emitted += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if emitted < file_lines.len() {
+                    items.push("  ...".to_string());
+                }
+            }
+        }
+    }
+
+    if items.is_empty() {
+        String::new()
+    } else {
+        let mut out = String::from("### Project landscape\n\n");
+        out.push_str(&items.join("\n"));
+        out
+    }
 }
 
 #[cfg(test)]
@@ -2053,5 +2276,325 @@ mod tests {
         assert_eq!(kinds, vec![MOD, FN]);
         assert_eq!(items[0].name, "tests");
         assert_eq!(items[1].name, "real");
+    }
+
+    // ── format_landscape_with_signals budget path ─────────────────────
+
+    #[test]
+    fn format_landscape_with_signals_signals_and_skeleton_under_budget() {
+        let root = Path::new("/repo");
+        let outline = FileOutline {
+            skipped: false,
+            path: root.join("src/main.rs"),
+            items: vec![
+                OutlineItem::new(FN, "main", 1),
+                OutlineItem::new(STRUCT, "App", 2),
+                OutlineItem::new(KEY, "package", 3),
+            ],
+        };
+        let signal_sections = vec![signals::SignalSection::new(
+            "signals",
+            "<!-- signal section -->\ncontent here",
+        )];
+        // Large budget — both signals and skeleton should appear.
+        let block = format_landscape_with_signals(
+            std::slice::from_ref(&outline),
+            root,
+            10_000,
+            true,
+            &signal_sections,
+        )
+        .unwrap();
+        assert!(
+            block.block.starts_with("<!-- signal section -->"),
+            "block should start with signal section; got: {}",
+            &block.block[..block.block.len().min(80)]
+        );
+        assert!(
+            block.block.contains("1|fn|main"),
+            "block should contain skeleton items; block.len={}",
+            block.block.len()
+        );
+        assert!(block.file_count > 0, "file_count should be > 0");
+    }
+
+    #[test]
+    fn format_landscape_with_signals_signals_exceed_budget_drops_skeleton() {
+        let root = Path::new("/repo");
+        let outline = FileOutline {
+            skipped: false,
+            path: root.join("src/main.rs"),
+            items: vec![OutlineItem::new(FN, "main", 1)],
+        };
+        // A signal section that alone exceeds the tiny budget.
+        let large_signal = "x".repeat(500);
+        let signal_sections = vec![signals::SignalSection::new("big", large_signal.clone())];
+        let block = format_landscape_with_signals(
+            std::slice::from_ref(&outline),
+            root,
+            100, // tiny budget — signal alone exceeds it
+            true,
+            &signal_sections,
+        )
+        .unwrap();
+        assert_eq!(block.block, large_signal, "should be signal-only");
+        assert_eq!(block.file_count, 0, "file_count should be 0");
+        assert_eq!(block.item_count, 0, "item_count should be 0");
+    }
+
+    #[test]
+    fn format_landscape_with_signals_empty_sections_delegates() {
+        let root = Path::new("/repo");
+        let outline = FileOutline {
+            skipped: false,
+            path: root.join("src/main.rs"),
+            items: vec![
+                OutlineItem::new(FN, "main", 1),
+                OutlineItem::new(STRUCT, "App", 2),
+                OutlineItem::new(KEY, "package", 3),
+            ],
+        };
+        let empty: Vec<signals::SignalSection> = vec![];
+        let with_signals = format_landscape_with_signals(
+            std::slice::from_ref(&outline),
+            root,
+            usize::MAX,
+            true,
+            &empty,
+        )
+        .unwrap();
+        let without_signals =
+            format_landscape_block(std::slice::from_ref(&outline), root, usize::MAX, true).unwrap();
+        assert_eq!(
+            with_signals.block, without_signals.block,
+            "empty sections should delegate to format_landscape_block"
+        );
+        assert!(!with_signals.block.is_empty(), "block should not be empty");
+    }
+
+    #[test]
+    fn format_landscape_with_signals_skeleton_budget_exceeded_falls_back() {
+        let root = Path::new("/repo");
+        let outline = FileOutline {
+            skipped: false,
+            path: root.join("src/main.rs"),
+            items: vec![OutlineItem::new(FN, "main", 1)],
+        };
+        let signal_sections = vec![signals::SignalSection::new(
+            "signals",
+            "<!-- small signal -->".to_string(),
+        )];
+        // Budget large enough for signals but too small for the skeleton
+        // (even at minimum depth the skeleton needs > 70 tokens).
+        let block = format_landscape_with_signals(
+            std::slice::from_ref(&outline),
+            root,
+            70, // signals fit, skeleton doesn't
+            true,
+            &signal_sections,
+        )
+        .unwrap();
+        assert!(
+            block.block.starts_with("<!-- small signal -->"),
+            "should fall back to signal-only; got: {}",
+            &block.block[..block.block.len().min(80)]
+        );
+        assert_eq!(block.file_count, 0);
+        assert_eq!(block.item_count, 0);
+    }
+
+    #[test]
+    fn landscape_data_seed_indexes_files_by_full_path() {
+        let root = Path::new("/repo");
+        let mut data = LandscapeData {
+            root: root.to_path_buf(),
+            outlines: vec![
+                FileOutline {
+                    path: root.join("src/lib.rs"),
+                    items: vec![OutlineItem::new(FN, "lib", 1)],
+                    skipped: false,
+                },
+                FileOutline {
+                    path: root.join("README.md"),
+                    items: vec![OutlineItem::new(HEADING, "Intro", 1)],
+                    skipped: false,
+                },
+            ],
+            signal_sections: vec![],
+            symbol_index: Default::default(),
+            file_entries: Default::default(),
+        };
+
+        data.seed();
+
+        assert_eq!(data.file_entries.len(), 2);
+        assert!(data.file_entries.contains_key(&root.join("src/lib.rs")));
+        assert!(data.file_entries.contains_key(&root.join("README.md")));
+        assert_eq!(
+            data.file_entries[&root.join("src/lib.rs")].items,
+            vec![OutlineItem::new(FN, "lib", 1)]
+        );
+    }
+
+    #[test]
+    fn landscape_data_touch_file_updates_single_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, "fn one() {}\nstruct Two;\nimpl Two {}\n").unwrap();
+
+        let mut data = LandscapeData {
+            root: dir.path().to_path_buf(),
+            outlines: vec![],
+            signal_sections: vec![],
+            symbol_index: Default::default(),
+            file_entries: Default::default(),
+        };
+
+        data.touch_file(&file, &LandscapeExplorer);
+
+        let entry = data.file_entries.get(&file).expect("file indexed");
+        assert_eq!(entry.items.len(), 3);
+    }
+
+    #[test]
+    fn landscape_data_touch_dir_replaces_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.rs");
+        let b = dir.path().join("b.rs");
+        std::fs::write(&a, "fn a() {}\nstruct A;\nimpl A {}\n").unwrap();
+        std::fs::write(&b, "fn b() {}\nstruct B;\nimpl B {}\n").unwrap();
+
+        let mut data = LandscapeData {
+            root: dir.path().to_path_buf(),
+            outlines: vec![],
+            signal_sections: vec![],
+            symbol_index: Default::default(),
+            file_entries: Default::default(),
+        };
+
+        data.touch_dir(dir.path(), &LandscapeExplorer);
+        assert_eq!(data.file_entries.len(), 2);
+        assert!(data.file_entries.contains_key(&a));
+        assert!(data.file_entries.contains_key(&b));
+
+        std::fs::remove_file(&b).unwrap();
+        data.touch_dir(dir.path(), &LandscapeExplorer);
+
+        assert!(data.file_entries.contains_key(&a));
+        assert!(!data.file_entries.contains_key(&b));
+    }
+
+    #[test]
+    fn format_landscape_data_groups_by_directory_and_includes_signals() {
+        let root = Path::new("/repo");
+        let data = LandscapeData {
+            root: root.to_path_buf(),
+            outlines: vec![],
+            signal_sections: vec![signals::SignalSection::new(
+                "signals",
+                "<!-- signals -->".to_string(),
+            )],
+            symbol_index: Default::default(),
+            file_entries: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    root.join("src/lib.rs"),
+                    LandscapeFileEntry {
+                        items: vec![OutlineItem::new(FN, "lib", 1)],
+                    },
+                );
+                m.insert(
+                    root.join("README.md"),
+                    LandscapeFileEntry {
+                        items: vec![OutlineItem::new(HEADING, "Intro", 1)],
+                    },
+                );
+                m
+            },
+        };
+
+        let out = format_landscape_data(&data, usize::MAX);
+
+        assert!(
+            out.starts_with("### Project landscape\n\n<!-- signals -->\n"),
+            "got: {out:?}"
+        );
+        assert!(
+            out.contains("/repo/\n  README.md 1|heading|Intro"),
+            "got: {out:?}"
+        );
+        assert!(
+            out.contains("/repo/src/\n  lib.rs 1|fn|lib"),
+            "got: {out:?}"
+        );
+    }
+
+    // ── token budget fallback for format_landscape_block_tool ──────────
+
+    #[test]
+    fn tool_token_budget_direct_zero_caps_output() {
+        // Passing Some(0) as token_budget directly → BudgetExceeded.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.rs"),
+            "fn main() {}\nstruct S;\nimpl S {}",
+        )
+        .unwrap();
+        let build = LandscapeExplorer
+            .build_with_failures(dir.path(), usize::MAX)
+            .unwrap();
+        let result = format_landscape_block_tool(&build, dir.path(), Some(0));
+        assert!(
+            matches!(result, Err(LandscapeError::BudgetExceeded)),
+            "expected BudgetExceeded"
+        );
+    }
+
+    #[test]
+    fn tool_token_budget_no_config_no_token_budget_is_unlimited() {
+        // No config → no fallback cap → full-depth output with no error.
+        let _sandbox = crate::test_support::Sandbox::new();
+        crate::config::clear_global();
+        crate::config::init_global().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn main() {}").unwrap();
+        let build = LandscapeExplorer
+            .build_with_failures(dir.path(), usize::MAX)
+            .unwrap();
+        let result = format_landscape_block_tool(&build, dir.path(), None);
+        assert!(result.is_ok(), "should not be capped");
+        assert!(
+            !result.unwrap().block.is_empty(),
+            "output should not be empty"
+        );
+    }
+
+    #[test]
+    fn tool_token_budget_model_token_budget_overrides_config() {
+        // Config has max-tool-tokens: 0 (would cap), but caller passes
+        // an explicit token_budget → models budget wins, no cap error.
+        let _sandbox = crate::test_support::Sandbox::with_config(Some(
+            r#"{"landscape": {"max-tool-tokens": 0}}"#,
+        ));
+        crate::config::clear_global();
+        crate::config::init_global().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.rs"),
+            "fn main() {}\nstruct S;\nimpl S {}",
+        )
+        .unwrap();
+        let build = LandscapeExplorer
+            .build_with_failures(dir.path(), usize::MAX)
+            .unwrap();
+        let result = format_landscape_block_tool(&build, dir.path(), Some(usize::MAX));
+        assert!(result.is_ok(), "caller budget should override config");
+        assert!(
+            !result.unwrap().block.is_empty(),
+            "output should not be empty"
+        );
+        crate::config::clear_global();
     }
 }
