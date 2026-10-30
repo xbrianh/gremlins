@@ -680,8 +680,6 @@ fn render_key_parts(
 /// Per-file cache entry in the living landscape.
 #[derive(Clone, Debug)]
 pub(crate) struct LandscapeFileEntry {
-    /// Last turn this file was touched (observed via Read/Grep/Write/Edit/Landscape/Glob).
-    pub(crate) last_touched_turn: usize,
     /// Outline items discovered for this file (empty when skipped or when no
     /// items were found).
     pub(crate) items: Vec<OutlineItem>,
@@ -717,7 +715,6 @@ impl LandscapeData {
             self.file_entries.insert(
                 outline.path.clone(),
                 LandscapeFileEntry {
-                    last_touched_turn: 0,
                     items: outline.items.clone(),
                 },
             );
@@ -725,37 +722,20 @@ impl LandscapeData {
     }
 
     /// Touch a single file: re-outline it and update (or insert) its cache
-    /// entry. `turn` is the current turn number.
-    pub fn touch_file(
-        &mut self,
-        path: &std::path::Path,
-        explorer: &LandscapeExplorer,
-        turn: usize,
-    ) {
+    /// entry.
+    pub fn touch_file(&mut self, path: &std::path::Path, explorer: &LandscapeExplorer) {
         match explorer.outline_file(path, true) {
             Ok(items) => {
-                self.file_entries.insert(
-                    path.to_path_buf(),
-                    LandscapeFileEntry {
-                        last_touched_turn: turn,
-                        items,
-                    },
-                );
+                self.file_entries.insert(path.to_path_buf(), LandscapeFileEntry { items });
             }
             Err(_) => {
-                // Read/parse error: bump the existing entry's timestamp so an
-                // actively-touched file is never decay-pruned even when
-                // re-outlining keeps failing. If there is no existing entry we
-                // insert an empty one (retry on a later touch).
-                if let Some(existing) = self.file_entries.get_mut(path) {
-                    existing.last_touched_turn = turn;
-                } else {
+                // Read/parse error: keep the existing entry (if any) so a
+                // later touch can retry. If there is no existing entry we
+                // insert an empty one.
+                if !self.file_entries.contains_key(path) {
                     self.file_entries.insert(
                         path.to_path_buf(),
-                        LandscapeFileEntry {
-                            last_touched_turn: turn,
-                            items: Vec::new(),
-                        },
+                        LandscapeFileEntry { items: Vec::new() },
                     );
                 }
             }
@@ -765,9 +745,8 @@ impl LandscapeData {
     /// Touch a directory: re-explore its direct children and refresh the cache
     /// entries for the files directly inside it.
     ///
-    /// Files no longer present on disk are removed from the cache. `turn` is
-    /// the current turn number.
-    pub fn touch_dir(&mut self, dir: &std::path::Path, explorer: &LandscapeExplorer, turn: usize) {
+    /// Files no longer present on disk are removed from the cache.
+    pub fn touch_dir(&mut self, dir: &std::path::Path, explorer: &LandscapeExplorer) {
         match explorer.build(dir, 0) {
             Ok(outlines) => {
                 // Drop stale entries for this directory's direct children so
@@ -777,33 +756,14 @@ impl LandscapeData {
                 for outline in outlines {
                     self.file_entries.insert(
                         outline.path.clone(),
-                        LandscapeFileEntry {
-                            last_touched_turn: turn,
-                            items: outline.items,
-                        },
+                        LandscapeFileEntry { items: outline.items },
                     );
                 }
             }
             Err(_) => {
-                // Read error: bump the existing entries' timestamps so an
-                // actively-touched directory is never decay-pruned even when
-                // re-exploration keeps failing.
-                for (path, entry) in self.file_entries.iter_mut() {
-                    if path.parent() == Some(dir) {
-                        entry.last_touched_turn = turn;
-                    }
-                }
+                // Read error: keep existing entries so a later touch can retry.
             }
         }
-    }
-
-    /// Prune files whose last touch is more than `n` turns ago.
-    /// Returns the number of files pruned.
-    pub fn prune_decayed(&mut self, turn: usize, n: usize) -> usize {
-        let before = self.file_entries.len();
-        self.file_entries
-            .retain(|_path, entry| turn.saturating_sub(entry.last_touched_turn) <= n);
-        before - self.file_entries.len()
     }
 
     /// True when there is no landscape data at all (no outlines, no signal sections).
@@ -2539,10 +2499,9 @@ mod tests {
             file_entries: Default::default(),
         };
 
-        data.touch_file(&file, &LandscapeExplorer, 3);
+        data.touch_file(&file, &LandscapeExplorer);
 
         let entry = data.file_entries.get(&file).expect("file indexed");
-        assert_eq!(entry.last_touched_turn, 3);
         assert_eq!(entry.items.len(), 3);
     }
 
@@ -2562,13 +2521,13 @@ mod tests {
             file_entries: Default::default(),
         };
 
-        data.touch_dir(dir.path(), &LandscapeExplorer, 1);
+        data.touch_dir(dir.path(), &LandscapeExplorer);
         assert_eq!(data.file_entries.len(), 2);
         assert!(data.file_entries.contains_key(&a));
         assert!(data.file_entries.contains_key(&b));
 
         std::fs::remove_file(&b).unwrap();
-        data.touch_dir(dir.path(), &LandscapeExplorer, 2);
+        data.touch_dir(dir.path(), &LandscapeExplorer);
 
         assert!(data.file_entries.contains_key(&a));
         assert!(!data.file_entries.contains_key(&b));
@@ -2590,14 +2549,12 @@ mod tests {
                 m.insert(
                     root.join("src/lib.rs"),
                     LandscapeFileEntry {
-                        last_touched_turn: 0,
                         items: vec![OutlineItem::new(FN, "lib", 1)],
                     },
                 );
                 m.insert(
                     root.join("README.md"),
                     LandscapeFileEntry {
-                        last_touched_turn: 0,
                         items: vec![OutlineItem::new(HEADING, "Intro", 1)],
                     },
                 );

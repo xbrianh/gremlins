@@ -7,60 +7,32 @@ use crate::landscape::{LandscapeData, LandscapeExplorer};
 /// Mutable model context that maintains a living landscape of the worktree.
 ///
 /// Owns a [`LandscapeData`] holding the full-tree outlines and signal sections
-/// from stage start, plus a per-file cache that is refreshed on tool touches
-/// and pruned by turn decay.
+/// from stage start, plus a per-file cache that is refreshed on tool touches.
 ///
 /// On each tool observation (Read/Grep/Landscape/Write/Edit/Glob), the touched
 /// file (or directory) is re-explored on disk so the landscape always reflects
-/// current file state. Files untouched for more than `decay_turns` turns are
-/// pruned at [`finalize_turn`]. When `decay_turns` is 0 pruning is disabled
-/// entirely.
+/// current file state.
 ///
-/// # Deferred reconciliation
-///
-/// Instead of invalidating the system prompt (and its Anthropic cache) on
-/// every file touch, landscape updates are deferred into per-turn transcript
-/// deltas. The system prompt carries a frozen `stable_landscape` snapshot that
-/// persists across turns. Deltas accumulate in transcript blocks; when their
-/// combined token count exceeds `reconcile_threshold`, the stable landscape is
-/// rebuilt from the full current [`LandscapeData`] and all deltas are cleared.
-/// This trades occasional cache misses (at reconcile) for a ~100% system-prompt
-/// cache-hit rate between reconciles.
+/// The landscape is rendered into the system prompt via [`system_message`] and
+/// rebuilt every turn so the model always sees an up-to-date view of the file
+/// tree.
 #[derive(Clone)]
 pub(crate) struct LandscapeContext {
     /// The living landscape data — always up to date.
     data: LandscapeData,
 
-    // ── stable layer → system_message() ──
-    /// Frozen landscape snapshot rendered at construction and after each
-    /// reconcile.  Served via [`system_message`] so it sits in the trusted
-    /// system prompt and is cached by the model provider.
+    /// Rendered landscape snapshot.  Rebuilt at construction and after each
+    /// turn in [`finalize_turn`].  Served via [`system_message`].
     stable_landscape: String,
 
-    // ── delta layer → transcript() ──
     /// File paths touched during the current turn (cleared each turn).
     dirty: HashSet<PathBuf>,
-    /// Per-turn delta blocks.  `None` when the turn produced no delta.
-    /// Index `i` corresponds to turn `i`.
-    turn_blocks: Vec<Option<String>>,
-    /// Running token count of all unreconciled delta blocks.
-    accumulated_tokens: usize,
-    /// When `accumulated_tokens` exceeds this threshold the stable landscape
-    /// is rebuilt and all deltas are cleared.  Derived from config; 0
-    /// disables deferral (reconcile every turn, same as pre-deferral
-    /// behaviour).
-    reconcile_threshold: usize,
 
     /// Token budget for landscape rendering.
     max_tokens: usize,
-    /// Turn-decay window: files untouched for more turns than this are pruned.
-    /// When `0`, pruning is disabled.
-    decay_turns: usize,
     /// Whether landscape was ever enabled for this stage.
     /// Set from `data.is_empty()` at construction — when false, all
-    /// observations are no-ops and transcripts are always empty.  Remains
-    /// false even after every file entry is decay-pruned, so re-touches can
-    /// re-explore.
+    /// observations are no-ops and transcripts are always empty.
     landscape_enabled: bool,
     /// Per-gremlin log channel for landscape statistics.
     log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
@@ -83,18 +55,8 @@ impl LandscapeContext {
 
         let max_tokens =
             usize::try_from(crate::config::max_landscape_tokens()).unwrap_or(usize::MAX);
-        let decay_turns = usize::try_from(crate::config::landscape_decay_turns()).unwrap_or(5);
 
-        // Reconcile threshold: explicit config value, or default to 30% of
-        // max_tokens.  When 0, reconcile every turn (same behaviour as
-        // before deferred reconciliation existed).
-        let reconcile_threshold = match crate::config::landscape_reconcile_threshold_tokens() {
-            Some(0) => 0,
-            Some(n) => usize::try_from(n).unwrap_or(usize::MAX),
-            None => max_tokens.saturating_mul(3) / 10,
-        };
-
-        // Render the initial stable landscape from the seeded data.
+        // Render the initial landscape from the seeded data.
         let stable_landscape = if landscape_enabled {
             crate::landscape::format_landscape_data(&data, max_tokens)
         } else {
@@ -105,11 +67,7 @@ impl LandscapeContext {
             data,
             stable_landscape,
             dirty: HashSet::new(),
-            turn_blocks: vec![None], // turn 0: landscape in system prompt, no delta
-            accumulated_tokens: 0,
-            reconcile_threshold,
             max_tokens,
-            decay_turns,
             landscape_enabled,
             log_tx,
         };
@@ -122,7 +80,7 @@ impl LandscapeContext {
     /// Read/Write/Edit/Grep/Glob/Landscape all supply a path argument.
     /// We resolve the path, then operate on the file if it's a file (or
     /// doesn't exist yet), or landscape the directory if it's a directory.
-    fn observe_tool(&mut self, turn: usize, tool: &str, args_json: &str) {
+    fn observe_tool(&mut self, _turn: usize, tool: &str, args_json: &str) {
         // When landscape was never enabled, every observation is a no-op.
         if !self.landscape_enabled {
             return;
@@ -150,7 +108,7 @@ impl LandscapeContext {
             if !path.as_os_str().is_empty() {
                 let explorer = LandscapeExplorer;
                 if path.is_dir() {
-                    self.data.touch_dir(&path, &explorer, turn);
+                    self.data.touch_dir(&path, &explorer);
                     // Mark all files currently in this directory as dirty
                     // so the delta captures the full updated listing.
                     for file_path in self.data.file_entries.keys() {
@@ -159,7 +117,7 @@ impl LandscapeContext {
                         }
                     }
                 } else {
-                    self.data.touch_file(&path, &explorer, turn);
+                    self.data.touch_file(&path, &explorer);
                     self.dirty.insert(path);
                 }
                 self.log_stats();
@@ -200,70 +158,6 @@ impl LandscapeContext {
             format!("landscape context updated: {dir_count} directories, {file_count} files, {item_count} outline items"),
         );
     }
-
-    /// Render a landscape delta block from the current turn's dirty paths.
-    ///
-    /// Returns the formatted delta text, or an empty string when no dirty
-    /// paths exist or none have entries in `file_entries`.
-    fn render_delta(&self) -> String {
-        if self.dirty.is_empty() {
-            return String::new();
-        }
-
-        // Build a throwaway LandscapeData containing only the dirty entries.
-        // Signal sections never appear in deltas.
-        let mut delta_data = crate::landscape::LandscapeData {
-            root: self.data.root.clone(),
-            outlines: Vec::new(),
-            signal_sections: Vec::new(),
-            symbol_index: std::collections::HashMap::new(),
-            file_entries: std::collections::HashMap::new(),
-        };
-
-        for path in &self.dirty {
-            if let Some(entry) = self.data.file_entries.get(path) {
-                delta_data.file_entries.insert(path.clone(), entry.clone());
-            }
-        }
-
-        if delta_data.file_entries.is_empty() {
-            return String::new();
-        }
-
-        let rendered = crate::landscape::format_landscape_data(&delta_data, self.max_tokens);
-        if rendered.is_empty() {
-            return String::new();
-        }
-
-        format!(
-            "<!-- Landscape update — apply to the directory structure in the system prompt -->\n\n{rendered}"
-        )
-    }
-
-    /// Rebuild the stable landscape from the full current `data` and clear
-    /// all pending deltas.  Called when accumulated delta tokens cross the
-    /// reconcile threshold.
-    fn reconcile(&mut self) {
-        self.stable_landscape = if self.landscape_enabled {
-            crate::landscape::format_landscape_data(&self.data, self.max_tokens)
-        } else {
-            String::new()
-        };
-        self.turn_blocks.fill(None);
-        self.accumulated_tokens = 0;
-
-        send_log(
-            &self.log_tx,
-            log::Level::Debug,
-            "landscape context: reconciled — stable landscape rebuilt, deltas cleared",
-        );
-    }
-
-    /// Compute an approximate token count for a string using the o200k_base
-    /// tokenizer.
-    fn approx_tokens(text: &str) -> usize {
-        crate::landscape::count_tokens(text).unwrap_or(text.len())
-    }
 }
 
 impl crate::clients::model_context::MutableModelContext for LandscapeContext {
@@ -287,56 +181,96 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
         self.observe_tool(turn, tool, args);
     }
 
-    fn finalize_turn(&mut self, turn: usize) {
-        // Prune decayed directories. When decay_turns is 0 the guard
-        // disables pruning entirely so every entry persists regardless
-        // of the time since its last touch.
-        if self.decay_turns > 0 {
-            self.data.prune_decayed(turn, self.decay_turns);
+    fn tool_result_extra(
+        &self,
+        _turn: usize,
+        tool: &str,
+        args: &str,
+        _output: &str,
+    ) -> Option<String> {
+        if !self.landscape_enabled {
+            return None;
         }
 
-        // Ensure turn_blocks has capacity for this turn index.
-        while self.turn_blocks.len() <= turn {
-            self.turn_blocks.push(None);
-        }
+        let args_val: serde_json::Value =
+            serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
 
-        // Turn 0: landscape lives in the system prompt; no delta needed.
-        // Subsequent turns: render a delta from dirty paths if any.
-        let delta = if turn == 0 {
-            String::new()
-        } else {
-            self.render_delta()
+        let raw = |key: &str| -> Option<String> {
+            args_val
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty())
         };
 
-        if delta.is_empty() {
-            self.turn_blocks[turn] = None;
+        let path_str = match tool {
+            "Read" | "Write" | "Edit" | "Landscape" => raw("file_path"),
+            "Grep" | "Glob" => raw("path"),
+            _ => None,
+        }?;
+
+        let path = self.resolve_path(&path_str);
+        if path.as_os_str().is_empty() {
+            return None;
+        }
+
+        // For directories: render a compact listing of immediate children
+        // with their outlines, sorted by name.
+        if path.is_dir() {
+            let mut lines: Vec<String> = Vec::new();
+            for (fp, entry) in &self.data.file_entries {
+                if fp.parent() == Some(path.as_path()) {
+                    let name = fp
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let mut line = name;
+                    if !entry.items.is_empty() {
+                        line.push(' ');
+                        line.push_str(&crate::landscape::format_outline_items(
+                            &entry.items,
+                        ));
+                    }
+                    lines.push(line);
+                }
+            }
+            if lines.is_empty() {
+                return None;
+            }
+            lines.sort();
+            let dir_label = path.to_string_lossy();
+            let listing = lines.join("\n  ");
+            return Some(format!("[seen]\n{dir_label}/\n  {listing}"));
+        }
+
+        // For files: look up the cached entry and render its outline items.
+        let entry = self.data.file_entries.get(&path)?;
+        if entry.items.is_empty() {
+            return None;
+        }
+
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let items_str = crate::landscape::format_outline_items(&entry.items);
+        Some(format!("[seen]\n{name} {items_str}"))
+    }
+
+    fn finalize_turn(&mut self, _turn: usize) {
+        // Rebuild the stable landscape for the next turn.
+        self.stable_landscape = if self.landscape_enabled {
+            crate::landscape::format_landscape_data(&self.data, self.max_tokens)
         } else {
-            let tok = Self::approx_tokens(&delta);
-            self.turn_blocks[turn] = Some(delta);
-            self.accumulated_tokens += tok;
-
-            send_log(
-                &self.log_tx,
-                log::Level::Debug,
-                format!(
-                    "landscape context: turn {turn} delta {tok} tokens, accumulated {} / {} threshold",
-                    self.accumulated_tokens, self.reconcile_threshold,
-                ),
-            );
-        }
-
-        // Check reconcile threshold.  When 0, always reconcile (pre-deferral
-        // behaviour — every turn updates the system prompt).
-        if self.reconcile_threshold == 0 || self.accumulated_tokens >= self.reconcile_threshold {
-            self.reconcile();
-        }
+            String::new()
+        };
 
         // Clear per-turn dirty set for the next turn.
         self.dirty.clear();
     }
 
     fn transcript(&self) -> Vec<Option<String>> {
-        self.turn_blocks.clone()
+        Vec::new()
     }
 
     fn system_message(&self) -> Option<String> {
@@ -358,49 +292,23 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
 
     fn join(&mut self, other: &dyn crate::clients::model_context::MutableModelContext) {
         if let Some(other_ctx) = other.as_any().downcast_ref::<LandscapeContext>() {
-            // Merge file entries: re-stamp child entries with the parent's
-            // current turn so they share the parent's decay clock rather than
-            // the child's independent turn space.
-            let current_turn = self.turn_blocks.len().saturating_sub(1);
+            // Merge file entries: copy child entries into the parent.
             for (path, entry) in &other_ctx.data.file_entries {
-                let should_insert = match self.data.file_entries.get(path) {
-                    Some(existing) => existing.last_touched_turn < entry.last_touched_turn,
-                    None => true,
-                };
-                if should_insert {
-                    let mut new_entry = entry.clone();
-                    new_entry.last_touched_turn = current_turn;
-                    self.data.file_entries.insert(path.clone(), new_entry);
-                }
+                self.data.file_entries.insert(path.clone(), entry.clone());
             }
 
-            // Merge child delta blocks at the parent's current turn index
-            // rather than interleaving by the child's (unrelated) indices.
-            if self.turn_blocks.is_empty() {
-                self.turn_blocks.push(None);
-            }
-            let parent_idx = self.turn_blocks.len() - 1;
-            // … rest of join logic continues below
-            for theirs in &other_ctx.turn_blocks {
-                if theirs.is_some() && self.turn_blocks[parent_idx].is_none() {
-                    self.turn_blocks[parent_idx] = theirs.clone();
-                }
-            }
-
-            // If the child has already reconciled (or has more recent data),
-            // rebuild our stable landscape to match.  This avoids serving a
-            // stale system message after a join.  Clear pending deltas too
-            // so the model doesn't see the same updates twice (once folded
-            // into the stable system prompt, once as a pending delta).
+            // If the child has more recent data, rebuild our landscape.
             if !other_ctx.stable_landscape.is_empty() {
-                self.reconcile();
+                self.stable_landscape = if self.landscape_enabled {
+                    crate::landscape::format_landscape_data(&self.data, self.max_tokens)
+                } else {
+                    String::new()
+                };
             }
 
             self.log_stats();
         }
     }
 
-    fn clear_transcript(&mut self) {
-        self.turn_blocks.clear();
-    }
+    fn clear_transcript(&mut self) {}
 }
