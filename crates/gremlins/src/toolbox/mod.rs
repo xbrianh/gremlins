@@ -10,7 +10,6 @@ pub(crate) mod edit;
 pub(crate) mod glob;
 pub(crate) mod grep;
 pub(crate) mod landscape;
-pub(crate) mod landscape_fn;
 pub(crate) mod read;
 pub(crate) mod skills;
 pub(crate) mod websearch;

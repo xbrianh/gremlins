@@ -3,10 +3,9 @@ use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 
-use super::landscape_fn::LandscapeExplorerFn;
-use crate::clients::tools::{
-    blocking_string, io_enforce, parse_args, req_str, resolve, AgentLoopRuntime, ToolHandler,
-};
+use crate::clients::tools::{blocking_string, parse_args, req_str, AgentLoopRuntime, ToolHandler};
+use crate::core::paths::{io_enforce, resolve};
+use crate::landscape::LandscapeExplorerFn;
 
 pub(crate) struct LandscapeTool;
 

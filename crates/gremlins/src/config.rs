@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use log::warn;
 use serde::{Deserialize, Serialize};
 
-use crate::clients::task_kind::TaskKind;
+use crate::task_kind::TaskKind;
 
 /// Default name of the project-local overlay directory.
 pub(crate) const OVERLAY_DIRNAME: &str = ".gremlins";
@@ -822,7 +822,7 @@ pub(crate) fn parse_stage_models(
 /// spellings (guaranteed by the YAML reader); an unknown or empty key is a hard
 /// error, matching the load-time validation, so a merged runtime map that
 /// bypasses load-time checks cannot silently drop an override.
-pub fn parse_task_models_map(
+pub(crate) fn parse_task_models_map(
     map: Option<&IndexMap<String, String>>,
 ) -> Result<HashMap<TaskKind, String>, ConfigError> {
     let Some(obj) = map else {

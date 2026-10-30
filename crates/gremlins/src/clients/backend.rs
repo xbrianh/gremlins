@@ -2,8 +2,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::executor::state::StateStore;
-
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use rig_core::completion::Message;
@@ -78,19 +76,10 @@ pub struct RunParams {
     /// The executor layer wires this to the daemon event broadcast.
     pub token_usage_sink: crate::clients::token_usage::TokenUsageSink,
     /// Path to the persistent stage scratchpad file (under
-    /// `.gremlins/implicit/_scratchpad.md` in the checkout artifact dir).    /// When `Some`, the agent loop reads and re-injects scratchpad content
+    /// `.gremlins/implicit/_scratchpad.md` in the checkout artifact dir).
+    /// When `Some`, the agent loop reads and re-injects scratchpad content
     /// on each turn. `None` disables the per-turn injection.
     pub scratchpad_path: Option<PathBuf>,
-    /// Stage-start landscape data: precomputed per-file outlines bundled with
-    /// signal sections. `None` when the stage has landscape disabled. The
-    /// agent loop feeds this into a
-    /// [`super::landscape_context::LandscapeContext`] before the first turn; the
-    /// landscape is delivered via the `LandscapeContext` transcript block.
-    pub(crate) landscape_data: Option<crate::landscape::LandscapeData>,
-    /// When `GREMLINS_LOG_LEVEL=DEBUG` and this is `Some`, every model call
-    /// dumps the full serialized prompt to a `prompt_{timestamp}.txt` file
-    /// in the state directory via the [`StateStore`] blob interface.
-    pub prompt_debug_store: Option<Arc<dyn StateStore + Send + Sync>>,
     /// Inversion-of-control plug that carries cross-package dependencies
     /// (log, scratchpad, prompt-debug, token-usage, contexts) into the
     /// agent loop. `None` defaults to a no-op plug.
@@ -128,8 +117,6 @@ impl Clone for RunParams {
             compactor: self.compactor.clone(),
             token_usage_sink: self.token_usage_sink.clone(),
             scratchpad_path: self.scratchpad_path.clone(),
-            landscape_data: self.landscape_data.clone(),
-            prompt_debug_store: self.prompt_debug_store.clone(),
             plug: self.plug.clone(),
         }
     }

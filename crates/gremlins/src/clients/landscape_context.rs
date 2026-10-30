@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::executor::send_log;
+use crate::core::logging::send_log;
 use crate::landscape::{LandscapeData, LandscapeExplorer};
 
 /// Mutable model context that maintains a living landscape of the worktree.

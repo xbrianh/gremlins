@@ -142,13 +142,13 @@ fn discard_tool_output(rx: &mut Option<mpsc::Receiver<tools::ToolOutputLine>>) {
 fn task_kind_is_fork(args: &serde_json::Value) -> bool {
     args.get("kind")
         .and_then(|v| v.as_str())
-        .and_then(super::task_kind::TaskKind::parse)
-        == Some(super::task_kind::TaskKind::Fork)
+        .and_then(crate::task_kind::TaskKind::parse)
+        == Some(crate::task_kind::TaskKind::Fork)
 }
 
-fn task_kind_from_args(args_json: &str) -> Option<super::task_kind::TaskKind> {
+fn task_kind_from_args(args_json: &str) -> Option<crate::task_kind::TaskKind> {
     let args: serde_json::Value = serde_json::from_str(args_json).ok()?;
-    super::task_kind::TaskKind::parse(args.get("kind")?.as_str()?)
+    crate::task_kind::TaskKind::parse(args.get("kind")?.as_str()?)
 }
 
 /// Sleep for the turn-level backoff, aborting early when the cancel token is
@@ -1339,7 +1339,7 @@ impl LoopState {
             // into history, so already-seen files are not re-injected. Fork
             // and Implement stay prose-only.
             let history_output = if job.name == "Task"
-                && task_kind_from_args(&job.args) == Some(super::task_kind::TaskKind::Scout)
+                && task_kind_from_args(&job.args) == Some(crate::task_kind::TaskKind::Scout)
             {
                 // A Scout's writes are also mutations of the parent's view.
                 // Downcast to ToolLedger for Scout-specific processing;
@@ -2074,7 +2074,7 @@ pub(crate) async fn run_agent_loop(
         None
     };
 
-    let worktree = tools::worktree_root(cwd.as_deref());
+    let worktree = crate::core::paths::worktree_root(cwd.as_deref());
     let audit_log = raw_path.as_ref().map(|p| tools::audit_log_path(p));
     let max_turns = crate::config::max_agent_turns();
     // When the run requests allow-all, skip building the roots list entirely;
@@ -2084,7 +2084,7 @@ pub(crate) async fn run_agent_loop(
     } else {
         let mut allowed_roots = vec![worktree];
         if let Some(ref artifact_dir) = ctx.params.artifact_dir {
-            allowed_roots.push(tools::canonicalize_or_ancestor(artifact_dir));
+            allowed_roots.push(crate::core::paths::canonicalize_or_ancestor(artifact_dir));
         }
         tools::SandboxMode::Roots(allowed_roots)
     };
@@ -3686,8 +3686,6 @@ mod tests {
                 active_skills: None,
                 token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
                 scratchpad_path: None,
-                landscape_data: None,
-                prompt_debug_store: None,
                 plug: None,
             },
             prefix: "[t] ".into(),
@@ -6218,10 +6216,7 @@ mod tests {
         });
 
         let selector = super::super::task::TaskModelSelector::new(
-            HashMap::from([(
-                super::super::task_kind::TaskKind::Scout,
-                "openai/mini".to_string(),
-            )]),
+            HashMap::from([(crate::task_kind::TaskKind::Scout, "openai/mini".to_string())]),
             factory,
         )
         .expect("a configured task-models map yields a selector");
@@ -6528,10 +6523,7 @@ mod tests {
         });
 
         let selector = super::super::task::TaskModelSelector::new(
-            HashMap::from([(
-                super::super::task_kind::TaskKind::Scout,
-                "openai/mini".to_string(),
-            )]),
+            HashMap::from([(crate::task_kind::TaskKind::Scout, "openai/mini".to_string())]),
             factory,
         )
         .expect("configured");
@@ -6746,10 +6738,7 @@ mod tests {
         });
 
         let selector = super::super::task::TaskModelSelector::new(
-            HashMap::from([(
-                super::super::task_kind::TaskKind::Scout,
-                "openai/mini".to_string(),
-            )]),
+            HashMap::from([(crate::task_kind::TaskKind::Scout, "openai/mini".to_string())]),
             factory,
         )
         .expect("configured");

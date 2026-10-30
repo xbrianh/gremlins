@@ -1,4 +1,4 @@
-use super::task_kind::TaskKind;
+use crate::task_kind::TaskKind;
 use rig_core::completion::ToolDefinition;
 
 /// Maximum number of concurrent tool calls the harness will execute from a

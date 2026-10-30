@@ -17,7 +17,6 @@ use crate::builders::composite::{ParallelBuilder, SequenceBuilder};
 use crate::builders::definition::{fill_builder_names, DefinitionBuilder, LandBuilder};
 use crate::builders::exec::ExecBuilder;
 use crate::clients::client::validate_task_model_spec;
-use crate::clients::task_kind::TaskKind;
 use crate::config;
 use crate::definition::r#static::expand;
 use crate::model_uri::ModelURI;
@@ -25,6 +24,7 @@ use crate::schemas::bootstrap::Bootstrap;
 use crate::schemas::error::SchemaError;
 use crate::stage_spec::node::StageSpec;
 use crate::stage_spec::parallel::ErrorPolicy;
+use crate::task_kind::TaskKind;
 
 use super::StaticDefinition;
 

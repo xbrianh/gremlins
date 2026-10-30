@@ -13,7 +13,6 @@ use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
 use crate::clients::backend::{ClientError, CompactionOpts, Compactor, RunParams};
 use crate::clients::client::{Client, ModelURI};
-use crate::clients::task_kind::TaskKind;
 use crate::config;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
@@ -34,6 +33,7 @@ use crate::executor::DaemonEvent;
 use crate::executor::RunError;
 use crate::landscape::FileOutline;
 use crate::landscape::{LandscapeError, LandscapeExplorer};
+use crate::task_kind::TaskKind;
 use indexmap::IndexMap;
 use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::completion::Message;
@@ -123,7 +123,7 @@ async fn persist_observed_paths(
             cwd.join(&raw)
         };
         all_paths.insert(
-            crate::clients::tools::canonicalize_or_ancestor(&abs)
+            crate::core::paths::canonicalize_or_ancestor(&abs)
                 .to_string_lossy()
                 .into_owned(),
         );
@@ -967,8 +967,6 @@ async fn run_agent(
         active_skills: gremlin.active_skills.clone(),
         token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
         scratchpad_path: None,
-        landscape_data: None,
-        prompt_debug_store: None,
         plug: Some(plug),
     };
 

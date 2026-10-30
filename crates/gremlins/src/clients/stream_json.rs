@@ -1,5 +1,7 @@
 use serde_json::Value;
 
+use crate::core::logging::send_log;
+
 /// Parse a stream-json line and extract state updates.
 /// Returns None if the line is not valid JSON or not a relevant event.
 pub(crate) fn decode_line(line: &[u8]) -> Option<Value> {
@@ -140,10 +142,6 @@ pub(crate) fn emit_event(
         }
         _ => {}
     }
-}
-
-fn send_log(tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>, level: log::Level, msg: &str) {
-    crate::executor::send_log(tx, level, msg);
 }
 
 fn tool_arg(c: &Value) -> String {

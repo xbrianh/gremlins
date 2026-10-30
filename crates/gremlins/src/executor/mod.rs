@@ -6,9 +6,6 @@
 //! owns the sequential run loop that walks a definition's stages and drives each
 //! one through its guard, scope, and bail bookkeeping.
 
-use std::sync::OnceLock;
-
-use log::LevelFilter;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
@@ -17,31 +14,7 @@ use rig_core::completion::Message;
 use crate::clients::backend::ClientError;
 use crate::executor::state::StateError;
 
-/// Cached log‑level threshold, read once from `GREMLINS_LOG_LEVEL`.
-pub(crate) fn log_level_threshold() -> LevelFilter {
-    static THRESHOLD: OnceLock<LevelFilter> = OnceLock::new();
-    *THRESHOLD.get_or_init(|| {
-        std::env::var("GREMLINS_LOG_LEVEL")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(LevelFilter::Info)
-    })
-}
-
-/// Send a line through the per-gremlin log channel when the given
-/// level meets the `GREMLINS_LOG_LEVEL` threshold.
-pub(crate) fn send_log(
-    tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    level: log::Level,
-    msg: impl AsRef<str>,
-) {
-    if level > log_level_threshold() {
-        return;
-    }
-    if let Some(tx) = tx {
-        let _ = tx.send(msg.as_ref().to_string());
-    }
-}
+pub(crate) use crate::core::logging::{log_level_threshold, send_log};
 
 /// Read a string field from a JSON object, defaulting to `""`.
 pub(crate) fn str_field(map: &Map<String, Value>, field: &str) -> String {

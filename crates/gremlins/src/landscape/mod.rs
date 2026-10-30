@@ -5,16 +5,16 @@
 //! here is deliberately regex/line oriented; no native parsing dependencies.
 
 mod error;
+mod explorer_fn;
 pub mod heuristic;
 pub(crate) mod signals;
 
 pub use error::LandscapeError;
+pub(crate) use explorer_fn::LandscapeExplorerFn;
 
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
-
-use crate::toolbox::landscape_fn::LandscapeExplorerFn;
 
 pub const FN: &str = "fn";
 pub const STRUCT: &str = "struct";

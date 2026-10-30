@@ -4,8 +4,8 @@ use std::sync::Arc;
 use rig_core::completion::Message;
 
 use super::model::GremlinsModel;
-use super::task_kind::TaskKind;
 use super::tools::{self, AgentLoopRuntime};
+use crate::task_kind::TaskKind;
 
 pub(crate) use super::task_models::*;
 
@@ -194,7 +194,7 @@ fn make_task_runner_at_depth(
                     preserve_reasoning_in_history,
                 ));
 
-                let work_root = tools::worktree_root(task_cwd.as_deref());
+                let work_root = crate::core::paths::worktree_root(task_cwd.as_deref());
                 let system_prompt = if kind == TaskKind::Fork {
                     Some(crate::clients::system_prompts::fork_system_prompt(
                         &work_root,

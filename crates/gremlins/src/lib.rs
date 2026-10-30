@@ -13,6 +13,7 @@ pub mod prelude;
 pub mod schemas;
 pub mod skills;
 pub mod stage_spec;
+pub(crate) mod task_kind;
 pub(crate) mod toolbox;
 
 /// Build version shared by CLI and daemon.

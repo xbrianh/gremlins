@@ -2,9 +2,8 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
-use crate::clients::tools::{
-    blocking_string, io_enforce, parse_args, req_str, resolve, AgentLoopRuntime, ToolHandler,
-};
+use crate::clients::tools::{blocking_string, parse_args, req_str, AgentLoopRuntime, ToolHandler};
+use crate::core::paths::{io_enforce, resolve};
 
 pub(crate) struct EditTool;
 
@@ -372,10 +371,7 @@ fn apply_edits(content: &str, edits: &[EditOp], file_path: &str) -> Result<Strin
                     continue;
                 }
                 let start = line_offsets.get(line_no - 1).copied().unwrap_or(0);
-                let end = line_offsets
-                    .get(line_no)
-                    .copied()
-                    .unwrap_or(buffer.len());
+                let end = line_offsets.get(line_no).copied().unwrap_or(buffer.len());
                 let line = buffer[start..end].trim_end_matches(&['\r', '\n'][..]);
                 entries.push((line_no_str, clip_line(line, 120)));
             }

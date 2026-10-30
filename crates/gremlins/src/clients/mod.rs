@@ -28,7 +28,6 @@ pub(crate) mod signal_context;
 pub(crate) mod stream_json;
 pub(crate) mod system_prompts;
 pub(crate) mod task;
-pub(crate) mod task_kind;
 pub(crate) mod task_models;
 pub(crate) mod token_provider;
 pub(crate) mod token_usage;

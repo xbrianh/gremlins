@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::model::GremlinsModel;
-use super::task_kind::TaskKind;
+use crate::task_kind::TaskKind;
 
 /// Build a [`TaskModelSelector`] from the raw `task-models` config map and a
 /// provider-agnostic model factory.

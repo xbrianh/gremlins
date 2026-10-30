@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::clients::tools::{canonicalize_or_ancestor, within_worktree};
+use crate::core::paths::{canonicalize_or_ancestor, within_worktree};
 
 /// One logical signal section with a stable machine key for logging and
 /// the rendered text body.
