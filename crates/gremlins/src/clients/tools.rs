@@ -3427,6 +3427,10 @@ mod tests {
         let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
         assert!(result.starts_with("Applied 1 edit"), "got: {result}");
         assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "x\n");
+    }
+
+    #[test]
+    fn edit_scope_start_gt_end_clamped() {
         // start_line > end_line within a scope is accepted; scope_byte_range
         // clamps, producing a not-found diagnostic when the match falls
         // outside the clamped range.

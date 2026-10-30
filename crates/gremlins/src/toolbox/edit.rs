@@ -296,16 +296,48 @@ fn parse_edits(edits_arr: &[serde_json::Value], file_path: &str) -> Result<Vec<E
     Ok(edits)
 }
 
+struct AppliedEdit {
+    start: usize,
+    old_len: usize,
+    new_len: usize,
+}
+
+/// Track a byte position from the accumulated buffer state immediately after
+/// `from_edit` was applied through every subsequent edit, returning its final
+/// position in the result buffer.
+///
+/// A later edit shifts positions after its replaced region by its length
+/// delta; positions at or before the match start are untouched, and a position
+/// that falls inside the replaced region collapses to the start of that
+/// replacement (the original byte no longer exists).
+fn map_position_forward(applied: &[AppliedEdit], from_edit: usize, mut position: usize) -> usize {
+    for later in &applied[from_edit + 1..] {
+        if position <= later.start {
+            continue;
+        }
+        let region_end = later.start + later.old_len;
+        if position >= region_end {
+            position =
+                (position as isize + later.new_len as isize - later.old_len as isize) as usize;
+        } else {
+            // inside the replaced region — collapse to its start
+            position = later.start;
+        }
+    }
+    position
+}
+
 fn apply_edits(
     content: &str,
     edits: &[EditOp],
     file_path: &str,
 ) -> Result<(String, Vec<(usize, usize)>), String> {
     let mut buffer = content.to_string();
-    // Each applied edit records the 1-based line extent of its replacement in
-    // the accumulated (post-edit) buffer, so chained edits report their true
-    // final position rather than their position in the original content.
-    let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(edits.len());
+    // Record each applied edit's replacement byte span at application time.
+    // Line ranges are computed afterwards against the final buffer, so a later
+    // edit that inserts or deletes lines before an earlier edit's position
+    // still reports the earlier edit at its true final location.
+    let mut applied: Vec<AppliedEdit> = Vec::with_capacity(edits.len());
 
     // Validate and apply edits sequentially. Each edit sees the accumulated
     // state of all prior edits in the same batch, enabling chained edits
@@ -432,16 +464,32 @@ fn apply_edits(
 
         // Single match — apply to the accumulated buffer.
         let start = match_positions[0];
-        let end = start + old_str.len();
-        buffer.replace_range(start..end, &edit.new_str);
+        let old_len = old_str.len();
+        buffer.replace_range(start..start + old_len, &edit.new_str);
+        applied.push(AppliedEdit {
+            start,
+            old_len,
+            new_len: edit.new_str.len(),
+        });
+    }
 
-        // Record the replacement's line extent in the post-edit buffer.
-        let offsets = compute_line_offsets(&buffer);
-        let start_line = line_number_at(&offsets, start);
-        let end_line = if edit.new_str.is_empty() {
+    // Translate each replacement's byte span into the final buffer (after all
+    // edits are applied), then map each to a 1-based line extent. Line offsets
+    // are computed once here rather than rescanning the whole buffer per edit.
+    let offsets = compute_line_offsets(&buffer);
+    let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(applied.len());
+    for (i, edit) in applied.iter().enumerate() {
+        let final_start = map_position_forward(&applied, i, edit.start);
+        let start_line = line_number_at(&offsets, final_start);
+        let end_line = if edit.new_len == 0 {
             start_line
         } else {
-            line_number_at(&offsets, start + edit.new_str.len() - 1)
+            let final_end = map_position_forward(&applied, i, edit.start + edit.new_len);
+            if final_end > final_start {
+                line_number_at(&offsets, final_end - 1)
+            } else {
+                start_line
+            }
         };
         ranges.push((start_line, end_line));
     }
@@ -451,49 +499,71 @@ fn apply_edits(
 
 const SUCCESS_SNIPPET_RADIUS: usize = 3;
 const SUCCESS_EXPANDED_EDIT_CAP: usize = 6;
+const SUCCESS_WINDOW_LINE_CAP: usize = 12;
+
+/// Render one line of the success report with its 1-based line number.
+fn render_success_line(content: &str, offsets: &[usize], line_no: usize) -> String {
+    let line_start = offsets.get(line_no - 1).copied().unwrap_or(content.len());
+    let line_end = offsets.get(line_no).copied().unwrap_or(content.len());
+    let line = content[line_start..line_end].trim_end_matches(&['\r', '\n'][..]);
+    format!("  {line_no}: {}\n", clip_line(line, 120))
+}
 
 /// Render the bounded post-edit confirmation report returned by a successful
 /// `edit_sync` call.
 ///
 /// Each applied edit contributes a short, numbered snippet of the final file
 /// around its replacement, so the caller can confirm where the edit landed
-/// without a follow-up `Read`. Adjacent windows are coalesced so shared
-/// context lines are not repeated, and only the first
-/// `SUCCESS_EXPANDED_EDIT_CAP` edits are expanded; the remainder are summarized
-/// by a trailing count.
+/// without a follow-up `Read`. Windows that touch or overlap are coalesced so
+/// shared context lines are not repeated, at most the first
+/// `SUCCESS_EXPANDED_EDIT_CAP` coalesced windows are expanded (the remainder
+/// are summarized by a trailing count), and every window is capped at
+/// `SUCCESS_WINDOW_LINE_CAP` lines so a huge replacement cannot blow up the
+/// token budget.
 fn render_success(content: &str, ranges: &[(usize, usize)], file_path: &str) -> String {
     let offsets = compute_line_offsets(content);
-    let last_line = content.lines().count().max(1);
+    let last_line = offsets.len();
 
     // Expand each replacement's line extent into a 1-based inclusive window
-    // with `SUCCESS_SNIPPET_RADIUS` lines of context on either side, then
-    // merge windows that touch or overlap.
-    let mut windows: Vec<(usize, usize)> = Vec::new();
-    for &(start_line, end_line) in ranges {
-        let start = start_line.saturating_sub(SUCCESS_SNIPPET_RADIUS).max(1);
-        let end = end_line
-            .saturating_add(SUCCESS_SNIPPET_RADIUS)
-            .min(last_line);
-        match windows.last_mut() {
+    // with `SUCCESS_SNIPPET_RADIUS` lines of context on either side. Sort the
+    // windows by start line first — ranges arrive in edit-application order,
+    // which need not be monotonic in the final file — then merge windows that
+    // touch or overlap.
+    let mut windows: Vec<(usize, usize)> = ranges
+        .iter()
+        .map(|&(start_line, end_line)| {
+            let start = start_line.saturating_sub(SUCCESS_SNIPPET_RADIUS).max(1);
+            let end = end_line
+                .saturating_add(SUCCESS_SNIPPET_RADIUS)
+                .min(last_line);
+            (start, end)
+        })
+        .collect();
+    windows.sort_unstable_by_key(|&(start, _)| start);
+
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in windows {
+        match merged.last_mut() {
             Some((_, last_end)) if start <= last_end.saturating_add(1) => {
                 *last_end = (*last_end).max(end);
             }
-            _ => windows.push((start, end)),
+            _ => merged.push((start, end)),
         }
     }
 
     // Coalescing windows may collapse several edits into fewer blocks than the
-    // edit cap. The report header still records every applied edit, and the
-    // per-block expansion is itself bounded by the file's line count.
+    // edit cap. The report header still records every applied edit, and each
+    // block is bounded by both the file's line count and
+    // `SUCCESS_WINDOW_LINE_CAP`.
     let mut out = format!(
         "Applied {} edit{} to {file_path}.\n",
         ranges.len(),
         if ranges.len() == 1 { "" } else { "s" }
     );
 
-    for (block_idx, &(start, end)) in windows.iter().enumerate() {
+    for (block_idx, &(start, end)) in merged.iter().enumerate() {
         if block_idx >= SUCCESS_EXPANDED_EDIT_CAP {
-            let remaining = windows.len() - block_idx;
+            let remaining = merged.len() - block_idx;
             out.push_str(&format!(
                 "({remaining} more context block{} not shown)\n",
                 if remaining == 1 { "" } else { "s" }
@@ -503,11 +573,23 @@ fn render_success(content: &str, ranges: &[(usize, usize)], file_path: &str) -> 
         if block_idx > 0 {
             out.push_str("--\n");
         }
-        for line_no in start..=end {
-            let line_start = offsets.get(line_no - 1).copied().unwrap_or(content.len());
-            let line_end = offsets.get(line_no).copied().unwrap_or(content.len());
-            let line = content[line_start..line_end].trim_end_matches(&['\r', '\n'][..]);
-            out.push_str(&format!("  {line_no}: {}\n", clip_line(line, 120)));
+
+        let block_len = end - start + 1;
+        if block_len > SUCCESS_WINDOW_LINE_CAP {
+            let head_end = start + SUCCESS_WINDOW_LINE_CAP / 2 - 1;
+            let tail_start = end - (SUCCESS_WINDOW_LINE_CAP / 2) + 1;
+            for line_no in start..=head_end {
+                out.push_str(&render_success_line(content, &offsets, line_no));
+            }
+            let skipped = tail_start - head_end - 1;
+            out.push_str(&format!("  ... {skipped} lines ...\n"));
+            for line_no in tail_start..=end {
+                out.push_str(&render_success_line(content, &offsets, line_no));
+            }
+        } else {
+            for line_no in start..=end {
+                out.push_str(&render_success_line(content, &offsets, line_no));
+            }
         }
     }
 
@@ -1201,6 +1283,62 @@ mod tests {
             !report.contains("--"),
             "adjacent edits should not repeat context; got: {report}"
         );
+    }
+
+    #[test]
+    fn render_success_coalesces_out_of_order_windows() {
+        let content = "one\ntwo\nthree\nfour\nfive\n";
+        let report = render_success(content, &[(5, 5), (1, 1)], "f.txt");
+        assert!(report.starts_with("Applied 2 edits"), "got: {report}");
+        assert_eq!(report.matches("  1: one").count(), 1, "got: {report}");
+        assert_eq!(report.matches("  5: five").count(), 1, "got: {report}");
+        assert!(!report.contains("--"), "got: {report}");
+    }
+
+    #[test]
+    fn render_success_preserves_trailing_empty_line() {
+        let content = "one\ntwo\n";
+        let report = render_success(content, &[(2, 2)], "f.txt");
+        assert!(report.contains("  3: "), "got: {report}");
+    }
+
+    #[test]
+    fn apply_edits_reports_ranges_when_later_edit_shifts_earlier_lines() {
+        // Edit 1 replaces a later line; edit 2 inserts a line before it, so
+        // edit 1's true final position shifts down relative to its position at
+        // application time.
+        let content = "a\nb\nc\n";
+        let edits = vec![
+            EditOp {
+                old_str: "c".into(),
+                new_str: "C".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+            EditOp {
+                old_str: "a".into(),
+                new_str: "A\nA2".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+        ];
+        let (out, ranges) = apply_edits(content, &edits, "f.txt").unwrap();
+        assert_eq!(out, "A\nA2\nb\nC\n");
+        assert_eq!(ranges, vec![(4, 4), (1, 2)]);
+    }
+
+    #[test]
+    fn render_success_caps_oversized_window() {
+        let content: String = (1..=40)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let report = render_success(&content, &[(1, 40)], "f.txt");
+        assert!(report.starts_with("Applied 1 edit"), "got: {report}");
+        assert!(report.contains("  1: line1"), "got: {report}");
+        assert!(report.contains("  6: line6"), "got: {report}");
+        assert!(!report.contains("  7: line7"), "got: {report}");
+        assert!(report.contains("28 lines"), "got: {report}");
     }
 
     #[test]
