@@ -509,17 +509,27 @@ fn render_success_line(content: &str, offsets: &[usize], line_no: usize) -> Stri
     format!("  {line_no}: {}\n", clip_line(line, 120))
 }
 
+/// A contiguous block of lines already bounded to the per-edit cap.
+struct SuccessPiece {
+    /// Bounded line segments to render for this edit (head and, for an
+    /// oversized window, tail).
+    segments: Vec<(usize, usize)>,
+    /// Interior lines omitted from an oversized window, inclusive.
+    skipped: Option<(usize, usize)>,
+}
+
 /// Render the bounded post-edit confirmation report returned by a successful
 /// `edit_sync` call.
 ///
 /// Each applied edit contributes a short, numbered snippet of the final file
 /// around its replacement, so the caller can confirm where the edit landed
-/// without a follow-up `Read`. Windows that touch or overlap are coalesced so
-/// shared context lines are not repeated, at most the first
-/// `SUCCESS_EXPANDED_EDIT_CAP` coalesced windows are expanded (the remainder
-/// are summarized by a trailing count), and every window is capped at
-/// `SUCCESS_WINDOW_LINE_CAP` lines so a huge replacement cannot blow up the
-/// token budget.
+/// without a follow-up `Read`. Per-edit snippets are bounded *before* shared
+/// context is deduplicated, so an edit whose context window would otherwise be
+/// swallowed by an adjacent oversized block is still shown. Overlapping or
+/// touching segments are coalesced after capping, at most the first
+/// `SUCCESS_EXPANDED_EDIT_CAP` edits are expanded (the remainder are summarized
+/// by a trailing count), and every snippet is capped at
+/// `SUCCESS_WINDOW_LINE_CAP` lines.
 fn render_success(content: &str, ranges: &[(usize, usize)], file_path: &str) -> String {
     let offsets = compute_line_offsets(content);
     let last_line = offsets.len();
@@ -527,8 +537,7 @@ fn render_success(content: &str, ranges: &[(usize, usize)], file_path: &str) -> 
     // Expand each replacement's line extent into a 1-based inclusive window
     // with `SUCCESS_SNIPPET_RADIUS` lines of context on either side. Sort the
     // windows by start line first — ranges arrive in edit-application order,
-    // which need not be monotonic in the final file — then merge windows that
-    // touch or overlap.
+    // which need not be monotonic in the final file.
     let mut windows: Vec<(usize, usize)> = ranges
         .iter()
         .map(|&(start_line, end_line)| {
@@ -541,55 +550,85 @@ fn render_success(content: &str, ranges: &[(usize, usize)], file_path: &str) -> 
         .collect();
     windows.sort_unstable_by_key(|&(start, _)| start);
 
-    let mut merged: Vec<(usize, usize)> = Vec::new();
-    for (start, end) in windows {
-        match merged.last_mut() {
-            Some((_, last_end)) if start <= last_end.saturating_add(1) => {
-                *last_end = (*last_end).max(end);
-            }
-            _ => merged.push((start, end)),
+    let expanded = windows.len().min(SUCCESS_EXPANDED_EDIT_CAP);
+
+    // Bound each selected edit before coalescing. An oversized window is split
+    // into a head and tail around its omitted interior so the surrounding
+    // context is still labeled while the replacement's endpoints stay visible.
+    let mut pieces: Vec<SuccessPiece> = Vec::with_capacity(expanded);
+    for &(start, end) in windows.iter().take(expanded) {
+        let block_len = end - start + 1;
+        if block_len > SUCCESS_WINDOW_LINE_CAP {
+            let head_end = start + SUCCESS_WINDOW_LINE_CAP / 2 - 1;
+            let tail_start = end - (SUCCESS_WINDOW_LINE_CAP / 2) + 1;
+            pieces.push(SuccessPiece {
+                segments: vec![(start, head_end), (tail_start, end)],
+                skipped: Some((head_end + 1, tail_start.saturating_sub(1))),
+            });
+        } else {
+            pieces.push(SuccessPiece {
+                segments: vec![(start, end)],
+                skipped: None,
+            });
         }
     }
 
-    // Coalescing windows may collapse several edits into fewer blocks than the
-    // edit cap. The report header still records every applied edit, and each
-    // block is bounded by both the file's line count and
-    // `SUCCESS_WINDOW_LINE_CAP`.
+    // Deduplicate shared context by merging touching/overlapping bounded
+    // segments into union intervals. Segments are sorted so a later edit that
+    // overlaps an earlier edit's skipped interior still lands in file order.
+    let mut segments: Vec<(usize, usize)> = pieces
+        .iter()
+        .flat_map(|piece| piece.segments.iter().copied())
+        .collect();
+    segments.sort_unstable_by_key(|&(start, _)| start);
+
+    let mut intervals: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in segments {
+        match intervals.last_mut() {
+            Some((_, last_end)) if start <= last_end.saturating_add(1) => {
+                *last_end = (*last_end).max(end);
+            }
+            _ => intervals.push((start, end)),
+        }
+    }
+
     let mut out = format!(
         "Applied {} edit{} to {file_path}.\n",
         ranges.len(),
         if ranges.len() == 1 { "" } else { "s" }
     );
 
-    for (block_idx, &(start, end)) in merged.iter().enumerate() {
-        if block_idx >= SUCCESS_EXPANDED_EDIT_CAP {
-            let remaining = merged.len() - block_idx;
-            out.push_str(&format!(
-                "({remaining} more context block{} not shown)\n",
-                if remaining == 1 { "" } else { "s" }
-            ));
-            break;
-        }
-        if block_idx > 0 {
-            out.push_str("--\n");
+    if expanded < windows.len() {
+        let remaining = windows.len() - expanded;
+        out.push_str(&format!(
+            "({remaining} more context block{} not shown)\n",
+            if remaining == 1 { "" } else { "s" }
+        ));
+    }
+
+    for (interval_idx, &(start, end)) in intervals.iter().enumerate() {
+        if interval_idx > 0 {
+            let previous_end = intervals[interval_idx - 1].1;
+            let gap_start = previous_end.saturating_add(1);
+            let gap_end = start.saturating_sub(1);
+
+            // A gap that is the omitted interior of a single oversized edit is
+            // rendered as a line-count marker; any other non-contiguous gap is
+            // a separate context block and gets the block separator.
+            let is_skipped_interior = pieces.iter().any(|piece| {
+                piece.skipped.is_some_and(|(skip_start, skip_end)| {
+                    skip_start <= gap_start && gap_end <= skip_end
+                })
+            });
+            if is_skipped_interior {
+                out.push_str(&format!("  ... {} lines ...\n", gap_end - gap_start + 1));
+            } else {
+                out.push_str("--\n");
+            }
         }
 
-        let block_len = end - start + 1;
-        if block_len > SUCCESS_WINDOW_LINE_CAP {
-            let head_end = start + SUCCESS_WINDOW_LINE_CAP / 2 - 1;
-            let tail_start = end - (SUCCESS_WINDOW_LINE_CAP / 2) + 1;
-            for line_no in start..=head_end {
-                out.push_str(&render_success_line(content, &offsets, line_no));
-            }
-            let skipped = tail_start - head_end - 1;
-            out.push_str(&format!("  ... {skipped} lines ...\n"));
-            for line_no in tail_start..=end {
-                out.push_str(&render_success_line(content, &offsets, line_no));
-            }
-        } else {
-            for line_no in start..=end {
-                out.push_str(&render_success_line(content, &offsets, line_no));
-            }
+        for line_no in start..=end {
+            out.push_str(&render_success_line(content, &offsets, line_no));
         }
     }
 
@@ -1369,5 +1408,24 @@ mod tests {
             !report.contains("  70:"),
             "last block should be capped; got: {report}"
         );
+    }
+
+    #[test]
+    fn render_success_keeps_each_edit_inside_a_coalesced_oversized_window() {
+        // Three disjoint one-line edits at lines 10, 17, and 24 produce
+        // context windows 7-13, 14-20, and 21-27. Those touch and therefore
+        // coalesce into a single 21-line window, but capping must be done per
+        // edit *before* deduplication — otherwise the oversized-window
+        // truncation keeps only lines 7-12 and 22-27 and silently drops the
+        // replacement at line 17.
+        let content: String = (1..=30)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let report = render_success(&content, &[(10, 10), (17, 17), (24, 24)], "f.txt");
+        assert!(report.contains("  10: line10"), "got: {report}");
+        assert!(report.contains("  17: line17"), "got: {report}");
+        assert!(report.contains("  24: line24"), "got: {report}");
+        assert!(!report.contains("... skipped"), "got: {report}");
     }
 }
