@@ -925,7 +925,6 @@ async fn run_agent(
         if let Some(ld) = landscape_data.take() {
             contexts.push(Box::new(LandscapeContext::new(
                 ld,
-                gremlin.runtime_config.log_tx.clone(),
             )));
         }
         plug.register_contexts(contexts);
