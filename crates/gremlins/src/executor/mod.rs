@@ -84,7 +84,6 @@ pub enum RunError {
 
 pub mod agent_runner;
 pub mod bootstrap;
-pub mod conversation;
 pub mod exec_runner;
 pub mod gremlin;
 pub(crate) mod implicit;

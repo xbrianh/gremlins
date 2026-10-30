@@ -1393,10 +1393,14 @@ pub(crate) fn max_tool_output_bytes() -> u64 {
         .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES)
 }
 
-/// GREMLINS_COMPACTION_THRESHOLD_TOKENS — soft token trigger for headless
-/// (pipeline) conversation compaction. Default 50 000. 0 disables proactive
-/// compaction; the hard `max-prompt-bytes` ceiling still applies. Settings.yaml
+/// Soft token trigger for headless (pipeline) conversation compaction.
+/// Default 50 000. 0 disables proactive compaction; the hard
+/// `max-prompt-bytes` ceiling still applies. Settings.yaml
 /// `compaction.threshold-tokens` takes precedence over the env var.
+///
+/// Currently unused: proactive compaction was removed and this accessor is
+/// retained for the replacement compaction design.
+#[allow(dead_code)]
 pub(crate) fn compaction_threshold_tokens() -> u64 {
     get_global()
         .map(|c| c.compaction_threshold_tokens())
@@ -1408,10 +1412,14 @@ pub(crate) fn compaction_threshold_tokens() -> u64 {
         .unwrap_or(DEFAULT_COMPACTION_THRESHOLD_TOKENS)
 }
 
-/// GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT — soft token trigger for chat
-/// conversation compaction. Default 64 000. 0 disables proactive compaction;
-/// the hard `max-prompt-bytes` ceiling still applies. Settings.yaml
-/// `compaction.threshold-tokens-chat` takes precedence over the env var.
+/// Soft token trigger for chat conversation compaction. Default 64 000.
+/// 0 disables proactive compaction; the hard `max-prompt-bytes` ceiling still
+/// applies. Settings.yaml `compaction.threshold-tokens-chat` takes precedence
+/// over the env var.
+///
+/// Currently unused: proactive compaction was removed and this accessor is
+/// retained for the replacement compaction design.
+#[allow(dead_code)]
 pub(crate) fn compaction_threshold_tokens_chat() -> u64 {
     get_global()
         .map(|c| c.compaction_threshold_tokens_chat())

@@ -16,8 +16,6 @@ use crate::core::paths::{
     roots_suffix, within_worktree, within_worktree_lexical,
 };
 use crate::task_kind::TaskKind;
-// Re-export result_status so agent_loop's `tools::result_status` calls keep working.
-pub(crate) use super::compaction::result_status;
 
 /// First `max_chars` characters of a string, with \n escaped to `\\n`.
 pub(crate) fn preview_str(s: &str, max_chars: usize) -> String {
@@ -27,6 +25,15 @@ pub(crate) fn preview_str(s: &str, max_chars: usize) -> String {
         format!("{escaped}…")
     } else {
         escaped
+    }
+}
+
+/// Classify a tool result string as `"ok"` or `"error"`.
+pub(crate) fn result_status(res: &str) -> &'static str {
+    if res.starts_with("Error:") || res.starts_with("[exit") || res.starts_with("[timeout]") {
+        "error"
+    } else {
+        "ok"
     }
 }
 

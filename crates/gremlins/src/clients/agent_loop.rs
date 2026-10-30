@@ -7,17 +7,17 @@ use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use rig_core::completion::message::{
-    AssistantContent, CallId, Reasoning, Sealed, Text, ToolCall, ToolName, UserContent,
+    AssistantContent, CallId, Reasoning, Sealed, Text, ToolCall, ToolName, ToolResultContent,
+    UserContent,
 };
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
 use rig_core::error::ProviderError;
+use rig_core::message::ToolResult as ToolResultMsg;
 use rig_core::operation::Completion;
 use rig_core::streaming::{Item, StreamEvent, Streamed};
 use tokio::sync::{mpsc, Semaphore};
 
 use super::backend::RunParams;
-use super::compaction;
-use super::compaction::CompactionOpts;
 use super::interactive::{
     InteractiveCommand, InteractiveEvent, InteractiveSession, PauseToken, StreamEventSender,
 };
@@ -166,8 +166,6 @@ pub(crate) struct RunContext {
     pub(crate) stream_events: Option<StreamEventSender>,
     /// Pre-populated message history carried into the loop's internal history.
     pub(crate) prepopulated_messages: Option<Vec<Message>>,
-    /// Chat-only soft compaction settings (mirrors `RunParams`).
-    pub(crate) compaction_opts: Option<CompactionOpts>,
     /// Inversion-of-control plug carrying cross-package dependencies.
     /// Defaults to a no-op plug when `None`.
     pub(crate) plug: LoopPlug,
@@ -183,7 +181,6 @@ impl RunContext {
         } else {
             format!("[{}] ", params.label)
         };
-        let compaction_opts = params.compaction_opts;
         Self {
             idle_timeout,
             prefix,
@@ -192,7 +189,6 @@ impl RunContext {
             completion_nudge_budget: crate::config::completion_nudge_budget(),
             stream_events: params.stream_events.clone(),
             prepopulated_messages: params.prepopulated_messages.clone(),
-            compaction_opts,
             plug: params.plug.clone().unwrap_or_else(LoopPlug::new),
             params,
         }
@@ -237,7 +233,6 @@ struct LoopState {
     history: Vec<Message>,
     next_prompt: Message,
     current_turn_start: usize,
-    compacted: Option<compaction::CompactedWorking>,
     turns: usize,
     turn_num: usize,
     turn_retries: usize,
@@ -374,7 +369,6 @@ impl LoopState {
             history,
             next_prompt: Message::user(prompt.to_string()),
             current_turn_start,
-            compacted: None,
             turns: 0,
             turn_num: 0,
             turn_retries: 0,
@@ -425,14 +419,11 @@ impl LoopState {
         prefix: &str,
         idle_timeout: f64,
         nested: bool,
-        compaction_opts: Option<CompactionOpts>,
-        compactor: Option<Arc<dyn compaction::Compactor>>,
         turn_retry_backoff: &[f64],
         timeout_retry_backoff: &[f64],
     ) -> Result<StreamTurnOutcome, ClientError> {
         // Phase 1: assemble the request (messages, scratchpad, gen params).
-        let builder =
-            self.prepare_stream_request(tool_defs, opts, compaction_opts, compactor, nested);
+        let builder = self.prepare_stream_request(tool_defs, opts, nested);
 
         // Dump the full prompt to the state directory when
         // GREMLINS_LOG_LEVEL=DEBUG and a debug store is configured.
@@ -519,40 +510,18 @@ impl LoopState {
     }
 
     /// Build the [`CompletionRequest`] for one model turn: assemble the request
-    /// messages, re-inject the scratchpad when compaction dropped a prior
-    /// injection, and apply the caller's generation parameters.
-    #[allow(clippy::too_many_arguments)]
+    /// messages, re-inject the scratchpad when a prior injection is missing,
+    /// and apply the caller's generation parameters.
     fn prepare_stream_request(
         &mut self,
         tool_defs: &[ToolDefinition],
         opts: &LoopOpts<'_>,
-        compaction_opts: Option<CompactionOpts>,
-        compactor: Option<Arc<dyn compaction::Compactor>>,
         nested: bool,
     ) -> CompletionRequest {
-        let next_prompt_text = user_message_text(&self.next_prompt);
-        let overhead_bytes = compaction::completion_request_overhead(
-            &next_prompt_text,
-            self.system_prompt.as_deref(),
-            tool_defs,
-        );
-        let overhead_tokens = compaction::completion_request_overhead_tokens(
-            &next_prompt_text,
-            self.system_prompt.as_deref(),
-            tool_defs,
-        );
-        let request_messages = build_request_messages(
-            &self.history,
-            &mut self.compacted,
-            self.current_turn_start,
-            compaction_opts,
-            compactor.clone(),
-            overhead_tokens,
-            overhead_bytes,
-        );
+        let request_messages = self.history.to_vec();
 
         // If findings weren't injected this turn but the ledger has entries
-        // and compaction dropped the prior injection from history, force
+        // and the prior injection is missing from history, force
         // re-injection so the model doesn't lose its discovered facts.
         if !nested && !self.turn_findings_injected {
             let findings_block = self.findings_ledger.format();
@@ -571,7 +540,7 @@ impl LoopState {
         }
 
         // If the scratchpad wasn't injected this turn (hash unchanged)
-        // but compaction dropped the prior injection from history, force
+        // but the prior injection is missing from history, force
         // re-injection so the model doesn't lose its working memory.
         if !nested && !self.turn_scratchpad_injected {
             if let Some(content) = self.plug.read_scratchpad() {
@@ -1768,7 +1737,7 @@ impl LoopState {
                             "[turn {}]: Done {} (rejected)\n\n{}",
                             self.turn_num, done_summary, reminder
                         );
-                        self.next_prompt = compaction::done_user_message(
+                        self.next_prompt = done_user_message(
                             &rejected_ledger,
                             done_tc.id.clone(),
                             done_tc.function.name.clone(),
@@ -1836,7 +1805,7 @@ impl LoopState {
                     self.preserve_reasoning_in_history,
                 ));
                 let done_ledger = format!("[turn {}]: Done {}", self.turn_num, done_summary);
-                messages.push(compaction::done_user_message(
+                messages.push(done_user_message(
                     &done_ledger,
                     done_tc.id.clone(),
                     done_tc.function.name.clone(),
@@ -2200,8 +2169,6 @@ pub(crate) async fn run_agent_loop(
         interactive,
         tool_output_rx,
         ctx.prepopulated_messages.clone(),
-        ctx.compaction_opts,
-        ctx.params.compactor.clone(),
     )
     .await
 }
@@ -2307,8 +2274,6 @@ pub(crate) async fn run_agent_loop_nested(
         None,
         None,
         prepopulated_messages,
-        None,
-        None,
     )
     .await;
     plug.log(log::Level::Info, &format!("{prefix}task: end"));
@@ -2536,104 +2501,38 @@ fn user_message_text(message: &Message) -> String {
     }
 }
 
-/// Build the message list for the next `CompletionRequest`.
+/// Build a single [`Message::User`] that merges a Done action ledger with
+/// the matching tool_result. This avoids consecutive `User` messages in
+/// the persisted history, which Anthropic (and other providers) reject
+/// because they violate the required user/assistant alternation and the
+/// rule that every `tool_use` must be immediately followed by a matching
+/// `tool_result` block.
 ///
-/// `history` is the verbatim source of truth and is never mutated here. When
-/// compaction is enabled, a cached `CompactedWorking` keeps the request prefix
-/// byte-stable across rounds; a new pass is triggered only when the current
-/// materialized view exceeds the soft token threshold.
-fn build_request_messages(
-    history: &[Message],
-    compacted: &mut Option<compaction::CompactedWorking>,
-    current_turn_start: usize,
-    opts: Option<CompactionOpts>,
-    compactor: Option<Arc<dyn compaction::Compactor>>,
-    overhead_tokens: usize,
-    overhead_bytes: usize,
-) -> Vec<Message> {
-    let Some(opts) = opts else {
-        return history.to_vec();
-    };
-    let compactor = compactor.expect("compactor must be provided when compaction is enabled");
-
-    if let Some(cached) = compacted.as_ref() {
-        if cached.cut > history.len() {
-            // History was popped (for example a mid-tool pause re-run); the
-            // old cut no longer points into the verbatim transcript.
-            *compacted = None;
-        }
+/// The [`UserContent::ToolResult`] comes first because Anthropic requires
+/// every `tool_result` block to precede any text blocks in the responding
+/// user message.
+fn done_user_message(
+    ledger: &str,
+    call_id: CallId,
+    tool_name: ToolName,
+    result_text: &str,
+) -> Message {
+    Message::User {
+        content: vec![
+            UserContent::ToolResult(ToolResultMsg {
+                call: call_id,
+                name: tool_name,
+                content: vec![ToolResultContent::Text(Text {
+                    text: result_text.to_string(),
+                    additional_params: None,
+                })],
+            }),
+            UserContent::Text(Text {
+                text: ledger.to_string(),
+                additional_params: None,
+            }),
+        ],
     }
-
-    let working = match compacted.as_ref() {
-        Some(cached) => cached.materialize(history),
-        None => history.to_vec(),
-    };
-
-    if compaction::token_len(&working).saturating_add(overhead_tokens)
-        <= opts.threshold_tokens as usize
-    {
-        return working;
-    }
-
-    let granularity = if history.len() > current_turn_start {
-        compaction::CutGranularity::Round { current_turn_start }
-    } else {
-        compaction::CutGranularity::Turn
-    };
-
-    // Convert only the remaining history-token allowance to bytes via the
-    // conservative 3:1 ratio, then add back the measured byte overhead so
-    // compact_working's internal budget subtraction correctly recovers the
-    // history budget.
-    let history_token_budget = opts.target_tokens.saturating_sub(overhead_tokens as u64);
-    let target_bytes = history_token_budget
-        .saturating_mul(compaction::BYTES_PER_TOKEN)
-        .saturating_add(overhead_bytes as u64);
-
-    // Try the byte budget. For token-dense histories the 3:1 estimate may
-    // be too generous, leaving the resulting view still over the token
-    // target. When that happens — or when the fitter bails because the
-    // serialized history already fits in the byte budget — shrink the
-    // budget and retry.
-    let mut byte_budget = target_bytes;
-    loop {
-        if let Some(fresh) =
-            compactor.compact_working(history, byte_budget, overhead_bytes, granularity)
-        {
-            let request = fresh.materialize(history);
-            let tokens = compaction::token_len(&request).saturating_add(overhead_tokens);
-            if tokens <= opts.target_tokens as usize {
-                *compacted = Some(fresh);
-                return request;
-            }
-            // Token count still over target — the 3:1 estimate was too
-            // generous for this dense content. Shrink budget proportionally.
-            byte_budget = byte_budget
-                .saturating_mul(opts.target_tokens)
-                .saturating_div(tokens as u64)
-                .min(byte_budget.saturating_sub(1));
-            if byte_budget == 0 {
-                break;
-            }
-        } else {
-            // compact_working returned None. If the full history already
-            // fits in the available byte budget it bailed early — shrink
-            // the budget to force a cut. Otherwise there is genuinely no
-            // room and we stop.
-            let available = byte_budget.saturating_sub(overhead_bytes as u64) as usize;
-            if compaction::serialized_len(history) <= available && available > 0 {
-                byte_budget = (available - 1).saturating_add(overhead_bytes) as u64;
-            } else {
-                break;
-            }
-        }
-    }
-
-    // The newest round alone exceeds the target (or the transcript has no
-    // valid cut). Return the input unchanged and let the hard
-    // `max-prompt-bytes` ceiling fail the request; cutting mid-round would
-    // orphan an assistant tool-use from its results.
-    working
 }
 
 // ── agent loop ────────────────────────────────────────────────────────────
@@ -2660,8 +2559,6 @@ async fn run_agent_loop_core(
     interactive: Option<InteractiveSession>,
     tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
     prepopulated_messages: Option<Vec<Message>>,
-    compaction_opts: Option<CompactionOpts>,
-    compactor: Option<Arc<dyn compaction::Compactor>>,
 ) -> Result<CompletedRun, ClientError> {
     let mut state = LoopState::new(
         system_prompt,
@@ -2712,8 +2609,6 @@ async fn run_agent_loop_core(
                 prefix,
                 idle_timeout,
                 nested,
-                compaction_opts,
-                compactor.clone(),
                 &turn_retry_backoff,
                 &timeout_retry_backoff,
             )
@@ -3725,10 +3620,8 @@ mod tests {
                 cancel_token: None,
                 stream_events: None,
                 prepopulated_messages: None,
-                compaction_opts: None,
                 skills_available: false,
                 discovered_skills: None,
-                compactor: None,
                 active_skills: None,
                 token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
                 scratchpad_path: None,
@@ -3741,7 +3634,6 @@ mod tests {
             completion_nudge_budget: 0,
             stream_events: None,
             prepopulated_messages: None,
-            compaction_opts: None,
             plug: {
                 // Seed a ToolLedger so tests that assert on ledger behavior work.
                 let mut plug = LoopPlug::new();
@@ -3750,293 +3642,6 @@ mod tests {
                 plug.register_contexts(vec![Box::new(ledger) as Box<dyn MutableModelContext>]);
                 plug
             },
-        }
-    }
-
-    fn padded_history(rounds: usize, assistant_text_len: usize) -> Vec<Message> {
-        let mut history = vec![Message::user("operator prompt")];
-        for index in 0..rounds {
-            history.push(assistant_tool_message(
-                &"x".repeat(assistant_text_len),
-                &[],
-                &[],
-                true,
-            ));
-            history.push(Message::user(format!("[turn {}]: round {index}", index)));
-        }
-        history
-    }
-
-    fn bash_history(rounds: usize, output_len: usize) -> Vec<Message> {
-        let mut history = vec![Message::user("operator prompt")];
-        for index in 0..rounds {
-            let call = ToolCall::from_dual_wire(
-                "",
-                format!("bash_{index}"),
-                ToolFunction::new(
-                    ToolName::new("Bash".to_string()).unwrap(),
-                    serde_json::json!({"command": format!("cargo check {index}")}),
-                ),
-            );
-            history.push(assistant_tool_message("", &[], &[call], true));
-            history.push(Message::tool_result(
-                CallId::from_wire(format!("bash_{index}")),
-                ToolName::new("Bash".to_string()).unwrap(),
-                format!("output for batch {index}\n{}", "x".repeat(output_len)),
-            ));
-            history.push(Message::user(format!(
-                "[turn {}]: Bash cargo check {index}",
-                index
-            )));
-        }
-        history
-    }
-
-    #[test]
-    fn build_request_messages_compacts_mid_turn_with_sticky_prefix() {
-        let mut history = padded_history(6, 3_000);
-        let full_len = compaction::token_len(&history);
-        let opts = CompactionOpts {
-            threshold_tokens: full_len as u64 - 1,
-            target_tokens: full_len as u64 / 2,
-        };
-
-        let mut compacted = None;
-        let compactor: Arc<dyn crate::clients::compaction::Compactor> =
-            Arc::new(crate::executor::conversation::ConversationCompactor);
-        let first = build_request_messages(
-            &history,
-            &mut compacted,
-            0,
-            Some(opts),
-            Some(compactor.clone()),
-            0,
-            0,
-        );
-        assert!(
-            compacted.is_some(),
-            "an over-threshold multi-round turn must compact"
-        );
-        assert!(compaction::token_len(&first) < full_len);
-
-        let prefix_before = compacted.as_ref().unwrap().prefix.clone();
-        let cut_before = compacted.as_ref().unwrap().cut;
-
-        // Append several small rounds. The cached prefix must stay
-        // byte-identical and no second compaction pass may run while the view
-        // is under threshold.
-        for round in 0..5 {
-            history.push(assistant_tool_message("small", &[], &[], true));
-            history.push(Message::user(format!("[turn {}]: small {round}", round)));
-            let request = build_request_messages(
-                &history,
-                &mut compacted,
-                0,
-                Some(opts),
-                Some(compactor.clone()),
-                0,
-                0,
-            );
-            assert!(compacted.is_some());
-            assert_eq!(compacted.as_ref().unwrap().prefix, prefix_before);
-            assert_eq!(compacted.as_ref().unwrap().cut, cut_before);
-            let mut expected = prefix_before.clone();
-            expected.extend_from_slice(&history[cut_before..]);
-            assert_eq!(request, expected);
-        }
-    }
-
-    #[test]
-    fn build_request_messages_runs_two_passes_and_keeps_earlier_facts() {
-        let mut history = bash_history(6, 2_000);
-        let full_len = compaction::token_len(&history);
-        let opts = CompactionOpts {
-            threshold_tokens: full_len as u64 - 1,
-            target_tokens: full_len as u64 / 2,
-        };
-
-        let mut compacted = None;
-        let compactor: Arc<dyn crate::clients::compaction::Compactor> =
-            Arc::new(crate::executor::conversation::ConversationCompactor);
-        let first = build_request_messages(
-            &history,
-            &mut compacted,
-            0,
-            Some(opts),
-            Some(compactor.clone()),
-            0,
-            0,
-        );
-        assert!(compacted.is_some(), "first pass must compact");
-        assert!(compaction::token_len(&first) < full_len);
-        let first_cut = compacted.as_ref().unwrap().cut;
-        let first_prefix = compacted.as_ref().unwrap().prefix.clone();
-        assert!(user_message_text(&first_prefix[0]).contains("Bash: cargo check 0"));
-
-        // Push the materialized view back over the soft threshold.
-        for batch in 6..12 {
-            let index = batch;
-            let call = ToolCall::from_dual_wire(
-                "",
-                format!("bash_{index}"),
-                ToolFunction::new(
-                    ToolName::new("Bash".to_string()).unwrap(),
-                    serde_json::json!({"command": format!("cargo check {index}")}),
-                ),
-            );
-            history.push(assistant_tool_message("", &[], &[call], true));
-            history.push(Message::tool_result(
-                CallId::from_wire(format!("bash_{index}")),
-                ToolName::new("Bash".to_string()).unwrap(),
-                format!("output for batch {index}\n{}", "x".repeat(2_000)),
-            ));
-            history.push(Message::user(format!(
-                "[turn {}]: Bash cargo check {index}",
-                index
-            )));
-        }
-
-        let second = build_request_messages(
-            &history,
-            &mut compacted,
-            0,
-            Some(opts),
-            Some(compactor.clone()),
-            0,
-            0,
-        );
-        let fresh = compacted
-            .as_ref()
-            .expect("a second compaction pass must be cached");
-        assert!(
-            fresh.cut != first_cut || fresh.prefix != first_prefix,
-            "the second over-threshold pass must choose a new sticky prefix"
-        );
-        assert!(compaction::token_len(&second) < compaction::token_len(&history));
-
-        let memory = user_message_text(&fresh.prefix[0]);
-        assert!(
-            memory.contains("Bash: cargo check 0"),
-            "facts from the first pass must survive into the second pass"
-        );
-        assert!(
-            memory.contains("Bash: cargo check 5"),
-            "facts from rounds before the second pass must be present"
-        );
-    }
-
-    #[test]
-    fn build_request_messages_uses_verbatim_history_without_opts() {
-        let history = padded_history(3, 1_000);
-        let mut compacted = None;
-        let request = build_request_messages(&history, &mut compacted, 0, None, None, 0, 0);
-        assert_eq!(request, history);
-        assert!(compacted.is_none());
-    }
-
-    #[test]
-    fn build_request_messages_resets_cached_cut_after_history_pop() {
-        let mut history = padded_history(6, 3_000);
-        let full_len = compaction::token_len(&history);
-        let opts = CompactionOpts {
-            threshold_tokens: full_len as u64 - 1,
-            target_tokens: full_len as u64 / 2,
-        };
-
-        let mut compacted = None;
-        let compactor: Arc<dyn crate::clients::compaction::Compactor> =
-            Arc::new(crate::executor::conversation::ConversationCompactor);
-        let _ = build_request_messages(
-            &history,
-            &mut compacted,
-            0,
-            Some(opts),
-            Some(compactor.clone()),
-            0,
-            0,
-        );
-        assert!(compacted.is_some());
-
-        // Simulate a mid-tool pause re-run popping messages back below the cut.
-        while history.len() > compacted.as_ref().unwrap().cut {
-            history.pop();
-        }
-        history.pop();
-
-        let request = build_request_messages(
-            &history,
-            &mut compacted,
-            0,
-            Some(opts),
-            Some(compactor.clone()),
-            0,
-            0,
-        );
-        assert!(
-            compacted.is_none() || compacted.as_ref().is_some_and(|c| c.cut <= history.len()),
-            "a stale cached cut must not survive a history pop"
-        );
-        assert_eq!(request, history);
-    }
-
-    #[test]
-    fn build_request_messages_can_drop_scratchpad_under_aggressive_compaction() {
-        // Verify that aggressive compaction can drop a scratchpad-injected
-        // user message from history. The recovery check in
-        // run_agent_loop_core detects this by scanning the assembled request
-        // for "## Scratchpad" and forces re-injection when it's missing.
-        let scratchpad_user = Message::user(
-            "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\nremember: fix bug #42\n\n---\n\nPlease fix the bug",
-        );
-        let call = ToolCall::from_dual_wire(
-            "",
-            "read_1",
-            ToolFunction::new(
-                ToolName::new("Read".to_string()).unwrap(),
-                serde_json::json!({"file_path": "src/main.rs"}),
-            ),
-        );
-        let history = vec![
-            scratchpad_user,
-            assistant_tool_message("", &[], &[call], true),
-            Message::tool_result(
-                CallId::from_wire("read_1".to_string()),
-                ToolName::new("Read".to_string()).unwrap(),
-                "fn main() {\n    println!(\"hello\");\n}\n".repeat(200),
-            ),
-            Message::user("[turn 1]: Read src/main.rs"),
-        ];
-
-        // Aggressive compaction: force compaction on tiny histories.
-        let opts = CompactionOpts {
-            threshold_tokens: 10,
-            target_tokens: 10,
-        };
-
-        let mut compacted = None;
-        let compactor: Arc<dyn crate::clients::compaction::Compactor> =
-            Arc::new(crate::executor::conversation::ConversationCompactor);
-        let request = build_request_messages(
-            &history,
-            &mut compacted,
-            0,
-            Some(opts),
-            Some(compactor),
-            0,
-            0,
-        );
-
-        let has_scratchpad = request
-            .iter()
-            .any(|msg| user_message_text(msg).contains("## Scratchpad"));
-        // The scratchpad may or may not survive compaction depending on the
-        // token budget. When it doesn't, the recovery code in
-        // run_agent_loop_core must detect the absence via this same check
-        // and force re-injection into next_prompt.
-        if !has_scratchpad {
-            // The recovery check would find "## Scratchpad" absent and
-            // trigger re-injection. This path validates the detection logic.
-            assert!(!has_scratchpad);
         }
     }
 
@@ -7106,8 +6711,6 @@ mod tests {
                 Some(session),
                 None,
                 None,
-                None,
-                None,
             )
             .await
         });
@@ -7219,8 +6822,6 @@ mod tests {
                 Some(session),
                 None,
                 None,
-                None,
-                None,
             )
             .await
         });
@@ -7319,8 +6920,6 @@ mod tests {
                 Some(session),
                 None,
                 None,
-                None,
-                None,
             )
             .await
         });
@@ -7406,8 +7005,6 @@ mod tests {
                 0,
                 &LoopPlug::new(),
                 Some(session),
-                None,
-                None,
                 None,
                 None,
             )
@@ -7571,8 +7168,6 @@ mod tests {
             None,
             None,
             None,
-            None,
-            None,
         )
         .await
         .unwrap();
@@ -7652,8 +7247,6 @@ mod tests {
             0,
             0,
             &LoopPlug::new(),
-            None,
-            None,
             None,
             None,
             None,

@@ -7,7 +7,6 @@ use indexmap::IndexMap;
 use rig_core::completion::Message;
 
 use super::cancel::CancelToken;
-pub(crate) use super::compaction::{CompactionOpts, Compactor};
 use super::interactive::{InteractiveSession, StreamEventSender};
 use super::model::GremlinsModel;
 use super::params::ResolvedParams;
@@ -59,10 +58,6 @@ pub struct RunParams {
     /// roles) instead of building from a bare system-prompt + user-prompt pair.
     /// The user prompt is still appended as the next user message.
     pub prepopulated_messages: Option<Vec<Message>>,
-    /// Chat-only soft compaction settings. `Some` enables mid-loop compaction
-    /// (and the first-request/read-time pass inside the agent loop); `None`
-    /// keeps the loop's byte-accounting behavior unchanged.
-    pub(crate) compaction_opts: Option<CompactionOpts>,
     /// Whether skills are available for this chat session.
     pub(crate) skills_available: bool,
     /// Discovered skills for this session. Session-bound so concurrent chat
@@ -70,8 +65,6 @@ pub struct RunParams {
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
     /// Shared mutable reference to active skill names.
     pub active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
-    /// Compaction algorithm (set alongside compaction_opts).
-    pub(crate) compactor: Option<Arc<dyn Compactor>>,
     /// Sink for per-turn token-usage events emitted by the agent loop.
     /// The executor layer wires this to the daemon event broadcast.
     pub token_usage_sink: crate::clients::token_usage::TokenUsageSink,
@@ -110,11 +103,9 @@ impl Clone for RunParams {
             cancel_token: self.cancel_token.clone(),
             stream_events: self.stream_events.clone(),
             prepopulated_messages: self.prepopulated_messages.clone(),
-            compaction_opts: self.compaction_opts,
             skills_available: self.skills_available,
             discovered_skills: self.discovered_skills.clone(),
             active_skills: self.active_skills.clone(),
-            compactor: self.compactor.clone(),
             token_usage_sink: self.token_usage_sink.clone(),
             scratchpad_path: self.scratchpad_path.clone(),
             plug: self.plug.clone(),

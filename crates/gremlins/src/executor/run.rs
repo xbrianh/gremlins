@@ -5,19 +5,17 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
 use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
-use crate::clients::backend::{ClientError, CompactionOpts, Compactor, RunParams};
+use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::{Client, ModelURI};
 use crate::config;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
 use crate::executor::bootstrap::run_definition_bootstrap;
-use crate::executor::conversation;
 use crate::executor::exec_runner::{commit_exec, prepare_exec, run_shell, ExecError};
 use crate::executor::gremlin::Gremlin;
 #[cfg(test)]
@@ -791,29 +789,7 @@ async fn run_agent(
         None
     };
 
-    // Compaction is in-memory; the verbatim archive is preserved for
-    // artifact persistence, never compacted.
-    let compaction_opts = {
-        let threshold = if is_chat {
-            config::compaction_threshold_tokens_chat()
-        } else {
-            config::compaction_threshold_tokens()
-        };
-        if threshold == 0 {
-            None
-        } else {
-            Some(CompactionOpts {
-                threshold_tokens: threshold,
-                target_tokens: threshold.saturating_mul(55) / 100,
-            })
-        }
-    };
     let prepopulated_messages = verbatim_history.clone();
-
-    // The concrete compaction algorithm that pairs with `compaction_opts`:
-    // the agent loop runs it mid-loop when compaction is enabled.
-    let compactor: Option<Arc<dyn Compactor>> = compaction_opts
-        .map(|_| Arc::new(conversation::ConversationCompactor) as Arc<dyn Compactor>);
 
     // ── Live usage tracker for failure persistence ─────
     // Stores (combined_usage, stage_local_usage, cost_usd).
@@ -963,8 +939,6 @@ async fn run_agent(
         cancel_token: gremlin.cancel_token.clone(),
         stream_events: gremlin.runtime_config.stream_events.clone(),
         prepopulated_messages,
-        compaction_opts,
-        compactor,
         skills_available: gremlin.discovered_skills.is_some(),
         discovered_skills: gremlin.discovered_skills.clone(),
         active_skills: gremlin.active_skills.clone(),
