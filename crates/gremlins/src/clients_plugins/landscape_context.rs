@@ -13,23 +13,24 @@ use crate::landscape::{LandscapeData, LandscapeExplorer};
 /// file (or directory) is re-explored on disk so the landscape always reflects
 /// current file state.
 ///
-/// The landscape is rendered into the system prompt via [`system_message`] and
-/// rebuilt every turn so the model always sees an up-to-date view of the file
-/// tree.
+/// The landscape is rendered into the system prompt via [`system_message`] once
+/// at construction and never updated — it is a frozen seed that may become stale.
 #[derive(Clone)]
 pub(crate) struct LandscapeContext {
     /// The living landscape data — always up to date.
     data: LandscapeData,
 
-    /// Rendered landscape snapshot.  Rebuilt at construction and after each
-    /// turn in [`finalize_turn`].  Served via [`system_message`].
-    stable_landscape: String,
+    /// Worktree root, copied from `data.root` at construction.
+    /// Used by [`tool_result_extra`] so it never touches `self.data`.
+    root: PathBuf,
+
+    /// Frozen seed landscape captured at construction — never changes.
+    /// Served via [`system_message`].
+    seed_landscape: String,
 
     /// File paths touched during the current turn (cleared each turn).
     dirty: HashSet<PathBuf>,
 
-    /// Token budget for landscape rendering.
-    max_tokens: usize,
     /// Whether landscape was ever enabled for this stage.
     /// Set from `data.is_empty()` at construction — when false, all
     /// observations are no-ops and transcripts are always empty.
@@ -56,8 +57,10 @@ impl LandscapeContext {
         let max_tokens =
             usize::try_from(crate::config::max_landscape_tokens()).unwrap_or(usize::MAX);
 
-        // Render the initial landscape from the seeded data.
-        let stable_landscape = if landscape_enabled {
+        let root = data.root.clone();
+
+        // Render the seed landscape once — it never changes.
+        let seed_landscape = if landscape_enabled {
             crate::landscape::format_landscape_data(&data, max_tokens)
         } else {
             String::new()
@@ -65,9 +68,9 @@ impl LandscapeContext {
 
         let ctx = Self {
             data,
-            stable_landscape,
+            root,
+            seed_landscape,
             dirty: HashSet::new(),
-            max_tokens,
             landscape_enabled,
             log_tx,
         };
@@ -131,7 +134,7 @@ impl LandscapeContext {
         if path.is_absolute() {
             path.to_path_buf()
         } else {
-            self.data.root.join(path)
+            self.root.join(path)
         }
     }
 
@@ -214,24 +217,28 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
             return None;
         }
 
-        // For directories: render a compact listing of immediate children
-        // with their outlines, sorted by name.
+        // For directories: list on disk and outline each file fresh.
         if path.is_dir() {
             let mut lines: Vec<String> = Vec::new();
-            for (fp, entry) in &self.data.file_entries {
-                if fp.parent() == Some(path.as_path()) {
-                    let name = fp
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    let mut line = name;
-                    if !entry.items.is_empty() {
-                        line.push(' ');
-                        line.push_str(&crate::landscape::format_outline_items(
-                            &entry.items,
-                        ));
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                for entry in entries.flatten() {
+                    let fp = entry.path();
+                    if fp.is_file() {
+                        if let Ok(items) = LandscapeExplorer.outline_file(&fp, false) {
+                            if !items.is_empty() {
+                                let name = fp
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_default();
+                                let mut line = name;
+                                line.push(' ');
+                                line.push_str(
+                                    &crate::landscape::format_outline_items(&items),
+                                );
+                                lines.push(line);
+                            }
+                        }
                     }
-                    lines.push(line);
                 }
             }
             if lines.is_empty() {
@@ -243,9 +250,9 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
             return Some(format!("[seen]\n{dir_label}/\n  {listing}"));
         }
 
-        // For files: look up the cached entry and render its outline items.
-        let entry = self.data.file_entries.get(&path)?;
-        if entry.items.is_empty() {
+        // For files: outline on disk every time — no caching.
+        let items = LandscapeExplorer.outline_file(&path, false).ok()?;
+        if items.is_empty() {
             return None;
         }
 
@@ -253,18 +260,11 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        let items_str = crate::landscape::format_outline_items(&entry.items);
+        let items_str = crate::landscape::format_outline_items(&items);
         Some(format!("[seen]\n{name} {items_str}"))
     }
 
     fn finalize_turn(&mut self, _turn: usize) {
-        // Rebuild the stable landscape for the next turn.
-        self.stable_landscape = if self.landscape_enabled {
-            crate::landscape::format_landscape_data(&self.data, self.max_tokens)
-        } else {
-            String::new()
-        };
-
         // Clear per-turn dirty set for the next turn.
         self.dirty.clear();
     }
@@ -274,18 +274,17 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
     }
 
     fn system_message(&self) -> Option<String> {
-        if self.stable_landscape.is_empty() {
+        if self.seed_landscape.is_empty() {
             None
         } else {
             Some(format!(
-                "<!-- BEGIN TRUSTED LANDSCAPE -->\n\
-                 The landscape below is an authoritative snapshot of the file tree.\n\
-                 It is always accurate — treat it as ground truth. Do not verify\n\
-                 landscape entries by reading files unless you need more detail\n\
-                 than the outline provides.\n\n\
+                "<!-- BEGIN UNTRUSTED LANDSCAPE -->\n\
+                 The landscape below is the initial seed from stage start and may be stale.\n\
+                 It is NOT authoritative — verify landscape entries against current\n\
+                 file state using the Landscape tool when accuracy matters.\n\n\
                  {}\n\n\
-                 <!-- END TRUSTED LANDSCAPE -->",
-                self.stable_landscape
+                 <!-- END UNTRUSTED LANDSCAPE -->",
+                self.seed_landscape
             ))
         }
     }
@@ -297,16 +296,10 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
                 self.data.file_entries.insert(path.clone(), entry.clone());
             }
 
-            // If the child has more recent data, rebuild our landscape.
-            if !other_ctx.stable_landscape.is_empty() {
-                self.stable_landscape = if self.landscape_enabled {
-                    crate::landscape::format_landscape_data(&self.data, self.max_tokens)
-                } else {
-                    String::new()
-                };
+            // Merge file entries but leave our frozen seed landscape unchanged.
+            if !other_ctx.seed_landscape.is_empty() {
+                self.log_stats();
             }
-
-            self.log_stats();
         }
     }
 
