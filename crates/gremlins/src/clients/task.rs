@@ -153,15 +153,15 @@ fn make_task_runner_at_depth(
                     Ok((parent_selection.clone(), None))
                 } else {
                     match &task_model_selector {
-                        Some(selector) => selector
-                            .model_for(kind, &parent_selection)
-                            .map(|(mut selected, spec)| {
+                        Some(selector) => selector.model_for(kind, &parent_selection).map(
+                            |(mut selected, spec)| {
                                 if selected.preserve_reasoning.is_none() {
                                     selected.preserve_reasoning =
                                         Some(preserve_reasoning_in_history);
                                 }
                                 (selected, spec)
-                            }),
+                            },
+                        ),
                         None => Ok((parent_selection.clone(), None)),
                     }
                 };

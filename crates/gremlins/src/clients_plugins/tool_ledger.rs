@@ -472,10 +472,8 @@ impl crate::clients::model_context::MutableModelContext for ToolLedger {
                         } else {
                             format!("Read: {} (offset {}, limit {})", path, offset, limit)
                         };
-                        self.new_observations.push(format!(
-                            "{head}\n{}",
-                            &entry.output
-                        ));
+                        self.new_observations
+                            .push(format!("{head}\n{}", entry.output));
                     }
                 }
             }
@@ -494,7 +492,7 @@ impl crate::clients::model_context::MutableModelContext for ToolLedger {
                         self.new_observations.push(format!(
                             "Grep: \"{}\"{scope}\n{}",
                             truncate_ledger_value(pattern),
-                            &entry.output
+                            entry.output
                         ));
                     }
                 }

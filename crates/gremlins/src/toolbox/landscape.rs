@@ -65,7 +65,8 @@ fn landscape_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str
     }
 
     if meta.is_dir() {
-        let build = match LandscapeExplorer.build_with_failures(&path, depth.unwrap_or(usize::MAX)) {
+        let build = match LandscapeExplorer.build_with_failures(&path, depth.unwrap_or(usize::MAX))
+        {
             Ok(b) => b,
             Err(e) => return format!("Error: {e}"),
         };

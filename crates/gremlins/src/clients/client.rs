@@ -309,8 +309,7 @@ pub(crate) fn resolve_model(spec: &str) -> Result<super::task::TaskModel, String
     // reasoning items in history; Chat Completions backends do not. Carry that
     // preference on the selected TaskModel so a cross-provider task override
     // does not inherit the parent's opposite setting.
-    let preserve_reasoning =
-        matches!(client.provider(), "azure-openai" | "anthropic");
+    let preserve_reasoning = matches!(client.provider(), "azure-openai" | "anthropic");
     Ok(super::task::TaskModel {
         model,
         temperature: resolved.temperature,
