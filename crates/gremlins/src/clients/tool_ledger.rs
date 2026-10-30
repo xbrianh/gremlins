@@ -62,11 +62,6 @@ pub(crate) struct ToolLedger {
     /// Mutations recorded during the current turn (since last finalize_turn).
     /// Processed by finalize_turn and cleared afterward.
     pending_mutations: Vec<String>,
-    /// Worker observations that could not be fully injected into this loop's
-    /// message history, but must still propagate up when this loop itself is a
-    /// nested Scout. Kept separate from the seen maps so a later Scout is not
-    /// deduplicated against content the parent never fully received.
-    omitted: Vec<(usize, FileObservation)>,
     /// Per-turn transcript blocks, captured at finalize_turn time.
     /// Index i is turn i. Used by the MutableModelContext::transcript method.
     turn_transcripts: Vec<String>,
@@ -81,7 +76,6 @@ impl ToolLedger {
             seq: 0,
             mutations: Vec::new(),
             pending_mutations: Vec::new(),
-            omitted: Vec::new(),
             turn_transcripts: Vec::new(),
         }
     }
@@ -366,10 +360,6 @@ impl ToolLedger {
                 },
             ));
         }
-        for (seq, obs) in &self.omitted {
-            items.push((*seq, obs.clone()));
-        }
-
         items.sort_by_key(|a| std::cmp::Reverse(a.0));
         let items = items.into_iter().map(|(_, item)| item).collect();
 
@@ -384,81 +374,6 @@ impl ToolLedger {
             items,
             truncated: false,
             written_paths,
-        }
-    }
-
-    /// Whether the ledger already records an observation matching `obs`.
-    pub(crate) fn has_observation(&self, obs: &FileObservation) -> bool {
-        match obs.tool.as_str() {
-            "Read" => self
-                .reads
-                .contains_key(&(obs.path.clone(), obs.offset, obs.limit)),
-            "Grep" => {
-                let key = (obs.pattern.clone().unwrap_or_default(), obs.path.clone());
-                self.greps
-                    .get(&key)
-                    .is_some_and(|e| e.content_hash == Self::hash(&obs.output))
-            }
-            _ => false,
-        }
-    }
-
-    /// Record a worker's file observation as if this loop had read it.
-    pub(crate) fn absorb_observation(&mut self, obs: &FileObservation, turn_num: usize) {
-        self.seq += 1;
-        let seq = self.seq;
-        let content_hash = Self::hash(&obs.output);
-        match obs.tool.as_str() {
-            "Read" => {
-                let key = (obs.path.clone(), obs.offset, obs.limit);
-                self.reads.insert(
-                    key,
-                    LedgerReadEntry {
-                        last_age: turn_num,
-                        count: 1,
-                        content_hash,
-                        seq,
-                        last_seq: seq,
-                        output: obs.output.clone(),
-                    },
-                );
-            }
-            "Grep" => {
-                let key = (obs.pattern.clone().unwrap_or_default(), obs.path.clone());
-                self.greps.insert(
-                    key,
-                    LedgerGrepEntry {
-                        last_age: turn_num,
-                        count: 1,
-                        content_hash,
-                        seq,
-                        last_seq: seq,
-                        output: obs.output.clone(),
-                    },
-                );
-            }
-            "Landscape" | "DirLs" => {}
-            _ => {}
-        }
-    }
-
-    /// Remember an observation that was too large to deliver fully.
-    pub(crate) fn remember_omitted(&mut self, obs: &FileObservation) {
-        self.seq += 1;
-        self.omitted.push((self.seq, obs.clone()));
-    }
-
-    /// Queue file paths written by a Scout Task for deferred invalidation.
-    ///
-    /// Scout write paths participate in the same end-of-batch invalidation
-    /// as direct Write/Edit calls, preventing stale reads across concurrent
-    /// tool batches.  Caller must invoke `finalize_turn` to apply them.
-    pub(crate) fn queue_scout_writes(&mut self, paths: &[String]) {
-        for fp in paths {
-            self.pending_mutations.push(fp.clone());
-            if !self.mutations.contains(fp) {
-                self.mutations.push(fp.clone());
-            }
         }
     }
 
@@ -507,7 +422,10 @@ impl super::model_context::MutableModelContext for ToolLedger {
     }
 
     fn transcript(&self) -> Vec<Option<String>> {
-        self.turn_transcripts.iter().map(|s| if s.is_empty() { None } else { Some(s.clone()) }).collect()
+        self.turn_transcripts
+            .iter()
+            .map(|s| if s.is_empty() { None } else { Some(s.clone()) })
+            .collect()
     }
 
     fn system_message(&self) -> Option<String> {
@@ -551,6 +469,15 @@ impl super::model_context::MutableModelContext for ToolLedger {
                     self.mutations.push(p.clone());
                 }
             }
+            // Queue child write paths for deferred invalidation in the
+            // parent's `finalize_turn`, so a child's Write/Edit invalidates
+            // the parent's stale reads within the same tool batch.  `join`
+            // replaces the old `queue_scout_writes` path.
+            for fp in other_ledger.writes.keys() {
+                if !self.pending_mutations.contains(fp) {
+                    self.pending_mutations.push(fp.clone());
+                }
+            }
             // Take the higher sequence number.
             self.seq = self.seq.max(other_ledger.seq);
             // Merge turn transcripts: pad ours to match, then overwrite empties.
@@ -564,158 +491,11 @@ impl super::model_context::MutableModelContext for ToolLedger {
             }
         }
     }
-}
 
-/// Fold a Scout Task result's embedded file observations into a readable
-/// form, deduplicated against the parent's own [`ToolLedger`].
-///
-/// Files the worker wrote invalidate the parent's stale ledger entries; files
-/// the parent has already read are dropped so they are not re-injected into
-/// the message history. A truncation marker is preserved when the worker read
-/// more than the output budget permitted.
-pub(crate) fn fold_scout_output(output: &str, ledger: &mut ToolLedger, turn_num: usize) -> String {
-    let Some((mut obs, prefix, suffix)) = FileObservations::parse_block(output) else {
-        return output.to_string();
-    };
-
-    // A worker's Write/Edit must invalidate the parent's stale copy of any
-    // file it touched, so the parent never serves an outdated read. Record
-    // those paths too, so a Scout nested inside a Scout propagates the
-    // invalidation all the way up the chain.
-    for fp in &obs.written_paths {
-        ledger.invalidate_after_write(fp);
-        if !ledger.mutations.iter().any(|m| m == fp) {
-            ledger.mutations.push(fp.clone());
-        }
+    fn clear_transcript(&mut self) {
+        self.turn_transcripts.clear();
+        self.turn_transcripts.push(String::new());
     }
-
-    // Drop observations the parent has already read this run.
-    obs.items.retain(|o| !ledger.has_observation(o));
-
-    if obs.items.is_empty() && !obs.truncated {
-        return format!("{prefix}{suffix}");
-    }
-
-    let max_bytes = crate::config::max_tool_output_bytes() as usize;
-    let budget = if max_bytes == 0 {
-        usize::MAX
-    } else {
-        max_bytes
-    };
-
-    // Reserve room for the fixed wrapper (heading + truncation marker) before
-    // allocating bytes to rendered observations. Without this, a section that
-    // fills the raw budget would push the wrapped block over the configured
-    // tool-output cap. The marker is always reserved because truncation may
-    // only become known while rendering below.
-    let heading = "\n\n## Scout observations\n";
-    let marker =
-        "> Some observations were omitted: the worker read more than the output budget.\n\n";
-    let section_budget = budget.saturating_sub(heading.len() + marker.len());
-
-    let mut truncated = obs.truncated;
-    let mut section = String::new();
-    let mut used = 0usize;
-    let mut delivered: Vec<FileObservation> = Vec::new();
-    let mut omitted: Vec<FileObservation> = Vec::new();
-
-    // Items are most-recent-first; keep the newest observations and a prefix
-    // of any single oversized observation rather than dropping it entirely.
-    for o in &obs.items {
-        let rendered = render_observation(o);
-        if used.saturating_add(rendered.len()) <= section_budget {
-            section.push_str(&rendered);
-            used += rendered.len();
-            delivered.push(o.clone());
-        } else if used < section_budget {
-            let remaining = section_budget - used;
-            section.push_str(&truncate_to_bytes(&rendered, remaining));
-            used = section_budget;
-            truncated = true;
-            // The parent only receives a prefix, so the full observation must
-            // still propagate upward without entering the seen ledger.
-            omitted.push(o.clone());
-        } else {
-            truncated = true;
-            omitted.push(o.clone());
-        }
-    }
-
-    // Only fully delivered observations become "seen" for future dedup.
-    // Omitted ones are remembered separately for recursive propagation.
-    let mut delivered_oldest_first = delivered;
-    delivered_oldest_first.reverse();
-    for o in &delivered_oldest_first {
-        ledger.absorb_observation(o, turn_num);
-    }
-    let mut omitted_oldest_first = omitted;
-    omitted_oldest_first.reverse();
-    for o in &omitted_oldest_first {
-        ledger.remember_omitted(o);
-    }
-
-    let mut out = prefix.to_string();
-    let mut block = String::new();
-    block.push_str(heading);
-    if truncated {
-        block.push_str(marker);
-    }
-    block.push_str(&section);
-    // The fixed wrapper itself can exceed a very small budget; clamp the
-    // complete block so the configured cap is still honored.
-    out.push_str(&truncate_to_bytes(&block, budget));
-    out.push_str(suffix);
-    out
-}
-
-/// Extract the file paths a Scout Task wrote, for the parent's deferred
-/// invalidation pass. A Scout that edits a file is a mutation of the parent's
-/// view just like a direct Write/Edit, so these paths must participate in the
-/// same end-of-batch invalidation that guards against concurrent tool ordering.
-pub(crate) fn scout_written_paths(output: &str) -> Vec<String> {
-    FileObservations::parse_block(output)
-        .map(|(obs, _, _)| obs.written_paths)
-        .unwrap_or_default()
-}
-
-/// Render one worker observation as the markdown section injected into the
-/// parent's message history.
-fn render_observation(o: &FileObservation) -> String {
-    match o.tool.as_str() {
-        "Read" => format!(
-            "### Read: {} (offset {}..{})\n{}\n\n",
-            o.path,
-            o.offset,
-            o.offset.saturating_add(o.limit),
-            o.output
-        ),
-        "Grep" => format!(
-            "### Grep: {} in {}\n{}\n\n",
-            o.pattern.as_deref().unwrap_or(""),
-            o.path,
-            o.output
-        ),
-        "Landscape" if o.path.is_empty() => format!("### Landscape\n{}\n\n", o.output),
-        "Landscape" => format!("### Landscape: {}\n{}\n\n", o.path, o.output),
-        "DirLs" => String::new(),
-        _ => String::new(),
-    }
-}
-
-/// Return a prefix of `s` that fits within `max_bytes` at a UTF-8 character
-/// boundary.
-fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
-    let mut out = String::with_capacity(max_bytes);
-    let mut used = 0usize;
-    for c in s.chars() {
-        let cl = c.len_utf8();
-        if used + cl > max_bytes {
-            break;
-        }
-        out.push(c);
-        used += cl;
-    }
-    out
 }
 
 #[cfg(test)]
@@ -723,17 +503,6 @@ mod tests {
     use super::*;
     use crate::clients::format::ledger_key_arg;
     use crate::test_support::EnvGuard;
-
-    fn make_read_obs(path: &str, output: &str, offset: u64, limit: u64) -> FileObservation {
-        FileObservation {
-            tool: "Read".into(),
-            path: path.into(),
-            offset,
-            limit,
-            pattern: None,
-            output: output.into(),
-        }
-    }
 
     // ── ToolLedger unit tests ──────────────────────────────────────
 
@@ -942,215 +711,6 @@ mod tests {
         assert!(!out.contains("W("), "no W entry for Edit: {out}");
     }
 
-    // ── Scout observation tests ────────────────────────────────────
-
-    #[test]
-    fn fold_scout_dedups_against_parent_reads() {
-        let _env = EnvGuard::lock();
-        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
-
-        let mut ledger = ToolLedger::new();
-        let args_json =
-            serde_json::json!({"file_path": "/tmp/foo.rs", "offset": 0, "limit": 0}).to_string();
-        // Simulate parent already having read /tmp/foo.rs
-        ledger.record("Read", "content A", &args_json, 1);
-
-        let obs = FileObservations {
-            items: vec![make_read_obs("/tmp/foo.rs", "content A", 0, 0)],
-            truncated: false,
-            written_paths: vec![],
-        };
-        let scout_output = format!("Done.{}", obs.render_block());
-
-        // fold_scout_output should dedup the already-read file and return
-        // only the "Done." prose.
-        let folded = fold_scout_output(&scout_output, &mut ledger, 2);
-        assert!(
-            !folded.contains("content A"),
-            "already-read file must be deduplicated, got: {folded:?}"
-        );
-        assert!(folded.starts_with("Done."), "prose prefix preserved");
-        assert!(
-            !folded.contains("__SCOUT_OBSERVATIONS__"),
-            "no block markers in output"
-        );
-    }
-
-    #[test]
-    fn fold_scout_passes_through_unread_file() {
-        let _env = EnvGuard::lock();
-        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
-
-        let mut ledger = ToolLedger::new();
-        let obs = FileObservations {
-            items: vec![make_read_obs("/tmp/bar.rs", "bar content", 5, 20)],
-            truncated: false,
-            written_paths: vec![],
-        };
-        let scout_output = format!("Ran scout.{}", obs.render_block());
-        let folded = fold_scout_output(&scout_output, &mut ledger, 1);
-        assert!(
-            folded.contains("bar content"),
-            "unread file must appear in output"
-        );
-        assert!(folded.starts_with("Ran scout."), "prose prefix preserved");
-    }
-
-    #[test]
-    fn fold_scout_invalidates_writes_and_absorbs_into_ledger() {
-        let _env = EnvGuard::lock();
-        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
-
-        let mut ledger = ToolLedger::new();
-        // Parent previously read the file; worker then wrote it.
-        let args_json =
-            serde_json::json!({"file_path": "/tmp/shared.rs", "offset": 0, "limit": 0}).to_string();
-        ledger.record("Read", "stale content", &args_json, 1);
-
-        let obs = FileObservations {
-            items: vec![make_read_obs("/tmp/other.rs", "other", 0, 0)],
-            truncated: false,
-            written_paths: vec!["/tmp/shared.rs".into()],
-        };
-        let scout_output = format!("Done.{}", obs.render_block());
-        let folded = fold_scout_output(&scout_output, &mut ledger, 2);
-
-        // The stale read of /tmp/shared.rs should be invalidated.
-        assert!(
-            !ledger.has_observation(&make_read_obs("/tmp/shared.rs", "", 0, 0)),
-            "written file must be invalidated in parent ledger"
-        );
-        // /tmp/other.rs should be absorbed.
-        assert!(
-            ledger.has_observation(&make_read_obs("/tmp/other.rs", "other", 0, 0)),
-            "unread file must be absorbed into parent ledger for propagation"
-        );
-        assert!(
-            folded.contains("other"),
-            "unread file appears in rendered output"
-        );
-    }
-
-    #[test]
-    fn fold_scout_no_block_returns_unchanged() {
-        let _env = EnvGuard::lock();
-        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
-
-        let mut ledger = ToolLedger::new();
-        let output = "plain prose without markers";
-        let folded = fold_scout_output(output, &mut ledger, 1);
-        assert_eq!(folded, output);
-    }
-
-    #[test]
-    fn fold_scout_truncated_preserves_marker() {
-        let _env = EnvGuard::lock();
-        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
-
-        let mut ledger = ToolLedger::new();
-        let obs = FileObservations {
-            items: vec![],
-            truncated: true,
-            written_paths: vec![],
-        };
-        let scout_output = format!("OK.{}", obs.render_block());
-        let folded = fold_scout_output(&scout_output, &mut ledger, 1);
-        assert!(
-            folded.contains("Some observations were omitted"),
-            "truncation marker must appear"
-        );
-    }
-
-    #[test]
-    fn fold_scout_caps_after_dedup_and_keeps_newest() {
-        let _env = EnvGuard::lock();
-        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "154");
-
-        let mut ledger = ToolLedger::new();
-        // Parent already read old.rs; the Scout reports it again plus new.rs.
-        let old_args =
-            serde_json::json!({"file_path": "/tmp/old.rs", "offset": 0, "limit": 0}).to_string();
-        ledger.record("Read", "old", &old_args, 1);
-
-        let obs = FileObservations {
-            items: vec![
-                make_read_obs("/tmp/new.rs", "new contents", 0, 0),
-                make_read_obs("/tmp/old.rs", "old", 0, 0),
-            ],
-            truncated: false,
-            written_paths: vec![],
-        };
-        let scout_output = format!("Done.{}", obs.render_block());
-        let folded = fold_scout_output(&scout_output, &mut ledger, 2);
-
-        assert!(
-            folded.contains("new contents"),
-            "newest unseen read must survive the cap, got: {folded:?}"
-        );
-        assert!(
-            !folded.contains("### Read: /tmp/old.rs"),
-            "already-seen read must be deduped before the cap is applied, got: {folded:?}"
-        );
-    }
-
-    #[test]
-    fn fold_scout_keeps_prefix_of_oversized_observation() {
-        let _env = EnvGuard::lock();
-        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "126");
-
-        let mut ledger = ToolLedger::new();
-        let obs = FileObservations {
-            items: vec![make_read_obs("/tmp/huge.rs", "0123456789", 0, 0)],
-            truncated: false,
-            written_paths: vec![],
-        };
-        let scout_output = format!("Done.{}", obs.render_block());
-        let folded = fold_scout_output(&scout_output, &mut ledger, 1);
-
-        assert!(
-            folded.contains("### Read: /tmp/huge.rs"),
-            "oversized observation must keep a prefix rather than vanishing, got: {folded:?}"
-        );
-        assert!(
-            folded.contains("Some observations were omitted"),
-            "oversized observation must carry the truncation marker"
-        );
-    }
-
-    #[test]
-    fn fold_scout_absorbs_landscape_and_propagates_writes() {
-        let _env = EnvGuard::lock();
-        std::env::remove_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES");
-
-        let mut ledger = ToolLedger::new();
-        let landscape = FileObservation {
-            tool: "Landscape".into(),
-            path: "/tmp/dir".into(),
-            offset: 0,
-            limit: 0,
-            pattern: None,
-            output: "tree".into(),
-        };
-        let obs = FileObservations {
-            items: vec![
-                make_read_obs("/tmp/child.rs", "child content", 0, 0),
-                landscape,
-            ],
-            truncated: false,
-            written_paths: vec!["/tmp/wrote.rs".into()],
-        };
-        let scout_output = format!("Child.{}", obs.render_block());
-        let folded = fold_scout_output(&scout_output, &mut ledger, 2);
-
-        assert!(folded.contains("child content"));
-        assert!(folded.contains("### Landscape: /tmp/dir"));
-        assert!(ledger.has_observation(&make_read_obs("/tmp/child.rs", "child content", 0, 0)));
-
-        // The outer ledger must report the nested write upward too.
-        let reported = ledger.file_observations();
-        assert!(reported.written_paths.iter().any(|p| p == "/tmp/wrote.rs"));
-    }
-
     #[test]
     fn tool_ledger_snapshot_orders_by_last_access() {
         let _env = EnvGuard::lock();
@@ -1191,152 +751,5 @@ mod tests {
             a_idx < b_idx,
             "display order unchanged by re-read: A first, then B"
         );
-    }
-
-    #[test]
-    fn tool_ledger_has_observation_grep_compares_content_hash() {
-        let _env = EnvGuard::lock();
-        let mut ledger = ToolLedger::new();
-
-        let args_json = serde_json::json!({"pattern": "fn", "path": "/tmp"}).to_string();
-        ledger.record("Grep", "hits: A", &args_json, 0);
-
-        // Same pattern/path but different output — must NOT be a duplicate.
-        let fresh = FileObservation {
-            tool: "Grep".into(),
-            path: "/tmp".into(),
-            offset: 0,
-            limit: 0,
-            pattern: Some("fn".into()),
-            output: "hits: B".into(),
-        };
-        assert!(
-            !ledger.has_observation(&fresh),
-            "different Grep output must not be deduplicated"
-        );
-
-        // Same output — IS a duplicate.
-        let dup = FileObservation {
-            tool: "Grep".into(),
-            path: "/tmp".into(),
-            offset: 0,
-            limit: 0,
-            pattern: Some("fn".into()),
-            output: "hits: A".into(),
-        };
-        assert!(
-            ledger.has_observation(&dup),
-            "identical Grep output must be deduplicated"
-        );
-
-        // Different glob — key is identical, output hash decides.
-        let different_glob = FileObservation {
-            tool: "Grep".into(),
-            path: "/tmp".into(),
-            offset: 0,
-            limit: 0,
-            pattern: Some("fn".into()),
-            output: "hits: C".into(),
-        };
-        assert!(
-            !ledger.has_observation(&different_glob),
-            "Grep with different glob/output must not deduplicate"
-        );
-    }
-
-    #[test]
-    fn fold_scout_marks_only_delivered_as_seen_and_propagates_omitted() {
-        let _env = EnvGuard::lock();
-        // Budget such that only the newest observation (55 bytes rendered) fits;
-        // the older one (45 bytes) is pushed to omitted for propagation.
-        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "159");
-
-        let mut ledger = ToolLedger::new();
-        let newest = make_read_obs("/tmp/newest.rs", "newest content", 0, 0);
-        let older = make_read_obs("/tmp/older.rs", "older", 0, 0);
-        let obs = FileObservations {
-            items: vec![newest.clone(), older.clone()],
-            truncated: false,
-            written_paths: vec![],
-        };
-        let scout_output = format!("Done.{}", obs.render_block());
-        let folded = fold_scout_output(&scout_output, &mut ledger, 1);
-
-        // newest delivered and visible in history.
-        assert!(folded.contains("newest content"));
-        assert!(folded.contains("### Read: /tmp/newest.rs"));
-
-        // older NOT in history, but still in snapshot for propagation.
-        assert!(!folded.contains("older"));
-        let snapshot = ledger.file_observations();
-        assert!(
-            snapshot
-                .items
-                .iter()
-                .any(|o| o.path == "/tmp/older.rs" && o.output == "older"),
-            "omitted observations must still propagate upward"
-        );
-
-        // Only newest is "seen" for dedup.
-        assert!(ledger.has_observation(&newest));
-        assert!(!ledger.has_observation(&older));
-
-        // truncation marker present because render budget was exceeded.
-        assert!(folded.contains("Some observations were omitted"));
-    }
-
-    #[test]
-    fn fold_scout_reserves_wrapper_budget() {
-        let _env = EnvGuard::lock();
-        // Budget exactly covers heading + marker only (24 + 80 = 104 bytes).
-        // No observation content can fit, so the section is empty.
-        std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "104");
-
-        let mut ledger = ToolLedger::new();
-        let obs = FileObservations {
-            items: vec![make_read_obs("/tmp/x.rs", "secret", 0, 0)],
-            truncated: false,
-            written_paths: vec![],
-        };
-        let scout_output = format!("Prose.{}", obs.render_block());
-        let folded = fold_scout_output(&scout_output, &mut ledger, 1);
-
-        // The heading is emitted.
-        assert!(folded.contains("## Scout observations"));
-        // The marker is emitted (truncation forced by budget).
-        assert!(folded.contains("Some observations were omitted"));
-        // The observation content itself must NOT leak past the reserved wrapper.
-        assert!(!folded.contains("secret"));
-
-        // Observation propagated upward (via omitted list).
-        let snapshot = ledger.file_observations();
-        assert!(
-            snapshot
-                .items
-                .iter()
-                .any(|o| o.path == "/tmp/x.rs" && o.output == "secret"),
-            "omitted observations must still propagate upward"
-        );
-
-        // But not "seen" — a later Scout returning the same file won't be
-        // deduplicated away against an observation the parent never fully received.
-        assert!(!ledger.has_observation(&make_read_obs("/tmp/x.rs", "secret", 0, 0)));
-    }
-
-    #[test]
-    fn scout_written_paths_extracts_mutation_paths() {
-        let _env = EnvGuard::lock();
-        let obs = FileObservations {
-            items: vec![],
-            truncated: false,
-            written_paths: vec!["/tmp/a.rs".into(), "/tmp/b.rs".into()],
-        };
-        let output = format!("Scout done.{}", obs.render_block());
-
-        let paths = scout_written_paths(&output);
-        assert_eq!(paths, vec!["/tmp/a.rs", "/tmp/b.rs"]);
-
-        // No block → empty.
-        assert!(scout_written_paths("plain text").is_empty());
     }
 }

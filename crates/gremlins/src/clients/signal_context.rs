@@ -176,4 +176,9 @@ impl super::model_context::MutableModelContext for SignalMapContext {
     fn join(&mut self, _other: &dyn super::model_context::MutableModelContext) {
         // No-op: signal sections come from the parent stage.
     }
+
+    fn clear_transcript(&mut self) {
+        self.turn_transcripts.clear();
+        self.turn_transcripts.push(None);
+    }
 }

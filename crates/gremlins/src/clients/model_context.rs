@@ -7,7 +7,7 @@ use std::any::Any;
 /// and never produce durable history — only ephemeral transcript blocks that
 /// `compose_model_transcript` weaves into the outgoing request.
 #[allow(dead_code)]
-pub(crate) trait MutableModelContext: Any + Send + Sync {
+pub trait MutableModelContext: Any + Send + Sync {
     /// Whether this context propagates into nested Task (Fork/Scout/Implement)
     /// loops. `ToolLedger` propagates; futures like `FindingsLedger` may not.
     fn propagates_to_task(&self) -> bool;
@@ -48,12 +48,36 @@ pub(crate) trait MutableModelContext: Any + Send + Sync {
         None
     }
 
+    /// Reset per-turn transcript state so the context starts fresh in a
+    /// child loop.  Seeded parent contexts call this before the child's
+    /// first turn; the child's own turns then populate new transcript
+    /// entries indexed from 0, independent of the parent's turn numbering.
+    fn clear_transcript(&mut self) {
+        // Default: no-op.  Concrete contexts with transcript state override.
+    }
+
     /// Merge another context of the same concrete type into `self`.
     ///
     /// Used after a parallel fork to reconcile observations from sibling
     /// branches.  Not yet wired by any caller.
     fn join(&mut self, _other: &dyn MutableModelContext) {
         // Default: no-op.  Concrete contexts that need merging override this.
+    }
+}
+
+// `Box<dyn MutableModelContext>` participates in `#[derive(Clone)]` structs
+// (e.g. `AgentLoopRuntime`); delegate to the trait's `clone_box`.
+impl Clone for Box<dyn MutableModelContext> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
+// `CompletedRun` derives `Debug`; the trait object needs a `Debug` impl, but
+// its contents are not worth printing.
+impl std::fmt::Debug for dyn MutableModelContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MutableModelContext")
     }
 }
 
@@ -64,9 +88,12 @@ pub(crate) trait MutableModelContext: Any + Send + Sync {
 /// Returns a `Vec` where each element (one per turn index) is itself a `Vec`
 /// of per-context blocks for that turn.  `None` blocks are omitted.
 ///
-/// # Panics
-///
-/// Panics if any context's transcript length differs from `expected_len`.
+/// A context whose transcript is shorter than `expected_len` (missing turns)
+/// contributes nothing for the absent indices; one that is longer (a parent
+/// context seeded into a nested loop, whose extra entries belong to the
+/// parent's own turn numbering) has its surplus entries ignored.  Both cases
+/// are benign for rendering: the child's inherited history already carries
+/// the parent's earlier turns.
 pub(crate) fn zip_context_transcripts(
     contexts: &[Box<dyn MutableModelContext>],
     expected_len: usize,
@@ -75,13 +102,7 @@ pub(crate) fn zip_context_transcripts(
 
     for ctx in contexts {
         let tx = ctx.transcript();
-        assert_eq!(
-            tx.len(),
-            expected_len,
-            "context transcript length {} != expected {expected_len}",
-            tx.len(),
-        );
-        for (i, block) in tx.into_iter().enumerate() {
+        for (i, block) in tx.into_iter().enumerate().take(expected_len) {
             if let Some(text) = block {
                 by_turn[i].push(text);
             }

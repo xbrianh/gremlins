@@ -403,6 +403,7 @@ impl super::model_context::MutableModelContext for LandscapeContext {
                 self.turn_blocks.push(None);
             }
             let parent_idx = self.turn_blocks.len() - 1;
+            // … rest of join logic continues below
             for theirs in &other_ctx.turn_blocks {
                 if theirs.is_some() && self.turn_blocks[parent_idx].is_none() {
                     self.turn_blocks[parent_idx] = theirs.clone();
@@ -420,5 +421,9 @@ impl super::model_context::MutableModelContext for LandscapeContext {
 
             self.log_stats();
         }
+    }
+
+    fn clear_transcript(&mut self) {
+        self.turn_blocks.clear();
     }
 }

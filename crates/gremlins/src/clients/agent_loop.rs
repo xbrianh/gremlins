@@ -33,7 +33,7 @@ use super::model::{GremlinsModel, GremlinsModelError};
 use super::model_context::{compose_model_transcript, MutableModelContext};
 use super::plug::LoopPlug;
 use super::protocol::{add_opt, CompletedRun, FileObservations, TurnStats, UsageStats};
-use super::tool_ledger::{fold_scout_output, scout_written_paths, ToolLedger};
+use super::tool_ledger::ToolLedger;
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 
 // ── Architecture ────────────────────────────────────────────────────────────
@@ -146,11 +146,6 @@ fn task_kind_is_fork(args: &serde_json::Value) -> bool {
         == Some(crate::task_kind::TaskKind::Fork)
 }
 
-fn task_kind_from_args(args_json: &str) -> Option<crate::task_kind::TaskKind> {
-    let args: serde_json::Value = serde_json::from_str(args_json).ok()?;
-    crate::task_kind::TaskKind::parse(args.get("kind")?.as_str()?)
-}
-
 /// Sleep for the turn-level backoff, aborting early when the cancel token is
 /// set. Returns `true` if cancellation was observed (the caller must abandon
 /// the retry and unwind), `false` if the full backoff elapsed.
@@ -221,13 +216,15 @@ struct ToolJob {
     args: String,
     call: String,
     over_cap: Option<String>,
+    /// Parent contexts cloned for this Task job (only set for "Task" jobs).
+    task_parent_contexts: Vec<Box<dyn MutableModelContext>>,
 }
 
 /// Outcome of one concurrent tool batch dispatched by
 /// [`LoopState::dispatch_tool_jobs`].
 enum ToolDispatchOutcome {
     /// Every tool finished; outputs are aligned with the job list order.
-    Completed(Vec<String>),
+    Completed(Vec<(String, Vec<Box<dyn MutableModelContext>>)>),
     /// The operator entered debug mid-batch: the batch was abandoned, the
     /// turn's history was unwound, and the caller should re-execute the turn.
     ReexecuteTurn,
@@ -1092,6 +1089,15 @@ impl LoopState {
                 } else {
                     None
                 },
+                task_parent_contexts: if tc.function.name == "Task" {
+                    self.contexts
+                        .iter()
+                        .filter(|c| c.propagates_to_task())
+                        .map(|c| c.clone_box())
+                        .collect()
+                } else {
+                    Vec::new()
+                },
             });
         }
         jobs
@@ -1161,10 +1167,25 @@ impl LoopState {
             let sem = sem.clone();
             async move {
                 if let Some(msg) = &j.over_cap {
-                    msg.clone()
+                    (msg.clone(), Vec::new())
                 } else {
                     let _permit = sem.acquire_owned().await;
-                    tools::invoke(&j.id, &j.name, ctx, &j.args).await
+                    if j.name == "Task" && !j.task_parent_contexts.is_empty() {
+                        let outcome = tools::invoke_with_contexts(
+                            &j.id,
+                            &j.name,
+                            ctx,
+                            &j.args,
+                            j.task_parent_contexts.clone(),
+                        )
+                        .await;
+                        (outcome.output, outcome.contexts)
+                    } else {
+                        (
+                            tools::invoke(&j.id, &j.name, ctx, &j.args).await,
+                            Vec::new(),
+                        )
+                    }
                 }
             }
         }));
@@ -1259,7 +1280,7 @@ impl LoopState {
     async fn emit_tool_results(
         &mut self,
         jobs: Vec<ToolJob>,
-        results: Vec<String>,
+        results: Vec<(String, Vec<Box<dyn MutableModelContext>>)>,
         tool_ctx: &AgentLoopRuntime,
         prefix: &str,
         nested: bool,
@@ -1292,7 +1313,7 @@ impl LoopState {
         // for `tool_calls.len()` when bumping the turn counter below.
         let job_count = jobs.len();
         let mut result_msgs = Vec::new();
-        for (job, output) in jobs.into_iter().zip(results) {
+        for (job, (output, child_contexts)) in jobs.into_iter().zip(results) {
             let result_msg = format!("result: {}", trunc(&output, 200));
             self.plug
                 .log(log::Level::Info, &format!("{prefix}{result_msg}"));
@@ -1333,42 +1354,23 @@ impl LoopState {
                     ctx.observe(self.turn_num, &job.name, &job.args, &output);
                 }
             }
-            // Only Scout Task results carry the worker's file observations as a
-            // machine-parseable block. Fold them into readable content and
-            // deduplicate against the parent's own reads before writing them
-            // into history, so already-seen files are not re-injected. Fork
-            // and Implement stay prose-only.
-            let history_output = if job.name == "Task"
-                && task_kind_from_args(&job.args) == Some(crate::task_kind::TaskKind::Scout)
-            {
-                // A Scout's writes are also mutations of the parent's view.
-                // Downcast to ToolLedger for Scout-specific processing;
-                // this is the one place the agent_loop reaches past the
-                // MutableModelContext trait.  Scout propagation (the
-                // serialize→parse round-trip) remains intact.
-                let ledger = self
-                    .contexts
-                    .iter_mut()
-                    .find_map(|ctx| ctx.as_any_mut().downcast_mut::<ToolLedger>());
-                if let Some(ledger) = ledger {
-                    // Queue Scout-written paths for deferred invalidation
-                    // so they participate in the same end-of-batch pass
-                    // as direct Write/Edit calls.
-                    let written = scout_written_paths(&output);
-                    if !written.is_empty() {
-                        ledger.queue_scout_writes(&written);
+            // Join child contexts back into parent.  Match by concrete
+            // type (TypeId) so a child ToolLedger joins only the parent
+            // ToolLedger, etc. — no silent cross-type no-op calls.
+            if job.name == "Task" && !child_contexts.is_empty() {
+                for child_ctx in &child_contexts {
+                    let child_tid = child_ctx.as_any().type_id();
+                    for parent_ctx in &mut self.contexts {
+                        if parent_ctx.as_any().type_id() == child_tid {
+                            parent_ctx.join(child_ctx.as_ref());
+                        }
                     }
-                    fold_scout_output(&output, ledger, self.turn_num)
-                } else {
-                    output
                 }
-            } else {
-                output
-            };
+            }
             result_msgs.push(Message::tool_result(
                 CallId::from_wire(job.id.clone()),
                 ToolName::new(job.name.clone()).expect("tool name must not be empty"),
-                history_output,
+                output,
             ));
         }
         // Phase 2: finalize — apply deferred invalidations for every context.
@@ -1815,6 +1817,7 @@ impl LoopState {
                     usage,
                     Some(messages),
                     Some(self.ledger_file_observations().unwrap_or_default()),
+                    self.contexts.iter().map(|c| c.clone_box()).collect(),
                 ))));
             }
             _ => {}
@@ -1969,6 +1972,7 @@ impl LoopState {
             usage,
             Some(messages),
             Some(self.ledger_file_observations().unwrap_or_default()),
+            self.contexts.iter().map(|c| c.clone_box()).collect(),
         )))
     }
 
@@ -2196,6 +2200,7 @@ pub(crate) async fn run_agent_loop_nested(
     extra: Option<serde_json::Value>,
     preserve_reasoning_in_history: bool,
     prepopulated_messages: Option<Vec<Message>>,
+    mut parent_contexts: Vec<Box<dyn MutableModelContext>>,
 ) -> Result<CompletedRun, ClientError> {
     let opts = LoopOpts {
         extra,
@@ -2234,6 +2239,16 @@ pub(crate) async fn run_agent_loop_nested(
     // (tests, debug tooling) can observe task begin/turn events without
     // subscribing to the process-wide logger.
     let mut plug = LoopPlug::new();
+    if !parent_contexts.is_empty() {
+        // Reset transcript state so each seeded context starts fresh
+        // in the child loop. The child's own turns populate new
+        // transcript entries indexed from 0, independent of the
+        // parent's turn numbering.
+        for ctx in &mut parent_contexts {
+            ctx.clear_transcript();
+        }
+        plug.register_contexts(parent_contexts);
+    }
     if let Some(log_tx) = nested_tool_ctx.log_tx.clone() {
         plug.register_logger(move |_level, msg| {
             let _ = log_tx.send(msg.to_string());
@@ -2445,6 +2460,7 @@ fn completed_run(
     usage: UsageStats,
     messages: Option<Vec<Message>>,
     file_observations: Option<FileObservations>,
+    contexts: Vec<Box<dyn MutableModelContext>>,
 ) -> CompletedRun {
     CompletedRun {
         exit_code: 0,
@@ -2455,6 +2471,7 @@ fn completed_run(
         token_usage: Some(usage),
         messages,
         file_observations,
+        contexts,
     }
 }
 
@@ -5658,24 +5675,32 @@ mod tests {
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
         let key = ledger_key_arg(&serde_json::json!({"file_path": f.to_str().unwrap()}));
         assert!(key.contains("x.txt"), "ledger must name the file: {key}");
-        // The [seen] block now travels through the system prompt as trusted
-        // content — the first message in chat_history.
+        // The [seen] block travels through user-message transcript blocks
+        // (ToolLedger::system_message() returns None to keep the system
+        // prompt cache-stable).
         assert!(history.len() >= 3, "unexpected history: {history:#?}");
-        let sys_msg = match history.first() {
-            Some(Message::System { content }) => content,
-            other => panic!("system prompt must lead the history, got: {other:?}"),
-        };
+        let seen_msg = history
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::User { content: _ } => {
+                    let text = user_message_text(m);
+                    if text.contains("[seen]") {
+                        Some(text)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("[seen] block not found in any user message: {history:#?}"));
         assert!(
-            sys_msg.contains("[seen]"),
-            "ledger must be in the system prompt: {sys_msg}"
+            seen_msg.contains(&key),
+            "ledger must name the file: {seen_msg}"
         );
         assert!(
-            sys_msg.contains(&key),
-            "ledger must name the file: {sys_msg}"
-        );
-        assert!(
-            sys_msg.contains("R("),
-            "ledger must show Read indicator: {sys_msg}"
+            seen_msg.contains("R("),
+            "ledger must show Read indicator: {seen_msg}"
         );
         // The history must contain a tool result.
         let has_result = history.iter().any(|m| {
@@ -5744,20 +5769,28 @@ mod tests {
 
         let reqs = model.requests();
         let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
-        // The [seen] block now travels through the system prompt as trusted
-        // content — the first message in chat_history.
+        // The [seen] block travels through user-message transcript blocks
+        // (ToolLedger::system_message() returns None to keep the system
+        // prompt cache-stable).
         assert!(history.len() >= 4, "unexpected history: {history:#?}");
-        let sys_msg = match history.first() {
-            Some(Message::System { content }) => content,
-            other => panic!("system prompt must lead the history, got: {other:?}"),
-        };
+        let seen_msg = history
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::User { content: _ } => {
+                    let text = user_message_text(m);
+                    if text.contains("[seen]") {
+                        Some(text)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("[seen] block not found in any user message: {history:#?}"));
         assert!(
-            sys_msg.contains("a.txt") && sys_msg.contains("b.txt"),
-            "ledger must list both actions: {sys_msg}"
-        );
-        assert!(
-            sys_msg.contains("[seen]"),
-            "system prompt must contain [seen] block"
+            seen_msg.contains("a.txt") && seen_msg.contains("b.txt"),
+            "ledger must list both actions: {seen_msg}"
         );
     }
 

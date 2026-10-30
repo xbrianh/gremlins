@@ -30,11 +30,29 @@ pub(crate) fn preview_str(s: &str, max_chars: usize) -> String {
     }
 }
 
-type TaskFuture = Pin<Box<dyn std::future::Future<Output = String> + Send>>;
+type TaskFuture = Pin<Box<dyn std::future::Future<Output = TaskOutcome> + Send>>;
+
+/// Output of a Task tool invocation: prose text + the child loop's final
+/// mutable model contexts for fork + join propagation.
+pub(crate) struct TaskOutcome {
+    /// The prose output (text result) from the child agent loop.
+    pub output: String,
+    /// Mutable model contexts carried back from the child loop after `join`.
+    pub contexts: Vec<Box<dyn super::model_context::MutableModelContext>>,
+}
 
 /// Callback that `invoke` calls for Task tool invocations.
+///
+/// The fourth parameter carries the parent's live contexts (filtered by
+/// `propagates_to_task`, cloned at call time) so the child loop can seed
+/// its own `LoopPlug` with a copy of the parent's state.
 pub(crate) type TaskFn = Arc<
-    dyn Fn(TaskKind, String, Option<Vec<rig_core::completion::Message>>) -> TaskFuture
+    dyn Fn(
+            TaskKind,
+            String,
+            Option<Vec<rig_core::completion::Message>>,
+            Vec<Box<dyn super::model_context::MutableModelContext>>,
+        ) -> TaskFuture
         + Send
         + Sync,
 >;
@@ -504,12 +522,13 @@ fn global_registry() -> &'static ToolRegistry {
     GLOBAL_TOOL_REGISTRY.get_or_init(crate::toolbox::default_registry)
 }
 
-pub(crate) async fn invoke(
+pub(crate) async fn invoke_with_contexts(
     id: &str,
     name: &str,
     ctx: &AgentLoopRuntime,
     args_json: &str,
-) -> String {
+    parent_contexts: Vec<Box<dyn super::model_context::MutableModelContext>>,
+) -> TaskOutcome {
     if let Some(allowed) = &ctx.allowed_tools {
         // Mischief is chat-only; allow it through the gate only when the
         // session is chat. LoadSkill keeps its old bypass: the handler returns
@@ -520,7 +539,10 @@ pub(crate) async fn invoke(
             && !chat_only_always_available(name, chat)
             && !allowed.iter().any(|n| n == name)
         {
-            return format!("Error: unknown tool {name}");
+            return TaskOutcome {
+                output: format!("Error: unknown tool {name}"),
+                contexts: Vec::new(),
+            };
         }
     }
     let ka = audit_key_arg(args_json);
@@ -534,7 +556,10 @@ pub(crate) async fn invoke(
                 &ka,
                 "error",
             );
-            return "Error: invalid arguments".into();
+            return TaskOutcome {
+                output: "Error: invalid arguments".into(),
+                contexts: Vec::new(),
+            };
         }
     };
     // Validate args against the tool's expected schema before dispatching.
@@ -548,7 +573,10 @@ pub(crate) async fn invoke(
             &ka,
             "error",
         );
-        return err;
+        return TaskOutcome {
+            output: err,
+            contexts: Vec::new(),
+        };
     }
     if let Some(err) = check_tool(name, ctx, &args) {
         audit(
@@ -558,34 +586,43 @@ pub(crate) async fn invoke(
             &ka,
             "denied",
         );
-        return err;
+        return TaskOutcome {
+            output: err,
+            contexts: Vec::new(),
+        };
     }
-    let res = match name {
+    let mut outcome = match name {
         "Task" => {
             if let Some(f) = &ctx.task_fn {
                 let kind_str = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                 let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
                 if prompt.is_empty() {
-                    return "Error: Task prompt is required".to_string();
+                    return TaskOutcome {
+                        output: "Error: Task prompt is required".to_string(),
+                        contexts: Vec::new(),
+                    };
                 }
                 let Some(kind) = TaskKind::parse(kind_str) else {
-                    return format!(
-                        "Error: unknown Task kind {kind_str:?}. Expected one of: {}",
-                        TaskKind::ALL
-                            .iter()
-                            .map(|k| k.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
+                    return TaskOutcome {
+                        output: format!(
+                            "Error: unknown Task kind {kind_str:?}. Expected one of: {}",
+                            TaskKind::ALL
+                                .iter()
+                                .map(|k| k.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        contexts: Vec::new(),
+                    };
                 };
                 let history = if kind == TaskKind::Fork {
                     ctx.parent_history.clone()
                 } else {
                     None
                 };
-                let out = f(kind, prompt.to_string(), history).await;
+                let child_outcome = f(kind, prompt.to_string(), history, parent_contexts).await;
                 // Label the result so concurrent Task outputs can be told apart.
-                let final_output = format!("# {kind}\n\n{out}");
+                let final_output = format!("# {kind}\n\n{}", child_outcome.output);
                 log::info!(
                     "task dispatch complete: kind={kind} prompt_len={p_len} prompt_preview={p_preview:?} output_len={o_len} output_preview={o_preview:?}",
                     p_len = prompt.len(),
@@ -593,21 +630,41 @@ pub(crate) async fn invoke(
                     o_len = final_output.len(),
                     o_preview = preview_str(&final_output, 300),
                 );
-                final_output
+                TaskOutcome {
+                    output: final_output,
+                    contexts: child_outcome.contexts,
+                }
             } else {
-                "Error: Task not available for this backend".to_string()
+                TaskOutcome {
+                    output: "Error: Task not available for this backend".to_string(),
+                    contexts: Vec::new(),
+                }
             }
         }
         "Done" => {
             let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
-            format!("Done. {summary}")
+            TaskOutcome {
+                output: format!("Done. {summary}"),
+                contexts: Vec::new(),
+            }
         }
-        "Mischief" => include_str!("mischief_dsl.md").to_string(),
+        "Mischief" => TaskOutcome {
+            output: include_str!("mischief_dsl.md").to_string(),
+            contexts: Vec::new(),
+        },
         _ => {
             let registry = global_registry();
             match registry.handlers.get(name) {
-                Some(handler) => handler.invoke(id, ctx, args_json).await,
-                None => return format!("Error: unknown tool {name}"),
+                Some(handler) => TaskOutcome {
+                    output: handler.invoke(id, ctx, args_json).await,
+                    contexts: Vec::new(),
+                },
+                None => {
+                    return TaskOutcome {
+                        output: format!("Error: unknown tool {name}"),
+                        contexts: Vec::new(),
+                    }
+                }
             }
         }
     };
@@ -616,7 +673,7 @@ pub(crate) async fn invoke(
         ctx.audit_lock.as_deref(),
         name,
         &ka,
-        result_status(&res),
+        result_status(&outcome.output),
     );
     // Cap output for tools that can produce unbounded results.
     // Task and Done are excluded: Task manages its own context, Done is tiny.
@@ -628,7 +685,7 @@ pub(crate) async fn invoke(
             name,
             "Read" | "Bash" | "Grep" | "Glob" | "Landscape" | "WebSearch"
         )
-        && res.len() as u64 > cap
+        && outcome.output.len() as u64 > cap
     {
         let marker = match name {
             "Read" => format!(
@@ -646,24 +703,36 @@ pub(crate) async fn invoke(
         };
         let marker_len = marker.len() as u64;
         let keep = cap.saturating_sub(marker_len) as usize;
-        if keep == 0 {
-            // Marker alone exceeds cap — return a char-boundary prefix.
-            return truncate_to_bytes(&marker, cap as usize);
-        }
-        let mut trunc = String::with_capacity(cap as usize);
-        let mut used = 0usize;
-        for c in res.chars() {
-            let cl = c.len_utf8();
-            if used + cl > keep {
-                break;
+        let res = &outcome.output;
+        outcome.output = if keep == 0 {
+            truncate_to_bytes(&marker, cap as usize)
+        } else {
+            let mut trunc = String::with_capacity(cap as usize);
+            let mut used = 0usize;
+            for c in res.chars() {
+                let cl = c.len_utf8();
+                if used + cl > keep {
+                    break;
+                }
+                trunc.push(c);
+                used += cl;
             }
-            trunc.push(c);
-            used += cl;
-        }
-        trunc.push_str(&marker);
-        return trunc;
+            trunc.push_str(&marker);
+            trunc
+        };
     }
-    res
+    outcome
+}
+
+pub(crate) async fn invoke(
+    id: &str,
+    name: &str,
+    ctx: &AgentLoopRuntime,
+    args_json: &str,
+) -> String {
+    invoke_with_contexts(id, name, ctx, args_json, Vec::new())
+        .await
+        .output
 }
 
 /// Return a prefix of `s` that fits within `max_bytes`, at a valid UTF-8
@@ -3845,9 +3914,14 @@ mod tests {
         let dir = tmp();
         let called = Arc::new(std::sync::Mutex::new(false));
         let called2 = called.clone();
-        let task_fn: TaskFn = Arc::new(move |kind, prompt, _history| {
+        let task_fn: TaskFn = Arc::new(move |kind, prompt, _history, _ctx| {
             *called2.lock().unwrap() = true;
-            Box::pin(async move { format!("task result: {kind} / {prompt}") })
+            Box::pin(async move {
+                TaskOutcome {
+                    output: format!("task result: {kind} / {prompt}"),
+                    contexts: Vec::new(),
+                }
+            })
         });
         let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
@@ -3878,8 +3952,13 @@ mod tests {
     #[tokio::test]
     async fn task_empty_prompt_returns_error() {
         let dir = tmp();
-        let task_fn: TaskFn = Arc::new(|_kind, _prompt, _history| {
-            Box::pin(async move { "should not be called".to_string() })
+        let task_fn: TaskFn = Arc::new(|_kind, _prompt, _history, _ctx| {
+            Box::pin(async move {
+                TaskOutcome {
+                    output: "should not be called".to_string(),
+                    contexts: Vec::new(),
+                }
+            })
         });
         let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
@@ -3916,9 +3995,14 @@ mod tests {
         let dir = tmp();
         let called = Arc::new(std::sync::Mutex::new(false));
         let called2 = called.clone();
-        let task_fn: TaskFn = Arc::new(move |_kind, _prompt, _history| {
+        let task_fn: TaskFn = Arc::new(move |_kind, _prompt, _history, _ctx| {
             *called2.lock().unwrap() = true;
-            Box::pin(async move { "should not be called".to_string() })
+            Box::pin(async move {
+                TaskOutcome {
+                    output: "should not be called".to_string(),
+                    contexts: Vec::new(),
+                }
+            })
         });
         let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
@@ -3952,8 +4036,14 @@ mod tests {
     #[tokio::test]
     async fn task_result_is_headered_with_kind() {
         let dir = tmp();
-        let task_fn: TaskFn =
-            Arc::new(|_k, _p, _history| Box::pin(async move { "body".to_string() }));
+        let task_fn: TaskFn = Arc::new(|_k, _p, _history, _ctx| {
+            Box::pin(async move {
+                TaskOutcome {
+                    output: "body".to_string(),
+                    contexts: Vec::new(),
+                }
+            })
+        });
         let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
             extra_env: None,
@@ -4428,7 +4518,14 @@ mod tests {
     async fn invoke_does_not_cap_task() {
         let _env = crate::test_support::EnvGuard::lock();
         let dir = tmp();
-        let task_fn: TaskFn = Arc::new(|_k, _p, _history| Box::pin(async move { "x".repeat(500) }));
+        let task_fn: TaskFn = Arc::new(|_k, _p, _history, _ctx| {
+            Box::pin(async move {
+                TaskOutcome {
+                    output: "x".repeat(500),
+                    contexts: Vec::new(),
+                }
+            })
+        });
         let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
             extra_env: None,
