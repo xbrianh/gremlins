@@ -25,7 +25,7 @@ use super::format::{
     trunc,
 };
 use super::model::{GremlinsModel, GremlinsModelError};
-use super::model_context::{Conversation, ConversationContext};
+use super::model_context::Conversation;
 use super::plug::LoopHooks;
 use super::protocol::{add_opt, CompletedRun, FileObservations, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
@@ -209,8 +209,6 @@ struct ToolJob {
     args: String,
     call: String,
     over_cap: Option<String>,
-    /// Parent contexts cloned for this Task job (only set for "Task" jobs).
-    task_parent_contexts: Vec<Box<dyn ConversationContext>>,
 }
 
 /// Outcome of one concurrent tool batch dispatched by
@@ -361,17 +359,9 @@ impl LoopState {
         conv.set_preserve_reasoning(preserve_reasoning_in_history);
         // If the conversation has no contexts yet, seed a ToolLedger so the
         // [seen] block and file observations work. The executor (run.rs)
-        // normally handles this by calling conv.set_contexts() before
-        // RunParams is built, but tests that bypass the executor still
-        // need the ledger.
-        if conv.context_snapshot().is_empty() {
-            let mut ledger = crate::conversation::contexts::tool_ledger::ToolLedger::new();
-            ledger.capture_turn_transcript(0);
-            conv.set_contexts(vec![Box::new(ledger) as Box<dyn ConversationContext>]);
-        }
-        // Seed the conversation with the run's mutable model contexts so the
-        // loop never carries a parallel context list. Empty is allowed: a
-        // fork child conversation already carries its (cleared) contexts.
+        // normally handles this before RunParams is built, but tests that
+        // bypass the executor still need the ledger.
+        conv.ensure_contexts();
 
         Self {
             system_prompt,
@@ -968,11 +958,6 @@ impl LoopState {
                 } else {
                     None
                 },
-                task_parent_contexts: if tc.function.name == "Task" {
-                    self.conv.propagating_contexts()
-                } else {
-                    Vec::new()
-                },
             });
         }
         jobs
@@ -1037,27 +1022,20 @@ impl LoopState {
             std::future::pending::<()>().await;
         };
         let sem = Arc::new(Semaphore::new(tools::MAX_CONCURRENT_TOOLS));
-        let parent_contexts: Vec<Box<dyn ConversationContext>> = self.conv.context_snapshot();
+        // Borrow self.conv as &dyn Conversation so concurrent async blocks
+        // can read serve_tool / empty_child_with_contexts without needing
+        // a mutable borrow.
+        let conv: &dyn Conversation = &*self.conv;
         let exec_fut = join_all(jobs.iter().map(|j| {
             let ctx = &ctx;
             let sem = sem.clone();
-            // Only Landscape and Task tools need parent contexts (Landscape for
-            // serve_tool dispatch, Task for child-loop context propagation).
-            // All other tools pass an empty vec to avoid unnecessary cloning.
-            let contexts = if j.name == "Task" {
-                j.task_parent_contexts.clone()
-            } else if j.name == "Landscape" {
-                parent_contexts.clone()
-            } else {
-                Vec::new()
-            };
             async move {
                 if let Some(msg) = &j.over_cap {
                     (msg.clone(), None)
                 } else {
                     let _permit = sem.acquire_owned().await;
                     let outcome =
-                        tools::invoke_with_contexts(&j.id, &j.name, ctx, &j.args, contexts).await;
+                        tools::invoke_with_conversation(&j.id, &j.name, ctx, &j.args, Some(conv)).await;
                     (outcome.output, outcome.conversation)
                 }
             }
@@ -1237,10 +1215,7 @@ impl LoopState {
             // type, etc. — no silent cross-type no-op calls.
             if job.name == "Task" {
                 if let Some(child_conv) = child_conversation {
-                    let child_contexts = child_conv.context_snapshot();
-                    if !child_contexts.is_empty() {
-                        task_observations = self.conv.join_child_contexts(&child_contexts);
-                    }
+                    task_observations = self.conv.join_child_conversation(&*child_conv);
                 }
             }
             let annotated = extra.iter().flatten().fold(String::new(), |mut acc, s| {

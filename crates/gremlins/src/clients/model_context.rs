@@ -26,7 +26,7 @@ pub trait ConversationContext: Any + Send + Sync {
     /// Serve a tool result directly from this context, short-circuiting the
     /// normal handler dispatch. Called after arg validation and sandbox
     /// checking but before the `match name { ... }` dispatch in
-    /// [`invoke_with_contexts`].
+    /// [`invoke_with_conversation`].
     ///
     /// Returns `Some(output)` when this context handles the tool; `None`
     /// falls through to the normal handler. Read-only (`&self`) — context
@@ -207,6 +207,22 @@ pub(crate) trait Conversation: Any + Send + Sync {
     /// Produce a child conversation seeded from this conversation's history.
     fn fork(&self, kind: crate::task_kind::TaskKind) -> Box<dyn Conversation>;
 
+    /// Serve a tool result through active conversation contexts, short-circuiting
+    /// the normal handler dispatch. Called after arg validation and sandbox
+    /// checking. Read-only (`&self`).
+    ///
+    /// Returns `Some(output)` when a context handles the tool; `None`
+    /// falls through to the normal handler.
+    fn serve_tool(&self, _name: &str, _args: &serde_json::Value) -> Option<String> {
+        None
+    }
+
+    /// Create a fresh child conversation seeded with propagating contexts from
+    /// this conversation, but with a clean message history. Used for
+    /// Scout/Implement tasks that need inherited context state without
+    /// the parent's message transcript.
+    fn empty_child_with_contexts(&self, _prompt: &str) -> Box<dyn Conversation>;
+
     /// Replace the pending user prompt (used to begin a freshly-forked child
     /// or set a continuation/reminder prompt).
     fn set_next_prompt(&mut self, prompt: &str);
@@ -256,10 +272,19 @@ pub(crate) trait Conversation: Any + Send + Sync {
         Vec::new()
     }
 
+    /// Join a child conversation's contexts back into this conversation,
+    /// returning any newly-observed text blocks. This is the preferred path
+    /// for Task tool context joining — it avoids exposing raw
+    /// [`ConversationContext`] objects to callers.
+    fn join_child_conversation(&mut self, _child: &dyn Conversation) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Call `finalize_turn` on every context at a turn boundary.
     fn finalize_contexts(&mut self, _turn: usize) {}
 
     /// Return clones of every context that propagates into nested tasks.
+    #[allow(dead_code)]
     fn propagating_contexts(&self) -> Vec<Box<dyn ConversationContext>> {
         Vec::new()
     }
@@ -273,6 +298,10 @@ pub(crate) trait Conversation: Any + Send + Sync {
     fn file_observations(&self) -> Option<FileObservations> {
         None
     }
+
+    /// Seed the conversation with default tool-ledger contexts if none are
+    /// present. Used by tests that bypass the executor's normal context setup.
+    fn ensure_contexts(&mut self) {}
 
     /// Reset per-turn transcript state on every context so a child loop
     /// starts with a clean slate.

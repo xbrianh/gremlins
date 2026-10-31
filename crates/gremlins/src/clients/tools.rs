@@ -528,12 +528,15 @@ fn global_registry() -> &'static ToolRegistry {
     GLOBAL_TOOL_REGISTRY.get_or_init(crate::toolbox::default_registry)
 }
 
-pub(crate) async fn invoke_with_contexts(
+/// Dispatch a single tool call. `conv`, when `Some`, provides the parent
+/// conversation whose contexts serve/seed tool operations. `None` means no
+/// conversation is available (used by tests).
+pub(crate) async fn invoke_with_conversation(
     id: &str,
     name: &str,
     ctx: &AgentLoopRuntime,
     args_json: &str,
-    parent_contexts: Vec<Box<dyn super::model_context::ConversationContext>>,
+    conv: Option<&dyn super::model_context::Conversation>,
 ) -> TaskOutcome {
     if let Some(allowed) = &ctx.allowed_tools {
         // Mischief is chat-only; allow it through the gate only when the
@@ -598,26 +601,24 @@ pub(crate) async fn invoke_with_contexts(
         };
     }
 
-    // Let active contexts serve the tool result before falling through to
-    // the handler registry. This is a read-only pull path — context state
-    // is mutated separately through observe_tool() in emit_tool_results.
-    for ctxc in &parent_contexts {
+    // Let active conversation contexts serve the tool result before falling
+    // through to the handler registry. This is a read-only pull path — context
+    // state is mutated separately through observe_tool() in emit_tool_results.
+    if let Some(conv) = conv {
         // Landscape exploration uses rayon for parallel directory walks —
         // offload to a blocking thread so tokio workers stay responsive.
         let maybe_output: Option<String> = if name == "Landscape" {
             let args_owned = args.clone();
-            let ctx_owned = ctxc.clone_box();
+            let conv = conv.clone_box();
             let name_owned = name.to_string();
-            match tokio::task::spawn_blocking(move || {
-                ctx_owned.serve_tool(&name_owned, &args_owned)
-            })
-            .await
+            match tokio::task::spawn_blocking(move || conv.serve_tool(&name_owned, &args_owned))
+                .await
             {
                 Ok(v) => v,
                 Err(e) => Some(format!("Error: {e}")),
             }
         } else {
-            ctxc.serve_tool(name, &args)
+            conv.serve_tool(name, &args)
         };
         if let Some(output) = maybe_output {
             let output = cap_output(name, output);
@@ -661,18 +662,10 @@ pub(crate) async fn invoke_with_contexts(
                 };
                 let history = if kind == TaskKind::Fork {
                     ctx.conversation.clone()
-                } else if !parent_contexts.is_empty() {
+                } else if let Some(conv) = conv {
                     // Scout/Implement: build a fresh conversation seeded with
                     // the parent's propagating contexts.
-                    let mut conv: Box<dyn super::model_context::Conversation> = Box::new(
-                        crate::conversation::standard::StandardConversation::new(
-                            prompt,
-                            false,
-                            None,
-                        ),
-                    );
-                    conv.set_contexts(parent_contexts);
-                    Some(conv)
+                    Some(conv.empty_child_with_contexts(prompt))
                 } else {
                     None
                 };
@@ -785,7 +778,7 @@ fn cap_output(name: &str, output: String) -> String {
     }
 }
 
-/// Convenience wrapper for tests that don't need parent contexts.
+/// Convenience wrapper for tests that don't need conversation contexts.
 #[cfg(test)]
 pub(crate) async fn invoke(
     id: &str,
@@ -793,7 +786,7 @@ pub(crate) async fn invoke(
     ctx: &AgentLoopRuntime,
     args_json: &str,
 ) -> String {
-    invoke_with_contexts(id, name, ctx, args_json, Vec::new())
+    invoke_with_conversation(id, name, ctx, args_json, None)
         .await
         .output
 }

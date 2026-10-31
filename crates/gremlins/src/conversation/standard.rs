@@ -333,6 +333,26 @@ impl Conversation for StandardConversation {
         })
     }
 
+    fn serve_tool(&self, name: &str, args: &serde_json::Value) -> Option<String> {
+        for ctx in &self.contexts {
+            if let Some(output) = ctx.serve_tool(name, args) {
+                return Some(output);
+            }
+        }
+        None
+    }
+
+    fn empty_child_with_contexts(&self, prompt: &str) -> Box<dyn Conversation> {
+        let mut child = Self::new(prompt, self.preserve_reasoning_in_history, None);
+        let propagating = self.contexts
+            .iter()
+            .filter(|c| c.propagates_to_task())
+            .map(|c| c.clone_box())
+            .collect::<Vec<_>>();
+        child.contexts = propagating;
+        Box::new(child)
+    }
+
     fn set_next_prompt(&mut self, prompt: &str) {
         self.next_prompt = Message::user(prompt.to_string());
     }
@@ -429,6 +449,14 @@ impl Conversation for StandardConversation {
         task_observations
     }
 
+    fn join_child_conversation(&mut self, child: &dyn Conversation) -> Vec<String> {
+        let child_contexts = child.context_snapshot();
+        if child_contexts.is_empty() {
+            return Vec::new();
+        }
+        self.join_child_contexts(&child_contexts)
+    }
+
     fn finalize_contexts(&mut self, turn: usize) {
         for ctx in &mut self.contexts {
             ctx.finalize_turn(turn);
@@ -454,6 +482,15 @@ impl Conversation for StandardConversation {
     fn clear_context_transcripts(&mut self) {
         for ctx in &mut self.contexts {
             ctx.clear_transcript();
+        }
+    }
+
+    fn ensure_contexts(&mut self) {
+        if self.contexts.is_empty() {
+            use crate::conversation::contexts::tool_ledger::ToolLedger;
+            let mut ledger = ToolLedger::new();
+            ledger.capture_turn_transcript(0);
+            self.contexts.push(Box::new(ledger) as Box<dyn ConversationContext>);
         }
     }
 }
