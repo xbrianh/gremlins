@@ -810,15 +810,17 @@ async fn run_agent(
         )>,
     ));
 
-    // ── Build inversion-of-control plug ─────
+    // ── Build inversion-of-control hooks ─────
     // Wires cross-package dependencies (log, scratchpad, prompt-debug,
-    // token-usage, model contexts) into the agent loop without the loop
-    // importing `crate::executor` or `crate::landscape`.
-    let mut plug = crate::clients::plug::LoopPlug::new();
+    // token-usage) into the agent loop without the loop importing
+    // `crate::executor` or `crate::landscape`.
+    let mut hooks = crate::clients::plug::LoopHooks::new();
     {
         let log_tx = gremlin.runtime_config.log_tx.clone();
-        plug.register_logger(move |level, msg| {
-            crate::executor::send_log(&log_tx, level, msg);
+        hooks.register_logger(move |msg| {
+            if let Some(ref tx) = log_tx {
+                let _ = tx.send(msg.to_string());
+            }
         });
     }
     if let Some(sp) = prepared
@@ -830,13 +832,13 @@ async fn run_agent(
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| gremlin.cwd());
-        plug.register_scratchpad_reader(move || {
+        hooks.register_scratchpad_reader(move || {
             crate::executor::agent_runner::read_scratchpad_contained(&sp, &root).ok()
         });
     }
     {
         let store = gremlin.state.store_handle();
-        plug.register_prompt_debug(move |request| {
+        hooks.register_prompt_debug(move |request| {
             if crate::executor::log_level_threshold() < log::LevelFilter::Debug {
                 return;
             }
@@ -864,7 +866,7 @@ async fn run_agent(
             gremlin.state.read_field("token_usage").as_ref(),
         );
         let live_usage_tracker = live_usage.clone();
-        plug.register_token_usage(
+        hooks.register_token_usage(
             move |totals, last_prompt_tokens, last_cached_input_tokens| {
                 let usage = crate::executor::supervisor::add_usage_stats(&baseline_usage, &totals);
                 let cost_usd = client_for_cost.total_cost_usd();
@@ -885,7 +887,7 @@ async fn run_agent(
     // Build model contexts from landscape data: ToolLedger + SignalMapContext + LandscapeContext.
     // ToolLedger is always created — it tracks reads/writes and produces the [seen] block.
     // SignalMapContext and LandscapeContext are built from landscape data when available.
-    {
+    let contexts: Vec<Box<dyn MutableModelContext>> = {
         let mut contexts: Vec<Box<dyn MutableModelContext>> = Vec::new();
         // ToolLedger always goes first — it's the primary per-turn observation context.
         let mut ledger = ToolLedger::new();
@@ -910,8 +912,8 @@ async fn run_agent(
         if let Some(ld) = landscape_data.take() {
             contexts.push(Box::new(LandscapeContext::new(ld)));
         }
-        plug.register_contexts(contexts);
-    }
+        contexts
+    };
 
     let params = RunParams {
         prompt: prepared.user_prompt(),
@@ -950,7 +952,8 @@ async fn run_agent(
         active_skills: gremlin.active_skills.clone(),
         token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
         scratchpad_path: None,
-        plug: Some(plug),
+        hooks: Some(hooks),
+        contexts,
     };
 
     let effective_model = params

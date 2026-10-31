@@ -7,7 +7,7 @@ use super::interactive::{InteractiveSession, StreamEventSender};
 use super::model::GremlinsModel;
 use super::model_context::Conversation;
 use super::params::ResolvedParams;
-pub(crate) use super::plug::LoopPlug;
+pub(crate) use super::plug::LoopHooks;
 use super::protocol::CompletedRun;
 use super::task_models::TaskModelSelector;
 use async_trait::async_trait;
@@ -72,10 +72,13 @@ pub struct RunParams {
     /// When `Some`, the agent loop reads and re-injects scratchpad content
     /// on each turn. `None` disables the per-turn injection.
     pub scratchpad_path: Option<PathBuf>,
-    /// Inversion-of-control plug that carries cross-package dependencies
-    /// (log, scratchpad, prompt-debug, token-usage, contexts) into the
-    /// agent loop. `None` defaults to a no-op plug.
-    pub plug: Option<LoopPlug>,
+    /// Inversion-of-control hooks that carry cross-package dependencies
+    /// (prompt-debug, token-usage) into the agent loop. `None` defaults
+    /// to no-op hooks.
+    pub hooks: Option<LoopHooks>,
+    /// Mutable model contexts (ToolLedger, SignalMapContext, LandscapeContext)
+    /// seeded onto the run's conversation.
+    pub(crate) contexts: Vec<Box<dyn crate::clients::model_context::MutableModelContext>>,
 }
 
 impl Clone for RunParams {
@@ -107,7 +110,8 @@ impl Clone for RunParams {
             active_skills: self.active_skills.clone(),
             token_usage_sink: self.token_usage_sink.clone(),
             scratchpad_path: self.scratchpad_path.clone(),
-            plug: self.plug.clone(),
+            hooks: self.hooks.clone(),
+            contexts: self.contexts.iter().map(|c| c.clone_box()).collect(),
         }
     }
 }

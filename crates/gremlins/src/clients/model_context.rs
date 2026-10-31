@@ -182,7 +182,6 @@ pub(crate) trait Conversation: Any + Send + Sync {
     fn render_turn(
         &mut self,
         stage_prompt: &str,
-        contexts: &[Box<dyn MutableModelContext>],
         turn: usize,
         nested: bool,
         scratchpad: Option<String>,
@@ -234,6 +233,50 @@ pub(crate) trait Conversation: Any + Send + Sync {
     /// conversations built from raw messages (chat continuation) inherit the
     /// run's actual preserve-reasoning setting rather than a hardcoded `false`.
     fn set_preserve_reasoning(&mut self, _preserve: bool) {}
+
+    /// Seed the conversation's mutable model contexts. Cloned from the
+    /// caller's seed list via `clone_box()`.
+    fn set_contexts(&mut self, _ctxs: Vec<Box<dyn MutableModelContext>>) {}
+
+    /// Observe one tool result across all contexts and return per-context
+    /// extra annotations (for inline visibility alongside raw output).
+    fn observe_tool_results(
+        &mut self,
+        _turn: usize,
+        _name: &str,
+        _args: &str,
+        _output: &str,
+    ) -> Vec<Option<String>> {
+        Vec::new()
+    }
+
+    /// Join child contexts (returned from a Task) back into the parent
+    /// contexts, returning any newly-observed text blocks.
+    fn join_child_contexts(&mut self, _children: &[Box<dyn MutableModelContext>]) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Call `finalize_turn` on every context at a turn boundary.
+    fn finalize_contexts(&mut self, _turn: usize) {}
+
+    /// Return clones of every context that propagates into nested tasks.
+    fn propagating_contexts(&self) -> Vec<Box<dyn MutableModelContext>> {
+        Vec::new()
+    }
+
+    /// Snapshot all contexts via `clone_box()`.
+    fn context_snapshot(&self) -> Vec<Box<dyn MutableModelContext>> {
+        Vec::new()
+    }
+
+    /// Return file observations from the first context that provides them.
+    fn file_observations(&self) -> Option<FileObservations> {
+        None
+    }
+
+    /// Reset per-turn transcript state on every context so a child loop
+    /// starts with a clean slate.
+    fn clear_context_transcripts(&mut self) {}
 }
 
 // `Box<dyn Conversation>` participates in struct cloning; delegate to `clone_box`.

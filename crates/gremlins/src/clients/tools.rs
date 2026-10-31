@@ -52,7 +52,7 @@ pub(crate) struct TaskOutcome {
 ///
 /// The fourth parameter carries the parent's live contexts (filtered by
 /// `propagates_to_task`, cloned at call time) so the child loop can seed
-/// its own `LoopPlug` with a copy of the parent's state.
+/// its own conversation with a copy of the parent's state.
 pub(crate) type TaskFn = Arc<
     dyn Fn(
             TaskKind,

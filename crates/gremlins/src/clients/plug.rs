@@ -1,20 +1,18 @@
-use super::model_context::{Conversation, MutableModelContext};
 use super::protocol::UsageStats;
 use rig_core::completion::CompletionRequest;
 use std::sync::Arc;
 
-/// Factory type for building a fresh [`Conversation`].
-pub(crate) type ConversationFactory = Arc<dyn Fn() -> Box<dyn Conversation> + Send + Sync>;
-
-/// Inversion-of-control plug that decouples the agent loop from
+/// Inversion-of-control hooks that decouple the agent loop from
 /// `crate::executor` and `crate::landscape`. Every cross-package
 /// dependency is replaced by a typed handler slot that the caller
 /// (in `executor/run.rs`) wires up with closures.
-pub struct LoopPlug {
-    /// Log sink: `(level, message)`. Prefix is already baked into the
-    /// message by the agent loop call site.
+pub struct LoopHooks {
+    /// Log sink: `(message)`. Prefix is already baked into the
+    /// message by the agent loop call site. The default no-op handler
+    /// discards; the executor wires this to the per-gremlin log
+    /// channel.
     #[allow(clippy::type_complexity)]
-    pub(crate) log_fn: Arc<dyn Fn(log::Level, &str) + Send + Sync>,
+    pub(crate) log_fn: Arc<dyn Fn(&str) + Send + Sync>,
     /// Scratchpad reader: returns `Some(content)` when a scratchpad file
     /// exists and is readable, `None` otherwise.
     pub(crate) read_scratchpad_fn: Arc<dyn Fn() -> Option<String> + Send + Sync>,
@@ -25,32 +23,23 @@ pub struct LoopPlug {
     /// Token-usage emitter: `(totals, last_prompt_tokens, last_cached_input_tokens)`.
     #[allow(clippy::type_complexity)]
     pub(crate) emit_token_usage_fn: Arc<dyn Fn(UsageStats, Option<u64>, Option<u64>) + Send + Sync>,
-    /// Mutable model contexts (ToolLedger, SignalMapContext, LandscapeContext).
-    /// Cloned (via `clone_box`) into each `LoopState`.
-    pub(crate) contexts: Vec<Box<dyn MutableModelContext>>,
-    /// Optional conversation factory. When `None`, the agent loop builds a
-    /// default [`StandardConversation`].
-    pub(crate) conversation: Option<ConversationFactory>,
 }
 
-impl LoopPlug {
-    /// Create a no-op plug. All slots default to silent discards;
-    /// `contexts` is empty.
+impl LoopHooks {
+    /// Create a no-op hook set. All slots default to silent discards.
     pub(crate) fn new() -> Self {
         Self {
-            log_fn: Arc::new(|_, _| {}),
+            log_fn: Arc::new(|_| {}),
             read_scratchpad_fn: Arc::new(|| None),
             dump_prompt_debug_fn: Arc::new(|_| {}),
             emit_token_usage_fn: Arc::new(|_, _, _| {}),
-            contexts: Vec::new(),
-            conversation: None,
         }
     }
 
-    /// Emit a log line through the registered handler. The message already
-    /// carries the stage/model/task prefix.
-    pub(crate) fn log(&self, level: log::Level, msg: &str) {
-        (self.log_fn)(level, msg);
+    /// Emit a log line through the registered handler. The message
+    /// already carries the stage/model/task prefix.
+    pub(crate) fn log(&self, msg: &str) {
+        (self.log_fn)(msg);
     }
 
     /// Read the persistent scratchpad, returning `Some(content)` when one is
@@ -77,7 +66,7 @@ impl LoopPlug {
     /// Register a log handler.
     pub(crate) fn register_logger<F>(&mut self, f: F)
     where
-        F: Fn(log::Level, &str) + Send + Sync + 'static,
+        F: Fn(&str) + Send + Sync + 'static,
     {
         self.log_fn = Arc::new(f);
     }
@@ -105,33 +94,15 @@ impl LoopPlug {
     {
         self.emit_token_usage_fn = Arc::new(f);
     }
-
-    /// Replace the context list with a new one.
-    pub(crate) fn register_contexts(&mut self, ctxs: Vec<Box<dyn MutableModelContext>>) {
-        self.contexts = ctxs;
-    }
-
-    /// Register a conversation factory.
-    #[allow(dead_code)]
-    pub(crate) fn register_conversation<F>(&mut self, f: F)
-    where
-        F: Fn() -> Box<dyn Conversation> + Send + Sync + 'static,
-    {
-        self.conversation = Some(Arc::new(f));
-    }
 }
 
-// Manual Clone impl needed because `Box<dyn MutableModelContext>` doesn't
-// auto-derive Clone — we use the trait's `clone_box()` method.
-impl Clone for LoopPlug {
+impl Clone for LoopHooks {
     fn clone(&self) -> Self {
         Self {
             log_fn: self.log_fn.clone(),
             read_scratchpad_fn: self.read_scratchpad_fn.clone(),
             dump_prompt_debug_fn: self.dump_prompt_debug_fn.clone(),
             emit_token_usage_fn: self.emit_token_usage_fn.clone(),
-            contexts: self.contexts.iter().map(|c| c.clone_box()).collect(),
-            conversation: self.conversation.clone(),
         }
     }
 }

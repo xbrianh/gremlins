@@ -15,6 +15,7 @@ use super::format::assistant_tool_message;
 use super::model_context::{
     compose_model_transcript, Conversation, MutableModelContext, RunArtifact, TurnScript,
 };
+use super::protocol::FileObservations;
 use crate::task_kind::TaskKind;
 
 /// The standard [`Conversation`] implementation.
@@ -40,6 +41,10 @@ pub(crate) struct StandardConversation {
     /// Once set, [`Conversation::messages`] returns this final transcript so
     /// persistence consumers see the exact durable message list.
     finalized_messages: Option<Vec<Message>>,
+    /// Mutable model contexts that observe tool calls and contribute per-turn
+    /// transcript blocks. Owned here so the agent loop routes every context
+    /// operation through the conversation instead of carrying a parallel list.
+    contexts: Vec<Box<dyn MutableModelContext>>,
 }
 
 impl StandardConversation {
@@ -61,6 +66,7 @@ impl StandardConversation {
             preserve_reasoning_in_history: preserve_reasoning,
             last_text: String::new(),
             finalized_messages: None,
+            contexts: Vec::new(),
         }
     }
 
@@ -162,6 +168,7 @@ impl Conversation for StandardConversation {
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: self.last_text.clone(),
             finalized_messages: self.finalized_messages.clone(),
+            contexts: self.contexts.iter().map(|c| c.clone_box()).collect(),
         })
     }
 
@@ -202,7 +209,6 @@ impl Conversation for StandardConversation {
     fn render_turn(
         &mut self,
         stage_prompt: &str,
-        contexts: &[Box<dyn MutableModelContext>],
         turn: usize,
         nested: bool,
         scratchpad: Option<String>,
@@ -216,7 +222,7 @@ impl Conversation for StandardConversation {
             stage_prompt,
             &request_messages,
             &self.next_prompt,
-            contexts,
+            &self.contexts,
             turn,
             self.current_turn_start,
         );
@@ -225,7 +231,8 @@ impl Conversation for StandardConversation {
             .map(|(last, rest)| (rest.to_vec(), last.clone()))
             .unwrap_or_else(|| (vec![], self.next_prompt.clone()));
 
-        let context_system_msgs: Vec<String> = contexts
+        let context_system_msgs: Vec<String> = self
+            .contexts
             .iter()
             .filter_map(|ctx| ctx.system_message())
             .collect();
@@ -321,6 +328,7 @@ impl Conversation for StandardConversation {
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: String::new(),
             finalized_messages: None,
+            contexts: self.contexts.iter().map(|c| c.clone_box()).collect(),
         })
     }
 
@@ -380,6 +388,72 @@ impl Conversation for StandardConversation {
         let mut all = self.history.clone();
         all.push(self.next_prompt.clone());
         all
+    }
+
+    fn set_contexts(&mut self, ctxs: Vec<Box<dyn MutableModelContext>>) {
+        self.contexts = ctxs.iter().map(|c| c.clone_box()).collect();
+    }
+
+    fn observe_tool_results(
+        &mut self,
+        turn: usize,
+        name: &str,
+        args: &str,
+        output: &str,
+    ) -> Vec<Option<String>> {
+        let mut extra = Vec::with_capacity(self.contexts.len());
+        for ctx in &mut self.contexts {
+            ctx.observe_tool(turn, name, args, output);
+            extra.push(ctx.tool_result_extra(turn, name, args, output));
+        }
+        extra
+    }
+
+    fn join_child_contexts(&mut self, children: &[Box<dyn MutableModelContext>]) -> Vec<String> {
+        let mut task_observations = Vec::new();
+        for child_ctx in children {
+            let child_tid = child_ctx.as_any().type_id();
+            for parent_ctx in &mut self.contexts {
+                if parent_ctx.as_any().type_id() == child_tid {
+                    parent_ctx.join(child_ctx.as_ref());
+                }
+            }
+        }
+        for parent_ctx in &mut self.contexts {
+            let text = parent_ctx.new_observations_text();
+            if !text.is_empty() {
+                task_observations.push(text);
+            }
+        }
+        task_observations
+    }
+
+    fn finalize_contexts(&mut self, turn: usize) {
+        for ctx in &mut self.contexts {
+            ctx.finalize_turn(turn);
+        }
+    }
+
+    fn propagating_contexts(&self) -> Vec<Box<dyn MutableModelContext>> {
+        self.contexts
+            .iter()
+            .filter(|c| c.propagates_to_task())
+            .map(|c| c.clone_box())
+            .collect()
+    }
+
+    fn context_snapshot(&self) -> Vec<Box<dyn MutableModelContext>> {
+        self.contexts.iter().map(|c| c.clone_box()).collect()
+    }
+
+    fn file_observations(&self) -> Option<FileObservations> {
+        self.contexts.iter().find_map(|ctx| ctx.file_observations())
+    }
+
+    fn clear_context_transcripts(&mut self) {
+        for ctx in &mut self.contexts {
+            ctx.clear_transcript();
+        }
     }
 }
 

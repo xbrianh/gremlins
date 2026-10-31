@@ -27,7 +27,7 @@ use super::format::{
 };
 use super::model::{GremlinsModel, GremlinsModelError};
 use super::model_context::{Conversation, MutableModelContext};
-use super::plug::LoopPlug;
+use super::plug::LoopHooks;
 use super::protocol::{add_opt, CompletedRun, FileObservations, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 use crate::task_kind::TaskKind;
@@ -163,9 +163,11 @@ pub(crate) struct RunContext {
     pub(crate) stream_events: Option<StreamEventSender>,
     /// Pre-populated conversation carried into the loop.
     pub(crate) prepopulated_conversation: Option<Box<dyn Conversation>>,
-    /// Inversion-of-control plug carrying cross-package dependencies.
-    /// Defaults to a no-op plug when `None`.
-    pub(crate) plug: LoopPlug,
+    /// Inversion-of-control hooks carrying cross-package dependencies
+    /// (prompt-debug, token-usage).
+    pub(crate) hooks: LoopHooks,
+    /// Mutable model contexts seeded onto the run's conversation.
+    pub(crate) contexts: Vec<Box<dyn MutableModelContext>>,
 }
 
 impl RunContext {
@@ -186,7 +188,8 @@ impl RunContext {
             completion_nudge_budget: crate::config::completion_nudge_budget(),
             stream_events: params.stream_events.clone(),
             prepopulated_conversation: params.prepopulated_conversation.clone(),
-            plug: params.plug.clone().unwrap_or_else(LoopPlug::new),
+            hooks: params.hooks.clone().unwrap_or_else(LoopHooks::new),
+            contexts: params.contexts.iter().map(|c| c.clone_box()).collect(),
             params,
         }
     }
@@ -241,13 +244,10 @@ struct LoopState {
     total_cached_tokens: Option<u64>,
     total_cache_creation_tokens: Option<u64>,
     total_reasoning_tokens: Option<u64>,
-    /// Mutable model contexts that observe tool calls and contribute per-turn
-    /// transcript blocks.
     /// Original stage/task prompt — persists across turns so the bootstrap
     /// message can always carry the model's instructions, even after
     /// `next_prompt` has been overwritten with "Continue.".
     stage_prompt: String,
-    contexts: Vec<Box<dyn MutableModelContext>>,
     interactive_active: bool,
     pending_run_one_turn: bool,
     cmd_rx: Option<mpsc::Receiver<InteractiveCommand>>,
@@ -256,8 +256,8 @@ struct LoopState {
     remaining_turns: usize,
     reminder_budget: usize,
     completion_nudge_budget: usize,
-    /// Inversion-of-control plug carrying log/scratchpad/debug/token-usage/contexts.
-    plug: LoopPlug,
+    /// Inversion-of-control hooks carrying prompt-debug/token-usage callbacks.
+    hooks: LoopHooks,
 }
 
 /// Accumulated state from one model completion stream.
@@ -334,7 +334,8 @@ impl LoopState {
         max_turns: usize,
         prefix: &str,
         preserve_reasoning_in_history: bool,
-        plug: &LoopPlug,
+        contexts: Vec<Box<dyn MutableModelContext>>,
+        hooks: &LoopHooks,
     ) -> Self {
         // Destructure the interactive session into its components so we can
         // thread them independently through the loop.
@@ -348,14 +349,11 @@ impl LoopState {
         let original_system_prompt = system_prompt.clone();
 
         let mut conv = prepopulated_conversation.unwrap_or_else(|| {
-            let conv = plug.conversation.as_ref().map(|f| f());
-            conv.unwrap_or_else(|| {
-                Box::new(StandardConversation::new(
-                    prompt,
-                    preserve_reasoning_in_history,
-                    None,
-                ))
-            })
+            Box::new(StandardConversation::new(
+                prompt,
+                preserve_reasoning_in_history,
+                None,
+            ))
         });
         // Always apply the stage prompt so chat continuations (built by
         // run.rs with an empty "" initial prompt) receive the stage
@@ -364,6 +362,12 @@ impl LoopState {
         // Chat continuations are built with preserve_reasoning=false
         // hardcoded. Apply the run's actual setting here.
         conv.set_preserve_reasoning(preserve_reasoning_in_history);
+        // Seed the conversation with the run's mutable model contexts so the
+        // loop never carries a parallel context list. Empty is allowed: a
+        // fork child conversation already carries its (cleared) contexts.
+        if !contexts.is_empty() {
+            conv.set_contexts(contexts);
+        }
 
         Self {
             system_prompt,
@@ -383,13 +387,6 @@ impl LoopState {
             total_cached_tokens: None,
             total_cache_creation_tokens: None,
             total_reasoning_tokens: None,
-            contexts: {
-                let mut contexts: Vec<Box<dyn MutableModelContext>> = Vec::new();
-                for ctx in &plug.contexts {
-                    contexts.push(ctx.clone_box());
-                }
-                contexts
-            },
             interactive_active: false,
             pending_run_one_turn: false,
             cmd_rx,
@@ -399,8 +396,17 @@ impl LoopState {
             remaining_turns: max_turns,
             reminder_budget,
             completion_nudge_budget,
-            plug: plug.clone(),
+            hooks: hooks.clone(),
         }
+    }
+
+    /// Emit a log line through both the process-wide logger (env_logger)
+    /// and the per-gremlin log channel wired by the executor. Daemon-mode
+    /// runs — where env_logger may not be installed — still write to the
+    /// gremlin log blob via this path.
+    fn hook_log(&self, msg: &str) {
+        log::info!("{msg}");
+        self.hooks.log(msg);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -422,22 +428,19 @@ impl LoopState {
 
         // Dump the full prompt to the state directory when
         // GREMLINS_LOG_LEVEL=DEBUG and a debug store is configured.
-        self.plug.dump_prompt_debug(&builder);
+        self.hooks.dump_prompt_debug(&builder);
 
         // Phase 2: launch the model stream, handling pre-stream errors and
         // retry inline (each path returns early).
         let response = match model.stream(builder) {
             Ok(s) => s,
             Err(GremlinsModelError::TooLarge { limit, actual }) => {
-                log::info!(
+                self.hook_log(&format!(
                     "agent_loop: prompt too large on turn {}: {} bytes exceeds configured limit of {} bytes", self.turn_num, actual, limit
-                );
-                self.plug.log(
-                    log::Level::Info,
-                    &format!(
-                        "{prefix}error: prompt size {actual} bytes exceeds configured limit of {limit} bytes"
-                    ),
-                );
+                ));
+                self.hook_log(&format!(
+                    "{prefix}error: prompt size {actual} bytes exceeds configured limit of {limit} bytes"
+                ));
                 return Err(ClientError::PromptTooLarge { limit, actual });
             }
             Err(GremlinsModelError::Provider(e)) => {
@@ -449,22 +452,14 @@ impl LoopState {
                 {
                     let wait = turn_retry_backoff[self.turn_retries];
                     self.turn_retries += 1;
-                    log::info!(
+                    self.hook_log(&format!(
                         "agent_loop: retryable stream error on turn {} (attempt {}), backing off {wait}s: {e}", self.turn_num, self.turn_retries
-                    );
-                    self.plug.log(
-                        log::Level::Info,
-                        &format!("{prefix}retry: transient error, backing off {wait}s"),
-                    );
+                    ));
+                    self.hook_log(&format!(
+                        "{prefix}retry: transient error, backing off {wait}s"
+                    ));
                     if retry_backoff(cancel, wait).await {
-                        log::info!(
-                            "agent_loop: cancelled during retry backoff (label={})",
-                            prefix
-                        );
-                        self.plug.log(
-                            log::Level::Info,
-                            &format!("{prefix}exit: cancelled during retry backoff"),
-                        );
+                        self.hook_log(&format!("{prefix}exit: cancelled during retry backoff"));
                         return Err(cancelled_error("cancelled", &self.conv.messages()));
                     }
                     // Preserve the pending one-turn state only when
@@ -515,10 +510,9 @@ impl LoopState {
     ) -> CompletionRequest {
         let script = self.conv.render_turn(
             &self.stage_prompt,
-            &self.contexts,
             self.turn_num,
             nested,
-            self.plug.read_scratchpad(),
+            self.hooks.read_scratchpad(),
             self.system_prompt.clone(),
         );
 
@@ -579,8 +573,8 @@ impl LoopState {
         loop {
             let item = tokio::select! {
                 _ = cancel.cancelled() => {
-                    log::info!("agent_loop: cancelled mid-stream (label={})", prefix);
-                    self.plug.log(log::Level::Info, &format!("{prefix}exit: cancelled mid-stream"));
+                    self.hook_log(&format!("agent_loop: cancelled mid-stream (label={})", prefix));
+                    self.hook_log(&format!("{prefix}exit: cancelled mid-stream"));
                     drop(response);
                     return Err(cancelled_error("cancelled", &stream_snapshot));
                 }
@@ -588,8 +582,8 @@ impl LoopState {
                     // Operator triggered debug — cancel the stream and enter
                     // interactive mode. The turn will be re-executed after
                     // the debug session ends.
-                    log::info!("agent_loop: paused mid-stream (label={})", prefix);
-                    self.plug.log(log::Level::Info, &format!("{prefix}pause: entering interactive mode (mid-stream)"));
+                    self.hook_log(&format!("agent_loop: paused mid-stream (label={})", prefix));
+                    self.hook_log(&format!("{prefix}pause: entering interactive mode (mid-stream)"));
                     drop(response);
                     paused_mid_stream = true;
                     if let Some(ref p) = self.pause {
@@ -636,8 +630,8 @@ impl LoopState {
                                 break; // exit the stream loop, execute one turn
                             }
                             Err(e) => {
-                                log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                                self.plug.log(log::Level::Info, &format!("{prefix}exit: operator bailed"));
+                                self.hook_log(&format!("agent_loop: exit (operator bailed, label={})", prefix));
+                                self.hook_log(&format!("{prefix}exit: operator bailed"));
                                 return Err(e);
                             }
                         }
@@ -655,26 +649,21 @@ impl LoopState {
                     if self.timeout_retries < timeout_retry_backoff.len() {
                         let wait = timeout_retry_backoff[self.timeout_retries];
                         self.timeout_retries += 1;
-                        log::info!(
+                        self.hook_log(&format!(
                             "agent_loop: idle timeout on turn {} (attempt {}), backing off {wait}s",
-                            self.turn_num,
-                            self.timeout_retries
-                        );
-                        self.plug.log(
-                            log::Level::Info,
-                            &format!("{prefix}retry: idle timeout, backing off {wait}s"),
-                        );
+                            self.turn_num, self.timeout_retries
+                        ));
+                        self.hook_log(&format!("{prefix}retry: idle timeout, backing off {wait}s"));
                         drop(response);
                         retry_timeout_turn = true;
                         if retry_backoff(cancel, wait).await {
-                            log::info!(
+                            self.hook_log(&format!(
                                 "agent_loop: cancelled during timeout backoff (label={})",
                                 prefix
-                            );
-                            self.plug.log(
-                                log::Level::Info,
-                                &format!("{prefix}exit: cancelled during timeout backoff"),
-                            );
+                            ));
+                            self.hook_log(&format!(
+                                "{prefix}exit: cancelled during timeout backoff"
+                            ));
                             return Err(cancelled_error("cancelled", &self.conv.messages()));
                         }
                         break;
@@ -697,24 +686,20 @@ impl LoopState {
                     {
                         let wait = turn_retry_backoff[self.turn_retries];
                         self.turn_retries += 1;
-                        log::info!(
+                        self.hook_log(&format!(
                             "agent_loop: retryable mid-stream error on turn {} (attempt {}), backing off {wait}s: {e}", self.turn_num, self.turn_retries
-                        );
-                        self.plug.log(
-                            log::Level::Info,
-                            &format!("{prefix}retry: transient error, backing off {wait}s"),
-                        );
+                        ));
+                        self.hook_log(&format!(
+                            "{prefix}retry: transient error, backing off {wait}s"
+                        ));
                         drop(response);
                         retry_turn = true;
                         if retry_backoff(cancel, wait).await {
-                            log::info!(
+                            self.hook_log(&format!(
                                 "agent_loop: cancelled during retry backoff (label={})",
                                 prefix
-                            );
-                            self.plug.log(
-                                log::Level::Info,
-                                &format!("{prefix}exit: cancelled during retry backoff"),
-                            );
+                            ));
+                            self.hook_log(&format!("{prefix}exit: cancelled during retry backoff"));
                             return Err(cancelled_error("cancelled", &self.conv.messages()));
                         }
                         break;
@@ -953,8 +938,7 @@ impl LoopState {
                     200
                 )
             );
-            self.plug
-                .log(log::Level::Info, &format!("{prefix}{tool_msg}"));
+            self.hook_log(&format!("{prefix}{tool_msg}"));
             if !nested {
                 let id_str = tc.id.to_string();
                 let tool_evt =
@@ -981,11 +965,7 @@ impl LoopState {
                     None
                 },
                 task_parent_contexts: if tc.function.name == "Task" {
-                    self.contexts
-                        .iter()
-                        .filter(|c| c.propagates_to_task())
-                        .map(|c| c.clone_box())
-                        .collect()
+                    self.conv.propagating_contexts()
                 } else {
                     Vec::new()
                 },
@@ -1053,8 +1033,7 @@ impl LoopState {
             std::future::pending::<()>().await;
         };
         let sem = Arc::new(Semaphore::new(tools::MAX_CONCURRENT_TOOLS));
-        let parent_contexts: Vec<Box<dyn MutableModelContext>> =
-            self.contexts.iter().map(|c| c.clone_box()).collect();
+        let parent_contexts: Vec<Box<dyn MutableModelContext>> = self.conv.context_snapshot();
         let exec_fut = join_all(jobs.iter().map(|j| {
             let ctx = &ctx;
             let sem = sem.clone();
@@ -1089,8 +1068,8 @@ impl LoopState {
                 // turn immediately. This is what lets run_chat_turn::finish
                 // re-insert the chat gremlin without waiting for every tool
                 // to complete.
-                log::info!("agent_loop: cancelled mid-tool (label={})", prefix);
-                self.plug.log(log::Level::Info, &format!("{prefix}exit: cancelled mid-tool"));
+                self.hook_log(&format!("agent_loop: cancelled mid-tool (label={})", prefix));
+                self.hook_log(&format!("{prefix}exit: cancelled mid-tool"));
                 discard_tool_output(&mut self.live_output_rx);
                 return Err(cancelled_error("cancelled", &self.conv.messages()));
             }
@@ -1098,8 +1077,8 @@ impl LoopState {
                 // Operator triggered debug mid-tool — drop the join_all future
                 // (cancels pending tool futures). Completed tool side effects
                 // (files written, bash commands run) are not unwound.
-                log::info!("agent_loop: paused mid-tool (label={})", prefix);
-                self.plug.log(log::Level::Info, &format!("{prefix}pause: entering interactive mode (mid-tool)"));
+                self.hook_log(&format!("agent_loop: paused mid-tool (label={})", prefix));
+                self.hook_log(&format!("{prefix}pause: entering interactive mode (mid-tool)"));
                 discard_tool_output(&mut self.live_output_rx);
                 if let Some(ref p) = self.pause {
                     p.reset();
@@ -1148,8 +1127,8 @@ impl LoopState {
                             return Ok(ToolDispatchOutcome::ReexecuteTurn);
                         }
                         Err(e) => {
-                            log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                            self.plug.log(log::Level::Info, &format!("{prefix}exit: operator bailed"));
+                            self.hook_log(&format!("agent_loop: exit (operator bailed, label={})", prefix));
+                            self.hook_log(&format!("{prefix}exit: operator bailed"));
                             return Err(e);
                         }
                     }
@@ -1203,8 +1182,7 @@ impl LoopState {
         let mut result_msgs = Vec::new();
         for (job, (output, child_contexts)) in jobs.into_iter().zip(results) {
             let result_msg = format!("result: {}", trunc(&output, 200));
-            self.plug
-                .log(log::Level::Info, &format!("{prefix}{result_msg}"));
+            self.hook_log(&format!("{prefix}{result_msg}"));
             if !nested {
                 let result_evt = tool_result_event(&job.id, &output);
                 write_raw(raw, &result_evt);
@@ -1239,12 +1217,8 @@ impl LoopState {
                 // Phase 1: observe — record tool results into every context.
                 // Invalidation is deferred to finalize_turn below to prevent
                 // concurrent tool batches from racing reads against writes.
-                let mut v = Vec::with_capacity(self.contexts.len());
-                for ctx in &mut self.contexts {
-                    ctx.observe_tool(self.turn_num, &job.name, &job.args, &output);
-                    v.push(ctx.tool_result_extra(self.turn_num, &job.name, &job.args, &output));
-                }
-                v
+                self.conv
+                    .observe_tool_results(self.turn_num, &job.name, &job.args, &output)
             } else {
                 Vec::new()
             };
@@ -1258,20 +1232,7 @@ impl LoopState {
             // child context joins only the parent context of the same
             // type, etc. — no silent cross-type no-op calls.
             if job.name == "Task" && !child_contexts.is_empty() {
-                for child_ctx in &child_contexts {
-                    let child_tid = child_ctx.as_any().type_id();
-                    for parent_ctx in &mut self.contexts {
-                        if parent_ctx.as_any().type_id() == child_tid {
-                            parent_ctx.join(child_ctx.as_ref());
-                        }
-                    }
-                }
-                for parent_ctx in &mut self.contexts {
-                    let text = parent_ctx.new_observations_text();
-                    if !text.is_empty() {
-                        task_observations.push(text);
-                    }
-                }
+                task_observations = self.conv.join_child_contexts(&child_contexts);
             }
             let annotated = extra.iter().flatten().fold(String::new(), |mut acc, s| {
                 if !acc.is_empty() {
@@ -1298,9 +1259,7 @@ impl LoopState {
         // Phase 2: finalize — apply deferred invalidations for every context.
         // For ledger contexts this processes pending_mutations (Write/Edit paths)
         // and captures the per-turn transcript block.
-        for ctx in &mut self.contexts {
-            ctx.finalize_turn(self.turn_num);
-        }
+        self.conv.finalize_contexts(self.turn_num);
         self.turns += job_count;
         // Every tool result lands in history so the results stay adjacent to
         // the assistant tool_calls message. Context content ([seen] block)
@@ -1346,22 +1305,23 @@ impl LoopState {
                         // Fall through to execute one turn.
                     }
                     Err(e) => {
-                        log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                        self.plug
-                            .log(log::Level::Info, &format!("{prefix}exit: operator bailed"));
+                        self.hook_log(&format!(
+                            "agent_loop: exit (operator bailed, label={})",
+                            prefix
+                        ));
+                        self.hook_log(&format!("{prefix}exit: operator bailed"));
                         return Err(e);
                     }
                 }
             } else if self.pause.as_ref().is_some_and(|p| p.is_paused()) {
                 // Pause token was triggered — enter interactive mode.
-                log::info!(
+                self.hook_log(&format!(
                     "agent_loop: pause token detected at turn boundary (label={})",
                     prefix
-                );
-                self.plug.log(
-                    log::Level::Info,
-                    &format!("{prefix}pause: entering interactive mode (turn boundary)"),
-                );
+                ));
+                self.hook_log(&format!(
+                    "{prefix}pause: entering interactive mode (turn boundary)"
+                ));
                 if let Some(ref p) = self.pause {
                     p.reset();
                 }
@@ -1393,9 +1353,11 @@ impl LoopState {
                         // Fall through to execute one turn.
                     }
                     Err(e) => {
-                        log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                        self.plug
-                            .log(log::Level::Info, &format!("{prefix}exit: operator bailed"));
+                        self.hook_log(&format!(
+                            "agent_loop: exit (operator bailed, label={})",
+                            prefix
+                        ));
+                        self.hook_log(&format!("{prefix}exit: operator bailed"));
                         return Err(e);
                     }
                 }
@@ -1476,11 +1438,11 @@ impl LoopState {
 
         if !reasoning.is_empty() {
             let msg = format!("think: {}", trunc(reasoning, 200));
-            self.plug.log(log::Level::Info, &format!("{prefix}{msg}"));
+            self.hook_log(&format!("{prefix}{msg}"));
         }
         if !text.is_empty() {
             let msg = format!("text: {}", trunc(text, 200));
-            self.plug.log(log::Level::Info, &format!("{prefix}{msg}"));
+            self.hook_log(&format!("{prefix}{msg}"));
         }
         if !nested && !text.is_empty() {
             write_raw(raw, &assistant_text_event(text));
@@ -1500,7 +1462,6 @@ impl LoopState {
             text,
             tool_calls,
             turn_usage,
-            &self.plug,
         );
         Ok(())
     }
@@ -1557,7 +1518,7 @@ impl LoopState {
                          Try again — this time either use tools, or call Done. Never both.",
                     ),
                 );
-                self.finalize_contexts(self.turn_num);
+                self.conv.finalize_contexts(self.turn_num);
                 return Ok(DoneDecision::RetryNeeded);
             }
             (Some(done_tc), false) => {
@@ -1569,10 +1530,7 @@ impl LoopState {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                self.plug.log(
-                    log::Level::Info,
-                    &format!("{prefix}tool: Done {}", trunc(&done_summary, 200)),
-                );
+                self.hook_log(&format!("{prefix}tool: Done {}", trunc(&done_summary, 200)));
                 if !nested && !expected_artifact_paths.is_empty() {
                     let missing = missing_artifacts(expected_artifact_paths);
                     if !missing.is_empty() && self.reminder_budget > 0 {
@@ -1600,7 +1558,7 @@ impl LoopState {
                                 )
                             },
                         );
-                        self.finalize_contexts(self.turn_num);
+                        self.conv.finalize_contexts(self.turn_num);
                         return Ok(DoneDecision::RetryNeeded);
                     }
                 }
@@ -1620,7 +1578,7 @@ impl LoopState {
                     self.total_reasoning_tokens,
                 );
                 if !nested {
-                    emit_final(prefix, self.turns, "", &self.plug);
+                    emit_final(prefix, self.turns, "");
                     emit_summary(
                         prefix,
                         self.turn_num,
@@ -1630,7 +1588,6 @@ impl LoopState {
                         self.total_cached_tokens,
                         self.total_cache_creation_tokens,
                         self.total_reasoning_tokens,
-                        &self.plug,
                     );
                 }
                 // Emit Done via stream_events. Nested loops skip this — only
@@ -1662,8 +1619,8 @@ impl LoopState {
                     captured,
                     usage,
                     Some(self.conv.clone_box()),
-                    Some(self.context_file_observations().unwrap_or_default()),
-                    self.contexts.iter().map(|c| c.clone_box()).collect(),
+                    Some(self.conv.file_observations().unwrap_or_default()),
+                    self.conv.context_snapshot(),
                 ))));
             }
             _ => {}
@@ -1698,7 +1655,7 @@ impl LoopState {
             log::debug!("reasoning-only turn: turn={} — continuing", self.turn_num);
             self.conv.record_turn("", reasoning_items, &[]);
             self.conv.set_next_prompt("Continue.");
-            self.finalize_contexts(self.turn_num);
+            self.conv.finalize_contexts(self.turn_num);
             return EmptyTurnAction::ContinueLoop;
         }
 
@@ -1715,11 +1672,11 @@ impl LoopState {
             let missing = missing_artifacts(expected_artifact_paths);
             if !missing.is_empty() {
                 self.reminder_budget -= 1;
-                log::info!(
+                self.hook_log(&format!(
                     "reminder: {} missing artifact(s) — nudging agent (remaining_budget={})",
                     missing.len(),
                     self.reminder_budget,
-                );
+                ));
                 self.conv.record_turn(text, reasoning_items, &[]);
                 let reminder = artifact_reminder(&missing);
                 write_raw(
@@ -1730,7 +1687,7 @@ impl LoopState {
                     evts.push(serde_json::json!({"type": "reminder", "message": reminder}));
                 }
                 self.conv.set_next_prompt(&reminder);
-                self.finalize_contexts(self.turn_num);
+                self.conv.finalize_contexts(self.turn_num);
                 return EmptyTurnAction::ContinueLoop;
             }
         }
@@ -1738,10 +1695,10 @@ impl LoopState {
         // Completion nudge — prompt the model to call Done.
         if !text.is_empty() && self.completion_nudge_budget > 0 {
             self.completion_nudge_budget -= 1;
-            log::info!(
+            self.hook_log(&format!(
                 "empty turn — nudging agent (remaining_budget={})",
                 self.completion_nudge_budget,
-            );
+            ));
             let nudge_msg = "You produced text but no tool calls. If your work is complete, \
                  call the Done tool. If you still need to make changes, use the \
                  appropriate tool now.";
@@ -1754,7 +1711,7 @@ impl LoopState {
             }
             self.conv.record_turn(text, reasoning_items, &[]);
             self.conv.set_next_prompt(nudge_msg);
-            self.finalize_contexts(self.turn_num);
+            self.conv.finalize_contexts(self.turn_num);
             return EmptyTurnAction::ContinueLoop;
         }
 
@@ -1775,7 +1732,7 @@ impl LoopState {
             self.total_reasoning_tokens,
         );
         if !nested {
-            emit_final(prefix, self.turns, " (exhausted)", &self.plug);
+            emit_final(prefix, self.turns, " (exhausted)");
             emit_summary(
                 prefix,
                 self.turn_num,
@@ -1785,7 +1742,6 @@ impl LoopState {
                 self.total_cached_tokens,
                 self.total_cache_creation_tokens,
                 self.total_reasoning_tokens,
-                &self.plug,
             );
         }
         let artifact = self
@@ -1797,22 +1753,9 @@ impl LoopState {
             captured,
             usage,
             Some(self.conv.clone_box()),
-            Some(self.context_file_observations().unwrap_or_default()),
-            self.contexts.iter().map(|c| c.clone_box()).collect(),
+            Some(self.conv.file_observations().unwrap_or_default()),
+            self.conv.context_snapshot(),
         )))
-    }
-
-    /// Snapshot file observations from contexts for CompletedRun.
-    fn context_file_observations(&self) -> Option<FileObservations> {
-        self.contexts.iter().find_map(|ctx| ctx.file_observations())
-    }
-
-    /// Call finalize_turn on every context, used at every turn boundary
-    /// to maintain the transcript length invariant.
-    fn finalize_contexts(&mut self, turn: usize) {
-        for ctx in &mut self.contexts {
-            ctx.finalize_turn(turn);
-        }
     }
 
     /// Append the current assistant turn to the conversation history.
@@ -1830,7 +1773,7 @@ impl LoopState {
 pub(crate) async fn run_agent_loop(
     model: GremlinsModel,
     prompt: &str,
-    ctx: RunContext,
+    mut ctx: RunContext,
     cancel: Arc<CancelToken>,
     opts: LoopOpts<'_>,
     interactive: Option<InteractiveSession>,
@@ -1866,14 +1809,10 @@ pub(crate) async fn run_agent_loop(
         cwd_display,
         trunc(reasoning_effort.unwrap_or("default"), 50)
     );
-    ctx.plug
-        .log(log::Level::Info, &format!("{prefix}{log_line}"));
+    log::info!("{prefix}{log_line}");
 
     if cwd.is_none() {
-        ctx.plug.log(
-            log::Level::Info,
-            &format!("{prefix}warning: no cwd set for worktree enforcement"),
-        );
+        log::info!("{prefix}warning: no cwd set for worktree enforcement");
     }
 
     let mut raw = raw_path
@@ -1984,10 +1923,11 @@ pub(crate) async fn run_agent_loop(
         &ctx.expected_artifact_paths,
         ctx.reminder_budget,
         ctx.completion_nudge_budget,
-        &ctx.plug,
+        &ctx.hooks,
         interactive,
         tool_output_rx,
         ctx.prepopulated_conversation.clone(),
+        std::mem::take(&mut ctx.contexts),
     )
     .await
 }
@@ -2013,7 +1953,7 @@ pub(crate) async fn run_agent_loop_nested(
     max_tokens: Option<u64>,
     extra: Option<serde_json::Value>,
     preserve_reasoning_in_history: bool,
-    prepopulated_conversation: Option<Box<dyn Conversation>>,
+    mut prepopulated_conversation: Option<Box<dyn Conversation>>,
     mut parent_contexts: Vec<Box<dyn MutableModelContext>>,
 ) -> Result<CompletedRun, ClientError> {
     let opts = LoopOpts {
@@ -2052,26 +1992,28 @@ pub(crate) async fn run_agent_loop_nested(
     // Forward nested-loop log lines to the optional channel so callers
     // (tests, debug tooling) can observe task begin/turn events without
     // subscribing to the process-wide logger.
-    let mut plug = LoopPlug::new();
-    if !parent_contexts.is_empty() {
-        // Reset transcript state so each seeded context starts fresh
-        // in the child loop. The child's own turns populate new
-        // transcript entries indexed from 0, independent of the
-        // parent's turn numbering.
-        for ctx in &mut parent_contexts {
-            ctx.clear_transcript();
-        }
-        plug.register_contexts(parent_contexts);
-    }
+    let mut hooks = LoopHooks::new();
     if let Some(log_tx) = nested_tool_ctx.log_tx.clone() {
-        plug.register_logger(move |_level, msg| {
+        hooks.register_logger(move |msg| {
             let _ = log_tx.send(msg.to_string());
         });
     }
-    plug.log(
-        log::Level::Info,
-        &format!("{prefix}task: begin (max_turns={max_turns})"),
-    );
+    let has_fork_conv = prepopulated_conversation.is_some();
+    if let Some(conv) = prepopulated_conversation.as_mut() {
+        // Fork children carry their own cloned contexts; reset their
+        // transcript state so the child turns start at index 0.
+        conv.clear_context_transcripts();
+    } else if !parent_contexts.is_empty() {
+        // Scout/Implement children are seeded from the parent's propagated
+        // contexts; clear those before the child loop starts numbering its
+        // own turns.
+        for ctx in &mut parent_contexts {
+            ctx.clear_transcript();
+        }
+    }
+    if let Some(log_tx) = &nested_tool_ctx.log_tx {
+        let _ = log_tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
+    }
     let result = run_agent_loop_core(
         &model,
         prompt,
@@ -2089,13 +2031,25 @@ pub(crate) async fn run_agent_loop_nested(
         &[],
         0,
         completion_nudge_budget,
-        &plug,
+        &hooks,
         None,
         None,
         prepopulated_conversation,
+        // Fork children carry their own contexts (cloned at fork time in
+        // StandardConversation::fork). Scout/Implement children instead seed
+        // from the parent's propagated contexts. Skipping parent_contexts here
+        // for a fork child is safe because the prepopulated conversation
+        // already has `contexts` populated.
+        if has_fork_conv {
+            Vec::new()
+        } else {
+            parent_contexts
+        },
     )
     .await;
-    plug.log(log::Level::Info, &format!("{prefix}task: end"));
+    if let Some(log_tx) = &nested_tool_ctx.log_tx {
+        let _ = log_tx.send(format!("{prefix}task: end"));
+    }
     result
 }
 
@@ -2294,10 +2248,11 @@ async fn run_agent_loop_core(
     expected_artifact_paths: &[PathBuf],
     reminder_budget: usize,
     completion_nudge_budget: usize,
-    plug: &LoopPlug,
+    hooks: &LoopHooks,
     interactive: Option<InteractiveSession>,
     tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
     prepopulated_conversation: Option<Box<dyn Conversation>>,
+    contexts: Vec<Box<dyn MutableModelContext>>,
 ) -> Result<CompletedRun, ClientError> {
     let mut state = LoopState::new(
         system_prompt,
@@ -2310,7 +2265,8 @@ async fn run_agent_loop_core(
         max_turns,
         prefix,
         opts.preserve_reasoning_in_history,
-        plug,
+        contexts,
+        hooks,
     );
     let loop_start = Instant::now();
     let turn_retry_backoff = crate::config::turn_retry_backoff();
@@ -2318,10 +2274,7 @@ async fn run_agent_loop_core(
     while state.remaining_turns > 0 {
         if cancel.is_cancelled() {
             log::info!("agent_loop: cancelled before turn (label={})", prefix);
-            plug.log(
-                log::Level::Info,
-                &format!("{prefix}exit: cancelled before turn"),
-            );
+            log::info!("{prefix}exit: cancelled before turn");
             return Err(cancelled_error("cancelled", &state.conv.messages()));
         }
 
@@ -2395,9 +2348,9 @@ async fn run_agent_loop_core(
             .as_ref()
             .map(|ts| (ts.prompt_tokens, ts.cached_input_tokens))
             .unwrap_or((None, None));
-        plug.emit_token_usage(totals.clone(), last_prompt, last_cached);
+        hooks.emit_token_usage(totals.clone(), last_prompt, last_cached);
 
-        emit_turn_stats(prefix, state.turn_num, turn_stats.as_ref(), &totals, plug);
+        emit_turn_stats(prefix, state.turn_num, turn_stats.as_ref(), &totals);
 
         state
             .emit_turn_artifacts(
@@ -2490,7 +2443,7 @@ async fn run_agent_loop_core(
         } else {
             ""
         };
-        emit_final(prefix, state.turns, suffix, plug);
+        emit_final(prefix, state.turns, suffix);
         emit_summary(
             prefix,
             state.turn_num,
@@ -2500,25 +2453,18 @@ async fn run_agent_loop_core(
             state.total_cached_tokens,
             state.total_cache_creation_tokens,
             state.total_reasoning_tokens,
-            plug,
         );
     }
 
     if state.timed_out {
         log::info!("agent_loop: exit (stream idle timeout, label={})", prefix);
-        plug.log(
-            log::Level::Info,
-            &format!("{prefix}exit: stream idle timeout"),
-        );
+        log::info!("{prefix}exit: stream idle timeout");
         if state.exhausted_timeout_retries {
             log::error!(
                 "agent_loop: exhausted turn-level timeout retries, giving up (label={})",
                 prefix
             );
-            plug.log(
-                log::Level::Info,
-                &format!("{prefix}exit: exhausted turn-level timeout retries"),
-            );
+            log::info!("{prefix}exit: exhausted turn-level timeout retries");
             return Err(ClientError::RetryExhausted {
                 message: "exhausted turn-level timeout retries".into(),
             });
@@ -2529,17 +2475,14 @@ async fn run_agent_loop_core(
     }
     if let Some(err) = state.stream_error {
         log::info!("agent_loop: exit (stream error, label={})", prefix);
-        plug.log(log::Level::Info, &format!("{prefix}exit: stream error"));
+        log::info!("{prefix}exit: stream error");
         if state.exhausted_turn_retries {
             log::error!(
                 "agent_loop: exhausted turn-level retries ({} attempts), giving up (label={}): {err}",
                 turn_retry_backoff.len() + 1,
                 prefix
             );
-            plug.log(
-                log::Level::Info,
-                &format!("{prefix}exit: exhausted turn-level retries"),
-            );
+            log::info!("{prefix}exit: exhausted turn-level retries");
             return Err(ClientError::RetryExhausted {
                 message: format!(
                     "exhausted turn-level retries ({} attempts): {err}",
@@ -2551,10 +2494,7 @@ async fn run_agent_loop_core(
         return Err(classify(err));
     }
     log::info!("agent_loop: exit (exceeded max turns, label={})", prefix);
-    plug.log(
-        log::Level::Info,
-        &format!("{prefix}exit: exceeded max turns ({max_turns})"),
-    );
+    log::info!("{prefix}exit: exceeded max turns ({max_turns})");
     Err(ClientError::Runtime {
         message: format!("exceeded max turns ({max_turns})"),
     })
@@ -2607,20 +2547,14 @@ pub(crate) fn write_raw(raw: &mut Option<std::fs::File>, evt: &serde_json::Value
 ///
 /// This is always logged regardless of the telemetry gate; timing and output
 /// byte-ratio extras live behind the separate [`emit_turn_metrics`] path.
-fn emit_turn_stats(
-    prefix: &str,
-    turn: usize,
-    stats: Option<&TurnStats>,
-    totals: &UsageStats,
-    plug: &LoopPlug,
-) {
+fn emit_turn_stats(prefix: &str, turn: usize, stats: Option<&TurnStats>, totals: &UsageStats) {
     let payload = serde_json::json!({
         "type": "turn_stats",
         "turn": turn,
         "stats": stats,
         "totals": totals,
     });
-    plug.log(log::Level::Info, &format!("{prefix}{payload}"));
+    log::info!("{prefix}{payload}");
 }
 
 /// Emit per-turn telemetry: timing, token counts, cache hit ratio, reasoning ratio.
@@ -2635,7 +2569,6 @@ fn emit_turn_metrics(
     text: &str,
     tool_calls: &[ToolCall],
     usage: Option<&Usage>,
-    plug: &LoopPlug,
 ) {
     if !crate::config::telemetry_enabled() {
         return;
@@ -2691,7 +2624,7 @@ fn emit_turn_metrics(
         reasoning_tok,
         reasoning_byte_ratio,
     );
-    plug.log(log::Level::Info, &format!("{prefix}{msg}"));
+    log::info!("{prefix}{msg}");
 }
 
 /// Emit stage-end telemetry summary (always emitted, not gated by GREMLINS_TELEMETRY).
@@ -2705,7 +2638,6 @@ fn emit_summary(
     total_cached: Option<u64>,
     total_cache_creation: Option<u64>,
     total_reasoning: Option<u64>,
-    plug: &LoopPlug,
 ) {
     let wall = loop_start.elapsed();
     let total_prompt_u = total_prompt.unwrap_or(0);
@@ -2752,12 +2684,12 @@ fn emit_summary(
         total_cache_creation.unwrap_or(0),
         reasoning_pct,
     );
-    plug.log(log::Level::Info, &format!("{prefix}{msg}"));
+    log::info!("{prefix}{msg}");
 }
 
-pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str, plug: &LoopPlug) {
+pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str) {
     let msg = format!("final: turns={turns} cost=not-reported{suffix}");
-    plug.log(log::Level::Info, &format!("{prefix}{msg}"));
+    log::info!("{prefix}{msg}");
 }
 
 #[cfg(test)]
@@ -2777,6 +2709,57 @@ mod tests {
 
     fn gm(model: DynModel<Completion>) -> GremlinsModel {
         GremlinsModel::new(model, crate::config::DEFAULT_MAX_PROMPT_BYTES)
+    }
+
+    /// Global-log sink used by `loop_done_emits_log_and_ledger` to observe the
+    /// `agent_loop` `log::info!` lines that used to ride the old `LoopPlug`
+    /// logger callback. Tests install it via [`log_guard`].
+    struct LogSink {
+        tx: std::sync::mpsc::Sender<String>,
+    }
+
+    impl LogSink {
+        fn new() -> (Self, std::sync::mpsc::Receiver<String>) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            (Self { tx }, rx)
+        }
+    }
+
+    impl log::Log for LogSink {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            let _ = self.tx.send(record.args().to_string());
+        }
+
+        fn flush(&self) {}
+    }
+
+    /// Install `sink` as the process-wide logger for the duration of one test
+    /// and restore the prior log level once the guard drops.  Guards a global
+    /// mutex so at most one test installs a logger at a time — `log` only
+    /// supports one boxed logger per process lifetime, so serial access is
+    /// the only safe option.
+    struct LogGuard {
+        prior_level: log::LevelFilter,
+    }
+
+    static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn log_guard(sink: LogSink) -> LogGuard {
+        let _lock = LOG_LOCK.lock().unwrap();
+        let prior_level = log::max_level();
+        log::set_max_level(log::LevelFilter::Trace);
+        log::set_boxed_logger(Box::new(sink)).ok();
+        LogGuard { prior_level }
+    }
+
+    impl Drop for LogGuard {
+        fn drop(&mut self) {
+            log::set_max_level(self.prior_level);
+        }
     }
 
     #[test]
@@ -3361,7 +3344,8 @@ mod tests {
                 active_skills: None,
                 token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
                 scratchpad_path: None,
-                plug: None,
+                hooks: None,
+                contexts: vec![],
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
@@ -3370,13 +3354,12 @@ mod tests {
             completion_nudge_budget: 0,
             stream_events: None,
             prepopulated_conversation: None,
-            plug: {
+            hooks: LoopHooks::new(),
+            contexts: {
                 // Seed a ToolLedger so tests that assert on ledger behavior work.
-                let mut plug = LoopPlug::new();
                 let mut ledger = ToolLedger::new();
                 ledger.capture_turn_transcript(0);
-                plug.register_contexts(vec![Box::new(ledger) as Box<dyn MutableModelContext>]);
-                plug
+                vec![Box::new(ledger) as Box<dyn MutableModelContext>]
             },
         }
     }
@@ -6443,10 +6426,11 @@ mod tests {
                 &[],
                 0,
                 0,
-                &LoopPlug::new(),
+                &LoopHooks::new(),
                 Some(session),
                 None,
                 None,
+                Vec::new(),
             )
             .await
         });
@@ -6554,10 +6538,11 @@ mod tests {
                 &[],
                 0,
                 0,
-                &LoopPlug::new(),
+                &LoopHooks::new(),
                 Some(session),
                 None,
                 None,
+                Vec::new(),
             )
             .await
         });
@@ -6652,10 +6637,11 @@ mod tests {
                 &[],
                 0,
                 0,
-                &LoopPlug::new(),
+                &LoopHooks::new(),
                 Some(session),
                 None,
                 None,
+                Vec::new(),
             )
             .await
         });
@@ -6739,10 +6725,11 @@ mod tests {
                 &[],
                 0,
                 0,
-                &LoopPlug::new(),
+                &LoopHooks::new(),
                 Some(session),
                 None,
                 None,
+                Vec::new(),
             )
             .await
         });
@@ -6877,11 +6864,8 @@ mod tests {
         let tool_defs = tools::tool_definitions(None, false);
         let cancel = CancelToken::new();
         let opts = loop_opts(None);
-        let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let mut plug = LoopPlug::new();
-        plug.register_logger(move |_level, msg| {
-            let _ = log_tx.send(msg.to_string());
-        });
+        let (sink, log_rx) = LogSink::new();
+        let _guard = log_guard(sink);
 
         let result = run_agent_loop_core(
             &model,
@@ -6900,10 +6884,11 @@ mod tests {
             &[],
             0,
             0,
-            &plug,
+            &LoopHooks::new(),
             None,
             None,
             None,
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -6986,10 +6971,11 @@ mod tests {
             &[],
             0,
             0,
-            &LoopPlug::new(),
+            &LoopHooks::new(),
             None,
             None,
             None,
+            Vec::new(),
         )
         .await
         .unwrap();
