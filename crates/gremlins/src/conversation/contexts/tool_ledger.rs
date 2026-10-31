@@ -11,7 +11,7 @@ use crate::clients::protocol::{FileObservation, FileObservations};
 /// content and can invalidate stale observations after writes.
 ///
 /// Directory landscape rendering moved to
-/// [`crate::clients_plugins::landscape_context::LandscapeContext`]; this struct is now a
+/// [`crate::conversation::contexts::landscape::LandscapeContext`]; this struct is now a
 /// pure read/grep/write/edit dedup index.
 #[derive(Clone)]
 struct LedgerReadEntry {
@@ -207,7 +207,7 @@ impl ToolLedger {
     /// Apply write/edit invalidation for a file path.  Nukes Read entries
     /// for that file and clears all Greps (any write can invalidate a grep
     /// result).  The landscape cache is managed independently by
-    /// [`crate::clients_plugins::landscape_context::LandscapeContext`].
+    /// [`crate::conversation::contexts::landscape::LandscapeContext`].
     pub(crate) fn invalidate_after_write(&mut self, file_path: &str) {
         self.reads.retain(|(fp, _, _), _| fp != file_path);
         self.greps.clear();

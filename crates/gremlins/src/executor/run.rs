@@ -37,8 +37,8 @@ use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::completion::Message;
 
 use crate::clients::model_context::MutableModelContext;
-use crate::clients_plugins::{
-    landscape_context::LandscapeContext, signal_context::SignalMapContext, tool_ledger::ToolLedger,
+use crate::conversation::contexts::{
+    landscape::LandscapeContext, signal::SignalMapContext, tool_ledger::ToolLedger,
 };
 
 // ---------------------------------------------------------------------------
@@ -790,7 +790,7 @@ async fn run_agent(
     };
 
     let prepopulated_conversation = verbatim_history.map(|msgs| {
-        Box::new(crate::clients::conversation::StandardConversation::new(
+        Box::new(crate::conversation::standard::StandardConversation::new(
             "",
             false,
             Some(msgs),

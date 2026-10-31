@@ -10,12 +10,13 @@ use std::hash::{Hash, Hasher};
 use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
 use rig_core::completion::Message;
 
-use super::findings::FindingsLedger;
-use super::format::assistant_tool_message;
-use super::model_context::{
+use crate::clients::findings::FindingsLedger;
+use crate::clients::format::assistant_tool_message;
+use crate::clients::model_context::{
     compose_model_transcript, Conversation, MutableModelContext, RunArtifact, TurnScript,
 };
-use super::protocol::FileObservations;
+use crate::clients::protocol::FileObservations;
+use crate::conversation::done::{done_user_message, user_message_text};
 use crate::task_kind::TaskKind;
 
 /// The standard [`Conversation`] implementation.
@@ -454,46 +455,5 @@ impl Conversation for StandardConversation {
         for ctx in &mut self.contexts {
             ctx.clear_transcript();
         }
-    }
-}
-
-/// Extract the concatenated text blocks from a user message.
-pub(crate) fn user_message_text(message: &Message) -> String {
-    use rig_core::completion::message::UserContent;
-    match message {
-        Message::User { content } => content
-            .iter()
-            .filter_map(|item| match item {
-                UserContent::Text(text) => Some(text.text.clone()),
-                _ => None,
-            })
-            .collect(),
-        _ => String::new(),
-    }
-}
-
-/// Build the merged Done action-ledger + tool_result user message.
-pub(crate) fn done_user_message(
-    ledger: &str,
-    call_id: rig_core::completion::message::CallId,
-    tool_name: rig_core::completion::message::ToolName,
-    result_text: &str,
-) -> Message {
-    use rig_core::completion::message::{Text, ToolResult, ToolResultContent, UserContent};
-    Message::User {
-        content: vec![
-            UserContent::ToolResult(ToolResult {
-                call: call_id,
-                name: tool_name,
-                content: vec![ToolResultContent::Text(Text {
-                    text: result_text.to_string(),
-                    additional_params: None,
-                })],
-            }),
-            UserContent::Text(Text {
-                text: ledger.to_string(),
-                additional_params: None,
-            }),
-        ],
     }
 }

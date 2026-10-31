@@ -19,7 +19,6 @@ use super::interactive::{
 };
 
 use super::cancel::{default_classify, is_retryable, CancelToken, ErrorClassifier};
-use super::conversation::{done_user_message, StandardConversation};
 use super::error::ClientError;
 use super::format::{
     apply_chunk, assistant_tool_message, enrich_log_line, format_tool_call, format_tool_call_parts,
@@ -30,6 +29,8 @@ use super::model_context::{Conversation, MutableModelContext};
 use super::plug::LoopHooks;
 use super::protocol::{add_opt, CompletedRun, FileObservations, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
+use crate::conversation::done::done_user_message;
+use crate::conversation::standard::StandardConversation;
 use crate::task_kind::TaskKind;
 
 // ── Architecture ────────────────────────────────────────────────────────────
@@ -2695,10 +2696,10 @@ pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clients::conversation::user_message_text;
     use crate::clients::format::{key_arg, ledger_key_arg};
     use crate::clients::interactive::InteractiveChannels;
-    use crate::clients_plugins::tool_ledger::ToolLedger;
+    use crate::conversation::contexts::tool_ledger::ToolLedger;
+    use crate::conversation::done::user_message_text;
     use http::StatusCode;
     use rig_core::driver::DynModel;
     use rig_core::message::{Issuer, Reasoning, ReasoningContent, ToolFunction, UserContent};

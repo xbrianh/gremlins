@@ -644,7 +644,7 @@ mod tests {
         let parent_history = vec![Message::user("earlier parent turn")];
         let parent_conversation: Option<Box<dyn crate::clients::model_context::Conversation>> =
             Some(Box::new(
-                crate::clients::conversation::StandardConversation::new(
+                crate::conversation::standard::StandardConversation::new(
                     "",
                     false,
                     Some(parent_history),

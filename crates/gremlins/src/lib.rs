@@ -3,8 +3,8 @@
 pub mod artifacts;
 pub mod builders;
 pub mod clients;
-pub(crate) mod clients_plugins;
 pub mod config;
+pub(crate) mod conversation;
 pub mod core;
 pub mod definition;
 pub mod executor;
