@@ -57,7 +57,7 @@ pub(crate) type TaskFn = Arc<
     dyn Fn(
             TaskKind,
             String,
-            Option<Vec<rig_core::completion::Message>>,
+            Option<Box<dyn super::model_context::Conversation>>,
             Vec<Box<dyn super::model_context::MutableModelContext>>,
         ) -> TaskFuture
         + Send
@@ -119,9 +119,9 @@ pub(crate) struct AgentLoopRuntime {
     pub(crate) allowed_tools: Option<Vec<String>>,
     pub(crate) task_fn: Option<TaskFn>,
     pub(crate) audit_lock: Option<Arc<std::sync::Mutex<()>>>,
-    /// Point-in-time snapshot of the parent conversation, available to Task
-    /// tool calls (used only by `Fork`). `None` when unavailable.
-    pub(crate) parent_history: Option<Vec<rig_core::completion::Message>>,
+    /// Point-in-time fork-parent conversation available to Task tool
+    /// invocations. Used only by `Fork`; `None` when unavailable.
+    pub(crate) conversation: Option<Box<dyn super::model_context::Conversation>>,
     /// Prefix prepended to tool call IDs emitted on the shared event stream.
     ///
     /// Nested Task conversations run on the parent's stream but reuse raw
@@ -661,7 +661,7 @@ pub(crate) async fn invoke_with_contexts(
                     };
                 };
                 let history = if kind == TaskKind::Fork {
-                    ctx.parent_history.clone()
+                    ctx.conversation.clone()
                 } else {
                     None
                 };
@@ -880,7 +880,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+            conversation: None,
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -1141,7 +1141,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+            conversation: None,
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -1182,7 +1182,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+            conversation: None,
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -1221,7 +1221,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+            conversation: None,
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -1666,7 +1666,7 @@ mod tests {
             allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+            conversation: None,
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -1698,7 +1698,7 @@ mod tests {
             allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+            conversation: None,
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -2649,7 +2649,7 @@ mod tests {
             allowed_tools: Some(vec!["Read".into()]),
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+            conversation: None,
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -3605,7 +3605,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+            conversation: None,
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -3644,7 +3644,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
-            parent_history: None,
+            conversation: None,
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -3681,7 +3681,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
-            parent_history: None,
+            conversation: None,
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -3725,7 +3725,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
-            parent_history: None,
+            conversation: None,
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -3765,7 +3765,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
-            parent_history: None,
+            conversation: None,
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -4217,7 +4217,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
-            parent_history: None,
+            conversation: None,
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -4253,7 +4253,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+            conversation: None,
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,

@@ -1,5 +1,3 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -7,12 +5,10 @@ use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use rig_core::completion::message::{
-    AssistantContent, CallId, Reasoning, Sealed, Text, ToolCall, ToolName, ToolResultContent,
-    UserContent,
+    AssistantContent, CallId, Reasoning, Sealed, ToolCall, ToolName,
 };
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
 use rig_core::error::ProviderError;
-use rig_core::message::ToolResult as ToolResultMsg;
 use rig_core::operation::Completion;
 use rig_core::streaming::{Item, StreamEvent, Streamed};
 use tokio::sync::{mpsc, Semaphore};
@@ -23,17 +19,18 @@ use super::interactive::{
 };
 
 use super::cancel::{default_classify, is_retryable, CancelToken, ErrorClassifier};
+use super::conversation::{done_user_message, StandardConversation};
 use super::error::ClientError;
-use super::findings::FindingsLedger;
 use super::format::{
     apply_chunk, assistant_tool_message, enrich_log_line, format_tool_call, format_tool_call_parts,
     trunc,
 };
 use super::model::{GremlinsModel, GremlinsModelError};
-use super::model_context::{compose_model_transcript, MutableModelContext};
+use super::model_context::{Conversation, MutableModelContext};
 use super::plug::LoopPlug;
 use super::protocol::{add_opt, CompletedRun, FileObservations, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
+use crate::task_kind::TaskKind;
 
 // ── Architecture ────────────────────────────────────────────────────────────
 // agent_loop.rs orchestrates a single agent turn-sequence:
@@ -164,8 +161,8 @@ pub(crate) struct RunContext {
     pub(crate) reminder_budget: usize,
     pub(crate) completion_nudge_budget: usize,
     pub(crate) stream_events: Option<StreamEventSender>,
-    /// Pre-populated message history carried into the loop's internal history.
-    pub(crate) prepopulated_messages: Option<Vec<Message>>,
+    /// Pre-populated conversation carried into the loop.
+    pub(crate) prepopulated_conversation: Option<Box<dyn Conversation>>,
     /// Inversion-of-control plug carrying cross-package dependencies.
     /// Defaults to a no-op plug when `None`.
     pub(crate) plug: LoopPlug,
@@ -188,7 +185,7 @@ impl RunContext {
             reminder_budget: crate::config::artifact_reminder_budget(),
             completion_nudge_budget: crate::config::completion_nudge_budget(),
             stream_events: params.stream_events.clone(),
-            prepopulated_messages: params.prepopulated_messages.clone(),
+            prepopulated_conversation: params.prepopulated_conversation.clone(),
             plug: params.plug.clone().unwrap_or_else(LoopPlug::new),
             params,
         }
@@ -230,19 +227,14 @@ struct LoopState {
     system_prompt: Option<String>,
     original_system_prompt: Option<String>,
     live_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
-    history: Vec<Message>,
-    next_prompt: Message,
-    current_turn_start: usize,
+    conv: Box<dyn Conversation>,
     turns: usize,
     turn_num: usize,
     turn_retries: usize,
     timeout_retries: usize,
-    final_text: String,
     timed_out: bool,
     exhausted_turn_retries: bool,
     exhausted_timeout_retries: bool,
-    turn_scratchpad_injected: bool,
-    last_scratchpad_hash: Option<u64>,
     stream_error: Option<ProviderError>,
     total_prompt_tokens: Option<u64>,
     total_completion_tokens: Option<u64>,
@@ -256,8 +248,6 @@ struct LoopState {
     /// `next_prompt` has been overwritten with "Continue.".
     stage_prompt: String,
     contexts: Vec<Box<dyn MutableModelContext>>,
-    findings_ledger: FindingsLedger,
-    turn_findings_injected: bool,
     interactive_active: bool,
     pending_run_one_turn: bool,
     cmd_rx: Option<mpsc::Receiver<InteractiveCommand>>,
@@ -266,7 +256,6 @@ struct LoopState {
     remaining_turns: usize,
     reminder_budget: usize,
     completion_nudge_budget: usize,
-    preserve_reasoning_in_history: bool,
     /// Inversion-of-control plug carrying log/scratchpad/debug/token-usage/contexts.
     plug: LoopPlug,
 }
@@ -337,7 +326,7 @@ impl LoopState {
     fn new(
         system_prompt: Option<String>,
         prompt: &str,
-        prepopulated_messages: Option<Vec<Message>>,
+        prepopulated_conversation: Option<Box<dyn Conversation>>,
         reminder_budget: usize,
         completion_nudge_budget: usize,
         interactive: Option<InteractiveSession>,
@@ -357,28 +346,37 @@ impl LoopState {
             .unwrap_or((None, None, None));
 
         let original_system_prompt = system_prompt.clone();
-        // `history` is the verbatim source of truth for the whole loop. The
-        // compacted request view is rebuilt around it but never replaces it.
-        let history: Vec<Message> = prepopulated_messages.unwrap_or_default();
-        let current_turn_start = history.len();
+
+        let mut conv = prepopulated_conversation.unwrap_or_else(|| {
+            let conv = plug.conversation.as_ref().map(|f| f());
+            conv.unwrap_or_else(|| {
+                Box::new(StandardConversation::new(
+                    prompt,
+                    preserve_reasoning_in_history,
+                    None,
+                ))
+            })
+        });
+        // Always apply the stage prompt so chat continuations (built by
+        // run.rs with an empty "" initial prompt) receive the stage
+        // instructions in their first user message.
+        conv.set_next_prompt(prompt);
+        // Chat continuations are built with preserve_reasoning=false
+        // hardcoded. Apply the run's actual setting here.
+        conv.set_preserve_reasoning(preserve_reasoning_in_history);
 
         Self {
             system_prompt,
             original_system_prompt,
             live_output_rx: tool_output_rx,
-            history,
-            next_prompt: Message::user(prompt.to_string()),
-            current_turn_start,
+            conv,
             turns: 0,
             turn_num: 0,
             turn_retries: 0,
             timeout_retries: 0,
-            final_text: String::new(),
             timed_out: false,
             exhausted_turn_retries: false,
             exhausted_timeout_retries: false,
-            turn_scratchpad_injected: false,
-            last_scratchpad_hash: None,
             stream_error: None,
             total_prompt_tokens: None,
             total_completion_tokens: None,
@@ -392,8 +390,6 @@ impl LoopState {
                 }
                 contexts
             },
-            findings_ledger: FindingsLedger::new(),
-            turn_findings_injected: false,
             interactive_active: false,
             pending_run_one_turn: false,
             cmd_rx,
@@ -403,7 +399,6 @@ impl LoopState {
             remaining_turns: max_turns,
             reminder_budget,
             completion_nudge_budget,
-            preserve_reasoning_in_history,
             plug: plug.clone(),
         }
     }
@@ -470,7 +465,7 @@ impl LoopState {
                             log::Level::Info,
                             &format!("{prefix}exit: cancelled during retry backoff"),
                         );
-                        return Err(cancelled_error("cancelled", &self.history));
+                        return Err(cancelled_error("cancelled", &self.conv.messages()));
                     }
                     // Preserve the pending one-turn state only when
                     // already interactive — otherwise an unconditional
@@ -518,91 +513,19 @@ impl LoopState {
         opts: &LoopOpts<'_>,
         nested: bool,
     ) -> CompletionRequest {
-        let request_messages = self.history.to_vec();
-
-        // If findings weren't injected this turn but the ledger has entries
-        // and the prior injection is missing from history, force
-        // re-injection so the model doesn't lose its discovered facts.
-        if !nested && !self.turn_findings_injected {
-            let findings_block = self.findings_ledger.format();
-            if !findings_block.is_empty() {
-                let in_request = request_messages
-                    .iter()
-                    .any(|msg| user_message_text(msg).contains("## Findings"))
-                    || user_message_text(&self.next_prompt).contains("## Findings");
-                if !in_request {
-                    let next_text = user_message_text(&self.next_prompt);
-                    let combined = format!("{next_text}\n\n{findings_block}");
-                    self.next_prompt = Message::user(combined);
-                    self.turn_findings_injected = true;
-                }
-            }
-        }
-
-        // If the scratchpad wasn't injected this turn (hash unchanged)
-        // but the prior injection is missing from history, force
-        // re-injection so the model doesn't lose its working memory.
-        if !nested && !self.turn_scratchpad_injected {
-            if let Some(content) = self.plug.read_scratchpad() {
-                if !content.trim().is_empty() {
-                    let in_request = request_messages
-                        .iter()
-                        .any(|msg| user_message_text(msg).contains("## Scratchpad"))
-                        || user_message_text(&self.next_prompt).contains("## Scratchpad");
-                    if !in_request {
-                        let mut hasher = DefaultHasher::new();
-                        content.hash(&mut hasher);
-                        self.last_scratchpad_hash = Some(hasher.finish());
-                        let next_text = user_message_text(&self.next_prompt);
-                        let combined = format!(
-                            "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
-                        );
-                        self.next_prompt = Message::user(combined);
-                        self.turn_scratchpad_injected = true;
-                    }
-                } else {
-                    self.last_scratchpad_hash = None;
-                }
-                // Note: when read_scratchpad() returns None, leave
-                // last_scratchpad_hash unchanged so a transient read
-                // failure won't cause redundant re-injection.
-            }
-        }
-
-        // Compose per-turn context transcripts into the request messages.
-        let composed = compose_model_transcript(
+        let script = self.conv.render_turn(
             &self.stage_prompt,
-            &request_messages,
-            &self.next_prompt,
             &self.contexts,
             self.turn_num,
-            self.current_turn_start,
+            nested,
+            self.plug.read_scratchpad(),
+            self.system_prompt.clone(),
         );
-        let (history_msgs, final_prompt) = composed
-            .split_last()
-            .map(|(last, rest)| (rest.to_vec(), last.clone()))
-            .unwrap_or_else(|| (vec![], self.next_prompt.clone()));
 
-        // Assemble system messages from contexts — trusted, always-accurate
-        // content that belongs in the system prompt rather than in user
-        // message transcript blocks.
-        let context_system_msgs: Vec<String> = self
-            .contexts
-            .iter()
-            .filter_map(|ctx| ctx.system_message())
-            .collect();
-
-        let combined_system = match (context_system_msgs.is_empty(), self.system_prompt.as_ref()) {
-            (true, None) => None,
-            (true, Some(sys)) => Some(sys.clone()),
-            (false, None) => Some(context_system_msgs.join("\n\n")),
-            (false, Some(sys)) => Some(format!("{}\n\n{}", context_system_msgs.join("\n\n"), sys)),
-        };
-
-        let mut builder = CompletionRequest::new(final_prompt)
-            .messages(history_msgs)
+        let mut builder = CompletionRequest::new(script.next_user_prompt)
+            .messages(script.messages)
             .tools(tool_defs.to_vec());
-        if let Some(ref sys) = combined_system {
+        if let Some(ref sys) = script.system_prompt {
             builder = builder.preamble(sys.clone());
         }
         if let Some(params) = opts.extra.clone() {
@@ -651,11 +574,7 @@ impl LoopState {
         // `next_prompt` and (as streaming progresses) accumulated
         // assistant content.  Plain `history` omits both because they
         // are only committed after a successful turn.
-        let mut stream_snapshot: Vec<Message> = {
-            let mut s = self.history.clone();
-            s.push(self.next_prompt.clone());
-            s
-        };
+        let mut stream_snapshot: Vec<Message> = self.conv.messages();
 
         loop {
             let item = tokio::select! {
@@ -695,8 +614,7 @@ impl LoopState {
                         };
                         match interactive_loop(
                             model,
-                            &mut self.history,
-                            &mut self.next_prompt,
+                            &mut *self.conv,
                             &mut session,
                             self.turn_num,
                         )
@@ -757,7 +675,7 @@ impl LoopState {
                                 log::Level::Info,
                                 &format!("{prefix}exit: cancelled during timeout backoff"),
                             );
-                            return Err(cancelled_error("cancelled", &self.history));
+                            return Err(cancelled_error("cancelled", &self.conv.messages()));
                         }
                         break;
                     }
@@ -797,7 +715,7 @@ impl LoopState {
                                 log::Level::Info,
                                 &format!("{prefix}exit: cancelled during retry backoff"),
                             );
-                            return Err(cancelled_error("cancelled", &self.history));
+                            return Err(cancelled_error("cancelled", &self.conv.messages()));
                         }
                         break;
                     }
@@ -935,7 +853,7 @@ impl LoopState {
             if !nested {
                 tool_ctx
                     .telemetry
-                    .send_stream_event(InteractiveEvent::StreamReset, cancel, &self.history)
+                    .send_stream_event(InteractiveEvent::StreamReset, cancel, &self.conv.messages())
                     .await?;
             }
             return Ok(StreamTurnOutcome::Continue);
@@ -977,17 +895,24 @@ impl LoopState {
         // *not* part of the snapshot: carrying it without its still-unknown
         // tool results would leave an unmatched assistant tool-use in the
         // child's transcript.
-        let fork_parent_history = tool_calls
+        let fork_parent_conversation = tool_calls
             .iter()
             .any(|tc| tc.function.name == "Task" && task_kind_is_fork(&tc.function.arguments))
-            .then(|| self.history[..self.history.len() - 1].to_vec());
+            .then(|| self.conv.fork(TaskKind::Fork));
 
         // Phase 1: collect + validate tool calls into owned jobs.
         let jobs = self.collect_tool_jobs(tool_calls, prefix, nested, raw, captured);
 
         // Phase 2: concurrent execution (cancel/pause aware).
         let results = match self
-            .dispatch_tool_jobs(&jobs, tool_ctx, model, prefix, cancel, fork_parent_history)
+            .dispatch_tool_jobs(
+                &jobs,
+                tool_ctx,
+                model,
+                prefix,
+                cancel,
+                fork_parent_conversation,
+            )
             .await?
         {
             ToolDispatchOutcome::Completed(results) => results,
@@ -1085,10 +1010,10 @@ impl LoopState {
         model: &GremlinsModel,
         prefix: &str,
         cancel: &CancelToken,
-        fork_parent_history: Option<Vec<Message>>,
+        fork_parent_conversation: Option<Box<dyn Conversation>>,
     ) -> Result<ToolDispatchOutcome, ClientError> {
         let mut ctx = tool_ctx.clone();
-        ctx.parent_history = fork_parent_history;
+        ctx.conversation = fork_parent_conversation;
         // Forward live tool output only for the duration of this batch. The
         // receiver is borrowed by the select below, so later batches never
         // hear stale chunks and Esc/clear cannot resurrect old output.
@@ -1167,7 +1092,7 @@ impl LoopState {
                 log::info!("agent_loop: cancelled mid-tool (label={})", prefix);
                 self.plug.log(log::Level::Info, &format!("{prefix}exit: cancelled mid-tool"));
                 discard_tool_output(&mut self.live_output_rx);
-                return Err(cancelled_error("cancelled", &self.history));
+                return Err(cancelled_error("cancelled", &self.conv.messages()));
             }
             _ = maybe_pause(&self.pause) => {
                 // Operator triggered debug mid-tool — drop the join_all future
@@ -1184,8 +1109,7 @@ impl LoopState {
                 // Pop the two messages pushed by the caller (next_prompt +
                 // assistant_tool_message) so the turn can be re-executed
                 // cleanly without duplicate history entries.
-                self.history.pop(); // assistant_tool_message
-                self.history.pop(); // next_prompt
+                self.conv.pop_last_two();
 
                 // Amend system prompt with operator note.
                 let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
@@ -1204,8 +1128,7 @@ impl LoopState {
                     };
                     match interactive_loop(
                         model,
-                        &mut self.history,
-                        &mut self.next_prompt,
+                        &mut *self.conv,
                         &mut session,
                         self.turn_num,
                     )
@@ -1268,7 +1191,7 @@ impl LoopState {
                             text: line.text,
                         },
                         cancel,
-                        &self.history,
+                        &self.conv.messages(),
                     )
                     .await?;
             }
@@ -1307,7 +1230,7 @@ impl LoopState {
                             output: display,
                         },
                         cancel,
-                        &self.history,
+                        &self.conv.messages(),
                     )
                     .await?;
             }
@@ -1380,23 +1303,10 @@ impl LoopState {
         }
         self.turns += job_count;
         // Every tool result lands in history so the results stay adjacent to
-        // the assistant tool_calls message.  Context content ([seen] block)
+        // the assistant tool_calls message. Context content ([seen] block)
         // no longer travels through history — it is composed ephemerally via
-        // compose_model_transcript.
-        self.history.extend(result_msgs);
-        // The next prompt is a simple continuation; context blocks are merged
-        // by compose_model_transcript during request assembly. Joined child
-        // observations ride the Task tool result in history, not this prompt.
-        let findings = self.findings_ledger.format();
-        let mut next_text = "Continue.".to_string();
-        if !findings.is_empty() {
-            next_text = format!("{next_text}\n\n{findings}");
-            self.turn_findings_injected = true;
-        } else {
-            self.turn_findings_injected = false;
-        }
-        self.next_prompt = Message::user(next_text);
-        self.turn_scratchpad_injected = false;
+        // StandardConversation::render_turn.
+        self.conv.record_tool_results(result_msgs);
         self.remaining_turns -= 1;
         Ok(())
     }
@@ -1422,15 +1332,7 @@ impl LoopState {
                     evt_tx: self.evt_tx.take().unwrap(),
                     pause: self.pause.clone().unwrap(),
                 };
-                match interactive_loop(
-                    model,
-                    &mut self.history,
-                    &mut self.next_prompt,
-                    &mut session,
-                    self.turn_num,
-                )
-                .await
-                {
+                match interactive_loop(model, &mut *self.conv, &mut session, self.turn_num).await {
                     Ok(InteractiveLoopResult::Resumed) => {
                         self.interactive_active = false;
                         self.system_prompt = self.original_system_prompt.clone();
@@ -1477,15 +1379,7 @@ impl LoopState {
                     evt_tx: self.evt_tx.take().unwrap(),
                     pause: self.pause.clone().unwrap(),
                 };
-                match interactive_loop(
-                    model,
-                    &mut self.history,
-                    &mut self.next_prompt,
-                    &mut session,
-                    self.turn_num,
-                )
-                .await
-                {
+                match interactive_loop(model, &mut *self.conv, &mut session, self.turn_num).await {
                     Ok(InteractiveLoopResult::Resumed) => {
                         self.system_prompt = self.original_system_prompt.clone();
                         self.cmd_rx = Some(session.cmd_rx);
@@ -1508,38 +1402,6 @@ impl LoopState {
             }
         }
         Ok(InteractiveBoundary::RunTurn)
-    }
-
-    /// Inject the persistent scratchpad into the next user prompt when its
-    /// content hash changed since the last turn. No-op for nested (Task)
-    /// loops, which are stateless helpers.
-    fn inject_scratchpad(&mut self, nested: bool) {
-        if !nested && !self.turn_scratchpad_injected {
-            if let Some(content) = self.plug.read_scratchpad() {
-                if !content.trim().is_empty() {
-                    let mut hasher = DefaultHasher::new();
-                    content.hash(&mut hasher);
-                    let current_hash = hasher.finish();
-                    if self.last_scratchpad_hash != Some(current_hash) {
-                        self.last_scratchpad_hash = Some(current_hash);
-                        let next_text = user_message_text(&self.next_prompt);
-                        let combined = format!(
-                            "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
-                        );
-                        self.next_prompt = Message::user(combined);
-                        self.turn_scratchpad_injected = true;
-                    }
-                } else {
-                    // Scratchpad was cleared — reset so a later rewrite
-                    // of the same content won't be skipped.
-                    self.last_scratchpad_hash = None;
-                }
-            }
-            // Note: when read_scratchpad() returns None (no path configured,
-            // or a transient read error mapped through .ok()), we intentionally
-            // leave last_scratchpad_hash unchanged so a transient failure
-            // won't cause a redundant re-injection next turn.
-        }
     }
 
     /// Fold this turn's provider usage into the running totals and return the
@@ -1607,7 +1469,7 @@ impl LoopState {
                         totals: Some(totals.clone()),
                     },
                     cancel,
-                    &self.history,
+                    &self.conv.messages(),
                 )
                 .await?;
         }
@@ -1620,19 +1482,13 @@ impl LoopState {
             let msg = format!("text: {}", trunc(text, 200));
             self.plug.log(log::Level::Info, &format!("{prefix}{msg}"));
         }
-        if !nested {
-            if !text.is_empty() {
-                write_raw(raw, &assistant_text_event(text));
-                if let Some(evts) = captured.as_mut() {
-                    evts.push(assistant_text_event(text));
-                }
-                self.final_text = text.to_string();
+        if !nested && !text.is_empty() {
+            write_raw(raw, &assistant_text_event(text));
+            if let Some(evts) = captured.as_mut() {
+                evts.push(assistant_text_event(text));
             }
-            self.findings_ledger.feed(text);
-        } else {
-            self.final_text = text.to_string();
-            self.findings_ledger.feed(text);
         }
+        self.conv.record_prose(text);
 
         emit_turn_metrics(
             prefix,
@@ -1674,14 +1530,7 @@ impl LoopState {
             (Some(_done_tc), true) => {
                 // Mixed — produce a tool_result for every call so providers
                 // see a valid round of history.
-                // No history.push(next_prompt) here — context content travels
-                // through compose_model_transcript.
-                self.history.push(assistant_tool_message(
-                    text,
-                    reasoning_items,
-                    tool_calls,
-                    self.preserve_reasoning_in_history,
-                ));
+                let mut results = Vec::with_capacity(tool_calls.len());
                 for tc in tool_calls {
                     let body = if tc.function.name == "Done" {
                         "Error: Done must be called alone — do not combine Done with \
@@ -1692,15 +1541,21 @@ impl LoopState {
                          with other tool calls in the same message. Re-issue without \
                          Done."
                     };
-                    self.history.push(Message::tool_result(
+                    results.push(Message::tool_result(
                         tc.id.clone(),
                         tc.function.name.clone(),
                         body,
                     ));
                 }
-                self.next_prompt = Message::user(
-                    "Done was rejected because it was combined with other tool calls. \
-                     Try again — this time either use tools, or call Done. Never both.",
+                self.conv.done_rejected(
+                    text,
+                    reasoning_items,
+                    tool_calls,
+                    results,
+                    Message::user(
+                        "Done was rejected because it was combined with other tool calls. \
+                         Try again — this time either use tools, or call Done. Never both.",
+                    ),
                 );
                 self.finalize_contexts(self.turn_num);
                 return Ok(DoneDecision::RetryNeeded);
@@ -1727,21 +1582,23 @@ impl LoopState {
                              tool, then call Done.",
                             artifact_reminder(&missing),
                         );
-                        self.history.push(assistant_tool_message(
+                        self.conv.done_rejected(
                             text,
                             reasoning_items,
                             std::slice::from_ref(done_tc),
-                            self.preserve_reasoning_in_history,
-                        ));
-                        let rejected_ledger = format!(
-                            "[turn {}]: Done {} (rejected)\n\n{}",
-                            self.turn_num, done_summary, reminder
-                        );
-                        self.next_prompt = done_user_message(
-                            &rejected_ledger,
-                            done_tc.id.clone(),
-                            done_tc.function.name.clone(),
-                            &reminder,
+                            vec![],
+                            {
+                                let rejected_ledger = format!(
+                                    "[turn {}]: Done {} (rejected)\n\n{}",
+                                    self.turn_num, done_summary, reminder
+                                );
+                                done_user_message(
+                                    &rejected_ledger,
+                                    done_tc.id.clone(),
+                                    done_tc.function.name.clone(),
+                                    &reminder,
+                                )
+                            },
                         );
                         self.finalize_contexts(self.turn_num);
                         return Ok(DoneDecision::RetryNeeded);
@@ -1789,34 +1646,22 @@ impl LoopState {
                                 usage: Some(usage.clone()),
                             },
                             cancel,
-                            &self.history,
+                            &self.conv.messages(),
                         )
                         .await?;
                 }
                 // Capture the full message history (prior turns + this final
                 // user prompt + assistant message) so the chat gremlin can
                 // persist complete model context between stages.
-                let mut messages = self.history.clone();
-                messages.push(self.next_prompt.clone());
-                messages.push(assistant_tool_message(
-                    text,
-                    reasoning_items,
-                    std::slice::from_ref(done_tc),
-                    self.preserve_reasoning_in_history,
-                ));
-                let done_ledger = format!("[turn {}]: Done {}", self.turn_num, done_summary);
-                messages.push(done_user_message(
-                    &done_ledger,
-                    done_tc.id.clone(),
-                    done_tc.function.name.clone(),
-                    "Done accepted.",
-                ));
+                let artifact =
+                    self.conv
+                        .finalize(self.turn_num, text, reasoning_items, Some(done_tc));
                 return Ok(DoneDecision::Accepted(Box::new(completed_run(
-                    Some(result_text),
+                    Some(artifact.final_text),
                     Some(done_summary),
                     captured,
                     usage,
-                    Some(messages),
+                    Some(self.conv.clone_box()),
                     Some(self.context_file_observations().unwrap_or_default()),
                     self.contexts.iter().map(|c| c.clone_box()).collect(),
                 ))));
@@ -1851,13 +1696,8 @@ impl LoopState {
         // the structured reasoning items for the next request.
         if text.is_empty() && !reasoning.is_empty() {
             log::debug!("reasoning-only turn: turn={} — continuing", self.turn_num);
-            self.history.push(assistant_tool_message(
-                "",
-                reasoning_items,
-                &[],
-                self.preserve_reasoning_in_history,
-            ));
-            self.next_prompt = Message::user("Continue.");
+            self.conv.record_turn("", reasoning_items, &[]);
+            self.conv.set_next_prompt("Continue.");
             self.finalize_contexts(self.turn_num);
             return EmptyTurnAction::ContinueLoop;
         }
@@ -1880,12 +1720,7 @@ impl LoopState {
                     missing.len(),
                     self.reminder_budget,
                 );
-                self.history.push(assistant_tool_message(
-                    text,
-                    reasoning_items,
-                    &[],
-                    self.preserve_reasoning_in_history,
-                ));
+                self.conv.record_turn(text, reasoning_items, &[]);
                 let reminder = artifact_reminder(&missing);
                 write_raw(
                     raw,
@@ -1894,7 +1729,7 @@ impl LoopState {
                 if let Some(evts) = captured.as_mut() {
                     evts.push(serde_json::json!({"type": "reminder", "message": reminder}));
                 }
-                self.next_prompt = Message::user(reminder);
+                self.conv.set_next_prompt(&reminder);
                 self.finalize_contexts(self.turn_num);
                 return EmptyTurnAction::ContinueLoop;
             }
@@ -1917,13 +1752,8 @@ impl LoopState {
             if let Some(evts) = captured.as_mut() {
                 evts.push(serde_json::json!({"type": "reminder", "message": nudge_msg}));
             }
-            self.history.push(assistant_tool_message(
-                text,
-                reasoning_items,
-                &[],
-                self.preserve_reasoning_in_history,
-            ));
-            self.next_prompt = Message::user(nudge_msg.to_string());
+            self.conv.record_turn(text, reasoning_items, &[]);
+            self.conv.set_next_prompt(nudge_msg);
             self.finalize_contexts(self.turn_num);
             return EmptyTurnAction::ContinueLoop;
         }
@@ -1958,20 +1788,15 @@ impl LoopState {
                 &self.plug,
             );
         }
-        let mut messages = self.history.clone();
-        messages.push(self.next_prompt.clone());
-        messages.push(assistant_tool_message(
-            text,
-            reasoning_items,
-            &[],
-            self.preserve_reasoning_in_history,
-        ));
+        let artifact = self
+            .conv
+            .finalize(self.turn_num, text, reasoning_items, None);
         EmptyTurnAction::ReturnRun(Box::new(completed_run(
-            Some(self.final_text.clone()),
+            Some(artifact.final_text),
             None,
             captured,
             usage,
-            Some(messages),
+            Some(self.conv.clone_box()),
             Some(self.context_file_observations().unwrap_or_default()),
             self.contexts.iter().map(|c| c.clone_box()).collect(),
         )))
@@ -1990,20 +1815,14 @@ impl LoopState {
         }
     }
 
-    /// Append the user prompt and assistant tool-call message for this turn to
-    /// the loop history.
+    /// Append the current assistant turn to the conversation history.
     fn commit_turn_to_history(
         &mut self,
         text: &str,
         reasoning_items: &[Sealed<Reasoning>],
         tool_calls: &[ToolCall],
     ) {
-        self.history.push(assistant_tool_message(
-            text,
-            reasoning_items,
-            tool_calls,
-            self.preserve_reasoning_in_history,
-        ));
+        self.conv.record_turn(text, reasoning_items, tool_calls);
     }
 }
 
@@ -2119,7 +1938,7 @@ pub(crate) async fn run_agent_loop(
         allowed_tools: opts.tool_filter.map(|s| s.to_vec()),
         task_fn: None,
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
-        parent_history: None,
+        conversation: None,
         id_prefix: String::new(),
         telemetry,
         active_skills: ctx.params.active_skills.clone(),
@@ -2168,7 +1987,7 @@ pub(crate) async fn run_agent_loop(
         &ctx.plug,
         interactive,
         tool_output_rx,
-        ctx.prepopulated_messages.clone(),
+        ctx.prepopulated_conversation.clone(),
     )
     .await
 }
@@ -2194,7 +2013,7 @@ pub(crate) async fn run_agent_loop_nested(
     max_tokens: Option<u64>,
     extra: Option<serde_json::Value>,
     preserve_reasoning_in_history: bool,
-    prepopulated_messages: Option<Vec<Message>>,
+    prepopulated_conversation: Option<Box<dyn Conversation>>,
     mut parent_contexts: Vec<Box<dyn MutableModelContext>>,
 ) -> Result<CompletedRun, ClientError> {
     let opts = LoopOpts {
@@ -2273,7 +2092,7 @@ pub(crate) async fn run_agent_loop_nested(
         &plug,
         None,
         None,
-        prepopulated_messages,
+        prepopulated_conversation,
     )
     .await;
     plug.log(log::Level::Info, &format!("{prefix}task: end"));
@@ -2307,8 +2126,7 @@ async fn maybe_pause(pause: &Option<Arc<PauseToken>>) {
 #[allow(clippy::too_many_arguments)]
 async fn interactive_loop(
     _model: &GremlinsModel,
-    history: &mut Vec<Message>,
-    next_prompt: &mut Message,
+    conv: &mut dyn Conversation,
     session: &mut InteractiveSession,
     turn: usize,
 ) -> Result<InteractiveLoopResult, ClientError> {
@@ -2336,39 +2154,7 @@ async fn interactive_loop(
                 "interactive_loop: Inject command (len={}, turn={turn})",
                 text.len()
             );
-            // If next_prompt already carries pending ToolResult content
-            // (e.g. a tool_result from a Done rejection), merge the
-            // injected text into that message rather than overwriting it.
-            // This preserves the matching tool_result so the assistant
-            // Done call already in history stays paired with its result.
-            // Anthropic requires tool_result blocks to precede text
-            // blocks, so the injected text is appended after any
-            // existing content.
-            if let Message::User {
-                content: ref existing,
-            } = *next_prompt
-            {
-                if existing
-                    .iter()
-                    .any(|c| matches!(c, UserContent::ToolResult(_)))
-                {
-                    let mut merged = existing.clone();
-                    merged.push(UserContent::Text(Text {
-                        text: format!("[operator]: {text}"),
-                        additional_params: None,
-                    }));
-                    *next_prompt = Message::User { content: merged };
-                    // Don't push a separate user message to history — it
-                    // would separate the assistant Done call from its
-                    // tool_result in the merged next_prompt.
-                } else {
-                    history.push(Message::user(format!("[operator]: {text}")));
-                    *next_prompt = Message::user(text);
-                }
-            } else {
-                history.push(Message::user(format!("[operator]: {text}")));
-                *next_prompt = Message::user(text);
-            }
+            conv.inject_operator(&text);
             Ok(InteractiveLoopResult::RunOneTurn)
         }
         InteractiveCommand::RunTurn => {
@@ -2451,7 +2237,7 @@ fn completed_run(
     summary: Option<String>,
     events: &Option<Vec<serde_json::Value>>,
     usage: UsageStats,
-    messages: Option<Vec<Message>>,
+    conversation: Option<Box<dyn Conversation>>,
     file_observations: Option<FileObservations>,
     contexts: Vec<Box<dyn MutableModelContext>>,
 ) -> CompletedRun {
@@ -2462,7 +2248,7 @@ fn completed_run(
         events: events.clone(),
         cost_usd: None,
         token_usage: Some(usage),
-        messages,
+        conversation,
         file_observations,
         contexts,
     }
@@ -2488,53 +2274,6 @@ fn artifact_reminder(missing: &[&PathBuf]) -> String {
     )
 }
 
-fn user_message_text(message: &Message) -> String {
-    match message {
-        Message::User { content } => content
-            .iter()
-            .filter_map(|item| match item {
-                UserContent::Text(text) => Some(text.text.clone()),
-                _ => None,
-            })
-            .collect(),
-        _ => String::new(),
-    }
-}
-
-/// Build a single [`Message::User`] that merges a Done action ledger with
-/// the matching tool_result. This avoids consecutive `User` messages in
-/// the persisted history, which Anthropic (and other providers) reject
-/// because they violate the required user/assistant alternation and the
-/// rule that every `tool_use` must be immediately followed by a matching
-/// `tool_result` block.
-///
-/// The [`UserContent::ToolResult`] comes first because Anthropic requires
-/// every `tool_result` block to precede any text blocks in the responding
-/// user message.
-fn done_user_message(
-    ledger: &str,
-    call_id: CallId,
-    tool_name: ToolName,
-    result_text: &str,
-) -> Message {
-    Message::User {
-        content: vec![
-            UserContent::ToolResult(ToolResultMsg {
-                call: call_id,
-                name: tool_name,
-                content: vec![ToolResultContent::Text(Text {
-                    text: result_text.to_string(),
-                    additional_params: None,
-                })],
-            }),
-            UserContent::Text(Text {
-                text: ledger.to_string(),
-                additional_params: None,
-            }),
-        ],
-    }
-}
-
 // ── agent loop ────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -2558,12 +2297,12 @@ async fn run_agent_loop_core(
     plug: &LoopPlug,
     interactive: Option<InteractiveSession>,
     tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
-    prepopulated_messages: Option<Vec<Message>>,
+    prepopulated_conversation: Option<Box<dyn Conversation>>,
 ) -> Result<CompletedRun, ClientError> {
     let mut state = LoopState::new(
         system_prompt,
         prompt,
-        prepopulated_messages,
+        prepopulated_conversation,
         reminder_budget,
         completion_nudge_budget,
         interactive,
@@ -2583,7 +2322,7 @@ async fn run_agent_loop_core(
                 log::Level::Info,
                 &format!("{prefix}exit: cancelled before turn"),
             );
-            return Err(cancelled_error("cancelled", &state.history));
+            return Err(cancelled_error("cancelled", &state.conv.messages()));
         }
 
         match state.await_interactive_turn(model, prefix).await? {
@@ -2594,10 +2333,6 @@ async fn run_agent_loop_core(
         // Snapshot before request construction so TTFT includes connection /
         // queue latency, not just server-side time-to-first-token.
         let turn_start = Instant::now();
-
-        // Inject the persistent scratchpad on every turn of the main
-        // (non-nested) loop. See [`LoopState::inject_scratchpad`].
-        state.inject_scratchpad(nested);
 
         let outcome = state
             .stream_turn(
@@ -3028,6 +2763,7 @@ pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str, plug: &LoopPl
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clients::conversation::user_message_text;
     use crate::clients::format::{key_arg, ledger_key_arg};
     use crate::clients::interactive::InteractiveChannels;
     use crate::clients_plugins::tool_ledger::ToolLedger;
@@ -3619,7 +3355,7 @@ mod tests {
                 task_models: None,
                 cancel_token: None,
                 stream_events: None,
-                prepopulated_messages: None,
+                prepopulated_conversation: None,
                 skills_available: false,
                 discovered_skills: None,
                 active_skills: None,
@@ -3633,7 +3369,7 @@ mod tests {
             reminder_budget: 0,
             completion_nudge_budget: 0,
             stream_events: None,
-            prepopulated_messages: None,
+            prepopulated_conversation: None,
             plug: {
                 // Seed a ToolLedger so tests that assert on ledger behavior work.
                 let mut plug = LoopPlug::new();
@@ -6641,7 +6377,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
-            parent_history: None,
+            conversation: None,
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -7184,7 +6920,11 @@ mod tests {
         );
 
         // The Done action ledger must be persisted in the returned history.
-        let messages = result.messages.expect("Done run must return messages");
+        let messages = result
+            .conversation
+            .as_ref()
+            .expect("Done run must return conversation")
+            .messages();
         let ledger = messages
             .iter()
             .find_map(|m| match m {
@@ -7254,7 +6994,11 @@ mod tests {
         .await
         .unwrap();
 
-        let messages = result.messages.expect("Done run must return messages");
+        let messages = result
+            .conversation
+            .as_ref()
+            .expect("Done run must return conversation")
+            .messages();
 
         // Assert no consecutive user messages.
         let mut prev_was_user = false;
@@ -7388,7 +7132,11 @@ mod tests {
         .await
         .unwrap();
 
-        let messages = result.messages.expect("Done run must return messages");
+        let messages = result
+            .conversation
+            .as_ref()
+            .expect("Done run must return conversation")
+            .messages();
 
         // No consecutive User messages.
         let mut prev_was_user = false;

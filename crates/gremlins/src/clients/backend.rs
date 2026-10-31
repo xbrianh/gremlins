@@ -2,17 +2,16 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use indexmap::IndexMap;
-use rig_core::completion::Message;
-
 use super::cancel::CancelToken;
 use super::interactive::{InteractiveSession, StreamEventSender};
 use super::model::GremlinsModel;
+use super::model_context::Conversation;
 use super::params::ResolvedParams;
 pub(crate) use super::plug::LoopPlug;
 use super::protocol::CompletedRun;
 use super::task_models::TaskModelSelector;
+use async_trait::async_trait;
+use indexmap::IndexMap;
 
 pub struct RunParams {
     pub prompt: String,
@@ -53,11 +52,11 @@ pub struct RunParams {
     /// Sender for stream events. When Some, the agent loop emits
     /// every stream event (reasoning, text, tool results, turn complete, done).
     pub stream_events: Option<StreamEventSender>,
-    /// Pre-populated message history. When set, the agent loop starts with
-    /// these messages already in its internal history (carrying their original
-    /// roles) instead of building from a bare system-prompt + user-prompt pair.
-    /// The user prompt is still appended as the next user message.
-    pub prepopulated_messages: Option<Vec<Message>>,
+    /// Pre-populated conversation state. When set, the agent loop starts from
+    /// this conversation's history (carrying its original roles) instead of a
+    /// bare system-prompt + user-prompt pair. The user prompt is still applied
+    /// as the next user message.
+    pub(crate) prepopulated_conversation: Option<Box<dyn Conversation>>,
     /// Whether skills are available for this chat session.
     pub(crate) skills_available: bool,
     /// Discovered skills for this session. Session-bound so concurrent chat
@@ -102,7 +101,7 @@ impl Clone for RunParams {
             task_models: self.task_models.clone(),
             cancel_token: self.cancel_token.clone(),
             stream_events: self.stream_events.clone(),
-            prepopulated_messages: self.prepopulated_messages.clone(),
+            prepopulated_conversation: self.prepopulated_conversation.clone(),
             skills_available: self.skills_available,
             discovered_skills: self.discovered_skills.clone(),
             active_skills: self.active_skills.clone(),

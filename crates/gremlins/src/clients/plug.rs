@@ -1,7 +1,10 @@
-use super::model_context::MutableModelContext;
+use super::model_context::{Conversation, MutableModelContext};
 use super::protocol::UsageStats;
 use rig_core::completion::CompletionRequest;
 use std::sync::Arc;
+
+/// Factory type for building a fresh [`Conversation`].
+pub(crate) type ConversationFactory = Arc<dyn Fn() -> Box<dyn Conversation> + Send + Sync>;
 
 /// Inversion-of-control plug that decouples the agent loop from
 /// `crate::executor` and `crate::landscape`. Every cross-package
@@ -25,6 +28,9 @@ pub struct LoopPlug {
     /// Mutable model contexts (ToolLedger, SignalMapContext, LandscapeContext).
     /// Cloned (via `clone_box`) into each `LoopState`.
     pub(crate) contexts: Vec<Box<dyn MutableModelContext>>,
+    /// Optional conversation factory. When `None`, the agent loop builds a
+    /// default [`StandardConversation`].
+    pub(crate) conversation: Option<ConversationFactory>,
 }
 
 impl LoopPlug {
@@ -37,6 +43,7 @@ impl LoopPlug {
             dump_prompt_debug_fn: Arc::new(|_| {}),
             emit_token_usage_fn: Arc::new(|_, _, _| {}),
             contexts: Vec::new(),
+            conversation: None,
         }
     }
 
@@ -103,6 +110,15 @@ impl LoopPlug {
     pub(crate) fn register_contexts(&mut self, ctxs: Vec<Box<dyn MutableModelContext>>) {
         self.contexts = ctxs;
     }
+
+    /// Register a conversation factory.
+    #[allow(dead_code)]
+    pub(crate) fn register_conversation<F>(&mut self, f: F)
+    where
+        F: Fn() -> Box<dyn Conversation> + Send + Sync + 'static,
+    {
+        self.conversation = Some(Arc::new(f));
+    }
 }
 
 // Manual Clone impl needed because `Box<dyn MutableModelContext>` doesn't
@@ -115,6 +131,7 @@ impl Clone for LoopPlug {
             dump_prompt_debug_fn: self.dump_prompt_debug_fn.clone(),
             emit_token_usage_fn: self.emit_token_usage_fn.clone(),
             contexts: self.contexts.iter().map(|c| c.clone_box()).collect(),
+            conversation: self.conversation.clone(),
         }
     }
 }

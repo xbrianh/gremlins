@@ -125,6 +125,131 @@ impl std::fmt::Debug for dyn MutableModelContext {
     }
 }
 
+// ── conversation machinery ──────────────────────────────────────────────────
+
+/// The transcript produced for one model turn.
+#[derive(Clone, Debug)]
+pub(crate) struct TurnScript {
+    pub(crate) messages: Vec<rig_core::completion::Message>,
+    pub(crate) system_prompt: Option<String>,
+    /// The final user prompt, ready to hand to [`CompletionRequest::new`].
+    /// This is a full [`Message`] (not a flat `String`) so any
+    /// [`ToolResult`] content blocks that ride on a Done-rejection or
+    /// operator-injected next-prompt survive into the outgoing request.
+    pub(crate) next_user_prompt: rig_core::completion::Message,
+}
+
+/// The final snapshot of a completed agent run.
+#[derive(Clone, Debug)]
+pub(crate) struct RunArtifact {
+    #[allow(dead_code)]
+    pub(crate) messages: Vec<rig_core::completion::Message>,
+    pub(crate) final_text: String,
+}
+
+/// Owns agent-loop conversation state: durable [`Message`] history plus the
+/// pending user prompt. The loop narrates what happened; the conversation
+/// assembles the transcript.
+pub(crate) trait Conversation: Any + Send + Sync {
+    /// Clone this conversation into a new heap allocation.
+    fn clone_box(&self) -> Box<dyn Conversation>;
+
+    /// Note assistant prose without committing an assistant turn to history
+    /// (used to update the findings ledger and `last_text` before completion
+    /// classification decides whether to record or reject the turn).
+    fn record_prose(&mut self, text: &str);
+
+    /// Record the assistant turn (text, reasoning, tool calls) into history.
+    /// The findings ledger is already fed by a prior `record_prose` call, so
+    /// this method should NOT re-feed the ledger — it only commits the message.
+    fn record_turn(
+        &mut self,
+        text: &str,
+        reasoning_items: &[rig_core::completion::message::Sealed<
+            rig_core::completion::message::Reasoning,
+        >],
+        tool_calls: &[rig_core::completion::message::ToolCall],
+    );
+
+    /// Record tool-result messages into history.
+    fn record_tool_results(&mut self, results: Vec<rig_core::completion::Message>);
+
+    /// Drop the most recent assistant turn from history so the turn can be
+    /// re-executed cleanly.
+    fn pop_last_two(&mut self);
+
+    /// Build the outgoing request for the given turn.
+    fn render_turn(
+        &mut self,
+        stage_prompt: &str,
+        contexts: &[Box<dyn MutableModelContext>],
+        turn: usize,
+        nested: bool,
+        scratchpad: Option<String>,
+        system_prompt: Option<String>,
+    ) -> TurnScript;
+
+    /// Build the final transcript for a finished run.
+    ///
+    /// `done` carries the accepted `Done` tool call when the run completed via
+    /// `Done`; it is `None` for the empty-turn-exhausted path. The returned
+    /// [`RunArtifact`] contains the full durable message transcript plus the
+    /// final assistant text result.
+    fn finalize(
+        &mut self,
+        turn: usize,
+        text: &str,
+        reasoning_items: &[rig_core::completion::message::Sealed<
+            rig_core::completion::message::Reasoning,
+        >],
+        done: Option<&rig_core::completion::message::ToolCall>,
+    ) -> RunArtifact;
+
+    /// Produce a child conversation seeded from this conversation's history.
+    fn fork(&self, kind: crate::task_kind::TaskKind) -> Box<dyn Conversation>;
+
+    /// Replace the pending user prompt (used to begin a freshly-forked child
+    /// or set a continuation/reminder prompt).
+    fn set_next_prompt(&mut self, prompt: &str);
+
+    /// Inject operator text from an interactive `Inject` command.
+    fn inject_operator(&mut self, text: &str);
+
+    /// Record a rejected `Done` turn (assistant turn + tool results + next prompt).
+    fn done_rejected(
+        &mut self,
+        text: &str,
+        reasoning_items: &[rig_core::completion::message::Sealed<
+            rig_core::completion::message::Reasoning,
+        >],
+        tool_calls: &[rig_core::completion::message::ToolCall],
+        results: Vec<rig_core::completion::Message>,
+        next_prompt: rig_core::completion::Message,
+    );
+
+    /// The full durable message transcript (history + pending user prompt).
+    fn messages(&self) -> Vec<rig_core::completion::Message>;
+
+    /// Update the preserve-reasoning flag. Called by `LoopState::new` so that
+    /// conversations built from raw messages (chat continuation) inherit the
+    /// run's actual preserve-reasoning setting rather than a hardcoded `false`.
+    fn set_preserve_reasoning(&mut self, _preserve: bool) {}
+}
+
+// `Box<dyn Conversation>` participates in struct cloning; delegate to `clone_box`.
+impl Clone for Box<dyn Conversation> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
+// `CompletedRun` derives `Debug`; the trait object needs a `Debug` impl.
+impl std::fmt::Debug for dyn Conversation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Conversation")
+    }
+}
+
 // ── composition machinery ──────────────────────────────────────────────────
 
 /// Zip per-turn transcripts from every context, asserting uniform length.

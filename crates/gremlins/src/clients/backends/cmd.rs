@@ -439,7 +439,7 @@ impl CmdBackend {
                 events,
                 cost_usd: state.cost_usd,
                 token_usage: None,
-                messages: None,
+                conversation: None,
                 file_observations: None,
                 contexts: Vec::new(),
             }
@@ -473,7 +473,7 @@ impl CmdBackend {
                 events: None,
                 cost_usd: None,
                 token_usage: None,
-                messages: None,
+                conversation: None,
                 file_observations: None,
                 contexts: Vec::new(),
             }

@@ -1,8 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use rig_core::completion::Message;
-
 use super::model::GremlinsModel;
 use super::tools::{self, AgentLoopRuntime};
 use crate::task_kind::TaskKind;
@@ -117,7 +115,7 @@ fn make_task_runner_at_depth(
     Arc::new(
         move |kind: TaskKind,
               task: String,
-              parent_history: Option<Vec<Message>>,
+              parent_conversation: Option<Box<dyn super::model_context::Conversation>>,
               parent_contexts: Vec<Box<dyn super::model_context::MutableModelContext>>| {
             let model = model.clone();
             let task_model_selector = task_model_selector.clone();
@@ -228,8 +226,12 @@ fn make_task_runner_at_depth(
                     ))
                 };
 
-                let prepopulated_messages = if kind == TaskKind::Fork {
-                    parent_history
+                let prepopulated_conversation = if kind == TaskKind::Fork {
+                    parent_conversation.map(|c| {
+                        let mut child = c.fork(TaskKind::Fork);
+                        child.set_next_prompt(&task);
+                        child
+                    })
                 } else {
                     None
                 };
@@ -250,7 +252,7 @@ fn make_task_runner_at_depth(
                     selected_max_tokens,
                     selected_extra.clone(),
                     child_preserve_reasoning,
-                    prepopulated_messages,
+                    prepopulated_conversation,
                     parent_contexts,
                 )
                 .await;
@@ -486,7 +488,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+            conversation: None,
             id_prefix: String::new(),
             telemetry: tools::AgentLoopTelemetry {
                 stream_events: None,
@@ -639,11 +641,19 @@ mod tests {
             false,
         );
 
-        let parent_history = vec![Message::user("earlier parent turn".to_string())];
+        let parent_history = vec![Message::user("earlier parent turn")];
+        let parent_conversation: Option<Box<dyn crate::clients::model_context::Conversation>> =
+            Some(Box::new(
+                crate::clients::conversation::StandardConversation::new(
+                    "",
+                    false,
+                    Some(parent_history),
+                ),
+            ));
         let output = runner(
             TaskKind::Fork,
             "child task".into(),
-            Some(parent_history),
+            parent_conversation,
             Vec::new(),
         )
         .await;

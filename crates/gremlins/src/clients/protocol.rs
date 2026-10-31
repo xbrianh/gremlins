@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::model_context::MutableModelContext;
-use rig_core::completion::Message;
+use super::model_context::{Conversation, MutableModelContext};
 
 /// Aggregated token usage summary from an agent run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,10 +48,11 @@ pub struct CompletedRun {
     pub events: Option<Vec<serde_json::Value>>,
     pub cost_usd: Option<f64>,
     pub token_usage: Option<UsageStats>,
-    /// The agent loop's accumulated message history (all roles), when the
-    /// backend captures it. Used by the chat gremlin to persist full model
-    /// context between stages via `artifact://conversation.json`.
-    pub messages: Option<Vec<Message>>,
+    /// The agent loop's final conversation, when the backend captures it.
+    /// Used by the chat gremlin to persist full model context between stages
+    /// via `artifact://conversation.json`. Only its messages are serialized.
+    #[serde(skip)]
+    pub(crate) conversation: Option<Box<dyn Conversation>>,
     /// File observations (Read/Grep/Landscape + mutation paths) collected
     /// during the agent stage. Populated for all agent loops so that
     /// cross-stage landscape pruning can skip already-explored files.
@@ -76,7 +76,7 @@ impl Clone for CompletedRun {
             events: self.events.clone(),
             cost_usd: self.cost_usd,
             token_usage: self.token_usage.clone(),
-            messages: self.messages.clone(),
+            conversation: self.conversation.clone(),
             file_observations: self.file_observations.clone(),
             contexts: self.contexts.iter().map(|c| c.clone_box()).collect(),
         }

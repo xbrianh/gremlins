@@ -789,7 +789,13 @@ async fn run_agent(
         None
     };
 
-    let prepopulated_messages = verbatim_history.clone();
+    let prepopulated_conversation = verbatim_history.map(|msgs| {
+        Box::new(crate::clients::conversation::StandardConversation::new(
+            "",
+            false,
+            Some(msgs),
+        )) as Box<dyn crate::clients::model_context::Conversation>
+    });
 
     // ── Live usage tracker for failure persistence ─────
     // Stores (combined_usage, stage_local_usage, cost_usd).
@@ -938,7 +944,7 @@ async fn run_agent(
         task_models,
         cancel_token: gremlin.cancel_token.clone(),
         stream_events: gremlin.runtime_config.stream_events.clone(),
-        prepopulated_messages,
+        prepopulated_conversation,
         skills_available: gremlin.discovered_skills.is_some(),
         discovered_skills: gremlin.discovered_skills.clone(),
         active_skills: gremlin.active_skills.clone(),
@@ -1060,7 +1066,8 @@ async fn run_agent(
     }
 
     if is_chat {
-        if let (Some(messages), Some(turn_num)) = (&completed.messages, chat_turn) {
+        if let (Some(conversation), Some(turn_num)) = (&completed.conversation, chat_turn) {
+            let messages = conversation.messages();
             let diff: Vec<Message> =
                 if canonical_prefix.is_empty() || messages.len() < canonical_prefix.len() {
                     messages.clone()
