@@ -78,7 +78,7 @@ pub struct RunParams {
     pub hooks: Option<LoopHooks>,
     /// Mutable model contexts (ToolLedger, SignalMapContext, LandscapeContext)
     /// seeded onto the run's conversation.
-    pub(crate) contexts: Vec<Box<dyn crate::clients::model_context::MutableModelContext>>,
+    pub(crate) contexts: Vec<Box<dyn crate::clients::model_context::ConversationContext>>,
 }
 
 impl Clone for RunParams {

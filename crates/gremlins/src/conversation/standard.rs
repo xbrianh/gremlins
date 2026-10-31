@@ -13,7 +13,7 @@ use rig_core::completion::Message;
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
 use crate::clients::model_context::{
-    compose_model_transcript, Conversation, MutableModelContext, RunArtifact, TurnScript,
+    compose_model_transcript, Conversation, ConversationContext, RunArtifact, TurnScript,
 };
 use crate::clients::protocol::FileObservations;
 use crate::conversation::done::{done_user_message, user_message_text};
@@ -45,7 +45,7 @@ pub(crate) struct StandardConversation {
     /// Mutable model contexts that observe tool calls and contribute per-turn
     /// transcript blocks. Owned here so the agent loop routes every context
     /// operation through the conversation instead of carrying a parallel list.
-    contexts: Vec<Box<dyn MutableModelContext>>,
+    contexts: Vec<Box<dyn ConversationContext>>,
 }
 
 impl StandardConversation {
@@ -391,7 +391,7 @@ impl Conversation for StandardConversation {
         all
     }
 
-    fn set_contexts(&mut self, ctxs: Vec<Box<dyn MutableModelContext>>) {
+    fn set_contexts(&mut self, ctxs: Vec<Box<dyn ConversationContext>>) {
         self.contexts = ctxs.iter().map(|c| c.clone_box()).collect();
     }
 
@@ -410,7 +410,7 @@ impl Conversation for StandardConversation {
         extra
     }
 
-    fn join_child_contexts(&mut self, children: &[Box<dyn MutableModelContext>]) -> Vec<String> {
+    fn join_child_contexts(&mut self, children: &[Box<dyn ConversationContext>]) -> Vec<String> {
         let mut task_observations = Vec::new();
         for child_ctx in children {
             let child_tid = child_ctx.as_any().type_id();
@@ -435,7 +435,7 @@ impl Conversation for StandardConversation {
         }
     }
 
-    fn propagating_contexts(&self) -> Vec<Box<dyn MutableModelContext>> {
+    fn propagating_contexts(&self) -> Vec<Box<dyn ConversationContext>> {
         self.contexts
             .iter()
             .filter(|c| c.propagates_to_task())
@@ -443,7 +443,7 @@ impl Conversation for StandardConversation {
             .collect()
     }
 
-    fn context_snapshot(&self) -> Vec<Box<dyn MutableModelContext>> {
+    fn context_snapshot(&self) -> Vec<Box<dyn ConversationContext>> {
         self.contexts.iter().map(|c| c.clone_box()).collect()
     }
 

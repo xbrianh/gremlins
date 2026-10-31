@@ -66,7 +66,7 @@ pub(crate) struct ToolLedger {
     /// replay at the join site. Cleared when read or at finalize_turn.
     new_observations: Vec<String>,
     /// Per-turn transcript blocks, captured at finalize_turn time.
-    /// Index i is turn i. Used by the MutableModelContext::transcript method.
+    /// Index i is turn i. Used by the ConversationContext::transcript method.
     turn_transcripts: Vec<String>,
 }
 
@@ -403,9 +403,9 @@ impl ToolLedger {
     }
 }
 
-// ── MutableModelContext impl ───────────────────────────────────────────────
+// ── ConversationContext impl ───────────────────────────────────────────────
 
-impl crate::clients::model_context::MutableModelContext for ToolLedger {
+impl crate::clients::model_context::ConversationContext for ToolLedger {
     fn propagates_to_task(&self) -> bool {
         true
     }
@@ -418,7 +418,7 @@ impl crate::clients::model_context::MutableModelContext for ToolLedger {
         self
     }
 
-    fn clone_box(&self) -> Box<dyn crate::clients::model_context::MutableModelContext> {
+    fn clone_box(&self) -> Box<dyn crate::clients::model_context::ConversationContext> {
         Box::new(self.clone())
     }
 
@@ -458,7 +458,7 @@ impl crate::clients::model_context::MutableModelContext for ToolLedger {
         None
     }
 
-    fn join(&mut self, other: &dyn crate::clients::model_context::MutableModelContext) {
+    fn join(&mut self, other: &dyn crate::clients::model_context::ConversationContext) {
         if let Some(other_ledger) = other.as_any().downcast_ref::<ToolLedger>() {
             // Merge reads: take the newer entry (by seq).
             for (key, entry) in &other_ledger.reads {

@@ -25,7 +25,7 @@ use super::format::{
     trunc,
 };
 use super::model::{GremlinsModel, GremlinsModelError};
-use super::model_context::{Conversation, MutableModelContext};
+use super::model_context::{Conversation, ConversationContext};
 use super::plug::LoopHooks;
 use super::protocol::{add_opt, CompletedRun, FileObservations, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
@@ -168,7 +168,7 @@ pub(crate) struct RunContext {
     /// (prompt-debug, token-usage).
     pub(crate) hooks: LoopHooks,
     /// Mutable model contexts seeded onto the run's conversation.
-    pub(crate) contexts: Vec<Box<dyn MutableModelContext>>,
+    pub(crate) contexts: Vec<Box<dyn ConversationContext>>,
 }
 
 impl RunContext {
@@ -213,14 +213,14 @@ struct ToolJob {
     call: String,
     over_cap: Option<String>,
     /// Parent contexts cloned for this Task job (only set for "Task" jobs).
-    task_parent_contexts: Vec<Box<dyn MutableModelContext>>,
+    task_parent_contexts: Vec<Box<dyn ConversationContext>>,
 }
 
 /// Outcome of one concurrent tool batch dispatched by
 /// [`LoopState::dispatch_tool_jobs`].
 enum ToolDispatchOutcome {
     /// Every tool finished; outputs are aligned with the job list order.
-    Completed(Vec<(String, Vec<Box<dyn MutableModelContext>>)>),
+    Completed(Vec<(String, Vec<Box<dyn ConversationContext>>)>),
     /// The operator entered debug mid-batch: the batch was abandoned, the
     /// turn's history was unwound, and the caller should re-execute the turn.
     ReexecuteTurn,
@@ -335,7 +335,7 @@ impl LoopState {
         max_turns: usize,
         prefix: &str,
         preserve_reasoning_in_history: bool,
-        contexts: Vec<Box<dyn MutableModelContext>>,
+        contexts: Vec<Box<dyn ConversationContext>>,
         hooks: &LoopHooks,
     ) -> Self {
         // Destructure the interactive session into its components so we can
@@ -1034,7 +1034,7 @@ impl LoopState {
             std::future::pending::<()>().await;
         };
         let sem = Arc::new(Semaphore::new(tools::MAX_CONCURRENT_TOOLS));
-        let parent_contexts: Vec<Box<dyn MutableModelContext>> = self.conv.context_snapshot();
+        let parent_contexts: Vec<Box<dyn ConversationContext>> = self.conv.context_snapshot();
         let exec_fut = join_all(jobs.iter().map(|j| {
             let ctx = &ctx;
             let sem = sem.clone();
@@ -1148,7 +1148,7 @@ impl LoopState {
     async fn emit_tool_results(
         &mut self,
         jobs: Vec<ToolJob>,
-        results: Vec<(String, Vec<Box<dyn MutableModelContext>>)>,
+        results: Vec<(String, Vec<Box<dyn ConversationContext>>)>,
         tool_ctx: &AgentLoopRuntime,
         prefix: &str,
         nested: bool,
@@ -1955,7 +1955,7 @@ pub(crate) async fn run_agent_loop_nested(
     extra: Option<serde_json::Value>,
     preserve_reasoning_in_history: bool,
     mut prepopulated_conversation: Option<Box<dyn Conversation>>,
-    mut parent_contexts: Vec<Box<dyn MutableModelContext>>,
+    mut parent_contexts: Vec<Box<dyn ConversationContext>>,
 ) -> Result<CompletedRun, ClientError> {
     let opts = LoopOpts {
         extra,
@@ -2194,7 +2194,7 @@ fn completed_run(
     usage: UsageStats,
     conversation: Option<Box<dyn Conversation>>,
     file_observations: Option<FileObservations>,
-    contexts: Vec<Box<dyn MutableModelContext>>,
+    contexts: Vec<Box<dyn ConversationContext>>,
 ) -> CompletedRun {
     CompletedRun {
         exit_code: 0,
@@ -2253,7 +2253,7 @@ async fn run_agent_loop_core(
     interactive: Option<InteractiveSession>,
     tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
     prepopulated_conversation: Option<Box<dyn Conversation>>,
-    contexts: Vec<Box<dyn MutableModelContext>>,
+    contexts: Vec<Box<dyn ConversationContext>>,
 ) -> Result<CompletedRun, ClientError> {
     let mut state = LoopState::new(
         system_prompt,
@@ -3360,7 +3360,7 @@ mod tests {
                 // Seed a ToolLedger so tests that assert on ledger behavior work.
                 let mut ledger = ToolLedger::new();
                 ledger.capture_turn_transcript(0);
-                vec![Box::new(ledger) as Box<dyn MutableModelContext>]
+                vec![Box::new(ledger) as Box<dyn ConversationContext>]
             },
         }
     }

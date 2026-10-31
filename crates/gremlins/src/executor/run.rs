@@ -36,7 +36,7 @@ use indexmap::IndexMap;
 use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::completion::Message;
 
-use crate::clients::model_context::MutableModelContext;
+use crate::clients::model_context::ConversationContext;
 use crate::conversation::contexts::{
     landscape::LandscapeContext, signal::SignalMapContext, tool_ledger::ToolLedger,
 };
@@ -887,12 +887,12 @@ async fn run_agent(
     // Build model contexts from landscape data: ToolLedger + SignalMapContext + LandscapeContext.
     // ToolLedger is always created — it tracks reads/writes and produces the [seen] block.
     // SignalMapContext and LandscapeContext are built from landscape data when available.
-    let contexts: Vec<Box<dyn MutableModelContext>> = {
-        let mut contexts: Vec<Box<dyn MutableModelContext>> = Vec::new();
+    let contexts: Vec<Box<dyn ConversationContext>> = {
+        let mut contexts: Vec<Box<dyn ConversationContext>> = Vec::new();
         // ToolLedger always goes first — it's the primary per-turn observation context.
         let mut ledger = ToolLedger::new();
         ledger.capture_turn_transcript(0);
-        contexts.push(Box::new(ledger) as Box<dyn MutableModelContext>);
+        contexts.push(Box::new(ledger) as Box<dyn ConversationContext>);
         if let Some(ref mut ld) = landscape_data {
             let signal_sections = std::mem::take(&mut ld.signal_sections);
             let symbol_index = std::mem::take(&mut ld.symbol_index);

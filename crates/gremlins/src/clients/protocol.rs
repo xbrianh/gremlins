@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::model_context::{Conversation, MutableModelContext};
+use super::model_context::{Conversation, ConversationContext};
 
 /// Aggregated token usage summary from an agent run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,10 +62,10 @@ pub struct CompletedRun {
     /// carried back from the child loop for fork + join propagation.
     /// Never serialized; consumed by the parent loop after `join`.
     #[serde(skip)]
-    pub contexts: Vec<Box<dyn MutableModelContext>>,
+    pub contexts: Vec<Box<dyn ConversationContext>>,
 }
 
-// Manual Clone impl needed because `Box<dyn MutableModelContext>` doesn't
+// Manual Clone impl needed because `Box<dyn ConversationContext>` doesn't
 // auto-derive Clone — we use the trait's `clone_box()` method.
 impl Clone for CompletedRun {
     fn clone(&self) -> Self {

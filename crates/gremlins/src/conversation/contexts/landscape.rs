@@ -138,7 +138,7 @@ impl Clone for LandscapeContext {
     }
 }
 
-impl crate::clients::model_context::MutableModelContext for LandscapeContext {
+impl crate::clients::model_context::ConversationContext for LandscapeContext {
     fn propagates_to_task(&self) -> bool {
         true
     }
@@ -151,7 +151,7 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
         self
     }
 
-    fn clone_box(&self) -> Box<dyn crate::clients::model_context::MutableModelContext> {
+    fn clone_box(&self) -> Box<dyn crate::clients::model_context::ConversationContext> {
         Box::new(self.clone())
     }
 
@@ -374,7 +374,7 @@ impl crate::clients::model_context::MutableModelContext for LandscapeContext {
         }
     }
 
-    fn join(&mut self, _other: &dyn crate::clients::model_context::MutableModelContext) {
+    fn join(&mut self, _other: &dyn crate::clients::model_context::ConversationContext) {
         // No-op: no live state to merge.
     }
 

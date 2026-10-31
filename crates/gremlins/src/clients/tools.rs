@@ -45,7 +45,7 @@ pub(crate) struct TaskOutcome {
     /// The prose output (text result) from the child agent loop.
     pub output: String,
     /// Mutable model contexts carried back from the child loop after `join`.
-    pub contexts: Vec<Box<dyn super::model_context::MutableModelContext>>,
+    pub contexts: Vec<Box<dyn super::model_context::ConversationContext>>,
 }
 
 /// Callback that `invoke` calls for Task tool invocations.
@@ -58,7 +58,7 @@ pub(crate) type TaskFn = Arc<
             TaskKind,
             String,
             Option<Box<dyn super::model_context::Conversation>>,
-            Vec<Box<dyn super::model_context::MutableModelContext>>,
+            Vec<Box<dyn super::model_context::ConversationContext>>,
         ) -> TaskFuture
         + Send
         + Sync,
@@ -534,7 +534,7 @@ pub(crate) async fn invoke_with_contexts(
     name: &str,
     ctx: &AgentLoopRuntime,
     args_json: &str,
-    parent_contexts: Vec<Box<dyn super::model_context::MutableModelContext>>,
+    parent_contexts: Vec<Box<dyn super::model_context::ConversationContext>>,
 ) -> TaskOutcome {
     if let Some(allowed) = &ctx.allowed_tools {
         // Mischief is chat-only; allow it through the gate only when the

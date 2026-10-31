@@ -9,7 +9,7 @@ use super::protocol::FileObservations;
 /// and never produce durable history — only ephemeral transcript blocks that
 /// `compose_model_transcript` weaves into the outgoing request.
 #[allow(dead_code)]
-pub trait MutableModelContext: Any + Send + Sync {
+pub trait ConversationContext: Any + Send + Sync {
     /// Whether this context propagates into nested Task (Fork/Scout/Implement)
     /// loops. `ToolLedger` propagates; futures like `FindingsLedger` may not.
     fn propagates_to_task(&self) -> bool;
@@ -21,7 +21,7 @@ pub trait MutableModelContext: Any + Send + Sync {
     fn as_any_mut(&mut self) -> &mut dyn Any;
 
     /// Clone this context into a new heap allocation.
-    fn clone_box(&self) -> Box<dyn MutableModelContext>;
+    fn clone_box(&self) -> Box<dyn ConversationContext>;
 
     /// Serve a tool result directly from this context, short-circuiting the
     /// normal handler dispatch. Called after arg validation and sandbox
@@ -96,7 +96,7 @@ pub trait MutableModelContext: Any + Send + Sync {
     ///
     /// Used after a parallel fork to reconcile observations from sibling
     /// branches.  Not yet wired by any caller.
-    fn join(&mut self, _other: &dyn MutableModelContext) {
+    fn join(&mut self, _other: &dyn ConversationContext) {
         // Default: no-op.  Concrete contexts that need merging override this.
     }
 
@@ -109,9 +109,9 @@ pub trait MutableModelContext: Any + Send + Sync {
     }
 }
 
-// `Box<dyn MutableModelContext>` participates in `#[derive(Clone)]` structs
+// `Box<dyn ConversationContext>` participates in `#[derive(Clone)]` structs
 // (e.g. `AgentLoopRuntime`); delegate to the trait's `clone_box`.
-impl Clone for Box<dyn MutableModelContext> {
+impl Clone for Box<dyn ConversationContext> {
     fn clone(&self) -> Self {
         self.clone_box()
     }
@@ -119,9 +119,9 @@ impl Clone for Box<dyn MutableModelContext> {
 
 // `CompletedRun` derives `Debug`; the trait object needs a `Debug` impl, but
 // its contents are not worth printing.
-impl std::fmt::Debug for dyn MutableModelContext {
+impl std::fmt::Debug for dyn ConversationContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "MutableModelContext")
+        write!(f, "ConversationContext")
     }
 }
 
@@ -236,7 +236,7 @@ pub(crate) trait Conversation: Any + Send + Sync {
 
     /// Seed the conversation's mutable model contexts. Cloned from the
     /// caller's seed list via `clone_box()`.
-    fn set_contexts(&mut self, _ctxs: Vec<Box<dyn MutableModelContext>>) {}
+    fn set_contexts(&mut self, _ctxs: Vec<Box<dyn ConversationContext>>) {}
 
     /// Observe one tool result across all contexts and return per-context
     /// extra annotations (for inline visibility alongside raw output).
@@ -252,7 +252,7 @@ pub(crate) trait Conversation: Any + Send + Sync {
 
     /// Join child contexts (returned from a Task) back into the parent
     /// contexts, returning any newly-observed text blocks.
-    fn join_child_contexts(&mut self, _children: &[Box<dyn MutableModelContext>]) -> Vec<String> {
+    fn join_child_contexts(&mut self, _children: &[Box<dyn ConversationContext>]) -> Vec<String> {
         Vec::new()
     }
 
@@ -260,12 +260,12 @@ pub(crate) trait Conversation: Any + Send + Sync {
     fn finalize_contexts(&mut self, _turn: usize) {}
 
     /// Return clones of every context that propagates into nested tasks.
-    fn propagating_contexts(&self) -> Vec<Box<dyn MutableModelContext>> {
+    fn propagating_contexts(&self) -> Vec<Box<dyn ConversationContext>> {
         Vec::new()
     }
 
     /// Snapshot all contexts via `clone_box()`.
-    fn context_snapshot(&self) -> Vec<Box<dyn MutableModelContext>> {
+    fn context_snapshot(&self) -> Vec<Box<dyn ConversationContext>> {
         Vec::new()
     }
 
@@ -307,7 +307,7 @@ impl std::fmt::Debug for dyn Conversation {
 /// are benign for rendering: the child's inherited history already carries
 /// the parent's earlier turns.
 pub(crate) fn zip_context_transcripts(
-    contexts: &[Box<dyn MutableModelContext>],
+    contexts: &[Box<dyn ConversationContext>],
     expected_len: usize,
 ) -> Vec<Vec<String>> {
     let mut by_turn: Vec<Vec<String>> = vec![Vec::new(); expected_len];
@@ -359,7 +359,7 @@ pub(crate) fn compose_model_transcript(
     stage_prompt: &str,
     history: &[rig_core::completion::Message],
     next_prompt: &rig_core::completion::Message,
-    contexts: &[Box<dyn MutableModelContext>],
+    contexts: &[Box<dyn ConversationContext>],
     turn: usize,
     inherited_count: usize,
 ) -> Vec<rig_core::completion::Message> {
