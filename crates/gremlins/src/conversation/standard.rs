@@ -5,6 +5,7 @@
 //! transcript by injecting findings/scratchpad into the pending prompt and then
 //! interleaving per-turn context blocks via [`compose_model_transcript`].
 
+use std::any::Any;
 use std::hash::{Hash, Hasher};
 
 use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
@@ -69,6 +70,13 @@ impl StandardConversation {
             finalized_messages: None,
             contexts: Vec::new(),
         }
+    }
+
+    /// Seed mutable model contexts. Cloned from the caller's seed list
+    /// via `clone_box()`. Called before the conversation is boxed and
+    /// handed off to the agent loop.
+    pub(crate) fn set_contexts(&mut self, ctxs: Vec<Box<dyn ConversationContext>>) {
+        self.contexts = ctxs.iter().map(|c| c.clone_box()).collect();
     }
 
     /// Re-inject findings into `next_prompt` when they are missing from the
@@ -157,6 +165,14 @@ impl StandardConversation {
 }
 
 impl Conversation for StandardConversation {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
     fn clone_box(&self) -> Box<dyn Conversation> {
         Box::new(Self {
             history: self.history.clone(),
@@ -411,10 +427,6 @@ impl Conversation for StandardConversation {
         all
     }
 
-    fn set_contexts(&mut self, ctxs: Vec<Box<dyn ConversationContext>>) {
-        self.contexts = ctxs.iter().map(|c| c.clone_box()).collect();
-    }
-
     fn observe_tool_results(
         &mut self,
         turn: usize,
@@ -430,9 +442,20 @@ impl Conversation for StandardConversation {
         extra
     }
 
-    fn join_child_contexts(&mut self, children: &[Box<dyn ConversationContext>]) -> Vec<String> {
+    fn join_child_conversation(&mut self, child: &dyn Conversation) -> Vec<String> {
+        // Downcast is safe: StandardConversation is the only Conversation impl.
+        let child = child
+            .as_any()
+            .downcast_ref::<StandardConversation>()
+            .expect("join_child_conversation: child must be StandardConversation");
+        let snapshot: Vec<Box<dyn ConversationContext>> =
+            child.contexts.iter().map(|c| c.clone_box()).collect();
+        if snapshot.is_empty() {
+            return Vec::new();
+        }
+        // Match child contexts to parent contexts by TypeId and join.
         let mut task_observations = Vec::new();
-        for child_ctx in children {
+        for child_ctx in &snapshot {
             let child_tid = child_ctx.as_any().type_id();
             for parent_ctx in &mut self.contexts {
                 if parent_ctx.as_any().type_id() == child_tid {
@@ -449,30 +472,10 @@ impl Conversation for StandardConversation {
         task_observations
     }
 
-    fn join_child_conversation(&mut self, child: &dyn Conversation) -> Vec<String> {
-        let child_contexts = child.context_snapshot();
-        if child_contexts.is_empty() {
-            return Vec::new();
-        }
-        self.join_child_contexts(&child_contexts)
-    }
-
     fn finalize_contexts(&mut self, turn: usize) {
         for ctx in &mut self.contexts {
             ctx.finalize_turn(turn);
         }
-    }
-
-    fn propagating_contexts(&self) -> Vec<Box<dyn ConversationContext>> {
-        self.contexts
-            .iter()
-            .filter(|c| c.propagates_to_task())
-            .map(|c| c.clone_box())
-            .collect()
-    }
-
-    fn context_snapshot(&self) -> Vec<Box<dyn ConversationContext>> {
-        self.contexts.iter().map(|c| c.clone_box()).collect()
     }
 
     fn file_observations(&self) -> Option<FileObservations> {

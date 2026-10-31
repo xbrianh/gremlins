@@ -789,13 +789,11 @@ async fn run_agent(
         None
     };
 
-    let mut prepopulated_conversation: Option<Box<dyn crate::clients::model_context::Conversation>> = verbatim_history.map(|msgs| {
-        Box::new(crate::conversation::standard::StandardConversation::new(
-            "",
-            false,
-            Some(msgs),
-        )) as Box<dyn crate::clients::model_context::Conversation>
-    });
+    let mut conv = crate::conversation::standard::StandardConversation::new(
+        "",
+        false,
+        verbatim_history,
+    );
 
     // ── Live usage tracker for failure persistence ─────
     // Stores (combined_usage, stage_local_usage, cost_usd).
@@ -916,18 +914,10 @@ async fn run_agent(
     };
 
     // Seed model contexts onto the conversation before handing off to the agent loop.
-    // If there's no pre-populated conversation yet, create a fresh one.
-    if !contexts.is_empty() {
-        if let Some(ref mut conv) = prepopulated_conversation {
-            conv.set_contexts(contexts);
-        } else {
-            let mut conv: Box<dyn crate::clients::model_context::Conversation> = Box::new(
-                crate::conversation::standard::StandardConversation::new("", false, None),
-            );
-            conv.set_contexts(contexts);
-            prepopulated_conversation = Some(conv);
-        }
-    }
+    conv.set_contexts(contexts);
+
+    let prepopulated_conversation: Option<Box<dyn crate::clients::model_context::Conversation>> =
+        Some(Box::new(conv));
 
     let params = RunParams {
         prompt: prepared.user_prompt(),
