@@ -17,7 +17,11 @@ use crate::clients::model_context::{
     compose_model_transcript, Conversation, ConversationContext, RunArtifact, TurnScript,
 };
 use crate::clients::protocol::FileObservations;
+use crate::conversation::contexts::{
+    landscape::LandscapeContext, signal::SignalMapContext, tool_ledger::ToolLedger,
+};
 use crate::conversation::done::{done_user_message, user_message_text};
+use crate::landscape::{signals::SignalProfile, LandscapeData};
 use crate::task_kind::TaskKind;
 
 /// The standard [`Conversation`] implementation.
@@ -72,11 +76,42 @@ impl StandardConversation {
         }
     }
 
-    /// Seed mutable model contexts. Cloned from the caller's seed list
-    /// via `clone_box()`. Called before the conversation is boxed and
-    /// handed off to the agent loop.
-    pub(crate) fn set_contexts(&mut self, ctxs: Vec<Box<dyn ConversationContext>>) {
-        self.contexts = ctxs.iter().map(|c| c.clone_box()).collect();
+    /// Seed mutable model contexts from raw landscape data.
+    ///
+    /// Builds a [`ToolLedger`] (always), plus a [`SignalMapContext`] and
+    /// [`LandscapeContext`] when `landscape_data` is present.  Contexts are
+    /// cloned via `clone_box()` so the conversation owns independent copies.
+    /// Called before the conversation is boxed and handed off to the agent loop.
+    pub(crate) fn seed_from_landscape(
+        &mut self,
+        landscape_data: Option<LandscapeData>,
+        user_prompt: &str,
+        profile: SignalProfile,
+    ) {
+        let mut contexts: Vec<Box<dyn ConversationContext>> = Vec::new();
+
+        // ToolLedger always goes first — it's the primary per-turn observation context.
+        let mut ledger = ToolLedger::new();
+        ledger.capture_turn_transcript(0);
+        contexts.push(Box::new(ledger) as Box<dyn ConversationContext>);
+
+        if let Some(mut ld) = landscape_data {
+            let signal_sections = std::mem::take(&mut ld.signal_sections);
+            let symbol_index = std::mem::take(&mut ld.symbol_index);
+            let has_signals = !signal_sections.is_empty() || !symbol_index.is_empty();
+            if has_signals {
+                contexts.push(Box::new(SignalMapContext::new(
+                    signal_sections,
+                    Some(user_prompt.to_string()),
+                    ld.root.clone(),
+                    symbol_index,
+                    profile,
+                )));
+            }
+            contexts.push(Box::new(LandscapeContext::new(ld)));
+        }
+
+        self.contexts = contexts.into_iter().map(|c| c.clone_box()).collect();
     }
 
     /// Re-inject findings into `next_prompt` when they are missing from the

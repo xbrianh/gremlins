@@ -36,11 +36,6 @@ use indexmap::IndexMap;
 use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::completion::Message;
 
-use crate::clients::model_context::ConversationContext;
-use crate::conversation::contexts::{
-    landscape::LandscapeContext, signal::SignalMapContext, tool_ledger::ToolLedger,
-};
-
 // ---------------------------------------------------------------------------
 // System prompt assembly
 // ---------------------------------------------------------------------------
@@ -647,7 +642,7 @@ async fn run_agent(
     // signal sections and bundle them into the data. The system prompt is just
     // the base prompt without any landscape block.
     let profile;
-    let mut landscape_data: Option<crate::landscape::LandscapeData> = if agent.landscape {
+    let landscape_data: Option<crate::landscape::LandscapeData> = if agent.landscape {
         let cwd2 = gremlin.cwd();
         let log_tx2 = gremlin.runtime_config.log_tx.clone();
         let outlines = build_outlines(cwd2.clone(), log_tx2.clone()).await;
@@ -883,38 +878,7 @@ async fn run_agent(
         );
     }
     // Build model contexts from landscape data: ToolLedger + SignalMapContext + LandscapeContext.
-    // ToolLedger is always created — it tracks reads/writes and produces the [seen] block.
-    // SignalMapContext and LandscapeContext are built from landscape data when available.
-    let contexts: Vec<Box<dyn ConversationContext>> = {
-        let mut contexts: Vec<Box<dyn ConversationContext>> = Vec::new();
-        // ToolLedger always goes first — it's the primary per-turn observation context.
-        let mut ledger = ToolLedger::new();
-        ledger.capture_turn_transcript(0);
-        contexts.push(Box::new(ledger) as Box<dyn ConversationContext>);
-        if let Some(ref mut ld) = landscape_data {
-            let signal_sections = std::mem::take(&mut ld.signal_sections);
-            let symbol_index = std::mem::take(&mut ld.symbol_index);
-            let cwd = ld.root.clone();
-            let has_signals = !signal_sections.is_empty() || !symbol_index.is_empty();
-            if has_signals {
-                let prompt = prepared.user_prompt();
-                contexts.push(Box::new(SignalMapContext::new(
-                    signal_sections,
-                    Some(prompt),
-                    cwd.clone(),
-                    symbol_index,
-                    profile,
-                )));
-            }
-        }
-        if let Some(ld) = landscape_data.take() {
-            contexts.push(Box::new(LandscapeContext::new(ld)));
-        }
-        contexts
-    };
-
-    // Seed model contexts onto the conversation before handing off to the agent loop.
-    conv.set_contexts(contexts);
+    conv.seed_from_landscape(landscape_data, &prepared.user_prompt(), profile);
 
     let prepopulated_conversation: Option<Box<dyn crate::clients::model_context::Conversation>> =
         Some(Box::new(conv));
