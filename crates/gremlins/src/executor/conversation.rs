@@ -651,7 +651,7 @@ fn is_full_read(args: &serde_json::Value, output: &str) -> bool {
     offset == 0 && args.get("limit").is_none() && !output.contains("[...truncated at")
 }
 fn is_successful_mutation(output: &str) -> bool {
-    output.trim() == "OK"
+    output.trim() == "OK" || output.starts_with("Applied ")
 }
 
 fn search_result_key(name: &str, args: &serde_json::Value) -> Option<String> {
@@ -1514,6 +1514,36 @@ mod tests {
     }
 
     #[test]
+    fn edit_success_invalidates_file_coverage_in_facts() {
+        // The Edit tool now returns a bounded post-edit snippet instead of
+        // "OK". That success report must still invalidate any earlier Read
+        // excerpt for the same path so compaction never treats it as
+        // authoritative.
+        let read_call = tool_call("read_1", "Read", serde_json::json!({"file_path": "a.txt"}));
+        let edit_call = tool_call(
+            "edit_1",
+            "Edit",
+            serde_json::json!({"file_path": "a.txt", "edits": [{"old_string": "old", "new_string": "new"}]}),
+        );
+
+        let history = vec![
+            user_prompt("read then edit a.txt"),
+            assistant_with_tools(&[read_call]),
+            tool_result("Read", "read_1", "old contents"),
+            assistant_with_tools(&[edit_call]),
+            tool_result(
+                "Edit",
+                "edit_1",
+                "Applied 1 edit to a.txt.\n  1: new contents\n",
+            ),
+        ];
+        let facts = extract_facts(&history);
+        assert!(!facts.covered_file_keys.contains("a.txt"));
+        assert!(!facts.file_keys.contains("a.txt"));
+        assert!(facts.invalidated_file_keys.contains("a.txt"));
+    }
+
+    #[test]
     fn window_keys_do_not_cover_partial_reads_or_mutations() {
         let full_read = tool_call("read_1", "Read", serde_json::json!({"file_path": "a.txt"}));
         let partial_read = tool_call(
@@ -1538,6 +1568,34 @@ mod tests {
         assert!(keys.file_keys.contains("a.txt"));
         assert!(!keys.file_keys.contains("b.txt"));
         assert!(!keys.file_keys.contains("c.txt"));
+    }
+
+    #[test]
+    fn edit_success_invalidates_window_coverage() {
+        // The Edit tool's bounded post-edit snippet must be recognized as a
+        // successful mutation so a prior full Read for the same path drops
+        // out of the verbatim-evidence window instead of being labeled
+        // authoritative.
+        let read_call = tool_call("read_1", "Read", serde_json::json!({"file_path": "a.txt"}));
+        let edit_call = tool_call(
+            "edit_1",
+            "Edit",
+            serde_json::json!({"file_path": "a.txt", "edits": [{"old_string": "old", "new_string": "new"}]}),
+        );
+
+        let history = vec![
+            user_prompt("read then edit a.txt"),
+            assistant_with_tools(&[read_call]),
+            tool_result("Read", "read_1", "full contents"),
+            assistant_with_tools(&[edit_call]),
+            tool_result(
+                "Edit",
+                "edit_1",
+                "Applied 1 edit to a.txt.\n  1: new contents\n",
+            ),
+        ];
+        let keys = window_keys_for_range(&history);
+        assert!(!keys.file_keys.contains("a.txt"));
     }
 
     #[test]

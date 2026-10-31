@@ -35,6 +35,18 @@ fn compute_line_offsets(content: &str) -> Vec<usize> {
     offs
 }
 
+/// Map a byte offset in `content` to its 1-based line number.
+///
+/// An offset that falls exactly on a line start reports that line; an offset
+/// in the middle of a line reports the line containing it. Offsets past the
+/// end of the file clamp to the final line.
+fn line_number_at(line_offsets: &[usize], byte_offset: usize) -> usize {
+    match line_offsets.binary_search(&byte_offset) {
+        Ok(idx) => idx + 1,
+        Err(idx) => idx,
+    }
+}
+
 /// Translate an inclusive line scope (`start_line` ..= `end_line`) into a
 /// half-open byte range `[start, end)`.
 ///
@@ -284,8 +296,48 @@ fn parse_edits(edits_arr: &[serde_json::Value], file_path: &str) -> Result<Vec<E
     Ok(edits)
 }
 
-fn apply_edits(content: &str, edits: &[EditOp], file_path: &str) -> Result<String, String> {
+struct AppliedEdit {
+    start: usize,
+    old_len: usize,
+    new_len: usize,
+}
+
+/// Track a byte position from the accumulated buffer state immediately after
+/// `from_edit` was applied through every subsequent edit, returning its final
+/// position in the result buffer.
+///
+/// A later edit shifts positions after its replaced region by its length
+/// delta; positions at or before the match start are untouched, and a position
+/// that falls inside the replaced region collapses to the start of that
+/// replacement (the original byte no longer exists).
+fn map_position_forward(applied: &[AppliedEdit], from_edit: usize, mut position: usize) -> usize {
+    for later in &applied[from_edit + 1..] {
+        if position <= later.start {
+            continue;
+        }
+        let region_end = later.start + later.old_len;
+        if position >= region_end {
+            position =
+                (position as isize + later.new_len as isize - later.old_len as isize) as usize;
+        } else {
+            // inside the replaced region — collapse to its start
+            position = later.start;
+        }
+    }
+    position
+}
+
+fn apply_edits(
+    content: &str,
+    edits: &[EditOp],
+    file_path: &str,
+) -> Result<(String, Vec<(usize, usize)>), String> {
     let mut buffer = content.to_string();
+    // Record each applied edit's replacement byte span at application time.
+    // Line ranges are computed afterwards against the final buffer, so a later
+    // edit that inserts or deletes lines before an earlier edit's position
+    // still reports the earlier edit at its true final location.
+    let mut applied: Vec<AppliedEdit> = Vec::with_capacity(edits.len());
 
     // Validate and apply edits sequentially. Each edit sees the accumulated
     // state of all prior edits in the same batch, enabling chained edits
@@ -412,11 +464,175 @@ fn apply_edits(content: &str, edits: &[EditOp], file_path: &str) -> Result<Strin
 
         // Single match — apply to the accumulated buffer.
         let start = match_positions[0];
-        let end = start + old_str.len();
-        buffer.replace_range(start..end, &edit.new_str);
+        let old_len = old_str.len();
+        buffer.replace_range(start..start + old_len, &edit.new_str);
+        applied.push(AppliedEdit {
+            start,
+            old_len,
+            new_len: edit.new_str.len(),
+        });
     }
 
-    Ok(buffer)
+    // Translate each replacement's byte span into the final buffer (after all
+    // edits are applied), then map each to a 1-based line extent. Line offsets
+    // are computed once here rather than rescanning the whole buffer per edit.
+    let offsets = compute_line_offsets(&buffer);
+    let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(applied.len());
+    for (i, edit) in applied.iter().enumerate() {
+        let final_start = map_position_forward(&applied, i, edit.start);
+        let start_line = line_number_at(&offsets, final_start);
+        let end_line = if edit.new_len == 0 {
+            start_line
+        } else {
+            let final_end = map_position_forward(&applied, i, edit.start + edit.new_len);
+            if final_end > final_start {
+                line_number_at(&offsets, final_end - 1)
+            } else {
+                start_line
+            }
+        };
+        ranges.push((start_line, end_line));
+    }
+
+    Ok((buffer, ranges))
+}
+
+const SUCCESS_SNIPPET_RADIUS: usize = 3;
+const SUCCESS_EXPANDED_EDIT_CAP: usize = 6;
+const SUCCESS_WINDOW_LINE_CAP: usize = 12;
+
+/// Render one line of the success report with its 1-based line number.
+fn render_success_line(content: &str, offsets: &[usize], line_no: usize) -> String {
+    let line_start = offsets.get(line_no - 1).copied().unwrap_or(content.len());
+    let line_end = offsets.get(line_no).copied().unwrap_or(content.len());
+    let line = content[line_start..line_end].trim_end_matches(&['\r', '\n'][..]);
+    format!("  {line_no}: {}\n", clip_line(line, 120))
+}
+
+/// A contiguous block of lines already bounded to the per-edit cap.
+struct SuccessPiece {
+    /// Bounded line segments to render for this edit (head and, for an
+    /// oversized window, tail).
+    segments: Vec<(usize, usize)>,
+    /// Interior lines omitted from an oversized window, inclusive.
+    skipped: Option<(usize, usize)>,
+}
+
+/// Render the bounded post-edit confirmation report returned by a successful
+/// `edit_sync` call.
+///
+/// Each applied edit contributes a short, numbered snippet of the final file
+/// around its replacement, so the caller can confirm where the edit landed
+/// without a follow-up `Read`. Per-edit snippets are bounded *before* shared
+/// context is deduplicated, so an edit whose context window would otherwise be
+/// swallowed by an adjacent oversized block is still shown. Overlapping or
+/// touching segments are coalesced after capping, at most the first
+/// `SUCCESS_EXPANDED_EDIT_CAP` edits are expanded (the remainder are summarized
+/// by a trailing count), and every snippet is capped at
+/// `SUCCESS_WINDOW_LINE_CAP` lines.
+fn render_success(content: &str, ranges: &[(usize, usize)], file_path: &str) -> String {
+    let offsets = compute_line_offsets(content);
+    let last_line = offsets.len();
+
+    // Expand each replacement's line extent into a 1-based inclusive window
+    // with `SUCCESS_SNIPPET_RADIUS` lines of context on either side. Sort the
+    // windows by start line first — ranges arrive in edit-application order,
+    // which need not be monotonic in the final file.
+    let mut windows: Vec<(usize, usize)> = ranges
+        .iter()
+        .map(|&(start_line, end_line)| {
+            let start = start_line.saturating_sub(SUCCESS_SNIPPET_RADIUS).max(1);
+            let end = end_line
+                .saturating_add(SUCCESS_SNIPPET_RADIUS)
+                .min(last_line);
+            (start, end)
+        })
+        .collect();
+    windows.sort_unstable_by_key(|&(start, _)| start);
+
+    let expanded = windows.len().min(SUCCESS_EXPANDED_EDIT_CAP);
+
+    // Bound each selected edit before coalescing. An oversized window is split
+    // into a head and tail around its omitted interior so the surrounding
+    // context is still labeled while the replacement's endpoints stay visible.
+    let mut pieces: Vec<SuccessPiece> = Vec::with_capacity(expanded);
+    for &(start, end) in windows.iter().take(expanded) {
+        let block_len = end - start + 1;
+        if block_len > SUCCESS_WINDOW_LINE_CAP {
+            let head_end = start + SUCCESS_WINDOW_LINE_CAP / 2 - 1;
+            let tail_start = end - (SUCCESS_WINDOW_LINE_CAP / 2) + 1;
+            pieces.push(SuccessPiece {
+                segments: vec![(start, head_end), (tail_start, end)],
+                skipped: Some((head_end + 1, tail_start.saturating_sub(1))),
+            });
+        } else {
+            pieces.push(SuccessPiece {
+                segments: vec![(start, end)],
+                skipped: None,
+            });
+        }
+    }
+
+    // Deduplicate shared context by merging touching/overlapping bounded
+    // segments into union intervals. Segments are sorted so a later edit that
+    // overlaps an earlier edit's skipped interior still lands in file order.
+    let mut segments: Vec<(usize, usize)> = pieces
+        .iter()
+        .flat_map(|piece| piece.segments.iter().copied())
+        .collect();
+    segments.sort_unstable_by_key(|&(start, _)| start);
+
+    let mut intervals: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in segments {
+        match intervals.last_mut() {
+            Some((_, last_end)) if start <= last_end.saturating_add(1) => {
+                *last_end = (*last_end).max(end);
+            }
+            _ => intervals.push((start, end)),
+        }
+    }
+
+    let mut out = format!(
+        "Applied {} edit{} to {file_path}.\n",
+        ranges.len(),
+        if ranges.len() == 1 { "" } else { "s" }
+    );
+
+    if expanded < windows.len() {
+        let remaining = windows.len() - expanded;
+        out.push_str(&format!(
+            "({remaining} more context block{} not shown)\n",
+            if remaining == 1 { "" } else { "s" }
+        ));
+    }
+
+    for (interval_idx, &(start, end)) in intervals.iter().enumerate() {
+        if interval_idx > 0 {
+            let previous_end = intervals[interval_idx - 1].1;
+            let gap_start = previous_end.saturating_add(1);
+            let gap_end = start.saturating_sub(1);
+
+            // A gap that is the omitted interior of a single oversized edit is
+            // rendered as a line-count marker; any other non-contiguous gap is
+            // a separate context block and gets the block separator.
+            let is_skipped_interior = pieces.iter().any(|piece| {
+                piece.skipped.is_some_and(|(skip_start, skip_end)| {
+                    skip_start <= gap_start && gap_end <= skip_end
+                })
+            });
+            if is_skipped_interior {
+                out.push_str(&format!("  ... {} lines ...\n", gap_end - gap_start + 1));
+            } else {
+                out.push_str("--\n");
+            }
+        }
+
+        for line_no in start..=end {
+            out.push_str(&render_success_line(content, &offsets, line_no));
+        }
+    }
+
+    out
 }
 
 pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
@@ -452,15 +668,15 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
         Err(e) => return e,
     };
 
-    let updated = match apply_edits(&content, &edits, file_path) {
+    let (updated, ranges) = match apply_edits(&content, &edits, file_path) {
         Ok(u) => u,
         Err(e) => return e,
     };
 
-    if let Err(e) = std::fs::write(&path, updated) {
+    if let Err(e) = std::fs::write(&path, &updated) {
         return format!("Error: {e}");
     }
-    "OK".into()
+    render_success(&updated, &ranges, file_path)
 }
 
 #[cfg(test)]
@@ -595,7 +811,7 @@ mod tests {
             scope_start: None,
             scope_end: None,
         }];
-        let out = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "foo baz");
     }
 
@@ -746,7 +962,7 @@ mod tests {
             scope_start: Some(2),
             scope_end: Some(4),
         }];
-        let out = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "line1\nline2\nTARGET\nline4\nline5\n");
     }
 
@@ -775,7 +991,7 @@ mod tests {
             scope_start: Some(3),
             scope_end: None,
         }];
-        let out = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "line1\nline2\nTARGET\nline4\n");
     }
 
@@ -788,7 +1004,7 @@ mod tests {
             scope_start: Some(2),
             scope_end: Some(100),
         }];
-        let out = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "line1\nline2\nTARGET\nline4\n");
     }
 
@@ -802,7 +1018,7 @@ mod tests {
             scope_start: Some(2),
             scope_end: Some(2),
         }];
-        let out = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "x\nBAR\nfoo\n");
     }
 
@@ -818,7 +1034,7 @@ mod tests {
             scope_start: Some(2),
             scope_end: Some(3),
         }];
-        let out = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "foo\nBAR\nBAZ\n");
     }
 
@@ -855,7 +1071,7 @@ mod tests {
                 scope_end: None,
             },
         ];
-        let out = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "fn baz() {}\nfn main() { baz(); }\n");
     }
 
@@ -916,7 +1132,7 @@ mod tests {
                 scope_end: None,
             },
         ];
-        let out = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "let a = \"hi\";\nlet b = \"bye\";\n");
     }
 
@@ -961,7 +1177,7 @@ mod tests {
                 scope_end: None,
             },
         ];
-        let out = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "aONEbTWOc");
     }
 
@@ -1040,5 +1256,176 @@ mod tests {
         assert!(msg.contains("diverges at byte offset 12"), "got: {msg}");
         assert!(msg.contains(r#"expected: "line2\nline3""#), "got: {msg}");
         assert!(msg.contains(r#"actual:   "line2\n""#), "got: {msg}");
+    }
+
+    // --- Success-report tests ---
+
+    #[test]
+    fn apply_edits_reports_line_range_for_single_edit() {
+        let content = "one\ntwo\nthree\nfour\nfive\n";
+        let edits = vec![EditOp {
+            old_str: "three".into(),
+            new_str: "THREE".into(),
+            scope_start: None,
+            scope_end: None,
+        }];
+        let (out, ranges) = apply_edits(content, &edits, "f.txt").unwrap();
+        assert_eq!(out, "one\ntwo\nTHREE\nfour\nfive\n");
+        assert_eq!(ranges, vec![(3, 3)]);
+    }
+
+    #[test]
+    fn render_success_includes_context_around_single_edit() {
+        let content = "one\ntwo\nTHREE\nfour\nfive\n";
+        let report = render_success(content, &[(3, 3)], "f.txt");
+        assert!(
+            report.starts_with("Applied 1 edit to f.txt.\n"),
+            "got: {report}"
+        );
+        assert!(report.contains("  1: one"), "got: {report}");
+        assert!(report.contains("  3: THREE"), "got: {report}");
+        assert!(report.contains("  5: five"), "got: {report}");
+    }
+
+    #[test]
+    fn apply_edits_reports_ranges_against_accumulated_buffer() {
+        // The first replacement adds a line, so the second edit's true final
+        // position shifts down relative to the original content.
+        let content = "a\nb\nc\nd\n";
+        let edits = vec![
+            EditOp {
+                old_str: "b\nc".into(),
+                new_str: "B\nC\nC2".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+            EditOp {
+                old_str: "d".into(),
+                new_str: "D".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+        ];
+        let (out, ranges) = apply_edits(content, &edits, "f.txt").unwrap();
+        assert_eq!(out, "a\nB\nC\nC2\nD\n");
+        assert_eq!(ranges, vec![(2, 4), (5, 5)]);
+    }
+
+    #[test]
+    fn render_success_coalesces_adjacent_windows() {
+        let content = "a\nB\nC\nd\n";
+        let report = render_success(content, &[(2, 2), (3, 3)], "f.txt");
+        assert!(report.starts_with("Applied 2 edits"), "got: {report}");
+        assert_eq!(report.matches("  2: B").count(), 1, "got: {report}");
+        assert_eq!(report.matches("  3: C").count(), 1, "got: {report}");
+        assert!(
+            !report.contains("--"),
+            "adjacent edits should not repeat context; got: {report}"
+        );
+    }
+
+    #[test]
+    fn render_success_coalesces_out_of_order_windows() {
+        let content = "one\ntwo\nthree\nfour\nfive\n";
+        let report = render_success(content, &[(5, 5), (1, 1)], "f.txt");
+        assert!(report.starts_with("Applied 2 edits"), "got: {report}");
+        assert_eq!(report.matches("  1: one").count(), 1, "got: {report}");
+        assert_eq!(report.matches("  5: five").count(), 1, "got: {report}");
+        assert!(!report.contains("--"), "got: {report}");
+    }
+
+    #[test]
+    fn render_success_preserves_trailing_empty_line() {
+        let content = "one\ntwo\n";
+        let report = render_success(content, &[(2, 2)], "f.txt");
+        assert!(report.contains("  3: "), "got: {report}");
+    }
+
+    #[test]
+    fn apply_edits_reports_ranges_when_later_edit_shifts_earlier_lines() {
+        // Edit 1 replaces a later line; edit 2 inserts a line before it, so
+        // edit 1's true final position shifts down relative to its position at
+        // application time.
+        let content = "a\nb\nc\n";
+        let edits = vec![
+            EditOp {
+                old_str: "c".into(),
+                new_str: "C".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+            EditOp {
+                old_str: "a".into(),
+                new_str: "A\nA2".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+        ];
+        let (out, ranges) = apply_edits(content, &edits, "f.txt").unwrap();
+        assert_eq!(out, "A\nA2\nb\nC\n");
+        assert_eq!(ranges, vec![(4, 4), (1, 2)]);
+    }
+
+    #[test]
+    fn render_success_caps_oversized_window() {
+        let content: String = (1..=40)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let report = render_success(&content, &[(1, 40)], "f.txt");
+        assert!(report.starts_with("Applied 1 edit"), "got: {report}");
+        assert!(report.contains("  1: line1"), "got: {report}");
+        assert!(report.contains("  6: line6"), "got: {report}");
+        assert!(!report.contains("  7: line7"), "got: {report}");
+        assert!(report.contains("28 lines"), "got: {report}");
+    }
+
+    #[test]
+    fn render_success_caps_expanded_blocks() {
+        // Eight disjoint ranges collapse to eight context blocks; only the
+        // first six are expanded, with a trailing count for the remainder.
+        let content: String = (1..=70)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let ranges = [
+            (1, 1),
+            (10, 10),
+            (20, 20),
+            (30, 30),
+            (40, 40),
+            (50, 50),
+            (60, 60),
+            (70, 70),
+        ];
+        let report = render_success(&content, &ranges, "f.txt");
+        assert!(report.starts_with("Applied 8 edits"), "got: {report}");
+        assert!(
+            report.contains("(2 more context blocks not shown)"),
+            "got: {report}"
+        );
+        assert!(
+            !report.contains("  70:"),
+            "last block should be capped; got: {report}"
+        );
+    }
+
+    #[test]
+    fn render_success_keeps_each_edit_inside_a_coalesced_oversized_window() {
+        // Three disjoint one-line edits at lines 10, 17, and 24 produce
+        // context windows 7-13, 14-20, and 21-27. Those touch and therefore
+        // coalesce into a single 21-line window, but capping must be done per
+        // edit *before* deduplication — otherwise the oversized-window
+        // truncation keeps only lines 7-12 and 22-27 and silently drops the
+        // replacement at line 17.
+        let content: String = (1..=30)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let report = render_success(&content, &[(10, 10), (17, 17), (24, 24)], "f.txt");
+        assert!(report.contains("  10: line10"), "got: {report}");
+        assert!(report.contains("  17: line17"), "got: {report}");
+        assert!(report.contains("  24: line24"), "got: {report}");
+        assert!(!report.contains("... skipped"), "got: {report}");
     }
 }
