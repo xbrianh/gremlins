@@ -115,8 +115,7 @@ fn make_task_runner_at_depth(
     Arc::new(
         move |kind: TaskKind,
               task: String,
-              parent_conversation: Option<Box<dyn super::model_context::Conversation>>,
-              parent_contexts: Vec<Box<dyn super::model_context::ConversationContext>>| {
+              parent_conversation: Option<Box<dyn super::model_context::Conversation>>| {
             let model = model.clone();
             let task_model_selector = task_model_selector.clone();
             let tool_filter = tool_filter.clone();
@@ -132,7 +131,7 @@ fn make_task_runner_at_depth(
                 if depth >= MAX_DEPTH {
                     return tools::TaskOutcome {
                         output: format!("Error: task max depth ({MAX_DEPTH}) exceeded"),
-                        contexts: Vec::new(),
+                        conversation: None,
                     };
                 }
 
@@ -168,7 +167,7 @@ fn make_task_runner_at_depth(
                     Err(reason) => {
                         return tools::TaskOutcome {
                             output: format!("Task error: {reason}"),
-                            contexts: Vec::new(),
+                            conversation: None,
                         };
                     }
                 };
@@ -233,7 +232,9 @@ fn make_task_runner_at_depth(
                         child
                     })
                 } else {
-                    None
+                    // Scout/Implement: parent_conversation is already a fresh
+                    // conversation seeded with parent contexts (built in tools.rs).
+                    parent_conversation
                 };
 
                 let result = crate::clients::agent_loop::run_agent_loop_nested(
@@ -253,7 +254,6 @@ fn make_task_runner_at_depth(
                     selected_extra.clone(),
                     child_preserve_reasoning,
                     prepopulated_conversation,
-                    parent_contexts,
                 )
                 .await;
 
@@ -271,12 +271,12 @@ fn make_task_runner_at_depth(
                         );
                         tools::TaskOutcome {
                             output: out,
-                            contexts: completed.contexts,
+                            conversation: completed.conversation,
                         }
                     }
                     Err(e) => tools::TaskOutcome {
                         output: format!("Task error: {e}"),
-                        contexts: Vec::new(),
+                        conversation: None,
                     },
                 }
             })
@@ -530,7 +530,7 @@ mod tests {
         );
 
         // First invocation: depth 0 < 3, should succeed.
-        let output = runner(TaskKind::Scout, "first call".into(), None, Vec::new()).await;
+        let output = runner(TaskKind::Scout, "first call".into(), None).await;
         assert!(
             !output.output.contains("max depth"),
             "depth 0 should not hit guard, got: {}",
@@ -574,7 +574,7 @@ mod tests {
             false,
         );
 
-        let output = runner(TaskKind::Scout, "x".repeat(10_000), None, Vec::new()).await;
+        let output = runner(TaskKind::Scout, "x".repeat(10_000), None).await;
         assert!(
             output.output.starts_with("Task error: prompt size "),
             "oversized task prompt must surface as a Task error string, got: {}",
@@ -654,7 +654,6 @@ mod tests {
             TaskKind::Fork,
             "child task".into(),
             parent_conversation,
-            Vec::new(),
         )
         .await;
 
@@ -757,7 +756,7 @@ mod tests {
             false,
         );
 
-        let output = runner(TaskKind::Scout, "go".into(), None, Vec::new()).await;
+        let output = runner(TaskKind::Scout, "go".into(), None).await;
         assert!(
             !output.output.contains("Task error"),
             "unexpected error: {}",
@@ -822,7 +821,7 @@ mod tests {
             false,
         );
 
-        let output = runner(TaskKind::Scout, "go".into(), None, Vec::new()).await;
+        let output = runner(TaskKind::Scout, "go".into(), None).await;
         assert!(
             output
                 .output
@@ -865,7 +864,7 @@ mod tests {
             false,
         );
 
-        let blocked = runner(TaskKind::Scout, "too deep".into(), None, Vec::new()).await;
+        let blocked = runner(TaskKind::Scout, "too deep".into(), None).await;
         assert!(
             blocked.output.contains("max depth (3) exceeded"),
             "call at MAX_DEPTH should be rejected, got: {}",
@@ -910,7 +909,6 @@ mod tests {
             TaskKind::Scout,
             "transient".into(),
             None,
-            Vec::new(),
         ));
         tokio::time::advance(std::time::Duration::from_secs(60)).await;
         let output = handle.await.unwrap();
@@ -956,7 +954,7 @@ mod tests {
             false,
         );
 
-        let handle = tokio::spawn(runner(TaskKind::Scout, "exhaust".into(), None, Vec::new()));
+        let handle = tokio::spawn(runner(TaskKind::Scout, "exhaust".into(), None));
         tokio::time::advance(std::time::Duration::from_secs(200)).await;
         let output = handle.await.unwrap();
         assert!(
@@ -1024,7 +1022,6 @@ mod tests {
                     TaskKind::Scout,
                     format!("call {i}"),
                     None,
-                    Vec::new(),
                 ))
             })
             .collect();
@@ -1140,7 +1137,7 @@ mod tests {
         #[test]
         fn task_prefix_wraps_a_single_segment_at_depth_one() {
             let (runner, mut log_rx) = runner_with_turns(vec![turn_text("only")]);
-            block_on(runner(TaskKind::Scout, "task".into(), None, Vec::new()));
+            block_on(runner(TaskKind::Scout, "task".into(), None));
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 1, "get {segments:?} from {lines:?}");
@@ -1161,7 +1158,7 @@ mod tests {
         fn nested_task_prefix_appends_to_the_parent_chain() {
             let (runner, mut log_rx) =
                 runner_with_turns(vec![turn_task_call(), turn_text("leaf"), turn_text("done")]);
-            block_on(runner(TaskKind::Scout, "task".into(), None, Vec::new()));
+            block_on(runner(TaskKind::Scout, "task".into(), None));
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 2, "got {segments:?} from {lines:?}");
@@ -1183,8 +1180,8 @@ mod tests {
         fn sibling_invocations_get_distinct_segments() {
             let (runner, mut log_rx) = runner_with_turns(vec![turn_text("a"), turn_text("b")]);
             block_on(async {
-                runner(TaskKind::Scout, "one".into(), None, Vec::new()).await;
-                runner(TaskKind::Scout, "two".into(), None, Vec::new()).await;
+                runner(TaskKind::Scout, "one".into(), None).await;
+                runner(TaskKind::Scout, "two".into(), None).await;
             });
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));

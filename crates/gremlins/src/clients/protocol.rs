@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::model_context::{Conversation, ConversationContext};
+use super::model_context::Conversation;
 
 /// Aggregated token usage summary from an agent run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,14 +58,10 @@ pub struct CompletedRun {
     /// cross-stage landscape pruning can skip already-explored files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_observations: Option<FileObservations>,
-    /// Mutable model contexts (ToolLedger, LandscapeContext, SignalMapContext)
-    /// carried back from the child loop for fork + join propagation.
-    /// Never serialized; consumed by the parent loop after `join`.
-    #[serde(skip)]
-    pub contexts: Vec<Box<dyn ConversationContext>>,
+
 }
 
-// Manual Clone impl needed because `Box<dyn ConversationContext>` doesn't
+// Manual Clone impl needed because `Box<dyn Conversation>` doesn't
 // auto-derive Clone — we use the trait's `clone_box()` method.
 impl Clone for CompletedRun {
     fn clone(&self) -> Self {
@@ -78,7 +74,6 @@ impl Clone for CompletedRun {
             token_usage: self.token_usage.clone(),
             conversation: self.conversation.clone(),
             file_observations: self.file_observations.clone(),
-            contexts: self.contexts.iter().map(|c| c.clone_box()).collect(),
         }
     }
 }

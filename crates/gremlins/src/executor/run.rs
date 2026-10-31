@@ -789,7 +789,7 @@ async fn run_agent(
         None
     };
 
-    let prepopulated_conversation = verbatim_history.map(|msgs| {
+    let mut prepopulated_conversation: Option<Box<dyn crate::clients::model_context::Conversation>> = verbatim_history.map(|msgs| {
         Box::new(crate::conversation::standard::StandardConversation::new(
             "",
             false,
@@ -915,6 +915,20 @@ async fn run_agent(
         contexts
     };
 
+    // Seed model contexts onto the conversation before handing off to the agent loop.
+    // If there's no pre-populated conversation yet, create a fresh one.
+    if !contexts.is_empty() {
+        if let Some(ref mut conv) = prepopulated_conversation {
+            conv.set_contexts(contexts);
+        } else {
+            let mut conv: Box<dyn crate::clients::model_context::Conversation> = Box::new(
+                crate::conversation::standard::StandardConversation::new("", false, None),
+            );
+            conv.set_contexts(contexts);
+            prepopulated_conversation = Some(conv);
+        }
+    }
+
     let params = RunParams {
         prompt: prepared.user_prompt(),
         label: prepared.name.clone(),
@@ -953,7 +967,6 @@ async fn run_agent(
         token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
         scratchpad_path: None,
         hooks: Some(hooks),
-        contexts,
     };
 
     let effective_model = params

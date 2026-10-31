@@ -76,9 +76,6 @@ pub struct RunParams {
     /// (prompt-debug, token-usage) into the agent loop. `None` defaults
     /// to no-op hooks.
     pub hooks: Option<LoopHooks>,
-    /// Mutable model contexts (ToolLedger, SignalMapContext, LandscapeContext)
-    /// seeded onto the run's conversation.
-    pub(crate) contexts: Vec<Box<dyn crate::clients::model_context::ConversationContext>>,
 }
 
 impl Clone for RunParams {
@@ -111,7 +108,6 @@ impl Clone for RunParams {
             token_usage_sink: self.token_usage_sink.clone(),
             scratchpad_path: self.scratchpad_path.clone(),
             hooks: self.hooks.clone(),
-            contexts: self.contexts.iter().map(|c| c.clone_box()).collect(),
         }
     }
 }

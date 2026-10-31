@@ -167,8 +167,6 @@ pub(crate) struct RunContext {
     /// Inversion-of-control hooks carrying cross-package dependencies
     /// (prompt-debug, token-usage).
     pub(crate) hooks: LoopHooks,
-    /// Mutable model contexts seeded onto the run's conversation.
-    pub(crate) contexts: Vec<Box<dyn ConversationContext>>,
 }
 
 impl RunContext {
@@ -190,7 +188,6 @@ impl RunContext {
             stream_events: params.stream_events.clone(),
             prepopulated_conversation: params.prepopulated_conversation.clone(),
             hooks: params.hooks.clone().unwrap_or_else(LoopHooks::new),
-            contexts: params.contexts.iter().map(|c| c.clone_box()).collect(),
             params,
         }
     }
@@ -220,7 +217,7 @@ struct ToolJob {
 /// [`LoopState::dispatch_tool_jobs`].
 enum ToolDispatchOutcome {
     /// Every tool finished; outputs are aligned with the job list order.
-    Completed(Vec<(String, Vec<Box<dyn ConversationContext>>)>),
+    Completed(Vec<(String, Option<Box<dyn Conversation>>)>),
     /// The operator entered debug mid-batch: the batch was abandoned, the
     /// turn's history was unwound, and the caller should re-execute the turn.
     ReexecuteTurn,
@@ -335,7 +332,6 @@ impl LoopState {
         max_turns: usize,
         prefix: &str,
         preserve_reasoning_in_history: bool,
-        contexts: Vec<Box<dyn ConversationContext>>,
         hooks: &LoopHooks,
     ) -> Self {
         // Destructure the interactive session into its components so we can
@@ -363,12 +359,19 @@ impl LoopState {
         // Chat continuations are built with preserve_reasoning=false
         // hardcoded. Apply the run's actual setting here.
         conv.set_preserve_reasoning(preserve_reasoning_in_history);
+        // If the conversation has no contexts yet, seed a ToolLedger so the
+        // [seen] block and file observations work. The executor (run.rs)
+        // normally handles this by calling conv.set_contexts() before
+        // RunParams is built, but tests that bypass the executor still
+        // need the ledger.
+        if conv.context_snapshot().is_empty() {
+            let mut ledger = crate::conversation::contexts::tool_ledger::ToolLedger::new();
+            ledger.capture_turn_transcript(0);
+            conv.set_contexts(vec![Box::new(ledger) as Box<dyn ConversationContext>]);
+        }
         // Seed the conversation with the run's mutable model contexts so the
         // loop never carries a parallel context list. Empty is allowed: a
         // fork child conversation already carries its (cleared) contexts.
-        if !contexts.is_empty() {
-            conv.set_contexts(contexts);
-        }
 
         Self {
             system_prompt,
@@ -1050,12 +1053,12 @@ impl LoopState {
             };
             async move {
                 if let Some(msg) = &j.over_cap {
-                    (msg.clone(), Vec::new())
+                    (msg.clone(), None)
                 } else {
                     let _permit = sem.acquire_owned().await;
                     let outcome =
                         tools::invoke_with_contexts(&j.id, &j.name, ctx, &j.args, contexts).await;
-                    (outcome.output, outcome.contexts)
+                    (outcome.output, outcome.conversation)
                 }
             }
         }));
@@ -1148,7 +1151,7 @@ impl LoopState {
     async fn emit_tool_results(
         &mut self,
         jobs: Vec<ToolJob>,
-        results: Vec<(String, Vec<Box<dyn ConversationContext>>)>,
+        results: Vec<(String, Option<Box<dyn Conversation>>)>,
         tool_ctx: &AgentLoopRuntime,
         prefix: &str,
         nested: bool,
@@ -1181,7 +1184,7 @@ impl LoopState {
         // for `tool_calls.len()` when bumping the turn counter below.
         let job_count = jobs.len();
         let mut result_msgs = Vec::new();
-        for (job, (output, child_contexts)) in jobs.into_iter().zip(results) {
+        for (job, (output, child_conversation)) in jobs.into_iter().zip(results) {
             let result_msg = format!("result: {}", trunc(&output, 200));
             self.hook_log(&format!("{prefix}{result_msg}"));
             if !nested {
@@ -1232,8 +1235,13 @@ impl LoopState {
             // Join child contexts back into parent.  Match by concrete
             // child context joins only the parent context of the same
             // type, etc. — no silent cross-type no-op calls.
-            if job.name == "Task" && !child_contexts.is_empty() {
-                task_observations = self.conv.join_child_contexts(&child_contexts);
+            if job.name == "Task" {
+                if let Some(child_conv) = child_conversation {
+                    let child_contexts = child_conv.context_snapshot();
+                    if !child_contexts.is_empty() {
+                        task_observations = self.conv.join_child_contexts(&child_contexts);
+                    }
+                }
             }
             let annotated = extra.iter().flatten().fold(String::new(), |mut acc, s| {
                 if !acc.is_empty() {
@@ -1621,8 +1629,7 @@ impl LoopState {
                     usage,
                     Some(self.conv.clone_box()),
                     Some(self.conv.file_observations().unwrap_or_default()),
-                    self.conv.context_snapshot(),
-                ))));
+                    ))));
             }
             _ => {}
         }
@@ -1755,7 +1762,6 @@ impl LoopState {
             usage,
             Some(self.conv.clone_box()),
             Some(self.conv.file_observations().unwrap_or_default()),
-            self.conv.context_snapshot(),
         )))
     }
 
@@ -1774,7 +1780,7 @@ impl LoopState {
 pub(crate) async fn run_agent_loop(
     model: GremlinsModel,
     prompt: &str,
-    mut ctx: RunContext,
+    ctx: RunContext,
     cancel: Arc<CancelToken>,
     opts: LoopOpts<'_>,
     interactive: Option<InteractiveSession>,
@@ -1928,7 +1934,6 @@ pub(crate) async fn run_agent_loop(
         interactive,
         tool_output_rx,
         ctx.prepopulated_conversation.clone(),
-        std::mem::take(&mut ctx.contexts),
     )
     .await
 }
@@ -1955,7 +1960,6 @@ pub(crate) async fn run_agent_loop_nested(
     extra: Option<serde_json::Value>,
     preserve_reasoning_in_history: bool,
     mut prepopulated_conversation: Option<Box<dyn Conversation>>,
-    mut parent_contexts: Vec<Box<dyn ConversationContext>>,
 ) -> Result<CompletedRun, ClientError> {
     let opts = LoopOpts {
         extra,
@@ -1999,19 +2003,13 @@ pub(crate) async fn run_agent_loop_nested(
             let _ = log_tx.send(msg.to_string());
         });
     }
-    let has_fork_conv = prepopulated_conversation.is_some();
+    let _has_fork_conv = prepopulated_conversation.is_some();
     if let Some(conv) = prepopulated_conversation.as_mut() {
         // Fork children carry their own cloned contexts; reset their
         // transcript state so the child turns start at index 0.
         conv.clear_context_transcripts();
-    } else if !parent_contexts.is_empty() {
-        // Scout/Implement children are seeded from the parent's propagated
-        // contexts; clear those before the child loop starts numbering its
-        // own turns.
-        for ctx in &mut parent_contexts {
-            ctx.clear_transcript();
-        }
     }
+
     if let Some(log_tx) = &nested_tool_ctx.log_tx {
         let _ = log_tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
     }
@@ -2036,16 +2034,6 @@ pub(crate) async fn run_agent_loop_nested(
         None,
         None,
         prepopulated_conversation,
-        // Fork children carry their own contexts (cloned at fork time in
-        // StandardConversation::fork). Scout/Implement children instead seed
-        // from the parent's propagated contexts. Skipping parent_contexts here
-        // for a fork child is safe because the prepopulated conversation
-        // already has `contexts` populated.
-        if has_fork_conv {
-            Vec::new()
-        } else {
-            parent_contexts
-        },
     )
     .await;
     if let Some(log_tx) = &nested_tool_ctx.log_tx {
@@ -2194,7 +2182,6 @@ fn completed_run(
     usage: UsageStats,
     conversation: Option<Box<dyn Conversation>>,
     file_observations: Option<FileObservations>,
-    contexts: Vec<Box<dyn ConversationContext>>,
 ) -> CompletedRun {
     CompletedRun {
         exit_code: 0,
@@ -2205,7 +2192,6 @@ fn completed_run(
         token_usage: Some(usage),
         conversation,
         file_observations,
-        contexts,
     }
 }
 
@@ -2253,7 +2239,6 @@ async fn run_agent_loop_core(
     interactive: Option<InteractiveSession>,
     tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
     prepopulated_conversation: Option<Box<dyn Conversation>>,
-    contexts: Vec<Box<dyn ConversationContext>>,
 ) -> Result<CompletedRun, ClientError> {
     let mut state = LoopState::new(
         system_prompt,
@@ -2266,7 +2251,6 @@ async fn run_agent_loop_core(
         max_turns,
         prefix,
         opts.preserve_reasoning_in_history,
-        contexts,
         hooks,
     );
     let loop_start = Instant::now();
@@ -2698,7 +2682,6 @@ mod tests {
     use super::*;
     use crate::clients::format::{key_arg, ledger_key_arg};
     use crate::clients::interactive::InteractiveChannels;
-    use crate::conversation::contexts::tool_ledger::ToolLedger;
     use crate::conversation::done::user_message_text;
     use http::StatusCode;
     use rig_core::driver::DynModel;
@@ -3346,7 +3329,6 @@ mod tests {
                 token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
                 scratchpad_path: None,
                 hooks: None,
-                contexts: vec![],
             },
             prefix: "[t] ".into(),
             idle_timeout: 0.05,
@@ -3356,12 +3338,6 @@ mod tests {
             stream_events: None,
             prepopulated_conversation: None,
             hooks: LoopHooks::new(),
-            contexts: {
-                // Seed a ToolLedger so tests that assert on ledger behavior work.
-                let mut ledger = ToolLedger::new();
-                ledger.capture_turn_transcript(0);
-                vec![Box::new(ledger) as Box<dyn ConversationContext>]
-            },
         }
     }
 
@@ -6431,7 +6407,6 @@ mod tests {
                 Some(session),
                 None,
                 None,
-                Vec::new(),
             )
             .await
         });
@@ -6543,7 +6518,6 @@ mod tests {
                 Some(session),
                 None,
                 None,
-                Vec::new(),
             )
             .await
         });
@@ -6642,7 +6616,6 @@ mod tests {
                 Some(session),
                 None,
                 None,
-                Vec::new(),
             )
             .await
         });
@@ -6730,7 +6703,6 @@ mod tests {
                 Some(session),
                 None,
                 None,
-                Vec::new(),
             )
             .await
         });
@@ -6889,7 +6861,6 @@ mod tests {
             None,
             None,
             None,
-            Vec::new(),
         )
         .await
         .unwrap();
@@ -6976,7 +6947,6 @@ mod tests {
             None,
             None,
             None,
-            Vec::new(),
         )
         .await
         .unwrap();

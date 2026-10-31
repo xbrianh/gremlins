@@ -441,7 +441,6 @@ impl CmdBackend {
                 token_usage: None,
                 conversation: None,
                 file_observations: None,
-                contexts: Vec::new(),
             }
         } else {
             let (text, timed_out) = Self::read_plain(
@@ -475,7 +474,6 @@ impl CmdBackend {
                 token_usage: None,
                 conversation: None,
                 file_observations: None,
-                contexts: Vec::new(),
             }
         };
 

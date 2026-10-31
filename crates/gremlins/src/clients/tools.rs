@@ -39,26 +39,25 @@ pub(crate) fn result_status(res: &str) -> &'static str {
 
 type TaskFuture = Pin<Box<dyn std::future::Future<Output = TaskOutcome> + Send>>;
 
-/// Output of a Task tool invocation: prose text + the child loop's final
-/// mutable model contexts for fork + join propagation.
+/// Output of a Task tool invocation: prose text + the child loop's
+/// final conversation (which carries its own contexts for join).
 pub(crate) struct TaskOutcome {
     /// The prose output (text result) from the child agent loop.
     pub output: String,
-    /// Mutable model contexts carried back from the child loop after `join`.
-    pub contexts: Vec<Box<dyn super::model_context::ConversationContext>>,
+    /// The child loop's conversation, carrying its own context state.
+    pub conversation: Option<Box<dyn super::model_context::Conversation>>,
 }
 
 /// Callback that `invoke` calls for Task tool invocations.
 ///
-/// The fourth parameter carries the parent's live contexts (filtered by
-/// `propagates_to_task`, cloned at call time) so the child loop can seed
-/// its own conversation with a copy of the parent's state.
+/// The third parameter optionally carries the parent's conversation for
+/// Fork tasks. Scout/Implement tasks receive `None` and the runner builds
+/// a fresh conversation seeded from parent context state.
 pub(crate) type TaskFn = Arc<
     dyn Fn(
             TaskKind,
             String,
             Option<Box<dyn super::model_context::Conversation>>,
-            Vec<Box<dyn super::model_context::ConversationContext>>,
         ) -> TaskFuture
         + Send
         + Sync,
@@ -548,7 +547,7 @@ pub(crate) async fn invoke_with_contexts(
         {
             return TaskOutcome {
                 output: format!("Error: unknown tool {name}"),
-                contexts: Vec::new(),
+                conversation: None,
             };
         }
     }
@@ -565,7 +564,7 @@ pub(crate) async fn invoke_with_contexts(
             );
             return TaskOutcome {
                 output: "Error: invalid arguments".into(),
-                contexts: Vec::new(),
+                conversation: None,
             };
         }
     };
@@ -582,7 +581,7 @@ pub(crate) async fn invoke_with_contexts(
         );
         return TaskOutcome {
             output: err,
-            contexts: Vec::new(),
+            conversation: None,
         };
     }
     if let Some(err) = check_tool(name, ctx, &args) {
@@ -595,7 +594,7 @@ pub(crate) async fn invoke_with_contexts(
         );
         return TaskOutcome {
             output: err,
-            contexts: Vec::new(),
+            conversation: None,
         };
     }
 
@@ -631,7 +630,7 @@ pub(crate) async fn invoke_with_contexts(
             );
             return TaskOutcome {
                 output,
-                contexts: Vec::new(),
+                conversation: None,
             };
         }
     }
@@ -644,7 +643,7 @@ pub(crate) async fn invoke_with_contexts(
                 if prompt.is_empty() {
                     return TaskOutcome {
                         output: "Error: Task prompt is required".to_string(),
-                        contexts: Vec::new(),
+                        conversation: None,
                     };
                 }
                 let Some(kind) = TaskKind::parse(kind_str) else {
@@ -657,15 +656,27 @@ pub(crate) async fn invoke_with_contexts(
                                 .collect::<Vec<_>>()
                                 .join(", ")
                         ),
-                        contexts: Vec::new(),
+                        conversation: None,
                     };
                 };
                 let history = if kind == TaskKind::Fork {
                     ctx.conversation.clone()
+                } else if !parent_contexts.is_empty() {
+                    // Scout/Implement: build a fresh conversation seeded with
+                    // the parent's propagating contexts.
+                    let mut conv: Box<dyn super::model_context::Conversation> = Box::new(
+                        crate::conversation::standard::StandardConversation::new(
+                            prompt,
+                            false,
+                            None,
+                        ),
+                    );
+                    conv.set_contexts(parent_contexts);
+                    Some(conv)
                 } else {
                     None
                 };
-                let child_outcome = f(kind, prompt.to_string(), history, parent_contexts).await;
+                let child_outcome = f(kind, prompt.to_string(), history).await;
                 // Label the result so concurrent Task outputs can be told apart.
                 let final_output = format!("# {kind}\n\n{}", child_outcome.output);
                 log::info!(
@@ -677,12 +688,12 @@ pub(crate) async fn invoke_with_contexts(
                 );
                 TaskOutcome {
                     output: final_output,
-                    contexts: child_outcome.contexts,
+                    conversation: child_outcome.conversation,
                 }
             } else {
                 TaskOutcome {
                     output: "Error: Task not available for this backend".to_string(),
-                    contexts: Vec::new(),
+                    conversation: None,
                 }
             }
         }
@@ -690,24 +701,24 @@ pub(crate) async fn invoke_with_contexts(
             let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
             TaskOutcome {
                 output: format!("Done. {summary}"),
-                contexts: Vec::new(),
+                conversation: None,
             }
         }
         "Mischief" => TaskOutcome {
             output: include_str!("mischief_dsl.md").to_string(),
-            contexts: Vec::new(),
+            conversation: None,
         },
         _ => {
             let registry = global_registry();
             match registry.handlers.get(name) {
                 Some(handler) => TaskOutcome {
                     output: handler.invoke(id, ctx, args_json).await,
-                    contexts: Vec::new(),
+                    conversation: None,
                 },
                 None => {
                     return TaskOutcome {
                         output: format!("Error: unknown tool {name}"),
-                        contexts: Vec::new(),
+                        conversation: None,
                     }
                 }
             }
@@ -3626,12 +3637,12 @@ mod tests {
         let dir = tmp();
         let called = Arc::new(std::sync::Mutex::new(false));
         let called2 = called.clone();
-        let task_fn: TaskFn = Arc::new(move |kind, prompt, _history, _ctx| {
+        let task_fn: TaskFn = Arc::new(move |kind, prompt, _history| {
             *called2.lock().unwrap() = true;
             Box::pin(async move {
                 TaskOutcome {
                     output: format!("task result: {kind} / {prompt}"),
-                    contexts: Vec::new(),
+                    conversation: None,
                 }
             })
         });
@@ -3664,11 +3675,11 @@ mod tests {
     #[tokio::test]
     async fn task_empty_prompt_returns_error() {
         let dir = tmp();
-        let task_fn: TaskFn = Arc::new(|_kind, _prompt, _history, _ctx| {
+        let task_fn: TaskFn = Arc::new(|_kind, _prompt, _history| {
             Box::pin(async move {
                 TaskOutcome {
                     output: "should not be called".to_string(),
-                    contexts: Vec::new(),
+                    conversation: None,
                 }
             })
         });
@@ -3707,12 +3718,12 @@ mod tests {
         let dir = tmp();
         let called = Arc::new(std::sync::Mutex::new(false));
         let called2 = called.clone();
-        let task_fn: TaskFn = Arc::new(move |_kind, _prompt, _history, _ctx| {
+        let task_fn: TaskFn = Arc::new(move |_kind, _prompt, _history| {
             *called2.lock().unwrap() = true;
             Box::pin(async move {
                 TaskOutcome {
                     output: "should not be called".to_string(),
-                    contexts: Vec::new(),
+                    conversation: None,
                 }
             })
         });
@@ -3748,11 +3759,11 @@ mod tests {
     #[tokio::test]
     async fn task_result_is_headered_with_kind() {
         let dir = tmp();
-        let task_fn: TaskFn = Arc::new(|_k, _p, _history, _ctx| {
+        let task_fn: TaskFn = Arc::new(|_k, _p, _history| {
             Box::pin(async move {
                 TaskOutcome {
                     output: "body".to_string(),
-                    contexts: Vec::new(),
+                    conversation: None,
                 }
             })
         });
@@ -4200,11 +4211,11 @@ mod tests {
     async fn invoke_does_not_cap_task() {
         let _env = crate::test_support::EnvGuard::lock();
         let dir = tmp();
-        let task_fn: TaskFn = Arc::new(|_k, _p, _history, _ctx| {
+        let task_fn: TaskFn = Arc::new(|_k, _p, _history| {
             Box::pin(async move {
                 TaskOutcome {
                     output: "x".repeat(500),
-                    contexts: Vec::new(),
+                    conversation: None,
                 }
             })
         });
