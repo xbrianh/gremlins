@@ -341,11 +341,6 @@ impl LoopState {
         // Chat continuations are built with preserve_reasoning=false
         // hardcoded. Apply the run's actual setting here.
         conv.set_preserve_reasoning(preserve_reasoning_in_history);
-        // If the conversation has no contexts yet, seed a ToolLedger so the
-        // [seen] block and file observations work. The executor (run.rs)
-        // normally handles this before RunParams is built, but tests that
-        // bypass the executor still need the ledger.
-        conv.ensure_contexts();
 
         Self {
             system_prompt,

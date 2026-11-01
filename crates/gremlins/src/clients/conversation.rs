@@ -28,20 +28,6 @@ pub(crate) struct RunArtifact {
 /// pending user prompt. The loop narrates what happened; the conversation
 /// assembles the transcript.
 pub(crate) trait Conversation: Any + Send + Sync {
-    /// Create a fresh blank conversation of the same concrete type.
-    ///
-    /// This is a `where Self: Sized` associated function — call it on the
-    /// concrete type (e.g. `StandardConversation::blank(...)`).  Callers with
-    /// only a `Box<dyn Conversation>` should use the free function
-    /// [`crate::conversation::new_blank_conversation`] instead.
-    fn blank(
-        prompt: &str,
-        preserve_reasoning: bool,
-        prepopulated_messages: Option<Vec<rig_core::completion::Message>>,
-    ) -> Box<dyn Conversation>
-    where
-        Self: Sized;
-
     /// Downcast to a concrete type.
     fn as_any(&self) -> &dyn Any;
 
@@ -175,17 +161,6 @@ pub(crate) trait Conversation: Any + Send + Sync {
     fn file_observations(&self) -> Option<FileObservations> {
         None
     }
-
-    /// Create a new, empty conversation of the same concrete type.
-    ///
-    /// No history, no contexts, no landscape — just a prompt.
-    /// The `preserve_reasoning` flag is inherited from `self` (matching
-    /// [`fork`](Self::fork) and [`empty_child_with_contexts`](Self::empty_child_with_contexts)).
-    fn new_empty(&self, prompt: &str) -> Box<dyn Conversation>;
-
-    /// Seed the conversation with default tool-ledger contexts if none are
-    /// present. Used by tests that bypass the executor's normal context setup.
-    fn ensure_contexts(&mut self) {}
 
     /// Reset per-turn transcript state on every context so a child loop
     /// starts with a clean slate.
