@@ -8,7 +8,7 @@ pub(crate) mod conversation;
 pub mod core;
 pub mod definition;
 pub mod executor;
-pub mod landscape;
+pub use gremlins_landscape as landscape;
 pub mod model_uri;
 pub mod prelude;
 pub mod schemas;

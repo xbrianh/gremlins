@@ -828,6 +828,7 @@ dependencies = [
  "blake3",
  "clap",
  "gremlins",
+ "gremlins-landscape",
  "proc-macro2",
  "quote",
  "serde",
@@ -1231,6 +1232,7 @@ dependencies = [
  "dirs",
  "futures",
  "glob",
+ "gremlins-landscape",
  "http",
  "ignore",
  "indexmap",
@@ -1261,6 +1263,7 @@ dependencies = [
  "crossterm",
  "env_logger",
  "gremlins",
+ "gremlins-landscape",
  "json5",
  "libc",
  "log",
@@ -1274,6 +1277,19 @@ dependencies = [
  "tempfile",
  "tokio",
  "unicode-width",
+]
+
+[[package]]
+name = "gremlins-landscape"
+version = "0.1.0"
+dependencies = [
+ "ignore",
+ "log",
+ "rayon",
+ "regex",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tiktoken-rs",
 ]
 
 [[package]]

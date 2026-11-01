@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 gremlins = { path = "../gremlins" }
+gremlins-landscape = { path = "../gremlins-landscape" }
 regex = "1"
 json5 = "0.4"
 clap = { version = "4", features = ["derive"] }
