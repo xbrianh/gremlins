@@ -8,6 +8,7 @@ pub(crate) mod cancel;
 pub(crate) mod cancels;
 pub mod client;
 pub mod config;
+pub(crate) mod done_helpers;
 pub(crate) mod error;
 pub(crate) mod findings;
 pub(crate) mod format;

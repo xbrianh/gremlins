@@ -643,13 +643,13 @@ mod tests {
 
         let parent_history = vec![Message::user("earlier parent turn")];
         let parent_conversation: Option<Box<dyn crate::clients::conversation::Conversation>> =
-            Some(Box::new(
-                crate::conversation::standard::StandardConversation::new(
+            Some(
+                crate::conversation::new_blank_conversation(
                     "",
                     false,
                     Some(parent_history),
                 ),
-            ));
+            );
         let output = runner(
             TaskKind::Fork,
             "child task".into(),

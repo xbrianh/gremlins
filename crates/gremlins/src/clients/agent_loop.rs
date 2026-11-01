@@ -29,8 +29,8 @@ use super::conversation::Conversation;
 use super::plug::LoopHooks;
 use super::protocol::{add_opt, CompletedRun, FileObservations, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
-use crate::conversation::done::done_user_message;
-use crate::conversation::standard::StandardConversation;
+use crate::clients::done_helpers::done_user_message;
+use crate::conversation;
 use crate::task_kind::TaskKind;
 
 // ── Architecture ────────────────────────────────────────────────────────────
@@ -344,11 +344,11 @@ impl LoopState {
         let original_system_prompt = system_prompt.clone();
 
         let mut conv = prepopulated_conversation.unwrap_or_else(|| {
-            Box::new(StandardConversation::new(
+            conversation::new_blank_conversation(
                 prompt,
                 preserve_reasoning_in_history,
                 None,
-            ))
+            )
         });
         // Always apply the stage prompt so chat continuations (built by
         // run.rs with an empty "" initial prompt) receive the stage
@@ -2657,7 +2657,7 @@ mod tests {
     use super::*;
     use crate::clients::format::{key_arg, ledger_key_arg};
     use crate::clients::interactive::InteractiveChannels;
-    use crate::conversation::done::user_message_text;
+    use crate::clients::done_helpers::user_message_text;
     use http::StatusCode;
     use rig_core::driver::DynModel;
     use rig_core::message::{Issuer, Reasoning, ReasoningContent, ToolFunction, UserContent};

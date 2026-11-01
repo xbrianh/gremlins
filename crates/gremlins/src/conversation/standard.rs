@@ -19,7 +19,7 @@ use crate::clients::protocol::FileObservations;
 use crate::conversation::contexts::{
     landscape::LandscapeContext, signal::SignalMapContext, tool_ledger::ToolLedger,
 };
-use crate::conversation::done::{done_user_message, user_message_text};
+use crate::clients::done_helpers::{done_user_message, user_message_text};
 use crate::landscape::{signals::SignalProfile, LandscapeData};
 use crate::task_kind::TaskKind;
 
