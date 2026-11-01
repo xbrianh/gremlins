@@ -25,7 +25,7 @@ use super::format::{
     trunc,
 };
 use super::model::{GremlinsModel, GremlinsModelError};
-use super::model_context::Conversation;
+use super::conversation::Conversation;
 use super::plug::LoopHooks;
 use super::protocol::{add_opt, CompletedRun, FileObservations, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};

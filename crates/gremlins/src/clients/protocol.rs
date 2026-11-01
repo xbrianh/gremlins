@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::model_context::Conversation;
+use super::conversation::Conversation;
 
 /// Aggregated token usage summary from an agent run.
 #[derive(Debug, Clone, Serialize, Deserialize)]

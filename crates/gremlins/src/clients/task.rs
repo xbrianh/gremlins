@@ -115,7 +115,7 @@ fn make_task_runner_at_depth(
     Arc::new(
         move |kind: TaskKind,
               task: String,
-              parent_conversation: Option<Box<dyn super::model_context::Conversation>>| {
+              parent_conversation: Option<Box<dyn super::conversation::Conversation>>| {
             let model = model.clone();
             let task_model_selector = task_model_selector.clone();
             let tool_filter = tool_filter.clone();
@@ -642,7 +642,7 @@ mod tests {
         );
 
         let parent_history = vec![Message::user("earlier parent turn")];
-        let parent_conversation: Option<Box<dyn crate::clients::model_context::Conversation>> =
+        let parent_conversation: Option<Box<dyn crate::clients::conversation::Conversation>> =
             Some(Box::new(
                 crate::conversation::standard::StandardConversation::new(
                     "",

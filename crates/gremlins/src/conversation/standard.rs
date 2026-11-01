@@ -13,7 +13,7 @@ use rig_core::completion::Message;
 
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
-use crate::clients::model_context::{Conversation, RunArtifact, TurnScript};
+use crate::clients::conversation::{Conversation, RunArtifact, TurnScript};
 use crate::conversation::context::{compose_model_transcript, ConversationContext};
 use crate::clients::protocol::FileObservations;
 use crate::conversation::contexts::{

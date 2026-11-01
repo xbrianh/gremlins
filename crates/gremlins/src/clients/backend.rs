@@ -5,7 +5,7 @@ use std::sync::Arc;
 use super::cancel::CancelToken;
 use super::interactive::{InteractiveSession, StreamEventSender};
 use super::model::GremlinsModel;
-use super::model_context::Conversation;
+use super::conversation::Conversation;
 use super::params::ResolvedParams;
 pub(crate) use super::plug::LoopHooks;
 use super::protocol::CompletedRun;

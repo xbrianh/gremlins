@@ -45,7 +45,7 @@ pub(crate) struct TaskOutcome {
     /// The prose output (text result) from the child agent loop.
     pub output: String,
     /// The child loop's conversation, carrying its own context state.
-    pub conversation: Option<Box<dyn super::model_context::Conversation>>,
+    pub conversation: Option<Box<dyn super::conversation::Conversation>>,
 }
 
 /// Callback that `invoke` calls for Task tool invocations.
@@ -57,7 +57,7 @@ pub(crate) type TaskFn = Arc<
     dyn Fn(
             TaskKind,
             String,
-            Option<Box<dyn super::model_context::Conversation>>,
+            Option<Box<dyn super::conversation::Conversation>>,
         ) -> TaskFuture
         + Send
         + Sync,
@@ -120,7 +120,7 @@ pub(crate) struct AgentLoopRuntime {
     pub(crate) audit_lock: Option<Arc<std::sync::Mutex<()>>>,
     /// Point-in-time fork-parent conversation available to Task tool
     /// invocations. Used only by `Fork`; `None` when unavailable.
-    pub(crate) conversation: Option<Box<dyn super::model_context::Conversation>>,
+    pub(crate) conversation: Option<Box<dyn super::conversation::Conversation>>,
     /// Prefix prepended to tool call IDs emitted on the shared event stream.
     ///
     /// Nested Task conversations run on the parent's stream but reuse raw
@@ -536,7 +536,7 @@ pub(crate) async fn invoke_with_conversation(
     name: &str,
     ctx: &AgentLoopRuntime,
     args_json: &str,
-    conv: Option<&dyn super::model_context::Conversation>,
+    conv: Option<&dyn super::conversation::Conversation>,
 ) -> TaskOutcome {
     if let Some(allowed) = &ctx.allowed_tools {
         // Mischief is chat-only; allow it through the gate only when the
