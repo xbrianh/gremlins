@@ -405,7 +405,7 @@ impl ToolLedger {
 
 // ── ConversationContext impl ───────────────────────────────────────────────
 
-impl crate::clients::model_context::ConversationContext for ToolLedger {
+impl crate::conversation::context::ConversationContext for ToolLedger {
     fn propagates_to_task(&self) -> bool {
         true
     }
@@ -418,7 +418,7 @@ impl crate::clients::model_context::ConversationContext for ToolLedger {
         self
     }
 
-    fn clone_box(&self) -> Box<dyn crate::clients::model_context::ConversationContext> {
+    fn clone_box(&self) -> Box<dyn crate::conversation::context::ConversationContext> {
         Box::new(self.clone())
     }
 
@@ -458,7 +458,7 @@ impl crate::clients::model_context::ConversationContext for ToolLedger {
         None
     }
 
-    fn join(&mut self, other: &dyn crate::clients::model_context::ConversationContext) {
+    fn join(&mut self, other: &dyn crate::conversation::context::ConversationContext) {
         if let Some(other_ledger) = other.as_any().downcast_ref::<ToolLedger>() {
             // Merge reads: take the newer entry (by seq).
             for (key, entry) in &other_ledger.reads {
