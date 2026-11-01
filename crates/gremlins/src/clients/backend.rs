@@ -56,7 +56,7 @@ pub struct RunParams {
     /// this conversation's history (carrying its original roles) instead of a
     /// bare system-prompt + user-prompt pair. The user prompt is still applied
     /// as the next user message.
-    pub(crate) prepopulated_conversation: Option<Box<dyn Conversation>>,
+    pub(crate) prepopulated_conversation: Box<dyn Conversation>,
     /// Whether skills are available for this chat session.
     pub(crate) skills_available: bool,
     /// Discovered skills for this session. Session-bound so concurrent chat

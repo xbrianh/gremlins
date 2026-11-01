@@ -880,8 +880,8 @@ async fn run_agent(
     // Build model contexts from landscape data: ToolLedger + SignalMapContext + LandscapeContext.
     conv.seed_from_landscape(landscape_data, &prepared.user_prompt(), profile);
 
-    let prepopulated_conversation: Option<Box<dyn crate::clients::conversation::Conversation>> =
-        Some(Box::new(conv));
+    let prepopulated_conversation: Box<dyn crate::clients::conversation::Conversation> =
+        Box::new(conv);
 
     let params = RunParams {
         prompt: prepared.user_prompt(),

@@ -53,6 +53,15 @@ pub(crate) struct StandardConversation {
 }
 
 impl StandardConversation {
+    /// Construct a fresh blank conversation without landscape data or contexts.
+    pub(crate) fn blank(
+        prompt: &str,
+        preserve_reasoning: bool,
+        prepopulated_messages: Option<Vec<Message>>,
+    ) -> Box<dyn Conversation> {
+        Box::new(Self::new(prompt, preserve_reasoning, prepopulated_messages))
+    }
+
     pub(crate) fn new(
         prompt: &str,
         preserve_reasoning: bool,
@@ -221,6 +230,21 @@ impl Conversation for StandardConversation {
             finalized_messages: self.finalized_messages.clone(),
             contexts: self.contexts.iter().map(|c| c.clone_box()).collect(),
         })
+    }
+
+    fn blank(
+        prompt: &str,
+        preserve_reasoning: bool,
+        prepopulated_messages: Option<Vec<Message>>,
+    ) -> Box<dyn Conversation>
+    where
+        Self: Sized,
+    {
+        Self::blank(prompt, preserve_reasoning, prepopulated_messages)
+    }
+
+    fn new_empty(&self, prompt: &str) -> Box<dyn Conversation> {
+        Box::new(Self::new(prompt, self.preserve_reasoning_in_history, None))
     }
 
     fn record_prose(&mut self, text: &str) {
@@ -405,6 +429,10 @@ impl Conversation for StandardConversation {
 
     fn set_next_prompt(&mut self, prompt: &str) {
         self.next_prompt = Message::user(prompt.to_string());
+    }
+
+    fn set_preserve_reasoning(&mut self, preserve: bool) {
+        self.preserve_reasoning_in_history = preserve;
     }
 
     fn inject_operator(&mut self, text: &str) {

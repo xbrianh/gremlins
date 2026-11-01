@@ -115,7 +115,7 @@ fn make_task_runner_at_depth(
     Arc::new(
         move |kind: TaskKind,
               task: String,
-              parent_conversation: Option<Box<dyn super::conversation::Conversation>>| {
+              parent_conversation: Box<dyn super::conversation::Conversation>| {
             let model = model.clone();
             let task_model_selector = task_model_selector.clone();
             let tool_filter = tool_filter.clone();
@@ -226,15 +226,13 @@ fn make_task_runner_at_depth(
                 };
 
                 let prepopulated_conversation = if kind == TaskKind::Fork {
-                    parent_conversation.map(|c| {
-                        let mut child = c.fork(TaskKind::Fork);
-                        child.set_next_prompt(&task);
-                        child
-                    })
+                    let mut child = parent_conversation.fork(TaskKind::Fork);
+                    child.set_next_prompt(&task);
+                    child
                 } else {
-                    // Scout/Implement: parent_conversation is already a fresh
-                    // conversation seeded with parent contexts (built in tools.rs).
-                    parent_conversation
+                    // Scout/Implement: build a fresh conversation seeded with
+                    // parent context state.
+                    parent_conversation.empty_child_with_contexts(&task)
                 };
 
                 let result = crate::clients::agent_loop::run_agent_loop_nested(
@@ -488,7 +486,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            conversation: None,
+            conversation: crate::conversation::new_blank_conversation("", false, None),
             id_prefix: String::new(),
             telemetry: tools::AgentLoopTelemetry {
                 stream_events: None,
@@ -642,14 +640,12 @@ mod tests {
         );
 
         let parent_history = vec![Message::user("earlier parent turn")];
-        let parent_conversation: Option<Box<dyn crate::clients::conversation::Conversation>> =
-            Some(
+        let parent_conversation =
                 crate::conversation::new_blank_conversation(
                     "",
                     false,
                     Some(parent_history),
-                ),
-            );
+                );
         let output = runner(
             TaskKind::Fork,
             "child task".into(),

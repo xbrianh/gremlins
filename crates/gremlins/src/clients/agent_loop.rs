@@ -30,8 +30,6 @@ use super::plug::LoopHooks;
 use super::protocol::{add_opt, CompletedRun, FileObservations, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 use crate::clients::done_helpers::done_user_message;
-use crate::conversation;
-use crate::task_kind::TaskKind;
 
 // ── Architecture ────────────────────────────────────────────────────────────
 // agent_loop.rs orchestrates a single agent turn-sequence:
@@ -136,13 +134,6 @@ fn discard_tool_output(rx: &mut Option<mpsc::Receiver<tools::ToolOutputLine>>) {
     }
 }
 
-fn task_kind_is_fork(args: &serde_json::Value) -> bool {
-    args.get("kind")
-        .and_then(|v| v.as_str())
-        .and_then(crate::task_kind::TaskKind::parse)
-        == Some(crate::task_kind::TaskKind::Fork)
-}
-
 /// Sleep for the turn-level backoff, aborting early when the cancel token is
 /// set. Returns `true` if cancellation was observed (the caller must abandon
 /// the retry and unwind), `false` if the full backoff elapsed.
@@ -162,8 +153,7 @@ pub(crate) struct RunContext {
     pub(crate) reminder_budget: usize,
     pub(crate) completion_nudge_budget: usize,
     pub(crate) stream_events: Option<StreamEventSender>,
-    /// Pre-populated conversation carried into the loop.
-    pub(crate) prepopulated_conversation: Option<Box<dyn Conversation>>,
+    pub(crate) prepopulated_conversation: Box<dyn Conversation>,
     /// Inversion-of-control hooks carrying cross-package dependencies
     /// (prompt-debug, token-usage).
     pub(crate) hooks: LoopHooks,
@@ -322,7 +312,7 @@ impl LoopState {
     fn new(
         system_prompt: Option<String>,
         prompt: &str,
-        prepopulated_conversation: Option<Box<dyn Conversation>>,
+        prepopulated_conversation: Box<dyn Conversation>,
         reminder_budget: usize,
         completion_nudge_budget: usize,
         interactive: Option<InteractiveSession>,
@@ -343,13 +333,7 @@ impl LoopState {
 
         let original_system_prompt = system_prompt.clone();
 
-        let mut conv = prepopulated_conversation.unwrap_or_else(|| {
-            conversation::new_blank_conversation(
-                prompt,
-                preserve_reasoning_in_history,
-                None,
-            )
-        });
+        let mut conv = prepopulated_conversation;
         // Always apply the stage prompt so chat continuations (built by
         // run.rs with an empty "" initial prompt) receive the stage
         // instructions in their first user message.
@@ -868,17 +852,6 @@ impl LoopState {
         captured: &mut Option<Vec<serde_json::Value>>,
         nested: bool,
     ) -> Result<(), ClientError> {
-        // A Fork child inherits the conversation that led up to this turn,
-        // including the user message being answered. The assistant tool-call
-        // message the caller just appended to `history` is intentionally
-        // *not* part of the snapshot: carrying it without its still-unknown
-        // tool results would leave an unmatched assistant tool-use in the
-        // child's transcript.
-        let fork_parent_conversation = tool_calls
-            .iter()
-            .any(|tc| tc.function.name == "Task" && task_kind_is_fork(&tc.function.arguments))
-            .then(|| self.conv.fork(TaskKind::Fork));
-
         // Phase 1: collect + validate tool calls into owned jobs.
         let jobs = self.collect_tool_jobs(tool_calls, prefix, nested, raw, captured);
 
@@ -890,7 +863,6 @@ impl LoopState {
                 model,
                 prefix,
                 cancel,
-                fork_parent_conversation,
             )
             .await?
         {
@@ -979,10 +951,8 @@ impl LoopState {
         model: &GremlinsModel,
         prefix: &str,
         cancel: &CancelToken,
-        fork_parent_conversation: Option<Box<dyn Conversation>>,
     ) -> Result<ToolDispatchOutcome, ClientError> {
-        let mut ctx = tool_ctx.clone();
-        ctx.conversation = fork_parent_conversation;
+        let ctx = tool_ctx.clone();
         // Forward live tool output only for the duration of this batch. The
         // receiver is borrowed by the select below, so later batches never
         // hear stale chunks and Esc/clear cannot resurrect old output.
@@ -1859,7 +1829,7 @@ pub(crate) async fn run_agent_loop(
         allowed_tools: opts.tool_filter.map(|s| s.to_vec()),
         task_fn: None,
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
-        conversation: None,
+        conversation: ctx.prepopulated_conversation.clone(),
         id_prefix: String::new(),
         telemetry,
         active_skills: ctx.params.active_skills.clone(),
@@ -1934,7 +1904,7 @@ pub(crate) async fn run_agent_loop_nested(
     max_tokens: Option<u64>,
     extra: Option<serde_json::Value>,
     preserve_reasoning_in_history: bool,
-    mut prepopulated_conversation: Option<Box<dyn Conversation>>,
+    mut prepopulated_conversation: Box<dyn Conversation>,
 ) -> Result<CompletedRun, ClientError> {
     let opts = LoopOpts {
         extra,
@@ -1978,12 +1948,9 @@ pub(crate) async fn run_agent_loop_nested(
             let _ = log_tx.send(msg.to_string());
         });
     }
-    let _has_fork_conv = prepopulated_conversation.is_some();
-    if let Some(conv) = prepopulated_conversation.as_mut() {
-        // Fork children carry their own cloned contexts; reset their
-        // transcript state so the child turns start at index 0.
-        conv.clear_context_transcripts();
-    }
+    // Fork children carry their own cloned contexts; reset their
+    // transcript state so the child turns start at index 0.
+    prepopulated_conversation.clear_context_transcripts();
 
     if let Some(log_tx) = &nested_tool_ctx.log_tx {
         let _ = log_tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
@@ -2213,7 +2180,7 @@ async fn run_agent_loop_core(
     hooks: &LoopHooks,
     interactive: Option<InteractiveSession>,
     tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
-    prepopulated_conversation: Option<Box<dyn Conversation>>,
+    prepopulated_conversation: Box<dyn Conversation>,
 ) -> Result<CompletedRun, ClientError> {
     let mut state = LoopState::new(
         system_prompt,
@@ -3297,7 +3264,11 @@ mod tests {
                 task_models: None,
                 cancel_token: None,
                 stream_events: None,
-                prepopulated_conversation: None,
+                prepopulated_conversation: crate::conversation::new_blank_conversation(
+                    "hi",
+                    false,
+                    None,
+                ),
                 skills_available: false,
                 discovered_skills: None,
                 active_skills: None,
@@ -3311,7 +3282,11 @@ mod tests {
             reminder_budget: 0,
             completion_nudge_budget: 0,
             stream_events: None,
-            prepopulated_conversation: None,
+            prepopulated_conversation: crate::conversation::new_blank_conversation(
+                "hi",
+                false,
+                None,
+            ),
             hooks: LoopHooks::new(),
         }
     }
@@ -6312,7 +6287,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
-            conversation: None,
+            conversation: crate::conversation::new_blank_conversation("", false, None),
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -6381,8 +6356,8 @@ mod tests {
                 &LoopHooks::new(),
                 Some(session),
                 None,
-                None,
-            )
+            crate::conversation::new_blank_conversation("hi", false, None),
+        )
             .await
         });
 
@@ -6492,8 +6467,8 @@ mod tests {
                 &LoopHooks::new(),
                 Some(session),
                 None,
-                None,
-            )
+            crate::conversation::new_blank_conversation("hi", false, None),
+        )
             .await
         });
 
@@ -6590,8 +6565,8 @@ mod tests {
                 &LoopHooks::new(),
                 Some(session),
                 None,
-                None,
-            )
+            crate::conversation::new_blank_conversation("hi", false, None),
+        )
             .await
         });
 
@@ -6677,8 +6652,8 @@ mod tests {
                 &LoopHooks::new(),
                 Some(session),
                 None,
-                None,
-            )
+            crate::conversation::new_blank_conversation("hi", false, None),
+        )
             .await
         });
 
@@ -6835,7 +6810,7 @@ mod tests {
             &LoopHooks::new(),
             None,
             None,
-            None,
+            crate::conversation::new_blank_conversation("hi", false, None),
         )
         .await
         .unwrap();
@@ -6921,7 +6896,7 @@ mod tests {
             &LoopHooks::new(),
             None,
             None,
-            None,
+            crate::conversation::new_blank_conversation("hi", false, None),
         )
         .await
         .unwrap();
