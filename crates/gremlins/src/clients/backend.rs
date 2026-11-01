@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::cancel::CancelToken;
+use super::conversation::Conversation;
 use super::interactive::{InteractiveSession, StreamEventSender};
 use super::model::GremlinsModel;
-use super::conversation::Conversation;
 use super::params::ResolvedParams;
 pub(crate) use super::plug::LoopHooks;
 use super::protocol::CompletedRun;

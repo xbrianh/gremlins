@@ -54,11 +54,7 @@ pub(crate) struct TaskOutcome {
 /// Fork receives a clone of the parent conversation; Scout/Implement
 /// receive a fresh conversation seeded from the parent's contexts.
 pub(crate) type TaskFn = Arc<
-    dyn Fn(
-            TaskKind,
-            String,
-            Box<dyn super::conversation::Conversation>,
-        ) -> TaskFuture
+    dyn Fn(TaskKind, String, Box<dyn super::conversation::Conversation>) -> TaskFuture
         + Send
         + Sync,
 >;
@@ -118,10 +114,6 @@ pub(crate) struct AgentLoopRuntime {
     pub(crate) allowed_tools: Option<Vec<String>>,
     pub(crate) task_fn: Option<TaskFn>,
     pub(crate) audit_lock: Option<Arc<std::sync::Mutex<()>>>,
-    /// The parent conversation, available to Task tool invocations.
-    /// Fork tasks clone this; Scout/Implement use the `conv` parameter
-    /// of `invoke_with_conversation` instead.
-    pub(crate) conversation: Box<dyn super::conversation::Conversation>,
     /// Prefix prepended to tool call IDs emitted on the shared event stream.
     ///
     /// Nested Task conversations run on the parent's stream but reuse raw
@@ -610,9 +602,7 @@ pub(crate) async fn invoke_with_conversation(
         let args_owned = args.clone();
         let conv = conv.clone_box();
         let name_owned = name.to_string();
-        match tokio::task::spawn_blocking(move || conv.serve_tool(&name_owned, &args_owned))
-            .await
-        {
+        match tokio::task::spawn_blocking(move || conv.serve_tool(&name_owned, &args_owned)).await {
             Ok(v) => v,
             Err(e) => Some(format!("Error: {e}")),
         }
@@ -659,7 +649,7 @@ pub(crate) async fn invoke_with_conversation(
                     };
                 };
                 let conversation = if kind == TaskKind::Fork {
-                    ctx.conversation.clone()
+                    conv.clone_box()
                 } else {
                     conv.empty_child_with_contexts(prompt)
                 };
@@ -879,7 +869,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            conversation: crate::conversation::new_blank_conversation("", false, None),
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -1140,7 +1130,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            conversation: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -1181,7 +1171,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            conversation: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -1220,7 +1210,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            conversation: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -1665,7 +1655,7 @@ mod tests {
             allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
             task_fn: None,
             audit_lock: None,
-            conversation: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -1697,7 +1687,7 @@ mod tests {
             allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
             task_fn: None,
             audit_lock: None,
-            conversation: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -2648,7 +2638,7 @@ mod tests {
             allowed_tools: Some(vec!["Read".into()]),
             task_fn: None,
             audit_lock: None,
-            conversation: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -3604,7 +3594,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            conversation: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -3643,7 +3633,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
-            conversation: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -3680,7 +3670,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
-            conversation: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -3724,7 +3714,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
-            conversation: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -3764,7 +3754,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
-            conversation: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -4216,7 +4206,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
-            conversation: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -4252,7 +4242,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            conversation: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,

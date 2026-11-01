@@ -48,6 +48,11 @@ pub(crate) fn canonicalize_or_ancestor(p: &Path) -> PathBuf {
 
 /// Check whether `p` is contained within any of the `roots`.
 /// All paths are canonicalized before comparison.
+///
+/// This is a standalone two-argument version of `gremlins::core::paths::within_worktree`.
+/// The third `cwd` argument from the original is not needed here because all
+/// signal-context paths are already absolute (resolved via `contained_path`),
+/// so relative-path resolution against a CWD is never required.
 pub(crate) fn within_worktree(p: &Path, roots: &[PathBuf]) -> bool {
     let p = canonicalize_or_ancestor(p);
     roots.iter().any(|root| {

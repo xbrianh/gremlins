@@ -50,11 +50,7 @@ pub(crate) fn shouty_snake_regex() -> &'static Regex {
 // ── Extraction helpers ────────────────────────────────────────────────────
 
 /// Scan a single line of source text for identifiers in all three forms.
-pub fn extract_identifiers(
-    line: &str,
-    line_number: usize,
-    source_file: &Path,
-) -> Vec<Identifier> {
+pub fn extract_identifiers(line: &str, line_number: usize, source_file: &Path) -> Vec<Identifier> {
     let mut identifiers = Vec::new();
 
     for caps in snake_case_regex().captures_iter(line) {

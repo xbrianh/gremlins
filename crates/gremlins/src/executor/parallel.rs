@@ -1205,7 +1205,7 @@ mod tests {
     #[tokio::test]
     async fn parallel_group_model_beats_profile_stage_model() {
         let stages = vec![ParallelBuilder::new("group")
-            .model(model("cmd/true"))
+            .model(model("cmd/sh -c 'cat > /dev/null'"))
             .stage(AgentBuilder::new("plan").prompt("hi").build().unwrap())
             .build()
             .unwrap()];

@@ -19,13 +19,13 @@ use super::interactive::{
 };
 
 use super::cancel::{default_classify, is_retryable, CancelToken, ErrorClassifier};
+use super::conversation::Conversation;
 use super::error::ClientError;
 use super::format::{
     apply_chunk, assistant_tool_message, enrich_log_line, format_tool_call, format_tool_call_parts,
     trunc,
 };
 use super::model::{GremlinsModel, GremlinsModelError};
-use super::conversation::Conversation;
 use super::plug::LoopHooks;
 use super::protocol::{add_opt, CompletedRun, FileObservations, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
@@ -852,13 +852,7 @@ impl LoopState {
 
         // Phase 2: concurrent execution (cancel/pause aware).
         let results = match self
-            .dispatch_tool_jobs(
-                &jobs,
-                tool_ctx,
-                model,
-                prefix,
-                cancel,
-            )
+            .dispatch_tool_jobs(&jobs, tool_ctx, model, prefix, cancel)
             .await?
         {
             ToolDispatchOutcome::Completed(results) => results,
@@ -1032,10 +1026,9 @@ impl LoopState {
                 }
                 log::debug!("agent_loop: entering interactive mode mid-tool (label={})", prefix);
 
-                // Pop the two messages pushed by the caller (next_prompt +
-                // assistant_tool_message) so the turn can be re-executed
+                // Pop the assistant turn so it can be re-executed
                 // cleanly without duplicate history entries.
-                self.conv.pop_last_two();
+                self.conv.pop_last_assistant_turn();
 
                 // Amend system prompt with operator note.
                 let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
@@ -1411,6 +1404,7 @@ impl LoopState {
             text,
             tool_calls,
             turn_usage,
+            &self.hooks,
         );
         Ok(())
     }
@@ -1527,7 +1521,7 @@ impl LoopState {
                     self.total_reasoning_tokens,
                 );
                 if !nested {
-                    emit_final(prefix, self.turns, "");
+                    emit_final(prefix, self.turns, "", &self.hooks);
                     emit_summary(
                         prefix,
                         self.turn_num,
@@ -1537,6 +1531,7 @@ impl LoopState {
                         self.total_cached_tokens,
                         self.total_cache_creation_tokens,
                         self.total_reasoning_tokens,
+                        &self.hooks,
                     );
                 }
                 // Emit Done via stream_events. Nested loops skip this — only
@@ -1569,7 +1564,7 @@ impl LoopState {
                     usage,
                     Some(self.conv.clone_box()),
                     Some(self.conv.file_observations().unwrap_or_default()),
-                    ))));
+                ))));
             }
             _ => {}
         }
@@ -1680,7 +1675,7 @@ impl LoopState {
             self.total_reasoning_tokens,
         );
         if !nested {
-            emit_final(prefix, self.turns, " (exhausted)");
+            emit_final(prefix, self.turns, " (exhausted)", &self.hooks);
             emit_summary(
                 prefix,
                 self.turn_num,
@@ -1690,6 +1685,7 @@ impl LoopState {
                 self.total_cached_tokens,
                 self.total_cache_creation_tokens,
                 self.total_reasoning_tokens,
+                &self.hooks,
             );
         }
         let artifact = self
@@ -1757,9 +1753,13 @@ pub(crate) async fn run_agent_loop(
         trunc(reasoning_effort.unwrap_or("default"), 50)
     );
     log::info!("{prefix}{log_line}");
+    ctx.hooks.log(&format!("{prefix}{log_line}"));
 
     if cwd.is_none() {
         log::info!("{prefix}warning: no cwd set for worktree enforcement");
+        ctx.hooks.log(&format!(
+            "{prefix}warning: no cwd set for worktree enforcement"
+        ));
     }
 
     let mut raw = raw_path
@@ -1824,7 +1824,6 @@ pub(crate) async fn run_agent_loop(
         allowed_tools: opts.tool_filter.map(|s| s.to_vec()),
         task_fn: None,
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
-        conversation: ctx.prepopulated_conversation.clone(),
         id_prefix: String::new(),
         telemetry,
         active_skills: ctx.params.active_skills.clone(),
@@ -2197,6 +2196,7 @@ async fn run_agent_loop_core(
         if cancel.is_cancelled() {
             log::info!("agent_loop: cancelled before turn (label={})", prefix);
             log::info!("{prefix}exit: cancelled before turn");
+            hooks.log(&format!("{prefix}exit: cancelled before turn"));
             return Err(cancelled_error("cancelled", &state.conv.messages()));
         }
 
@@ -2272,7 +2272,7 @@ async fn run_agent_loop_core(
             .unwrap_or((None, None));
         hooks.emit_token_usage(totals.clone(), last_prompt, last_cached);
 
-        emit_turn_stats(prefix, state.turn_num, turn_stats.as_ref(), &totals);
+        emit_turn_stats(prefix, state.turn_num, turn_stats.as_ref(), &totals, hooks);
 
         state
             .emit_turn_artifacts(
@@ -2365,7 +2365,7 @@ async fn run_agent_loop_core(
         } else {
             ""
         };
-        emit_final(prefix, state.turns, suffix);
+        emit_final(prefix, state.turns, suffix, hooks);
         emit_summary(
             prefix,
             state.turn_num,
@@ -2375,18 +2375,23 @@ async fn run_agent_loop_core(
             state.total_cached_tokens,
             state.total_cache_creation_tokens,
             state.total_reasoning_tokens,
+            hooks,
         );
     }
 
     if state.timed_out {
         log::info!("agent_loop: exit (stream idle timeout, label={})", prefix);
         log::info!("{prefix}exit: stream idle timeout");
+        hooks.log(&format!("{prefix}exit: stream idle timeout"));
         if state.exhausted_timeout_retries {
             log::error!(
                 "agent_loop: exhausted turn-level timeout retries, giving up (label={})",
                 prefix
             );
             log::info!("{prefix}exit: exhausted turn-level timeout retries");
+            hooks.log(&format!(
+                "{prefix}exit: exhausted turn-level timeout retries"
+            ));
             return Err(ClientError::RetryExhausted {
                 message: "exhausted turn-level timeout retries".into(),
             });
@@ -2398,6 +2403,7 @@ async fn run_agent_loop_core(
     if let Some(err) = state.stream_error {
         log::info!("agent_loop: exit (stream error, label={})", prefix);
         log::info!("{prefix}exit: stream error");
+        hooks.log(&format!("{prefix}exit: stream error"));
         if state.exhausted_turn_retries {
             log::error!(
                 "agent_loop: exhausted turn-level retries ({} attempts), giving up (label={}): {err}",
@@ -2405,6 +2411,7 @@ async fn run_agent_loop_core(
                 prefix
             );
             log::info!("{prefix}exit: exhausted turn-level retries");
+            hooks.log(&format!("{prefix}exit: exhausted turn-level retries"));
             return Err(ClientError::RetryExhausted {
                 message: format!(
                     "exhausted turn-level retries ({} attempts): {err}",
@@ -2417,6 +2424,7 @@ async fn run_agent_loop_core(
     }
     log::info!("agent_loop: exit (exceeded max turns, label={})", prefix);
     log::info!("{prefix}exit: exceeded max turns ({max_turns})");
+    hooks.log(&format!("{prefix}exit: exceeded max turns ({max_turns})"));
     Err(ClientError::Runtime {
         message: format!("exceeded max turns ({max_turns})"),
     })
@@ -2469,14 +2477,22 @@ pub(crate) fn write_raw(raw: &mut Option<std::fs::File>, evt: &serde_json::Value
 ///
 /// This is always logged regardless of the telemetry gate; timing and output
 /// byte-ratio extras live behind the separate [`emit_turn_metrics`] path.
-fn emit_turn_stats(prefix: &str, turn: usize, stats: Option<&TurnStats>, totals: &UsageStats) {
+fn emit_turn_stats(
+    prefix: &str,
+    turn: usize,
+    stats: Option<&TurnStats>,
+    totals: &UsageStats,
+    hooks: &LoopHooks,
+) {
     let payload = serde_json::json!({
         "type": "turn_stats",
         "turn": turn,
         "stats": stats,
         "totals": totals,
     });
-    log::info!("{prefix}{payload}");
+    let msg = format!("{prefix}{payload}");
+    log::info!("{msg}");
+    hooks.log(&msg);
 }
 
 /// Emit per-turn telemetry: timing, token counts, cache hit ratio, reasoning ratio.
@@ -2491,6 +2507,7 @@ fn emit_turn_metrics(
     text: &str,
     tool_calls: &[ToolCall],
     usage: Option<&Usage>,
+    hooks: &LoopHooks,
 ) {
     if !crate::config::telemetry_enabled() {
         return;
@@ -2547,6 +2564,7 @@ fn emit_turn_metrics(
         reasoning_byte_ratio,
     );
     log::info!("{prefix}{msg}");
+    hooks.log(&format!("{prefix}{msg}"));
 }
 
 /// Emit stage-end telemetry summary (always emitted, not gated by GREMLINS_TELEMETRY).
@@ -2560,6 +2578,7 @@ fn emit_summary(
     total_cached: Option<u64>,
     total_cache_creation: Option<u64>,
     total_reasoning: Option<u64>,
+    hooks: &LoopHooks,
 ) {
     let wall = loop_start.elapsed();
     let total_prompt_u = total_prompt.unwrap_or(0);
@@ -2606,20 +2625,24 @@ fn emit_summary(
         total_cache_creation.unwrap_or(0),
         reasoning_pct,
     );
-    log::info!("{prefix}{msg}");
+    let full = format!("{prefix}{msg}");
+    log::info!("{full}");
+    hooks.log(&full);
 }
 
-pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str) {
+pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str, hooks: &LoopHooks) {
     let msg = format!("final: turns={turns} cost=not-reported{suffix}");
-    log::info!("{prefix}{msg}");
+    let full = format!("{prefix}{msg}");
+    log::info!("{full}");
+    hooks.log(&full);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clients::done_helpers::user_message_text;
     use crate::clients::format::{key_arg, ledger_key_arg};
     use crate::clients::interactive::InteractiveChannels;
-    use crate::clients::done_helpers::user_message_text;
     use http::StatusCode;
     use rig_core::driver::DynModel;
     use rig_core::message::{Issuer, Reasoning, ReasoningContent, ToolFunction, UserContent};
@@ -3260,9 +3283,7 @@ mod tests {
                 cancel_token: None,
                 stream_events: None,
                 prepopulated_conversation: crate::conversation::new_blank_conversation(
-                    "hi",
-                    false,
-                    None,
+                    "hi", false, None,
                 ),
                 skills_available: false,
                 discovered_skills: None,
@@ -3278,9 +3299,7 @@ mod tests {
             completion_nudge_budget: 0,
             stream_events: None,
             prepopulated_conversation: crate::conversation::new_blank_conversation(
-                "hi",
-                false,
-                None,
+                "hi", false, None,
             ),
             hooks: LoopHooks::new(),
         }
@@ -6282,7 +6301,6 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
-            conversation: crate::conversation::new_blank_conversation("", false, None),
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -6351,8 +6369,8 @@ mod tests {
                 &LoopHooks::new(),
                 Some(session),
                 None,
-            crate::conversation::new_blank_conversation("hi", false, None),
-        )
+                crate::conversation::new_blank_conversation("hi", false, None),
+            )
             .await
         });
 
@@ -6462,8 +6480,8 @@ mod tests {
                 &LoopHooks::new(),
                 Some(session),
                 None,
-            crate::conversation::new_blank_conversation("hi", false, None),
-        )
+                crate::conversation::new_blank_conversation("hi", false, None),
+            )
             .await
         });
 
@@ -6560,8 +6578,8 @@ mod tests {
                 &LoopHooks::new(),
                 Some(session),
                 None,
-            crate::conversation::new_blank_conversation("hi", false, None),
-        )
+                crate::conversation::new_blank_conversation("hi", false, None),
+            )
             .await
         });
 
@@ -6647,8 +6665,8 @@ mod tests {
                 &LoopHooks::new(),
                 Some(session),
                 None,
-            crate::conversation::new_blank_conversation("hi", false, None),
-        )
+                crate::conversation::new_blank_conversation("hi", false, None),
+            )
             .await
         });
 

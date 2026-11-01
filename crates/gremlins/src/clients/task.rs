@@ -486,7 +486,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            conversation: crate::conversation::new_blank_conversation("", false, None),
+
             id_prefix: String::new(),
             telemetry: tools::AgentLoopTelemetry {
                 stream_events: None,
@@ -528,7 +528,12 @@ mod tests {
         );
 
         // First invocation: depth 0 < 3, should succeed.
-        let output = runner(TaskKind::Scout, "first call".into(), None).await;
+        let output = runner(
+            TaskKind::Scout,
+            "first call".into(),
+            crate::conversation::new_blank_conversation("", false, None),
+        )
+        .await;
         assert!(
             !output.output.contains("max depth"),
             "depth 0 should not hit guard, got: {}",
@@ -572,7 +577,12 @@ mod tests {
             false,
         );
 
-        let output = runner(TaskKind::Scout, "x".repeat(10_000), None).await;
+        let output = runner(
+            TaskKind::Scout,
+            "x".repeat(10_000),
+            crate::conversation::new_blank_conversation("", false, None),
+        )
+        .await;
         assert!(
             output.output.starts_with("Task error: prompt size "),
             "oversized task prompt must surface as a Task error string, got: {}",
@@ -641,17 +651,8 @@ mod tests {
 
         let parent_history = vec![Message::user("earlier parent turn")];
         let parent_conversation =
-                crate::conversation::new_blank_conversation(
-                    "",
-                    false,
-                    Some(parent_history),
-                );
-        let output = runner(
-            TaskKind::Fork,
-            "child task".into(),
-            parent_conversation,
-        )
-        .await;
+            crate::conversation::new_blank_conversation("", false, Some(parent_history));
+        let output = runner(TaskKind::Fork, "child task".into(), parent_conversation).await;
 
         assert_eq!(output.output, "fork reply");
         // Fork must bypass task-models entirely, even when another kind is
@@ -752,7 +753,12 @@ mod tests {
             false,
         );
 
-        let output = runner(TaskKind::Scout, "go".into(), None).await;
+        let output = runner(
+            TaskKind::Scout,
+            "go".into(),
+            crate::conversation::new_blank_conversation("", false, None),
+        )
+        .await;
         assert!(
             !output.output.contains("Task error"),
             "unexpected error: {}",
@@ -817,7 +823,12 @@ mod tests {
             false,
         );
 
-        let output = runner(TaskKind::Scout, "go".into(), None).await;
+        let output = runner(
+            TaskKind::Scout,
+            "go".into(),
+            crate::conversation::new_blank_conversation("", false, None),
+        )
+        .await;
         assert!(
             output
                 .output
@@ -860,7 +871,12 @@ mod tests {
             false,
         );
 
-        let blocked = runner(TaskKind::Scout, "too deep".into(), None).await;
+        let blocked = runner(
+            TaskKind::Scout,
+            "too deep".into(),
+            crate::conversation::new_blank_conversation("", false, None),
+        )
+        .await;
         assert!(
             blocked.output.contains("max depth (3) exceeded"),
             "call at MAX_DEPTH should be rejected, got: {}",
@@ -904,7 +920,7 @@ mod tests {
         let handle = tokio::spawn(runner(
             TaskKind::Scout,
             "transient".into(),
-            None,
+            crate::conversation::new_blank_conversation("", false, None),
         ));
         tokio::time::advance(std::time::Duration::from_secs(60)).await;
         let output = handle.await.unwrap();
@@ -950,7 +966,11 @@ mod tests {
             false,
         );
 
-        let handle = tokio::spawn(runner(TaskKind::Scout, "exhaust".into(), None));
+        let handle = tokio::spawn(runner(
+            TaskKind::Scout,
+            "exhaust".into(),
+            crate::conversation::new_blank_conversation("", false, None),
+        ));
         tokio::time::advance(std::time::Duration::from_secs(200)).await;
         let output = handle.await.unwrap();
         assert!(
@@ -1017,7 +1037,7 @@ mod tests {
                 tokio::spawn(runner.clone()(
                     TaskKind::Scout,
                     format!("call {i}"),
-                    None,
+                    crate::conversation::new_blank_conversation("", false, None),
                 ))
             })
             .collect();
@@ -1133,7 +1153,11 @@ mod tests {
         #[test]
         fn task_prefix_wraps_a_single_segment_at_depth_one() {
             let (runner, mut log_rx) = runner_with_turns(vec![turn_text("only")]);
-            block_on(runner(TaskKind::Scout, "task".into(), None));
+            block_on(runner(
+                TaskKind::Scout,
+                "task".into(),
+                crate::conversation::new_blank_conversation("", false, None),
+            ));
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 1, "get {segments:?} from {lines:?}");
@@ -1154,7 +1178,11 @@ mod tests {
         fn nested_task_prefix_appends_to_the_parent_chain() {
             let (runner, mut log_rx) =
                 runner_with_turns(vec![turn_task_call(), turn_text("leaf"), turn_text("done")]);
-            block_on(runner(TaskKind::Scout, "task".into(), None));
+            block_on(runner(
+                TaskKind::Scout,
+                "task".into(),
+                crate::conversation::new_blank_conversation("", false, None),
+            ));
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 2, "got {segments:?} from {lines:?}");
@@ -1176,8 +1204,18 @@ mod tests {
         fn sibling_invocations_get_distinct_segments() {
             let (runner, mut log_rx) = runner_with_turns(vec![turn_text("a"), turn_text("b")]);
             block_on(async {
-                runner(TaskKind::Scout, "one".into(), None).await;
-                runner(TaskKind::Scout, "two".into(), None).await;
+                runner(
+                    TaskKind::Scout,
+                    "one".into(),
+                    crate::conversation::new_blank_conversation("", false, None),
+                )
+                .await;
+                runner(
+                    TaskKind::Scout,
+                    "two".into(),
+                    crate::conversation::new_blank_conversation("", false, None),
+                )
+                .await;
             });
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));

@@ -60,7 +60,7 @@ pub(crate) trait Conversation: Any + Send + Sync {
 
     /// Drop the most recent assistant turn from history so the turn can be
     /// re-executed cleanly.
-    fn pop_last_two(&mut self);
+    fn pop_last_assistant_turn(&mut self);
 
     /// Build the outgoing request for the given turn.
     fn render_turn(

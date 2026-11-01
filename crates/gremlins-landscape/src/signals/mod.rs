@@ -122,10 +122,7 @@ pub struct SignalRendered {
 /// whose content cannot be read as UTF-8 are silently skipped.
 ///
 /// [`skipped`]: crate::FileOutline::skipped
-pub fn build_signals(
-    _ctx: &SignalContext,
-    outlines: &[crate::FileOutline],
-) -> SignalRendered {
+pub fn build_signals(_ctx: &SignalContext, outlines: &[crate::FileOutline]) -> SignalRendered {
     let mut identifiers: Vec<Identifier> = Vec::new();
     let mut symbol_index: HashMap<String, SymbolEntry> = HashMap::new();
 
@@ -539,8 +536,8 @@ pub fn render_signal_sections(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{FileOutline, OutlineItem};
+    use super::*;
 
     // ── helpers ────────────────────────────────────────────────────────
 

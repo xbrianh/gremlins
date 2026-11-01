@@ -11,15 +11,15 @@ use std::hash::{Hash, Hasher};
 use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
 use rig_core::completion::Message;
 
+use crate::clients::conversation::{Conversation, RunArtifact, TurnScript};
+use crate::clients::done_helpers::{done_user_message, user_message_text};
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
-use crate::clients::conversation::{Conversation, RunArtifact, TurnScript};
-use crate::conversation::context::{compose_model_transcript, ConversationContext};
 use crate::clients::protocol::FileObservations;
+use crate::conversation::context::{compose_model_transcript, ConversationContext};
 use crate::conversation::contexts::{
     landscape::LandscapeContext, signal::SignalMapContext, tool_ledger::ToolLedger,
 };
-use crate::clients::done_helpers::{done_user_message, user_message_text};
 use crate::landscape::{signals::SignalProfile, LandscapeData};
 use crate::task_kind::TaskKind;
 
@@ -248,7 +248,7 @@ impl Conversation for StandardConversation {
         self.begin_next_turn();
     }
 
-    fn pop_last_two(&mut self) {
+    fn pop_last_assistant_turn(&mut self) {
         // The pending user prompt is a separate field, not in history.
         // Only the assistant message (and any trailing results from the
         // same turn) need removal for clean turn re-execution.
@@ -379,7 +379,12 @@ impl Conversation for StandardConversation {
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: String::new(),
             finalized_messages: None,
-            contexts: self.contexts.iter().map(|c| c.clone_box()).collect(),
+            contexts: self
+                .contexts
+                .iter()
+                .filter(|c| c.propagates_to_task())
+                .map(|c| c.clone_box())
+                .collect(),
         })
     }
 
@@ -394,7 +399,8 @@ impl Conversation for StandardConversation {
 
     fn empty_child_with_contexts(&self, prompt: &str) -> Box<dyn Conversation> {
         let mut child = Self::new(prompt, self.preserve_reasoning_in_history, None);
-        let propagating = self.contexts
+        let propagating = self
+            .contexts
             .iter()
             .filter(|c| c.propagates_to_task())
             .map(|c| c.clone_box())

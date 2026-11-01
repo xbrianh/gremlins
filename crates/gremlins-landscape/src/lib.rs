@@ -6,8 +6,8 @@
 
 mod error;
 pub mod heuristic;
-pub mod signals;
 mod paths;
+pub mod signals;
 
 #[cfg(test)]
 mod test_support;
@@ -635,7 +635,7 @@ fn render_key_parts(
 pub struct LandscapeFileEntry {
     /// Outline items discovered for this file (empty when skipped or when no
     /// items were found).
-    pub(crate) items: Vec<OutlineItem>,
+    pub items: Vec<OutlineItem>,
 }
 
 /// Living, mutable landscape data owned by LandscapeContext.

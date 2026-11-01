@@ -50,7 +50,8 @@ pub struct CompletedRun {
     pub token_usage: Option<UsageStats>,
     /// The agent loop's final conversation, when the backend captures it.
     /// Used by the chat gremlin to persist full model context between stages
-    /// via `artifact://conversation.json`. Only its messages are serialized.
+    /// via `artifact://conversation.json`. The `messages()` method provides
+    /// the serializable transcript; the trait object itself is never serialized.
     #[serde(skip)]
     pub(crate) conversation: Option<Box<dyn Conversation>>,
     /// File observations (Read/Grep/Landscape + mutation paths) collected
@@ -58,7 +59,6 @@ pub struct CompletedRun {
     /// cross-stage landscape pruning can skip already-explored files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_observations: Option<FileObservations>,
-
 }
 
 // Manual Clone impl needed because `Box<dyn Conversation>` doesn't

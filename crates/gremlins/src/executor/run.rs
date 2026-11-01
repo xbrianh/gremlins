@@ -784,11 +784,8 @@ async fn run_agent(
         None
     };
 
-    let mut conv = crate::conversation::standard::StandardConversation::new(
-        "",
-        false,
-        verbatim_history,
-    );
+    let mut conv =
+        crate::conversation::standard::StandardConversation::new("", false, verbatim_history);
 
     // ── Live usage tracker for failure persistence ─────
     // Stores (combined_usage, stage_local_usage, cost_usd).
