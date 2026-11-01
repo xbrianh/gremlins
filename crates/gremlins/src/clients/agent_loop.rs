@@ -1005,7 +1005,7 @@ impl LoopState {
                 } else {
                     let _permit = sem.acquire_owned().await;
                     let outcome =
-                        tools::invoke_with_conversation(&j.id, &j.name, ctx, &j.args, Some(conv)).await;
+                        tools::invoke_with_conversation(&j.id, &j.name, ctx, &j.args, conv).await;
                     (outcome.output, outcome.conversation)
                 }
             }

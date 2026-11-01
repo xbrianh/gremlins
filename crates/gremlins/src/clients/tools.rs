@@ -529,15 +529,14 @@ fn global_registry() -> &'static ToolRegistry {
     GLOBAL_TOOL_REGISTRY.get_or_init(crate::toolbox::default_registry)
 }
 
-/// Dispatch a single tool call. `conv`, when `Some`, provides the parent
-/// conversation whose contexts serve/seed tool operations. `None` means no
-/// conversation is available (used by tests).
+/// Dispatch a single tool call. `conv` provides the parent
+/// conversation whose contexts serve/seed tool operations.
 pub(crate) async fn invoke_with_conversation(
     id: &str,
     name: &str,
     ctx: &AgentLoopRuntime,
     args_json: &str,
-    conv: Option<&dyn super::conversation::Conversation>,
+    conv: &dyn super::conversation::Conversation,
 ) -> TaskOutcome {
     if let Some(allowed) = &ctx.allowed_tools {
         // Mischief is chat-only; allow it through the gate only when the
@@ -605,36 +604,34 @@ pub(crate) async fn invoke_with_conversation(
     // Let active conversation contexts serve the tool result before falling
     // through to the handler registry. This is a read-only pull path — context
     // state is mutated separately through observe_tool() in emit_tool_results.
-    if let Some(conv) = conv {
-        // Landscape exploration uses rayon for parallel directory walks —
-        // offload to a blocking thread so tokio workers stay responsive.
-        let maybe_output: Option<String> = if name == "Landscape" {
-            let args_owned = args.clone();
-            let conv = conv.clone_box();
-            let name_owned = name.to_string();
-            match tokio::task::spawn_blocking(move || conv.serve_tool(&name_owned, &args_owned))
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => Some(format!("Error: {e}")),
-            }
-        } else {
-            conv.serve_tool(name, &args)
-        };
-        if let Some(output) = maybe_output {
-            let output = cap_output(name, output);
-            audit(
-                ctx.audit_log.as_deref(),
-                ctx.audit_lock.as_deref(),
-                name,
-                &ka,
-                result_status(&output),
-            );
-            return TaskOutcome {
-                output,
-                conversation: None,
-            };
+    // Landscape exploration uses rayon for parallel directory walks —
+    // offload to a blocking thread so tokio workers stay responsive.
+    let maybe_output: Option<String> = if name == "Landscape" {
+        let args_owned = args.clone();
+        let conv = conv.clone_box();
+        let name_owned = name.to_string();
+        match tokio::task::spawn_blocking(move || conv.serve_tool(&name_owned, &args_owned))
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => Some(format!("Error: {e}")),
         }
+    } else {
+        conv.serve_tool(name, &args)
+    };
+    if let Some(output) = maybe_output {
+        let output = cap_output(name, output);
+        audit(
+            ctx.audit_log.as_deref(),
+            ctx.audit_lock.as_deref(),
+            name,
+            &ka,
+            result_status(&output),
+        );
+        return TaskOutcome {
+            output,
+            conversation: None,
+        };
     }
 
     let mut outcome = match name {
@@ -663,10 +660,8 @@ pub(crate) async fn invoke_with_conversation(
                 };
                 let conversation = if kind == TaskKind::Fork {
                     ctx.conversation.clone()
-                } else if let Some(conv) = conv {
-                    conv.empty_child_with_contexts(prompt)
                 } else {
-                    crate::conversation::new_blank_conversation(prompt, false, None)
+                    conv.empty_child_with_contexts(prompt)
                 };
                 let child_outcome = f(kind, prompt.to_string(), conversation).await;
                 // Label the result so concurrent Task outputs can be told apart.
@@ -785,7 +780,8 @@ pub(crate) async fn invoke(
     ctx: &AgentLoopRuntime,
     args_json: &str,
 ) -> String {
-    invoke_with_conversation(id, name, ctx, args_json, None)
+    let conv = crate::conversation::new_blank_conversation("", false, None);
+    invoke_with_conversation(id, name, ctx, args_json, &*conv)
         .await
         .output
 }
