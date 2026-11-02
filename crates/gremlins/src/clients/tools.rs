@@ -528,6 +528,14 @@ pub(crate) trait ToolHandler: Send + Sync {
     fn output_marker(&self, cap: u64) -> String {
         format!("\n[...truncated at {cap} bytes...]")
     }
+
+    /// Whether this tool is the loop's completion signal. The loop consults
+    /// this to detect a completion request (solo-only validation, expected
+    /// artifact check) without naming the tool. Exactly one tool returns
+    /// `true`; every other tool keeps the default.
+    fn completion(&self) -> bool {
+        false
+    }
 }
 
 #[allow(dead_code)]
@@ -573,6 +581,17 @@ pub(crate) fn display_truncation(name: &str) -> usize {
         .get(name)
         .map(|h| h.display_truncation())
         .unwrap_or(200)
+}
+
+/// Whether `name` is the loop's completion signal. The agent loop's Done
+/// handling consults this instead of comparing the tool name itself, so any
+/// tool could become the completion signal by declaring `completion()`.
+pub(crate) fn is_completion(name: &str) -> bool {
+    global_registry()
+        .handlers
+        .get(name)
+        .map(|h| h.completion())
+        .unwrap_or(false)
 }
 
 /// Dispatch a single tool call. `conv` provides the parent

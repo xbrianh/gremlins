@@ -11,6 +11,10 @@ pub(crate) struct DoneTool;
 
 #[async_trait]
 impl ToolHandler for DoneTool {
+    fn completion(&self) -> bool {
+        true
+    }
+
     async fn invoke(
         &self,
         _id: &str,

@@ -1421,9 +1421,14 @@ impl LoopState {
     ) -> Result<DoneDecision, ClientError> {
         // Solo Done is the only valid completion signal. Mixed Done + other
         // tool calls is incoherent and rejected wholesale so the model retries
-        // cleanly.
-        let has_non_done = tool_calls.iter().any(|tc| tc.function.name != "Done");
-        let done_call = tool_calls.iter().find(|tc| tc.function.name == "Done");
+        // cleanly. Which tool completes the loop is the handler's
+        // `completion()` policy, not a name comparison here.
+        let has_non_done = tool_calls
+            .iter()
+            .any(|tc| !tools::is_completion(tc.function.name.as_str()));
+        let done_call = tool_calls
+            .iter()
+            .find(|tc| tools::is_completion(tc.function.name.as_str()));
 
         match (done_call, has_non_done) {
             (Some(_done_tc), true) => {
@@ -1431,7 +1436,7 @@ impl LoopState {
                 // see a valid round of history.
                 let mut results = Vec::with_capacity(tool_calls.len());
                 for tc in tool_calls {
-                    let body = if tc.function.name == "Done" {
+                    let body = if tools::is_completion(tc.function.name.as_str()) {
                         "Error: Done must be called alone — do not combine Done with \
                          other tool calls in the same message. Re-issue your tool \
                          calls without Done, then call Done by itself when finished."
@@ -2316,7 +2321,7 @@ pub(crate) async fn run_agent_loop_core(
         // Done handled — filter it out before execution.
         let tool_calls: Vec<ToolCall> = tool_calls
             .into_iter()
-            .filter(|tc| tc.function.name != "Done")
+            .filter(|tc| !tools::is_completion(tc.function.name.as_str()))
             .collect();
 
         if tool_calls.is_empty() {
