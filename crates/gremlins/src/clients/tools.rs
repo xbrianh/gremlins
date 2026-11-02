@@ -17,6 +17,9 @@ use crate::core::paths::{
 };
 use crate::task_kind::TaskKind;
 
+#[cfg(test)]
+use super::conversation::ConversationStub;
+
 /// First `max_chars` characters of a string, with \n escaped to `\\n`.
 pub(crate) fn preview_str(s: &str, max_chars: usize) -> String {
     let truncated: String = s.chars().take(max_chars).collect();
@@ -770,7 +773,7 @@ pub(crate) async fn invoke(
     ctx: &AgentLoopRuntime,
     args_json: &str,
 ) -> String {
-    let conv = crate::conversation::new_blank_conversation("", false, None);
+    let conv = Box::new(ConversationStub::new(""));
     invoke_with_conversation(id, name, ctx, args_json, &*conv)
         .await
         .output

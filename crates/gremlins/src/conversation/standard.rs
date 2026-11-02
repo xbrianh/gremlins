@@ -532,3 +532,528 @@ impl Conversation for StandardConversation {
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use rig_core::completion::Message;
+    use rig_core::message::{AssistantContent, Issuer, UserContent};
+
+    use crate::clients::agent_loop::*;
+    use crate::clients::cancel::CancelToken;
+    use crate::clients::done_helpers::user_message_text;
+    use crate::clients::format::ledger_key_arg;
+    use crate::conversation::new_blank_conversation;
+
+    // Override test_ctx to use StandardConversation (context-aware) instead of
+    // the ConversationStub that agent_loop tests use.
+    fn test_ctx(
+        cwd: Option<std::path::PathBuf>,
+        raw_path: Option<std::path::PathBuf>,
+    ) -> crate::clients::agent_loop::RunContext {
+        let mut ctx = crate::clients::agent_loop::test_ctx(cwd, raw_path);
+        ctx.prepopulated_conversation = new_blank_conversation("hi", false, None);
+        ctx
+    }
+
+    /// A parent agent-loop turn with prior assistant/tool-result history that
+    /// emits `Task(kind="Fork")` must hand the child the snapshot of that
+    /// history (including the current user prompt), followed by the Fork
+    /// prompt, in exact order. This exercises the agent-loop snapshot path and
+    /// the `tools::invoke` handoff rather than calling the task runner directly.
+    #[tokio::test]
+    async fn fork_child_receives_parent_history_then_fork_prompt() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("note.txt");
+        std::fs::write(&note, "hello from parent").unwrap();
+
+        let read_call = MockStreamEvent::tool_call(
+            "r1",
+            "Read",
+            serde_json::json!({ "file_path": note.to_str().unwrap() }),
+        );
+        let fork_call = MockStreamEvent::tool_call(
+            "f1",
+            "Task",
+            serde_json::json!({"kind": "Fork", "prompt": "finish as fork"}),
+        );
+        let done_call = |id: &str, summary: &str| {
+            MockStreamEvent::tool_call(id, "Done", serde_json::json!({ "summary": summary }))
+        };
+
+        // One model drives every loop: parent Read turn, parent Fork turn,
+        // forked child turn, then parent wrap-up turn.
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                read_call,
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                fork_call,
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                MockStreamEvent::text("fork reply"),
+                done_call("d2", "fork reply"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                MockStreamEvent::text("parent done"),
+                done_call("d1", "parent done"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+
+        run_agent_loop(
+            gm(model.clone().erase()),
+            "parent go",
+            ctx,
+            CancelToken::new(),
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let requests = model.requests();
+        let fork_req = requests
+            .iter()
+            .find(|req| {
+                matches!(
+                    req.chat_history.first(),
+                    Some(Message::System { content })
+                        if content.contains("This is a forked child agent")
+                )
+            })
+            .expect("the forked child must issue its own request");
+
+        let history = &fork_req.chat_history;
+        // The child inherits the parent's conversation but no longer sees a
+        // separate [seen] block — context content travels through
+        // compose_model_transcript.  The inherited ledger is cleared via
+        // clear_transcript so the context blocks are empty.
+        assert_eq!(history.len(), 4, "unexpected fork history: {history:#?}");
+
+        // Fork system prompt leads the child history.
+        assert!(matches!(
+            &history[0],
+            Message::System { content }
+                if content.contains("<tools>") && content.contains("Do not call")
+        ));
+
+        // Inherited parent conversation — the fork prompt is the last message.
+        assert!(
+            history
+                .iter()
+                .any(|m| matches!(m, Message::Assistant { .. })),
+            "history must contain an assistant message"
+        );
+        assert!(
+            history.iter().any(|m| matches!(m, Message::User { content } if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))),
+            "history must contain a tool result"
+        );
+        // The Fork prompt is the last message in chat_history.
+        assert!(
+            user_message_text(history.last().unwrap()).contains("finish as fork"),
+            "last message should be fork prompt: {:?}",
+            history.last()
+        );
+    }
+
+
+
+    #[tokio::test]
+    async fn loop_ledger_follows_all_tool_results() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-ledger-multi-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f1 = dir.join("a.txt");
+        let f2 = dir.join("b.txt");
+        std::fs::write(&f1, "alpha").unwrap();
+        std::fs::write(&f2, "beta").unwrap();
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c1",
+                    "Read",
+                    serde_json::json!({"file_path": f1.to_str().unwrap()}),
+                ),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c2",
+                    "Read",
+                    serde_json::json!({"file_path": f2.to_str().unwrap()}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("done"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        run_agent_loop(
+            gm(model.clone().erase()),
+            "read both",
+            ctx.clone(),
+            CancelToken::new(),
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let reqs = model.requests();
+        let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
+        // The [seen] block travels through user-message transcript blocks
+        // (The ledger's system_message() returns None to keep the system
+        // prompt cache-stable).
+        assert!(history.len() >= 4, "unexpected history: {history:#?}");
+        let seen_msg = history
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::User { content: _ } => {
+                    let text = user_message_text(m);
+                    if text.contains("[seen]") {
+                        Some(text)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("[seen] block not found in any user message: {history:#?}"));
+        assert!(
+            seen_msg.contains("a.txt") && seen_msg.contains("b.txt"),
+            "ledger must list both actions: {seen_msg}"
+        );
+    }
+
+
+
+    #[tokio::test]
+    async fn loop_ledger_injected_into_history() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-ledger-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("x.txt");
+        std::fs::write(&f, "content").unwrap();
+
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "c1",
+                    "Read",
+                    serde_json::json!({"file_path": f.to_str().unwrap()}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("done"),
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({"summary": "done"}),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+        run_agent_loop(
+            gm(model.clone().erase()),
+            "read",
+            ctx.clone(),
+            cancel,
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let reqs = model.requests();
+        assert_eq!(reqs.len(), 2);
+        let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
+        let key = ledger_key_arg(&serde_json::json!({"file_path": f.to_str().unwrap()}));
+        assert!(key.contains("x.txt"), "ledger must name the file: {key}");
+        // The [seen] block travels through user-message transcript blocks
+        // (The ledger's system_message() returns None to keep the system
+        // prompt cache-stable).
+        assert!(history.len() >= 3, "unexpected history: {history:#?}");
+        let seen_msg = history
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::User { content: _ } => {
+                    let text = user_message_text(m);
+                    if text.contains("[seen]") {
+                        Some(text)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("[seen] block not found in any user message: {history:#?}"));
+        assert!(
+            seen_msg.contains(&key),
+            "ledger must name the file: {seen_msg}"
+        );
+        assert!(
+            seen_msg.contains("R("),
+            "ledger must show Read indicator: {seen_msg}"
+        );
+        // The history must contain a tool result.
+        let has_result = history.iter().any(|m| {
+            matches!(m, Message::User { content } if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))
+        });
+        assert!(has_result, "history must contain a tool result");
+        // The history must contain an assistant message.
+        let has_assistant = history
+            .iter()
+            .any(|m| matches!(m, Message::Assistant { .. }));
+        assert!(has_assistant, "history must contain an assistant message");
+    }
+
+
+
+    /// A reasoning-only turn (reasoning deltas but no text and no tool call)
+    /// must still record an assistant message carrying the structured
+    /// reasoning item before nudging with "Continue.". Dropping it would both
+    /// omit the item from the next request and leave two consecutive user
+    /// messages — breaking the replay invariant the provider relies on.
+    #[tokio::test]
+    async fn loop_replays_reasoning_item_on_reasoning_only_turn() {
+        let dir = std::env::temp_dir().join(format!(
+            "gremlins-oa-reasoning-only-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Turn 0: reasoning only (rs_0), no text, no tool call — the loop
+        // records the reasoning item and continues with "Continue.".
+        // Turn 1: Done. The second request must carry rs_0 as an assistant
+        // message, not as two consecutive user messages.
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::reasoning_delta_with_id("rs_0", "thinking"),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::tool_call(
+                    "done1",
+                    "Done",
+                    serde_json::json!({ "summary": "done" }),
+                ),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        let cancel = CancelToken::new();
+        let result = run_agent_loop(
+            gm(model.clone().erase()),
+            "think then finish",
+            ctx,
+            cancel,
+            loop_opts_preserve_reasoning(None),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.exit_code, 0);
+
+        let reqs = model.requests();
+        assert_eq!(reqs.len(), 2);
+        let second = &reqs[1];
+
+        // The reasoning-only turn must be replayed as an assistant message.
+        let assistant = second
+            .chat_history
+            .iter()
+            .find(|m| matches!(m, Message::Assistant { .. }))
+            .expect("second request carries the prior assistant turn");
+        let Message::Assistant { content, .. } = assistant else {
+            unreachable!()
+        };
+        let reasoning = content.iter().find_map(|c| match c {
+            AssistantContent::Reasoning(sealed) => {
+                sealed.open(&Issuer::from("mock")).map(|r| r.id.clone())
+            }
+            _ => None,
+        });
+        assert_eq!(
+            reasoning.flatten().as_deref(),
+            Some("rs_0"),
+            "reasoning-only turn's structured item must survive into the replay"
+        );
+
+        // No two consecutive user messages: the assistant turn (with its
+        // reasoning item) must sit between the original prompt and "Continue.".
+        let mut prev_user = false;
+        for m in &second.chat_history {
+            match m {
+                Message::User { .. } => {
+                    assert!(
+                        !prev_user,
+                        "replayed history must not contain consecutive user messages"
+                    );
+                    prev_user = true;
+                }
+                _ => prev_user = false,
+            }
+        }
+    }
+
+
+
+    /// Regression: a Scout child that reads a file must have those contents
+    /// attached to the Task tool result in the parent's durable history, not
+    /// only the ephemeral next_prompt. After a further tool round the evidence
+    /// must still be present even though the ledger marks the file as read.
+    #[tokio::test]
+    async fn scout_read_observations_ride_the_task_tool_result() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("note.txt");
+        std::fs::write(&note, "evidence-from-child").unwrap();
+
+        let task_call = MockStreamEvent::tool_call(
+            "t1",
+            "Task",
+            serde_json::json!({ "kind": "Scout", "prompt": "inspect note.txt" }),
+        );
+        let done_call = |id: &str, summary: &str| {
+            MockStreamEvent::tool_call(id, "Done", serde_json::json!({ "summary": summary }))
+        };
+
+        // Parent: delegate, then finish.
+        let parent = MockCompletionModel::from_stream_turns([
+            vec![
+                task_call,
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                done_call("d1", "outer done"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        // Child (Scout): Read the file, then finish.
+        let child = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call(
+                    "r1",
+                    "Read",
+                    serde_json::json!({ "file_path": note.to_str().unwrap() }),
+                ),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                MockStreamEvent::text("scout result"),
+                done_call("d2", "scout result"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+
+        let child_handle = child.clone();
+        let factory: crate::clients::task::TaskModelFactory = Arc::new(move |_spec: &str| {
+            Ok(crate::clients::task::TaskModel {
+                model: gm(child_handle.clone().erase()),
+                temperature: None,
+                max_tokens: None,
+                extra: None,
+                preserve_reasoning: None,
+            })
+        });
+        let selector = crate::clients::task::TaskModelSelector::new(
+            HashMap::from([(crate::task_kind::TaskKind::Scout, "openai/mini".to_string())]),
+            factory,
+        )
+        .expect("configured");
+        let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        ctx.params.task_models = Some(selector);
+
+        run_agent_loop(
+            gm(parent.clone().erase()),
+            "go",
+            ctx,
+            CancelToken::new(),
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // The parent's second request must carry the child's Read evidence
+        // inside the Task tool result (durable history).
+        let reqs = parent.requests();
+        let parent_history = &reqs.last().unwrap().chat_history;
+        let task_result = parent_history
+            .iter()
+            .flat_map(|m| match m {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::ToolResult(r) => Some(
+                            r.content
+                                .iter()
+                                .filter_map(|rc| match rc {
+                                    rig_core::completion::message::ToolResultContent::Text(t) => {
+                                        Some(t.text.clone())
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<String>(),
+                        ),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => vec![],
+            })
+            .find(|t| t.contains("scout result"))
+            .expect("task result must reach the parent history");
+        assert!(
+            task_result.contains("evidence-from-child"),
+            "joined Read observations must ride the Task tool result, got: {task_result}"
+        );
+    }
+
+
+}

@@ -285,6 +285,7 @@ fn make_task_runner_at_depth(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clients::conversation::ConversationStub;
     use rig_core::completion::Message;
     use rig_core::driver::DynModel;
     use rig_core::operation::Completion;
@@ -531,7 +532,7 @@ mod tests {
         let output = runner(
             TaskKind::Scout,
             "first call".into(),
-            crate::conversation::new_blank_conversation("", false, None),
+            Box::new(ConversationStub::new("")),
         )
         .await;
         assert!(
@@ -580,7 +581,7 @@ mod tests {
         let output = runner(
             TaskKind::Scout,
             "x".repeat(10_000),
-            crate::conversation::new_blank_conversation("", false, None),
+            Box::new(ConversationStub::new("")),
         )
         .await;
         assert!(
@@ -651,7 +652,7 @@ mod tests {
 
         let parent_history = vec![Message::user("earlier parent turn")];
         let parent_conversation =
-            crate::conversation::new_blank_conversation("", false, Some(parent_history));
+            Box::new(ConversationStub::with_history("", parent_history));
         let output = runner(TaskKind::Fork, "child task".into(), parent_conversation).await;
 
         assert_eq!(output.output, "fork reply");
@@ -756,7 +757,7 @@ mod tests {
         let output = runner(
             TaskKind::Scout,
             "go".into(),
-            crate::conversation::new_blank_conversation("", false, None),
+            Box::new(ConversationStub::new("")),
         )
         .await;
         assert!(
@@ -826,7 +827,7 @@ mod tests {
         let output = runner(
             TaskKind::Scout,
             "go".into(),
-            crate::conversation::new_blank_conversation("", false, None),
+            Box::new(ConversationStub::new("")),
         )
         .await;
         assert!(
@@ -874,7 +875,7 @@ mod tests {
         let blocked = runner(
             TaskKind::Scout,
             "too deep".into(),
-            crate::conversation::new_blank_conversation("", false, None),
+            Box::new(ConversationStub::new("")),
         )
         .await;
         assert!(
@@ -920,7 +921,7 @@ mod tests {
         let handle = tokio::spawn(runner(
             TaskKind::Scout,
             "transient".into(),
-            crate::conversation::new_blank_conversation("", false, None),
+            Box::new(ConversationStub::new("")),
         ));
         tokio::time::advance(std::time::Duration::from_secs(60)).await;
         let output = handle.await.unwrap();
@@ -969,7 +970,7 @@ mod tests {
         let handle = tokio::spawn(runner(
             TaskKind::Scout,
             "exhaust".into(),
-            crate::conversation::new_blank_conversation("", false, None),
+            Box::new(ConversationStub::new("")),
         ));
         tokio::time::advance(std::time::Duration::from_secs(200)).await;
         let output = handle.await.unwrap();
@@ -1037,7 +1038,7 @@ mod tests {
                 tokio::spawn(runner.clone()(
                     TaskKind::Scout,
                     format!("call {i}"),
-                    crate::conversation::new_blank_conversation("", false, None),
+                    Box::new(ConversationStub::new("")),
                 ))
             })
             .collect();
@@ -1156,7 +1157,7 @@ mod tests {
             block_on(runner(
                 TaskKind::Scout,
                 "task".into(),
-                crate::conversation::new_blank_conversation("", false, None),
+                Box::new(ConversationStub::new("")),
             ));
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
@@ -1181,7 +1182,7 @@ mod tests {
             block_on(runner(
                 TaskKind::Scout,
                 "task".into(),
-                crate::conversation::new_blank_conversation("", false, None),
+                Box::new(ConversationStub::new("")),
             ));
             let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
@@ -1207,13 +1208,13 @@ mod tests {
                 runner(
                     TaskKind::Scout,
                     "one".into(),
-                    crate::conversation::new_blank_conversation("", false, None),
+                    Box::new(ConversationStub::new("")),
                 )
                 .await;
                 runner(
                     TaskKind::Scout,
                     "two".into(),
-                    crate::conversation::new_blank_conversation("", false, None),
+                    Box::new(ConversationStub::new("")),
                 )
                 .await;
             });
