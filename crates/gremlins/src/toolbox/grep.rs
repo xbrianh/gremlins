@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use regex::Regex;
 
 use crate::clients::tools::{
-    blocking_string, parse_args, req_str, AgentLoopRuntime, ToolHandler, ToolOutcome,
+    blocking_string, parse_args, push_str_arg, push_u64_arg, req_str, str_detail, AgentLoopRuntime,
+    ToolHandler, ToolOutcome,
 };
 use crate::core::paths::{enforce, io_enforce, resolve};
 
@@ -15,6 +16,24 @@ pub(crate) struct GrepTool;
 
 #[async_trait]
 impl ToolHandler for GrepTool {
+    fn title_detail(&self, args: &serde_json::Value) -> Option<String> {
+        str_detail(args, "pattern")
+    }
+
+    fn title_uses_secondaries(&self) -> bool {
+        true
+    }
+
+    fn secondary_args(&self, args: &serde_json::Value, string_cap: Option<usize>) -> Vec<String> {
+        let mut out = Vec::new();
+        push_u64_arg(&mut out, args, "max_matches");
+        push_str_arg(&mut out, args, "glob", string_cap);
+        push_str_arg(&mut out, args, "path", string_cap);
+        push_u64_arg(&mut out, args, "context_before");
+        push_u64_arg(&mut out, args, "context_after");
+        out
+    }
+
     fn sandbox_check(&self, ctx: &AgentLoopRuntime, args: &serde_json::Value) -> Option<String> {
         let roots = ctx.sandbox.roots()?;
         enforce(

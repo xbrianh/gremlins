@@ -42,70 +42,21 @@ pub(crate) fn format_tool_call(tc: &ToolCall) -> String {
 ///
 /// This is the single formatting routine shared by the FIFO tool-event path
 /// and the live-output forwarder so both always render the same string.
+///
+/// What a title shows is a property of the tool, so both the primary detail and
+/// the decision to append secondaries come from the handler registry rather
+/// than from a name table here.
 pub(crate) fn format_tool_call_parts(name: &str, args: &serde_json::Value) -> String {
-    // Extract the primary argument for common tools.
-    let detail: Option<String> = match name {
-        "Bash" => args
-            .get("command")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("command={s:?}")),
-        "Read" => args
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("file_path={s:?}")),
-        "Write" => args
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("file_path={s:?}")),
-        "Edit" => args
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("file_path={s:?}")),
-        "Glob" => args
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("pattern={s:?}")),
-        "Grep" => args
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("pattern={s:?}")),
-        "WebSearch" => args
-            .get("url")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("url={s:?}")),
-        "Landscape" => {
-            let depth = args
-                .get("depth")
-                .and_then(|v| v.as_u64())
-                .map(|d| format!("depth={d}"));
-            let path = args
-                .get("file_path")
-                .and_then(|v| v.as_str())
-                .map(|s| format!("file_path={s:?}"));
-            match (path, depth) {
-                (Some(p), Some(d)) => Some(format!("{p}, {d}")),
-                (Some(p), None) => Some(p),
-                _ => None,
-            }
-        }
-        "Done" => args
-            .get("summary")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("summary={:?}", trunc(s, 120))),
-        "Task" => args
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("kind={s:?}")),
-        _ => None,
-    };
-
-    // Collect secondary parameters for Read and Grep.
     let mut parts: Vec<String> = Vec::new();
-    if let Some(d) = detail {
-        parts.push(d);
+    if let Some(detail) = super::tools::title_detail(name, args) {
+        parts.push(detail);
     }
-    if name == "Read" || name == "Grep" {
-        parts.extend(tool_secondary_args_with(name, args, Some(TITLE_VALUE_CAP)));
+    if super::tools::title_uses_secondaries(name) {
+        parts.extend(super::tools::secondary_args(
+            name,
+            args,
+            Some(TITLE_VALUE_CAP),
+        ));
     }
 
     if parts.is_empty() {
@@ -170,120 +121,13 @@ pub(crate) fn key_arg(args: &serde_json::Value) -> String {
 /// is a display-only concern for the comparatively narrow tool-slot titles.
 const TITLE_VALUE_CAP: usize = 120;
 
-/// Collect non-empty secondary parameters for a tool invocation, without
-/// display truncation.
-///
-/// Returns ordered `key=value` strings for parameters beyond the primary
-/// argument that help operators understand the tool invocation at a glance.
-/// Absent, zero, or empty values are omitted. Callers that need a display cap
-/// (such as TUI titles) should use [`tool_secondary_args_with`] instead.
-fn tool_secondary_args(name: &str, args: &serde_json::Value) -> Vec<String> {
-    tool_secondary_args_with(name, args, None)
-}
-
-/// Collect non-empty secondary parameters for a tool invocation.
-///
-/// When `string_value_cap` is `Some(n)`, string values longer than `n`
-/// characters are truncated with [`trunc`] before being debug-quoted. This is
-/// used for compact TUI titles; logging passes `None` and applies its own
-/// whole-line budget afterward.
-fn tool_secondary_args_with(
-    name: &str,
-    args: &serde_json::Value,
-    string_value_cap: Option<usize>,
-) -> Vec<String> {
-    let mut extras = Vec::new();
-
-    let string_arg = |value: &str| match string_value_cap {
-        Some(cap) => format!("{:?}", trunc(value, cap)),
-        None => format!("{value:?}"),
-    };
-
-    match name {
-        "Read" => {
-            if let Some(v) = args
-                .get("offset")
-                .and_then(|v| v.as_u64())
-                .filter(|v| *v > 0)
-            {
-                extras.push(format!("offset={v}"));
-            }
-            if let Some(v) = args
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .filter(|v| *v > 0)
-            {
-                extras.push(format!("limit={v}"));
-            }
-        }
-        "Bash" | "WebSearch" => {
-            if let Some(v) = args
-                .get("timeout")
-                .and_then(|v| v.as_u64())
-                .filter(|v| *v > 0)
-            {
-                extras.push(format!("timeout={v}"));
-            }
-        }
-        "Grep" => {
-            if let Some(v) = args
-                .get("max_matches")
-                .and_then(|v| v.as_u64())
-                .filter(|v| *v > 0)
-            {
-                extras.push(format!("max_matches={v}"));
-            }
-            if let Some(v) = args
-                .get("glob")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                extras.push(format!("glob={}", string_arg(v)));
-            }
-            if let Some(v) = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                extras.push(format!("path={}", string_arg(v)));
-            }
-            if let Some(v) = args
-                .get("context_before")
-                .and_then(|v| v.as_u64())
-                .filter(|v| *v > 0)
-            {
-                extras.push(format!("context_before={v}"));
-            }
-            if let Some(v) = args
-                .get("context_after")
-                .and_then(|v| v.as_u64())
-                .filter(|v| *v > 0)
-            {
-                extras.push(format!("context_after={v}"));
-            }
-        }
-        "Glob" => {
-            if let Some(v) = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                extras.push(format!("path={}", string_arg(v)));
-            }
-        }
-        _ => {}
-    }
-
-    extras
-}
-
 /// Enrich the log line with secondary arguments beyond what `key_arg` returns.
 ///
 /// `key_arg` picks a single primary key; this function appends any additional
 /// parameters that help operators understand the tool invocation at a glance.
 pub(crate) fn enrich_log_line(name: &str, args: &serde_json::Value) -> String {
     let primary = key_arg(args);
-    let extras = tool_secondary_args(name, args);
+    let extras = super::tools::secondary_args(name, args, None);
 
     if extras.is_empty() {
         return primary;

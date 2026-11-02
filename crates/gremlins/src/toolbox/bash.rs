@@ -7,7 +7,8 @@ use tokio::process::{ChildStderr, ChildStdout, Command};
 
 use crate::clients::format::format_tool_call_parts;
 use crate::clients::tools::{
-    bash_check, parse_args, req_str, AgentLoopRuntime, ToolHandler, ToolOutcome,
+    bash_check, parse_args, push_u64_arg, req_str, str_detail, AgentLoopRuntime, ToolHandler,
+    ToolOutcome,
 };
 use crate::core::paths::project_root;
 
@@ -17,6 +18,16 @@ pub(crate) struct BashTool;
 
 #[async_trait]
 impl ToolHandler for BashTool {
+    fn title_detail(&self, args: &serde_json::Value) -> Option<String> {
+        str_detail(args, "command")
+    }
+
+    fn secondary_args(&self, args: &serde_json::Value, _string_cap: Option<usize>) -> Vec<String> {
+        let mut out = Vec::new();
+        push_u64_arg(&mut out, args, "timeout");
+        out
+    }
+
     fn sandbox_check(&self, ctx: &AgentLoopRuntime, args: &serde_json::Value) -> Option<String> {
         let roots = ctx.sandbox.roots()?;
         bash_check(

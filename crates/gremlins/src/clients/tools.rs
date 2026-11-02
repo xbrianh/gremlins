@@ -536,6 +536,26 @@ pub(crate) trait ToolHandler: Send + Sync {
     fn completion(&self) -> bool {
         false
     }
+
+    /// Presentation: the primary `key=value` detail shown in a tool's TUI
+    /// title and log label. `None` renders the bare tool name.
+    fn title_detail(&self, _args: &serde_json::Value) -> Option<String> {
+        None
+    }
+
+    /// Presentation: whether the tool's secondary args belong in the compact
+    /// TUI title. Only Read and Grep show them there; Bash/WebSearch/Glob
+    /// secondaries appear only in the wider log line.
+    fn title_uses_secondaries(&self) -> bool {
+        false
+    }
+
+    /// Presentation: secondary `key=value` args, ordered. `string_cap`
+    /// truncates long string values (TUI titles); `None` leaves them whole
+    /// (log lines, which apply their own whole-line budget).
+    fn secondary_args(&self, _args: &serde_json::Value, _string_cap: Option<usize>) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[allow(dead_code)]
@@ -592,6 +612,73 @@ pub(crate) fn is_completion(name: &str) -> bool {
         .get(name)
         .map(|h| h.completion())
         .unwrap_or(false)
+}
+
+/// Primary title detail for a tool call, or `None` for an unknown tool.
+pub(crate) fn title_detail(name: &str, args: &serde_json::Value) -> Option<String> {
+    global_registry()
+        .handlers
+        .get(name)
+        .and_then(|h| h.title_detail(args))
+}
+
+/// Whether `name` shows its secondary args in the compact TUI title.
+pub(crate) fn title_uses_secondaries(name: &str) -> bool {
+    global_registry()
+        .handlers
+        .get(name)
+        .map(|h| h.title_uses_secondaries())
+        .unwrap_or(false)
+}
+
+/// Secondary `key=value` args for a tool call.
+pub(crate) fn secondary_args(
+    name: &str,
+    args: &serde_json::Value,
+    string_cap: Option<usize>,
+) -> Vec<String> {
+    global_registry()
+        .handlers
+        .get(name)
+        .map(|h| h.secondary_args(args, string_cap))
+        .unwrap_or_default()
+}
+
+/// `key="value"` detail for a single string argument, used by handlers that
+/// present one primary path/command/pattern.
+pub(crate) fn str_detail(args: &serde_json::Value, key: &str) -> Option<String> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| format!("{key}={s:?}"))
+}
+
+/// Push `key=value` for a non-zero unsigned argument, used by handlers
+/// assembling their secondary args.
+pub(crate) fn push_u64_arg(out: &mut Vec<String>, args: &serde_json::Value, key: &str) {
+    if let Some(v) = args.get(key).and_then(|v| v.as_u64()).filter(|v| *v > 0) {
+        out.push(format!("{key}={v}"));
+    }
+}
+
+/// Push `key="value"` for a non-empty string argument, optionally truncating
+/// the value for the compact TUI title.
+pub(crate) fn push_str_arg(
+    out: &mut Vec<String>,
+    args: &serde_json::Value,
+    key: &str,
+    string_cap: Option<usize>,
+) {
+    if let Some(v) = args
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        let rendered = match string_cap {
+            Some(cap) => format!("{:?}", super::format::trunc(v, cap)),
+            None => format!("{v:?}"),
+        };
+        out.push(format!("{key}={rendered}"));
+    }
 }
 
 /// Dispatch a single tool call. `conv` provides the parent

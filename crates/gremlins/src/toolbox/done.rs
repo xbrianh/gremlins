@@ -15,6 +15,12 @@ impl ToolHandler for DoneTool {
         true
     }
 
+    fn title_detail(&self, args: &serde_json::Value) -> Option<String> {
+        args.get("summary")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("summary={:?}", crate::clients::format::trunc(s, 120)))
+    }
+
     async fn invoke(
         &self,
         _id: &str,

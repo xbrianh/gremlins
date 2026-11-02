@@ -13,6 +13,22 @@ pub(crate) struct LandscapeTool;
 
 #[async_trait]
 impl ToolHandler for LandscapeTool {
+    fn title_detail(&self, args: &serde_json::Value) -> Option<String> {
+        let path = args
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("file_path={s:?}"));
+        let depth = args
+            .get("depth")
+            .and_then(|v| v.as_u64())
+            .map(|d| format!("depth={d}"));
+        match (path, depth) {
+            (Some(p), Some(d)) => Some(format!("{p}, {d}")),
+            (Some(p), None) => Some(p),
+            _ => None,
+        }
+    }
+
     fn sandbox_check(&self, ctx: &AgentLoopRuntime, args: &serde_json::Value) -> Option<String> {
         let roots = ctx.sandbox.roots()?;
         enforce(

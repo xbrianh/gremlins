@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 
 use crate::clients::tools::{
-    blocking_string, parse_args, req_str, AgentLoopRuntime, ToolHandler, ToolOutcome,
+    blocking_string, parse_args, push_str_arg, req_str, str_detail, AgentLoopRuntime, ToolHandler,
+    ToolOutcome,
 };
 use crate::core::paths::{enforce, io_enforce, resolve};
 
@@ -11,6 +12,16 @@ pub(crate) struct GlobTool;
 
 #[async_trait]
 impl ToolHandler for GlobTool {
+    fn title_detail(&self, args: &serde_json::Value) -> Option<String> {
+        str_detail(args, "pattern")
+    }
+
+    fn secondary_args(&self, args: &serde_json::Value, string_cap: Option<usize>) -> Vec<String> {
+        let mut out = Vec::new();
+        push_str_arg(&mut out, args, "path", string_cap);
+        out
+    }
+
     fn sandbox_check(&self, ctx: &AgentLoopRuntime, args: &serde_json::Value) -> Option<String> {
         let roots = ctx.sandbox.roots()?;
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");

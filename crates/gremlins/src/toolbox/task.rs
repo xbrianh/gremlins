@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 
 use crate::clients::conversation::Conversation;
-use crate::clients::tools::{parse_args, preview_str, AgentLoopRuntime, ToolHandler, ToolOutcome};
+use crate::clients::tools::{
+    parse_args, preview_str, str_detail, AgentLoopRuntime, ToolHandler, ToolOutcome,
+};
 use crate::task_kind::TaskKind;
 
 /// The Task tool. Unlike the filesystem/process tools, Task fans out to a
@@ -12,6 +14,10 @@ pub(crate) struct TaskTool;
 
 #[async_trait]
 impl ToolHandler for TaskTool {
+    fn title_detail(&self, args: &serde_json::Value) -> Option<String> {
+        str_detail(args, "kind")
+    }
+
     fn max_per_message(&self) -> Option<usize> {
         Some(crate::clients::tool_specs::TASK_MAX_PER_TURN)
     }
