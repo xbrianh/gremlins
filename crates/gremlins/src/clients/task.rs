@@ -129,9 +129,9 @@ fn make_task_runner_at_depth(
 
             Box::pin(async move {
                 if depth >= MAX_DEPTH {
-                    return tools::TaskOutcome {
+                    return tools::ToolOutcome {
                         output: format!("Error: task max depth ({MAX_DEPTH}) exceeded"),
-                        conversation: None,
+                        child: None,
                     };
                 }
 
@@ -165,9 +165,9 @@ fn make_task_runner_at_depth(
                 let (selected, _selected_spec) = match selection {
                     Ok(selection) => selection,
                     Err(reason) => {
-                        return tools::TaskOutcome {
+                        return tools::ToolOutcome {
                             output: format!("Task error: {reason}"),
-                            conversation: None,
+                            child: None,
                         };
                     }
                 };
@@ -267,14 +267,14 @@ fn make_task_runner_at_depth(
                             has_done = out.starts_with("Done."),
                             has_md = out.starts_with("# "),
                         );
-                        tools::TaskOutcome {
+                        tools::ToolOutcome {
                             output: out,
-                            conversation: completed.conversation,
+                            child: completed.conversation,
                         }
                     }
-                    Err(e) => tools::TaskOutcome {
+                    Err(e) => tools::ToolOutcome {
                         output: format!("Task error: {e}"),
-                        conversation: None,
+                        child: None,
                     },
                 }
             })
@@ -651,8 +651,7 @@ mod tests {
         );
 
         let parent_history = vec![Message::user("earlier parent turn")];
-        let parent_conversation =
-            Box::new(ConversationStub::with_history("", parent_history));
+        let parent_conversation = Box::new(ConversationStub::with_history("", parent_history));
         let output = runner(TaskKind::Fork, "child task".into(), parent_conversation).await;
 
         assert_eq!(output.output, "fork reply");

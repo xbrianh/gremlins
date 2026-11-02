@@ -1,17 +1,24 @@
 use async_trait::async_trait;
 
-use crate::clients::tools::{parse_args, AgentLoopRuntime, ToolHandler};
+use crate::clients::conversation::Conversation;
+use crate::clients::tools::{parse_args, AgentLoopRuntime, ToolHandler, ToolOutcome};
 
 pub(crate) struct LoadSkillTool;
 
 #[async_trait]
 impl ToolHandler for LoadSkillTool {
-    async fn invoke(&self, _id: &str, ctx: &AgentLoopRuntime, args_json: &str) -> String {
+    async fn invoke(
+        &self,
+        _id: &str,
+        ctx: &AgentLoopRuntime,
+        _conv: &dyn Conversation,
+        args_json: &str,
+    ) -> ToolOutcome {
         let args = match parse_args(args_json) {
             Ok(v) => v,
-            Err(e) => return e,
+            Err(e) => return ToolOutcome::text(e),
         };
-        load_skill_invoke(ctx, &args)
+        ToolOutcome::text(load_skill_invoke(ctx, &args))
     }
 }
 

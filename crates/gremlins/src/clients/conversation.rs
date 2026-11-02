@@ -261,14 +261,12 @@ impl Conversation for ConversationStub {
         >],
         tool_calls: &[rig_core::completion::message::ToolCall],
     ) {
-        self.history.push(
-            super::format::assistant_tool_message(
-                text,
-                reasoning_items,
-                tool_calls,
-                self.preserve_reasoning,
-            ),
-        );
+        self.history.push(super::format::assistant_tool_message(
+            text,
+            reasoning_items,
+            tool_calls,
+            self.preserve_reasoning,
+        ));
     }
 
     fn record_tool_results(&mut self, results: Vec<rig_core::completion::Message>) {
@@ -277,7 +275,10 @@ impl Conversation for ConversationStub {
     }
 
     fn pop_last_assistant_turn(&mut self) {
-        if matches!(self.history.last(), Some(rig_core::completion::Message::Assistant { .. })) {
+        if matches!(
+            self.history.last(),
+            Some(rig_core::completion::Message::Assistant { .. })
+        ) {
             self.history.pop();
         }
     }

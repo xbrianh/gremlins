@@ -533,7 +533,6 @@ impl Conversation for StandardConversation {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -668,8 +667,6 @@ mod tests {
         );
     }
 
-
-
     #[tokio::test]
     async fn loop_ledger_follows_all_tool_results() {
         let dir = std::env::temp_dir().join(format!(
@@ -749,8 +746,6 @@ mod tests {
             "ledger must list both actions: {seen_msg}"
         );
     }
-
-
 
     #[tokio::test]
     async fn loop_ledger_injected_into_history() {
@@ -844,8 +839,6 @@ mod tests {
         assert!(has_assistant, "history must contain an assistant message");
     }
 
-
-
     /// A reasoning-only turn (reasoning deltas but no text and no tool call)
     /// must still record an assistant message carrying the structured
     /// reasoning item before nudging with "Continue.". Dropping it would both
@@ -938,8 +931,6 @@ mod tests {
             }
         }
     }
-
-
 
     /// Regression: a Scout child that reads a file must have those contents
     /// attached to the Task tool result in the parent's durable history, not
@@ -1054,6 +1045,4 @@ mod tests {
             "joined Read observations must ride the Task tool result, got: {task_result}"
         );
     }
-
-
 }

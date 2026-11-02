@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use tokio::process::Command;
 
 use crate::clients::format::format_tool_call_parts;
-use crate::clients::tools::{parse_args, req_str, AgentLoopRuntime, ToolHandler};
+use crate::clients::tools::{parse_args, req_str, AgentLoopRuntime, ToolHandler, ToolOutcome};
 
 use super::bash::{apply_env_to_command, emit_live_lines, LineScanner, ProcessGroupGuard};
 
@@ -15,8 +15,18 @@ pub(crate) struct WebSearchTool;
 
 #[async_trait]
 impl ToolHandler for WebSearchTool {
-    async fn invoke(&self, id: &str, ctx: &AgentLoopRuntime, args_json: &str) -> String {
-        websearch_invoke(ctx, args_json, id).await
+    fn output_cap(&self) -> bool {
+        true
+    }
+
+    async fn invoke(
+        &self,
+        id: &str,
+        ctx: &AgentLoopRuntime,
+        _conv: &dyn crate::clients::conversation::Conversation,
+        args_json: &str,
+    ) -> ToolOutcome {
+        ToolOutcome::text(websearch_invoke(ctx, args_json, id).await)
     }
 }
 

@@ -9,11 +9,11 @@ use super::shell_parse::{
 };
 pub(crate) use super::tool_specs::{
     always_available, chat_only_always_available, tool_definitions, validate_tool_args,
-    MAX_CONCURRENT_TOOLS, TASK_MAX_PER_TURN,
+    MAX_CONCURRENT_TOOLS,
 };
 use crate::core::paths::{
-    canonicalize_or_ancestor, enforce, expand_user, normalize_path, project_root, resolve,
-    roots_suffix, within_worktree, within_worktree_lexical,
+    canonicalize_or_ancestor, expand_user, normalize_path, project_root, resolve, roots_suffix,
+    within_worktree, within_worktree_lexical,
 };
 use crate::task_kind::TaskKind;
 
@@ -40,15 +40,29 @@ pub(crate) fn result_status(res: &str) -> &'static str {
     }
 }
 
-type TaskFuture = Pin<Box<dyn std::future::Future<Output = TaskOutcome> + Send>>;
+type ToolFuture = Pin<Box<dyn std::future::Future<Output = ToolOutcome> + Send>>;
 
-/// Output of a Task tool invocation: prose text + the child loop's
-/// final conversation (which carries its own contexts for join).
-pub(crate) struct TaskOutcome {
-    /// The prose output (text result) from the child agent loop.
+/// Output of a tool invocation: prose text plus an optional child
+/// conversation (which carries its own contexts for join).
+///
+/// Task is the only tool that returns a child today; the field is named and
+/// joined uniformly so any future fan-out tool can do the same without
+/// name dispatch in the agent loop.
+pub(crate) struct ToolOutcome {
+    /// The prose output (text result) from the tool.
     pub output: String,
-    /// The child loop's conversation, carrying its own context state.
-    pub conversation: Option<Box<dyn super::conversation::Conversation>>,
+    /// A child loop's conversation, carrying its own context state.
+    pub child: Option<Box<dyn super::conversation::Conversation>>,
+}
+
+impl ToolOutcome {
+    /// Build an outcome with prose output and no child conversation.
+    pub(crate) fn text(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            child: None,
+        }
+    }
 }
 
 /// Callback that `invoke` calls for Task tool invocations.
@@ -57,7 +71,7 @@ pub(crate) struct TaskOutcome {
 /// Fork receives a clone of the parent conversation; Scout/Implement
 /// receive a fresh conversation seeded from the parent's contexts.
 pub(crate) type TaskFn = Arc<
-    dyn Fn(TaskKind, String, Box<dyn super::conversation::Conversation>) -> TaskFuture
+    dyn Fn(TaskKind, String, Box<dyn super::conversation::Conversation>) -> ToolFuture
         + Send
         + Sync,
 >;
@@ -437,39 +451,13 @@ fn audit_write(log: &Path, line: &str) {
 }
 
 fn check_tool(name: &str, ctx: &AgentLoopRuntime, args: &serde_json::Value) -> Option<String> {
-    // AllowAll disables every containment check — no path is ever denied.
-    let roots = ctx.sandbox.roots()?;
-    match name {
-        "Read" | "Edit" | "Write" | "Landscape" => enforce(
-            roots,
-            args.get("file_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("."),
-            ctx.cwd.as_deref(),
-        ),
-        "Grep" => enforce(
-            roots,
-            args.get("path").and_then(|v| v.as_str()).unwrap_or("."),
-            ctx.cwd.as_deref(),
-        ),
-        "Glob" => {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-            let base = resolve(path, ctx.cwd.as_deref());
-            let full_path = base.join(pattern);
-            let full_str = full_path.to_string_lossy();
-            enforce(roots, &full_str, ctx.cwd.as_deref())
-        }
-        "Bash" => bash_check(
-            roots,
-            args.get("command").and_then(|v| v.as_str()).unwrap_or(""),
-            ctx.cwd.as_deref(),
-        ),
-        // Network I/O has no filesystem path to sandbox.
-        "WebSearch" => None,
-        "LoadSkill" => None,
-        _ => None,
-    }
+    // Per-tool sandbox policy lives on each handler. AllowAll is expressed as
+    // `ctx.sandbox.roots() == None`, which each `sandbox_check` impl honors by
+    // returning `None` (allowed) — the old early return moved into the tools.
+    global_registry()
+        .handlers
+        .get(name)
+        .and_then(|h| h.sandbox_check(ctx, args))
 }
 
 pub(crate) async fn blocking_string(f: impl FnOnce() -> String + Send + 'static) -> String {
@@ -492,9 +480,54 @@ pub(crate) fn req_str<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a 
 // === Tool handler registry =============================================================
 
 /// Opaque handler dispatched by `invoke`. Implementations live in `crate::toolbox`.
+///
+/// `conv` is the parent conversation whose contexts serve/seed tool operations
+/// (Task uses it to fork or seed a child loop). Handlers return [`ToolOutcome`]
+/// so a fan-out tool can surface a child conversation for the loop to join
+/// uniformly — the loop never names a tool to decide whether to join.
 #[async_trait::async_trait]
 pub(crate) trait ToolHandler: Send + Sync {
-    async fn invoke(&self, id: &str, ctx: &AgentLoopRuntime, args_json: &str) -> String;
+    async fn invoke(
+        &self,
+        id: &str,
+        ctx: &AgentLoopRuntime,
+        conv: &dyn super::conversation::Conversation,
+        args_json: &str,
+    ) -> ToolOutcome;
+
+    /// Per-message concurrency budget for fan-out tools. `None` means uncapped.
+    /// The loop consults this to reject excess calls *without* naming the tool.
+    fn max_per_message(&self) -> Option<usize> {
+        None
+    }
+
+    /// Display-truncation length for live ToolResult previews. Read uses a
+    /// larger preview (500) than the 200-char default because its body is
+    /// already a focal artifact of every turn.
+    fn display_truncation(&self) -> usize {
+        200
+    }
+
+    /// Sandbox the tool's path arguments against the run's containment roots.
+    /// Returns an error string on denial; `None` when allowed. `AllowAll` is
+    /// expressed as `roots() == None`, which each implementation must honor by
+    /// returning `None` (allowed) — mirroring the old `check_tool` early return.
+    fn sandbox_check(&self, _ctx: &AgentLoopRuntime, _args: &serde_json::Value) -> Option<String> {
+        None
+    }
+
+    /// Whether this tool's output is subject to the byte cap. Read/Bash/Grep/
+    /// Glob/Landscape/WebSearch are capped; Edit/Write/Done/Task/Mischief/LoadSkill
+    /// are not.
+    fn output_cap(&self) -> bool {
+        false
+    }
+
+    /// The truncation-marker suffix used when [`ToolHandler::output_cap`]
+    /// truncates. `cap` is the configured byte budget.
+    fn output_marker(&self, cap: u64) -> String {
+        format!("\n[...truncated at {cap} bytes...]")
+    }
 }
 
 #[allow(dead_code)]
@@ -524,6 +557,24 @@ fn global_registry() -> &'static ToolRegistry {
     GLOBAL_TOOL_REGISTRY.get_or_init(crate::toolbox::default_registry)
 }
 
+/// Per-message concurrency budget for a fan-out tool, or `None` when uncapped.
+/// The loop consults this to reject excess calls without naming the tool.
+pub(crate) fn max_per_message(name: &str) -> Option<usize> {
+    global_registry()
+        .handlers
+        .get(name)
+        .and_then(|h| h.max_per_message())
+}
+
+/// Display-truncation length for a tool's live ToolResult preview.
+pub(crate) fn display_truncation(name: &str) -> usize {
+    global_registry()
+        .handlers
+        .get(name)
+        .map(|h| h.display_truncation())
+        .unwrap_or(200)
+}
+
 /// Dispatch a single tool call. `conv` provides the parent
 /// conversation whose contexts serve/seed tool operations.
 pub(crate) async fn invoke_with_conversation(
@@ -532,7 +583,7 @@ pub(crate) async fn invoke_with_conversation(
     ctx: &AgentLoopRuntime,
     args_json: &str,
     conv: &dyn super::conversation::Conversation,
-) -> TaskOutcome {
+) -> ToolOutcome {
     if let Some(allowed) = &ctx.allowed_tools {
         // Mischief is chat-only; allow it through the gate only when the
         // session is chat. LoadSkill keeps its old bypass: the handler returns
@@ -543,9 +594,9 @@ pub(crate) async fn invoke_with_conversation(
             && !chat_only_always_available(name, chat)
             && !allowed.iter().any(|n| n == name)
         {
-            return TaskOutcome {
+            return ToolOutcome {
                 output: format!("Error: unknown tool {name}"),
-                conversation: None,
+                child: None,
             };
         }
     }
@@ -560,9 +611,9 @@ pub(crate) async fn invoke_with_conversation(
                 &ka,
                 "error",
             );
-            return TaskOutcome {
+            return ToolOutcome {
                 output: "Error: invalid arguments".into(),
-                conversation: None,
+                child: None,
             };
         }
     };
@@ -577,9 +628,9 @@ pub(crate) async fn invoke_with_conversation(
             &ka,
             "error",
         );
-        return TaskOutcome {
+        return ToolOutcome {
             output: err,
-            conversation: None,
+            child: None,
         };
     }
     if let Some(err) = check_tool(name, ctx, &args) {
@@ -590,9 +641,9 @@ pub(crate) async fn invoke_with_conversation(
             &ka,
             "denied",
         );
-        return TaskOutcome {
+        return ToolOutcome {
             output: err,
-            conversation: None,
+            child: None,
         };
     }
 
@@ -621,87 +672,20 @@ pub(crate) async fn invoke_with_conversation(
             &ka,
             result_status(&output),
         );
-        return TaskOutcome {
+        return ToolOutcome {
             output,
-            conversation: None,
+            child: None,
         };
     }
 
-    let mut outcome = match name {
-        "Task" => {
-            if let Some(f) = &ctx.task_fn {
-                let kind_str = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-                if prompt.is_empty() {
-                    return TaskOutcome {
-                        output: "Error: Task prompt is required".to_string(),
-                        conversation: None,
-                    };
-                }
-                let Some(kind) = TaskKind::parse(kind_str) else {
-                    return TaskOutcome {
-                        output: format!(
-                            "Error: unknown Task kind {kind_str:?}. Expected one of: {}",
-                            TaskKind::ALL
-                                .iter()
-                                .map(|k| k.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                        conversation: None,
-                    };
-                };
-                let conversation = if kind == TaskKind::Fork {
-                    conv.clone_box()
-                } else {
-                    conv.empty_child_with_contexts(prompt)
-                };
-                let child_outcome = f(kind, prompt.to_string(), conversation).await;
-                // Label the result so concurrent Task outputs can be told apart.
-                let final_output = format!("# {kind}\n\n{}", child_outcome.output);
-                log::info!(
-                    "task dispatch complete: kind={kind} prompt_len={p_len} prompt_preview={p_preview:?} output_len={o_len} output_preview={o_preview:?}",
-                    p_len = prompt.len(),
-                    p_preview = preview_str(prompt, 120),
-                    o_len = final_output.len(),
-                    o_preview = preview_str(&final_output, 300),
-                );
-                TaskOutcome {
-                    output: final_output,
-                    conversation: child_outcome.conversation,
-                }
-            } else {
-                TaskOutcome {
-                    output: "Error: Task not available for this backend".to_string(),
-                    conversation: None,
-                }
-            }
-        }
-        "Done" => {
-            let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
-            TaskOutcome {
-                output: format!("Done. {summary}"),
-                conversation: None,
-            }
-        }
-        "Mischief" => TaskOutcome {
-            output: include_str!("mischief_dsl.md").to_string(),
-            conversation: None,
-        },
-        _ => {
-            let registry = global_registry();
-            match registry.handlers.get(name) {
-                Some(handler) => TaskOutcome {
-                    output: handler.invoke(id, ctx, args_json).await,
-                    conversation: None,
-                },
-                None => {
-                    return TaskOutcome {
-                        output: format!("Error: unknown tool {name}"),
-                        conversation: None,
-                    }
-                }
-            }
+    // Dispatch through the registry. Every tool — including Task, Done, and
+    // Mischief — lives behind the same handler registry, so there is no
+    // name-based execution branch here.
+    let registry = global_registry();
+    let mut outcome = match registry.handlers.get(name) {
+        Some(handler) => handler.invoke(id, ctx, conv, args_json).await,
+        None => {
+            return ToolOutcome::text(format!("Error: unknown tool {name}"));
         }
     };
     audit(
@@ -715,33 +699,22 @@ pub(crate) async fn invoke_with_conversation(
     outcome
 }
 
-/// Cap output for tools that can produce unbounded results.
-/// Task and Done are excluded: Task manages its own context, Done is tiny.
-/// Edit and Write always return tiny results.
+/// Cap output for tools that can produce unbounded results. Per-tool policy
+/// (`output_cap` + `output_marker`) lives on each handler; this free fn looks
+/// up the handler and applies the shared byte-budget truncation.
+/// Task, Done, Edit, Write, Mischief, and LoadSkill opt out via `output_cap`.
 /// WebSearch handles its own truncation in websearch_invoke_with_cap.
 fn cap_output(name: &str, output: String) -> String {
     let cap = crate::config::max_tool_output_bytes();
-    if cap > 0
-        && matches!(
-            name,
-            "Read" | "Bash" | "Grep" | "Glob" | "Landscape" | "WebSearch"
-        )
-        && output.len() as u64 > cap
-    {
-        let marker = match name {
-            "Read" => format!(
-                "\n[...truncated at {} bytes, use offset/limit to paginate...]",
-                cap
-            ),
-            "Bash" => format!("\n[...truncated at {} bytes...]", cap),
-            "Grep" => format!(
-                "\n[...truncated at {} bytes, lower max_matches or narrow path...]",
-                cap
-            ),
-            "Glob" => format!("\n[...truncated at {} bytes, restrict the path...]", cap),
-            "Landscape" | "WebSearch" => format!("\n[...truncated at {} bytes...]", cap),
-            _ => format!("\n[...truncated at {} bytes...]", cap),
-        };
+    let handler = match global_registry().handlers.get(name) {
+        Some(h) => h,
+        None => return output,
+    };
+    if !handler.output_cap() {
+        return output;
+    }
+    if cap > 0 && output.len() as u64 > cap {
+        let marker = handler.output_marker(cap);
         let marker_len = marker.len() as u64;
         let keep = cap.saturating_sub(marker_len) as usize;
         if keep == 0 {
@@ -3621,9 +3594,9 @@ mod tests {
         let task_fn: TaskFn = Arc::new(move |kind, prompt, _history| {
             *called2.lock().unwrap() = true;
             Box::pin(async move {
-                TaskOutcome {
+                ToolOutcome {
                     output: format!("task result: {kind} / {prompt}"),
-                    conversation: None,
+                    child: None,
                 }
             })
         });
@@ -3658,9 +3631,9 @@ mod tests {
         let dir = tmp();
         let task_fn: TaskFn = Arc::new(|_kind, _prompt, _history| {
             Box::pin(async move {
-                TaskOutcome {
+                ToolOutcome {
                     output: "should not be called".to_string(),
-                    conversation: None,
+                    child: None,
                 }
             })
         });
@@ -3702,9 +3675,9 @@ mod tests {
         let task_fn: TaskFn = Arc::new(move |_kind, _prompt, _history| {
             *called2.lock().unwrap() = true;
             Box::pin(async move {
-                TaskOutcome {
+                ToolOutcome {
                     output: "should not be called".to_string(),
-                    conversation: None,
+                    child: None,
                 }
             })
         });
@@ -3742,9 +3715,9 @@ mod tests {
         let dir = tmp();
         let task_fn: TaskFn = Arc::new(|_k, _p, _history| {
             Box::pin(async move {
-                TaskOutcome {
+                ToolOutcome {
                     output: "body".to_string(),
-                    conversation: None,
+                    child: None,
                 }
             })
         });
@@ -4194,9 +4167,9 @@ mod tests {
         let dir = tmp();
         let task_fn: TaskFn = Arc::new(|_k, _p, _history| {
             Box::pin(async move {
-                TaskOutcome {
+                ToolOutcome {
                     output: "x".repeat(500),
-                    conversation: None,
+                    child: None,
                 }
             })
         });

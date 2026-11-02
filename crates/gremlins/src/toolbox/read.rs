@@ -2,15 +2,46 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
-use crate::clients::tools::{blocking_string, parse_args, req_str, AgentLoopRuntime, ToolHandler};
-use crate::core::paths::{io_enforce, resolve};
+use crate::clients::tools::{
+    blocking_string, parse_args, req_str, AgentLoopRuntime, ToolHandler, ToolOutcome,
+};
+use crate::core::paths::{enforce, io_enforce, resolve};
 
 pub(crate) struct ReadTool;
 
 #[async_trait]
 impl ToolHandler for ReadTool {
-    async fn invoke(&self, _id: &str, ctx: &AgentLoopRuntime, args_json: &str) -> String {
-        read_invoke(ctx, args_json).await
+    fn display_truncation(&self) -> usize {
+        500
+    }
+
+    fn sandbox_check(&self, ctx: &AgentLoopRuntime, args: &serde_json::Value) -> Option<String> {
+        let roots = ctx.sandbox.roots()?;
+        enforce(
+            roots,
+            args.get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("."),
+            ctx.cwd.as_deref(),
+        )
+    }
+
+    fn output_cap(&self) -> bool {
+        true
+    }
+
+    fn output_marker(&self, cap: u64) -> String {
+        format!("\n[...truncated at {cap} bytes, use offset/limit to paginate...]")
+    }
+
+    async fn invoke(
+        &self,
+        _id: &str,
+        ctx: &AgentLoopRuntime,
+        _conv: &dyn crate::clients::conversation::Conversation,
+        args_json: &str,
+    ) -> ToolOutcome {
+        ToolOutcome::text(read_invoke(ctx, args_json).await)
     }
 }
 

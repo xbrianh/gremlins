@@ -6,12 +6,15 @@
 //! needs it.
 
 pub(crate) mod bash;
+pub(crate) mod done;
 pub(crate) mod edit;
 pub(crate) mod glob;
 pub(crate) mod grep;
 pub(crate) mod landscape;
+pub(crate) mod mischief;
 pub(crate) mod read;
 pub(crate) mod skills;
+pub(crate) mod task;
 pub(crate) mod websearch;
 pub(crate) mod write;
 use std::sync::Arc;
@@ -29,5 +32,8 @@ pub(crate) fn default_registry() -> ToolRegistry {
         ("Landscape", Arc::new(landscape::LandscapeTool)),
         ("WebSearch", Arc::new(websearch::WebSearchTool)),
         ("LoadSkill", Arc::new(skills::LoadSkillTool)),
+        ("Task", Arc::new(task::TaskTool)),
+        ("Done", Arc::new(done::DoneTool)),
+        ("Mischief", Arc::new(mischief::MischiefTool)),
     ])
 }

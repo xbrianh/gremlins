@@ -2,22 +2,49 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
-use crate::clients::tools::{blocking_string, parse_args, req_str, AgentLoopRuntime, ToolHandler};
-use crate::core::paths::{io_enforce, resolve};
+use crate::clients::conversation::Conversation;
+use crate::clients::tools::{
+    blocking_string, parse_args, req_str, AgentLoopRuntime, ToolHandler, ToolOutcome,
+};
+use crate::core::paths::{enforce, io_enforce, resolve};
 use crate::landscape::{format_landscape_block_tool, format_outline_items, LandscapeExplorer};
 
 pub(crate) struct LandscapeTool;
 
 #[async_trait]
 impl ToolHandler for LandscapeTool {
-    async fn invoke(&self, _id: &str, ctx: &AgentLoopRuntime, args_json: &str) -> String {
+    fn sandbox_check(&self, ctx: &AgentLoopRuntime, args: &serde_json::Value) -> Option<String> {
+        let roots = ctx.sandbox.roots()?;
+        enforce(
+            roots,
+            args.get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("."),
+            ctx.cwd.as_deref(),
+        )
+    }
+
+    fn output_cap(&self) -> bool {
+        true
+    }
+
+    async fn invoke(
+        &self,
+        _id: &str,
+        ctx: &AgentLoopRuntime,
+        _conv: &dyn Conversation,
+        args_json: &str,
+    ) -> ToolOutcome {
         // This registry handler only runs when no LandscapeContext served the
         // call. Provide the same directory/file outline behavior as the context
         // so Landscape keeps working even for a stage without that context.
         let cwd = ctx.cwd.clone();
         let roots = ctx.sandbox.roots().map(|r| r.to_vec());
         let args_json = args_json.to_string();
-        blocking_string(move || landscape_sync(cwd.as_deref(), roots.as_deref(), &args_json)).await
+        let out =
+            blocking_string(move || landscape_sync(cwd.as_deref(), roots.as_deref(), &args_json))
+                .await;
+        ToolOutcome::text(out)
     }
 }
 

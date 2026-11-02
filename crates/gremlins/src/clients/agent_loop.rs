@@ -908,17 +908,15 @@ impl LoopState {
                 name: tc.function.name.to_string(),
                 args: args_json,
                 call: format_tool_call_parts(&tc.function.name, &tc.function.arguments),
-                over_cap: if tc.function.name == "Task" && {
+                over_cap: tools::max_per_message(tc.function.name.as_str()).and_then(|cap| {
                     task_count += 1;
-                    task_count > tools::TASK_MAX_PER_TURN
-                } {
-                    Some(format!(
-                        "Error: at most {} Task calls per message",
-                        tools::TASK_MAX_PER_TURN
-                    ))
-                } else {
-                    None
-                },
+                    (task_count > cap).then(|| {
+                        format!(
+                            "Error: at most {} {} calls per message",
+                            cap, tc.function.name
+                        )
+                    })
+                }),
             });
         }
         jobs
@@ -929,9 +927,9 @@ impl LoopState {
     /// order). A `tokio::select!` races the batch against cancel and the
     /// operator pause token so a long batch stays interruptible.
     ///
-    /// The Task-specific cap (`TASK_MAX_PER_TURN`) is *not* re-checked here:
-    /// it is a hard rejection applied in [`Self::collect_tool_jobs`] because
-    /// each Task spawns a child loop.
+    /// The fan-out cap is *not* re-checked here: it is a hard rejection
+    /// applied in [`Self::collect_tool_jobs`] via each tool's
+    /// `max_per_message()` policy, because a capped tool spawns a child loop.
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_tool_jobs(
         &mut self,
@@ -995,7 +993,7 @@ impl LoopState {
                     let _permit = sem.acquire_owned().await;
                     let outcome =
                         tools::invoke_with_conversation(&j.id, &j.name, ctx, &j.args, conv).await;
-                    (outcome.output, outcome.conversation)
+                    (outcome.output, outcome.child)
                 }
             }
         }));
@@ -1132,12 +1130,8 @@ impl LoopState {
             }
             // Emit tool result via stream_events when there is a listener.
             if tool_ctx.telemetry.wants_stream_events() {
-                // For Read, truncate to a reasonable preview.
-                let display = if job.name == "Read" {
-                    trunc(&output, 500)
-                } else {
-                    trunc(&output, 200)
-                };
+                // Per-tool preview budget (Read uses a larger preview).
+                let display = trunc(&output, tools::display_truncation(&job.name));
                 tool_ctx
                     .telemetry
                     .send_stream_event(
@@ -1164,17 +1158,18 @@ impl LoopState {
             };
             // Newly joined Read/Grep outputs are not part of the compact
             // `[seen]` transcript, so drain them here. They are attached to
-            // this Task's tool result (durable history) rather than only the
-            // ephemeral next_prompt, so later turns retain the Scout's evidence
+            // this tool's result (durable history) rather than only the
+            // ephemeral next_prompt, so later turns retain the child's evidence
             // even after the ledger has marked the files as read.
-            let mut task_observations: Vec<String> = Vec::new();
-            // Join child contexts back into parent.  Match by concrete
-            // child context joins only the parent context of the same
-            // type, etc. — no silent cross-type no-op calls.
-            if job.name == "Task" {
-                if let Some(child_conv) = child_conversation {
-                    task_observations = self.conv.join_child_conversation(&*child_conv);
-                }
+            //
+            // A tool that returns a child conversation (Task and any future
+            // fan-out tool) is joined uniformly here — no name dispatch.
+            // Join child contexts back into parent: matching by concrete child
+            // context joins only the parent context of the same type, etc. —
+            // no silent cross-type no-op calls.
+            let mut child_observations: Vec<String> = Vec::new();
+            if let Some(child_conv) = child_conversation {
+                child_observations = self.conv.join_child_conversation(&*child_conv);
             }
             let annotated = extra.iter().flatten().fold(String::new(), |mut acc, s| {
                 if !acc.is_empty() {
@@ -1188,9 +1183,9 @@ impl LoopState {
             } else {
                 format!("{annotated}\n{output}")
             };
-            if !task_observations.is_empty() {
+            if !child_observations.is_empty() {
                 tool_output.push_str("\n\n");
-                tool_output.push_str(&task_observations.join("\n\n"));
+                tool_output.push_str(&child_observations.join("\n\n"));
             }
             result_msgs.push(Message::tool_result(
                 CallId::from_wire(job.id.clone()),
@@ -2637,11 +2632,12 @@ pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str, hooks: &LoopH
     hooks.log(&full);
 }
 
-
 // ── lifted test helpers (used by conversation/standard.rs tests) ────────
 
 #[cfg(test)]
-pub(crate) fn gm(model: rig_core::driver::DynModel<rig_core::operation::Completion>) -> GremlinsModel {
+pub(crate) fn gm(
+    model: rig_core::driver::DynModel<rig_core::operation::Completion>,
+) -> GremlinsModel {
     GremlinsModel::new(model, crate::config::DEFAULT_MAX_PROMPT_BYTES)
 }
 
@@ -2660,7 +2656,9 @@ impl LogSink {
 
 #[cfg(test)]
 impl log::Log for LogSink {
-    fn enabled(&self, _: &log::Metadata<'_>) -> bool { true }
+    fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+        true
+    }
     fn log(&self, record: &log::Record<'_>) {
         let _ = self.tx.send(record.args().to_string());
     }
@@ -2798,9 +2796,6 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::broadcast::error::RecvError;
-
-
-
 
     #[test]
     fn turn_stats_passes_through_partial_usage_without_zero_filling() {
@@ -3329,8 +3324,6 @@ mod tests {
             "cancellation must interrupt a blocked stream send and report not sent"
         );
     }
-
-
 
     #[tokio::test]
     async fn oversized_prompt_fails_hard_before_any_request() {
@@ -5176,8 +5169,8 @@ mod tests {
         assert_eq!(model.requests().len(), 1);
     }
 
-    /// A single message can request at most `TASK_MAX_PER_TURN` Task calls;
-    /// the excess short-circuit instead of spawning more child loops.
+    /// A single message can request at most the Task fan-out cap; the excess
+    /// short-circuit instead of spawning more child loops.
     #[tokio::test]
     async fn task_calls_are_capped_per_message() {
         let dir = std::env::temp_dir().join(format!(
@@ -5190,7 +5183,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let over = tools::TASK_MAX_PER_TURN + 1;
+        let cap = tools::max_per_message("Task").expect("Task must be capped");
+        let over = cap + 1;
         let mut turn = Vec::new();
         for i in 0..over {
             turn.push(rig_core::test_utils::MockStreamEvent::tool_call(
@@ -5828,7 +5822,6 @@ mod tests {
     }
 
     // ── Interactive session tests ───────────────────────────────────────
-
 
     /// Pause at turn boundary: the agent loop checks `pause.is_paused()`
     /// before making the API call, enters interactive mode, broadcasts

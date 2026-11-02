@@ -6,7 +6,9 @@ use async_trait::async_trait;
 use tokio::process::{ChildStderr, ChildStdout, Command};
 
 use crate::clients::format::format_tool_call_parts;
-use crate::clients::tools::{parse_args, req_str, AgentLoopRuntime, ToolHandler};
+use crate::clients::tools::{
+    bash_check, parse_args, req_str, AgentLoopRuntime, ToolHandler, ToolOutcome,
+};
 use crate::core::paths::project_root;
 
 const BASH_TIMEOUT_SECS: u64 = 120;
@@ -15,8 +17,27 @@ pub(crate) struct BashTool;
 
 #[async_trait]
 impl ToolHandler for BashTool {
-    async fn invoke(&self, id: &str, ctx: &AgentLoopRuntime, args_json: &str) -> String {
-        bash_invoke(ctx, args_json, id).await
+    fn sandbox_check(&self, ctx: &AgentLoopRuntime, args: &serde_json::Value) -> Option<String> {
+        let roots = ctx.sandbox.roots()?;
+        bash_check(
+            roots,
+            args.get("command").and_then(|v| v.as_str()).unwrap_or(""),
+            ctx.cwd.as_deref(),
+        )
+    }
+
+    fn output_cap(&self) -> bool {
+        true
+    }
+
+    async fn invoke(
+        &self,
+        id: &str,
+        ctx: &AgentLoopRuntime,
+        _conv: &dyn crate::clients::conversation::Conversation,
+        args_json: &str,
+    ) -> ToolOutcome {
+        ToolOutcome::text(bash_invoke(ctx, args_json, id).await)
     }
 }
 
