@@ -455,7 +455,11 @@ pub fn build_symbol_map(
 pub fn render_signal_sections(
     ctx: &SignalContext,
     outlines: &[crate::FileOutline],
-) -> (Vec<SignalSection>, Vec<PathBuf>, HashMap<String, SymbolEntry>) {
+) -> (
+    Vec<SignalSection>,
+    Vec<PathBuf>,
+    HashMap<String, SymbolEntry>,
+) {
     let signals = build_signals(ctx, outlines);
     let mut sections = Vec::new();
 

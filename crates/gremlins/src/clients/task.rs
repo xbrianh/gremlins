@@ -265,9 +265,7 @@ fn make_task_runner_at_depth(
                             has_done = out.starts_with("Done."),
                             has_md = out.starts_with("# "),
                         );
-                        tools::ToolOutcome {
-                            output: out,
-                        }
+                        tools::ToolOutcome { output: out }
                     }
                     Err(e) => tools::ToolOutcome {
                         output: format!("Task error: {e}"),

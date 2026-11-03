@@ -724,9 +724,7 @@ pub(crate) async fn invoke_with_conversation(
             &ka,
             "error",
         );
-        return ToolOutcome {
-            output: err,
-        };
+        return ToolOutcome { output: err };
     }
     if let Some(err) = check_tool(name, ctx, &args) {
         audit(
@@ -736,9 +734,7 @@ pub(crate) async fn invoke_with_conversation(
             &ka,
             "denied",
         );
-        return ToolOutcome {
-            output: err,
-        };
+        return ToolOutcome { output: err };
     }
 
     // Let active conversation contexts serve the tool result before falling
@@ -766,9 +762,7 @@ pub(crate) async fn invoke_with_conversation(
             &ka,
             result_status(&output),
         );
-        return ToolOutcome {
-            output,
-        };
+        return ToolOutcome { output };
     }
 
     // Dispatch through the registry. Every tool — including Task, Done, and
