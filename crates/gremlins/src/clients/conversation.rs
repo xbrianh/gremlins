@@ -53,11 +53,9 @@ pub(crate) trait Conversation: Any + Send + Sync {
     /// re-executed cleanly.
     fn pop_last_assistant_turn(&mut self);
 
-    /// Build the outgoing request for the given turn.
+    /// Build the outgoing request for the current turn.
     fn render_turn(
         &mut self,
-        stage_prompt: &str,
-        turn: usize,
         nested: bool,
         scratchpad: Option<String>,
         system_prompt: Option<String>,
@@ -139,10 +137,6 @@ pub(crate) trait Conversation: Any + Send + Sync {
 
     /// Call `finalize_turn` on every context at a turn boundary.
     fn finalize_contexts(&mut self, _turn: usize) {}
-
-    /// Reset per-turn transcript state on every context so a child loop
-    /// starts with a clean slate.
-    fn clear_context_transcripts(&mut self) {}
 }
 
 // `Box<dyn Conversation>` participates in struct cloning; delegate to `clone_box`.
@@ -255,18 +249,14 @@ impl Conversation for ConversationStub {
 
     fn render_turn(
         &mut self,
-        stage_prompt: &str,
-        _turn: usize,
         _nested: bool,
         _scratchpad: Option<String>,
         system_prompt: Option<String>,
     ) -> TurnScript {
-        let mut messages = self.history.clone();
-        messages.push(self.next_prompt.clone());
         TurnScript {
-            messages,
+            messages: self.history.clone(),
             system_prompt,
-            next_user_prompt: rig_core::completion::Message::user(stage_prompt.to_string()),
+            next_user_prompt: self.next_prompt.clone(),
         }
     }
 
@@ -328,11 +318,18 @@ impl Conversation for ConversationStub {
 
     fn fork(&self, _kind: crate::task_kind::TaskKind) -> Box<dyn Conversation> {
         let mut history = self.history.clone();
-        if matches!(
+        let had_assistant = matches!(
             history.last(),
             Some(rig_core::completion::Message::Assistant { .. })
-        ) {
+        );
+        if had_assistant {
             history.pop();
+            if matches!(
+                history.last(),
+                Some(rig_core::completion::Message::User { .. })
+            ) {
+                history.pop();
+            }
         }
         Box::new(Self {
             history,

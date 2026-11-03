@@ -1,0 +1,216 @@
+# Static conversation transcript — findings
+
+Analysis of converting `StandardConversation` to record and resend the entire
+transcript verbatim, deleting the dynamic per-turn context-block machinery.
+Findings only; nothing implemented.
+
+---
+
+## 1. The headline: the dynamic machinery is already dead in practice
+
+Both concrete contexts have already been converted to system-prompt-only:
+
+- `LandscapeContext::transcript()` returns `Vec::new()`
+  — `crates/gremlins/src/conversation/contexts/landscape.rs:357`
+- `SignalMapContext::transcript()` returns `vec![None; n]`
+  — `crates/gremlins/src/conversation/contexts/signal.rs:168`
+
+`SignalMapContext` still maintains `turn_transcripts` (`:31`), fills it in
+`set_tail_turn` (`:118-127`, called from `finalize_turn` `:164-166`), and then
+`transcript()` deliberately throws the contents away.
+
+Consequences:
+
+- `zip_context_transcripts` (`context.rs:117`) always yields
+  `vec![Vec::new(); n]`.
+- Every `blocks_by_turn[i].is_empty()` branch in `compose_model_transcript`
+  (`context.rs:166-250`) is the branch taken.
+- `merge_context_blocks` (`context.rs:261`), `is_tool_result` (`context.rs:255`)
+  and the `(assistant, results*)` pair-walking loop are unreachable in effect.
+
+## 2. What `compose_model_transcript` actually still does
+
+For turn ≥ 1, with all context blocks empty, the composed output reduces to:
+
+```
+history[..current_turn_start]
+  + User(stage_prompt)                  <-- synthesized, NOT in self.history
+  + history[current_turn_start..]
+  + next_prompt
+```
+
+So the one live behaviour is: it **synthesizes a bootstrap `User(stage_prompt)`
+message at index `current_turn_start`**.
+
+Compare `StandardConversation::messages()` (`standard.rs:448`), which returns
+`history + next_prompt` with *no* bootstrap. `render_turn` and `messages()`
+already disagree today.
+
+This is what makes the static conversion clean: on turn 0, `next_prompt` *is*
+the stage prompt. Commit it to history instead of keeping it pending, and
+history becomes
+
+```
+[User(stage_prompt), Assistant, results, ...]
+```
+
+which is byte-identical to what `compose_model_transcript` reconstructs. The
+bootstrap insertion disappears and nothing is lost.
+
+## 3. Required semantic change
+
+`next_prompt` must move from a floating pending field into `history`.
+
+`record_turn` pushes `next_prompt` onto `history` **before** the assistant
+message. Ordering is preserved, so the alternation invariant the two
+"consecutive user messages" tests guard still holds.
+
+## 4. The crux: `pop_last_assistant_turn`
+
+`pop_last_assistant_turn` (`standard.rs:234`) currently pops only a trailing
+assistant message, because `next_prompt` lives outside history. The comment
+there ("The pending user prompt is a separate field, not in history") documents
+exactly the assumption being removed.
+
+Once the prompt is committed, the pause path at
+`crates/gremlins/src/clients/agent_loop.rs:1029` must **uncommit two**
+messages — the assistant turn *and* the trailing user prompt, restoring the
+latter to `next_prompt`. Otherwise `ToolDispatchOutcome::ReexecuteTurn` sends
+the prompt twice.
+
+Same reasoning applies to the mid-stream pause branch
+(`agent_loop.rs:565-640`) and to `DoneDecision::RetryNeeded` paths.
+
+This is the one genuinely new piece of logic the change requires.
+
+## 5. Second decision: findings and scratchpad placement
+
+Today `inject_findings_if_missing` (`standard.rs:109`) and
+`inject_scratchpad_if_missing` (`:132`) mutate `next_prompt` in a *cloned
+local* before composing. The injections are therefore ephemeral and never
+reach history.
+
+Three guards exist:
+- `nested` (skip in child loops)
+- `turn_findings_injected` / `turn_scratchpad_injected` flags
+- a `"## Findings"` / `"## Scratchpad"` presence scan of the outgoing request
+
+The scratchpad additionally hashes content into `last_scratchpad_hash`.
+
+If the prompt is committed verbatim, both become **permanent duplicated
+history**: the same `## Findings` block re-stated on every turn, and the
+scratchpad body re-sent on every turn in which it changes.
+
+Natural answer: move both into `context.system_message()` — recomputed per
+turn from a live ledger, never in history. That is precisely what the trait
+method exists for, and it matches what both contexts already do.
+
+Cost: `StandardConversation` changes from "owns a `FindingsLedger` and splices
+it into prompts" to "owns a `FindingsLedger` and exposes it as a context".
+Under that route `last_scratchpad_hash` and both `turn_*_injected` flags
+disappear entirely. Under the commit-verbatim route they become meaningless
+but harmless. Operator decision.
+
+## 6. Deletion set
+
+| file | what goes | approx |
+|---|---|---|
+| `conversation/context.rs` | `transcript`, `clear_transcript` (trait), `zip_context_transcripts`, `compose_model_transcript`, `is_tool_result`, `merge_context_blocks` | ~185 of 290 lines |
+| `conversation/contexts/signal.rs` | `turn_transcripts` field, `set_tail_turn`, `finalize_turn` impl, `transcript`, `clear_transcript` | ~30 lines |
+| `conversation/contexts/landscape.rs` | `transcript`, `clear_transcript` | ~8 lines |
+| `conversation/standard.rs` | `current_turn_start` field, `inherited_count` plumbing, most of `render_turn`, `clear_context_transcripts` | — |
+| `clients/conversation.rs` | trait `clear_context_transcripts`; `render_turn` drops `stage_prompt` + `turn` (5 params → 3) | — |
+| `clients/agent_loop.rs` | `LoopState::stage_prompt` field (only read at `:485`), `clear_context_transcripts()` call at `:1926`, `render_turn` args | — |
+
+Net rough size: **~250 lines deleted, ~30 added**, concentrated in
+`context.rs` and `standard.rs`.
+
+In `signal.rs`, `render_symbol_map` / `render` / `system_message` all stay.
+In `landscape.rs`, `serve_tool` / `tool_result_extra` / `observe_tool` /
+`system_message` all stay; `finalize_turn`'s body (`seen.rotate()`) needs a
+decision — see §8.
+
+## 7. Dead code that rides along
+
+`ConversationContext::as_any` (`context.rs:16`) and `as_any_mut` (`:19`) have
+**zero callers** — grepping the tree finds only the declarations and the two
+impls (`landscape.rs:146,150`; `signal.rs:135,139`). They were only ever
+consumed by the now-deleted tool ledger.
+
+Once they go, the `Any` supertrait goes too, leaving
+`ConversationContext: Send + Sync`.
+
+This resolves the open question in the prior scratchpad: it is not only
+`as_any_mut` that is removable — it is the pair, plus the import.
+
+## 8. `finalize_contexts` after the change
+
+`finalize_contexts` (`standard.rs:472`) currently exists to apply deferred
+context mutations at a turn boundary — `SignalMapContext::finalize_turn` calls
+`set_tail_turn`, and `LandscapeContext::finalize_turn` calls
+`seen.rotate()` (`landscape.rs:353`).
+
+Once `SignalMapContext::finalize_turn` is deleted, the only surviving impl is
+the `LandscapeContext` `seen` rotation. That is a real behaviour (it bounds
+`tool_result_extra` re-emission to a 5-turn window) and the hook is its
+natural home. Recommendation: **keep `finalize_contexts`**, shrink its
+justification to the `seen` rotation, and drop the 6 non-tool call sites in
+`agent_loop.rs` that exist only for `set_tail_turn`
+(`:1445, :1485, :1581, :1613, :1637`). Keep the one at `:1180` (post-tool).
+
+## 9. Test fallout
+
+**Re-verify, likely keep passing:**
+- `loop_done_persisted_history_has_no_consecutive_user_messages`
+  — `agent_loop.rs:6321`
+- `loop_done_artifact_reminder_exhausted_no_consecutive_user_messages`
+  — `agent_loop.rs:6462`
+
+These are the canaries: they encode *why* prompts were kept out of history.
+Ordering survives if the prompt is committed before the assistant message.
+Note both run against `ConversationStub`, i.e. the simple implementation — so
+today they do **not** guard the code being changed. Flipping them onto
+`StandardConversation` first would make them meaningful.
+
+**Must re-derive:**
+- `fork_child_receives_parent_history_then_fork_prompt` — `standard.rs:587`
+  asserts `history.len() == 4`. That count was derived under composition.
+
+**Trivially true, remove:**
+- the `[seen]` assertion block at `agent_loop.rs:4443-4448`.
+
+**Reference implementation exists:**
+`ConversationStub::render_turn` (`conversation.rs:256-271`) already has the
+post-refactor shape: 3 meaningful params, `history + next_prompt`, no
+bootstrap. It is effectively the target `StandardConversation` is moving
+toward.
+
+**Docs:**
+`plans/finish_extraction.md` (gitignored) treats `zip_context_transcripts` and
+`compose_model_transcript` as things `ContextBag` must round-trip. That plan
+needs rewriting; its `clear_transcripts` API disappears entirely.
+
+## 10. Side effect worth flagging explicitly
+
+`tool_result_extra` `[seen]` annotation blocks are prepended to the tool output
+string in `agent_loop.rs:1150-1170`, so they are recorded **into history
+permanently** once the conversation is static. They already land in history
+today (they are part of the tool-result message), but under static history the
+`SeenState` 5-turn rotation (`SeenState::rotate`, `landscape.rs:67`) loses most
+of its purpose: it bounds re-emission, not total history growth.
+
+Behaviour change to call out in the commit message.
+
+## 11. Suggested ordering
+
+Two increments, both landing green independently:
+
+1. **Behaviour-neutral deletions** — contexts' `transcript`/`clear_transcript`
+   impls, `zip_context_transcripts`, `merge_context_blocks`, `is_tool_result`,
+   `SignalMapContext::turn_transcripts` + `set_tail_turn`, and the dead
+   `as_any`/`as_any_mut` pair. This leaves `compose_model_transcript` with the
+   now-provably-empty blocks path.
+2. **The real change** — commit `next_prompt` into history, delete
+   `compose_model_transcript` + `current_turn_start` + `stage_prompt`,
+   rework `pop_last_assistant_turn`, decide findings/scratchpad placement,
+   fix the fork-count test.

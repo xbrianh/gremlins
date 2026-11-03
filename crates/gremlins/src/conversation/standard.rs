@@ -1,49 +1,44 @@
 //! The default [`Conversation`] implementation used by the agent loop.
 //!
-//! `StandardConversation` owns the durable message history, the pending user
-//! prompt, and the findings ledger. It assembles each turn's outgoing model
-//! transcript by injecting findings/scratchpad into the pending prompt and then
-//! interleaving per-turn context blocks via [`compose_model_transcript`].
-
-use std::hash::{Hash, Hasher};
+//! `StandardConversation` owns the durable message history and the pending user
+//! prompt. On each turn the pending prompt is committed into history before the
+//! assistant message, so `history + next_prompt` is always the complete
+//! transcript. Findings and scratchpad content travel through the system
+//! prompt instead of being spliced into ephemeral user prompts.
 
 use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
 use rig_core::completion::Message;
 
 use crate::clients::conversation::{Conversation, RunArtifact, TurnScript};
-use crate::clients::done_helpers::{done_user_message, user_message_text};
+use crate::clients::done_helpers::done_user_message;
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
-use crate::conversation::context::{compose_model_transcript, ConversationContext};
+use crate::conversation::context::ConversationContext;
 use crate::conversation::contexts::{landscape::LandscapeContext, signal::SignalMapContext};
 use crate::landscape::{signals::SignalProfile, LandscapeData};
 use crate::task_kind::TaskKind;
 
 /// The standard [`Conversation`] implementation.
 pub(crate) struct StandardConversation {
-    /// Verbatim durable message history (assistant tool-call messages followed
-    /// by their tool results). Non-fork inherited history precedes this loop's
-    /// own messages; `current_turn_start` marks that boundary.
+    /// Verbatim durable message history. User prompts are committed before each
+    /// assistant message, so `history` alone is the complete transcript of all
+    /// completed turns.
     history: Vec<Message>,
-    /// The harness's next user message (the stage prompt on turn 0, then
-    /// `"Continue."` or a findings/nudge variant).
+    /// The harness's next user message — committed into [`history`] by
+    /// [`record_turn`] and [`done_rejected`], replaced by [`record_tool_results`]
+    /// and [`set_next_prompt`].
     next_prompt: Message,
-    /// Number of history messages that predate this loop (fork/chat continuation).
-    current_turn_start: usize,
-    /// Declarative findings extracted from assistant prose and re-injected so
-    /// the model does not re-derive facts it already stated.
+    /// Declarative findings extracted from assistant prose and surfaced in the
+    /// system prompt so the model does not re-derive facts it already stated.
     findings_ledger: FindingsLedger,
-    turn_findings_injected: bool,
-    turn_scratchpad_injected: bool,
-    last_scratchpad_hash: Option<u64>,
     preserve_reasoning_in_history: bool,
     last_text: String,
     /// Snapshot produced by the most recent [`Conversation::finalize`] call.
     /// Once set, [`Conversation::messages`] returns this final transcript so
     /// persistence consumers see the exact durable message list.
     finalized_messages: Option<Vec<Message>>,
-    /// Mutable model contexts that observe tool calls and contribute per-turn
-    /// transcript blocks. Owned here so the agent loop routes every context
+    /// Mutable model contexts that observe tool calls and contribute system-
+    /// prompt blocks. Owned here so the agent loop routes every context
     /// operation through the conversation instead of carrying a parallel list.
     contexts: Vec<Box<dyn ConversationContext>>,
 }
@@ -55,15 +50,10 @@ impl StandardConversation {
         prepopulated_messages: Option<Vec<Message>>,
     ) -> Self {
         let history = prepopulated_messages.unwrap_or_default();
-        let current_turn_start = history.len();
         Self {
             history,
             next_prompt: Message::user(prompt.to_string()),
-            current_turn_start,
             findings_ledger: FindingsLedger::new(),
-            turn_findings_injected: false,
-            turn_scratchpad_injected: false,
-            last_scratchpad_hash: None,
             preserve_reasoning_in_history: preserve_reasoning,
             last_text: String::new(),
             finalized_messages: None,
@@ -104,81 +94,56 @@ impl StandardConversation {
         self.contexts = contexts.into_iter().map(|c| c.clone_box()).collect();
     }
 
-    /// Re-inject findings into `next_prompt` when they are missing from the
-    /// outgoing request. No-op for nested loops.
-    fn inject_findings_if_missing(&mut self, request_messages: &[Message], nested: bool) {
-        if nested || self.turn_findings_injected {
-            return;
-        }
-        let findings_block = self.findings_ledger.format();
-        if findings_block.is_empty() {
-            return;
-        }
-        let in_request = request_messages
-            .iter()
-            .any(|msg| user_message_text(msg).contains("## Findings"))
-            || user_message_text(&self.next_prompt).contains("## Findings");
-        if in_request {
-            return;
-        }
-        let next_text = user_message_text(&self.next_prompt);
-        let combined = format!("{next_text}\n\n{findings_block}");
-        self.next_prompt = Message::user(combined);
-        self.turn_findings_injected = true;
-    }
-
-    /// Re-inject the scratchpad into `next_prompt` when its content changed
-    /// since the last turn. No-op for nested loops.
-    fn inject_scratchpad_if_missing(
+    /// Build the combined system prompt from contexts, findings, scratchpad,
+    /// and the stage-supplied system prompt.
+    fn build_system_prompt(
         &mut self,
-        request_messages: &[Message],
         nested: bool,
         scratchpad: Option<String>,
-    ) {
-        if nested || self.turn_scratchpad_injected {
-            return;
+        system_prompt: Option<String>,
+    ) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+
+        // Context system messages (landscape seed, signal map).
+        for ctx in &self.contexts {
+            if let Some(msg) = ctx.system_message() {
+                parts.push(msg);
+            }
         }
-        let Some(content) = scratchpad else {
-            return;
-        };
-        if content.trim().is_empty() {
-            self.last_scratchpad_hash = None;
-            return;
+
+        if !nested {
+            // Scratchpad (ephemeral — never in history).
+            if let Some(content) = scratchpad {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    parts.push(format!(
+                        "## Scratchpad\n\nThe following is your persistent scratchpad \
+                         content:\n\n{trimmed}"
+                    ));
+                }
+            }
+
+            // Findings from the ledger (recomputed per turn).
+            let findings = self.findings_ledger.format();
+            if !findings.is_empty() {
+                parts.push(findings);
+            }
         }
-        let in_request = request_messages
-            .iter()
-            .any(|msg| user_message_text(msg).contains("## Scratchpad"))
-            || user_message_text(&self.next_prompt).contains("## Scratchpad");
-        if in_request {
-            return;
+
+        if let Some(sys) = system_prompt {
+            parts.push(sys);
         }
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        content.hash(&mut hasher);
-        let current_hash = hasher.finish();
-        if self.last_scratchpad_hash == Some(current_hash) {
-            return;
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n\n"))
         }
-        self.last_scratchpad_hash = Some(current_hash);
-        let next_text = user_message_text(&self.next_prompt);
-        let combined = format!(
-            "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
-        );
-        self.next_prompt = Message::user(combined);
-        self.turn_scratchpad_injected = true;
     }
 
     /// Roll prompt-forward bookkeeping after a tool batch.
     fn begin_next_turn(&mut self) {
-        let findings = self.findings_ledger.format();
-        let mut next_text = "Continue.".to_string();
-        if !findings.is_empty() {
-            next_text = format!("{next_text}\n\n{findings}");
-            self.turn_findings_injected = true;
-        } else {
-            self.turn_findings_injected = false;
-        }
-        self.next_prompt = Message::user(next_text);
-        self.turn_scratchpad_injected = false;
+        self.next_prompt = Message::user("Continue.".to_string());
     }
 
     fn feed_text(&mut self, text: &str) {
@@ -194,11 +159,7 @@ impl Conversation for StandardConversation {
         Box::new(Self {
             history: self.history.clone(),
             next_prompt: self.next_prompt.clone(),
-            current_turn_start: self.current_turn_start,
             findings_ledger: self.findings_ledger.clone(),
-            turn_findings_injected: self.turn_findings_injected,
-            turn_scratchpad_injected: self.turn_scratchpad_injected,
-            last_scratchpad_hash: self.last_scratchpad_hash,
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: self.last_text.clone(),
             finalized_messages: self.finalized_messages.clone(),
@@ -218,6 +179,12 @@ impl Conversation for StandardConversation {
     ) {
         // record_prose already fed the findings ledger and updated last_text;
         // do NOT call feed_text here to avoid double-counting findings.
+
+        // Commit the pending user prompt into history before the assistant
+        // message. This is the static-conversation invariant: every user prompt
+        // that the model sees lives in history, verbatim.
+        let prompt = self.next_prompt.clone();
+        self.history.push(prompt);
         self.history.push(assistant_tool_message(
             text,
             reasoning_items,
@@ -232,56 +199,30 @@ impl Conversation for StandardConversation {
     }
 
     fn pop_last_assistant_turn(&mut self) {
-        // The pending user prompt is a separate field, not in history.
-        // Only the assistant message (and any trailing results from the
-        // same turn) need removal for clean turn re-execution.
+        // Pop the assistant message.
         if matches!(self.history.last(), Some(Message::Assistant { .. })) {
             self.history.pop();
+        }
+        // Pop the preceding user prompt (the one committed by record_turn)
+        // and restore it as next_prompt for clean turn re-execution.
+        if let Some(Message::User { .. }) = self.history.last() {
+            let prompt = self.history.pop().unwrap();
+            self.next_prompt = prompt;
         }
     }
 
     fn render_turn(
         &mut self,
-        stage_prompt: &str,
-        turn: usize,
         nested: bool,
         scratchpad: Option<String>,
         system_prompt: Option<String>,
     ) -> TurnScript {
-        let request_messages = self.history.clone();
-        self.inject_findings_if_missing(&request_messages, nested);
-        self.inject_scratchpad_if_missing(&request_messages, nested, scratchpad);
-
-        let composed = compose_model_transcript(
-            stage_prompt,
-            &request_messages,
-            &self.next_prompt,
-            &self.contexts,
-            turn,
-            self.current_turn_start,
-        );
-        let (history_msgs, final_prompt) = composed
-            .split_last()
-            .map(|(last, rest)| (rest.to_vec(), last.clone()))
-            .unwrap_or_else(|| (vec![], self.next_prompt.clone()));
-
-        let context_system_msgs: Vec<String> = self
-            .contexts
-            .iter()
-            .filter_map(|ctx| ctx.system_message())
-            .collect();
-        let combined_system = match (context_system_msgs.is_empty(), system_prompt) {
-            (true, None) => None,
-            (true, Some(sys)) => Some(sys),
-            (false, None) => Some(context_system_msgs.join("\n\n")),
-            (false, Some(sys)) => Some(format!("{}\n\n{}", context_system_msgs.join("\n\n"), sys)),
-        };
+        let combined_system = self.build_system_prompt(nested, scratchpad, system_prompt);
 
         TurnScript {
-            messages: history_msgs,
+            messages: self.history.clone(),
             system_prompt: combined_system,
-            // Pass the final message verbatim so ToolResult blocks survive.
-            next_user_prompt: final_prompt,
+            next_user_prompt: self.next_prompt.clone(),
         }
     }
 
@@ -293,6 +234,8 @@ impl Conversation for StandardConversation {
         done: Option<&ToolCall>,
     ) -> RunArtifact {
         let mut messages = self.history.clone();
+        // The pending prompt for this Done turn was never committed by
+        // record_turn, so append it here.
         messages.push(self.next_prompt.clone());
         let final_text = if text.trim().is_empty() {
             done.and_then(|tc| {
@@ -344,21 +287,25 @@ impl Conversation for StandardConversation {
         // The caller appends the current-turn assistant tool-call to history
         // before forking. Carrying it into the child without its still-unknown
         // tool results would leave an unmatched assistant tool-use, so drop it.
-        if matches!(history.last(), Some(Message::Assistant { .. })) {
+        // Also drop the preceding user prompt that was committed by record_turn
+        // for this same turn — the child receives its own fork prompt instead.
+        let had_assistant = matches!(history.last(), Some(Message::Assistant { .. }));
+        if had_assistant {
             history.pop();
+            // Only pop the preceding user prompt when we actually removed an
+            // assistant — the prompt is the one committed by record_turn for
+            // the same turn.
+            if let Some(Message::User { .. }) = history.last() {
+                history.pop();
+            }
         }
-        let current_turn_start = history.len();
         Box::new(Self {
             history,
             next_prompt: Message::user(String::new()),
-            current_turn_start,
             // Fork children start with a clean FindingsLedger and empty
             // last_text — matching the old prepopulated_messages semantics
             // where only raw messages were carried forward.
             findings_ledger: FindingsLedger::new(),
-            turn_findings_injected: false,
-            turn_scratchpad_injected: false,
-            last_scratchpad_hash: None,
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: String::new(),
             finalized_messages: None,
@@ -435,6 +382,11 @@ impl Conversation for StandardConversation {
     ) {
         // record_prose already fed the findings ledger and updated last_text;
         // do NOT call feed_text here to avoid double-counting findings.
+
+        // Commit the pending user prompt into history before the assistant
+        // message, matching the record_turn invariant.
+        let prompt = std::mem::replace(&mut self.next_prompt, next_prompt);
+        self.history.push(prompt);
         self.history.push(assistant_tool_message(
             text,
             reasoning_items,
@@ -442,7 +394,6 @@ impl Conversation for StandardConversation {
             self.preserve_reasoning_in_history,
         ));
         self.history.extend(results);
-        self.next_prompt = next_prompt;
     }
 
     fn messages(&self) -> Vec<Message> {
@@ -474,12 +425,6 @@ impl Conversation for StandardConversation {
             ctx.finalize_turn(turn);
         }
     }
-
-    fn clear_context_transcripts(&mut self) {
-        for ctx in &mut self.contexts {
-            ctx.clear_transcript();
-        }
-    }
 }
 
 #[cfg(test)]
@@ -489,8 +434,21 @@ mod tests {
 
     use crate::clients::agent_loop::*;
     use crate::clients::cancel::CancelToken;
-    use crate::clients::done_helpers::user_message_text;
     use crate::conversation::new_blank_conversation;
+
+    fn user_message_text(message: &Message) -> String {
+        match message {
+            Message::User { content } => content
+                .iter()
+                .filter_map(|c| match c {
+                    UserContent::Text(t) => Some(t.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+            _ => String::new(),
+        }
+    }
 
     // Override test_ctx to use StandardConversation (context-aware) instead of
     // the ConversationStub that agent_loop tests use.
@@ -580,11 +538,10 @@ mod tests {
             .expect("the forked child must issue its own request");
 
         let history = &fork_req.chat_history;
-        // The child inherits the parent's conversation but no longer sees a
-        // separate [seen] block — context content travels through
-        // compose_model_transcript.  The inherited ledger is cleared via
-        // clear_transcript so the context blocks are empty.
-        assert_eq!(history.len(), 4, "unexpected fork history: {history:#?}");
+        // The child inherits the parent's conversation as static history:
+        // [system prompt] + [User(stage_prompt), Assistant(tool_call), User(tool_result)]
+        // followed by the fork prompt. That's 5 messages: system + 4 (3 inherited + 1 fork).
+        assert_eq!(history.len(), 5, "unexpected fork history: {history:#?}");
 
         // Fork system prompt leads the child history.
         assert!(matches!(
@@ -704,5 +661,4 @@ mod tests {
             }
         }
     }
-
 }

@@ -26,9 +26,6 @@ pub(crate) struct SignalMapContext {
     /// The live symbol map rendering must match this so symbols from
     /// unchanged files are not restored after a DiffFocused seed.
     profile: signals::SignalProfile,
-    /// Per-turn transcript blocks.  Only the most recent turn carries
-    /// `Some(rendered)`; all prior turns are `None`.
-    turn_transcripts: Vec<Option<String>>,
 }
 
 impl SignalMapContext {
@@ -52,7 +49,6 @@ impl SignalMapContext {
             cwd,
             symbol_index,
             profile,
-            turn_transcripts: vec![None],
         }
     }
 
@@ -114,30 +110,11 @@ impl SignalMapContext {
         }
     }
 
-    /// Make `turn` the sole index that carries signal content.
-    fn set_tail_turn(&mut self, turn: usize) {
-        while self.turn_transcripts.len() <= turn {
-            self.turn_transcripts.push(None);
-        }
-        self.turn_transcripts.fill(None);
-        let rendered = self.render();
-        if !rendered.is_empty() {
-            self.turn_transcripts[turn] = Some(rendered);
-        }
-    }
 }
 
 impl crate::conversation::context::ConversationContext for SignalMapContext {
     fn propagates_to_task(&self) -> bool {
         true
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 
     fn clone_box(&self) -> Box<dyn crate::conversation::context::ConversationContext> {
@@ -161,14 +138,6 @@ impl crate::conversation::context::ConversationContext for SignalMapContext {
         }
     }
 
-    fn finalize_turn(&mut self, turn: usize) {
-        self.set_tail_turn(turn);
-    }
-
-    fn transcript(&self) -> Vec<Option<String>> {
-        vec![None; self.turn_transcripts.len()]
-    }
-
     fn system_message(&self) -> Option<String> {
         let rendered = self.render();
         if rendered.is_empty() {
@@ -178,8 +147,4 @@ impl crate::conversation::context::ConversationContext for SignalMapContext {
         }
     }
 
-    fn clear_transcript(&mut self) {
-        self.turn_transcripts.clear();
-        self.turn_transcripts.push(None);
-    }
 }

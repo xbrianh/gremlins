@@ -230,10 +230,6 @@ struct LoopState {
     total_cached_tokens: Option<u64>,
     total_cache_creation_tokens: Option<u64>,
     total_reasoning_tokens: Option<u64>,
-    /// Original stage/task prompt — persists across turns so the bootstrap
-    /// message can always carry the model's instructions, even after
-    /// `next_prompt` has been overwritten with "Continue.".
-    stage_prompt: String,
     interactive_active: bool,
     pending_run_one_turn: bool,
     cmd_rx: Option<mpsc::Receiver<InteractiveCommand>>,
@@ -365,7 +361,6 @@ impl LoopState {
             cmd_rx,
             evt_tx,
             pause,
-            stage_prompt: prompt.to_string(),
             remaining_turns: max_turns,
             reminder_budget,
             completion_nudge_budget,
@@ -482,8 +477,6 @@ impl LoopState {
         nested: bool,
     ) -> CompletionRequest {
         let script = self.conv.render_turn(
-            &self.stage_prompt,
-            self.turn_num,
             nested,
             self.hooks.read_scratchpad(),
             self.system_prompt.clone(),
@@ -1442,7 +1435,6 @@ impl LoopState {
                          Try again — this time either use tools, or call Done. Never both.",
                     ),
                 );
-                self.conv.finalize_contexts(self.turn_num);
                 return Ok(DoneDecision::RetryNeeded);
             }
             (Some(done_tc), false) => {
@@ -1482,7 +1474,6 @@ impl LoopState {
                                 )
                             },
                         );
-                        self.conv.finalize_contexts(self.turn_num);
                         return Ok(DoneDecision::RetryNeeded);
                     }
                 }
@@ -1578,7 +1569,6 @@ impl LoopState {
             log::debug!("reasoning-only turn: turn={} — continuing", self.turn_num);
             self.conv.record_turn("", reasoning_items, &[]);
             self.conv.set_next_prompt("Continue.");
-            self.conv.finalize_contexts(self.turn_num);
             return EmptyTurnAction::ContinueLoop;
         }
 
@@ -1610,7 +1600,6 @@ impl LoopState {
                     evts.push(serde_json::json!({"type": "reminder", "message": reminder}));
                 }
                 self.conv.set_next_prompt(&reminder);
-                self.conv.finalize_contexts(self.turn_num);
                 return EmptyTurnAction::ContinueLoop;
             }
         }
@@ -1634,7 +1623,6 @@ impl LoopState {
             }
             self.conv.record_turn(text, reasoning_items, &[]);
             self.conv.set_next_prompt(nudge_msg);
-            self.conv.finalize_contexts(self.turn_num);
             return EmptyTurnAction::ContinueLoop;
         }
 
@@ -1877,7 +1865,7 @@ pub(crate) async fn run_agent_loop_nested(
     max_tokens: Option<u64>,
     extra: Option<serde_json::Value>,
     preserve_reasoning_in_history: bool,
-    mut prepopulated_conversation: Box<dyn Conversation>,
+    prepopulated_conversation: Box<dyn Conversation>,
 ) -> Result<CompletedRun, ClientError> {
     let opts = LoopOpts {
         extra,
@@ -1921,10 +1909,6 @@ pub(crate) async fn run_agent_loop_nested(
             let _ = log_tx.send(msg.to_string());
         });
     }
-    // Fork children carry their own cloned contexts; reset their
-    // transcript state so the child turns start at index 0.
-    prepopulated_conversation.clear_context_transcripts();
-
     if let Some(log_tx) = &nested_tool_ctx.log_tx {
         let _ = log_tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
     }

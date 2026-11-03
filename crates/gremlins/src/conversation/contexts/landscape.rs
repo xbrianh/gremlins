@@ -73,10 +73,6 @@ impl SeenState {
         }
     }
 
-    fn clear(&mut self) {
-        self.current.clear();
-        self.past.clear();
-    }
 }
 
 impl LandscapeContext {
@@ -141,14 +137,6 @@ impl Clone for LandscapeContext {
 impl crate::conversation::context::ConversationContext for LandscapeContext {
     fn propagates_to_task(&self) -> bool {
         true
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 
     fn clone_box(&self) -> Box<dyn crate::conversation::context::ConversationContext> {
@@ -354,10 +342,6 @@ impl crate::conversation::context::ConversationContext for LandscapeContext {
         self.seen.lock().unwrap().rotate();
     }
 
-    fn transcript(&self) -> Vec<Option<String>> {
-        Vec::new()
-    }
-
     fn system_message(&self) -> Option<String> {
         if self.seed_landscape.is_empty() {
             None
@@ -374,7 +358,4 @@ impl crate::conversation::context::ConversationContext for LandscapeContext {
         }
     }
 
-    fn clear_transcript(&mut self) {
-        self.seen.lock().unwrap().clear();
-    }
 }
