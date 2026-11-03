@@ -145,7 +145,12 @@ fn collect_tool_evidence(messages: &[rig_core::completion::Message]) -> String {
                                 .arguments
                                 .get("file_path")
                                 .or_else(|| call.function.arguments.get("path"))
-                                .and_then(|v| v.as_str())?;
+                                .and_then(|v| v.as_str());
+                            let target = if name == "Grep" {
+                                target.unwrap_or(".")
+                            } else {
+                                target?
+                            };
                             Some((call.id.clone(), format!("{name}: {target}")))
                         }
                         _ => None,
@@ -186,7 +191,7 @@ fn collect_tool_evidence(messages: &[rig_core::completion::Message]) -> String {
     for entry in entries {
         let extra = entry.len() + if out.is_empty() { 0 } else { 2 };
         if out.len() + extra > MAX_EVIDENCE_BYTES {
-            break;
+            continue;
         }
         if !out.is_empty() {
             out.push_str("\n\n");
@@ -224,6 +229,7 @@ impl std::fmt::Debug for dyn Conversation {
 pub(crate) struct ConversationStub {
     history: Vec<rig_core::completion::Message>,
     next_prompt: rig_core::completion::Message,
+    prompt_committed: bool,
     preserve_reasoning: bool,
     last_text: String,
     finalized_messages: Option<Vec<rig_core::completion::Message>>,
@@ -235,6 +241,7 @@ impl ConversationStub {
         Self {
             history: Vec::new(),
             next_prompt: rig_core::completion::Message::user(prompt.to_string()),
+            prompt_committed: false,
             preserve_reasoning: false,
             last_text: String::new(),
             finalized_messages: None,
@@ -246,6 +253,7 @@ impl ConversationStub {
         Self {
             history,
             next_prompt: rig_core::completion::Message::user(prompt.to_string()),
+            prompt_committed: false,
             preserve_reasoning: false,
             last_text: String::new(),
             finalized_messages: None,
@@ -254,12 +262,14 @@ impl ConversationStub {
 
     fn begin_next_turn(&mut self) {
         self.next_prompt = rig_core::completion::Message::user("Continue.".to_string());
+        self.prompt_committed = false;
     }
 
     fn box_self(&self) -> Box<dyn Conversation> {
         Box::new(Self {
             history: self.history.clone(),
             next_prompt: self.next_prompt.clone(),
+            prompt_committed: self.prompt_committed,
             preserve_reasoning: self.preserve_reasoning,
             last_text: self.last_text.clone(),
             finalized_messages: self.finalized_messages.clone(),
@@ -286,10 +296,9 @@ impl Conversation for ConversationStub {
         tool_calls: &[rig_core::completion::message::ToolCall],
     ) {
         // Commit the pending user prompt before the assistant message.
-        // This is the same prompt-commit invariant that
-        // StandardConversation::record_turn uses.
         let prompt = self.next_prompt.clone();
         self.history.push(prompt);
+        self.prompt_committed = true;
         self.history.push(super::format::assistant_tool_message(
             text,
             reasoning_items,
@@ -316,6 +325,7 @@ impl Conversation for ConversationStub {
             let prompt = self.history.pop().unwrap();
             self.next_prompt = prompt;
         }
+        self.prompt_committed = false;
     }
 
     fn render_turn(
@@ -389,31 +399,19 @@ impl Conversation for ConversationStub {
 
     fn fork(&self) -> Box<dyn Conversation> {
         let mut history = self.history.clone();
-        // Drop the assistant turn the caller appended for the current turn: its
-        // tool results are still unknown, so carrying it would leave an
-        // unmatched assistant tool-use in the child transcript. The paired user
-        // prompt goes with it — the child receives its own fork prompt — but a
-        // tool-result user message (which belongs to the previous pair) must
-        // stay.
+        // Drop the in-flight assistant turn: its tool results are still
+        // unknown. Keep the preceding user prompt (the original task)
+        // so the child receives the promised parent context.
         if matches!(
             history.last(),
             Some(rig_core::completion::Message::Assistant { .. })
         ) {
             history.pop();
-            if matches!(
-                history.last(),
-                Some(rig_core::completion::Message::User { content })
-                    if !content.iter().any(|c| matches!(
-                        c,
-                        rig_core::completion::message::UserContent::ToolResult(_)
-                    ))
-            ) {
-                history.pop();
-            }
         }
         Box::new(Self {
             history,
             next_prompt: rig_core::completion::Message::user(String::new()),
+            prompt_committed: false,
             preserve_reasoning: self.preserve_reasoning,
             last_text: String::new(),
             finalized_messages: None,
@@ -446,6 +444,7 @@ impl Conversation for ConversationStub {
         // `StandardConversation::done_rejected` does.
         let prompt = std::mem::replace(&mut self.next_prompt, next_prompt);
         self.history.push(prompt);
+        self.prompt_committed = true;
         self.history.push(super::format::assistant_tool_message(
             text,
             reasoning_items,
@@ -460,7 +459,9 @@ impl Conversation for ConversationStub {
             return msgs.clone();
         }
         let mut msgs = self.history.clone();
-        msgs.push(self.next_prompt.clone());
+        if !self.prompt_committed {
+            msgs.push(self.next_prompt.clone());
+        }
         msgs
     }
 

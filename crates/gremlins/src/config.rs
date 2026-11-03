@@ -263,7 +263,7 @@ struct LandscapeSection {
     #[serde(rename = "max-tokens", default)]
     _max_tokens: Option<u64>,
     /// Formerly enabled heuristic landscape signal sections.
-    #[serde(default)]
+    #[serde(rename = "signals", default)]
     _signals: Option<bool>,
     /// Formerly pruned signal sections against the tool ledger.
     #[serde(rename = "tool-ledger-pruning", default)]

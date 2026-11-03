@@ -1877,7 +1877,9 @@ pub(crate) async fn run_agent_loop_nested(
     let mut hooks = LoopHooks::new();
     if let Some(log_tx) = nested_tool_ctx.log_tx.clone() {
         hooks.register_logger(move |msg| {
-            let _ = log_tx.send(msg.to_string());
+            if log::Level::Info <= crate::core::logging::log_level_threshold() {
+                let _ = log_tx.send(msg.to_string());
+            }
         });
     }
     if let Some(log_tx) = &nested_tool_ctx.log_tx {

@@ -568,7 +568,9 @@ async fn run_agent(
         let log_tx = gremlin.runtime_config.log_tx.clone();
         hooks.register_logger(move |msg| {
             if let Some(ref tx) = log_tx {
-                let _ = tx.send(msg.to_string());
+                if log::Level::Info <= crate::core::logging::log_level_threshold() {
+                    let _ = tx.send(msg.to_string());
+                }
             }
         });
     }
