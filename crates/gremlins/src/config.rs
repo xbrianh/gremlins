@@ -1273,6 +1273,10 @@ pub(crate) fn max_prompt_bytes() -> u64 {
 /// The block is depth-limited to fit within this budget. If it still cannot
 /// be trimmed below the limit (including when the budget is zero), the
 /// landscape is omitted entirely.
+///
+/// Only the test-only landscape snapshot helper uses this now: nothing renders
+/// a landscape block into the system prompt any more.
+#[cfg(test)]
 pub(crate) fn max_landscape_tokens() -> u64 {
     get_global()
         .map(|c| c.max_landscape_tokens())

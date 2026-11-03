@@ -16,6 +16,6 @@ pub(crate) fn new_blank_conversation(
 ) -> Box<dyn crate::clients::conversation::Conversation> {
     let mut conv =
         standard::StandardConversation::new(prompt, preserve_reasoning, prepopulated_messages);
-    conv.seed_from_landscape(None, "", crate::landscape::signals::SignalProfile::Full);
+    conv.seed_from_landscape(None);
     Box::new(conv)
 }

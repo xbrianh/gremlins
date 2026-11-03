@@ -1,107 +1,33 @@
-use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use crate::landscape::{
     format_landscape_block_tool, format_outline_items, LandscapeData, LandscapeExplorer,
 };
 
-/// Number of past turns whose `[seen]` paths are remembered so the same path is
-/// never landscaped again for at least this many turns after its first appearance.
-const SEEN_WINDOW_TURNS: usize = 11;
-
-/// Mutable model context that carries a frozen seed landscape of the worktree.
+/// Model context that serves the `Landscape` tool from the worktree root.
 ///
-/// The landscape is rendered into the system prompt via [`system_message`] once
-/// at construction and never updated — it is a frozen seed that may become stale.
-/// Cross-turn dedup is performed so a path that received a `[seen]` block is
-/// skipped for the next `SEEN_WINDOW_TURNS` turns.  Outlines are always
-/// recomputed from disk — no content caching.
+/// Outlines are always recomputed from disk on each call — no content caching.
 pub(crate) struct LandscapeContext {
     /// Worktree root.
     root: PathBuf,
 
-    /// Frozen seed landscape captured at construction — never changes.
-    /// Served via [`system_message`].
-    seed_landscape: String,
-
     /// Whether landscape was ever enabled for this stage.
-    /// When false, all observations are no-ops and transcripts are always empty.
+    /// When false, `serve_tool` falls through to the default stub.
     landscape_enabled: bool,
-
-    /// Accumulating paths for the current turn plus ring-buffer of completed
-    /// turns.  `tool_result_extra` checks *all* sets before producing output.
-    seen: Mutex<SeenState>,
-}
-
-/// Per-turn tracking of landscaped paths.
-#[derive(Clone)]
-struct SeenState {
-    /// Paths already given a `[seen]` block in the current turn.
-    current: HashSet<PathBuf>,
-
-    /// Completed turn sets; newest at the back, oldest at the front.
-    /// Capacity is `SEEN_WINDOW_TURNS - 1` (the current set counts too).
-    past: VecDeque<HashSet<PathBuf>>,
-}
-
-impl SeenState {
-    fn new() -> Self {
-        Self {
-            current: HashSet::new(),
-            past: VecDeque::with_capacity(SEEN_WINDOW_TURNS - 1),
-        }
-    }
-
-    /// Save the current turn's set into the ring and start a fresh current set.
-    /// Always rotates even when the current set is empty, so expiry measures
-    /// actual turns rather than indefinitely suppressing paths.
-    fn rotate(&mut self) {
-        let prev = std::mem::take(&mut self.current);
-        self.past.push_back(prev);
-        // Keep at most SEEN_WINDOW_TURNS - 1 past sets (plus current = N).
-        while self.past.len() >= SEEN_WINDOW_TURNS {
-            self.past.pop_front();
-        }
-    }
-
 }
 
 impl LandscapeContext {
     /// Create a new LandscapeContext from the stage-start landscape data.
     ///
-    /// Calls [`LandscapeData::seed`] to populate the initial file entries.
-    /// When `data` is empty (no outlines, no signal sections), no seeding is
-    /// performed and all transcripts will be empty.
-    pub(crate) fn new(mut data: LandscapeData) -> Self {
+    /// Only [`LandscapeData::is_empty`] matters here: an empty payload means
+    /// landscape was disabled for this stage, so the tool is not served.
+    pub(crate) fn new(data: LandscapeData) -> Self {
         let landscape_enabled = !data.is_empty();
-        if landscape_enabled {
-            data.seed();
-        }
-
-        let max_tokens =
-            usize::try_from(crate::config::max_landscape_tokens()).unwrap_or(usize::MAX);
-
-        let root = data.root.clone();
-
-        // Render the seed landscape once — it never changes.
-        let seed_landscape = if landscape_enabled {
-            crate::landscape::format_landscape_data(&data, max_tokens)
-        } else {
-            String::new()
-        };
-
         Self {
-            root,
-            seed_landscape,
+            root: data.root,
             landscape_enabled,
-            seen: Mutex::new(SeenState::new()),
         }
     }
-
-    /// No-op: dedup is handled entirely in `tool_result_extra` using
-    /// interior mutability so the read-only signature works.
-    fn observe_tool(&mut self, _turn: usize, _tool: &str, _args_json: &str) {}
 
     /// Resolve a raw tool path against the worktree root.
     fn resolve_path(&self, p: &str) -> PathBuf {
@@ -114,14 +40,12 @@ impl LandscapeContext {
     }
 }
 
-/// Manual Clone: Mutex<SeenState> is not Clone, so we start fresh.
+/// Manual Clone: all fields are cheap to clone.
 impl Clone for LandscapeContext {
     fn clone(&self) -> Self {
         Self {
             root: self.root.clone(),
-            seed_landscape: self.seed_landscape.clone(),
             landscape_enabled: self.landscape_enabled,
-            seen: Mutex::new(SeenState::new()),
         }
     }
 }
@@ -233,26 +157,5 @@ impl crate::conversation::context::ConversationContext for LandscapeContext {
         }
     }
 
-    fn observe_tool(&mut self, turn: usize, tool: &str, args: &str, _output: &str) {
-        self.observe_tool(turn, tool, args);
-    }
-
-    fn tool_result_extra(
-        &self,
-        _turn: usize,
-        _tool: &str,
-        _args: &str,
-        _output: &str,
-    ) -> Option<String> {
-        None
-    }
-
-    fn finalize_turn(&mut self, _turn: usize) {
-        self.seen.lock().unwrap().rotate();
-    }
-
-    fn system_message(&self) -> Option<String> {
-        None
-    }
-
+    fn observe_tool(&mut self, _turn: usize, _tool: &str, _args: &str, _output: &str) {}
 }

@@ -14,8 +14,8 @@ use crate::clients::done_helpers::done_user_message;
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
 use crate::conversation::context::ConversationContext;
-use crate::conversation::contexts::{landscape::LandscapeContext, signal::SignalMapContext};
-use crate::landscape::{signals::SignalProfile, LandscapeData};
+use crate::conversation::contexts::landscape::LandscapeContext;
+use crate::landscape::LandscapeData;
 use crate::task_kind::TaskKind;
 
 /// The standard [`Conversation`] implementation.
@@ -63,31 +63,14 @@ impl StandardConversation {
 
     /// Seed mutable model contexts from raw landscape data.
     ///
-    /// Builds a [`SignalMapContext`] and [`LandscapeContext`] when
-    /// `landscape_data` is present.  Contexts are cloned via `clone_box()` so
-    /// the conversation owns independent copies.
+    /// Builds a [`LandscapeContext`] when `landscape_data` is present.  The
+    /// context is cloned via `clone_box()` so the conversation owns an
+    /// independent copy.
     /// Called before the conversation is boxed and handed off to the agent loop.
-    pub(crate) fn seed_from_landscape(
-        &mut self,
-        landscape_data: Option<LandscapeData>,
-        user_prompt: &str,
-        profile: SignalProfile,
-    ) {
+    pub(crate) fn seed_from_landscape(&mut self, landscape_data: Option<LandscapeData>) {
         let mut contexts: Vec<Box<dyn ConversationContext>> = Vec::new();
 
-        if let Some(mut ld) = landscape_data {
-            let signal_sections = std::mem::take(&mut ld.signal_sections);
-            let symbol_index = std::mem::take(&mut ld.symbol_index);
-            let has_signals = !signal_sections.is_empty() || !symbol_index.is_empty();
-            if has_signals {
-                contexts.push(Box::new(SignalMapContext::new(
-                    signal_sections,
-                    Some(user_prompt.to_string()),
-                    ld.root.clone(),
-                    symbol_index,
-                    profile,
-                )));
-            }
+        if let Some(ld) = landscape_data {
             contexts.push(Box::new(LandscapeContext::new(ld)));
         }
 

@@ -530,7 +530,6 @@ async fn run_agent(
     // landscape). When landscape is enabled, compute the full-tree outlines and
     // signal sections and bundle them into the data. The system prompt is just
     // the base prompt without any landscape block.
-    let profile;
     let landscape_data: Option<crate::landscape::LandscapeData> = if agent.landscape {
         let cwd2 = gremlin.cwd();
         let log_tx2 = gremlin.runtime_config.log_tx.clone();
@@ -540,7 +539,7 @@ async fn run_agent(
             .iter()
             .any(|k| k == "artifact://diff" || k.starts_with("artifact://diff/"));
 
-        profile = if crate::config::landscape_stage_profiles() && has_diff_input {
+        let profile = if crate::config::landscape_stage_profiles() && has_diff_input {
             crate::landscape::signals::SignalProfile::DiffFocused
         } else {
             crate::landscape::signals::SignalProfile::Full
@@ -590,7 +589,6 @@ async fn run_agent(
         };
         Some(seed)
     } else {
-        profile = crate::landscape::signals::SignalProfile::Full;
         None
     };
 
@@ -761,8 +759,8 @@ async fn run_agent(
             },
         );
     }
-    // Build model contexts from landscape data: SignalMapContext + LandscapeContext.
-    conv.seed_from_landscape(landscape_data, &prepared.user_prompt(), profile);
+    // Build model contexts from landscape data: LandscapeContext.
+    conv.seed_from_landscape(landscape_data);
 
     let prepopulated_conversation: Box<dyn crate::clients::conversation::Conversation> =
         Box::new(conv);
