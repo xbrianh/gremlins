@@ -4,7 +4,7 @@
 //! [`run_stage`]. Parallel groups delegate to [`run_parallel`].
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde_json::{Map, Value};
 
@@ -29,70 +29,10 @@ use crate::executor::supervisor::{emit_event, get_run_map};
 use crate::executor::vars;
 use crate::executor::DaemonEvent;
 use crate::executor::RunError;
-use crate::landscape::FileOutline;
-use crate::landscape::{LandscapeError, LandscapeExplorer};
 use crate::task_kind::TaskKind;
 use indexmap::IndexMap;
 use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::completion::Message;
-
-// ---------------------------------------------------------------------------
-// System prompt assembly
-// ---------------------------------------------------------------------------
-
-/// Build file outlines for a workspace root.
-///
-/// This is the raw-outline half of the landscape block builder, extracted so
-/// callers that need the outlines (e.g. for signal derivation) can obtain them
-/// without a second tree walk.
-async fn build_outlines(
-    cwd: PathBuf,
-    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
-) -> Vec<FileOutline> {
-    let log_tx2 = log_tx.clone();
-    tokio::task::spawn_blocking(move || match LandscapeExplorer.build(&cwd, usize::MAX) {
-        Ok(outlines) => outlines,
-        Err(LandscapeError::Read(e)) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => {
-            let msg = format!("landscape build failed for {}: {error}", cwd.display());
-            log::warn!("{msg}");
-            send_log(&log_tx2, log::Level::Info, &msg);
-            Vec::new()
-        }
-    })
-    .await
-    .unwrap_or_else(|error| {
-        let msg = format!("landscape build task failed: {error}");
-        log::warn!("{msg}");
-        send_log(&log_tx, log::Level::Info, &msg);
-        Vec::new()
-    })
-}
-
-/// Build and format a landscape block for one workspace root.
-///
-/// Kept for tests that need the pre-signals block shape.
-#[cfg(test)]
-async fn build_landscape_snapshot(
-    cwd: PathBuf,
-    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    has_outline_tool: bool,
-) -> (String, usize, usize) {
-    let log_warn = |msg: &str| {
-        log::warn!("{msg}");
-        send_log(&log_tx, log::Level::Warn, msg);
-    };
-    let outlines = build_outlines(cwd.clone(), log_tx.clone()).await;
-    let budget: u64 = crate::config::max_landscape_tokens();
-    let max_tokens = usize::try_from(budget).unwrap_or(usize::MAX);
-    match crate::landscape::format_landscape_block(&outlines, &cwd, max_tokens, has_outline_tool) {
-        Ok(block) => (block.block, block.file_count, block.item_count),
-        Err(e) => {
-            log_warn(&format!("landscape block formatting failed: {e}"));
-            (String::new(), 0, 0)
-        }
-    }
-}
 
 /// On-disk path for the agent raw stream, routed through the store's blob seam.
 fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunError> {
@@ -526,71 +466,11 @@ async fn run_agent(
         prompt = prompt.replace("{scratchpad_path}", &scratchpad_model_path);
     }
 
-    // Build the landscape data payload for the LandscapeContext (living
-    // landscape). When landscape is enabled, compute the full-tree outlines and
-    // signal sections and bundle them into the data. The system prompt is just
-    // the base prompt without any landscape block.
-    let landscape_data: Option<crate::landscape::LandscapeData> = if agent.landscape {
-        let cwd2 = gremlin.cwd();
-        let log_tx2 = gremlin.runtime_config.log_tx.clone();
-        let outlines = build_outlines(cwd2.clone(), log_tx2.clone()).await;
-
-        let has_diff_input = checkout_keys
-            .iter()
-            .any(|k| k == "artifact://diff" || k.starts_with("artifact://diff/"));
-
-        let profile = if crate::config::landscape_stage_profiles() && has_diff_input {
-            crate::landscape::signals::SignalProfile::DiffFocused
-        } else {
-            crate::landscape::signals::SignalProfile::Full
-        };
-
-        let signals_enabled = crate::config::landscape_signals();
-
-        let (signal_sections, diff_paths, symbol_index) = if signals_enabled {
-            let ctx = crate::landscape::signals::SignalContext {
-                cwd: cwd2.clone(),
-                profile,
-                prompt: if prepared.prompt.is_empty() {
-                    None
-                } else {
-                    Some(prepared.prompt.to_string())
-                },
-                diff_stat: crate::config::landscape_diff_stat(),
-            };
-            crate::landscape::inject_signal_sections(&ctx, &outlines)
-        } else {
-            Default::default()
-        };
-
-        // When DiffFocused, filter outlines to just diff files.
-        let effective_outlines: Vec<crate::landscape::FileOutline> = if profile
-            == crate::landscape::signals::SignalProfile::DiffFocused
-            && !diff_paths.is_empty()
-        {
-            let diff_set: std::collections::HashSet<&Path> =
-                diff_paths.iter().map(|p| p.as_path()).collect();
-            outlines
-                .into_iter()
-                .filter(|o| diff_set.contains(o.path.as_path()))
-                .collect()
-        } else {
-            outlines
-        };
-
-        // Build data: full-tree outlines plus signal sections wrapped in a
-        // LandscapeData struct for the LandscapeContext.
-        let seed = crate::landscape::LandscapeData {
-            root: cwd2.clone(),
-            outlines: effective_outlines,
-            signal_sections,
-            symbol_index,
-            file_entries: Default::default(),
-        };
-        Some(seed)
-    } else {
-        None
-    };
+    // The landscape context only serves the `Landscape` tool from the worktree
+    // root; it no longer contributes anything to the system prompt.  When
+    // landscape is disabled for the stage, no context is installed and the
+    // tool falls through to the registry handler.
+    let landscape_root = agent.landscape.then(|| gremlin.cwd());
 
     let system_prompt = prompt;
 
@@ -759,8 +639,8 @@ async fn run_agent(
             },
         );
     }
-    // Build model contexts from landscape data: LandscapeContext.
-    conv.seed_from_landscape(landscape_data);
+    // Build model contexts: LandscapeContext.
+    conv.seed_from_landscape(landscape_root);
 
     let prepopulated_conversation: Box<dyn crate::clients::conversation::Conversation> =
         Box::new(conv);
@@ -2992,85 +2872,6 @@ mod tests {
         assert_eq!(messages.len(), 3);
         super::strip_unpaired_tool_messages(&mut messages);
         assert_eq!(messages.len(), 1);
-    }
-
-    // --- System prompt assembly (inlined, tested above) ---
-
-    #[tokio::test]
-    async fn missing_cwd_produces_empty_block() {
-        let (block, file_count, item_count) = build_landscape_snapshot(
-            PathBuf::from("/definitely/not/present/landscape-cwd"),
-            None,
-            true,
-        )
-        .await;
-        assert_eq!(block, "");
-        assert_eq!(file_count, 0);
-        assert_eq!(item_count, 0);
-    }
-
-    #[tokio::test]
-    async fn dropped_block_reports_zero_stats() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("thin.rs"), "fn only() {}\n").unwrap();
-        let (block, file_count, item_count) =
-            build_landscape_snapshot(dir.path().to_path_buf(), None, true).await;
-        assert_eq!(block, "");
-        assert_eq!(file_count, 0);
-        assert_eq!(item_count, 0);
-    }
-
-    #[tokio::test]
-    async fn nonempty_outline_flows_through_assemble() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("main.rs"),
-            "fn main() {}\nstruct Config {}\nimpl Config {}\n",
-        )
-        .unwrap();
-        let (block, file_count, item_count) =
-            build_landscape_snapshot(dir.path().to_path_buf(), None, true).await;
-        assert!(block.contains("<!-- BEGIN LANDSCAPE BLOCK -->"));
-        assert!(block.contains(&format!("<!-- root: {} -->\n", dir.path().display())));
-        assert!(block.lines().any(|line| line.starts_with("main.rs:")));
-        assert!(!block.contains(&format!("{}:", dir.path().join("main.rs").display())));
-        assert!(block.contains("1|fn|main"));
-        assert!(block.contains("2|struct|Config"));
-        assert!(block.contains("3|impl|Config"));
-        assert_eq!(file_count, 1);
-        assert_eq!(item_count, 3);
-    }
-
-    #[tokio::test]
-    async fn build_landscape_snapshot_matches_format_landscape_block() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("src");
-        std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(src.join("lib.rs"), "pub fn hello() {}\n").unwrap();
-
-        let cwd = dir.path().to_path_buf();
-        let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
-
-        // Build outlines once, then format both ways and compare.
-        let outlines = build_outlines(cwd.clone(), log_tx.clone()).await;
-        let budget: u64 = crate::config::max_landscape_tokens();
-        let expected = crate::landscape::format_landscape_block(
-            &outlines,
-            &cwd,
-            usize::try_from(budget).unwrap_or(usize::MAX),
-            false,
-        )
-        .unwrap();
-
-        // The signals-off path must produce the same skeleton as formatting the
-        // outlines directly (minus the usage hint / log lines).
-        let (block_from_snapshot, _, _) =
-            build_landscape_snapshot(cwd.clone(), log_tx.clone(), false).await;
-
-        assert_eq!(
-            block_from_snapshot, expected.block,
-            "build_landscape_snapshot must match format_landscape_block"
-        );
     }
 
     #[test]

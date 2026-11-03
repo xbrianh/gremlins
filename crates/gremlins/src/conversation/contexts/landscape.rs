@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::landscape::{
-    format_landscape_block_tool, format_outline_items, LandscapeData, LandscapeExplorer,
-};
+use crate::landscape::{format_landscape_block_tool, format_outline_items, LandscapeExplorer};
 
 /// Model context that serves the `Landscape` tool from the worktree root.
 ///
@@ -10,23 +8,11 @@ use crate::landscape::{
 pub(crate) struct LandscapeContext {
     /// Worktree root.
     root: PathBuf,
-
-    /// Whether landscape was ever enabled for this stage.
-    /// When false, `serve_tool` falls through to the default stub.
-    landscape_enabled: bool,
 }
 
 impl LandscapeContext {
-    /// Create a new LandscapeContext from the stage-start landscape data.
-    ///
-    /// Only [`LandscapeData::is_empty`] matters here: an empty payload means
-    /// landscape was disabled for this stage, so the tool is not served.
-    pub(crate) fn new(data: LandscapeData) -> Self {
-        let landscape_enabled = !data.is_empty();
-        Self {
-            root: data.root,
-            landscape_enabled,
-        }
+    pub(crate) fn new(root: PathBuf) -> Self {
+        Self { root }
     }
 
     /// Resolve a raw tool path against the worktree root.
@@ -45,7 +31,6 @@ impl Clone for LandscapeContext {
     fn clone(&self) -> Self {
         Self {
             root: self.root.clone(),
-            landscape_enabled: self.landscape_enabled,
         }
     }
 }
@@ -60,7 +45,7 @@ impl crate::conversation::context::ConversationContext for LandscapeContext {
     }
 
     fn serve_tool(&self, name: &str, args: &serde_json::Value) -> Option<String> {
-        if !self.landscape_enabled || name != "Landscape" {
+        if name != "Landscape" {
             return None;
         }
 

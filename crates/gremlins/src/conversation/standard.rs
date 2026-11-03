@@ -15,7 +15,6 @@ use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
 use crate::conversation::context::ConversationContext;
 use crate::conversation::contexts::landscape::LandscapeContext;
-use crate::landscape::LandscapeData;
 use crate::task_kind::TaskKind;
 
 /// The standard [`Conversation`] implementation.
@@ -61,17 +60,18 @@ impl StandardConversation {
         }
     }
 
-    /// Seed mutable model contexts from raw landscape data.
+    /// Seed mutable model contexts.
     ///
-    /// Builds a [`LandscapeContext`] when `landscape_data` is present.  The
+    /// `landscape_root` is `Some` when the stage has the landscape context
+    /// enabled; the context serves the `Landscape` tool from that root.  The
     /// context is cloned via `clone_box()` so the conversation owns an
     /// independent copy.
     /// Called before the conversation is boxed and handed off to the agent loop.
-    pub(crate) fn seed_from_landscape(&mut self, landscape_data: Option<LandscapeData>) {
+    pub(crate) fn seed_from_landscape(&mut self, landscape_root: Option<std::path::PathBuf>) {
         let mut contexts: Vec<Box<dyn ConversationContext>> = Vec::new();
 
-        if let Some(ld) = landscape_data {
-            contexts.push(Box::new(LandscapeContext::new(ld)));
+        if let Some(root) = landscape_root {
+            contexts.push(Box::new(LandscapeContext::new(root)));
         }
 
         self.contexts = contexts.into_iter().map(|c| c.clone_box()).collect();

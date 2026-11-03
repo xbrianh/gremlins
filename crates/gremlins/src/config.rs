@@ -124,9 +124,6 @@ pub struct Config {
     max_prompt_bytes: u64,
     max_landscape_tokens: u64,
     max_landscape_tool_tokens: Option<u64>,
-    landscape_signals: bool,
-    landscape_stage_profiles: bool,
-    landscape_diff_stat: bool,
     backoff: BackoffConfig,
 }
 
@@ -258,17 +255,6 @@ struct LandscapeSection {
     /// Preferred key: `max-tool-tokens` under `landscape:`.
     #[serde(rename = "max-tool-tokens", default)]
     max_tool_tokens: Option<u64>,
-    /// Enable heuristic landscape signals (changed files, symbol map, referenced paths).
-    #[serde(default)]
-    signals: Option<bool>,
-    /// Enable stage profiles — derive signal sections from artifact inputs
-    /// rather than always emitting every section.
-    #[serde(rename = "stage-profiles", default)]
-    stage_profiles: Option<bool>,
-    /// Emit a per-file `git diff --numstat` summary (added/deleted counts)
-    /// before the changed-files listing when the stage has a diff artifact.
-    #[serde(rename = "diff-stat", default)]
-    diff_stat: Option<bool>,
 }
 
 /// A single `model-profiles` entry as it appears in `settings.yaml`.
@@ -352,18 +338,6 @@ impl Config {
                 let max_landscape_tool_tokens = std::env::var("GREMLINS_MAX_LANDSCAPE_TOOL_TOKENS")
                     .ok()
                     .and_then(|v| v.parse().ok());
-                let landscape_signals = std::env::var("GREMLINS_LANDSCAPE_SIGNALS")
-                    .ok()
-                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_SIGNALS", &v))
-                    .unwrap_or(true);
-                let landscape_stage_profiles = std::env::var("GREMLINS_LANDSCAPE_STAGE_PROFILES")
-                    .ok()
-                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_STAGE_PROFILES", &v))
-                    .unwrap_or(false);
-                let landscape_diff_stat = std::env::var("GREMLINS_LANDSCAPE_DIFF_STAT")
-                    .ok()
-                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_DIFF_STAT", &v))
-                    .unwrap_or(false);
                 return Ok(Config {
                     default_model: env_default_model(),
                     max_tool_output_bytes,
@@ -374,9 +348,6 @@ impl Config {
                     max_prompt_bytes,
                     max_landscape_tokens,
                     max_landscape_tool_tokens,
-                    landscape_signals,
-                    landscape_stage_profiles,
-                    landscape_diff_stat,
                     ..Config::default()
                 });
             }
@@ -558,39 +529,6 @@ impl Config {
                     .and_then(|v| v.parse().ok())
             });
 
-        let landscape_signals = cfg_file
-            .landscape
-            .as_ref()
-            .and_then(|l| l.signals)
-            .or_else(|| {
-                std::env::var("GREMLINS_LANDSCAPE_SIGNALS")
-                    .ok()
-                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_SIGNALS", &v))
-            })
-            .unwrap_or(true);
-
-        let landscape_stage_profiles = cfg_file
-            .landscape
-            .as_ref()
-            .and_then(|l| l.stage_profiles)
-            .or_else(|| {
-                std::env::var("GREMLINS_LANDSCAPE_STAGE_PROFILES")
-                    .ok()
-                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_STAGE_PROFILES", &v))
-            })
-            .unwrap_or(false);
-
-        let landscape_diff_stat = cfg_file
-            .landscape
-            .as_ref()
-            .and_then(|l| l.diff_stat)
-            .or_else(|| {
-                std::env::var("GREMLINS_LANDSCAPE_DIFF_STAT")
-                    .ok()
-                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_DIFF_STAT", &v))
-            })
-            .unwrap_or(false);
-
         Ok(Config {
             default_model,
             tui_model,
@@ -609,9 +547,6 @@ impl Config {
             max_prompt_bytes,
             max_landscape_tokens,
             max_landscape_tool_tokens,
-            landscape_signals,
-            landscape_stage_profiles,
-            landscape_diff_stat,
             backoff,
         })
     }
@@ -683,18 +618,6 @@ impl Config {
 
     pub fn max_landscape_tool_tokens(&self) -> Option<u64> {
         self.max_landscape_tool_tokens
-    }
-
-    pub fn landscape_signals(&self) -> bool {
-        self.landscape_signals
-    }
-
-    pub fn landscape_stage_profiles(&self) -> bool {
-        self.landscape_stage_profiles
-    }
-
-    pub fn landscape_diff_stat(&self) -> bool {
-        self.landscape_diff_stat
     }
 
     pub fn turn_retry_schedule(&self) -> &[f64] {
@@ -1300,56 +1223,6 @@ pub(crate) fn max_landscape_tool_tokens() -> Option<u64> {
                 .ok()
                 .and_then(|v| v.parse().ok())
         })
-}
-
-/// GREMLINS_LANDSCAPE_SIGNALS — enable heuristic landscape signals
-/// (changed files, symbol map, referenced paths). Default true.
-/// Settings.yaml `landscape.signals` takes precedence over the env var.
-pub(crate) fn landscape_signals() -> bool {
-    Config::load()
-        .map(|c| c.landscape_signals())
-        .unwrap_or(true)
-}
-
-/// GREMLINS_LANDSCAPE_STAGE_PROFILES — enable stage-driven signal profile
-/// selection. When on and the stage has `artifact://diff` input, the
-/// landscape block is scoped to changed files. Default false.
-/// Settings.yaml `landscape.stage-profiles` takes precedence over the env var.
-pub(crate) fn landscape_stage_profiles() -> bool {
-    Config::load()
-        .map(|c| c.landscape_stage_profiles())
-        .unwrap_or(false)
-}
-
-/// GREMLINS_LANDSCAPE_DIFF_STAT — emit a per-file added/deleted summary
-/// before the changed-files listing when the stage has an `artifact://diff`
-/// input. Default false. Settings.yaml `landscape.diff-stat` takes precedence
-/// over the env var.
-pub(crate) fn landscape_diff_stat() -> bool {
-    Config::load()
-        .map(|c| c.landscape_diff_stat())
-        .unwrap_or(false)
-}
-
-/// Parse a boolean from an environment variable value.
-/// Accepts "1", "true" (case-insensitive) as true; "0", "false" as false.
-fn parse_env_bool(v: &str) -> Option<bool> {
-    match v.to_lowercase().as_str() {
-        "1" | "true" => Some(true),
-        "0" | "false" => Some(false),
-        _ => None,
-    }
-}
-
-/// Like [`parse_env_bool`] but logs a warning when the value is unparseable.
-fn parse_env_bool_or_warn(var_name: &str, v: &str) -> Option<bool> {
-    let result = parse_env_bool(v);
-    if result.is_none() {
-        log::warn!(
-            "{var_name} value {v:?} is not a recognised boolean (expected 0/1 or true/false); ignoring"
-        );
-    }
-    result
 }
 
 /// GREMLINS_MAX_TOOL_OUTPUT_BYTES — cap tool output at this many bytes.
@@ -2846,13 +2719,5 @@ model-profiles:
             cfg.compaction_threshold_tokens_chat(),
             DEFAULT_COMPACTION_THRESHOLD_TOKENS_CHAT
         );
-    }
-
-    #[test]
-    fn test_landscape_stage_profiles_default_off() {
-        // No settings.yaml and no env var → defaults to false.
-        let _sandbox = Sandbox::new();
-        clear_global();
-        assert!(!landscape_stage_profiles());
     }
 }
