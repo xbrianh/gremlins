@@ -60,7 +60,6 @@ impl SignalMapContext {
     fn render_symbol_map(&self) -> String {
         let ctx = signals::SignalContext {
             cwd: self.cwd.clone(),
-            pruned_files: None,
             profile: self.profile,
             prompt: self.prompt.clone(),
             diff_stat: false,
@@ -177,10 +176,6 @@ impl crate::conversation::context::ConversationContext for SignalMapContext {
         } else {
             Some(rendered)
         }
-    }
-
-    fn join(&mut self, _other: &dyn crate::conversation::context::ConversationContext) {
-        // No-op: signal sections come from the parent stage.
     }
 
     fn clear_transcript(&mut self) {

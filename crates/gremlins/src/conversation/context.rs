@@ -1,7 +1,5 @@
 use std::any::Any;
 
-use crate::clients::protocol::FileObservations;
-
 /// A per-turn mutable context attached to the agent loop.
 ///
 /// Contexts observe tool calls and produce per-turn transcript blocks that are
@@ -11,7 +9,7 @@ use crate::clients::protocol::FileObservations;
 #[allow(dead_code)]
 pub(crate) trait ConversationContext: Any + Send + Sync {
     /// Whether this context propagates into nested Task (Fork/Scout/Implement)
-    /// loops. `ToolLedger` propagates; futures like `FindingsLedger` may not.
+    /// loops. The landscape contexts do; futures like `FindingsLedger` may not.
     fn propagates_to_task(&self) -> bool;
 
     /// Downcast to a concrete type.
@@ -77,13 +75,6 @@ pub(crate) trait ConversationContext: Any + Send + Sync {
         None
     }
 
-    /// Return file observations (Read/Grep + mutation paths) for cross-stage
-    /// pruning and reporting. `ToolLedger` overrides this; other contexts
-    /// return `None`.
-    fn file_observations(&self) -> Option<FileObservations> {
-        None
-    }
-
     /// Reset per-turn transcript state so the context starts fresh in a
     /// child loop.  Seeded parent contexts call this before the child's
     /// first turn; the child's own turns then populate new transcript
@@ -92,21 +83,6 @@ pub(crate) trait ConversationContext: Any + Send + Sync {
         // Default: no-op.  Concrete contexts with transcript state override.
     }
 
-    /// Merge another context of the same concrete type into `self`.
-    ///
-    /// Used after a parallel fork to reconcile observations from sibling
-    /// branches.  Not yet wired by any caller.
-    fn join(&mut self, _other: &dyn ConversationContext) {
-        // Default: no-op.  Concrete contexts that need merging override this.
-    }
-
-    /// Text for observations that arrived via [`join`] since the last call.
-    /// The agent loop drains this after a Task child's contexts are merged
-    /// back into the parent so newly discovered file contents reach the
-    /// parent model. Default: empty.
-    fn new_observations_text(&mut self) -> String {
-        String::new()
-    }
 }
 
 // `Box<dyn ConversationContext>` participates in `#[derive(Clone)]` structs

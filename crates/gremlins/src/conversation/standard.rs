@@ -5,7 +5,6 @@
 //! transcript by injecting findings/scratchpad into the pending prompt and then
 //! interleaving per-turn context blocks via [`compose_model_transcript`].
 
-use std::any::Any;
 use std::hash::{Hash, Hasher};
 
 use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
@@ -15,11 +14,8 @@ use crate::clients::conversation::{Conversation, RunArtifact, TurnScript};
 use crate::clients::done_helpers::{done_user_message, user_message_text};
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
-use crate::clients::protocol::FileObservations;
 use crate::conversation::context::{compose_model_transcript, ConversationContext};
-use crate::conversation::contexts::{
-    landscape::LandscapeContext, signal::SignalMapContext, tool_ledger::ToolLedger,
-};
+use crate::conversation::contexts::{landscape::LandscapeContext, signal::SignalMapContext};
 use crate::landscape::{signals::SignalProfile, LandscapeData};
 use crate::task_kind::TaskKind;
 
@@ -77,9 +73,9 @@ impl StandardConversation {
 
     /// Seed mutable model contexts from raw landscape data.
     ///
-    /// Builds a [`ToolLedger`] (always), plus a [`SignalMapContext`] and
-    /// [`LandscapeContext`] when `landscape_data` is present.  Contexts are
-    /// cloned via `clone_box()` so the conversation owns independent copies.
+    /// Builds a [`SignalMapContext`] and [`LandscapeContext`] when
+    /// `landscape_data` is present.  Contexts are cloned via `clone_box()` so
+    /// the conversation owns independent copies.
     /// Called before the conversation is boxed and handed off to the agent loop.
     pub(crate) fn seed_from_landscape(
         &mut self,
@@ -88,11 +84,6 @@ impl StandardConversation {
         profile: SignalProfile,
     ) {
         let mut contexts: Vec<Box<dyn ConversationContext>> = Vec::new();
-
-        // ToolLedger always goes first — it's the primary per-turn observation context.
-        let mut ledger = ToolLedger::new();
-        ledger.capture_turn_transcript(0);
-        contexts.push(Box::new(ledger) as Box<dyn ConversationContext>);
 
         if let Some(mut ld) = landscape_data {
             let signal_sections = std::mem::take(&mut ld.signal_sections);
@@ -199,14 +190,6 @@ impl StandardConversation {
 }
 
 impl Conversation for StandardConversation {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn clone_box(&self) -> Box<dyn Conversation> {
         Box::new(Self {
             history: self.history.clone(),
@@ -486,44 +469,10 @@ impl Conversation for StandardConversation {
         extra
     }
 
-    fn join_child_conversation(&mut self, child: &dyn Conversation) -> Vec<String> {
-        // Downcast is safe: StandardConversation is the only Conversation impl.
-        let child = child
-            .as_any()
-            .downcast_ref::<StandardConversation>()
-            .expect("join_child_conversation: child must be StandardConversation");
-        let snapshot: Vec<Box<dyn ConversationContext>> =
-            child.contexts.iter().map(|c| c.clone_box()).collect();
-        if snapshot.is_empty() {
-            return Vec::new();
-        }
-        // Match child contexts to parent contexts by TypeId and join.
-        let mut task_observations = Vec::new();
-        for child_ctx in &snapshot {
-            let child_tid = child_ctx.as_any().type_id();
-            for parent_ctx in &mut self.contexts {
-                if parent_ctx.as_any().type_id() == child_tid {
-                    parent_ctx.join(child_ctx.as_ref());
-                }
-            }
-        }
-        for parent_ctx in &mut self.contexts {
-            let text = parent_ctx.new_observations_text();
-            if !text.is_empty() {
-                task_observations.push(text);
-            }
-        }
-        task_observations
-    }
-
     fn finalize_contexts(&mut self, turn: usize) {
         for ctx in &mut self.contexts {
             ctx.finalize_turn(turn);
         }
-    }
-
-    fn file_observations(&self) -> Option<FileObservations> {
-        self.contexts.iter().find_map(|ctx| ctx.file_observations())
     }
 
     fn clear_context_transcripts(&mut self) {
@@ -535,16 +484,12 @@ impl Conversation for StandardConversation {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-
     use rig_core::completion::Message;
     use rig_core::message::{AssistantContent, Issuer, UserContent};
 
     use crate::clients::agent_loop::*;
     use crate::clients::cancel::CancelToken;
     use crate::clients::done_helpers::user_message_text;
-    use crate::clients::format::ledger_key_arg;
     use crate::conversation::new_blank_conversation;
 
     // Override test_ctx to use StandardConversation (context-aware) instead of
@@ -667,178 +612,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn loop_ledger_follows_all_tool_results() {
-        let dir = std::env::temp_dir().join(format!(
-            "gremlins-oa-ledger-multi-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let f1 = dir.join("a.txt");
-        let f2 = dir.join("b.txt");
-        std::fs::write(&f1, "alpha").unwrap();
-        std::fs::write(&f2, "beta").unwrap();
-        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
-            vec![
-                rig_core::test_utils::MockStreamEvent::tool_call(
-                    "c1",
-                    "Read",
-                    serde_json::json!({"file_path": f1.to_str().unwrap()}),
-                ),
-                rig_core::test_utils::MockStreamEvent::tool_call(
-                    "c2",
-                    "Read",
-                    serde_json::json!({"file_path": f2.to_str().unwrap()}),
-                ),
-                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-            ],
-            vec![
-                rig_core::test_utils::MockStreamEvent::text("done"),
-                rig_core::test_utils::MockStreamEvent::tool_call(
-                    "done1",
-                    "Done",
-                    serde_json::json!({"summary": "done"}),
-                ),
-                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-            ],
-        ]);
-        let mut ctx = test_ctx(Some(dir.clone()), None);
-        ctx.idle_timeout = 5.0;
-        ctx.params.idle_timeout = Some(5.0);
-        run_agent_loop(
-            gm(model.clone().erase()),
-            "read both",
-            ctx.clone(),
-            CancelToken::new(),
-            loop_opts(None),
-            None,
-        )
-        .await
-        .unwrap();
-
-        let reqs = model.requests();
-        let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
-        // The [seen] block travels through user-message transcript blocks
-        // (The ledger's system_message() returns None to keep the system
-        // prompt cache-stable).
-        assert!(history.len() >= 4, "unexpected history: {history:#?}");
-        let seen_msg = history
-            .iter()
-            .rev()
-            .find_map(|m| match m {
-                Message::User { content: _ } => {
-                    let text = user_message_text(m);
-                    if text.contains("[seen]") {
-                        Some(text)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("[seen] block not found in any user message: {history:#?}"));
-        assert!(
-            seen_msg.contains("a.txt") && seen_msg.contains("b.txt"),
-            "ledger must list both actions: {seen_msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn loop_ledger_injected_into_history() {
-        let dir = std::env::temp_dir().join(format!(
-            "gremlins-oa-ledger-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let f = dir.join("x.txt");
-        std::fs::write(&f, "content").unwrap();
-
-        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
-            vec![
-                rig_core::test_utils::MockStreamEvent::tool_call(
-                    "c1",
-                    "Read",
-                    serde_json::json!({"file_path": f.to_str().unwrap()}),
-                ),
-                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-            ],
-            vec![
-                rig_core::test_utils::MockStreamEvent::text("done"),
-                rig_core::test_utils::MockStreamEvent::tool_call(
-                    "done1",
-                    "Done",
-                    serde_json::json!({"summary": "done"}),
-                ),
-                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-            ],
-        ]);
-        let mut ctx = test_ctx(Some(dir.clone()), None);
-        ctx.idle_timeout = 5.0;
-        ctx.params.idle_timeout = Some(5.0);
-        let cancel = CancelToken::new();
-        run_agent_loop(
-            gm(model.clone().erase()),
-            "read",
-            ctx.clone(),
-            cancel,
-            loop_opts(None),
-            None,
-        )
-        .await
-        .unwrap();
-
-        let reqs = model.requests();
-        assert_eq!(reqs.len(), 2);
-        let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
-        let key = ledger_key_arg(&serde_json::json!({"file_path": f.to_str().unwrap()}));
-        assert!(key.contains("x.txt"), "ledger must name the file: {key}");
-        // The [seen] block travels through user-message transcript blocks
-        // (The ledger's system_message() returns None to keep the system
-        // prompt cache-stable).
-        assert!(history.len() >= 3, "unexpected history: {history:#?}");
-        let seen_msg = history
-            .iter()
-            .rev()
-            .find_map(|m| match m {
-                Message::User { content: _ } => {
-                    let text = user_message_text(m);
-                    if text.contains("[seen]") {
-                        Some(text)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("[seen] block not found in any user message: {history:#?}"));
-        assert!(
-            seen_msg.contains(&key),
-            "ledger must name the file: {seen_msg}"
-        );
-        assert!(
-            seen_msg.contains("R("),
-            "ledger must show Read indicator: {seen_msg}"
-        );
-        // The history must contain a tool result.
-        let has_result = history.iter().any(|m| {
-            matches!(m, Message::User { content } if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))
-        });
-        assert!(has_result, "history must contain a tool result");
-        // The history must contain an assistant message.
-        let has_assistant = history
-            .iter()
-            .any(|m| matches!(m, Message::Assistant { .. }));
-        assert!(has_assistant, "history must contain an assistant message");
-    }
-
     /// A reasoning-only turn (reasoning deltas but no text and no tool call)
     /// must still record an assistant message carrying the structured
     /// reasoning item before nudging with "Continue.". Dropping it would both
@@ -932,117 +705,4 @@ mod tests {
         }
     }
 
-    /// Regression: a Scout child that reads a file must have those contents
-    /// attached to the Task tool result in the parent's durable history, not
-    /// only the ephemeral next_prompt. After a further tool round the evidence
-    /// must still be present even though the ledger marks the file as read.
-    #[tokio::test]
-    async fn scout_read_observations_ride_the_task_tool_result() {
-        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
-
-        let dir = tempfile::tempdir().unwrap();
-        let note = dir.path().join("note.txt");
-        std::fs::write(&note, "evidence-from-child").unwrap();
-
-        let task_call = MockStreamEvent::tool_call(
-            "t1",
-            "Task",
-            serde_json::json!({ "kind": "Scout", "prompt": "inspect note.txt" }),
-        );
-        let done_call = |id: &str, summary: &str| {
-            MockStreamEvent::tool_call(id, "Done", serde_json::json!({ "summary": summary }))
-        };
-
-        // Parent: delegate, then finish.
-        let parent = MockCompletionModel::from_stream_turns([
-            vec![
-                task_call,
-                MockStreamEvent::final_response_with_default_usage(),
-            ],
-            vec![
-                done_call("d1", "outer done"),
-                MockStreamEvent::final_response_with_default_usage(),
-            ],
-        ]);
-        // Child (Scout): Read the file, then finish.
-        let child = MockCompletionModel::from_stream_turns([
-            vec![
-                MockStreamEvent::tool_call(
-                    "r1",
-                    "Read",
-                    serde_json::json!({ "file_path": note.to_str().unwrap() }),
-                ),
-                MockStreamEvent::final_response_with_default_usage(),
-            ],
-            vec![
-                MockStreamEvent::text("scout result"),
-                done_call("d2", "scout result"),
-                MockStreamEvent::final_response_with_default_usage(),
-            ],
-        ]);
-
-        let child_handle = child.clone();
-        let factory: crate::clients::task::TaskModelFactory = Arc::new(move |_spec: &str| {
-            Ok(crate::clients::task::TaskModel {
-                model: gm(child_handle.clone().erase()),
-                temperature: None,
-                max_tokens: None,
-                extra: None,
-                preserve_reasoning: None,
-            })
-        });
-        let selector = crate::clients::task::TaskModelSelector::new(
-            HashMap::from([(crate::task_kind::TaskKind::Scout, "openai/mini".to_string())]),
-            factory,
-        )
-        .expect("configured");
-        let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
-        ctx.idle_timeout = 5.0;
-        ctx.params.idle_timeout = Some(5.0);
-        ctx.params.task_models = Some(selector);
-
-        run_agent_loop(
-            gm(parent.clone().erase()),
-            "go",
-            ctx,
-            CancelToken::new(),
-            loop_opts(None),
-            None,
-        )
-        .await
-        .unwrap();
-
-        // The parent's second request must carry the child's Read evidence
-        // inside the Task tool result (durable history).
-        let reqs = parent.requests();
-        let parent_history = &reqs.last().unwrap().chat_history;
-        let task_result = parent_history
-            .iter()
-            .flat_map(|m| match m {
-                Message::User { content } => content
-                    .iter()
-                    .filter_map(|c| match c {
-                        UserContent::ToolResult(r) => Some(
-                            r.content
-                                .iter()
-                                .filter_map(|rc| match rc {
-                                    rig_core::completion::message::ToolResultContent::Text(t) => {
-                                        Some(t.text.clone())
-                                    }
-                                    _ => None,
-                                })
-                                .collect::<String>(),
-                        ),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>(),
-                _ => vec![],
-            })
-            .find(|t| t.contains("scout result"))
-            .expect("task result must reach the parent history");
-        assert!(
-            task_result.contains("evidence-from-child"),
-            "joined Read observations must ride the Task tool result, got: {task_result}"
-        );
-    }
 }

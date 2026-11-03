@@ -42,17 +42,10 @@ pub(crate) fn result_status(res: &str) -> &'static str {
 
 type ToolFuture = Pin<Box<dyn std::future::Future<Output = ToolOutcome> + Send>>;
 
-/// Output of a tool invocation: prose text plus an optional child
-/// conversation (which carries its own contexts for join).
-///
-/// Task is the only tool that returns a child today; the field is named and
-/// joined uniformly so any future fan-out tool can do the same without
-/// name dispatch in the agent loop.
+/// Output of a tool invocation: the prose text the model sees.
 pub(crate) struct ToolOutcome {
     /// The prose output (text result) from the tool.
     pub output: String,
-    /// A child loop's conversation, carrying its own context state.
-    pub child: Option<Box<dyn super::conversation::Conversation>>,
 }
 
 impl ToolOutcome {
@@ -60,7 +53,6 @@ impl ToolOutcome {
     pub(crate) fn text(output: impl Into<String>) -> Self {
         Self {
             output: output.into(),
-            child: None,
         }
     }
 }
@@ -702,7 +694,6 @@ pub(crate) async fn invoke_with_conversation(
         {
             return ToolOutcome {
                 output: format!("Error: unknown tool {name}"),
-                child: None,
             };
         }
     }
@@ -719,7 +710,6 @@ pub(crate) async fn invoke_with_conversation(
             );
             return ToolOutcome {
                 output: "Error: invalid arguments".into(),
-                child: None,
             };
         }
     };
@@ -736,7 +726,6 @@ pub(crate) async fn invoke_with_conversation(
         );
         return ToolOutcome {
             output: err,
-            child: None,
         };
     }
     if let Some(err) = check_tool(name, ctx, &args) {
@@ -749,7 +738,6 @@ pub(crate) async fn invoke_with_conversation(
         );
         return ToolOutcome {
             output: err,
-            child: None,
         };
     }
 
@@ -780,7 +768,6 @@ pub(crate) async fn invoke_with_conversation(
         );
         return ToolOutcome {
             output,
-            child: None,
         };
     }
 
@@ -3702,7 +3689,6 @@ mod tests {
             Box::pin(async move {
                 ToolOutcome {
                     output: format!("task result: {kind} / {prompt}"),
-                    child: None,
                 }
             })
         });
@@ -3739,7 +3725,6 @@ mod tests {
             Box::pin(async move {
                 ToolOutcome {
                     output: "should not be called".to_string(),
-                    child: None,
                 }
             })
         });
@@ -3783,7 +3768,6 @@ mod tests {
             Box::pin(async move {
                 ToolOutcome {
                     output: "should not be called".to_string(),
-                    child: None,
                 }
             })
         });
@@ -3823,7 +3807,6 @@ mod tests {
             Box::pin(async move {
                 ToolOutcome {
                     output: "body".to_string(),
-                    child: None,
                 }
             })
         });
@@ -4275,7 +4258,6 @@ mod tests {
             Box::pin(async move {
                 ToolOutcome {
                     output: "x".repeat(500),
-                    child: None,
                 }
             })
         });

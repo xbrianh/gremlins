@@ -131,7 +131,6 @@ fn make_task_runner_at_depth(
                 if depth >= MAX_DEPTH {
                     return tools::ToolOutcome {
                         output: format!("Error: task max depth ({MAX_DEPTH}) exceeded"),
-                        child: None,
                     };
                 }
 
@@ -167,7 +166,6 @@ fn make_task_runner_at_depth(
                     Err(reason) => {
                         return tools::ToolOutcome {
                             output: format!("Task error: {reason}"),
-                            child: None,
                         };
                     }
                 };
@@ -269,12 +267,10 @@ fn make_task_runner_at_depth(
                         );
                         tools::ToolOutcome {
                             output: out,
-                            child: completed.conversation,
                         }
                     }
                     Err(e) => tools::ToolOutcome {
                         output: format!("Task error: {e}"),
-                        child: None,
                     },
                 }
             })

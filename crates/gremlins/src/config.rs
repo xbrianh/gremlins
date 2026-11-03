@@ -125,7 +125,6 @@ pub struct Config {
     max_landscape_tokens: u64,
     max_landscape_tool_tokens: Option<u64>,
     landscape_signals: bool,
-    landscape_tool_ledger_pruning: bool,
     landscape_stage_profiles: bool,
     landscape_diff_stat: bool,
     backoff: BackoffConfig,
@@ -262,10 +261,6 @@ struct LandscapeSection {
     /// Enable heuristic landscape signals (changed files, symbol map, referenced paths).
     #[serde(default)]
     signals: Option<bool>,
-    /// Prune landscape signal sections against already-observed files from
-    /// the ToolLedger.
-    #[serde(rename = "tool-ledger-pruning", default)]
-    tool_ledger_pruning: Option<bool>,
     /// Enable stage profiles — derive signal sections from artifact inputs
     /// rather than always emitting every section.
     #[serde(rename = "stage-profiles", default)]
@@ -361,13 +356,6 @@ impl Config {
                     .ok()
                     .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_SIGNALS", &v))
                     .unwrap_or(true);
-                let landscape_tool_ledger_pruning =
-                    std::env::var("GREMLINS_LANDSCAPE_TOOL_LEDGER_PRUNING")
-                        .ok()
-                        .and_then(|v| {
-                            parse_env_bool_or_warn("GREMLINS_LANDSCAPE_TOOL_LEDGER_PRUNING", &v)
-                        })
-                        .unwrap_or(false);
                 let landscape_stage_profiles = std::env::var("GREMLINS_LANDSCAPE_STAGE_PROFILES")
                     .ok()
                     .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_STAGE_PROFILES", &v))
@@ -387,7 +375,6 @@ impl Config {
                     max_landscape_tokens,
                     max_landscape_tool_tokens,
                     landscape_signals,
-                    landscape_tool_ledger_pruning,
                     landscape_stage_profiles,
                     landscape_diff_stat,
                     ..Config::default()
@@ -582,19 +569,6 @@ impl Config {
             })
             .unwrap_or(true);
 
-        let landscape_tool_ledger_pruning = cfg_file
-            .landscape
-            .as_ref()
-            .and_then(|l| l.tool_ledger_pruning)
-            .or_else(|| {
-                std::env::var("GREMLINS_LANDSCAPE_TOOL_LEDGER_PRUNING")
-                    .ok()
-                    .and_then(|v| {
-                        parse_env_bool_or_warn("GREMLINS_LANDSCAPE_TOOL_LEDGER_PRUNING", &v)
-                    })
-            })
-            .unwrap_or(false);
-
         let landscape_stage_profiles = cfg_file
             .landscape
             .as_ref()
@@ -636,7 +610,6 @@ impl Config {
             max_landscape_tokens,
             max_landscape_tool_tokens,
             landscape_signals,
-            landscape_tool_ledger_pruning,
             landscape_stage_profiles,
             landscape_diff_stat,
             backoff,
@@ -714,10 +687,6 @@ impl Config {
 
     pub fn landscape_signals(&self) -> bool {
         self.landscape_signals
-    }
-
-    pub fn tool_ledger_pruning(&self) -> bool {
-        self.landscape_tool_ledger_pruning
     }
 
     pub fn landscape_stage_profiles(&self) -> bool {

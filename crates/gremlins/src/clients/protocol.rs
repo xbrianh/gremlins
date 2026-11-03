@@ -54,11 +54,6 @@ pub struct CompletedRun {
     /// the serializable transcript; the trait object itself is never serialized.
     #[serde(skip)]
     pub(crate) conversation: Option<Box<dyn Conversation>>,
-    /// File observations (Read/Grep/Landscape + mutation paths) collected
-    /// during the agent stage. Populated for all agent loops so that
-    /// cross-stage landscape pruning can skip already-explored files.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file_observations: Option<FileObservations>,
 }
 
 // Manual Clone impl needed because `Box<dyn Conversation>` doesn't
@@ -73,7 +68,6 @@ impl Clone for CompletedRun {
             cost_usd: self.cost_usd,
             token_usage: self.token_usage.clone(),
             conversation: self.conversation.clone(),
-            file_observations: self.file_observations.clone(),
         }
     }
 }
@@ -89,44 +83,6 @@ pub fn add_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a + b),
         (a, b) => a.or(b),
-    }
-}
-
-/// One file observation captured from a worker agent's Read, Grep, or Landscape.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FileObservation {
-    /// Tool name: "Read", "Grep", "DirLs", or "Landscape".
-    pub tool: String,
-    /// File path for Read; search path for Grep; directory for Landscape.
-    pub path: String,
-    #[serde(default)]
-    pub offset: u64,
-    #[serde(default)]
-    pub limit: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pattern: Option<String>,
-    /// Exact tool output captured by the worker.
-    pub output: String,
-}
-
-/// Aggregated file observations from a nested agent loop plus mutation paths
-/// for parent-ledger invalidation.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct FileObservations {
-    pub items: Vec<FileObservation>,
-    /// True when observations were truncated to fit the configured output budget.
-    #[serde(default)]
-    pub truncated: bool,
-    /// Files the worker modified (Write/Edit), used to invalidate stale parent-ledger reads.
-    #[serde(default)]
-    pub written_paths: Vec<String>,
-}
-
-impl FileObservations {
-    /// Whether this snapshot carries nothing worth reporting: no reads, no
-    /// mutation paths, and no truncation marker.
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty() && self.written_paths.is_empty() && !self.truncated
     }
 }
 
@@ -168,35 +124,5 @@ mod tests {
         assert_eq!(decoded.cache_creation_input_tokens, None);
         assert_eq!(decoded.reasoning_tokens, Some(2));
         assert_eq!(decoded.turns, 4);
-    }
-
-    #[test]
-    fn is_empty_no_content_no_truncation() {
-        let obs = FileObservations {
-            items: vec![],
-            truncated: false,
-            written_paths: vec![],
-        };
-        assert!(obs.is_empty());
-    }
-
-    #[test]
-    fn is_empty_with_truncation() {
-        let obs = FileObservations {
-            items: vec![],
-            truncated: true,
-            written_paths: vec![],
-        };
-        assert!(!obs.is_empty());
-    }
-
-    #[test]
-    fn is_empty_with_written_paths() {
-        let obs = FileObservations {
-            items: vec![],
-            truncated: false,
-            written_paths: vec!["src/lib.rs".into()],
-        };
-        assert!(!obs.is_empty());
     }
 }

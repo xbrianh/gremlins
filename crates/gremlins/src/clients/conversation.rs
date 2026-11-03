@@ -1,7 +1,5 @@
 use std::any::Any;
 
-use crate::clients::protocol::FileObservations;
-
 // ── conversation machinery ──────────────────────────────────────────────────
 
 /// The transcript produced for one model turn.
@@ -28,13 +26,6 @@ pub(crate) struct RunArtifact {
 /// pending user prompt. The loop narrates what happened; the conversation
 /// assembles the transcript.
 pub(crate) trait Conversation: Any + Send + Sync {
-    /// Downcast to a concrete type.
-    fn as_any(&self) -> &dyn Any;
-
-    /// Downcast to a concrete type (mutable).
-    #[allow(dead_code)]
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-
     /// Clone this conversation into a new heap allocation.
     fn clone_box(&self) -> Box<dyn Conversation>;
 
@@ -146,21 +137,8 @@ pub(crate) trait Conversation: Any + Send + Sync {
         Vec::new()
     }
 
-    /// Join a child conversation's contexts back into this conversation,
-    /// returning any newly-observed text blocks. This is the preferred path
-    /// for Task tool context joining — it avoids exposing raw
-    /// [`ConversationContext`] objects to callers.
-    fn join_child_conversation(&mut self, _child: &dyn Conversation) -> Vec<String> {
-        Vec::new()
-    }
-
     /// Call `finalize_turn` on every context at a turn boundary.
     fn finalize_contexts(&mut self, _turn: usize) {}
-
-    /// Return file observations from the first context that provides them.
-    fn file_observations(&self) -> Option<FileObservations> {
-        None
-    }
 
     /// Reset per-turn transcript state on every context so a child loop
     /// starts with a clean slate.
@@ -237,14 +215,6 @@ impl ConversationStub {
 
 #[cfg(test)]
 impl Conversation for ConversationStub {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-
     fn clone_box(&self) -> Box<dyn Conversation> {
         self.box_self()
     }

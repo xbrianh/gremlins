@@ -54,16 +54,14 @@ const ALLOWLIST_DOT_DIRS: &[&str] = &[".gremlins", ".github", ".cargo-gremlin-ta
 
 /// Render heuristic signal sections for injection into the landscape block.
 ///
-/// Returns `SignalSection` values for each non-empty section,
-/// together with the count of files skipped due to pruning, and the set of
-/// canonical changed-file paths (used by the `DiffFocused` profile to scope
-/// the skeleton).
+/// Returns `SignalSection` values for each non-empty section, together with
+/// the set of canonical changed-file paths (used by the `DiffFocused` profile
+/// to scope the skeleton).
 pub fn inject_signal_sections(
     ctx: &signals::SignalContext,
     outlines: &[FileOutline],
 ) -> (
     Vec<signals::SignalSection>,
-    usize,
     Vec<PathBuf>,
     std::collections::HashMap<String, signals::SymbolEntry>,
 ) {

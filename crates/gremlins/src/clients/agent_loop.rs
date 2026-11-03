@@ -27,7 +27,7 @@ use super::format::{
 };
 use super::model::{GremlinsModel, GremlinsModelError};
 use super::plug::LoopHooks;
-use super::protocol::{add_opt, CompletedRun, FileObservations, TurnStats, UsageStats};
+use super::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 use crate::clients::done_helpers::done_user_message;
 
@@ -205,7 +205,7 @@ struct ToolJob {
 /// [`LoopState::dispatch_tool_jobs`].
 enum ToolDispatchOutcome {
     /// Every tool finished; outputs are aligned with the job list order.
-    Completed(Vec<(String, Option<Box<dyn Conversation>>)>),
+    Completed(Vec<String>),
     /// The operator entered debug mid-batch: the batch was abandoned, the
     /// turn's history was unwound, and the caller should re-execute the turn.
     ReexecuteTurn,
@@ -988,12 +988,12 @@ impl LoopState {
             let sem = sem.clone();
             async move {
                 if let Some(msg) = &j.over_cap {
-                    (msg.clone(), None)
+                    msg.clone()
                 } else {
                     let _permit = sem.acquire_owned().await;
-                    let outcome =
-                        tools::invoke_with_conversation(&j.id, &j.name, ctx, &j.args, conv).await;
-                    (outcome.output, outcome.child)
+                    tools::invoke_with_conversation(&j.id, &j.name, ctx, &j.args, conv)
+                        .await
+                        .output
                 }
             }
         }));
@@ -1085,7 +1085,7 @@ impl LoopState {
     async fn emit_tool_results(
         &mut self,
         jobs: Vec<ToolJob>,
-        results: Vec<(String, Option<Box<dyn Conversation>>)>,
+        results: Vec<String>,
         tool_ctx: &AgentLoopRuntime,
         prefix: &str,
         nested: bool,
@@ -1118,7 +1118,7 @@ impl LoopState {
         // for `tool_calls.len()` when bumping the turn counter below.
         let job_count = jobs.len();
         let mut result_msgs = Vec::new();
-        for (job, (output, child_conversation)) in jobs.into_iter().zip(results) {
+        for (job, output) in jobs.into_iter().zip(results) {
             let result_msg = format!("result: {}", trunc(&output, 200));
             self.hook_log(&format!("{prefix}{result_msg}"));
             if !nested {
@@ -1156,21 +1156,6 @@ impl LoopState {
             } else {
                 Vec::new()
             };
-            // Newly joined Read/Grep outputs are not part of the compact
-            // `[seen]` transcript, so drain them here. They are attached to
-            // this tool's result (durable history) rather than only the
-            // ephemeral next_prompt, so later turns retain the child's evidence
-            // even after the ledger has marked the files as read.
-            //
-            // A tool that returns a child conversation (Task and any future
-            // fan-out tool) is joined uniformly here — no name dispatch.
-            // Join child contexts back into parent: matching by concrete child
-            // context joins only the parent context of the same type, etc. —
-            // no silent cross-type no-op calls.
-            let mut child_observations: Vec<String> = Vec::new();
-            if let Some(child_conv) = child_conversation {
-                child_observations = self.conv.join_child_conversation(&*child_conv);
-            }
             let annotated = extra.iter().flatten().fold(String::new(), |mut acc, s| {
                 if !acc.is_empty() {
                     acc.push('\n');
@@ -1178,15 +1163,11 @@ impl LoopState {
                 acc.push_str(s);
                 acc
             });
-            let mut tool_output = if annotated.is_empty() {
+            let tool_output = if annotated.is_empty() {
                 output
             } else {
                 format!("{annotated}\n{output}")
             };
-            if !child_observations.is_empty() {
-                tool_output.push_str("\n\n");
-                tool_output.push_str(&child_observations.join("\n\n"));
-            }
             result_msgs.push(Message::tool_result(
                 CallId::from_wire(job.id.clone()),
                 ToolName::new(job.name.clone()).expect("tool name must not be empty"),
@@ -1563,7 +1544,6 @@ impl LoopState {
                     captured,
                     usage,
                     Some(self.conv.clone_box()),
-                    Some(self.conv.file_observations().unwrap_or_default()),
                 ))));
             }
             _ => {}
@@ -1697,7 +1677,6 @@ impl LoopState {
             captured,
             usage,
             Some(self.conv.clone_box()),
-            Some(self.conv.file_observations().unwrap_or_default()),
         )))
     }
 
@@ -2117,7 +2096,6 @@ fn completed_run(
     events: &Option<Vec<serde_json::Value>>,
     usage: UsageStats,
     conversation: Option<Box<dyn Conversation>>,
-    file_observations: Option<FileObservations>,
 ) -> CompletedRun {
     CompletedRun {
         exit_code: 0,
@@ -2127,7 +2105,6 @@ fn completed_run(
         cost_usd: None,
         token_usage: Some(usage),
         conversation,
-        file_observations,
     }
 }
 
@@ -2793,7 +2770,7 @@ pub(crate) fn test_tool_ctx() -> super::tools::AgentLoopRuntime {
 mod tests {
     use super::*;
     use crate::clients::conversation::ConversationStub;
-    use crate::clients::format::{key_arg, ledger_key_arg};
+    use crate::clients::format::key_arg;
     use crate::clients::interactive::InteractiveChannels;
     use http::StatusCode;
     use rig_core::message::{Issuer, Reasoning, ReasoningContent, ToolFunction, UserContent};
@@ -2900,29 +2877,6 @@ mod tests {
             "echo hi"
         );
         assert_eq!(key_arg(&serde_json::json!({})), "");
-    }
-
-    #[test]
-    fn ledger_key_arg_covers_extra_fields_and_truncates() {
-        assert_eq!(ledger_key_arg(&serde_json::json!({"path": "/tmp"})), "/tmp");
-        assert_eq!(
-            ledger_key_arg(&serde_json::json!({"kind": "Scout"})),
-            "Scout"
-        );
-        assert_eq!(ledger_key_arg(&serde_json::json!({"pattern": ""})), "");
-        let long = ledger_key_arg(&serde_json::json!({"command": "x".repeat(200)}));
-        assert_eq!(long.chars().count(), 80);
-        assert!(long.contains('…'));
-        assert!(ledger_key_arg(&serde_json::json!({
-            "file_path": format!("{}/deep/path.txt", "d".repeat(200))
-        }))
-        .ends_with("path.txt"));
-
-        // Multiline commands must stay on one ledger line.
-        assert_eq!(
-            ledger_key_arg(&serde_json::json!({"command": "a\nb\r\nc"})),
-            "a b  c"
-        );
     }
 
     #[test]
@@ -3236,27 +3190,6 @@ mod tests {
             line.len() <= 200,
             "enriched line must fit the 200-char cap, got {}: {line}",
             line.len()
-        );
-    }
-
-    #[test]
-    fn ledger_key_arg_includes_summary() {
-        assert_eq!(
-            ledger_key_arg(&serde_json::json!({"summary": "Fixed the bug"})),
-            "Fixed the bug"
-        );
-        // summary is lower priority than file_path, command, pattern.
-        assert_eq!(
-            ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x", "summary": "ignored"})),
-            "/tmp/x"
-        );
-        assert_eq!(
-            ledger_key_arg(&serde_json::json!({"command": "ls", "summary": "ignored"})),
-            "ls"
-        );
-        assert_eq!(
-            ledger_key_arg(&serde_json::json!({"pattern": "fn", "summary": "ignored"})),
-            "fn"
         );
     }
 

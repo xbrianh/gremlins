@@ -374,10 +374,6 @@ impl crate::conversation::context::ConversationContext for LandscapeContext {
         }
     }
 
-    fn join(&mut self, _other: &dyn crate::conversation::context::ConversationContext) {
-        // No-op: no live state to merge.
-    }
-
     fn clear_transcript(&mut self) {
         self.seen.lock().unwrap().clear();
     }

@@ -40,117 +40,6 @@ use rig_core::completion::Message;
 // System prompt assembly
 // ---------------------------------------------------------------------------
 
-/// URI of the cross-stage observed-file-path snapshot used to prune redundant
-/// landscape signal sections.
-const LEDGER_SNAPSHOT_URI: &str = "artifact://_signals/ledger_snapshot.json";
-
-/// Whether cross-stage ToolLedger landscape pruning is active. Requires both
-/// the pruning opt-in and landscape signals to be enabled.
-fn ledger_pruning_enabled() -> bool {
-    let cfg = crate::config::Config::load().unwrap_or_default();
-    cfg.tool_ledger_pruning() && cfg.landscape_signals()
-}
-
-/// Read the set of file paths observed by prior stages, for pruning redundant
-/// landscape signal sections. Returns `None` when pruning is disabled or no
-/// paths have been recorded yet.
-async fn read_pruned_files(gremlin: &Gremlin) -> Option<std::collections::HashSet<PathBuf>> {
-    if !ledger_pruning_enabled() {
-        return None;
-    }
-    let log_tx = gremlin.runtime_config.log_tx.clone();
-    let json = match gremlin.state.content(LEDGER_SNAPSHOT_URI, None).await {
-        Ok(json) => json,
-        Err(_) => return None,
-    };
-    let paths: Vec<String> = match serde_json::from_str(&json) {
-        Ok(paths) => paths,
-        Err(e) => {
-            log::warn!("[ledger-pruning] failed to parse {LEDGER_SNAPSHOT_URI}: {e}");
-            send_log(
-                &log_tx,
-                log::Level::Info,
-                format!("[ledger-pruning] failed to parse snapshot: {e}"),
-            );
-            return None;
-        }
-    };
-    if paths.is_empty() {
-        return None;
-    }
-    Some(paths.into_iter().map(PathBuf::from).collect())
-}
-
-/// Merge this stage's observed file paths into the accumulated cross-stage
-/// snapshot so later stages can prune redundant landscape signal sections.
-///
-/// Paths are stored as absolute canonical paths (via `canonicalize_or_ancestor`)
-/// so they match the canonical form the signal pruning filter compares against.
-/// No-op unless both landscape signals and ToolLedger pruning are enabled.
-async fn persist_observed_paths(
-    gremlin: &Gremlin,
-    observations: &crate::clients::protocol::FileObservations,
-) {
-    if !ledger_pruning_enabled() {
-        return;
-    }
-    let log_tx = gremlin.runtime_config.log_tx.clone();
-    let cwd = gremlin.cwd();
-    // Seed from the accumulated set written by prior stages.
-    let mut all_paths: std::collections::HashSet<String> =
-        match gremlin.state.content(LEDGER_SNAPSHOT_URI, None).await {
-            Ok(json) => match serde_json::from_str::<Vec<String>>(&json) {
-                Ok(paths) => paths.into_iter().collect(),
-                Err(e) => {
-                    log::warn!("[ledger-pruning] failed to parse existing snapshot: {e}");
-                    send_log(
-                        &log_tx,
-                        log::Level::Info,
-                        format!("[ledger-pruning] failed to parse existing snapshot: {e}"),
-                    );
-                    std::collections::HashSet::new()
-                }
-            },
-            Err(_) => std::collections::HashSet::new(),
-        };
-    for item in &observations.items {
-        let raw = PathBuf::from(&item.path);
-        let abs = if raw.is_absolute() {
-            raw
-        } else {
-            cwd.join(&raw)
-        };
-        all_paths.insert(
-            crate::core::paths::canonicalize_or_ancestor(&abs)
-                .to_string_lossy()
-                .into_owned(),
-        );
-    }
-    let paths: Vec<String> = all_paths.into_iter().collect();
-    if let Ok(json) = serde_json::to_string(&paths) {
-        match Uri::parse(LEDGER_SNAPSHOT_URI) {
-            Ok(uri) => {
-                if let Err(e) = gremlin.state.write_into_registry(&uri, &json).await {
-                    log::warn!("[ledger-pruning] failed to write snapshot: {e}");
-                    send_log(
-                        &log_tx,
-                        log::Level::Info,
-                        format!("[ledger-pruning] failed to write snapshot: {e}"),
-                    );
-                }
-            }
-            Err(e) => {
-                log::warn!("[ledger-pruning] invalid snapshot URI {LEDGER_SNAPSHOT_URI}: {e}");
-                send_log(
-                    &log_tx,
-                    log::Level::Info,
-                    format!("[ledger-pruning] invalid snapshot URI {LEDGER_SNAPSHOT_URI}: {e}"),
-                );
-            }
-        }
-    }
-}
-
 /// Build file outlines for a workspace root.
 ///
 /// This is the raw-outline half of the landscape block builder, extracted so
@@ -650,7 +539,6 @@ async fn run_agent(
         let has_diff_input = checkout_keys
             .iter()
             .any(|k| k == "artifact://diff" || k.starts_with("artifact://diff/"));
-        let pruned = read_pruned_files(gremlin).await;
 
         profile = if crate::config::landscape_stage_profiles() && has_diff_input {
             crate::landscape::signals::SignalProfile::DiffFocused
@@ -660,10 +548,9 @@ async fn run_agent(
 
         let signals_enabled = crate::config::landscape_signals();
 
-        let (signal_sections, _pruned_skipped, diff_paths, symbol_index) = if signals_enabled {
+        let (signal_sections, diff_paths, symbol_index) = if signals_enabled {
             let ctx = crate::landscape::signals::SignalContext {
                 cwd: cwd2.clone(),
-                pruned_files: pruned,
                 profile,
                 prompt: if prepared.prompt.is_empty() {
                     None
@@ -874,7 +761,7 @@ async fn run_agent(
             },
         );
     }
-    // Build model contexts from landscape data: ToolLedger + SignalMapContext + LandscapeContext.
+    // Build model contexts from landscape data: SignalMapContext + LandscapeContext.
     conv.seed_from_landscape(landscape_data, &prepared.user_prompt(), profile);
 
     let prepopulated_conversation: Box<dyn crate::clients::conversation::Conversation> =
@@ -1055,12 +942,6 @@ async fn run_agent(
     commit_agent(&prepared, local_registry.as_ref())
         .await
         .map_err(|error| agent_commit_err(error, &prepared.name))?;
-
-    // Persist this stage's observed file paths so later stages can prune
-    // redundant landscape signal sections.
-    if let Some(ref observations) = completed.file_observations {
-        persist_observed_paths(gremlin, observations).await;
-    }
 
     // Merge the localized registry back into the main registry.
     gremlin

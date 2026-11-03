@@ -43,9 +43,6 @@ impl SignalSection {
 pub struct SignalContext {
     /// Worktree root directory used for sandbox containment checks.
     pub cwd: PathBuf,
-    /// Set of already-observed file paths to exclude from signal sections.
-    /// Absolute canonical paths.
-    pub pruned_files: Option<HashSet<PathBuf>>,
     /// Which signal sections to emit, derived from stage artifact inputs.
     pub profile: SignalProfile,
     /// Stage prompt/plan text used to derive symbol-map candidates.
@@ -197,7 +194,7 @@ fn contained_path(root: &Path, path: &Path) -> Option<PathBuf> {
 /// The third return element is the set of canonical paths of the changed
 /// files, used by `DiffFocused` profile to scope the skeleton and other
 /// sections.
-fn build_changed_files(ctx: &SignalContext) -> (Option<String>, Vec<PathBuf>, usize) {
+fn build_changed_files(ctx: &SignalContext) -> (Option<String>, Vec<PathBuf>) {
     // Obtain the git repository root first; `diff --name-only` emits
     // paths relative to the repo root, not the current directory.
     let Ok(repo_root_output) = Command::new("git")
@@ -205,13 +202,13 @@ fn build_changed_files(ctx: &SignalContext) -> (Option<String>, Vec<PathBuf>, us
         .current_dir(&ctx.cwd)
         .output()
     else {
-        return (None, Vec::new(), 0);
+        return (None, Vec::new());
     };
     if !repo_root_output.status.success() {
-        return (None, Vec::new(), 0);
+        return (None, Vec::new());
     }
     let Ok(repo_root) = String::from_utf8(repo_root_output.stdout) else {
-        return (None, Vec::new(), 0);
+        return (None, Vec::new());
     };
     let repo_root = PathBuf::from(repo_root.trim());
 
@@ -220,15 +217,14 @@ fn build_changed_files(ctx: &SignalContext) -> (Option<String>, Vec<PathBuf>, us
         .current_dir(&ctx.cwd)
         .output()
     else {
-        return (None, Vec::new(), 0);
+        return (None, Vec::new());
     };
     if !output.status.success() {
-        return (None, Vec::new(), 0);
+        return (None, Vec::new());
     }
     let Ok(text) = String::from_utf8(output.stdout) else {
-        return (None, Vec::new(), 0);
+        return (None, Vec::new());
     };
-    let mut skipped = 0usize;
     let mut canonical_paths = Vec::new();
     let paths: Vec<String> = text
         .lines()
@@ -241,24 +237,16 @@ fn build_changed_files(ctx: &SignalContext) -> (Option<String>, Vec<PathBuf>, us
             if !canonical.is_file() {
                 return None;
             }
-            // Skip paths already observed by a prior stage.
-            if let Some(ref pruned) = ctx.pruned_files {
-                if pruned.contains(&canonical) {
-                    skipped += 1;
-                    return None;
-                }
-            }
             canonical_paths.push(canonical);
             Some(p.to_string())
         })
         .collect();
     if paths.is_empty() {
-        return (None, Vec::new(), skipped);
+        return (None, Vec::new());
     }
     (
         Some(format!("<!-- Changed files -->\n{}\n", paths.join("\n"))),
         canonical_paths,
-        skipped,
     )
 }
 
@@ -266,7 +254,7 @@ fn build_changed_files(ctx: &SignalContext) -> (Option<String>, Vec<PathBuf>, us
 ///
 /// Complements [`build_changed_files`] by answering "how much changed" for
 /// each path in the name-only list. Paths are resolved against the repo root,
-/// sandbox-contained, and pruned exactly like the changed-files section;
+/// sandbox-contained, and filtered like the changed-files section;
 /// binary entries (`-` added count) and files outside the worktree are
 /// dropped. Entries are sorted by total magnitude descending and
 /// capped at 30 to respect the shared token budget.
@@ -364,11 +352,6 @@ fn build_diff_stat(ctx: &SignalContext) -> Option<String> {
         // Don't gate on is_file() — fully-deleted files still show their
         // deletion magnitude. The path passes containment (it was inside the
         // sandbox) so it's safe to report.
-        if let Some(ref pruned) = ctx.pruned_files {
-            if pruned.contains(&canonical) {
-                continue;
-            }
-        }
         let rel = canonical
             .strip_prefix(&repo_root_canonical)
             .map(|r| r.display().to_string())
@@ -472,19 +455,12 @@ pub fn build_symbol_map(
 pub fn render_signal_sections(
     ctx: &SignalContext,
     outlines: &[crate::FileOutline],
-) -> (
-    Vec<SignalSection>,
-    usize,
-    Vec<PathBuf>,
-    HashMap<String, SymbolEntry>,
-) {
+) -> (Vec<SignalSection>, Vec<PathBuf>, HashMap<String, SymbolEntry>) {
     let signals = build_signals(ctx, outlines);
     let mut sections = Vec::new();
-    let mut total_skipped = 0usize;
 
     // Changed files (via git) — always attempt regardless of profile.
-    let (changed, diff_paths, n) = build_changed_files(ctx);
-    total_skipped += n;
+    let (changed, diff_paths) = build_changed_files(ctx);
     if let Some(changed) = changed {
         sections.push(SignalSection::new("changed-files", changed));
     }
@@ -517,7 +493,7 @@ pub fn render_signal_sections(
             }
         }
 
-        (sections, total_skipped, diff_paths, signals.symbol_index)
+        (sections, diff_paths, signals.symbol_index)
     } else {
         // Full profile (or DiffFocused with empty diff): emit the unscoped
         // symbol map section.
@@ -528,7 +504,7 @@ pub fn render_signal_sections(
             }
         }
 
-        (sections, total_skipped, Vec::new(), signals.symbol_index)
+        (sections, Vec::new(), signals.symbol_index)
     }
 }
 
@@ -574,7 +550,6 @@ fn my_function_name() {
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
             diff_stat: false,
@@ -616,7 +591,6 @@ fn my_function_name() {
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
             diff_stat: false,
@@ -675,7 +649,6 @@ pub fn bar_init() -> BarConfig {
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
             diff_stat: false,
@@ -740,7 +713,6 @@ pub fn bar_init() -> BarConfig {
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
             diff_stat: false,
@@ -759,7 +731,6 @@ pub fn bar_init() -> BarConfig {
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
             diff_stat: false,
@@ -785,7 +756,6 @@ let config = Config::default();
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
             diff_stat: false,
@@ -804,20 +774,15 @@ let config = Config::default();
         );
     }
 
-    // ── pruning ────────────────────────────────────────────────────────
-
     #[test]
-    fn pruned_files_symbol_map_unaffected() {
-        // Even when every file in the outline is pruned, the symbol map
-        // (which is structural, not file-level content) is still emitted.
+    fn symbol_map_emitted_for_outlines() {
+        // The symbol map is structural: any outline with candidates yields
+        // index entries regardless of what the changed-files section reports.
         let dir = tempfile::tempdir().unwrap();
         let path = write_file(&dir, "lib.rs", "fn helper_fn() {}\n");
         let outline = make_outline(&path, false, vec![]);
-        let file_canon = contained_path(dir.path(), &path).unwrap();
-        let pruned = std::collections::HashSet::from([file_canon]);
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: Some(pruned),
             profile: SignalProfile::Full,
             prompt: None,
             diff_stat: false,
@@ -825,7 +790,7 @@ let config = Config::default();
         let result = build_signals(&ctx, &[outline]);
         assert!(
             result.symbol_index.contains_key("helper_fn"),
-            "symbol map should be unaffected by pruning"
+            "symbol map should include outline identifiers"
         );
     }
 
@@ -922,12 +887,11 @@ let config = Config::default();
         let outline = make_outline(&path, false, vec![]);
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: Some("helper_fn".to_string()),
             diff_stat: false,
         };
-        let (sections, _skipped, _diff, _) = render_signal_sections(&ctx, &[outline]);
+        let (sections, _diff, _) = render_signal_sections(&ctx, &[outline]);
         let keys: Vec<&str> = sections.iter().map(|s| s.key.as_str()).collect();
         assert!(
             keys.contains(&"symbol-map"),
@@ -950,12 +914,11 @@ let config = Config::default();
         }
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::DiffFocused,
             prompt: None,
             diff_stat: false,
         };
-        let (sections, _skipped, diff_paths, _) = render_signal_sections(&ctx, &outlines);
+        let (sections, diff_paths, _) = render_signal_sections(&ctx, &outlines);
         let keys: Vec<&str> = sections.iter().map(|s| s.key.as_str()).collect();
         assert!(
             keys.contains(&"changed-files"),
@@ -979,7 +942,6 @@ let config = Config::default();
         }
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::DiffFocused,
             // Prompt-derived resolution: only identifiers mentioned in the
             // prompt appear in the symbol map. func_01 is in the diff and
@@ -989,7 +951,7 @@ let config = Config::default();
             prompt: Some("func_01 func_02".to_string()),
             diff_stat: false,
         };
-        let (sections, _skipped, diff_paths, _) = render_signal_sections(&ctx, &outlines);
+        let (sections, diff_paths, _) = render_signal_sections(&ctx, &outlines);
 
         // At least one section should be Symbol map (files in diff contain
         // `fn func_NN` identifiers).
@@ -1049,12 +1011,11 @@ let config = Config::default();
 
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
             diff_stat: false,
         };
-        let (_, diff_paths, _) = build_changed_files(&ctx);
+        let (_, diff_paths) = build_changed_files(&ctx);
         assert!(!diff_paths.is_empty(), "expected changed files");
         let stat = build_diff_stat(&ctx).expect("diff stat should exist");
         let lines: Vec<&str> = stat.lines().collect();
@@ -1074,7 +1035,7 @@ let config = Config::default();
     }
 
     #[test]
-    fn diff_stat_drops_binary_and_pruned_and_escaped() {
+    fn diff_stat_drops_binary_and_escaped() {
         let dir = match setup_git_repo(11) {
             Some(d) => d,
             None => return,
@@ -1082,9 +1043,6 @@ let config = Config::default();
         // Binary file: non-UTF8 bytes → numstat reports "-" and we drop it.
         std::fs::write(dir.path().join("src/binary.bin"), [0u8, 1, 2, 0xff]).unwrap();
         git_commit_all(&dir, "binary");
-        // Text file we will prune via the context.
-        std::fs::write(dir.path().join("src/pruned.rs"), "fn pruned() {}\n").unwrap();
-        git_commit_all(&dir, "pruned");
         // Symlink whose target escapes the worktree.
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret.txt"), "secret\n").unwrap();
@@ -1095,23 +1053,17 @@ let config = Config::default();
         .unwrap();
         git_commit_all(&dir, "escape");
 
-        let pruned_canon = contained_path(dir.path(), &dir.path().join("src/pruned.rs")).unwrap();
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: Some(std::collections::HashSet::from([pruned_canon])),
             profile: SignalProfile::Full,
             prompt: None,
             diff_stat: false,
         };
-        let (_, _diff_paths, _) = build_changed_files(&ctx);
+        let (_, _diff_paths) = build_changed_files(&ctx);
         let stat = build_diff_stat(&ctx).expect("stat should exist");
         assert!(
             !stat.contains("binary.bin"),
             "binary entry must be dropped; got: {stat}"
-        );
-        assert!(
-            !stat.contains("pruned.rs"),
-            "pruned entry must be dropped; got: {stat}"
         );
         assert!(
             !stat.contains("escape.rs"),
@@ -1138,12 +1090,11 @@ let config = Config::default();
         git_commit_all(&dir, "bulk");
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
             diff_stat: false,
         };
-        let (_, _diff_paths, _) = build_changed_files(&ctx);
+        let (_, _diff_paths) = build_changed_files(&ctx);
         let stat = build_diff_stat(&ctx).expect("stat should exist");
         let lines: Vec<&str> = stat.lines().collect();
         // Header line + at most 30 entry lines.
@@ -1161,7 +1112,6 @@ let config = Config::default();
         write_file(&dir, "src/lib.rs", "fn f() {}\n");
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
             diff_stat: false,
@@ -1185,12 +1135,11 @@ let config = Config::default();
         let outlines: Vec<crate::FileOutline> = vec![];
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
             diff_stat: true,
         };
-        let (sections, _skipped, _paths, _) = render_signal_sections(&ctx, &outlines);
+        let (sections, _paths, _) = render_signal_sections(&ctx, &outlines);
         let keys: Vec<&str> = sections.iter().map(|s| s.key.as_str()).collect();
         assert!(
             keys.first() == Some(&"diff-stat"),
@@ -1221,12 +1170,11 @@ let config = Config::default();
         // diff_stat: false → section must be absent.
         let ctx_off = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
             diff_stat: false,
         };
-        let (sections_off, _, _, _) = render_signal_sections(&ctx_off, &outlines);
+        let (sections_off, _, _) = render_signal_sections(&ctx_off, &outlines);
         assert!(
             !sections_off.iter().any(|s| s.key == "diff-stat"),
             "diff-stat must be absent when flag is off"
@@ -1235,12 +1183,11 @@ let config = Config::default();
         // diff_stat: true → section must appear.
         let ctx_on = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
             diff_stat: true,
         };
-        let (sections_on, _, _, _) = render_signal_sections(&ctx_on, &outlines);
+        let (sections_on, _, _) = render_signal_sections(&ctx_on, &outlines);
         let has_diff_stat = sections_on.iter().any(|s| s.key == "diff-stat");
         assert!(has_diff_stat, "diff-stat must appear when flag is on");
     }
@@ -1259,12 +1206,11 @@ let config = Config::default();
         let outline = make_outline(&dir.path().join("src/lib.rs"), false, vec![]);
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: Some("helper_fn MyStruct MAX_ITEMS".to_string()),
             diff_stat: false,
         };
-        let (sections, _skipped, _diff, _) = render_signal_sections(&ctx, &[outline]);
+        let (sections, _diff, _) = render_signal_sections(&ctx, &[outline]);
         let body = sections
             .iter()
             .find(|s| s.key == "symbol-map")
@@ -1291,12 +1237,11 @@ let config = Config::default();
         let outline = make_outline(&dir.path().join("src/lib.rs"), false, vec![]);
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: None,
             diff_stat: false,
         };
-        let (sections, _skipped, _diff, _) = render_signal_sections(&ctx, &[outline]);
+        let (sections, _diff, _) = render_signal_sections(&ctx, &[outline]);
         assert!(
             !sections.iter().any(|s| s.key == "symbol-map"),
             "empty prompt must not produce symbol map; got sections: {sections:?}"
@@ -1310,7 +1255,6 @@ let config = Config::default();
         let outline = make_outline(&dir.path().join("src/lib.rs"), false, vec![]);
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             // "Config" is a single-word capital — rejected by camel_case_regex.
             // "use" is bare lowercase — rejected by snake_case_regex.
@@ -1318,7 +1262,7 @@ let config = Config::default();
             prompt: Some("Config use something_else".to_string()),
             diff_stat: false,
         };
-        let (sections, _skipped, _diff, _) = render_signal_sections(&ctx, &[outline]);
+        let (sections, _diff, _) = render_signal_sections(&ctx, &[outline]);
         assert!(
             !sections.iter().any(|s| s.key == "symbol-map"),
             "no-match prompt must not produce symbol map; got sections: {sections:?}"
@@ -1340,12 +1284,11 @@ let config = Config::default();
         let outline = make_outline(&dir.path().join("src/lib.rs"), false, vec![]);
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: Some("use let Config".to_string()),
             diff_stat: false,
         };
-        let (sections, _skipped, _diff, _) = render_signal_sections(&ctx, &[outline]);
+        let (sections, _diff, _) = render_signal_sections(&ctx, &[outline]);
         assert!(
             !sections.iter().any(|s| s.key == "symbol-map"),
             "bare words must not produce symbol map; got sections: {sections:?}"
@@ -1370,12 +1313,11 @@ let config = Config::default();
         }
         let ctx = SignalContext {
             cwd: dir.path().to_path_buf(),
-            pruned_files: None,
             profile: SignalProfile::Full,
             prompt: Some(prompt_parts.join(" ")),
             diff_stat: false,
         };
-        let (sections, _skipped, _diff, _) = render_signal_sections(&ctx, &outlines);
+        let (sections, _diff, _) = render_signal_sections(&ctx, &outlines);
         let body = sections
             .iter()
             .find(|s| s.key == "symbol-map")

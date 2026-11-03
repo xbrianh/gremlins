@@ -71,7 +71,6 @@ impl ToolHandler for TaskTool {
         );
         ToolOutcome {
             output: final_output,
-            child: child_outcome.child,
         }
     }
 }
