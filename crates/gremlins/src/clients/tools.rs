@@ -7,7 +7,7 @@ use super::interactive::StreamEventSender;
 use super::shell_parse::{
     shell_tokenize, split_commands, strip_heredocs, strip_subshells, ShellToken, SubCommandSep,
 };
-pub(crate) use super::tool_specs::{
+pub(crate) use crate::conversation::tool_specs::{
     always_available, chat_only_always_available, tool_definitions, validate_tool_args,
     MAX_CONCURRENT_TOOLS,
 };
@@ -471,7 +471,7 @@ pub(crate) fn req_str<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a 
 
 // === Tool handler registry =============================================================
 
-/// Opaque handler dispatched by `invoke`. Implementations live in `crate::toolbox`.
+/// Opaque handler dispatched by `invoke`. Implementations live in `crate::conversation::tools`.
 ///
 /// `conv` is the parent conversation, used by fan-out tools (`Task`) to seed a
 /// child loop — fork inherits the parent history, Scout/Implement get a fresh
@@ -574,7 +574,7 @@ impl ToolRegistry {
 static GLOBAL_TOOL_REGISTRY: OnceLock<ToolRegistry> = OnceLock::new();
 
 fn global_registry() -> &'static ToolRegistry {
-    GLOBAL_TOOL_REGISTRY.get_or_init(crate::toolbox::default_registry)
+    GLOBAL_TOOL_REGISTRY.get_or_init(crate::conversation::tools::default_registry)
 }
 
 /// Per-message concurrency budget for a fan-out tool, or `None` when uncapped.
@@ -830,9 +830,7 @@ fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::paths::*;
-    use crate::test_support::EnvGuard;
-    use crate::toolbox::{
+    use crate::conversation::tools::{
         bash::bash_invoke,
         edit::{edit_invoke, edit_sync},
         glob::glob_invoke,
@@ -842,6 +840,8 @@ mod tests {
         websearch::{websearch_invoke, websearch_invoke_with_cap},
         write::write_invoke,
     };
+    use crate::core::paths::*;
+    use crate::test_support::EnvGuard;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 

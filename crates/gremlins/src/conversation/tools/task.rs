@@ -18,7 +18,7 @@ impl ToolHandler for TaskTool {
     }
 
     fn max_per_message(&self) -> Option<usize> {
-        Some(crate::clients::tool_specs::TASK_MAX_PER_TURN)
+        Some(crate::conversation::tool_specs::TASK_MAX_PER_TURN)
     }
 
     async fn invoke(

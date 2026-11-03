@@ -16,6 +16,6 @@ impl ToolHandler for MischiefTool {
         _conv: &dyn Conversation,
         _args_json: &str,
     ) -> ToolOutcome {
-        ToolOutcome::text(include_str!("../clients/mischief_dsl.md"))
+        ToolOutcome::text(include_str!("../../clients/mischief_dsl.md"))
     }
 }

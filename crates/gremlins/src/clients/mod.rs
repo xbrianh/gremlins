@@ -29,5 +29,4 @@ pub(crate) mod task;
 pub(crate) mod task_models;
 pub(crate) mod token_provider;
 pub(crate) mod token_usage;
-pub(crate) mod tool_specs;
 pub(crate) mod tools;

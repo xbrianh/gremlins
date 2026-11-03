@@ -72,8 +72,8 @@ accepts both a bare key and its `artifact://` form because pipelines
 spell guards/stop conditions either way.
 
 The walker (`gremlins-landscape`) builds the outline; the `Landscape` tool
-handler (`toolbox/landscape.rs`) serves it on demand. Agent stages no longer
-inject a landscape block into the system prompt, so run-loop code in `run.rs`
+handler (`conversation/tools/landscape.rs`) serves it on demand. Agent stages
+no longer inject a landscape block into the system prompt, so run-loop code in `run.rs`
 only uses the stage's `landscape` flag to decide whether the tool is offered.
 
 ### Supervisor
@@ -133,7 +133,7 @@ reconstructs the lock from the inherited fd (`socket.rs`).
 | Change bootstrap behavior / DSL | `bootstrap.rs::run_definition_bootstrap`, `parse_gremlins_command`, `bind_artifact` |
 | Change exec/agent leaf execution | `exec_runner.rs` / `agent_runner.rs` (`prepare_*` + `commit_*`) |
 | Change agent system prompt | `agent_runner.rs` (`prepare_agent`'s `system_prompt`) and `clients/system_prompts.rs` |
-| Change the `Landscape` tool | `gremlins-landscape/src/lib.rs` (`format_landscape_block_tool`) and `toolbox/landscape.rs` |
+| Change the `Landscape` tool | `gremlins-landscape/src/lib.rs` (`format_landscape_block_tool`) and `conversation/tools/landscape.rs` |
 | Change `{var}` substitution | `vars.rs::substitute_vars`, `substitute_vars_to_env` |
 
 ## Error taxonomy
