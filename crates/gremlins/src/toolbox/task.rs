@@ -6,10 +6,9 @@ use crate::clients::tools::{
 };
 use crate::task_kind::TaskKind;
 
-/// The Task tool. Unlike the filesystem/process tools, Task fans out to a
-/// child agent loop and returns that child's conversation for the parent loop
-/// to join. It lives behind the registry like every other tool — the agent
-/// loop never names "Task" to decide how to dispatch or join.
+/// The Task tool. Fans out to a child agent loop and returns the child's
+/// prose output for the parent loop. Seeding happens here: `Fork` gets a copy
+/// of the parent conversation, Scout/Implement get a fresh child prompt.
 pub(crate) struct TaskTool;
 
 #[async_trait]
@@ -54,10 +53,15 @@ impl ToolHandler for TaskTool {
             ));
         };
 
-        let conversation = if kind == TaskKind::Fork {
-            conv.clone_box()
+        // Seed the child conversation here so the task runner does not
+        // need to clone again. Fork inherits parent history (via fork());
+        // Scout/Implement get a fresh conversation (via spawn()).
+        let conversation: Box<dyn Conversation> = if kind == TaskKind::Fork {
+            let mut c = conv.fork();
+            c.set_next_prompt(prompt);
+            c
         } else {
-            conv.empty_child_with_contexts(prompt)
+            conv.spawn_child(prompt)
         };
         let child_outcome = f(kind, prompt.to_string(), conversation).await;
         // Label the result so concurrent Task outputs can be told apart.

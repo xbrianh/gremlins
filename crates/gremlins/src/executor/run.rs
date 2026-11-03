@@ -466,12 +466,6 @@ async fn run_agent(
         prompt = prompt.replace("{scratchpad_path}", &scratchpad_model_path);
     }
 
-    // The landscape context only serves the `Landscape` tool from the worktree
-    // root; it no longer contributes anything to the system prompt.  When
-    // landscape is disabled for the stage, no context is installed and the
-    // tool falls through to the registry handler.
-    let landscape_root = agent.landscape.then(|| gremlin.cwd());
-
     let system_prompt = prompt;
 
     let stage_env = gremlin.env.clone();
@@ -484,7 +478,7 @@ async fn run_agent(
     let chat_turn: Option<usize> = chat_turn_from_stage_name(&agent.name);
 
     // Re-inject scratchpads persisted by prior stages so working memory (file
-    // paths, discovered patterns, decisions) survives conversation compaction.
+    // paths, discovered patterns, decisions) carries across stages.
     // Chat gremlins receive this injection in the supervisor so it rides on
     // the operator prompt — skip it here to avoid doubling up.
     if !is_chat {
@@ -549,7 +543,7 @@ async fn run_agent(
         None
     };
 
-    let mut conv =
+    let conv =
         crate::conversation::standard::StandardConversation::new("", false, verbatim_history);
 
     // ── Live usage tracker for failure persistence ─────
@@ -639,9 +633,6 @@ async fn run_agent(
             },
         );
     }
-    // Build model contexts: LandscapeContext.
-    conv.seed_from_landscape(landscape_root);
-
     let prepopulated_conversation: Box<dyn crate::clients::conversation::Conversation> =
         Box::new(conv);
 

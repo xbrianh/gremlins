@@ -43,7 +43,7 @@ use crate::clients::done_helpers::done_user_message;
 //     └─ LoopState::execute_tools            // batch tool execution
 //         ├─ collect_tool_jobs                // validate + build ToolJob list
 //         ├─ dispatch_tool_jobs               // concurrent execute with cancel
-//         └─ emit_tool_results                // ledger, history, mutation flush
+//         └─ emit_tool_results                // history + prompt roll-forward
 //
 // Supporting types: ToolJob, StreamAccumulator, StreamTurnOutcome,
 // LoopOpts, InteractiveSession, TurnFlow, etc.
@@ -853,7 +853,7 @@ impl LoopState {
             ToolDispatchOutcome::ReexecuteTurn => return Ok(()),
         };
 
-        // Phase 3: emit results, update ledger + history.
+        // Phase 3: emit results, extend history, roll the prompt forward.
         self.emit_tool_results(
             jobs, results, tool_ctx, prefix, nested, raw, captured, cancel,
         )
@@ -973,8 +973,7 @@ impl LoopState {
         };
         let sem = Arc::new(Semaphore::new(tools::MAX_CONCURRENT_TOOLS));
         // Borrow self.conv as &dyn Conversation so concurrent async blocks
-        // can read serve_tool / empty_child_with_contexts without needing
-        // a mutable borrow.
+        // can seed child task loops without needing a mutable borrow.
         let conv: &dyn Conversation = &*self.conv;
         let exec_fut = join_all(jobs.iter().map(|j| {
             let ctx = &ctx;
@@ -1072,8 +1071,7 @@ impl LoopState {
     }
 
     /// Emit tool results in request order: drain trailing live output,
-    /// publish ToolResult events, record ledger observations, apply deferred
-    /// write invalidations, extend history, and roll the prompt forward.
+    /// publish ToolResult events, extend history, and roll the prompt forward.
     #[allow(clippy::too_many_arguments)]
     async fn emit_tool_results(
         &mut self,
@@ -1140,42 +1138,15 @@ impl LoopState {
                     .await?;
             }
 
-            let extra: Vec<Option<String>> = if tools::result_status(&output) == "ok" {
-                // Phase 1: observe — record tool results into every context.
-                // Invalidation is deferred to finalize_turn below to prevent
-                // concurrent tool batches from racing reads against writes.
-                self.conv
-                    .observe_tool_results(self.turn_num, &job.name, &job.args, &output)
-            } else {
-                Vec::new()
-            };
-            let annotated = extra.iter().flatten().fold(String::new(), |mut acc, s| {
-                if !acc.is_empty() {
-                    acc.push('\n');
-                }
-                acc.push_str(s);
-                acc
-            });
-            let tool_output = if annotated.is_empty() {
-                output
-            } else {
-                format!("{annotated}\n{output}")
-            };
             result_msgs.push(Message::tool_result(
                 CallId::from_wire(job.id.clone()),
                 ToolName::new(job.name.clone()).expect("tool name must not be empty"),
-                tool_output,
+                output,
             ));
         }
-        // Phase 2: finalize — apply deferred invalidations for every context.
-        // For ledger contexts this processes pending_mutations (Write/Edit paths)
-        // and captures the per-turn transcript block.
-        self.conv.finalize_contexts(self.turn_num);
         self.turns += job_count;
         // Every tool result lands in history so the results stay adjacent to
-        // the assistant tool_calls message. Context content ([seen] block)
-        // no longer travels through history — it is composed ephemerally via
-        // StandardConversation::render_turn.
+        // the assistant tool_calls message.
         self.conv.record_tool_results(result_msgs);
         self.remaining_turns -= 1;
         Ok(())
@@ -2226,7 +2197,7 @@ pub(crate) async fn run_agent_loop_core(
         let turn_stats = turn_stats(state.turn_num, turn_usage.as_ref());
         let totals = state.fold_turn_usage(turn_usage.as_ref());
 
-        // ── Emit cumulative token usage via plug ─────
+        // ── Emit cumulative token usage via hooks ─────
         let (last_prompt, last_cached) = turn_stats
             .as_ref()
             .map(|ts| (ts.prompt_tokens, ts.cached_input_tokens))
@@ -2620,20 +2591,41 @@ impl LogSink {
     }
 }
 
+/// Process-global logger installed exactly once for tests. Records are
+/// forwarded to whichever sink the currently active [`LogGuard`] installed;
+/// when no guard is active the records are dropped.
 #[cfg(test)]
-impl log::Log for LogSink {
-    fn enabled(&self, _: &log::Metadata<'_>) -> bool {
-        true
+struct GlobalLogSink;
+
+#[cfg(test)]
+static ACTIVE_SINK: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+impl log::Log for GlobalLogSink {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::max_level()
     }
     fn log(&self, record: &log::Record<'_>) {
-        let _ = self.tx.send(record.args().to_string());
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        if let Ok(guard) = ACTIVE_SINK.lock() {
+            if let Some(tx) = guard.as_ref() {
+                let _ = tx.send(record.args().to_string());
+            }
+        }
     }
     fn flush(&self) {}
 }
 
+/// Serializes log-capturing tests and scopes the active sink to the guard's
+/// lifetime. The process-global logger itself is installed only once, so a
+/// second test still captures its own records.
 #[cfg(test)]
 pub(crate) struct LogGuard {
     prior_level: log::LevelFilter,
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
@@ -2641,16 +2633,28 @@ static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 pub(crate) fn log_guard(sink: LogSink) -> LogGuard {
-    let _lock = LOG_LOCK.lock().unwrap();
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    let lock = LOG_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    INSTALL.call_once(|| {
+        log::set_boxed_logger(Box::new(GlobalLogSink)).ok();
+    });
     let prior_level = log::max_level();
     log::set_max_level(log::LevelFilter::Trace);
-    log::set_boxed_logger(Box::new(sink)).ok();
-    LogGuard { prior_level }
+    *ACTIVE_SINK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some(sink.tx);
+    LogGuard {
+        prior_level,
+        _lock: lock,
+    }
 }
 
 #[cfg(test)]
 impl Drop for LogGuard {
     fn drop(&mut self) {
+        *ACTIVE_SINK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
         log::set_max_level(self.prior_level);
     }
 }
@@ -4421,16 +4425,8 @@ mod tests {
         let history_debug = format!("{:?}", history);
         assert!(
             history_debug.contains("Write"),
-            "denied call must appear in the ledger: {history_debug}"
+            "denied call must appear in history: {history_debug}"
         );
-        // Empty ledger produces no system message — the system prompt
-        // is absent or does not contain [seen].
-        if let Some(Message::System { content }) = history.first() {
-            assert!(
-                !content.contains("[seen]"),
-                "empty ledger must not produce [seen] block"
-            );
-        }
     }
 
     #[tokio::test]
@@ -6341,7 +6337,9 @@ mod tests {
             &LoopHooks::new(),
             None,
             None,
-            Box::new(ConversationStub::new("hi")),
+            // Run against the shipped implementation, not the stub: this test
+            // guards the prompt-commit invariant in `StandardConversation`.
+            crate::conversation::new_blank_conversation("hi", false, None),
         )
         .await
         .unwrap();
@@ -6472,6 +6470,9 @@ mod tests {
         ctx.expected_artifact_paths = vec![target.clone()];
         ctx.reminder_budget = 0; // exhausted — Done accepted with missing artifacts
         ctx.completion_nudge_budget = 0;
+        // Guard the shipped prompt-commit invariant, not the test stub.
+        ctx.prepopulated_conversation =
+            crate::conversation::new_blank_conversation("hi", false, None);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
             gm(model.clone().erase()),

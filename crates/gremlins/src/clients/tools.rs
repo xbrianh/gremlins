@@ -473,10 +473,10 @@ pub(crate) fn req_str<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a 
 
 /// Opaque handler dispatched by `invoke`. Implementations live in `crate::toolbox`.
 ///
-/// `conv` is the parent conversation whose contexts serve/seed tool operations
-/// (Task uses it to fork or seed a child loop). Handlers return [`ToolOutcome`]
-/// so a fan-out tool can surface a child conversation for the loop to join
-/// uniformly — the loop never names a tool to decide whether to join.
+/// `conv` is the parent conversation, used by fan-out tools (`Task`) to seed a
+/// child loop — fork inherits the parent history, Scout/Implement get a fresh
+/// conversation. Handlers return [`ToolOutcome`] carrying only the prose the
+/// model sees; the loop never names a tool to decide how to dispatch.
 #[async_trait::async_trait]
 pub(crate) trait ToolHandler: Send + Sync {
     async fn invoke(
@@ -673,8 +673,8 @@ pub(crate) fn push_str_arg(
     }
 }
 
-/// Dispatch a single tool call. `conv` provides the parent
-/// conversation whose contexts serve/seed tool operations.
+/// Dispatch a single tool call. `conv` is the parent conversation;
+/// fan-out handlers (`Task`) use it to seed a child loop.
 pub(crate) async fn invoke_with_conversation(
     id: &str,
     name: &str,
@@ -735,34 +735,6 @@ pub(crate) async fn invoke_with_conversation(
             "denied",
         );
         return ToolOutcome { output: err };
-    }
-
-    // Let active conversation contexts serve the tool result before falling
-    // through to the handler registry. This is a read-only pull path — context
-    // state is mutated separately through observe_tool() in emit_tool_results.
-    // Landscape exploration uses rayon for parallel directory walks —
-    // offload to a blocking thread so tokio workers stay responsive.
-    let maybe_output: Option<String> = if name == "Landscape" {
-        let args_owned = args.clone();
-        let conv = conv.clone_box();
-        let name_owned = name.to_string();
-        match tokio::task::spawn_blocking(move || conv.serve_tool(&name_owned, &args_owned)).await {
-            Ok(v) => v,
-            Err(e) => Some(format!("Error: {e}")),
-        }
-    } else {
-        conv.serve_tool(name, &args)
-    };
-    if let Some(output) = maybe_output {
-        let output = cap_output(name, output);
-        audit(
-            ctx.audit_log.as_deref(),
-            ctx.audit_lock.as_deref(),
-            name,
-            &ka,
-            result_status(&output),
-        );
-        return ToolOutcome { output };
     }
 
     // Dispatch through the registry. Every tool — including Task, Done, and

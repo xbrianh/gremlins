@@ -223,15 +223,7 @@ fn make_task_runner_at_depth(
                     ))
                 };
 
-                let prepopulated_conversation = if kind == TaskKind::Fork {
-                    let mut child = parent_conversation.fork(TaskKind::Fork);
-                    child.set_next_prompt(&task);
-                    child
-                } else {
-                    // Scout/Implement: build a fresh conversation seeded with
-                    // parent context state.
-                    parent_conversation.empty_child_with_contexts(&task)
-                };
+                let prepopulated_conversation = parent_conversation;
 
                 let result = crate::clients::agent_loop::run_agent_loop_nested(
                     selected_model.clone(),
@@ -265,7 +257,25 @@ fn make_task_runner_at_depth(
                             has_done = out.starts_with("Done."),
                             has_md = out.starts_with("# "),
                         );
-                        tools::ToolOutcome { output: out }
+                        // A Scout/Implement child's Read/Grep evidence rides
+                        // the Task tool result, so the parent keeps the proof
+                        // after the child loop is gone. Fork children already
+                        // inherited the parent transcript — no need to repeat it.
+                        let output = if kind == TaskKind::Fork {
+                            out
+                        } else {
+                            let evidence = completed
+                                .conversation
+                                .as_ref()
+                                .map(|conv| conv.tool_evidence())
+                                .unwrap_or_default();
+                            if evidence.is_empty() {
+                                out
+                            } else {
+                                format!("{out}\n\n{evidence}")
+                            }
+                        };
+                        tools::ToolOutcome { output }
                     }
                     Err(e) => tools::ToolOutcome {
                         output: format!("Task error: {e}"),

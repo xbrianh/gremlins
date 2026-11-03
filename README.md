@@ -687,16 +687,26 @@ landscape:
 |---|---|---|
 | `max-tool-tokens` | *(unset)* | Default token budget for the runtime `Landscape` tool when the model omits `token_budget`. Unset means no cap. |
 
+Deprecated keys (`max-tokens`, `signals`, `tool-ledger-pruning`, `stage-profiles`,
+`diff-stat`) are still accepted and silently ignored, so an existing settings
+file keeps loading.
+
 ### Structural landscape and token budgets
 
-Every agent stage's system prompt carries a **structural landscape block**: a
-captured outline of the workspace's recognized files (Rust/Markdown/JSON/…
-items with 1-based line numbers) so the agent can navigate without reading
-whole files first. Each item is rendered in the compact
-`line\|kind\|name` format (e.g. `53|fn|scan`, `125|struct|Visitor`). The block is wrapped in
-`<!-- BEGIN LANDSCAPE BLOCK -->` /
-`<!-- END LANDSCAPE BLOCK -->`, labelled as untrusted repository metadata,
-and its item names/paths have comment delimiters escaped.
+The `Landscape` tool is the primary discovery tool for every agent.  It
+returns a structural outline of the workspace's recognized files
+(Rust/Markdown/JSON/… items with 1-based line numbers) so the agent can
+navigate without reading whole files first. Each item is rendered in the
+compact `line\|kind\|name` format (e.g. `53|fn|scan`,
+`125|struct|Visitor`).
+
+The tool returns directory trees with headers ending in `/`, file headers
+ending in `:`, and item lists on the same line. It accepts an optional
+`token_budget` parameter that applies skeletonization and depth back-off when
+the tree is too large; when `token_budget` is omitted the default comes from
+`landscape.max-tool-tokens` in `settings.yaml` (unset by default, meaning no
+cap). When the budget is exceeded the tool returns `Error: budget exceeded`
+so the model can retry with a lower depth or narrower path.
 
 - Directory traversal respects `.gitignore` via the `ignore` crate.
   `target/`, `.git/`, `node_modules/`, and `__pycache__/` are always
@@ -706,24 +716,36 @@ and its item names/paths have comment delimiters escaped.
   such as `.devcontainer/` — are never shown.
 - The budget is an estimated **token** count (using the `o200k_base`
   tiktoken encoding), not a byte count.
-- When the block exceeds the budget, the rendered depth is reduced until it
-  fits; if even the minimum depth doesn't fit, the block is dropped rather
-  than failing the stage, and the `[landscape]` log line reports the drop.
-- Native agents also have the `Landscape` tool for current line numbers after
-  edits and to explore the directory tree. The `Landscape` tool accepts an
-  optional `token_budget` parameter that applies the same skeletonization and
-  depth back-off as the system-prompt block. The tool returns the same
-  `line\|kind\|name` item format, with directory headers ending in `/` and
-  file headers ending in `:`. The block only advertises the tool when
-  the stage's effective tool list actually includes it.
 - Agent stages carry a programmatic `landscape` flag (default `true`).
-  When `false`, the system prompt is assembled without a landscape block.
-  This is an escape hatch for callers that want to skip landscape
-  computation — the TUI currently recomputes the block on every turn
-  because line numbers shift after each edit, so a stale snapshot would
-  mislead the model.
+  It no longer changes the system prompt; the `Landscape` tool is always
+  available and is served by the registry handler.
 - Each build reparses every eligible recognized file from scratch; the
   computation is fast enough that caching is unnecessary.
+
+### Task sub-loops
+
+The `Task` tool fans out to a child agent loop and returns that child's prose
+output as a tool result. Seeding differs by kind: `Fork` inherits a copy of
+the parent conversation's history (minus the in-flight assistant turn) and
+`Scout`/`Implement` start from a fresh, empty transcript.
+
+A child's tool observations are **not** propagated back into the parent's
+transcript — only its final prose result is. The parent sees what the child
+concluded, not the files it read. Ask the child to quote the evidence it
+relied on in its result when the parent needs it.
+
+### Prompt size limits
+
+Proactive conversation compaction has been removed: a transcript is now
+replayed verbatim for the whole run, so the only ceiling is the hard
+`max-prompt-bytes` limit (default 1 MiB, `GREMLINS_MAX_PROMPT_BYTES`).
+Exceeding it fails the request with `PromptTooLarge` rather than silently
+dropping earlier turns.
+
+The `compaction:` block in `settings.yaml` (`threshold-tokens`,
+`threshold-tokens-chat`) and the `GREMLINS_COMPACTION_THRESHOLD_TOKENS*` env
+vars are still parsed and accepted but have no effect; they are reserved for
+the replacement compaction design.
 
 ### Model specifier syntax
 

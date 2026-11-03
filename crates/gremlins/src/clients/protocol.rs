@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::conversation::Conversation;
+use rig_core::completion::Message;
 
 /// Aggregated token usage summary from an agent run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +55,14 @@ pub struct CompletedRun {
     /// the serializable transcript; the trait object itself is never serialized.
     #[serde(skip)]
     pub(crate) conversation: Option<Box<dyn Conversation>>,
+}
+
+impl CompletedRun {
+    /// The agent loop's final durable message transcript.
+    /// `None` for non-agent backends (e.g. `cmd`, `exec`).
+    pub fn messages(&self) -> Option<Vec<Message>> {
+        self.conversation.as_ref().map(|conv| conv.messages())
+    }
 }
 
 // Manual Clone impl needed because `Box<dyn Conversation>` doesn't

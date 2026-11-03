@@ -52,10 +52,9 @@ pub struct RunParams {
     /// Sender for stream events. When Some, the agent loop emits
     /// every stream event (reasoning, text, tool results, turn complete, done).
     pub stream_events: Option<StreamEventSender>,
-    /// Pre-populated conversation state. When set, the agent loop starts from
-    /// this conversation's history (carrying its original roles) instead of a
-    /// bare system-prompt + user-prompt pair. The user prompt is still applied
-    /// as the next user message.
+    /// The conversation this run starts from. Its history (carrying original
+    /// roles) is replayed verbatim; the run's `prompt` is applied on top as
+    /// the next user message.
     pub(crate) prepopulated_conversation: Box<dyn Conversation>,
     /// Whether skills are available for this chat session.
     pub(crate) skills_available: bool,

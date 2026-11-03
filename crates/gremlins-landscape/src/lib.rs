@@ -375,9 +375,8 @@ pub fn escape_landscape_delimiters(text: &str) -> String {
 /// Render a slice of outline items in the unified `line|kind|name` format,
 /// separated by single spaces.
 ///
-/// This is the single source of truth for the item format used by both the
-/// system-prompt landscape block and the `Landscape` tool. Keeping it here
-/// means the two rendering paths cannot drift out of sync.
+/// This is the single source of truth for the item format used by the
+/// `Landscape` tool.
 pub fn format_outline_items(items: &[OutlineItem]) -> String {
     items
         .iter()
@@ -765,8 +764,8 @@ fn format_at_depth_inner(
     }
 }
 
-/// Format the captured outlines as the structural landscape block injected
-/// into an agent stage's system prompt.
+/// Format the captured outlines as the headerless tree returned by the
+/// `Landscape` tool.
 ///
 /// Paths under `root` are emitted relative to it (with `root` itself named in
 /// a preamble comment); anything outside `root` keeps its absolute path.

@@ -3,9 +3,9 @@
 //! After each turn the agent's text is scanned for short declarative
 //! sentences matching a small cue set (e.g. "the bug is", "root cause is").
 //! Matches are normalized, deduplicated, and accumulated into a bounded
-//! ledger (max five entries). The rendered `## Findings` block is appended
-//! to the next prompt's `[seen]` block so the model does not re-derive
-//! facts it already stated, even when compaction drops earlier turns.
+//! ledger (max five entries). The rendered `## Findings` block is prepended
+//! to the ephemeral turn prompt so the model does not re-derive facts it
+//! already stated.
 //!
 //! Extraction is heuristic and deterministic — no model calls, no async.
 

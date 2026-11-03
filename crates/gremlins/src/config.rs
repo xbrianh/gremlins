@@ -245,12 +245,35 @@ struct BackoffSection {
 }
 
 /// The `landscape` section of settings.yaml.
+///
+/// The landscape block no longer lives in the system prompt, so the signal and
+/// budget keys it used to take are gone. They are still *accepted* (and
+/// ignored) here so an existing settings file degrades instead of failing the
+/// whole config parse — `deny_unknown_fields` still rejects genuinely
+/// misspelled keys.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LandscapeSection {
     /// Preferred key: `max-tool-tokens` under `landscape:`.
     #[serde(rename = "max-tool-tokens", default)]
     max_tool_tokens: Option<u64>,
+
+    // ── deprecated, tolerated, ignored ─────────────────────────────────
+    /// Formerly capped the system-prompt landscape block.
+    #[serde(rename = "max-tokens", default)]
+    _max_tokens: Option<u64>,
+    /// Formerly enabled heuristic landscape signal sections.
+    #[serde(default)]
+    _signals: Option<bool>,
+    /// Formerly pruned signal sections against the tool ledger.
+    #[serde(rename = "tool-ledger-pruning", default)]
+    _tool_ledger_pruning: Option<bool>,
+    /// Formerly enabled stage-derived signal profiles.
+    #[serde(rename = "stage-profiles", default)]
+    _stage_profiles: Option<bool>,
+    /// Formerly emitted a `git diff --numstat` summary section.
+    #[serde(rename = "diff-stat", default)]
+    _diff_stat: Option<bool>,
 }
 
 /// A single `model-profiles` entry as it appears in `settings.yaml`.
@@ -1194,8 +1217,9 @@ pub(crate) fn max_tool_output_bytes() -> u64 {
 /// `max-prompt-bytes` ceiling still applies. Settings.yaml
 /// `compaction.threshold-tokens` takes precedence over the env var.
 ///
-/// Currently unused: proactive compaction was removed and this accessor is
-/// retained for the replacement compaction design.
+/// Compatibility accessor only: proactive compaction is not wired into the
+/// agent loop today, so long transcripts are bounded solely by the hard
+/// `max-prompt-bytes` ceiling. Retained for the replacement compaction design.
 #[allow(dead_code)]
 pub(crate) fn compaction_threshold_tokens() -> u64 {
     get_global()
@@ -1213,8 +1237,7 @@ pub(crate) fn compaction_threshold_tokens() -> u64 {
 /// applies. Settings.yaml `compaction.threshold-tokens-chat` takes precedence
 /// over the env var.
 ///
-/// Currently unused: proactive compaction was removed and this accessor is
-/// retained for the replacement compaction design.
+/// Compatibility accessor only — see [`compaction_threshold_tokens`].
 #[allow(dead_code)]
 pub(crate) fn compaction_threshold_tokens_chat() -> u64 {
     get_global()
@@ -2419,11 +2442,7 @@ model-profiles:
         let dir = tempfile::tempdir().unwrap();
         let config_dir = dir.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("settings.yaml"),
-            r#"{"landscape": {}}"#,
-        )
-        .unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"landscape": {}}"#).unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", dir.path());
         env.set("GREMLINS_MAX_LANDSCAPE_TOOL_TOKENS", "77777");
         let cfg = Config::load().unwrap();

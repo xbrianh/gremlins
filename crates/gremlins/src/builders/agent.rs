@@ -126,10 +126,9 @@ impl AgentBuilder {
         self
     }
 
-    /// Control whether the executor recomputes a landscape block before this stage.
-    /// Defaults to `true`. When `false`, the system prompt is assembled without a
-    /// landscape block — useful for conversation turns where the block is already
-    /// present in the context from the first turn.
+    /// Control whether the executor offers the `Landscape` tool to this stage.
+    /// Defaults to `true`. The tool itself is always registry-backed; the flag
+    /// only gates whether agents may call it.
     pub fn landscape(mut self, landscape: bool) -> Self {
         self.landscape = landscape;
         self

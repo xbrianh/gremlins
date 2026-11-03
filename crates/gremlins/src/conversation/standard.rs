@@ -3,19 +3,16 @@
 //! `StandardConversation` owns the durable message history and the pending user
 //! prompt. On each turn the pending prompt is committed into history before the
 //! assistant message, so `history + next_prompt` is always the complete
-//! transcript. Findings and scratchpad content travel through the system
-//! prompt instead of being spliced into ephemeral user prompts.
+//! transcript. Findings and scratchpad content are prepended to the ephemeral
+//! turn prompt so the system preamble stays cache-stable across turns.
 
-use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
+use rig_core::completion::message::{Reasoning, Sealed, ToolCall, UserContent};
 use rig_core::completion::Message;
 
 use crate::clients::conversation::{Conversation, RunArtifact, TurnScript};
 use crate::clients::done_helpers::done_user_message;
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
-use crate::conversation::context::ConversationContext;
-use crate::conversation::contexts::landscape::LandscapeContext;
-use crate::task_kind::TaskKind;
 
 /// The standard [`Conversation`] implementation.
 pub(crate) struct StandardConversation {
@@ -28,7 +25,7 @@ pub(crate) struct StandardConversation {
     /// and [`set_next_prompt`].
     next_prompt: Message,
     /// Declarative findings extracted from assistant prose and surfaced in the
-    /// system prompt so the model does not re-derive facts it already stated.
+    /// per-turn prompt so the model does not re-derive facts it already stated.
     findings_ledger: FindingsLedger,
     preserve_reasoning_in_history: bool,
     last_text: String,
@@ -36,10 +33,6 @@ pub(crate) struct StandardConversation {
     /// Once set, [`Conversation::messages`] returns this final transcript so
     /// persistence consumers see the exact durable message list.
     finalized_messages: Option<Vec<Message>>,
-    /// Mutable model contexts that observe tool calls and contribute system-
-    /// prompt blocks. Owned here so the agent loop routes every context
-    /// operation through the conversation instead of carrying a parallel list.
-    contexts: Vec<Box<dyn ConversationContext>>,
 }
 
 impl StandardConversation {
@@ -56,71 +49,6 @@ impl StandardConversation {
             preserve_reasoning_in_history: preserve_reasoning,
             last_text: String::new(),
             finalized_messages: None,
-            contexts: Vec::new(),
-        }
-    }
-
-    /// Seed mutable model contexts.
-    ///
-    /// `landscape_root` is `Some` when the stage has the landscape context
-    /// enabled; the context serves the `Landscape` tool from that root.  The
-    /// context is cloned via `clone_box()` so the conversation owns an
-    /// independent copy.
-    /// Called before the conversation is boxed and handed off to the agent loop.
-    pub(crate) fn seed_from_landscape(&mut self, landscape_root: Option<std::path::PathBuf>) {
-        let mut contexts: Vec<Box<dyn ConversationContext>> = Vec::new();
-
-        if let Some(root) = landscape_root {
-            contexts.push(Box::new(LandscapeContext::new(root)));
-        }
-
-        self.contexts = contexts.into_iter().map(|c| c.clone_box()).collect();
-    }
-
-    /// Build the combined system prompt from contexts, findings, scratchpad,
-    /// and the stage-supplied system prompt.
-    fn build_system_prompt(
-        &mut self,
-        nested: bool,
-        scratchpad: Option<String>,
-        system_prompt: Option<String>,
-    ) -> Option<String> {
-        let mut parts: Vec<String> = Vec::new();
-
-        // Context system messages (landscape seed, signal map).
-        for ctx in &self.contexts {
-            if let Some(msg) = ctx.system_message() {
-                parts.push(msg);
-            }
-        }
-
-        if !nested {
-            // Scratchpad (ephemeral — never in history).
-            if let Some(content) = scratchpad {
-                let trimmed = content.trim();
-                if !trimmed.is_empty() {
-                    parts.push(format!(
-                        "## Scratchpad\n\nThe following is your persistent scratchpad \
-                         content:\n\n{trimmed}"
-                    ));
-                }
-            }
-
-            // Findings from the ledger (recomputed per turn).
-            let findings = self.findings_ledger.format();
-            if !findings.is_empty() {
-                parts.push(findings);
-            }
-        }
-
-        if let Some(sys) = system_prompt {
-            parts.push(sys);
-        }
-
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join("\n\n"))
         }
     }
 
@@ -146,7 +74,6 @@ impl Conversation for StandardConversation {
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: self.last_text.clone(),
             finalized_messages: self.finalized_messages.clone(),
-            contexts: self.contexts.iter().map(|c| c.clone_box()).collect(),
         })
     }
 
@@ -200,12 +127,71 @@ impl Conversation for StandardConversation {
         scratchpad: Option<String>,
         system_prompt: Option<String>,
     ) -> TurnScript {
-        let combined_system = self.build_system_prompt(nested, scratchpad, system_prompt);
+        let combined_system = system_prompt;
+
+        let next_user_prompt = if nested {
+            self.next_prompt.clone()
+        } else {
+            // Prepend per-turn mutable content (scratchpad, findings) to the
+            // ephemeral user prompt so the system preamble stays cache-stable
+            // across turns.
+            let mut prefix = Vec::new();
+
+            if let Some(content) = scratchpad {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    prefix.push(format!(
+                        "## Scratchpad\n\nThe following is your persistent scratchpad \
+                         content:\n\n{trimmed}"
+                    ));
+                }
+            }
+
+            let findings = self.findings_ledger.format();
+            if !findings.is_empty() {
+                prefix.push(findings);
+            }
+
+            if prefix.is_empty() {
+                self.next_prompt.clone()
+            } else {
+                // Prefixes ride as text blocks ahead of the real content.
+                let mut content = Vec::new();
+                let separator = "\n\n---\n\n";
+                for p in prefix {
+                    content.push(rig_core::completion::message::UserContent::Text(
+                        rig_core::completion::message::Text {
+                            text: p,
+                            additional_params: None,
+                        },
+                    ));
+                }
+                content.push(rig_core::completion::message::UserContent::Text(
+                    rig_core::completion::message::Text {
+                        text: separator.to_string(),
+                        additional_params: None,
+                    },
+                ));
+                match self.next_prompt.clone() {
+                    Message::User {
+                        content: mut existing,
+                    } => {
+                        content.append(&mut existing);
+                        Message::User { content }
+                    }
+                    other => {
+                        // Non-user next_prompt: the content blocks won't merge
+                        // correctly, so return the prompt as-is.
+                        other
+                    }
+                }
+            }
+        };
 
         TurnScript {
             messages: self.history.clone(),
             system_prompt: combined_system,
-            next_user_prompt: self.next_prompt.clone(),
+            next_user_prompt,
         }
     }
 
@@ -264,8 +250,7 @@ impl Conversation for StandardConversation {
         }
     }
 
-    fn fork(&self, kind: TaskKind) -> Box<dyn Conversation> {
-        let _ = kind;
+    fn fork(&self) -> Box<dyn Conversation> {
         let mut history = self.history.clone();
         // The caller appends the current-turn assistant tool-call to history
         // before forking. Carrying it into the child without its still-unknown
@@ -275,10 +260,17 @@ impl Conversation for StandardConversation {
         let had_assistant = matches!(history.last(), Some(Message::Assistant { .. }));
         if had_assistant {
             history.pop();
-            // Only pop the preceding user prompt when we actually removed an
-            // assistant — the prompt is the one committed by record_turn for
-            // the same turn.
-            if let Some(Message::User { .. }) = history.last() {
+            // Pop the preceding user prompt that `record_turn` committed for
+            // this same turn — the child receives its own fork prompt instead.
+            // A tool-result user message belongs to the previous pair and must
+            // stay.
+            if matches!(
+                history.last(),
+                Some(Message::User { content })
+                    if !content
+                        .iter()
+                        .any(|c| matches!(c, UserContent::ToolResult(_)))
+            ) {
                 history.pop();
             }
         }
@@ -292,34 +284,11 @@ impl Conversation for StandardConversation {
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: String::new(),
             finalized_messages: None,
-            contexts: self
-                .contexts
-                .iter()
-                .filter(|c| c.propagates_to_task())
-                .map(|c| c.clone_box())
-                .collect(),
         })
     }
 
-    fn serve_tool(&self, name: &str, args: &serde_json::Value) -> Option<String> {
-        for ctx in &self.contexts {
-            if let Some(output) = ctx.serve_tool(name, args) {
-                return Some(output);
-            }
-        }
-        None
-    }
-
-    fn empty_child_with_contexts(&self, prompt: &str) -> Box<dyn Conversation> {
-        let mut child = Self::new(prompt, self.preserve_reasoning_in_history, None);
-        let propagating = self
-            .contexts
-            .iter()
-            .filter(|c| c.propagates_to_task())
-            .map(|c| c.clone_box())
-            .collect::<Vec<_>>();
-        child.contexts = propagating;
-        Box::new(child)
+    fn spawn_child(&self, prompt: &str) -> Box<dyn Conversation> {
+        Box::new(Self::new(prompt, self.preserve_reasoning_in_history, None))
     }
 
     fn set_next_prompt(&mut self, prompt: &str) {
@@ -386,27 +355,6 @@ impl Conversation for StandardConversation {
         let mut all = self.history.clone();
         all.push(self.next_prompt.clone());
         all
-    }
-
-    fn observe_tool_results(
-        &mut self,
-        turn: usize,
-        name: &str,
-        args: &str,
-        output: &str,
-    ) -> Vec<Option<String>> {
-        let mut extra = Vec::with_capacity(self.contexts.len());
-        for ctx in &mut self.contexts {
-            ctx.observe_tool(turn, name, args, output);
-            extra.push(ctx.tool_result_extra(turn, name, args, output));
-        }
-        extra
-    }
-
-    fn finalize_contexts(&mut self, turn: usize) {
-        for ctx in &mut self.contexts {
-            ctx.finalize_turn(turn);
-        }
     }
 }
 
@@ -549,6 +497,122 @@ mod tests {
             user_message_text(history.last().unwrap()).contains("finish as fork"),
             "last message should be fork prompt: {:?}",
             history.last()
+        );
+    }
+
+    /// A Scout child that reads a file must have those contents attached to
+    /// the Task tool result in the parent's durable history, not only the
+    /// child's own transcript. After a further tool round the evidence must
+    /// still be present.
+    #[tokio::test]
+    async fn scout_read_observations_ride_the_task_tool_result() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("note.txt");
+        std::fs::write(&note, "evidence-from-child").unwrap();
+
+        let task_call = MockStreamEvent::tool_call(
+            "t1",
+            "Task",
+            serde_json::json!({ "kind": "Scout", "prompt": "inspect note.txt" }),
+        );
+        let done_call = |id: &str, summary: &str| {
+            MockStreamEvent::tool_call(id, "Done", serde_json::json!({ "summary": summary }))
+        };
+
+        let parent = MockCompletionModel::from_stream_turns([
+            vec![
+                task_call,
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                done_call("d1", "outer done"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let child = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call(
+                    "r1",
+                    "Read",
+                    serde_json::json!({ "file_path": note.to_str().unwrap() }),
+                ),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                MockStreamEvent::text("scout result"),
+                done_call("d2", "scout result"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+
+        let child_handle = child.clone();
+        let factory: crate::clients::task::TaskModelFactory = Arc::new(move |_spec: &str| {
+            Ok(crate::clients::task::TaskModel {
+                model: gm(child_handle.clone().erase()),
+                temperature: None,
+                max_tokens: None,
+                extra: None,
+                preserve_reasoning: None,
+            })
+        });
+        let selector = crate::clients::task::TaskModelSelector::new(
+            HashMap::from([(crate::task_kind::TaskKind::Scout, "openai/mini".to_string())]),
+            factory,
+        )
+        .expect("configured");
+
+        let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        ctx.params.task_models = Some(selector);
+
+        run_agent_loop(
+            gm(parent.clone().erase()),
+            "go",
+            ctx,
+            CancelToken::new(),
+            loop_opts(None),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // The parent's second request must carry the child's Read evidence
+        // inside the Task tool result (durable history).
+        let requests = parent.requests();
+        let parent_history = &requests.last().unwrap().chat_history;
+        let task_result = parent_history
+            .iter()
+            .flat_map(|m| match m {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::ToolResult(r) => Some(
+                            r.content
+                                .iter()
+                                .filter_map(|rc| match rc {
+                                    rig_core::completion::message::ToolResultContent::Text(t) => {
+                                        Some(t.text.clone())
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<String>(),
+                        ),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => vec![],
+            })
+            .find(|t| t.contains("scout result"))
+            .expect("task result must reach the parent history");
+        assert!(
+            task_result.contains("evidence-from-child"),
+            "child Read evidence must ride the Task tool result, got: {task_result}"
         );
     }
 

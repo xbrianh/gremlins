@@ -1,5 +1,3 @@
-use std::any::Any;
-
 // ── conversation machinery ──────────────────────────────────────────────────
 
 /// The transcript produced for one model turn.
@@ -25,7 +23,7 @@ pub(crate) struct RunArtifact {
 /// Owns agent-loop conversation state: durable [`Message`] history plus the
 /// pending user prompt. The loop narrates what happened; the conversation
 /// assembles the transcript.
-pub(crate) trait Conversation: Any + Send + Sync {
+pub(crate) trait Conversation: Send + Sync {
     /// Clone this conversation into a new heap allocation.
     fn clone_box(&self) -> Box<dyn Conversation>;
 
@@ -78,23 +76,11 @@ pub(crate) trait Conversation: Any + Send + Sync {
     ) -> RunArtifact;
 
     /// Produce a child conversation seeded from this conversation's history.
-    fn fork(&self, kind: crate::task_kind::TaskKind) -> Box<dyn Conversation>;
+    fn fork(&self) -> Box<dyn Conversation>;
 
-    /// Serve a tool result through active conversation contexts, short-circuiting
-    /// the normal handler dispatch. Called after arg validation and sandbox
-    /// checking. Read-only (`&self`).
-    ///
-    /// Returns `Some(output)` when a context handles the tool; `None`
-    /// falls through to the normal handler.
-    fn serve_tool(&self, _name: &str, _args: &serde_json::Value) -> Option<String> {
-        None
-    }
-
-    /// Create a fresh child conversation seeded with propagating contexts from
-    /// this conversation, but with a clean message history. Used for
-    /// Scout/Implement tasks that need inherited context state without
-    /// the parent's message transcript.
-    fn empty_child_with_contexts(&self, _prompt: &str) -> Box<dyn Conversation>;
+    /// Create a fresh child conversation with a clean message history and the
+    /// given prompt. Used for Scout/Implement tasks.
+    fn spawn_child(&self, _prompt: &str) -> Box<dyn Conversation>;
 
     /// Replace the pending user prompt (used to begin a freshly-forked child
     /// or set a continuation/reminder prompt).
@@ -123,20 +109,91 @@ pub(crate) trait Conversation: Any + Send + Sync {
     /// run's actual preserve-reasoning setting rather than a hardcoded `false`.
     fn set_preserve_reasoning(&mut self, _preserve: bool) {}
 
-    /// Observe one tool result across all contexts and return per-context
-    /// extra annotations (for inline visibility alongside raw output).
-    fn observe_tool_results(
-        &mut self,
-        _turn: usize,
-        _name: &str,
-        _args: &str,
-        _output: &str,
-    ) -> Vec<Option<String>> {
-        Vec::new()
+    /// Compact digest of the Read/Grep evidence still present in the durable
+    /// transcript. Fan-out tools fold this into the parent's tool result so a
+    /// child loop's discoveries survive after the child is gone.
+    fn tool_evidence(&self) -> String {
+        collect_tool_evidence(&self.messages())
+    }
+}
+
+/// Upper bound on [`collect_tool_evidence`] output, so a child that read a
+/// large file cannot flood the parent's transcript.
+const MAX_EVIDENCE_BYTES: usize = 8_000;
+
+/// Summarize the Read/Grep results still present in `messages` as
+/// `label\n<output>` blocks, newest last, capped at [`MAX_EVIDENCE_BYTES`].
+fn collect_tool_evidence(messages: &[rig_core::completion::Message]) -> String {
+    use rig_core::completion::message::{AssistantContent, ToolResultContent, UserContent};
+
+    let mut entries: Vec<String> = Vec::new();
+    let mut pending: Vec<(rig_core::completion::message::CallId, String)> = Vec::new();
+
+    for message in messages {
+        match message {
+            rig_core::completion::Message::Assistant { content, .. } => {
+                pending = content
+                    .iter()
+                    .filter_map(|item| match item {
+                        AssistantContent::ToolCall(call) => {
+                            let name = call.function.name.as_str();
+                            if name != "Read" && name != "Grep" {
+                                return None;
+                            }
+                            let target = call
+                                .function
+                                .arguments
+                                .get("file_path")
+                                .or_else(|| call.function.arguments.get("path"))
+                                .and_then(|v| v.as_str())?;
+                            Some((call.id.clone(), format!("{name}: {target}")))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+            }
+            rig_core::completion::Message::User { content } => {
+                if pending.is_empty() {
+                    continue;
+                }
+                for item in content {
+                    let UserContent::ToolResult(result) = item else {
+                        continue;
+                    };
+                    let Some(position) = pending.iter().position(|(id, _)| *id == result.call)
+                    else {
+                        continue;
+                    };
+                    let text: String = result
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            ToolResultContent::Text(text) => Some(text.text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    if !text.is_empty() && !text.starts_with("Error:") {
+                        entries.push(format!("{}\n{text}", pending[position].1));
+                    }
+                    pending.remove(position);
+                }
+            }
+            _ => {}
+        }
     }
 
-    /// Call `finalize_turn` on every context at a turn boundary.
-    fn finalize_contexts(&mut self, _turn: usize) {}
+    let mut out = String::new();
+    for entry in entries {
+        let extra = entry.len() + if out.is_empty() { 0 } else { 2 };
+        if out.len() + extra > MAX_EVIDENCE_BYTES {
+            break;
+        }
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(&entry);
+    }
+    out
 }
 
 // `Box<dyn Conversation>` participates in struct cloning; delegate to `clone_box`.
@@ -157,9 +214,12 @@ impl std::fmt::Debug for dyn Conversation {
 
 /// A minimal [`Conversation`] implementation for use in `clients/` tests.
 ///
-/// Tracks flat message history (no context composition, no findings ledger)
-/// so that agent-loop and tool-registry tests can run without depending on
-/// `crate::conversation` (which lives in a different package boundary).
+/// Tracks flat message history (no findings ledger) so that agent-loop and
+/// tool-registry tests can run without depending on `crate::conversation`
+/// (which lives in a different package boundary). `record_turn`,
+/// `done_rejected`, `pop_last_assistant_turn`, and `fork` all mirror
+/// `StandardConversation` — including the prompt-commit invariant — so the
+/// "no consecutive user messages" guard tests exercise the shipped semantics.
 #[cfg(test)]
 pub(crate) struct ConversationStub {
     history: Vec<rig_core::completion::Message>,
@@ -225,6 +285,11 @@ impl Conversation for ConversationStub {
         >],
         tool_calls: &[rig_core::completion::message::ToolCall],
     ) {
+        // Commit the pending user prompt before the assistant message.
+        // This is the same prompt-commit invariant that
+        // StandardConversation::record_turn uses.
+        let prompt = self.next_prompt.clone();
+        self.history.push(prompt);
         self.history.push(super::format::assistant_tool_message(
             text,
             reasoning_items,
@@ -239,11 +304,17 @@ impl Conversation for ConversationStub {
     }
 
     fn pop_last_assistant_turn(&mut self) {
+        // Pop the assistant message.
         if matches!(
             self.history.last(),
             Some(rig_core::completion::Message::Assistant { .. })
         ) {
             self.history.pop();
+        }
+        // Pop the preceding user prompt and restore it as next_prompt.
+        if let Some(rig_core::completion::Message::User { .. }) = self.history.last() {
+            let prompt = self.history.pop().unwrap();
+            self.next_prompt = prompt;
         }
     }
 
@@ -316,17 +387,26 @@ impl Conversation for ConversationStub {
         }
     }
 
-    fn fork(&self, _kind: crate::task_kind::TaskKind) -> Box<dyn Conversation> {
+    fn fork(&self) -> Box<dyn Conversation> {
         let mut history = self.history.clone();
-        let had_assistant = matches!(
+        // Drop the assistant turn the caller appended for the current turn: its
+        // tool results are still unknown, so carrying it would leave an
+        // unmatched assistant tool-use in the child transcript. The paired user
+        // prompt goes with it — the child receives its own fork prompt — but a
+        // tool-result user message (which belongs to the previous pair) must
+        // stay.
+        if matches!(
             history.last(),
             Some(rig_core::completion::Message::Assistant { .. })
-        );
-        if had_assistant {
+        ) {
             history.pop();
             if matches!(
                 history.last(),
-                Some(rig_core::completion::Message::User { .. })
+                Some(rig_core::completion::Message::User { content })
+                    if !content.iter().any(|c| matches!(
+                        c,
+                        rig_core::completion::message::UserContent::ToolResult(_)
+                    ))
             ) {
                 history.pop();
             }
@@ -340,7 +420,7 @@ impl Conversation for ConversationStub {
         })
     }
 
-    fn empty_child_with_contexts(&self, prompt: &str) -> Box<dyn Conversation> {
+    fn spawn_child(&self, prompt: &str) -> Box<dyn Conversation> {
         Box::new(Self::new(prompt))
     }
 
@@ -362,6 +442,10 @@ impl Conversation for ConversationStub {
         results: Vec<rig_core::completion::Message>,
         next_prompt: rig_core::completion::Message,
     ) {
+        // Commit the pending prompt before the assistant message, exactly as
+        // `StandardConversation::done_rejected` does.
+        let prompt = std::mem::replace(&mut self.next_prompt, next_prompt);
+        self.history.push(prompt);
         self.history.push(super::format::assistant_tool_message(
             text,
             reasoning_items,
@@ -369,7 +453,6 @@ impl Conversation for ConversationStub {
             self.preserve_reasoning,
         ));
         self.history.extend(results);
-        self.next_prompt = next_prompt;
     }
 
     fn messages(&self) -> Vec<rig_core::completion::Message> {
