@@ -44,7 +44,6 @@ const OVERRIDES: &[&str] = &[
     "GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT",
     "GREMLINS_REASONING_EFFORT",
     "GREMLINS_MAX_LANDSCAPE_TOOL_TOKENS",
-    "GREMLINS_MAX_LANDSCAPE_TOKENS",
 ];
 
 /// Holds the process-state lock and undoes the environment changes its holder

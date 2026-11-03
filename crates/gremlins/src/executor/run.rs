@@ -2051,17 +2051,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn agent_landscape_flag_controls_landscape_data() {
-        // Landscape no longer appends a block to the system prompt; the flag
-        // only controls whether data is built for the LandscapeContext. This test
-        // verifies that the landscape block is no longer part of system prompt
-        // assembly — the old `assemble_system_prompt` function is gone.
-        let prompt = "base";
-        // System prompts are now just the base prompt without landscape.
-        assert_eq!(prompt, "base");
-    }
-
     // --- exec ---
 
     #[tokio::test]

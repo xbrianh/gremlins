@@ -37,10 +37,10 @@ Run through each dimension below. For each finding, record the wasted tokens or 
 The system prompt is assembled in `run.rs::assemble_system_prompt` and includes a landscape block
 (a structural outline of the project). Check:
 
-- `max_landscape_tokens` config (default 64 000): is the landscape block at or near the cap? Check
+- `max_landscape_tool_tokens` config (unset by default): is the `Landscape` tool budget at or near the cap? Check
   the info log for a `[landscape]` line reporting file count / item count / token count. If the
   block is near or at the cap, the project tree is too large for the budget and the model is seeing
-  a skeleton — suggest raising `max_landscape_tokens` or adding a `.gitignore`-style
+  a skeleton — suggest raising `max_landscape_tool_tokens` or adding a `.gitignore`-style
   `.gremlinsignore` if the repo has large irrelevant subtrees.
 - Repository context block: the untrusted metadata injected by the harness (branch, remotes, recent
   commits, top-level listing). Large commit histories or directory listings in the context block

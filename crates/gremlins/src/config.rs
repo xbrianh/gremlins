@@ -122,7 +122,6 @@ pub struct Config {
     max_tool_output_bytes: u64,
     compaction: CompactionConfig,
     max_prompt_bytes: u64,
-    max_landscape_tokens: u64,
     max_landscape_tool_tokens: Option<u64>,
     backoff: BackoffConfig,
 }
@@ -249,9 +248,6 @@ struct BackoffSection {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LandscapeSection {
-    /// Preferred key: `max-tokens` under `landscape:`.
-    #[serde(rename = "max-tokens", default)]
-    max_tokens: Option<u64>,
     /// Preferred key: `max-tool-tokens` under `landscape:`.
     #[serde(rename = "max-tool-tokens", default)]
     max_tool_tokens: Option<u64>,
@@ -331,10 +327,6 @@ impl Config {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(DEFAULT_MAX_PROMPT_BYTES);
-                let max_landscape_tokens = std::env::var("GREMLINS_MAX_LANDSCAPE_TOKENS")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(DEFAULT_MAX_LANDSCAPE_TOKENS);
                 let max_landscape_tool_tokens = std::env::var("GREMLINS_MAX_LANDSCAPE_TOOL_TOKENS")
                     .ok()
                     .and_then(|v| v.parse().ok());
@@ -346,7 +338,6 @@ impl Config {
                         threshold_tokens_chat: compaction_threshold_tokens_chat,
                     },
                     max_prompt_bytes,
-                    max_landscape_tokens,
                     max_landscape_tool_tokens,
                     ..Config::default()
                 });
@@ -507,17 +498,6 @@ impl Config {
             })
             .unwrap_or(DEFAULT_MAX_PROMPT_BYTES);
 
-        let max_landscape_tokens = cfg_file
-            .landscape
-            .as_ref()
-            .and_then(|l| l.max_tokens)
-            .or_else(|| {
-                std::env::var("GREMLINS_MAX_LANDSCAPE_TOKENS")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-            })
-            .unwrap_or(DEFAULT_MAX_LANDSCAPE_TOKENS);
-
         // max-landscape-tool-tokens: settings.yaml > env var, with no default.
         let max_landscape_tool_tokens = cfg_file
             .landscape
@@ -545,7 +525,6 @@ impl Config {
                 threshold_tokens_chat: compaction_threshold_tokens_chat,
             },
             max_prompt_bytes,
-            max_landscape_tokens,
             max_landscape_tool_tokens,
             backoff,
         })
@@ -610,10 +589,6 @@ impl Config {
 
     pub fn max_prompt_bytes(&self) -> u64 {
         self.max_prompt_bytes
-    }
-
-    pub fn max_landscape_tokens(&self) -> u64 {
-        self.max_landscape_tokens
     }
 
     pub fn max_landscape_tool_tokens(&self) -> Option<u64> {
@@ -1172,9 +1147,6 @@ pub(crate) const DEFAULT_COMPACTION_THRESHOLD_TOKENS_CHAT: u64 = 64_000;
 /// Default ceiling for a serialized prompt: 1 MiB.
 pub(crate) const DEFAULT_MAX_PROMPT_BYTES: u64 = 1_048_576;
 
-/// Default landscape block token budget.
-pub(crate) const DEFAULT_MAX_LANDSCAPE_TOKENS: u64 = 64_000;
-
 /// GREMLINS_MAX_PROMPT_BYTES — cap a serialized prompt at this many bytes.
 /// Default 1 048 576 (1 MiB). Settings.yaml `max-prompt-bytes` takes
 /// precedence over the env var.
@@ -1187,28 +1159,6 @@ pub(crate) fn max_prompt_bytes() -> u64 {
                 .and_then(|v| v.parse().ok())
         })
         .unwrap_or(DEFAULT_MAX_PROMPT_BYTES)
-}
-
-/// GREMLINS_MAX_LANDSCAPE_TOKENS — cap the landscape block injected into the
-/// agent system prompt at this many estimated tokens. Default 64 000.
-/// Settings.yaml `landscape.max-tokens` takes precedence over the env var.
-///
-/// The block is depth-limited to fit within this budget. If it still cannot
-/// be trimmed below the limit (including when the budget is zero), the
-/// landscape is omitted entirely.
-///
-/// Only the test-only landscape snapshot helper uses this now: nothing renders
-/// a landscape block into the system prompt any more.
-#[cfg(test)]
-pub(crate) fn max_landscape_tokens() -> u64 {
-    get_global()
-        .map(|c| c.max_landscape_tokens())
-        .or_else(|| {
-            std::env::var("GREMLINS_MAX_LANDSCAPE_TOKENS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-        })
-        .unwrap_or(DEFAULT_MAX_LANDSCAPE_TOKENS)
 }
 
 /// GREMLINS_MAX_LANDSCAPE_TOOL_TOKENS — default token budget for the
@@ -2447,65 +2397,6 @@ model-profiles:
         assert_eq!(cfg.max_prompt_bytes(), DEFAULT_MAX_PROMPT_BYTES);
     }
 
-    // --- max-landscape-tokens ------------------------------------------------
-
-    #[test]
-    fn test_max_landscape_tokens_default() {
-        let _env = EnvGuard::lock();
-        assert_eq!(max_landscape_tokens(), DEFAULT_MAX_LANDSCAPE_TOKENS);
-    }
-
-    #[test]
-    fn test_max_landscape_tokens_from_env() {
-        let mut env = EnvGuard::lock();
-        env.set("GREMLINS_MAX_LANDSCAPE_TOKENS", "512");
-        assert_eq!(max_landscape_tokens(), 512);
-    }
-
-    #[test]
-    fn test_max_landscape_tokens_from_landscape_section() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"landscape": {"max-tokens": 98765}}"#));
-        let cfg = Config::load().unwrap();
-        assert_eq!(cfg.max_landscape_tokens(), 98765);
-    }
-
-    #[test]
-    fn test_max_landscape_tokens_landscape_section_overrides_env() {
-        let mut env = EnvGuard::lock();
-        let dir = tempfile::tempdir().unwrap();
-        let config_dir = dir.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("settings.yaml"),
-            r#"{"landscape": {"max-tokens": 55555}}"#,
-        )
-        .unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
-        env.set("GREMLINS_MAX_LANDSCAPE_TOKENS", "999");
-        let cfg = Config::load().unwrap();
-        assert_eq!(cfg.max_landscape_tokens(), 55555);
-    }
-
-    #[test]
-    fn test_max_landscape_tokens_env_fallback_no_settings_file() {
-        let mut env = EnvGuard::lock();
-        let dir = tempfile::tempdir().unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
-        env.set("GREMLINS_MAX_LANDSCAPE_TOKENS", "4242");
-        let cfg = Config::load().unwrap();
-        assert_eq!(cfg.max_landscape_tokens(), 4242);
-    }
-
-    #[test]
-    fn test_max_landscape_tokens_default_no_settings_file() {
-        let mut env = EnvGuard::lock();
-        let dir = tempfile::tempdir().unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
-        // No settings.yaml, no env var — should get the 64000 default.
-        let cfg = Config::load().unwrap();
-        assert_eq!(cfg.max_landscape_tokens(), DEFAULT_MAX_LANDSCAPE_TOKENS);
-    }
-
     // --- max-landscape-tool-tokens -----------------------------------------
 
     #[test]
@@ -2530,7 +2421,7 @@ model-profiles:
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
             config_dir.join("settings.yaml"),
-            r#"{"landscape": {"max-tokens": 64000}}"#,
+            r#"{"landscape": {}}"#,
         )
         .unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", dir.path());
