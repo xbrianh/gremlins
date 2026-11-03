@@ -53,14 +53,6 @@ impl SeenState {
         }
     }
 
-    fn contains(&self, path: &Path) -> bool {
-        self.current.contains(path) || self.past.iter().any(|s| s.contains(path))
-    }
-
-    fn insert(&mut self, path: PathBuf) {
-        self.current.insert(path);
-    }
-
     /// Save the current turn's set into the ring and start a fresh current set.
     /// Always rotates even when the current set is empty, so expiry measures
     /// actual turns rather than indefinitely suppressing paths.
@@ -248,94 +240,11 @@ impl crate::conversation::context::ConversationContext for LandscapeContext {
     fn tool_result_extra(
         &self,
         _turn: usize,
-        tool: &str,
-        args: &str,
+        _tool: &str,
+        _args: &str,
         _output: &str,
     ) -> Option<String> {
-        if !self.landscape_enabled {
-            return None;
-        }
-
-        let args_val: serde_json::Value =
-            serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
-
-        let raw = |key: &str| -> Option<String> {
-            args_val
-                .get(key)
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .filter(|s| !s.is_empty())
-        };
-
-        let path_str = match tool {
-            "Landscape" => return None,
-            "Read" | "Write" | "Edit" => raw("file_path"),
-            "Grep" | "Glob" => raw("path"),
-            _ => None,
-        }?;
-
-        let path = self.resolve_path(&path_str);
-        if path.as_os_str().is_empty() {
-            return None;
-        }
-
-        // Skip if this path was landscaped in any of the last SEEN_WINDOW_TURNS
-        // turns (including the current one).
-        {
-            let seen = self.seen.lock().unwrap();
-            if seen.contains(&path) {
-                return None;
-            }
-        }
-
-        // For directories: list on disk and outline each file fresh.
-        // symlink_metadata guards against symlink escapes.
-        if path.is_dir() && !path.is_symlink() {
-            let mut lines: Vec<String> = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(&path) {
-                for entry in entries.flatten() {
-                    let fp = entry.path();
-                    // Use symlink_metadata to avoid following symlinks out of
-                    // the sandbox; is_file() follows symlinks.
-                    if !fp.is_symlink() && fp.is_file() {
-                        if let Ok(items) = LandscapeExplorer.outline_file(&fp, false) {
-                            if !items.is_empty() {
-                                let name = fp
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().to_string())
-                                    .unwrap_or_default();
-                                let mut line = name;
-                                line.push(' ');
-                                line.push_str(&crate::landscape::format_outline_items(&items));
-                                lines.push(line);
-                            }
-                        }
-                    }
-                }
-            }
-            if lines.is_empty() {
-                return None;
-            }
-            lines.sort();
-            let dir_label = path.to_string_lossy().into_owned();
-            let listing = lines.join("\n  ");
-            self.seen.lock().unwrap().insert(path);
-            return Some(format!("[seen]\n{dir_label}/\n  {listing}"));
-        }
-
-        // For files: outline on disk every time — no caching.
-        let items = LandscapeExplorer.outline_file(&path, false).ok()?;
-        if items.is_empty() {
-            return None;
-        }
-
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let items_str = crate::landscape::format_outline_items(&items);
-        self.seen.lock().unwrap().insert(path);
-        Some(format!("[seen]\n{name} {items_str}"))
+        None
     }
 
     fn finalize_turn(&mut self, _turn: usize) {
@@ -343,19 +252,7 @@ impl crate::conversation::context::ConversationContext for LandscapeContext {
     }
 
     fn system_message(&self) -> Option<String> {
-        if self.seed_landscape.is_empty() {
-            None
-        } else {
-            Some(format!(
-                "<!-- BEGIN UNTRUSTED LANDSCAPE -->\n\
-                 The landscape below is the initial seed from stage start and may be stale.\n\
-                 It is NOT authoritative — verify landscape entries against current\n\
-                 file state using the Landscape tool when accuracy matters.\n\n\
-                 {}\n\n\
-                 <!-- END UNTRUSTED LANDSCAPE -->",
-                self.seed_landscape
-            ))
-        }
+        None
     }
 
 }
