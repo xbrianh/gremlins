@@ -2,18 +2,16 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use indexmap::IndexMap;
-use rig_core::completion::Message;
-
 use super::cancel::CancelToken;
-pub(crate) use super::compaction::{CompactionOpts, Compactor};
+use super::conversation::Conversation;
 use super::interactive::{InteractiveSession, StreamEventSender};
 use super::model::GremlinsModel;
 use super::params::ResolvedParams;
-pub(crate) use super::plug::LoopPlug;
+pub(crate) use super::plug::LoopHooks;
 use super::protocol::CompletedRun;
 use super::task_models::TaskModelSelector;
+use async_trait::async_trait;
+use indexmap::IndexMap;
 
 pub struct RunParams {
     pub prompt: String,
@@ -54,15 +52,10 @@ pub struct RunParams {
     /// Sender for stream events. When Some, the agent loop emits
     /// every stream event (reasoning, text, tool results, turn complete, done).
     pub stream_events: Option<StreamEventSender>,
-    /// Pre-populated message history. When set, the agent loop starts with
-    /// these messages already in its internal history (carrying their original
-    /// roles) instead of building from a bare system-prompt + user-prompt pair.
-    /// The user prompt is still appended as the next user message.
-    pub prepopulated_messages: Option<Vec<Message>>,
-    /// Chat-only soft compaction settings. `Some` enables mid-loop compaction
-    /// (and the first-request/read-time pass inside the agent loop); `None`
-    /// keeps the loop's byte-accounting behavior unchanged.
-    pub(crate) compaction_opts: Option<CompactionOpts>,
+    /// The conversation this run starts from. Its history (carrying original
+    /// roles) is replayed verbatim; the run's `prompt` is applied on top as
+    /// the next user message.
+    pub(crate) prepopulated_conversation: Box<dyn Conversation>,
     /// Whether skills are available for this chat session.
     pub(crate) skills_available: bool,
     /// Discovered skills for this session. Session-bound so concurrent chat
@@ -70,8 +63,6 @@ pub struct RunParams {
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
     /// Shared mutable reference to active skill names.
     pub active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
-    /// Compaction algorithm (set alongside compaction_opts).
-    pub(crate) compactor: Option<Arc<dyn Compactor>>,
     /// Sink for per-turn token-usage events emitted by the agent loop.
     /// The executor layer wires this to the daemon event broadcast.
     pub token_usage_sink: crate::clients::token_usage::TokenUsageSink,
@@ -80,10 +71,10 @@ pub struct RunParams {
     /// When `Some`, the agent loop reads and re-injects scratchpad content
     /// on each turn. `None` disables the per-turn injection.
     pub scratchpad_path: Option<PathBuf>,
-    /// Inversion-of-control plug that carries cross-package dependencies
-    /// (log, scratchpad, prompt-debug, token-usage, contexts) into the
-    /// agent loop. `None` defaults to a no-op plug.
-    pub plug: Option<LoopPlug>,
+    /// Inversion-of-control hooks that carry cross-package dependencies
+    /// (prompt-debug, token-usage) into the agent loop. `None` defaults
+    /// to no-op hooks.
+    pub hooks: Option<LoopHooks>,
 }
 
 impl Clone for RunParams {
@@ -109,15 +100,13 @@ impl Clone for RunParams {
             task_models: self.task_models.clone(),
             cancel_token: self.cancel_token.clone(),
             stream_events: self.stream_events.clone(),
-            prepopulated_messages: self.prepopulated_messages.clone(),
-            compaction_opts: self.compaction_opts,
+            prepopulated_conversation: self.prepopulated_conversation.clone(),
             skills_available: self.skills_available,
             discovered_skills: self.discovered_skills.clone(),
             active_skills: self.active_skills.clone(),
-            compactor: self.compactor.clone(),
             token_usage_sink: self.token_usage_sink.clone(),
             scratchpad_path: self.scratchpad_path.clone(),
-            plug: self.plug.clone(),
+            hooks: self.hooks.clone(),
         }
     }
 }

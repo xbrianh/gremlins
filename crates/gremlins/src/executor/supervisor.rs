@@ -2874,9 +2874,9 @@ async fn handle_chat(
     };
     gremlin.client = client;
     // Re-inject scratchpads persisted by prior turns of this persistent chat
-    // gremlin so working memory survives conversation compaction. Each turn
-    // commits its scratchpad under `artifact://_scratchpad/{stage}.md`; the
-    // accumulated content is read back here.
+    // gremlin so working memory carries across turns. Each turn commits its
+    // scratchpad under `artifact://_scratchpad/{stage}.md`; the accumulated
+    // content is read back here.
     let scratchpad_accumulated = crate::executor::agent_runner::accumulate_scratchpads(
         gremlin.state.store_ref(),
         &[], // chat stages sort correctly lexically

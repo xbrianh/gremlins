@@ -7,17 +7,18 @@ use super::interactive::StreamEventSender;
 use super::shell_parse::{
     shell_tokenize, split_commands, strip_heredocs, strip_subshells, ShellToken, SubCommandSep,
 };
-pub(crate) use super::tool_specs::{
+pub(crate) use crate::conversation::tool_specs::{
     always_available, chat_only_always_available, tool_definitions, validate_tool_args,
-    MAX_CONCURRENT_TOOLS, TASK_MAX_PER_TURN,
+    MAX_CONCURRENT_TOOLS,
 };
 use crate::core::paths::{
-    canonicalize_or_ancestor, enforce, expand_user, normalize_path, project_root, resolve,
-    roots_suffix, within_worktree, within_worktree_lexical,
+    canonicalize_or_ancestor, expand_user, normalize_path, project_root, resolve, roots_suffix,
+    within_worktree, within_worktree_lexical,
 };
 use crate::task_kind::TaskKind;
-// Re-export result_status so agent_loop's `tools::result_status` calls keep working.
-pub(crate) use super::compaction::result_status;
+
+#[cfg(test)]
+use super::conversation::ConversationStub;
 
 /// First `max_chars` characters of a string, with \n escaped to `\\n`.
 pub(crate) fn preview_str(s: &str, max_chars: usize) -> String {
@@ -30,29 +31,39 @@ pub(crate) fn preview_str(s: &str, max_chars: usize) -> String {
     }
 }
 
-type TaskFuture = Pin<Box<dyn std::future::Future<Output = TaskOutcome> + Send>>;
+/// Classify a tool result string as `"ok"` or `"error"`.
+pub(crate) fn result_status(res: &str) -> &'static str {
+    if res.starts_with("Error:") || res.starts_with("[exit") || res.starts_with("[timeout]") {
+        "error"
+    } else {
+        "ok"
+    }
+}
 
-/// Output of a Task tool invocation: prose text + the child loop's final
-/// mutable model contexts for fork + join propagation.
-pub(crate) struct TaskOutcome {
-    /// The prose output (text result) from the child agent loop.
+type ToolFuture = Pin<Box<dyn std::future::Future<Output = ToolOutcome> + Send>>;
+
+/// Output of a tool invocation: the prose text the model sees.
+pub(crate) struct ToolOutcome {
+    /// The prose output (text result) from the tool.
     pub output: String,
-    /// Mutable model contexts carried back from the child loop after `join`.
-    pub contexts: Vec<Box<dyn super::model_context::MutableModelContext>>,
+}
+
+impl ToolOutcome {
+    /// Build an outcome with prose output and no child conversation.
+    pub(crate) fn text(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+        }
+    }
 }
 
 /// Callback that `invoke` calls for Task tool invocations.
 ///
-/// The fourth parameter carries the parent's live contexts (filtered by
-/// `propagates_to_task`, cloned at call time) so the child loop can seed
-/// its own `LoopPlug` with a copy of the parent's state.
+/// The third parameter carries the parent's conversation.
+/// Fork receives a clone of the parent conversation; Scout/Implement
+/// receive a fresh conversation seeded from the parent's contexts.
 pub(crate) type TaskFn = Arc<
-    dyn Fn(
-            TaskKind,
-            String,
-            Option<Vec<rig_core::completion::Message>>,
-            Vec<Box<dyn super::model_context::MutableModelContext>>,
-        ) -> TaskFuture
+    dyn Fn(TaskKind, String, Box<dyn super::conversation::Conversation>) -> ToolFuture
         + Send
         + Sync,
 >;
@@ -112,9 +123,6 @@ pub(crate) struct AgentLoopRuntime {
     pub(crate) allowed_tools: Option<Vec<String>>,
     pub(crate) task_fn: Option<TaskFn>,
     pub(crate) audit_lock: Option<Arc<std::sync::Mutex<()>>>,
-    /// Point-in-time snapshot of the parent conversation, available to Task
-    /// tool calls (used only by `Fork`). `None` when unavailable.
-    pub(crate) parent_history: Option<Vec<rig_core::completion::Message>>,
     /// Prefix prepended to tool call IDs emitted on the shared event stream.
     ///
     /// Nested Task conversations run on the parent's stream but reuse raw
@@ -435,39 +443,13 @@ fn audit_write(log: &Path, line: &str) {
 }
 
 fn check_tool(name: &str, ctx: &AgentLoopRuntime, args: &serde_json::Value) -> Option<String> {
-    // AllowAll disables every containment check — no path is ever denied.
-    let roots = ctx.sandbox.roots()?;
-    match name {
-        "Read" | "Edit" | "Write" | "Landscape" => enforce(
-            roots,
-            args.get("file_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("."),
-            ctx.cwd.as_deref(),
-        ),
-        "Grep" => enforce(
-            roots,
-            args.get("path").and_then(|v| v.as_str()).unwrap_or("."),
-            ctx.cwd.as_deref(),
-        ),
-        "Glob" => {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-            let base = resolve(path, ctx.cwd.as_deref());
-            let full_path = base.join(pattern);
-            let full_str = full_path.to_string_lossy();
-            enforce(roots, &full_str, ctx.cwd.as_deref())
-        }
-        "Bash" => bash_check(
-            roots,
-            args.get("command").and_then(|v| v.as_str()).unwrap_or(""),
-            ctx.cwd.as_deref(),
-        ),
-        // Network I/O has no filesystem path to sandbox.
-        "WebSearch" => None,
-        "LoadSkill" => None,
-        _ => None,
-    }
+    // Per-tool sandbox policy lives on each handler. AllowAll is expressed as
+    // `ctx.sandbox.roots() == None`, which each `sandbox_check` impl honors by
+    // returning `None` (allowed) — the old early return moved into the tools.
+    global_registry()
+        .handlers
+        .get(name)
+        .and_then(|h| h.sandbox_check(ctx, args))
 }
 
 pub(crate) async fn blocking_string(f: impl FnOnce() -> String + Send + 'static) -> String {
@@ -489,10 +471,83 @@ pub(crate) fn req_str<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a 
 
 // === Tool handler registry =============================================================
 
-/// Opaque handler dispatched by `invoke`. Implementations live in `crate::toolbox`.
+/// Opaque handler dispatched by `invoke`. Implementations live in `crate::conversation::tools`.
+///
+/// `conv` is the parent conversation, used by fan-out tools (`Task`) to seed a
+/// child loop — fork inherits the parent history, Scout/Implement get a fresh
+/// conversation. Handlers return [`ToolOutcome`] carrying only the prose the
+/// model sees; the loop never names a tool to decide how to dispatch.
 #[async_trait::async_trait]
 pub(crate) trait ToolHandler: Send + Sync {
-    async fn invoke(&self, id: &str, ctx: &AgentLoopRuntime, args_json: &str) -> String;
+    async fn invoke(
+        &self,
+        id: &str,
+        ctx: &AgentLoopRuntime,
+        conv: &dyn super::conversation::Conversation,
+        args_json: &str,
+    ) -> ToolOutcome;
+
+    /// Per-message concurrency budget for fan-out tools. `None` means uncapped.
+    /// The loop consults this to reject excess calls *without* naming the tool.
+    fn max_per_message(&self) -> Option<usize> {
+        None
+    }
+
+    /// Display-truncation length for live ToolResult previews. Read uses a
+    /// larger preview (500) than the 200-char default because its body is
+    /// already a focal artifact of every turn.
+    fn display_truncation(&self) -> usize {
+        200
+    }
+
+    /// Sandbox the tool's path arguments against the run's containment roots.
+    /// Returns an error string on denial; `None` when allowed. `AllowAll` is
+    /// expressed as `roots() == None`, which each implementation must honor by
+    /// returning `None` (allowed) — mirroring the old `check_tool` early return.
+    fn sandbox_check(&self, _ctx: &AgentLoopRuntime, _args: &serde_json::Value) -> Option<String> {
+        None
+    }
+
+    /// Whether this tool's output is subject to the byte cap. Read/Bash/Grep/
+    /// Glob/Landscape/WebSearch are capped; Edit/Write/Done/Task/Mischief/LoadSkill
+    /// are not.
+    fn output_cap(&self) -> bool {
+        false
+    }
+
+    /// The truncation-marker suffix used when [`ToolHandler::output_cap`]
+    /// truncates. `cap` is the configured byte budget.
+    fn output_marker(&self, cap: u64) -> String {
+        format!("\n[...truncated at {cap} bytes...]")
+    }
+
+    /// Whether this tool is the loop's completion signal. The loop consults
+    /// this to detect a completion request (solo-only validation, expected
+    /// artifact check) without naming the tool. Exactly one tool returns
+    /// `true`; every other tool keeps the default.
+    fn completion(&self) -> bool {
+        false
+    }
+
+    /// Presentation: the primary `key=value` detail shown in a tool's TUI
+    /// title and log label. `None` renders the bare tool name.
+    fn title_detail(&self, _args: &serde_json::Value) -> Option<String> {
+        None
+    }
+
+    /// Presentation: whether the tool's secondary args belong in the compact
+    /// TUI title. Only Read and Grep show them there; Bash/WebSearch/Glob
+    /// secondaries appear only in the wider log line.
+    fn title_uses_secondaries(&self) -> bool {
+        false
+    }
+
+    /// Presentation: secondary `key=value` args, ordered. `string_cap`
+    /// truncates long string values (TUI titles); `None` leaves them whole
+    /// (log lines, which apply their own whole-line budget).
+    fn secondary_args(&self, _args: &serde_json::Value, _string_cap: Option<usize>) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[allow(dead_code)]
@@ -519,16 +574,114 @@ impl ToolRegistry {
 static GLOBAL_TOOL_REGISTRY: OnceLock<ToolRegistry> = OnceLock::new();
 
 fn global_registry() -> &'static ToolRegistry {
-    GLOBAL_TOOL_REGISTRY.get_or_init(crate::toolbox::default_registry)
+    GLOBAL_TOOL_REGISTRY.get_or_init(crate::conversation::tools::default_registry)
 }
 
-pub(crate) async fn invoke_with_contexts(
+/// Per-message concurrency budget for a fan-out tool, or `None` when uncapped.
+/// The loop consults this to reject excess calls without naming the tool.
+pub(crate) fn max_per_message(name: &str) -> Option<usize> {
+    global_registry()
+        .handlers
+        .get(name)
+        .and_then(|h| h.max_per_message())
+}
+
+/// Display-truncation length for a tool's live ToolResult preview.
+pub(crate) fn display_truncation(name: &str) -> usize {
+    global_registry()
+        .handlers
+        .get(name)
+        .map(|h| h.display_truncation())
+        .unwrap_or(200)
+}
+
+/// Whether `name` is the loop's completion signal. The agent loop's Done
+/// handling consults this instead of comparing the tool name itself, so any
+/// tool could become the completion signal by declaring `completion()`.
+pub(crate) fn is_completion(name: &str) -> bool {
+    global_registry()
+        .handlers
+        .get(name)
+        .map(|h| h.completion())
+        .unwrap_or(false)
+}
+
+/// Primary title detail for a tool call, or `None` for an unknown tool.
+pub(crate) fn title_detail(name: &str, args: &serde_json::Value) -> Option<String> {
+    global_registry()
+        .handlers
+        .get(name)
+        .and_then(|h| h.title_detail(args))
+}
+
+/// Whether `name` shows its secondary args in the compact TUI title.
+pub(crate) fn title_uses_secondaries(name: &str) -> bool {
+    global_registry()
+        .handlers
+        .get(name)
+        .map(|h| h.title_uses_secondaries())
+        .unwrap_or(false)
+}
+
+/// Secondary `key=value` args for a tool call.
+pub(crate) fn secondary_args(
+    name: &str,
+    args: &serde_json::Value,
+    string_cap: Option<usize>,
+) -> Vec<String> {
+    global_registry()
+        .handlers
+        .get(name)
+        .map(|h| h.secondary_args(args, string_cap))
+        .unwrap_or_default()
+}
+
+/// `key="value"` detail for a single string argument, used by handlers that
+/// present one primary path/command/pattern.
+pub(crate) fn str_detail(args: &serde_json::Value, key: &str) -> Option<String> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| format!("{key}={s:?}"))
+}
+
+/// Push `key=value` for a non-zero unsigned argument, used by handlers
+/// assembling their secondary args.
+pub(crate) fn push_u64_arg(out: &mut Vec<String>, args: &serde_json::Value, key: &str) {
+    if let Some(v) = args.get(key).and_then(|v| v.as_u64()).filter(|v| *v > 0) {
+        out.push(format!("{key}={v}"));
+    }
+}
+
+/// Push `key="value"` for a non-empty string argument, optionally truncating
+/// the value for the compact TUI title.
+pub(crate) fn push_str_arg(
+    out: &mut Vec<String>,
+    args: &serde_json::Value,
+    key: &str,
+    string_cap: Option<usize>,
+) {
+    if let Some(v) = args
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        let rendered = match string_cap {
+            Some(cap) => format!("{:?}", super::format::trunc(v, cap)),
+            None => format!("{v:?}"),
+        };
+        out.push(format!("{key}={rendered}"));
+    }
+}
+
+/// Dispatch a single tool call. `conv` is the parent conversation;
+/// fan-out handlers (`Task`) use it to seed a child loop.
+pub(crate) async fn invoke_with_conversation(
     id: &str,
     name: &str,
     ctx: &AgentLoopRuntime,
     args_json: &str,
-    parent_contexts: Vec<Box<dyn super::model_context::MutableModelContext>>,
-) -> TaskOutcome {
+    conv: &dyn super::conversation::Conversation,
+) -> ToolOutcome {
     if let Some(allowed) = &ctx.allowed_tools {
         // Mischief is chat-only; allow it through the gate only when the
         // session is chat. LoadSkill keeps its old bypass: the handler returns
@@ -539,9 +692,8 @@ pub(crate) async fn invoke_with_contexts(
             && !chat_only_always_available(name, chat)
             && !allowed.iter().any(|n| n == name)
         {
-            return TaskOutcome {
+            return ToolOutcome {
                 output: format!("Error: unknown tool {name}"),
-                contexts: Vec::new(),
             };
         }
     }
@@ -556,9 +708,8 @@ pub(crate) async fn invoke_with_contexts(
                 &ka,
                 "error",
             );
-            return TaskOutcome {
+            return ToolOutcome {
                 output: "Error: invalid arguments".into(),
-                contexts: Vec::new(),
             };
         }
     };
@@ -573,10 +724,7 @@ pub(crate) async fn invoke_with_contexts(
             &ka,
             "error",
         );
-        return TaskOutcome {
-            output: err,
-            contexts: Vec::new(),
-        };
+        return ToolOutcome { output: err };
     }
     if let Some(err) = check_tool(name, ctx, &args) {
         audit(
@@ -586,124 +734,17 @@ pub(crate) async fn invoke_with_contexts(
             &ka,
             "denied",
         );
-        return TaskOutcome {
-            output: err,
-            contexts: Vec::new(),
-        };
+        return ToolOutcome { output: err };
     }
 
-    // Let active contexts serve the tool result before falling through to
-    // the handler registry. This is a read-only pull path — context state
-    // is mutated separately through observe_tool() in emit_tool_results.
-    for ctxc in &parent_contexts {
-        // Landscape exploration uses rayon for parallel directory walks —
-        // offload to a blocking thread so tokio workers stay responsive.
-        let maybe_output: Option<String> = if name == "Landscape" {
-            let args_owned = args.clone();
-            let ctx_owned = ctxc.clone_box();
-            let name_owned = name.to_string();
-            match tokio::task::spawn_blocking(move || {
-                ctx_owned.serve_tool(&name_owned, &args_owned)
-            })
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => Some(format!("Error: {e}")),
-            }
-        } else {
-            ctxc.serve_tool(name, &args)
-        };
-        if let Some(output) = maybe_output {
-            let output = cap_output(name, output);
-            audit(
-                ctx.audit_log.as_deref(),
-                ctx.audit_lock.as_deref(),
-                name,
-                &ka,
-                result_status(&output),
-            );
-            return TaskOutcome {
-                output,
-                contexts: Vec::new(),
-            };
-        }
-    }
-
-    let mut outcome = match name {
-        "Task" => {
-            if let Some(f) = &ctx.task_fn {
-                let kind_str = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-                if prompt.is_empty() {
-                    return TaskOutcome {
-                        output: "Error: Task prompt is required".to_string(),
-                        contexts: Vec::new(),
-                    };
-                }
-                let Some(kind) = TaskKind::parse(kind_str) else {
-                    return TaskOutcome {
-                        output: format!(
-                            "Error: unknown Task kind {kind_str:?}. Expected one of: {}",
-                            TaskKind::ALL
-                                .iter()
-                                .map(|k| k.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                        contexts: Vec::new(),
-                    };
-                };
-                let history = if kind == TaskKind::Fork {
-                    ctx.parent_history.clone()
-                } else {
-                    None
-                };
-                let child_outcome = f(kind, prompt.to_string(), history, parent_contexts).await;
-                // Label the result so concurrent Task outputs can be told apart.
-                let final_output = format!("# {kind}\n\n{}", child_outcome.output);
-                log::info!(
-                    "task dispatch complete: kind={kind} prompt_len={p_len} prompt_preview={p_preview:?} output_len={o_len} output_preview={o_preview:?}",
-                    p_len = prompt.len(),
-                    p_preview = preview_str(prompt, 120),
-                    o_len = final_output.len(),
-                    o_preview = preview_str(&final_output, 300),
-                );
-                TaskOutcome {
-                    output: final_output,
-                    contexts: child_outcome.contexts,
-                }
-            } else {
-                TaskOutcome {
-                    output: "Error: Task not available for this backend".to_string(),
-                    contexts: Vec::new(),
-                }
-            }
-        }
-        "Done" => {
-            let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
-            TaskOutcome {
-                output: format!("Done. {summary}"),
-                contexts: Vec::new(),
-            }
-        }
-        "Mischief" => TaskOutcome {
-            output: include_str!("mischief_dsl.md").to_string(),
-            contexts: Vec::new(),
-        },
-        _ => {
-            let registry = global_registry();
-            match registry.handlers.get(name) {
-                Some(handler) => TaskOutcome {
-                    output: handler.invoke(id, ctx, args_json).await,
-                    contexts: Vec::new(),
-                },
-                None => {
-                    return TaskOutcome {
-                        output: format!("Error: unknown tool {name}"),
-                        contexts: Vec::new(),
-                    }
-                }
-            }
+    // Dispatch through the registry. Every tool — including Task, Done, and
+    // Mischief — lives behind the same handler registry, so there is no
+    // name-based execution branch here.
+    let registry = global_registry();
+    let mut outcome = match registry.handlers.get(name) {
+        Some(handler) => handler.invoke(id, ctx, conv, args_json).await,
+        None => {
+            return ToolOutcome::text(format!("Error: unknown tool {name}"));
         }
     };
     audit(
@@ -717,33 +758,22 @@ pub(crate) async fn invoke_with_contexts(
     outcome
 }
 
-/// Cap output for tools that can produce unbounded results.
-/// Task and Done are excluded: Task manages its own context, Done is tiny.
-/// Edit and Write always return tiny results.
+/// Cap output for tools that can produce unbounded results. Per-tool policy
+/// (`output_cap` + `output_marker`) lives on each handler; this free fn looks
+/// up the handler and applies the shared byte-budget truncation.
+/// Task, Done, Edit, Write, Mischief, and LoadSkill opt out via `output_cap`.
 /// WebSearch handles its own truncation in websearch_invoke_with_cap.
 fn cap_output(name: &str, output: String) -> String {
     let cap = crate::config::max_tool_output_bytes();
-    if cap > 0
-        && matches!(
-            name,
-            "Read" | "Bash" | "Grep" | "Glob" | "Landscape" | "WebSearch"
-        )
-        && output.len() as u64 > cap
-    {
-        let marker = match name {
-            "Read" => format!(
-                "\n[...truncated at {} bytes, use offset/limit to paginate...]",
-                cap
-            ),
-            "Bash" => format!("\n[...truncated at {} bytes...]", cap),
-            "Grep" => format!(
-                "\n[...truncated at {} bytes, lower max_matches or narrow path...]",
-                cap
-            ),
-            "Glob" => format!("\n[...truncated at {} bytes, restrict the path...]", cap),
-            "Landscape" | "WebSearch" => format!("\n[...truncated at {} bytes...]", cap),
-            _ => format!("\n[...truncated at {} bytes...]", cap),
-        };
+    let handler = match global_registry().handlers.get(name) {
+        Some(h) => h,
+        None => return output,
+    };
+    if !handler.output_cap() {
+        return output;
+    }
+    if cap > 0 && output.len() as u64 > cap {
+        let marker = handler.output_marker(cap);
         let marker_len = marker.len() as u64;
         let keep = cap.saturating_sub(marker_len) as usize;
         if keep == 0 {
@@ -767,7 +797,7 @@ fn cap_output(name: &str, output: String) -> String {
     }
 }
 
-/// Convenience wrapper for tests that don't need parent contexts.
+/// Convenience wrapper for tests that don't need conversation contexts.
 #[cfg(test)]
 pub(crate) async fn invoke(
     id: &str,
@@ -775,7 +805,8 @@ pub(crate) async fn invoke(
     ctx: &AgentLoopRuntime,
     args_json: &str,
 ) -> String {
-    invoke_with_contexts(id, name, ctx, args_json, Vec::new())
+    let conv = Box::new(ConversationStub::new(""));
+    invoke_with_conversation(id, name, ctx, args_json, &*conv)
         .await
         .output
 }
@@ -799,9 +830,7 @@ fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::paths::*;
-    use crate::test_support::EnvGuard;
-    use crate::toolbox::{
+    use crate::conversation::tools::{
         bash::bash_invoke,
         edit::{edit_invoke, edit_sync},
         glob::glob_invoke,
@@ -811,6 +840,8 @@ mod tests {
         websearch::{websearch_invoke, websearch_invoke_with_cap},
         write::write_invoke,
     };
+    use crate::core::paths::*;
+    use crate::test_support::EnvGuard;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
@@ -873,7 +904,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -1134,7 +1165,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -1175,7 +1206,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -1214,7 +1245,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -1659,7 +1690,7 @@ mod tests {
             allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -1691,7 +1722,7 @@ mod tests {
             allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -2642,7 +2673,7 @@ mod tests {
             allowed_tools: Some(vec!["Read".into()]),
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -3598,7 +3629,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -3619,12 +3650,11 @@ mod tests {
         let dir = tmp();
         let called = Arc::new(std::sync::Mutex::new(false));
         let called2 = called.clone();
-        let task_fn: TaskFn = Arc::new(move |kind, prompt, _history, _ctx| {
+        let task_fn: TaskFn = Arc::new(move |kind, prompt, _history| {
             *called2.lock().unwrap() = true;
             Box::pin(async move {
-                TaskOutcome {
+                ToolOutcome {
                     output: format!("task result: {kind} / {prompt}"),
-                    contexts: Vec::new(),
                 }
             })
         });
@@ -3637,7 +3667,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
-            parent_history: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -3657,11 +3687,10 @@ mod tests {
     #[tokio::test]
     async fn task_empty_prompt_returns_error() {
         let dir = tmp();
-        let task_fn: TaskFn = Arc::new(|_kind, _prompt, _history, _ctx| {
+        let task_fn: TaskFn = Arc::new(|_kind, _prompt, _history| {
             Box::pin(async move {
-                TaskOutcome {
+                ToolOutcome {
                     output: "should not be called".to_string(),
-                    contexts: Vec::new(),
                 }
             })
         });
@@ -3674,7 +3703,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
-            parent_history: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -3700,12 +3729,11 @@ mod tests {
         let dir = tmp();
         let called = Arc::new(std::sync::Mutex::new(false));
         let called2 = called.clone();
-        let task_fn: TaskFn = Arc::new(move |_kind, _prompt, _history, _ctx| {
+        let task_fn: TaskFn = Arc::new(move |_kind, _prompt, _history| {
             *called2.lock().unwrap() = true;
             Box::pin(async move {
-                TaskOutcome {
+                ToolOutcome {
                     output: "should not be called".to_string(),
-                    contexts: Vec::new(),
                 }
             })
         });
@@ -3718,7 +3746,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
-            parent_history: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -3741,11 +3769,10 @@ mod tests {
     #[tokio::test]
     async fn task_result_is_headered_with_kind() {
         let dir = tmp();
-        let task_fn: TaskFn = Arc::new(|_k, _p, _history, _ctx| {
+        let task_fn: TaskFn = Arc::new(|_k, _p, _history| {
             Box::pin(async move {
-                TaskOutcome {
+                ToolOutcome {
                     output: "body".to_string(),
-                    contexts: Vec::new(),
                 }
             })
         });
@@ -3758,7 +3785,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
-            parent_history: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -4193,11 +4220,10 @@ mod tests {
     async fn invoke_does_not_cap_task() {
         let _env = crate::test_support::EnvGuard::lock();
         let dir = tmp();
-        let task_fn: TaskFn = Arc::new(|_k, _p, _history, _ctx| {
+        let task_fn: TaskFn = Arc::new(|_k, _p, _history| {
             Box::pin(async move {
-                TaskOutcome {
+                ToolOutcome {
                     output: "x".repeat(500),
-                    contexts: Vec::new(),
                 }
             })
         });
@@ -4210,7 +4236,7 @@ mod tests {
             allowed_tools: None,
             task_fn: Some(task_fn),
             audit_lock: None,
-            parent_history: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,
@@ -4246,7 +4272,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            parent_history: None,
+
             id_prefix: String::new(),
             telemetry: AgentLoopTelemetry {
                 stream_events: None,

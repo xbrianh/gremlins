@@ -439,9 +439,7 @@ impl CmdBackend {
                 events,
                 cost_usd: state.cost_usd,
                 token_usage: None,
-                messages: None,
-                file_observations: None,
-                contexts: Vec::new(),
+                conversation: None,
             }
         } else {
             let (text, timed_out) = Self::read_plain(
@@ -473,9 +471,7 @@ impl CmdBackend {
                 events: None,
                 cost_usd: None,
                 token_usage: None,
-                messages: None,
-                file_observations: None,
-                contexts: Vec::new(),
+                conversation: None,
             }
         };
 

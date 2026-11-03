@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::model_context::MutableModelContext;
+use super::conversation::Conversation;
 use rig_core::completion::Message;
 
 /// Aggregated token usage summary from an agent run.
@@ -49,23 +49,23 @@ pub struct CompletedRun {
     pub events: Option<Vec<serde_json::Value>>,
     pub cost_usd: Option<f64>,
     pub token_usage: Option<UsageStats>,
-    /// The agent loop's accumulated message history (all roles), when the
-    /// backend captures it. Used by the chat gremlin to persist full model
-    /// context between stages via `artifact://conversation.json`.
-    pub messages: Option<Vec<Message>>,
-    /// File observations (Read/Grep/Landscape + mutation paths) collected
-    /// during the agent stage. Populated for all agent loops so that
-    /// cross-stage landscape pruning can skip already-explored files.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file_observations: Option<FileObservations>,
-    /// Mutable model contexts (ToolLedger, LandscapeContext, SignalMapContext)
-    /// carried back from the child loop for fork + join propagation.
-    /// Never serialized; consumed by the parent loop after `join`.
+    /// The agent loop's final conversation, when the backend captures it.
+    /// Used by the chat gremlin to persist full model context between stages
+    /// via `artifact://conversation.json`. The `messages()` method provides
+    /// the serializable transcript; the trait object itself is never serialized.
     #[serde(skip)]
-    pub contexts: Vec<Box<dyn MutableModelContext>>,
+    pub(crate) conversation: Option<Box<dyn Conversation>>,
 }
 
-// Manual Clone impl needed because `Box<dyn MutableModelContext>` doesn't
+impl CompletedRun {
+    /// The agent loop's final durable message transcript.
+    /// `None` for non-agent backends (e.g. `cmd`, `exec`).
+    pub fn messages(&self) -> Option<Vec<Message>> {
+        self.conversation.as_ref().map(|conv| conv.messages())
+    }
+}
+
+// Manual Clone impl needed because `Box<dyn Conversation>` doesn't
 // auto-derive Clone — we use the trait's `clone_box()` method.
 impl Clone for CompletedRun {
     fn clone(&self) -> Self {
@@ -76,9 +76,7 @@ impl Clone for CompletedRun {
             events: self.events.clone(),
             cost_usd: self.cost_usd,
             token_usage: self.token_usage.clone(),
-            messages: self.messages.clone(),
-            file_observations: self.file_observations.clone(),
-            contexts: self.contexts.iter().map(|c| c.clone_box()).collect(),
+            conversation: self.conversation.clone(),
         }
     }
 }
@@ -94,44 +92,6 @@ pub fn add_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a + b),
         (a, b) => a.or(b),
-    }
-}
-
-/// One file observation captured from a worker agent's Read, Grep, or Landscape.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FileObservation {
-    /// Tool name: "Read", "Grep", "DirLs", or "Landscape".
-    pub tool: String,
-    /// File path for Read; search path for Grep; directory for Landscape.
-    pub path: String,
-    #[serde(default)]
-    pub offset: u64,
-    #[serde(default)]
-    pub limit: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pattern: Option<String>,
-    /// Exact tool output captured by the worker.
-    pub output: String,
-}
-
-/// Aggregated file observations from a nested agent loop plus mutation paths
-/// for parent-ledger invalidation.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct FileObservations {
-    pub items: Vec<FileObservation>,
-    /// True when observations were truncated to fit the configured output budget.
-    #[serde(default)]
-    pub truncated: bool,
-    /// Files the worker modified (Write/Edit), used to invalidate stale parent-ledger reads.
-    #[serde(default)]
-    pub written_paths: Vec<String>,
-}
-
-impl FileObservations {
-    /// Whether this snapshot carries nothing worth reporting: no reads, no
-    /// mutation paths, and no truncation marker.
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty() && self.written_paths.is_empty() && !self.truncated
     }
 }
 
@@ -173,35 +133,5 @@ mod tests {
         assert_eq!(decoded.cache_creation_input_tokens, None);
         assert_eq!(decoded.reasoning_tokens, Some(2));
         assert_eq!(decoded.turns, 4);
-    }
-
-    #[test]
-    fn is_empty_no_content_no_truncation() {
-        let obs = FileObservations {
-            items: vec![],
-            truncated: false,
-            written_paths: vec![],
-        };
-        assert!(obs.is_empty());
-    }
-
-    #[test]
-    fn is_empty_with_truncation() {
-        let obs = FileObservations {
-            items: vec![],
-            truncated: true,
-            written_paths: vec![],
-        };
-        assert!(!obs.is_empty());
-    }
-
-    #[test]
-    fn is_empty_with_written_paths() {
-        let obs = FileObservations {
-            items: vec![],
-            truncated: false,
-            written_paths: vec!["src/lib.rs".into()],
-        };
-        assert!(!obs.is_empty());
     }
 }

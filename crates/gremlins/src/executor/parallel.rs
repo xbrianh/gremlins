@@ -1200,12 +1200,12 @@ mod tests {
 
     /// A parallel group's explicit `model:` is an enclosing model for its
     /// children, so it must keep beating the selected profile's
-    /// `model-by-stage` map. `cmd/true` (the group model) succeeds while
-    /// `cmd/false` (the profile `plan` mapping) would fail the child.
+    /// `model-by-stage` map. The group model succeeds, the profile
+    /// `plan` mapping would fail the child.
     #[tokio::test]
     async fn parallel_group_model_beats_profile_stage_model() {
         let stages = vec![ParallelBuilder::new("group")
-            .model(model("cmd/true"))
+            .model(model("cmd/sh -c 'cat > /dev/null'"))
             .stage(AgentBuilder::new("plan").prompt("hi").build().unwrap())
             .build()
             .unwrap()];

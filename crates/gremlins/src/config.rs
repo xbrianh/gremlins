@@ -122,12 +122,7 @@ pub struct Config {
     max_tool_output_bytes: u64,
     compaction: CompactionConfig,
     max_prompt_bytes: u64,
-    max_landscape_tokens: u64,
     max_landscape_tool_tokens: Option<u64>,
-    landscape_signals: bool,
-    landscape_tool_ledger_pruning: bool,
-    landscape_stage_profiles: bool,
-    landscape_diff_stat: bool,
     backoff: BackoffConfig,
 }
 
@@ -250,30 +245,35 @@ struct BackoffSection {
 }
 
 /// The `landscape` section of settings.yaml.
+///
+/// The landscape block no longer lives in the system prompt, so the signal and
+/// budget keys it used to take are gone. They are still *accepted* (and
+/// ignored) here so an existing settings file degrades instead of failing the
+/// whole config parse — `deny_unknown_fields` still rejects genuinely
+/// misspelled keys.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LandscapeSection {
-    /// Preferred key: `max-tokens` under `landscape:`.
-    #[serde(rename = "max-tokens", default)]
-    max_tokens: Option<u64>,
     /// Preferred key: `max-tool-tokens` under `landscape:`.
     #[serde(rename = "max-tool-tokens", default)]
     max_tool_tokens: Option<u64>,
-    /// Enable heuristic landscape signals (changed files, symbol map, referenced paths).
-    #[serde(default)]
-    signals: Option<bool>,
-    /// Prune landscape signal sections against already-observed files from
-    /// the ToolLedger.
+
+    // ── deprecated, tolerated, ignored ─────────────────────────────────
+    /// Formerly capped the system-prompt landscape block.
+    #[serde(rename = "max-tokens", default)]
+    _max_tokens: Option<u64>,
+    /// Formerly enabled heuristic landscape signal sections.
+    #[serde(rename = "signals", default)]
+    _signals: Option<bool>,
+    /// Formerly pruned signal sections against the tool ledger.
     #[serde(rename = "tool-ledger-pruning", default)]
-    tool_ledger_pruning: Option<bool>,
-    /// Enable stage profiles — derive signal sections from artifact inputs
-    /// rather than always emitting every section.
+    _tool_ledger_pruning: Option<bool>,
+    /// Formerly enabled stage-derived signal profiles.
     #[serde(rename = "stage-profiles", default)]
-    stage_profiles: Option<bool>,
-    /// Emit a per-file `git diff --numstat` summary (added/deleted counts)
-    /// before the changed-files listing when the stage has a diff artifact.
+    _stage_profiles: Option<bool>,
+    /// Formerly emitted a `git diff --numstat` summary section.
     #[serde(rename = "diff-stat", default)]
-    diff_stat: Option<bool>,
+    _diff_stat: Option<bool>,
 }
 
 /// A single `model-profiles` entry as it appears in `settings.yaml`.
@@ -350,32 +350,9 @@ impl Config {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(DEFAULT_MAX_PROMPT_BYTES);
-                let max_landscape_tokens = std::env::var("GREMLINS_MAX_LANDSCAPE_TOKENS")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(DEFAULT_MAX_LANDSCAPE_TOKENS);
                 let max_landscape_tool_tokens = std::env::var("GREMLINS_MAX_LANDSCAPE_TOOL_TOKENS")
                     .ok()
                     .and_then(|v| v.parse().ok());
-                let landscape_signals = std::env::var("GREMLINS_LANDSCAPE_SIGNALS")
-                    .ok()
-                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_SIGNALS", &v))
-                    .unwrap_or(true);
-                let landscape_tool_ledger_pruning =
-                    std::env::var("GREMLINS_LANDSCAPE_TOOL_LEDGER_PRUNING")
-                        .ok()
-                        .and_then(|v| {
-                            parse_env_bool_or_warn("GREMLINS_LANDSCAPE_TOOL_LEDGER_PRUNING", &v)
-                        })
-                        .unwrap_or(false);
-                let landscape_stage_profiles = std::env::var("GREMLINS_LANDSCAPE_STAGE_PROFILES")
-                    .ok()
-                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_STAGE_PROFILES", &v))
-                    .unwrap_or(false);
-                let landscape_diff_stat = std::env::var("GREMLINS_LANDSCAPE_DIFF_STAT")
-                    .ok()
-                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_DIFF_STAT", &v))
-                    .unwrap_or(false);
                 return Ok(Config {
                     default_model: env_default_model(),
                     max_tool_output_bytes,
@@ -384,12 +361,7 @@ impl Config {
                         threshold_tokens_chat: compaction_threshold_tokens_chat,
                     },
                     max_prompt_bytes,
-                    max_landscape_tokens,
                     max_landscape_tool_tokens,
-                    landscape_signals,
-                    landscape_tool_ledger_pruning,
-                    landscape_stage_profiles,
-                    landscape_diff_stat,
                     ..Config::default()
                 });
             }
@@ -549,17 +521,6 @@ impl Config {
             })
             .unwrap_or(DEFAULT_MAX_PROMPT_BYTES);
 
-        let max_landscape_tokens = cfg_file
-            .landscape
-            .as_ref()
-            .and_then(|l| l.max_tokens)
-            .or_else(|| {
-                std::env::var("GREMLINS_MAX_LANDSCAPE_TOKENS")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-            })
-            .unwrap_or(DEFAULT_MAX_LANDSCAPE_TOKENS);
-
         // max-landscape-tool-tokens: settings.yaml > env var, with no default.
         let max_landscape_tool_tokens = cfg_file
             .landscape
@@ -570,52 +531,6 @@ impl Config {
                     .ok()
                     .and_then(|v| v.parse().ok())
             });
-
-        let landscape_signals = cfg_file
-            .landscape
-            .as_ref()
-            .and_then(|l| l.signals)
-            .or_else(|| {
-                std::env::var("GREMLINS_LANDSCAPE_SIGNALS")
-                    .ok()
-                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_SIGNALS", &v))
-            })
-            .unwrap_or(true);
-
-        let landscape_tool_ledger_pruning = cfg_file
-            .landscape
-            .as_ref()
-            .and_then(|l| l.tool_ledger_pruning)
-            .or_else(|| {
-                std::env::var("GREMLINS_LANDSCAPE_TOOL_LEDGER_PRUNING")
-                    .ok()
-                    .and_then(|v| {
-                        parse_env_bool_or_warn("GREMLINS_LANDSCAPE_TOOL_LEDGER_PRUNING", &v)
-                    })
-            })
-            .unwrap_or(false);
-
-        let landscape_stage_profiles = cfg_file
-            .landscape
-            .as_ref()
-            .and_then(|l| l.stage_profiles)
-            .or_else(|| {
-                std::env::var("GREMLINS_LANDSCAPE_STAGE_PROFILES")
-                    .ok()
-                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_STAGE_PROFILES", &v))
-            })
-            .unwrap_or(false);
-
-        let landscape_diff_stat = cfg_file
-            .landscape
-            .as_ref()
-            .and_then(|l| l.diff_stat)
-            .or_else(|| {
-                std::env::var("GREMLINS_LANDSCAPE_DIFF_STAT")
-                    .ok()
-                    .and_then(|v| parse_env_bool_or_warn("GREMLINS_LANDSCAPE_DIFF_STAT", &v))
-            })
-            .unwrap_or(false);
 
         Ok(Config {
             default_model,
@@ -633,12 +548,7 @@ impl Config {
                 threshold_tokens_chat: compaction_threshold_tokens_chat,
             },
             max_prompt_bytes,
-            max_landscape_tokens,
             max_landscape_tool_tokens,
-            landscape_signals,
-            landscape_tool_ledger_pruning,
-            landscape_stage_profiles,
-            landscape_diff_stat,
             backoff,
         })
     }
@@ -704,28 +614,8 @@ impl Config {
         self.max_prompt_bytes
     }
 
-    pub fn max_landscape_tokens(&self) -> u64 {
-        self.max_landscape_tokens
-    }
-
     pub fn max_landscape_tool_tokens(&self) -> Option<u64> {
         self.max_landscape_tool_tokens
-    }
-
-    pub fn landscape_signals(&self) -> bool {
-        self.landscape_signals
-    }
-
-    pub fn tool_ledger_pruning(&self) -> bool {
-        self.landscape_tool_ledger_pruning
-    }
-
-    pub fn landscape_stage_profiles(&self) -> bool {
-        self.landscape_stage_profiles
-    }
-
-    pub fn landscape_diff_stat(&self) -> bool {
-        self.landscape_diff_stat
     }
 
     pub fn turn_retry_schedule(&self) -> &[f64] {
@@ -1280,9 +1170,6 @@ pub(crate) const DEFAULT_COMPACTION_THRESHOLD_TOKENS_CHAT: u64 = 64_000;
 /// Default ceiling for a serialized prompt: 1 MiB.
 pub(crate) const DEFAULT_MAX_PROMPT_BYTES: u64 = 1_048_576;
 
-/// Default landscape block token budget.
-pub(crate) const DEFAULT_MAX_LANDSCAPE_TOKENS: u64 = 64_000;
-
 /// GREMLINS_MAX_PROMPT_BYTES — cap a serialized prompt at this many bytes.
 /// Default 1 048 576 (1 MiB). Settings.yaml `max-prompt-bytes` takes
 /// precedence over the env var.
@@ -1295,24 +1182,6 @@ pub(crate) fn max_prompt_bytes() -> u64 {
                 .and_then(|v| v.parse().ok())
         })
         .unwrap_or(DEFAULT_MAX_PROMPT_BYTES)
-}
-
-/// GREMLINS_MAX_LANDSCAPE_TOKENS — cap the landscape block injected into the
-/// agent system prompt at this many estimated tokens. Default 64 000.
-/// Settings.yaml `landscape.max-tokens` takes precedence over the env var.
-///
-/// The block is depth-limited to fit within this budget. If it still cannot
-/// be trimmed below the limit (including when the budget is zero), the
-/// landscape is omitted entirely.
-pub(crate) fn max_landscape_tokens() -> u64 {
-    get_global()
-        .map(|c| c.max_landscape_tokens())
-        .or_else(|| {
-            std::env::var("GREMLINS_MAX_LANDSCAPE_TOKENS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-        })
-        .unwrap_or(DEFAULT_MAX_LANDSCAPE_TOKENS)
 }
 
 /// GREMLINS_MAX_LANDSCAPE_TOOL_TOKENS — default token budget for the
@@ -1329,56 +1198,6 @@ pub(crate) fn max_landscape_tool_tokens() -> Option<u64> {
         })
 }
 
-/// GREMLINS_LANDSCAPE_SIGNALS — enable heuristic landscape signals
-/// (changed files, symbol map, referenced paths). Default true.
-/// Settings.yaml `landscape.signals` takes precedence over the env var.
-pub(crate) fn landscape_signals() -> bool {
-    Config::load()
-        .map(|c| c.landscape_signals())
-        .unwrap_or(true)
-}
-
-/// GREMLINS_LANDSCAPE_STAGE_PROFILES — enable stage-driven signal profile
-/// selection. When on and the stage has `artifact://diff` input, the
-/// landscape block is scoped to changed files. Default false.
-/// Settings.yaml `landscape.stage-profiles` takes precedence over the env var.
-pub(crate) fn landscape_stage_profiles() -> bool {
-    Config::load()
-        .map(|c| c.landscape_stage_profiles())
-        .unwrap_or(false)
-}
-
-/// GREMLINS_LANDSCAPE_DIFF_STAT — emit a per-file added/deleted summary
-/// before the changed-files listing when the stage has an `artifact://diff`
-/// input. Default false. Settings.yaml `landscape.diff-stat` takes precedence
-/// over the env var.
-pub(crate) fn landscape_diff_stat() -> bool {
-    Config::load()
-        .map(|c| c.landscape_diff_stat())
-        .unwrap_or(false)
-}
-
-/// Parse a boolean from an environment variable value.
-/// Accepts "1", "true" (case-insensitive) as true; "0", "false" as false.
-fn parse_env_bool(v: &str) -> Option<bool> {
-    match v.to_lowercase().as_str() {
-        "1" | "true" => Some(true),
-        "0" | "false" => Some(false),
-        _ => None,
-    }
-}
-
-/// Like [`parse_env_bool`] but logs a warning when the value is unparseable.
-fn parse_env_bool_or_warn(var_name: &str, v: &str) -> Option<bool> {
-    let result = parse_env_bool(v);
-    if result.is_none() {
-        log::warn!(
-            "{var_name} value {v:?} is not a recognised boolean (expected 0/1 or true/false); ignoring"
-        );
-    }
-    result
-}
-
 /// GREMLINS_MAX_TOOL_OUTPUT_BYTES — cap tool output at this many bytes.
 /// Default 300 000. 0 means no limit. Settings.yaml `max-tool-output-bytes`
 /// takes precedence over the env var.
@@ -1393,10 +1212,15 @@ pub(crate) fn max_tool_output_bytes() -> u64 {
         .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES)
 }
 
-/// GREMLINS_COMPACTION_THRESHOLD_TOKENS — soft token trigger for headless
-/// (pipeline) conversation compaction. Default 50 000. 0 disables proactive
-/// compaction; the hard `max-prompt-bytes` ceiling still applies. Settings.yaml
+/// Soft token trigger for headless (pipeline) conversation compaction.
+/// Default 50 000. 0 disables proactive compaction; the hard
+/// `max-prompt-bytes` ceiling still applies. Settings.yaml
 /// `compaction.threshold-tokens` takes precedence over the env var.
+///
+/// Compatibility accessor only: proactive compaction is not wired into the
+/// agent loop today, so long transcripts are bounded solely by the hard
+/// `max-prompt-bytes` ceiling. Retained for the replacement compaction design.
+#[allow(dead_code)]
 pub(crate) fn compaction_threshold_tokens() -> u64 {
     get_global()
         .map(|c| c.compaction_threshold_tokens())
@@ -1408,10 +1232,13 @@ pub(crate) fn compaction_threshold_tokens() -> u64 {
         .unwrap_or(DEFAULT_COMPACTION_THRESHOLD_TOKENS)
 }
 
-/// GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT — soft token trigger for chat
-/// conversation compaction. Default 64 000. 0 disables proactive compaction;
-/// the hard `max-prompt-bytes` ceiling still applies. Settings.yaml
-/// `compaction.threshold-tokens-chat` takes precedence over the env var.
+/// Soft token trigger for chat conversation compaction. Default 64 000.
+/// 0 disables proactive compaction; the hard `max-prompt-bytes` ceiling still
+/// applies. Settings.yaml `compaction.threshold-tokens-chat` takes precedence
+/// over the env var.
+///
+/// Compatibility accessor only — see [`compaction_threshold_tokens`].
+#[allow(dead_code)]
 pub(crate) fn compaction_threshold_tokens_chat() -> u64 {
     get_global()
         .map(|c| c.compaction_threshold_tokens_chat())
@@ -2593,65 +2420,6 @@ model-profiles:
         assert_eq!(cfg.max_prompt_bytes(), DEFAULT_MAX_PROMPT_BYTES);
     }
 
-    // --- max-landscape-tokens ------------------------------------------------
-
-    #[test]
-    fn test_max_landscape_tokens_default() {
-        let _env = EnvGuard::lock();
-        assert_eq!(max_landscape_tokens(), DEFAULT_MAX_LANDSCAPE_TOKENS);
-    }
-
-    #[test]
-    fn test_max_landscape_tokens_from_env() {
-        let mut env = EnvGuard::lock();
-        env.set("GREMLINS_MAX_LANDSCAPE_TOKENS", "512");
-        assert_eq!(max_landscape_tokens(), 512);
-    }
-
-    #[test]
-    fn test_max_landscape_tokens_from_landscape_section() {
-        let _sandbox = Sandbox::with_config(Some(r#"{"landscape": {"max-tokens": 98765}}"#));
-        let cfg = Config::load().unwrap();
-        assert_eq!(cfg.max_landscape_tokens(), 98765);
-    }
-
-    #[test]
-    fn test_max_landscape_tokens_landscape_section_overrides_env() {
-        let mut env = EnvGuard::lock();
-        let dir = tempfile::tempdir().unwrap();
-        let config_dir = dir.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("settings.yaml"),
-            r#"{"landscape": {"max-tokens": 55555}}"#,
-        )
-        .unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
-        env.set("GREMLINS_MAX_LANDSCAPE_TOKENS", "999");
-        let cfg = Config::load().unwrap();
-        assert_eq!(cfg.max_landscape_tokens(), 55555);
-    }
-
-    #[test]
-    fn test_max_landscape_tokens_env_fallback_no_settings_file() {
-        let mut env = EnvGuard::lock();
-        let dir = tempfile::tempdir().unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
-        env.set("GREMLINS_MAX_LANDSCAPE_TOKENS", "4242");
-        let cfg = Config::load().unwrap();
-        assert_eq!(cfg.max_landscape_tokens(), 4242);
-    }
-
-    #[test]
-    fn test_max_landscape_tokens_default_no_settings_file() {
-        let mut env = EnvGuard::lock();
-        let dir = tempfile::tempdir().unwrap();
-        env.set("GREMLINS_SANDBOX_ROOT", dir.path());
-        // No settings.yaml, no env var — should get the 64000 default.
-        let cfg = Config::load().unwrap();
-        assert_eq!(cfg.max_landscape_tokens(), DEFAULT_MAX_LANDSCAPE_TOKENS);
-    }
-
     // --- max-landscape-tool-tokens -----------------------------------------
 
     #[test]
@@ -2674,11 +2442,7 @@ model-profiles:
         let dir = tempfile::tempdir().unwrap();
         let config_dir = dir.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(
-            config_dir.join("settings.yaml"),
-            r#"{"landscape": {"max-tokens": 64000}}"#,
-        )
-        .unwrap();
+        std::fs::write(config_dir.join("settings.yaml"), r#"{"landscape": {}}"#).unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", dir.path());
         env.set("GREMLINS_MAX_LANDSCAPE_TOOL_TOKENS", "77777");
         let cfg = Config::load().unwrap();
@@ -2865,13 +2629,5 @@ model-profiles:
             cfg.compaction_threshold_tokens_chat(),
             DEFAULT_COMPACTION_THRESHOLD_TOKENS_CHAT
         );
-    }
-
-    #[test]
-    fn test_landscape_stage_profiles_default_off() {
-        // No settings.yaml and no env var → defaults to false.
-        let _sandbox = Sandbox::new();
-        clear_global();
-        assert!(!landscape_stage_profiles());
     }
 }

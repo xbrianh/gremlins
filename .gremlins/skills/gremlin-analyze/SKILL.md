@@ -34,14 +34,16 @@ Run through each dimension below. For each finding, record the wasted tokens or 
 
 #### A. System prompt bloat
 
-The system prompt is assembled in `run.rs::assemble_system_prompt` and includes a landscape block
-(a structural outline of the project). Check:
+The system prompt is `agent_runner.rs`'s `system_prompt()` (the stage prompt,
+or the harness default) plus any skill bodies loaded for the session.  No
+landscape block is injected any more — check that the `Landscape` tool is
+working correctly instead.
 
-- `max_landscape_tokens` config (default 64 000): is the landscape block at or near the cap? Check
-  the info log for a `[landscape]` line reporting file count / item count / token count. If the
-  block is near or at the cap, the project tree is too large for the budget and the model is seeing
-  a skeleton — suggest raising `max_landscape_tokens` or adding a `.gitignore`-style
-  `.gremlinsignore` if the repo has large irrelevant subtrees.
+- `max_landscape_tool_tokens` config (unset by default): is the `Landscape`
+  tool budget at or near the cap? Large trees hit the budget ceiling and
+  return an error; suggest raising `max_landscape_tool_tokens` or adding a
+  `.gitignore`-style `.gremlinsignore` if the repo has large irrelevant
+  subtrees.
 - Repository context block: the untrusted metadata injected by the harness (branch, remotes, recent
   commits, top-level listing). Large commit histories or directory listings in the context block
   consume tokens every turn. If the block is verbose, suggest trimming via `.gremlins/config`.
@@ -56,7 +58,7 @@ The system prompt is assembled in `run.rs::assemble_system_prompt` and includes 
 - **Prompt file size**: Read each `.md` file referenced by agent stage prompts. For each:
   - Count estimated tokens (roughly chars ÷ 3 for a lower-bound estimate).
   - Flag prompts over ~2 000 tokens: every turn pays this cost.
-  - Does the prompt repeat information already in the system prompt (landscape, skills, repository
+  - Does the prompt repeat information already in the system prompt (skills, repository
     context)? Suggest deduplication.
   - Does the prompt include a full file listing that the model could discover via `Landscape`?
   - Does the prompt instruct the model to use `Read` when `Landscape` would be more
@@ -80,8 +82,8 @@ The system prompt is assembled in `run.rs::assemble_system_prompt` and includes 
 - **Task tool usage**: `Task` delegates work to sub-agents. If the log shows a single agent doing
   all the work without delegating, suggest breaking the prompt into parallel `Task` calls.
 - **Redundant reads**: If the same file is read across multiple consecutive turns, the model may
-  not be retaining context. Suggest compaction threshold adjustments or prompt guidance to cache
-  findings.
+  not be retaining context. Suggest prompt guidance to cache findings — the findings ledger is
+  surfaced in the per-turn prompt for exactly this reason.
 
 #### D. Cache efficiency
 
@@ -116,13 +118,14 @@ The system prompt is assembled in `run.rs::assemble_system_prompt` and includes 
   build tools may dominate wall-clock time. Check whether they could run in parallel with
   other stages or whether results could be cached across iterations.
 
-#### F. Conversation compaction
+#### F. Conversation growth
 
-Gremlins compacts the conversation history when it exceeds the provider's context window.
-Check the log for compaction events. If the conversation is being compacted frequently:
-- The model may be losing context and re-asking for files it already read.
-- Suggest increasing `chat_compaction_threshold_bytes` or adjusting `max_prompt_bytes`.
-- Alternatively, suggest breaking a long agent run into multiple shorter stages.
+Gremlins no longer compacts conversation history in-loop; a run grows until it
+hits the hard `max-prompt-bytes` ceiling, at which point the stage fails with a
+prompt-too-large error. If a stage's transcript is approaching the ceiling:
+- Suggest breaking a long agent run into multiple shorter stages.
+- Suggest trimming tool output (`max-tool-output-bytes`) so each turn adds less.
+- The model may also be losing context and re-asking for files it already read.
 
 ### 3. Produce the report
 

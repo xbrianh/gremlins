@@ -14,7 +14,7 @@ CARGO_HOME = $(shell pwd)/.cargo-home
 # --- Test ---
 
 test:
-	cargo test -q -p gremlins --lib
+	cargo test -q -p gremlins --lib -p gremlins-landscape
 
 test-cli:
 	cargo test -q -p gremlins-cli

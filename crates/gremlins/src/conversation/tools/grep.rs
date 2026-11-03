@@ -3,8 +3,11 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use regex::Regex;
 
-use crate::clients::tools::{blocking_string, parse_args, req_str, AgentLoopRuntime, ToolHandler};
-use crate::core::paths::{io_enforce, resolve};
+use crate::clients::tools::{
+    blocking_string, parse_args, push_str_arg, push_u64_arg, req_str, str_detail, AgentLoopRuntime,
+    ToolHandler, ToolOutcome,
+};
+use crate::core::paths::{enforce, io_enforce, resolve};
 
 const GREP_MAX_LINES: usize = 2000;
 const SKIP_DIRS: &[&str] = &["__pycache__", "node_modules", "target"];
@@ -13,8 +16,49 @@ pub(crate) struct GrepTool;
 
 #[async_trait]
 impl ToolHandler for GrepTool {
-    async fn invoke(&self, _id: &str, ctx: &AgentLoopRuntime, args_json: &str) -> String {
-        grep_invoke(ctx, args_json).await
+    fn title_detail(&self, args: &serde_json::Value) -> Option<String> {
+        str_detail(args, "pattern")
+    }
+
+    fn title_uses_secondaries(&self) -> bool {
+        true
+    }
+
+    fn secondary_args(&self, args: &serde_json::Value, string_cap: Option<usize>) -> Vec<String> {
+        let mut out = Vec::new();
+        push_u64_arg(&mut out, args, "max_matches");
+        push_str_arg(&mut out, args, "glob", string_cap);
+        push_str_arg(&mut out, args, "path", string_cap);
+        push_u64_arg(&mut out, args, "context_before");
+        push_u64_arg(&mut out, args, "context_after");
+        out
+    }
+
+    fn sandbox_check(&self, ctx: &AgentLoopRuntime, args: &serde_json::Value) -> Option<String> {
+        let roots = ctx.sandbox.roots()?;
+        enforce(
+            roots,
+            args.get("path").and_then(|v| v.as_str()).unwrap_or("."),
+            ctx.cwd.as_deref(),
+        )
+    }
+
+    fn output_cap(&self) -> bool {
+        true
+    }
+
+    fn output_marker(&self, cap: u64) -> String {
+        format!("\n[...truncated at {cap} bytes, lower max_matches or narrow path...]")
+    }
+
+    async fn invoke(
+        &self,
+        _id: &str,
+        ctx: &AgentLoopRuntime,
+        _conv: &dyn crate::clients::conversation::Conversation,
+        args_json: &str,
+    ) -> ToolOutcome {
+        ToolOutcome::text(grep_invoke(ctx, args_json).await)
     }
 }
 

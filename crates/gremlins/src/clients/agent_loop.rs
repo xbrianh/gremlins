@@ -1,5 +1,3 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -7,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use rig_core::completion::message::{
-    AssistantContent, CallId, Reasoning, Sealed, Text, ToolCall, ToolName, UserContent,
+    AssistantContent, CallId, Reasoning, Sealed, ToolCall, ToolName,
 };
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
 use rig_core::error::ProviderError;
@@ -16,24 +14,22 @@ use rig_core::streaming::{Item, StreamEvent, Streamed};
 use tokio::sync::{mpsc, Semaphore};
 
 use super::backend::RunParams;
-use super::compaction;
-use super::compaction::CompactionOpts;
 use super::interactive::{
     InteractiveCommand, InteractiveEvent, InteractiveSession, PauseToken, StreamEventSender,
 };
 
 use super::cancel::{default_classify, is_retryable, CancelToken, ErrorClassifier};
+use super::conversation::Conversation;
 use super::error::ClientError;
-use super::findings::FindingsLedger;
 use super::format::{
     apply_chunk, assistant_tool_message, enrich_log_line, format_tool_call, format_tool_call_parts,
     trunc,
 };
 use super::model::{GremlinsModel, GremlinsModelError};
-use super::model_context::{compose_model_transcript, MutableModelContext};
-use super::plug::LoopPlug;
-use super::protocol::{add_opt, CompletedRun, FileObservations, TurnStats, UsageStats};
+use super::plug::LoopHooks;
+use super::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
+use crate::clients::done_helpers::done_user_message;
 
 // ── Architecture ────────────────────────────────────────────────────────────
 // agent_loop.rs orchestrates a single agent turn-sequence:
@@ -47,7 +43,7 @@ use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 //     └─ LoopState::execute_tools            // batch tool execution
 //         ├─ collect_tool_jobs                // validate + build ToolJob list
 //         ├─ dispatch_tool_jobs               // concurrent execute with cancel
-//         └─ emit_tool_results                // ledger, history, mutation flush
+//         └─ emit_tool_results                // history + prompt roll-forward
 //
 // Supporting types: ToolJob, StreamAccumulator, StreamTurnOutcome,
 // LoopOpts, InteractiveSession, TurnFlow, etc.
@@ -138,13 +134,6 @@ fn discard_tool_output(rx: &mut Option<mpsc::Receiver<tools::ToolOutputLine>>) {
     }
 }
 
-fn task_kind_is_fork(args: &serde_json::Value) -> bool {
-    args.get("kind")
-        .and_then(|v| v.as_str())
-        .and_then(crate::task_kind::TaskKind::parse)
-        == Some(crate::task_kind::TaskKind::Fork)
-}
-
 /// Sleep for the turn-level backoff, aborting early when the cancel token is
 /// set. Returns `true` if cancellation was observed (the caller must abandon
 /// the retry and unwind), `false` if the full backoff elapsed.
@@ -164,13 +153,10 @@ pub(crate) struct RunContext {
     pub(crate) reminder_budget: usize,
     pub(crate) completion_nudge_budget: usize,
     pub(crate) stream_events: Option<StreamEventSender>,
-    /// Pre-populated message history carried into the loop's internal history.
-    pub(crate) prepopulated_messages: Option<Vec<Message>>,
-    /// Chat-only soft compaction settings (mirrors `RunParams`).
-    pub(crate) compaction_opts: Option<CompactionOpts>,
-    /// Inversion-of-control plug carrying cross-package dependencies.
-    /// Defaults to a no-op plug when `None`.
-    pub(crate) plug: LoopPlug,
+    pub(crate) prepopulated_conversation: Box<dyn Conversation>,
+    /// Inversion-of-control hooks carrying cross-package dependencies
+    /// (prompt-debug, token-usage).
+    pub(crate) hooks: LoopHooks,
 }
 
 impl RunContext {
@@ -183,7 +169,6 @@ impl RunContext {
         } else {
             format!("[{}] ", params.label)
         };
-        let compaction_opts = params.compaction_opts;
         Self {
             idle_timeout,
             prefix,
@@ -191,9 +176,8 @@ impl RunContext {
             reminder_budget: crate::config::artifact_reminder_budget(),
             completion_nudge_budget: crate::config::completion_nudge_budget(),
             stream_events: params.stream_events.clone(),
-            prepopulated_messages: params.prepopulated_messages.clone(),
-            compaction_opts,
-            plug: params.plug.clone().unwrap_or_else(LoopPlug::new),
+            prepopulated_conversation: params.prepopulated_conversation.clone(),
+            hooks: params.hooks.clone().unwrap_or_else(LoopHooks::new),
             params,
         }
     }
@@ -215,15 +199,13 @@ struct ToolJob {
     args: String,
     call: String,
     over_cap: Option<String>,
-    /// Parent contexts cloned for this Task job (only set for "Task" jobs).
-    task_parent_contexts: Vec<Box<dyn MutableModelContext>>,
 }
 
 /// Outcome of one concurrent tool batch dispatched by
 /// [`LoopState::dispatch_tool_jobs`].
 enum ToolDispatchOutcome {
     /// Every tool finished; outputs are aligned with the job list order.
-    Completed(Vec<(String, Vec<Box<dyn MutableModelContext>>)>),
+    Completed(Vec<String>),
     /// The operator entered debug mid-batch: the batch was abandoned, the
     /// turn's history was unwound, and the caller should re-execute the turn.
     ReexecuteTurn,
@@ -234,35 +216,20 @@ struct LoopState {
     system_prompt: Option<String>,
     original_system_prompt: Option<String>,
     live_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
-    history: Vec<Message>,
-    next_prompt: Message,
-    current_turn_start: usize,
-    compacted: Option<compaction::CompactedWorking>,
+    conv: Box<dyn Conversation>,
     turns: usize,
     turn_num: usize,
     turn_retries: usize,
     timeout_retries: usize,
-    final_text: String,
     timed_out: bool,
     exhausted_turn_retries: bool,
     exhausted_timeout_retries: bool,
-    turn_scratchpad_injected: bool,
-    last_scratchpad_hash: Option<u64>,
     stream_error: Option<ProviderError>,
     total_prompt_tokens: Option<u64>,
     total_completion_tokens: Option<u64>,
     total_cached_tokens: Option<u64>,
     total_cache_creation_tokens: Option<u64>,
     total_reasoning_tokens: Option<u64>,
-    /// Mutable model contexts that observe tool calls and contribute per-turn
-    /// transcript blocks.
-    /// Original stage/task prompt — persists across turns so the bootstrap
-    /// message can always carry the model's instructions, even after
-    /// `next_prompt` has been overwritten with "Continue.".
-    stage_prompt: String,
-    contexts: Vec<Box<dyn MutableModelContext>>,
-    findings_ledger: FindingsLedger,
-    turn_findings_injected: bool,
     interactive_active: bool,
     pending_run_one_turn: bool,
     cmd_rx: Option<mpsc::Receiver<InteractiveCommand>>,
@@ -271,9 +238,8 @@ struct LoopState {
     remaining_turns: usize,
     reminder_budget: usize,
     completion_nudge_budget: usize,
-    preserve_reasoning_in_history: bool,
-    /// Inversion-of-control plug carrying log/scratchpad/debug/token-usage/contexts.
-    plug: LoopPlug,
+    /// Inversion-of-control hooks carrying prompt-debug/token-usage callbacks.
+    hooks: LoopHooks,
 }
 
 /// Accumulated state from one model completion stream.
@@ -342,7 +308,7 @@ impl LoopState {
     fn new(
         system_prompt: Option<String>,
         prompt: &str,
-        prepopulated_messages: Option<Vec<Message>>,
+        prepopulated_conversation: Box<dyn Conversation>,
         reminder_budget: usize,
         completion_nudge_budget: usize,
         interactive: Option<InteractiveSession>,
@@ -350,7 +316,7 @@ impl LoopState {
         max_turns: usize,
         prefix: &str,
         preserve_reasoning_in_history: bool,
-        plug: &LoopPlug,
+        hooks: &LoopHooks,
     ) -> Self {
         // Destructure the interactive session into its components so we can
         // thread them independently through the loop.
@@ -362,56 +328,53 @@ impl LoopState {
             .unwrap_or((None, None, None));
 
         let original_system_prompt = system_prompt.clone();
-        // `history` is the verbatim source of truth for the whole loop. The
-        // compacted request view is rebuilt around it but never replaces it.
-        let history: Vec<Message> = prepopulated_messages.unwrap_or_default();
-        let current_turn_start = history.len();
+
+        let mut conv = prepopulated_conversation;
+        // Always apply the stage prompt so chat continuations (built by
+        // run.rs with an empty "" initial prompt) receive the stage
+        // instructions in their first user message.
+        conv.set_next_prompt(prompt);
+        // Chat continuations are built with preserve_reasoning=false
+        // hardcoded. Apply the run's actual setting here.
+        conv.set_preserve_reasoning(preserve_reasoning_in_history);
 
         Self {
             system_prompt,
             original_system_prompt,
             live_output_rx: tool_output_rx,
-            history,
-            next_prompt: Message::user(prompt.to_string()),
-            current_turn_start,
-            compacted: None,
+            conv,
             turns: 0,
             turn_num: 0,
             turn_retries: 0,
             timeout_retries: 0,
-            final_text: String::new(),
             timed_out: false,
             exhausted_turn_retries: false,
             exhausted_timeout_retries: false,
-            turn_scratchpad_injected: false,
-            last_scratchpad_hash: None,
             stream_error: None,
             total_prompt_tokens: None,
             total_completion_tokens: None,
             total_cached_tokens: None,
             total_cache_creation_tokens: None,
             total_reasoning_tokens: None,
-            contexts: {
-                let mut contexts: Vec<Box<dyn MutableModelContext>> = Vec::new();
-                for ctx in &plug.contexts {
-                    contexts.push(ctx.clone_box());
-                }
-                contexts
-            },
-            findings_ledger: FindingsLedger::new(),
-            turn_findings_injected: false,
             interactive_active: false,
             pending_run_one_turn: false,
             cmd_rx,
             evt_tx,
             pause,
-            stage_prompt: prompt.to_string(),
             remaining_turns: max_turns,
             reminder_budget,
             completion_nudge_budget,
-            preserve_reasoning_in_history,
-            plug: plug.clone(),
+            hooks: hooks.clone(),
         }
+    }
+
+    /// Emit a log line through both the process-wide logger (env_logger)
+    /// and the per-gremlin log channel wired by the executor. Daemon-mode
+    /// runs — where env_logger may not be installed — still write to the
+    /// gremlin log blob via this path.
+    fn hook_log(&self, msg: &str) {
+        log::info!("{msg}");
+        self.hooks.log(msg);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -425,33 +388,27 @@ impl LoopState {
         prefix: &str,
         idle_timeout: f64,
         nested: bool,
-        compaction_opts: Option<CompactionOpts>,
-        compactor: Option<Arc<dyn compaction::Compactor>>,
         turn_retry_backoff: &[f64],
         timeout_retry_backoff: &[f64],
     ) -> Result<StreamTurnOutcome, ClientError> {
         // Phase 1: assemble the request (messages, scratchpad, gen params).
-        let builder =
-            self.prepare_stream_request(tool_defs, opts, compaction_opts, compactor, nested);
+        let builder = self.prepare_stream_request(tool_defs, opts, nested);
 
         // Dump the full prompt to the state directory when
         // GREMLINS_LOG_LEVEL=DEBUG and a debug store is configured.
-        self.plug.dump_prompt_debug(&builder);
+        self.hooks.dump_prompt_debug(&builder);
 
         // Phase 2: launch the model stream, handling pre-stream errors and
         // retry inline (each path returns early).
         let response = match model.stream(builder) {
             Ok(s) => s,
             Err(GremlinsModelError::TooLarge { limit, actual }) => {
-                log::info!(
+                self.hook_log(&format!(
                     "agent_loop: prompt too large on turn {}: {} bytes exceeds configured limit of {} bytes", self.turn_num, actual, limit
-                );
-                self.plug.log(
-                    log::Level::Info,
-                    &format!(
-                        "{prefix}error: prompt size {actual} bytes exceeds configured limit of {limit} bytes"
-                    ),
-                );
+                ));
+                self.hook_log(&format!(
+                    "{prefix}error: prompt size {actual} bytes exceeds configured limit of {limit} bytes"
+                ));
                 return Err(ClientError::PromptTooLarge { limit, actual });
             }
             Err(GremlinsModelError::Provider(e)) => {
@@ -463,23 +420,15 @@ impl LoopState {
                 {
                     let wait = turn_retry_backoff[self.turn_retries];
                     self.turn_retries += 1;
-                    log::info!(
+                    self.hook_log(&format!(
                         "agent_loop: retryable stream error on turn {} (attempt {}), backing off {wait}s: {e}", self.turn_num, self.turn_retries
-                    );
-                    self.plug.log(
-                        log::Level::Info,
-                        &format!("{prefix}retry: transient error, backing off {wait}s"),
-                    );
+                    ));
+                    self.hook_log(&format!(
+                        "{prefix}retry: transient error, backing off {wait}s"
+                    ));
                     if retry_backoff(cancel, wait).await {
-                        log::info!(
-                            "agent_loop: cancelled during retry backoff (label={})",
-                            prefix
-                        );
-                        self.plug.log(
-                            log::Level::Info,
-                            &format!("{prefix}exit: cancelled during retry backoff"),
-                        );
-                        return Err(cancelled_error("cancelled", &self.history));
+                        self.hook_log(&format!("{prefix}exit: cancelled during retry backoff"));
+                        return Err(cancelled_error("cancelled", &self.conv.messages()));
                     }
                     // Preserve the pending one-turn state only when
                     // already interactive — otherwise an unconditional
@@ -519,121 +468,24 @@ impl LoopState {
     }
 
     /// Build the [`CompletionRequest`] for one model turn: assemble the request
-    /// messages, re-inject the scratchpad when compaction dropped a prior
-    /// injection, and apply the caller's generation parameters.
-    #[allow(clippy::too_many_arguments)]
+    /// messages, re-inject the scratchpad when a prior injection is missing,
+    /// and apply the caller's generation parameters.
     fn prepare_stream_request(
         &mut self,
         tool_defs: &[ToolDefinition],
         opts: &LoopOpts<'_>,
-        compaction_opts: Option<CompactionOpts>,
-        compactor: Option<Arc<dyn compaction::Compactor>>,
         nested: bool,
     ) -> CompletionRequest {
-        let next_prompt_text = user_message_text(&self.next_prompt);
-        let overhead_bytes = compaction::completion_request_overhead(
-            &next_prompt_text,
-            self.system_prompt.as_deref(),
-            tool_defs,
-        );
-        let overhead_tokens = compaction::completion_request_overhead_tokens(
-            &next_prompt_text,
-            self.system_prompt.as_deref(),
-            tool_defs,
-        );
-        let request_messages = build_request_messages(
-            &self.history,
-            &mut self.compacted,
-            self.current_turn_start,
-            compaction_opts,
-            compactor.clone(),
-            overhead_tokens,
-            overhead_bytes,
+        let script = self.conv.render_turn(
+            nested,
+            self.hooks.read_scratchpad(),
+            self.system_prompt.clone(),
         );
 
-        // If findings weren't injected this turn but the ledger has entries
-        // and compaction dropped the prior injection from history, force
-        // re-injection so the model doesn't lose its discovered facts.
-        if !nested && !self.turn_findings_injected {
-            let findings_block = self.findings_ledger.format();
-            if !findings_block.is_empty() {
-                let in_request = request_messages
-                    .iter()
-                    .any(|msg| user_message_text(msg).contains("## Findings"))
-                    || user_message_text(&self.next_prompt).contains("## Findings");
-                if !in_request {
-                    let next_text = user_message_text(&self.next_prompt);
-                    let combined = format!("{next_text}\n\n{findings_block}");
-                    self.next_prompt = Message::user(combined);
-                    self.turn_findings_injected = true;
-                }
-            }
-        }
-
-        // If the scratchpad wasn't injected this turn (hash unchanged)
-        // but compaction dropped the prior injection from history, force
-        // re-injection so the model doesn't lose its working memory.
-        if !nested && !self.turn_scratchpad_injected {
-            if let Some(content) = self.plug.read_scratchpad() {
-                if !content.trim().is_empty() {
-                    let in_request = request_messages
-                        .iter()
-                        .any(|msg| user_message_text(msg).contains("## Scratchpad"))
-                        || user_message_text(&self.next_prompt).contains("## Scratchpad");
-                    if !in_request {
-                        let mut hasher = DefaultHasher::new();
-                        content.hash(&mut hasher);
-                        self.last_scratchpad_hash = Some(hasher.finish());
-                        let next_text = user_message_text(&self.next_prompt);
-                        let combined = format!(
-                            "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
-                        );
-                        self.next_prompt = Message::user(combined);
-                        self.turn_scratchpad_injected = true;
-                    }
-                } else {
-                    self.last_scratchpad_hash = None;
-                }
-                // Note: when read_scratchpad() returns None, leave
-                // last_scratchpad_hash unchanged so a transient read
-                // failure won't cause redundant re-injection.
-            }
-        }
-
-        // Compose per-turn context transcripts into the request messages.
-        let composed = compose_model_transcript(
-            &self.stage_prompt,
-            &request_messages,
-            &self.next_prompt,
-            &self.contexts,
-            self.turn_num,
-            self.current_turn_start,
-        );
-        let (history_msgs, final_prompt) = composed
-            .split_last()
-            .map(|(last, rest)| (rest.to_vec(), last.clone()))
-            .unwrap_or_else(|| (vec![], self.next_prompt.clone()));
-
-        // Assemble system messages from contexts — trusted, always-accurate
-        // content that belongs in the system prompt rather than in user
-        // message transcript blocks.
-        let context_system_msgs: Vec<String> = self
-            .contexts
-            .iter()
-            .filter_map(|ctx| ctx.system_message())
-            .collect();
-
-        let combined_system = match (context_system_msgs.is_empty(), self.system_prompt.as_ref()) {
-            (true, None) => None,
-            (true, Some(sys)) => Some(sys.clone()),
-            (false, None) => Some(context_system_msgs.join("\n\n")),
-            (false, Some(sys)) => Some(format!("{}\n\n{}", context_system_msgs.join("\n\n"), sys)),
-        };
-
-        let mut builder = CompletionRequest::new(final_prompt)
-            .messages(history_msgs)
+        let mut builder = CompletionRequest::new(script.next_user_prompt)
+            .messages(script.messages)
             .tools(tool_defs.to_vec());
-        if let Some(ref sys) = combined_system {
+        if let Some(ref sys) = script.system_prompt {
             builder = builder.preamble(sys.clone());
         }
         if let Some(params) = opts.extra.clone() {
@@ -682,17 +534,13 @@ impl LoopState {
         // `next_prompt` and (as streaming progresses) accumulated
         // assistant content.  Plain `history` omits both because they
         // are only committed after a successful turn.
-        let mut stream_snapshot: Vec<Message> = {
-            let mut s = self.history.clone();
-            s.push(self.next_prompt.clone());
-            s
-        };
+        let mut stream_snapshot: Vec<Message> = self.conv.messages();
 
         loop {
             let item = tokio::select! {
                 _ = cancel.cancelled() => {
-                    log::info!("agent_loop: cancelled mid-stream (label={})", prefix);
-                    self.plug.log(log::Level::Info, &format!("{prefix}exit: cancelled mid-stream"));
+                    self.hook_log(&format!("agent_loop: cancelled mid-stream (label={})", prefix));
+                    self.hook_log(&format!("{prefix}exit: cancelled mid-stream"));
                     drop(response);
                     return Err(cancelled_error("cancelled", &stream_snapshot));
                 }
@@ -700,8 +548,8 @@ impl LoopState {
                     // Operator triggered debug — cancel the stream and enter
                     // interactive mode. The turn will be re-executed after
                     // the debug session ends.
-                    log::info!("agent_loop: paused mid-stream (label={})", prefix);
-                    self.plug.log(log::Level::Info, &format!("{prefix}pause: entering interactive mode (mid-stream)"));
+                    self.hook_log(&format!("agent_loop: paused mid-stream (label={})", prefix));
+                    self.hook_log(&format!("{prefix}pause: entering interactive mode (mid-stream)"));
                     drop(response);
                     paused_mid_stream = true;
                     if let Some(ref p) = self.pause {
@@ -726,8 +574,7 @@ impl LoopState {
                         };
                         match interactive_loop(
                             model,
-                            &mut self.history,
-                            &mut self.next_prompt,
+                            &mut *self.conv,
                             &mut session,
                             self.turn_num,
                         )
@@ -749,8 +596,8 @@ impl LoopState {
                                 break; // exit the stream loop, execute one turn
                             }
                             Err(e) => {
-                                log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                                self.plug.log(log::Level::Info, &format!("{prefix}exit: operator bailed"));
+                                self.hook_log(&format!("agent_loop: exit (operator bailed, label={})", prefix));
+                                self.hook_log(&format!("{prefix}exit: operator bailed"));
                                 return Err(e);
                             }
                         }
@@ -768,27 +615,22 @@ impl LoopState {
                     if self.timeout_retries < timeout_retry_backoff.len() {
                         let wait = timeout_retry_backoff[self.timeout_retries];
                         self.timeout_retries += 1;
-                        log::info!(
+                        self.hook_log(&format!(
                             "agent_loop: idle timeout on turn {} (attempt {}), backing off {wait}s",
-                            self.turn_num,
-                            self.timeout_retries
-                        );
-                        self.plug.log(
-                            log::Level::Info,
-                            &format!("{prefix}retry: idle timeout, backing off {wait}s"),
-                        );
+                            self.turn_num, self.timeout_retries
+                        ));
+                        self.hook_log(&format!("{prefix}retry: idle timeout, backing off {wait}s"));
                         drop(response);
                         retry_timeout_turn = true;
                         if retry_backoff(cancel, wait).await {
-                            log::info!(
+                            self.hook_log(&format!(
                                 "agent_loop: cancelled during timeout backoff (label={})",
                                 prefix
-                            );
-                            self.plug.log(
-                                log::Level::Info,
-                                &format!("{prefix}exit: cancelled during timeout backoff"),
-                            );
-                            return Err(cancelled_error("cancelled", &self.history));
+                            ));
+                            self.hook_log(&format!(
+                                "{prefix}exit: cancelled during timeout backoff"
+                            ));
+                            return Err(cancelled_error("cancelled", &self.conv.messages()));
                         }
                         break;
                     }
@@ -810,25 +652,21 @@ impl LoopState {
                     {
                         let wait = turn_retry_backoff[self.turn_retries];
                         self.turn_retries += 1;
-                        log::info!(
+                        self.hook_log(&format!(
                             "agent_loop: retryable mid-stream error on turn {} (attempt {}), backing off {wait}s: {e}", self.turn_num, self.turn_retries
-                        );
-                        self.plug.log(
-                            log::Level::Info,
-                            &format!("{prefix}retry: transient error, backing off {wait}s"),
-                        );
+                        ));
+                        self.hook_log(&format!(
+                            "{prefix}retry: transient error, backing off {wait}s"
+                        ));
                         drop(response);
                         retry_turn = true;
                         if retry_backoff(cancel, wait).await {
-                            log::info!(
+                            self.hook_log(&format!(
                                 "agent_loop: cancelled during retry backoff (label={})",
                                 prefix
-                            );
-                            self.plug.log(
-                                log::Level::Info,
-                                &format!("{prefix}exit: cancelled during retry backoff"),
-                            );
-                            return Err(cancelled_error("cancelled", &self.history));
+                            ));
+                            self.hook_log(&format!("{prefix}exit: cancelled during retry backoff"));
+                            return Err(cancelled_error("cancelled", &self.conv.messages()));
                         }
                         break;
                     }
@@ -966,7 +804,7 @@ impl LoopState {
             if !nested {
                 tool_ctx
                     .telemetry
-                    .send_stream_event(InteractiveEvent::StreamReset, cancel, &self.history)
+                    .send_stream_event(InteractiveEvent::StreamReset, cancel, &self.conv.messages())
                     .await?;
             }
             return Ok(StreamTurnOutcome::Continue);
@@ -1002,23 +840,12 @@ impl LoopState {
         captured: &mut Option<Vec<serde_json::Value>>,
         nested: bool,
     ) -> Result<(), ClientError> {
-        // A Fork child inherits the conversation that led up to this turn,
-        // including the user message being answered. The assistant tool-call
-        // message the caller just appended to `history` is intentionally
-        // *not* part of the snapshot: carrying it without its still-unknown
-        // tool results would leave an unmatched assistant tool-use in the
-        // child's transcript.
-        let fork_parent_history = tool_calls
-            .iter()
-            .any(|tc| tc.function.name == "Task" && task_kind_is_fork(&tc.function.arguments))
-            .then(|| self.history[..self.history.len() - 1].to_vec());
-
         // Phase 1: collect + validate tool calls into owned jobs.
         let jobs = self.collect_tool_jobs(tool_calls, prefix, nested, raw, captured);
 
         // Phase 2: concurrent execution (cancel/pause aware).
         let results = match self
-            .dispatch_tool_jobs(&jobs, tool_ctx, model, prefix, cancel, fork_parent_history)
+            .dispatch_tool_jobs(&jobs, tool_ctx, model, prefix, cancel)
             .await?
         {
             ToolDispatchOutcome::Completed(results) => results,
@@ -1026,7 +853,7 @@ impl LoopState {
             ToolDispatchOutcome::ReexecuteTurn => return Ok(()),
         };
 
-        // Phase 3: emit results, update ledger + history.
+        // Phase 3: emit results, extend history, roll the prompt forward.
         self.emit_tool_results(
             jobs, results, tool_ctx, prefix, nested, raw, captured, cancel,
         )
@@ -1059,8 +886,7 @@ impl LoopState {
                     200
                 )
             );
-            self.plug
-                .log(log::Level::Info, &format!("{prefix}{tool_msg}"));
+            self.hook_log(&format!("{prefix}{tool_msg}"));
             if !nested {
                 let id_str = tc.id.to_string();
                 let tool_evt =
@@ -1075,26 +901,15 @@ impl LoopState {
                 name: tc.function.name.to_string(),
                 args: args_json,
                 call: format_tool_call_parts(&tc.function.name, &tc.function.arguments),
-                over_cap: if tc.function.name == "Task" && {
+                over_cap: tools::max_per_message(tc.function.name.as_str()).and_then(|cap| {
                     task_count += 1;
-                    task_count > tools::TASK_MAX_PER_TURN
-                } {
-                    Some(format!(
-                        "Error: at most {} Task calls per message",
-                        tools::TASK_MAX_PER_TURN
-                    ))
-                } else {
-                    None
-                },
-                task_parent_contexts: if tc.function.name == "Task" {
-                    self.contexts
-                        .iter()
-                        .filter(|c| c.propagates_to_task())
-                        .map(|c| c.clone_box())
-                        .collect()
-                } else {
-                    Vec::new()
-                },
+                    (task_count > cap).then(|| {
+                        format!(
+                            "Error: at most {} {} calls per message",
+                            cap, tc.function.name
+                        )
+                    })
+                }),
             });
         }
         jobs
@@ -1105,9 +920,9 @@ impl LoopState {
     /// order). A `tokio::select!` races the batch against cancel and the
     /// operator pause token so a long batch stays interruptible.
     ///
-    /// The Task-specific cap (`TASK_MAX_PER_TURN`) is *not* re-checked here:
-    /// it is a hard rejection applied in [`Self::collect_tool_jobs`] because
-    /// each Task spawns a child loop.
+    /// The fan-out cap is *not* re-checked here: it is a hard rejection
+    /// applied in [`Self::collect_tool_jobs`] via each tool's
+    /// `max_per_message()` policy, because a capped tool spawns a child loop.
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_tool_jobs(
         &mut self,
@@ -1116,10 +931,8 @@ impl LoopState {
         model: &GremlinsModel,
         prefix: &str,
         cancel: &CancelToken,
-        fork_parent_history: Option<Vec<Message>>,
     ) -> Result<ToolDispatchOutcome, ClientError> {
-        let mut ctx = tool_ctx.clone();
-        ctx.parent_history = fork_parent_history;
+        let ctx = tool_ctx.clone();
         // Forward live tool output only for the duration of this batch. The
         // receiver is borrowed by the select below, so later batches never
         // hear stale chunks and Esc/clear cannot resurrect old output.
@@ -1159,29 +972,20 @@ impl LoopState {
             std::future::pending::<()>().await;
         };
         let sem = Arc::new(Semaphore::new(tools::MAX_CONCURRENT_TOOLS));
-        let parent_contexts: Vec<Box<dyn MutableModelContext>> =
-            self.contexts.iter().map(|c| c.clone_box()).collect();
+        // Borrow self.conv as &dyn Conversation so concurrent async blocks
+        // can seed child task loops without needing a mutable borrow.
+        let conv: &dyn Conversation = &*self.conv;
         let exec_fut = join_all(jobs.iter().map(|j| {
             let ctx = &ctx;
             let sem = sem.clone();
-            // Only Landscape and Task tools need parent contexts (Landscape for
-            // serve_tool dispatch, Task for child-loop context propagation).
-            // All other tools pass an empty vec to avoid unnecessary cloning.
-            let contexts = if j.name == "Task" {
-                j.task_parent_contexts.clone()
-            } else if j.name == "Landscape" {
-                parent_contexts.clone()
-            } else {
-                Vec::new()
-            };
             async move {
                 if let Some(msg) = &j.over_cap {
-                    (msg.clone(), Vec::new())
+                    msg.clone()
                 } else {
                     let _permit = sem.acquire_owned().await;
-                    let outcome =
-                        tools::invoke_with_contexts(&j.id, &j.name, ctx, &j.args, contexts).await;
-                    (outcome.output, outcome.contexts)
+                    tools::invoke_with_conversation(&j.id, &j.name, ctx, &j.args, conv)
+                        .await
+                        .output
                 }
             }
         }));
@@ -1195,28 +999,26 @@ impl LoopState {
                 // turn immediately. This is what lets run_chat_turn::finish
                 // re-insert the chat gremlin without waiting for every tool
                 // to complete.
-                log::info!("agent_loop: cancelled mid-tool (label={})", prefix);
-                self.plug.log(log::Level::Info, &format!("{prefix}exit: cancelled mid-tool"));
+                self.hook_log(&format!("agent_loop: cancelled mid-tool (label={})", prefix));
+                self.hook_log(&format!("{prefix}exit: cancelled mid-tool"));
                 discard_tool_output(&mut self.live_output_rx);
-                return Err(cancelled_error("cancelled", &self.history));
+                return Err(cancelled_error("cancelled", &self.conv.messages()));
             }
             _ = maybe_pause(&self.pause) => {
                 // Operator triggered debug mid-tool — drop the join_all future
                 // (cancels pending tool futures). Completed tool side effects
                 // (files written, bash commands run) are not unwound.
-                log::info!("agent_loop: paused mid-tool (label={})", prefix);
-                self.plug.log(log::Level::Info, &format!("{prefix}pause: entering interactive mode (mid-tool)"));
+                self.hook_log(&format!("agent_loop: paused mid-tool (label={})", prefix));
+                self.hook_log(&format!("{prefix}pause: entering interactive mode (mid-tool)"));
                 discard_tool_output(&mut self.live_output_rx);
                 if let Some(ref p) = self.pause {
                     p.reset();
                 }
                 log::debug!("agent_loop: entering interactive mode mid-tool (label={})", prefix);
 
-                // Pop the two messages pushed by the caller (next_prompt +
-                // assistant_tool_message) so the turn can be re-executed
+                // Pop the assistant turn so it can be re-executed
                 // cleanly without duplicate history entries.
-                self.history.pop(); // assistant_tool_message
-                self.history.pop(); // next_prompt
+                self.conv.pop_last_assistant_turn();
 
                 // Amend system prompt with operator note.
                 let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
@@ -1235,8 +1037,7 @@ impl LoopState {
                     };
                     match interactive_loop(
                         model,
-                        &mut self.history,
-                        &mut self.next_prompt,
+                        &mut *self.conv,
                         &mut session,
                         self.turn_num,
                     )
@@ -1256,8 +1057,8 @@ impl LoopState {
                             return Ok(ToolDispatchOutcome::ReexecuteTurn);
                         }
                         Err(e) => {
-                            log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                            self.plug.log(log::Level::Info, &format!("{prefix}exit: operator bailed"));
+                            self.hook_log(&format!("agent_loop: exit (operator bailed, label={})", prefix));
+                            self.hook_log(&format!("{prefix}exit: operator bailed"));
                             return Err(e);
                         }
                     }
@@ -1270,13 +1071,12 @@ impl LoopState {
     }
 
     /// Emit tool results in request order: drain trailing live output,
-    /// publish ToolResult events, record ledger observations, apply deferred
-    /// write invalidations, extend history, and roll the prompt forward.
+    /// publish ToolResult events, extend history, and roll the prompt forward.
     #[allow(clippy::too_many_arguments)]
     async fn emit_tool_results(
         &mut self,
         jobs: Vec<ToolJob>,
-        results: Vec<(String, Vec<Box<dyn MutableModelContext>>)>,
+        results: Vec<String>,
         tool_ctx: &AgentLoopRuntime,
         prefix: &str,
         nested: bool,
@@ -1299,7 +1099,7 @@ impl LoopState {
                             text: line.text,
                         },
                         cancel,
-                        &self.history,
+                        &self.conv.messages(),
                     )
                     .await?;
             }
@@ -1309,10 +1109,9 @@ impl LoopState {
         // for `tool_calls.len()` when bumping the turn counter below.
         let job_count = jobs.len();
         let mut result_msgs = Vec::new();
-        for (job, (output, child_contexts)) in jobs.into_iter().zip(results) {
+        for (job, output) in jobs.into_iter().zip(results) {
             let result_msg = format!("result: {}", trunc(&output, 200));
-            self.plug
-                .log(log::Level::Info, &format!("{prefix}{result_msg}"));
+            self.hook_log(&format!("{prefix}{result_msg}"));
             if !nested {
                 let result_evt = tool_result_event(&job.id, &output);
                 write_raw(raw, &result_evt);
@@ -1322,12 +1121,8 @@ impl LoopState {
             }
             // Emit tool result via stream_events when there is a listener.
             if tool_ctx.telemetry.wants_stream_events() {
-                // For Read, truncate to a reasonable preview.
-                let display = if job.name == "Read" {
-                    trunc(&output, 500)
-                } else {
-                    trunc(&output, 200)
-                };
+                // Per-tool preview budget (Read uses a larger preview).
+                let display = trunc(&output, tools::display_truncation(&job.name));
                 tool_ctx
                     .telemetry
                     .send_stream_event(
@@ -1338,96 +1133,21 @@ impl LoopState {
                             output: display,
                         },
                         cancel,
-                        &self.history,
+                        &self.conv.messages(),
                     )
                     .await?;
             }
 
-            let extra: Vec<Option<String>> = if tools::result_status(&output) == "ok" {
-                // Phase 1: observe — record tool results into every context.
-                // Invalidation is deferred to finalize_turn below to prevent
-                // concurrent tool batches from racing reads against writes.
-                let mut v = Vec::with_capacity(self.contexts.len());
-                for ctx in &mut self.contexts {
-                    ctx.observe_tool(self.turn_num, &job.name, &job.args, &output);
-                    v.push(ctx.tool_result_extra(self.turn_num, &job.name, &job.args, &output));
-                }
-                v
-            } else {
-                Vec::new()
-            };
-            // Newly joined Read/Grep outputs are not part of the compact
-            // `[seen]` transcript, so drain them here. They are attached to
-            // this Task's tool result (durable history) rather than only the
-            // ephemeral next_prompt, so later turns retain the Scout's evidence
-            // even after the ledger has marked the files as read.
-            let mut task_observations: Vec<String> = Vec::new();
-            // Join child contexts back into parent.  Match by concrete
-            // child context joins only the parent context of the same
-            // type, etc. — no silent cross-type no-op calls.
-            if job.name == "Task" && !child_contexts.is_empty() {
-                for child_ctx in &child_contexts {
-                    let child_tid = child_ctx.as_any().type_id();
-                    for parent_ctx in &mut self.contexts {
-                        if parent_ctx.as_any().type_id() == child_tid {
-                            parent_ctx.join(child_ctx.as_ref());
-                        }
-                    }
-                }
-                for parent_ctx in &mut self.contexts {
-                    let text = parent_ctx.new_observations_text();
-                    if !text.is_empty() {
-                        task_observations.push(text);
-                    }
-                }
-            }
-            let annotated = extra.iter().flatten().fold(String::new(), |mut acc, s| {
-                if !acc.is_empty() {
-                    acc.push('\n');
-                }
-                acc.push_str(s);
-                acc
-            });
-            let mut tool_output = if annotated.is_empty() {
-                output
-            } else {
-                format!("{annotated}\n{output}")
-            };
-            if !task_observations.is_empty() {
-                tool_output.push_str("\n\n");
-                tool_output.push_str(&task_observations.join("\n\n"));
-            }
             result_msgs.push(Message::tool_result(
                 CallId::from_wire(job.id.clone()),
                 ToolName::new(job.name.clone()).expect("tool name must not be empty"),
-                tool_output,
+                output,
             ));
-        }
-        // Phase 2: finalize — apply deferred invalidations for every context.
-        // For ledger contexts this processes pending_mutations (Write/Edit paths)
-        // and captures the per-turn transcript block.
-        for ctx in &mut self.contexts {
-            ctx.finalize_turn(self.turn_num);
         }
         self.turns += job_count;
         // Every tool result lands in history so the results stay adjacent to
-        // the assistant tool_calls message.  Context content ([seen] block)
-        // no longer travels through history — it is composed ephemerally via
-        // compose_model_transcript.
-        self.history.extend(result_msgs);
-        // The next prompt is a simple continuation; context blocks are merged
-        // by compose_model_transcript during request assembly. Joined child
-        // observations ride the Task tool result in history, not this prompt.
-        let findings = self.findings_ledger.format();
-        let mut next_text = "Continue.".to_string();
-        if !findings.is_empty() {
-            next_text = format!("{next_text}\n\n{findings}");
-            self.turn_findings_injected = true;
-        } else {
-            self.turn_findings_injected = false;
-        }
-        self.next_prompt = Message::user(next_text);
-        self.turn_scratchpad_injected = false;
+        // the assistant tool_calls message.
+        self.conv.record_tool_results(result_msgs);
         self.remaining_turns -= 1;
         Ok(())
     }
@@ -1453,15 +1173,7 @@ impl LoopState {
                     evt_tx: self.evt_tx.take().unwrap(),
                     pause: self.pause.clone().unwrap(),
                 };
-                match interactive_loop(
-                    model,
-                    &mut self.history,
-                    &mut self.next_prompt,
-                    &mut session,
-                    self.turn_num,
-                )
-                .await
-                {
+                match interactive_loop(model, &mut *self.conv, &mut session, self.turn_num).await {
                     Ok(InteractiveLoopResult::Resumed) => {
                         self.interactive_active = false;
                         self.system_prompt = self.original_system_prompt.clone();
@@ -1475,22 +1187,23 @@ impl LoopState {
                         // Fall through to execute one turn.
                     }
                     Err(e) => {
-                        log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                        self.plug
-                            .log(log::Level::Info, &format!("{prefix}exit: operator bailed"));
+                        self.hook_log(&format!(
+                            "agent_loop: exit (operator bailed, label={})",
+                            prefix
+                        ));
+                        self.hook_log(&format!("{prefix}exit: operator bailed"));
                         return Err(e);
                     }
                 }
             } else if self.pause.as_ref().is_some_and(|p| p.is_paused()) {
                 // Pause token was triggered — enter interactive mode.
-                log::info!(
+                self.hook_log(&format!(
                     "agent_loop: pause token detected at turn boundary (label={})",
                     prefix
-                );
-                self.plug.log(
-                    log::Level::Info,
-                    &format!("{prefix}pause: entering interactive mode (turn boundary)"),
-                );
+                ));
+                self.hook_log(&format!(
+                    "{prefix}pause: entering interactive mode (turn boundary)"
+                ));
                 if let Some(ref p) = self.pause {
                     p.reset();
                 }
@@ -1508,15 +1221,7 @@ impl LoopState {
                     evt_tx: self.evt_tx.take().unwrap(),
                     pause: self.pause.clone().unwrap(),
                 };
-                match interactive_loop(
-                    model,
-                    &mut self.history,
-                    &mut self.next_prompt,
-                    &mut session,
-                    self.turn_num,
-                )
-                .await
-                {
+                match interactive_loop(model, &mut *self.conv, &mut session, self.turn_num).await {
                     Ok(InteractiveLoopResult::Resumed) => {
                         self.system_prompt = self.original_system_prompt.clone();
                         self.cmd_rx = Some(session.cmd_rx);
@@ -1530,47 +1235,17 @@ impl LoopState {
                         // Fall through to execute one turn.
                     }
                     Err(e) => {
-                        log::info!("agent_loop: exit (operator bailed, label={})", prefix);
-                        self.plug
-                            .log(log::Level::Info, &format!("{prefix}exit: operator bailed"));
+                        self.hook_log(&format!(
+                            "agent_loop: exit (operator bailed, label={})",
+                            prefix
+                        ));
+                        self.hook_log(&format!("{prefix}exit: operator bailed"));
                         return Err(e);
                     }
                 }
             }
         }
         Ok(InteractiveBoundary::RunTurn)
-    }
-
-    /// Inject the persistent scratchpad into the next user prompt when its
-    /// content hash changed since the last turn. No-op for nested (Task)
-    /// loops, which are stateless helpers.
-    fn inject_scratchpad(&mut self, nested: bool) {
-        if !nested && !self.turn_scratchpad_injected {
-            if let Some(content) = self.plug.read_scratchpad() {
-                if !content.trim().is_empty() {
-                    let mut hasher = DefaultHasher::new();
-                    content.hash(&mut hasher);
-                    let current_hash = hasher.finish();
-                    if self.last_scratchpad_hash != Some(current_hash) {
-                        self.last_scratchpad_hash = Some(current_hash);
-                        let next_text = user_message_text(&self.next_prompt);
-                        let combined = format!(
-                            "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\n{content}\n\n---\n\n{next_text}"
-                        );
-                        self.next_prompt = Message::user(combined);
-                        self.turn_scratchpad_injected = true;
-                    }
-                } else {
-                    // Scratchpad was cleared — reset so a later rewrite
-                    // of the same content won't be skipped.
-                    self.last_scratchpad_hash = None;
-                }
-            }
-            // Note: when read_scratchpad() returns None (no path configured,
-            // or a transient read error mapped through .ok()), we intentionally
-            // leave last_scratchpad_hash unchanged so a transient failure
-            // won't cause a redundant re-injection next turn.
-        }
     }
 
     /// Fold this turn's provider usage into the running totals and return the
@@ -1638,32 +1313,26 @@ impl LoopState {
                         totals: Some(totals.clone()),
                     },
                     cancel,
-                    &self.history,
+                    &self.conv.messages(),
                 )
                 .await?;
         }
 
         if !reasoning.is_empty() {
             let msg = format!("think: {}", trunc(reasoning, 200));
-            self.plug.log(log::Level::Info, &format!("{prefix}{msg}"));
+            self.hook_log(&format!("{prefix}{msg}"));
         }
         if !text.is_empty() {
             let msg = format!("text: {}", trunc(text, 200));
-            self.plug.log(log::Level::Info, &format!("{prefix}{msg}"));
+            self.hook_log(&format!("{prefix}{msg}"));
         }
-        if !nested {
-            if !text.is_empty() {
-                write_raw(raw, &assistant_text_event(text));
-                if let Some(evts) = captured.as_mut() {
-                    evts.push(assistant_text_event(text));
-                }
-                self.final_text = text.to_string();
+        if !nested && !text.is_empty() {
+            write_raw(raw, &assistant_text_event(text));
+            if let Some(evts) = captured.as_mut() {
+                evts.push(assistant_text_event(text));
             }
-            self.findings_ledger.feed(text);
-        } else {
-            self.final_text = text.to_string();
-            self.findings_ledger.feed(text);
         }
+        self.conv.record_prose(text);
 
         emit_turn_metrics(
             prefix,
@@ -1675,7 +1344,7 @@ impl LoopState {
             text,
             tool_calls,
             turn_usage,
-            &self.plug,
+            &self.hooks,
         );
         Ok(())
     }
@@ -1697,24 +1366,22 @@ impl LoopState {
     ) -> Result<DoneDecision, ClientError> {
         // Solo Done is the only valid completion signal. Mixed Done + other
         // tool calls is incoherent and rejected wholesale so the model retries
-        // cleanly.
-        let has_non_done = tool_calls.iter().any(|tc| tc.function.name != "Done");
-        let done_call = tool_calls.iter().find(|tc| tc.function.name == "Done");
+        // cleanly. Which tool completes the loop is the handler's
+        // `completion()` policy, not a name comparison here.
+        let has_non_done = tool_calls
+            .iter()
+            .any(|tc| !tools::is_completion(tc.function.name.as_str()));
+        let done_call = tool_calls
+            .iter()
+            .find(|tc| tools::is_completion(tc.function.name.as_str()));
 
         match (done_call, has_non_done) {
             (Some(_done_tc), true) => {
                 // Mixed — produce a tool_result for every call so providers
                 // see a valid round of history.
-                // No history.push(next_prompt) here — context content travels
-                // through compose_model_transcript.
-                self.history.push(assistant_tool_message(
-                    text,
-                    reasoning_items,
-                    tool_calls,
-                    self.preserve_reasoning_in_history,
-                ));
+                let mut results = Vec::with_capacity(tool_calls.len());
                 for tc in tool_calls {
-                    let body = if tc.function.name == "Done" {
+                    let body = if tools::is_completion(tc.function.name.as_str()) {
                         "Error: Done must be called alone — do not combine Done with \
                          other tool calls in the same message. Re-issue your tool \
                          calls without Done, then call Done by itself when finished."
@@ -1723,17 +1390,22 @@ impl LoopState {
                          with other tool calls in the same message. Re-issue without \
                          Done."
                     };
-                    self.history.push(Message::tool_result(
+                    results.push(Message::tool_result(
                         tc.id.clone(),
                         tc.function.name.clone(),
                         body,
                     ));
                 }
-                self.next_prompt = Message::user(
-                    "Done was rejected because it was combined with other tool calls. \
-                     Try again — this time either use tools, or call Done. Never both.",
+                self.conv.done_rejected(
+                    text,
+                    reasoning_items,
+                    tool_calls,
+                    results,
+                    Message::user(
+                        "Done was rejected because it was combined with other tool calls. \
+                         Try again — this time either use tools, or call Done. Never both.",
+                    ),
                 );
-                self.finalize_contexts(self.turn_num);
                 return Ok(DoneDecision::RetryNeeded);
             }
             (Some(done_tc), false) => {
@@ -1745,10 +1417,7 @@ impl LoopState {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                self.plug.log(
-                    log::Level::Info,
-                    &format!("{prefix}tool: Done {}", trunc(&done_summary, 200)),
-                );
+                self.hook_log(&format!("{prefix}tool: Done {}", trunc(&done_summary, 200)));
                 if !nested && !expected_artifact_paths.is_empty() {
                     let missing = missing_artifacts(expected_artifact_paths);
                     if !missing.is_empty() && self.reminder_budget > 0 {
@@ -1758,23 +1427,24 @@ impl LoopState {
                              tool, then call Done.",
                             artifact_reminder(&missing),
                         );
-                        self.history.push(assistant_tool_message(
+                        self.conv.done_rejected(
                             text,
                             reasoning_items,
                             std::slice::from_ref(done_tc),
-                            self.preserve_reasoning_in_history,
-                        ));
-                        let rejected_ledger = format!(
-                            "[turn {}]: Done {} (rejected)\n\n{}",
-                            self.turn_num, done_summary, reminder
+                            vec![],
+                            {
+                                let rejected_ledger = format!(
+                                    "[turn {}]: Done {} (rejected)\n\n{}",
+                                    self.turn_num, done_summary, reminder
+                                );
+                                done_user_message(
+                                    &rejected_ledger,
+                                    done_tc.id.clone(),
+                                    done_tc.function.name.clone(),
+                                    &reminder,
+                                )
+                            },
                         );
-                        self.next_prompt = compaction::done_user_message(
-                            &rejected_ledger,
-                            done_tc.id.clone(),
-                            done_tc.function.name.clone(),
-                            &reminder,
-                        );
-                        self.finalize_contexts(self.turn_num);
                         return Ok(DoneDecision::RetryNeeded);
                     }
                 }
@@ -1794,7 +1464,7 @@ impl LoopState {
                     self.total_reasoning_tokens,
                 );
                 if !nested {
-                    emit_final(prefix, self.turns, "", &self.plug);
+                    emit_final(prefix, self.turns, "", &self.hooks);
                     emit_summary(
                         prefix,
                         self.turn_num,
@@ -1804,7 +1474,7 @@ impl LoopState {
                         self.total_cached_tokens,
                         self.total_cache_creation_tokens,
                         self.total_reasoning_tokens,
-                        &self.plug,
+                        &self.hooks,
                     );
                 }
                 // Emit Done via stream_events. Nested loops skip this — only
@@ -1820,36 +1490,22 @@ impl LoopState {
                                 usage: Some(usage.clone()),
                             },
                             cancel,
-                            &self.history,
+                            &self.conv.messages(),
                         )
                         .await?;
                 }
                 // Capture the full message history (prior turns + this final
                 // user prompt + assistant message) so the chat gremlin can
                 // persist complete model context between stages.
-                let mut messages = self.history.clone();
-                messages.push(self.next_prompt.clone());
-                messages.push(assistant_tool_message(
-                    text,
-                    reasoning_items,
-                    std::slice::from_ref(done_tc),
-                    self.preserve_reasoning_in_history,
-                ));
-                let done_ledger = format!("[turn {}]: Done {}", self.turn_num, done_summary);
-                messages.push(compaction::done_user_message(
-                    &done_ledger,
-                    done_tc.id.clone(),
-                    done_tc.function.name.clone(),
-                    "Done accepted.",
-                ));
+                let artifact =
+                    self.conv
+                        .finalize(self.turn_num, text, reasoning_items, Some(done_tc));
                 return Ok(DoneDecision::Accepted(Box::new(completed_run(
-                    Some(result_text),
+                    Some(artifact.final_text),
                     Some(done_summary),
                     captured,
                     usage,
-                    Some(messages),
-                    Some(self.context_file_observations().unwrap_or_default()),
-                    self.contexts.iter().map(|c| c.clone_box()).collect(),
+                    Some(self.conv.clone_box()),
                 ))));
             }
             _ => {}
@@ -1882,14 +1538,8 @@ impl LoopState {
         // the structured reasoning items for the next request.
         if text.is_empty() && !reasoning.is_empty() {
             log::debug!("reasoning-only turn: turn={} — continuing", self.turn_num);
-            self.history.push(assistant_tool_message(
-                "",
-                reasoning_items,
-                &[],
-                self.preserve_reasoning_in_history,
-            ));
-            self.next_prompt = Message::user("Continue.");
-            self.finalize_contexts(self.turn_num);
+            self.conv.record_turn("", reasoning_items, &[]);
+            self.conv.set_next_prompt("Continue.");
             return EmptyTurnAction::ContinueLoop;
         }
 
@@ -1906,17 +1556,12 @@ impl LoopState {
             let missing = missing_artifacts(expected_artifact_paths);
             if !missing.is_empty() {
                 self.reminder_budget -= 1;
-                log::info!(
+                self.hook_log(&format!(
                     "reminder: {} missing artifact(s) — nudging agent (remaining_budget={})",
                     missing.len(),
                     self.reminder_budget,
-                );
-                self.history.push(assistant_tool_message(
-                    text,
-                    reasoning_items,
-                    &[],
-                    self.preserve_reasoning_in_history,
                 ));
+                self.conv.record_turn(text, reasoning_items, &[]);
                 let reminder = artifact_reminder(&missing);
                 write_raw(
                     raw,
@@ -1925,8 +1570,7 @@ impl LoopState {
                 if let Some(evts) = captured.as_mut() {
                     evts.push(serde_json::json!({"type": "reminder", "message": reminder}));
                 }
-                self.next_prompt = Message::user(reminder);
-                self.finalize_contexts(self.turn_num);
+                self.conv.set_next_prompt(&reminder);
                 return EmptyTurnAction::ContinueLoop;
             }
         }
@@ -1934,10 +1578,10 @@ impl LoopState {
         // Completion nudge — prompt the model to call Done.
         if !text.is_empty() && self.completion_nudge_budget > 0 {
             self.completion_nudge_budget -= 1;
-            log::info!(
+            self.hook_log(&format!(
                 "empty turn — nudging agent (remaining_budget={})",
                 self.completion_nudge_budget,
-            );
+            ));
             let nudge_msg = "You produced text but no tool calls. If your work is complete, \
                  call the Done tool. If you still need to make changes, use the \
                  appropriate tool now.";
@@ -1948,14 +1592,8 @@ impl LoopState {
             if let Some(evts) = captured.as_mut() {
                 evts.push(serde_json::json!({"type": "reminder", "message": nudge_msg}));
             }
-            self.history.push(assistant_tool_message(
-                text,
-                reasoning_items,
-                &[],
-                self.preserve_reasoning_in_history,
-            ));
-            self.next_prompt = Message::user(nudge_msg.to_string());
-            self.finalize_contexts(self.turn_num);
+            self.conv.record_turn(text, reasoning_items, &[]);
+            self.conv.set_next_prompt(nudge_msg);
             return EmptyTurnAction::ContinueLoop;
         }
 
@@ -1976,7 +1614,7 @@ impl LoopState {
             self.total_reasoning_tokens,
         );
         if !nested {
-            emit_final(prefix, self.turns, " (exhausted)", &self.plug);
+            emit_final(prefix, self.turns, " (exhausted)", &self.hooks);
             emit_summary(
                 prefix,
                 self.turn_num,
@@ -1986,55 +1624,29 @@ impl LoopState {
                 self.total_cached_tokens,
                 self.total_cache_creation_tokens,
                 self.total_reasoning_tokens,
-                &self.plug,
+                &self.hooks,
             );
         }
-        let mut messages = self.history.clone();
-        messages.push(self.next_prompt.clone());
-        messages.push(assistant_tool_message(
-            text,
-            reasoning_items,
-            &[],
-            self.preserve_reasoning_in_history,
-        ));
+        let artifact = self
+            .conv
+            .finalize(self.turn_num, text, reasoning_items, None);
         EmptyTurnAction::ReturnRun(Box::new(completed_run(
-            Some(self.final_text.clone()),
+            Some(artifact.final_text),
             None,
             captured,
             usage,
-            Some(messages),
-            Some(self.context_file_observations().unwrap_or_default()),
-            self.contexts.iter().map(|c| c.clone_box()).collect(),
+            Some(self.conv.clone_box()),
         )))
     }
 
-    /// Snapshot file observations from contexts for CompletedRun.
-    fn context_file_observations(&self) -> Option<FileObservations> {
-        self.contexts.iter().find_map(|ctx| ctx.file_observations())
-    }
-
-    /// Call finalize_turn on every context, used at every turn boundary
-    /// to maintain the transcript length invariant.
-    fn finalize_contexts(&mut self, turn: usize) {
-        for ctx in &mut self.contexts {
-            ctx.finalize_turn(turn);
-        }
-    }
-
-    /// Append the user prompt and assistant tool-call message for this turn to
-    /// the loop history.
+    /// Append the current assistant turn to the conversation history.
     fn commit_turn_to_history(
         &mut self,
         text: &str,
         reasoning_items: &[Sealed<Reasoning>],
         tool_calls: &[ToolCall],
     ) {
-        self.history.push(assistant_tool_message(
-            text,
-            reasoning_items,
-            tool_calls,
-            self.preserve_reasoning_in_history,
-        ));
+        self.conv.record_turn(text, reasoning_items, tool_calls);
     }
 }
 
@@ -2078,14 +1690,14 @@ pub(crate) async fn run_agent_loop(
         cwd_display,
         trunc(reasoning_effort.unwrap_or("default"), 50)
     );
-    ctx.plug
-        .log(log::Level::Info, &format!("{prefix}{log_line}"));
+    log::info!("{prefix}{log_line}");
+    ctx.hooks.log(&format!("{prefix}{log_line}"));
 
     if cwd.is_none() {
-        ctx.plug.log(
-            log::Level::Info,
-            &format!("{prefix}warning: no cwd set for worktree enforcement"),
-        );
+        log::info!("{prefix}warning: no cwd set for worktree enforcement");
+        ctx.hooks.log(&format!(
+            "{prefix}warning: no cwd set for worktree enforcement"
+        ));
     }
 
     let mut raw = raw_path
@@ -2150,7 +1762,6 @@ pub(crate) async fn run_agent_loop(
         allowed_tools: opts.tool_filter.map(|s| s.to_vec()),
         task_fn: None,
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
-        parent_history: None,
         id_prefix: String::new(),
         telemetry,
         active_skills: ctx.params.active_skills.clone(),
@@ -2196,12 +1807,10 @@ pub(crate) async fn run_agent_loop(
         &ctx.expected_artifact_paths,
         ctx.reminder_budget,
         ctx.completion_nudge_budget,
-        &ctx.plug,
+        &ctx.hooks,
         interactive,
         tool_output_rx,
-        ctx.prepopulated_messages.clone(),
-        ctx.compaction_opts,
-        ctx.params.compactor.clone(),
+        ctx.prepopulated_conversation.clone(),
     )
     .await
 }
@@ -2227,8 +1836,7 @@ pub(crate) async fn run_agent_loop_nested(
     max_tokens: Option<u64>,
     extra: Option<serde_json::Value>,
     preserve_reasoning_in_history: bool,
-    prepopulated_messages: Option<Vec<Message>>,
-    mut parent_contexts: Vec<Box<dyn MutableModelContext>>,
+    prepopulated_conversation: Box<dyn Conversation>,
 ) -> Result<CompletedRun, ClientError> {
     let opts = LoopOpts {
         extra,
@@ -2266,26 +1874,17 @@ pub(crate) async fn run_agent_loop_nested(
     // Forward nested-loop log lines to the optional channel so callers
     // (tests, debug tooling) can observe task begin/turn events without
     // subscribing to the process-wide logger.
-    let mut plug = LoopPlug::new();
-    if !parent_contexts.is_empty() {
-        // Reset transcript state so each seeded context starts fresh
-        // in the child loop. The child's own turns populate new
-        // transcript entries indexed from 0, independent of the
-        // parent's turn numbering.
-        for ctx in &mut parent_contexts {
-            ctx.clear_transcript();
-        }
-        plug.register_contexts(parent_contexts);
-    }
+    let mut hooks = LoopHooks::new();
     if let Some(log_tx) = nested_tool_ctx.log_tx.clone() {
-        plug.register_logger(move |_level, msg| {
-            let _ = log_tx.send(msg.to_string());
+        hooks.register_logger(move |msg| {
+            if log::Level::Info <= crate::core::logging::log_level_threshold() {
+                let _ = log_tx.send(msg.to_string());
+            }
         });
     }
-    plug.log(
-        log::Level::Info,
-        &format!("{prefix}task: begin (max_turns={max_turns})"),
-    );
+    if let Some(log_tx) = &nested_tool_ctx.log_tx {
+        let _ = log_tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
+    }
     let result = run_agent_loop_core(
         &model,
         prompt,
@@ -2303,15 +1902,15 @@ pub(crate) async fn run_agent_loop_nested(
         &[],
         0,
         completion_nudge_budget,
-        &plug,
+        &hooks,
         None,
         None,
-        prepopulated_messages,
-        None,
-        None,
+        prepopulated_conversation,
     )
     .await;
-    plug.log(log::Level::Info, &format!("{prefix}task: end"));
+    if let Some(log_tx) = &nested_tool_ctx.log_tx {
+        let _ = log_tx.send(format!("{prefix}task: end"));
+    }
     result
 }
 
@@ -2342,8 +1941,7 @@ async fn maybe_pause(pause: &Option<Arc<PauseToken>>) {
 #[allow(clippy::too_many_arguments)]
 async fn interactive_loop(
     _model: &GremlinsModel,
-    history: &mut Vec<Message>,
-    next_prompt: &mut Message,
+    conv: &mut dyn Conversation,
     session: &mut InteractiveSession,
     turn: usize,
 ) -> Result<InteractiveLoopResult, ClientError> {
@@ -2371,39 +1969,7 @@ async fn interactive_loop(
                 "interactive_loop: Inject command (len={}, turn={turn})",
                 text.len()
             );
-            // If next_prompt already carries pending ToolResult content
-            // (e.g. a tool_result from a Done rejection), merge the
-            // injected text into that message rather than overwriting it.
-            // This preserves the matching tool_result so the assistant
-            // Done call already in history stays paired with its result.
-            // Anthropic requires tool_result blocks to precede text
-            // blocks, so the injected text is appended after any
-            // existing content.
-            if let Message::User {
-                content: ref existing,
-            } = *next_prompt
-            {
-                if existing
-                    .iter()
-                    .any(|c| matches!(c, UserContent::ToolResult(_)))
-                {
-                    let mut merged = existing.clone();
-                    merged.push(UserContent::Text(Text {
-                        text: format!("[operator]: {text}"),
-                        additional_params: None,
-                    }));
-                    *next_prompt = Message::User { content: merged };
-                    // Don't push a separate user message to history — it
-                    // would separate the assistant Done call from its
-                    // tool_result in the merged next_prompt.
-                } else {
-                    history.push(Message::user(format!("[operator]: {text}")));
-                    *next_prompt = Message::user(text);
-                }
-            } else {
-                history.push(Message::user(format!("[operator]: {text}")));
-                *next_prompt = Message::user(text);
-            }
+            conv.inject_operator(&text);
             Ok(InteractiveLoopResult::RunOneTurn)
         }
         InteractiveCommand::RunTurn => {
@@ -2486,9 +2052,7 @@ fn completed_run(
     summary: Option<String>,
     events: &Option<Vec<serde_json::Value>>,
     usage: UsageStats,
-    messages: Option<Vec<Message>>,
-    file_observations: Option<FileObservations>,
-    contexts: Vec<Box<dyn MutableModelContext>>,
+    conversation: Option<Box<dyn Conversation>>,
 ) -> CompletedRun {
     CompletedRun {
         exit_code: 0,
@@ -2497,9 +2061,7 @@ fn completed_run(
         events: events.clone(),
         cost_usd: None,
         token_usage: Some(usage),
-        messages,
-        file_observations,
-        contexts,
+        conversation,
     }
 }
 
@@ -2523,123 +2085,10 @@ fn artifact_reminder(missing: &[&PathBuf]) -> String {
     )
 }
 
-fn user_message_text(message: &Message) -> String {
-    match message {
-        Message::User { content } => content
-            .iter()
-            .filter_map(|item| match item {
-                UserContent::Text(text) => Some(text.text.clone()),
-                _ => None,
-            })
-            .collect(),
-        _ => String::new(),
-    }
-}
-
-/// Build the message list for the next `CompletionRequest`.
-///
-/// `history` is the verbatim source of truth and is never mutated here. When
-/// compaction is enabled, a cached `CompactedWorking` keeps the request prefix
-/// byte-stable across rounds; a new pass is triggered only when the current
-/// materialized view exceeds the soft token threshold.
-fn build_request_messages(
-    history: &[Message],
-    compacted: &mut Option<compaction::CompactedWorking>,
-    current_turn_start: usize,
-    opts: Option<CompactionOpts>,
-    compactor: Option<Arc<dyn compaction::Compactor>>,
-    overhead_tokens: usize,
-    overhead_bytes: usize,
-) -> Vec<Message> {
-    let Some(opts) = opts else {
-        return history.to_vec();
-    };
-    let compactor = compactor.expect("compactor must be provided when compaction is enabled");
-
-    if let Some(cached) = compacted.as_ref() {
-        if cached.cut > history.len() {
-            // History was popped (for example a mid-tool pause re-run); the
-            // old cut no longer points into the verbatim transcript.
-            *compacted = None;
-        }
-    }
-
-    let working = match compacted.as_ref() {
-        Some(cached) => cached.materialize(history),
-        None => history.to_vec(),
-    };
-
-    if compaction::token_len(&working).saturating_add(overhead_tokens)
-        <= opts.threshold_tokens as usize
-    {
-        return working;
-    }
-
-    let granularity = if history.len() > current_turn_start {
-        compaction::CutGranularity::Round { current_turn_start }
-    } else {
-        compaction::CutGranularity::Turn
-    };
-
-    // Convert only the remaining history-token allowance to bytes via the
-    // conservative 3:1 ratio, then add back the measured byte overhead so
-    // compact_working's internal budget subtraction correctly recovers the
-    // history budget.
-    let history_token_budget = opts.target_tokens.saturating_sub(overhead_tokens as u64);
-    let target_bytes = history_token_budget
-        .saturating_mul(compaction::BYTES_PER_TOKEN)
-        .saturating_add(overhead_bytes as u64);
-
-    // Try the byte budget. For token-dense histories the 3:1 estimate may
-    // be too generous, leaving the resulting view still over the token
-    // target. When that happens — or when the fitter bails because the
-    // serialized history already fits in the byte budget — shrink the
-    // budget and retry.
-    let mut byte_budget = target_bytes;
-    loop {
-        if let Some(fresh) =
-            compactor.compact_working(history, byte_budget, overhead_bytes, granularity)
-        {
-            let request = fresh.materialize(history);
-            let tokens = compaction::token_len(&request).saturating_add(overhead_tokens);
-            if tokens <= opts.target_tokens as usize {
-                *compacted = Some(fresh);
-                return request;
-            }
-            // Token count still over target — the 3:1 estimate was too
-            // generous for this dense content. Shrink budget proportionally.
-            byte_budget = byte_budget
-                .saturating_mul(opts.target_tokens)
-                .saturating_div(tokens as u64)
-                .min(byte_budget.saturating_sub(1));
-            if byte_budget == 0 {
-                break;
-            }
-        } else {
-            // compact_working returned None. If the full history already
-            // fits in the available byte budget it bailed early — shrink
-            // the budget to force a cut. Otherwise there is genuinely no
-            // room and we stop.
-            let available = byte_budget.saturating_sub(overhead_bytes as u64) as usize;
-            if compaction::serialized_len(history) <= available && available > 0 {
-                byte_budget = (available - 1).saturating_add(overhead_bytes) as u64;
-            } else {
-                break;
-            }
-        }
-    }
-
-    // The newest round alone exceeds the target (or the transcript has no
-    // valid cut). Return the input unchanged and let the hard
-    // `max-prompt-bytes` ceiling fail the request; cutting mid-round would
-    // orphan an assistant tool-use from its results.
-    working
-}
-
 // ── agent loop ────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-async fn run_agent_loop_core(
+pub(crate) async fn run_agent_loop_core(
     model: &GremlinsModel,
     prompt: &str,
     system_prompt: Option<String>,
@@ -2656,17 +2105,15 @@ async fn run_agent_loop_core(
     expected_artifact_paths: &[PathBuf],
     reminder_budget: usize,
     completion_nudge_budget: usize,
-    plug: &LoopPlug,
+    hooks: &LoopHooks,
     interactive: Option<InteractiveSession>,
     tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
-    prepopulated_messages: Option<Vec<Message>>,
-    compaction_opts: Option<CompactionOpts>,
-    compactor: Option<Arc<dyn compaction::Compactor>>,
+    prepopulated_conversation: Box<dyn Conversation>,
 ) -> Result<CompletedRun, ClientError> {
     let mut state = LoopState::new(
         system_prompt,
         prompt,
-        prepopulated_messages,
+        prepopulated_conversation,
         reminder_budget,
         completion_nudge_budget,
         interactive,
@@ -2674,7 +2121,7 @@ async fn run_agent_loop_core(
         max_turns,
         prefix,
         opts.preserve_reasoning_in_history,
-        plug,
+        hooks,
     );
     let loop_start = Instant::now();
     let turn_retry_backoff = crate::config::turn_retry_backoff();
@@ -2682,11 +2129,9 @@ async fn run_agent_loop_core(
     while state.remaining_turns > 0 {
         if cancel.is_cancelled() {
             log::info!("agent_loop: cancelled before turn (label={})", prefix);
-            plug.log(
-                log::Level::Info,
-                &format!("{prefix}exit: cancelled before turn"),
-            );
-            return Err(cancelled_error("cancelled", &state.history));
+            log::info!("{prefix}exit: cancelled before turn");
+            hooks.log(&format!("{prefix}exit: cancelled before turn"));
+            return Err(cancelled_error("cancelled", &state.conv.messages()));
         }
 
         match state.await_interactive_turn(model, prefix).await? {
@@ -2698,10 +2143,6 @@ async fn run_agent_loop_core(
         // queue latency, not just server-side time-to-first-token.
         let turn_start = Instant::now();
 
-        // Inject the persistent scratchpad on every turn of the main
-        // (non-nested) loop. See [`LoopState::inject_scratchpad`].
-        state.inject_scratchpad(nested);
-
         let outcome = state
             .stream_turn(
                 model,
@@ -2712,8 +2153,6 @@ async fn run_agent_loop_core(
                 prefix,
                 idle_timeout,
                 nested,
-                compaction_opts,
-                compactor.clone(),
                 &turn_retry_backoff,
                 &timeout_retry_backoff,
             )
@@ -2760,14 +2199,14 @@ async fn run_agent_loop_core(
         let turn_stats = turn_stats(state.turn_num, turn_usage.as_ref());
         let totals = state.fold_turn_usage(turn_usage.as_ref());
 
-        // ── Emit cumulative token usage via plug ─────
+        // ── Emit cumulative token usage via hooks ─────
         let (last_prompt, last_cached) = turn_stats
             .as_ref()
             .map(|ts| (ts.prompt_tokens, ts.cached_input_tokens))
             .unwrap_or((None, None));
-        plug.emit_token_usage(totals.clone(), last_prompt, last_cached);
+        hooks.emit_token_usage(totals.clone(), last_prompt, last_cached);
 
-        emit_turn_stats(prefix, state.turn_num, turn_stats.as_ref(), &totals, plug);
+        emit_turn_stats(prefix, state.turn_num, turn_stats.as_ref(), &totals, hooks);
 
         state
             .emit_turn_artifacts(
@@ -2816,7 +2255,7 @@ async fn run_agent_loop_core(
         // Done handled — filter it out before execution.
         let tool_calls: Vec<ToolCall> = tool_calls
             .into_iter()
-            .filter(|tc| tc.function.name != "Done")
+            .filter(|tc| !tools::is_completion(tc.function.name.as_str()))
             .collect();
 
         if tool_calls.is_empty() {
@@ -2860,7 +2299,7 @@ async fn run_agent_loop_core(
         } else {
             ""
         };
-        emit_final(prefix, state.turns, suffix, plug);
+        emit_final(prefix, state.turns, suffix, hooks);
         emit_summary(
             prefix,
             state.turn_num,
@@ -2870,25 +2309,23 @@ async fn run_agent_loop_core(
             state.total_cached_tokens,
             state.total_cache_creation_tokens,
             state.total_reasoning_tokens,
-            plug,
+            hooks,
         );
     }
 
     if state.timed_out {
         log::info!("agent_loop: exit (stream idle timeout, label={})", prefix);
-        plug.log(
-            log::Level::Info,
-            &format!("{prefix}exit: stream idle timeout"),
-        );
+        log::info!("{prefix}exit: stream idle timeout");
+        hooks.log(&format!("{prefix}exit: stream idle timeout"));
         if state.exhausted_timeout_retries {
             log::error!(
                 "agent_loop: exhausted turn-level timeout retries, giving up (label={})",
                 prefix
             );
-            plug.log(
-                log::Level::Info,
-                &format!("{prefix}exit: exhausted turn-level timeout retries"),
-            );
+            log::info!("{prefix}exit: exhausted turn-level timeout retries");
+            hooks.log(&format!(
+                "{prefix}exit: exhausted turn-level timeout retries"
+            ));
             return Err(ClientError::RetryExhausted {
                 message: "exhausted turn-level timeout retries".into(),
             });
@@ -2899,17 +2336,16 @@ async fn run_agent_loop_core(
     }
     if let Some(err) = state.stream_error {
         log::info!("agent_loop: exit (stream error, label={})", prefix);
-        plug.log(log::Level::Info, &format!("{prefix}exit: stream error"));
+        log::info!("{prefix}exit: stream error");
+        hooks.log(&format!("{prefix}exit: stream error"));
         if state.exhausted_turn_retries {
             log::error!(
                 "agent_loop: exhausted turn-level retries ({} attempts), giving up (label={}): {err}",
                 turn_retry_backoff.len() + 1,
                 prefix
             );
-            plug.log(
-                log::Level::Info,
-                &format!("{prefix}exit: exhausted turn-level retries"),
-            );
+            log::info!("{prefix}exit: exhausted turn-level retries");
+            hooks.log(&format!("{prefix}exit: exhausted turn-level retries"));
             return Err(ClientError::RetryExhausted {
                 message: format!(
                     "exhausted turn-level retries ({} attempts): {err}",
@@ -2921,10 +2357,8 @@ async fn run_agent_loop_core(
         return Err(classify(err));
     }
     log::info!("agent_loop: exit (exceeded max turns, label={})", prefix);
-    plug.log(
-        log::Level::Info,
-        &format!("{prefix}exit: exceeded max turns ({max_turns})"),
-    );
+    log::info!("{prefix}exit: exceeded max turns ({max_turns})");
+    hooks.log(&format!("{prefix}exit: exceeded max turns ({max_turns})"));
     Err(ClientError::Runtime {
         message: format!("exceeded max turns ({max_turns})"),
     })
@@ -2982,7 +2416,7 @@ fn emit_turn_stats(
     turn: usize,
     stats: Option<&TurnStats>,
     totals: &UsageStats,
-    plug: &LoopPlug,
+    hooks: &LoopHooks,
 ) {
     let payload = serde_json::json!({
         "type": "turn_stats",
@@ -2990,7 +2424,9 @@ fn emit_turn_stats(
         "stats": stats,
         "totals": totals,
     });
-    plug.log(log::Level::Info, &format!("{prefix}{payload}"));
+    let msg = format!("{prefix}{payload}");
+    log::info!("{msg}");
+    hooks.log(&msg);
 }
 
 /// Emit per-turn telemetry: timing, token counts, cache hit ratio, reasoning ratio.
@@ -3005,7 +2441,7 @@ fn emit_turn_metrics(
     text: &str,
     tool_calls: &[ToolCall],
     usage: Option<&Usage>,
-    plug: &LoopPlug,
+    hooks: &LoopHooks,
 ) {
     if !crate::config::telemetry_enabled() {
         return;
@@ -3061,7 +2497,8 @@ fn emit_turn_metrics(
         reasoning_tok,
         reasoning_byte_ratio,
     );
-    plug.log(log::Level::Info, &format!("{prefix}{msg}"));
+    log::info!("{prefix}{msg}");
+    hooks.log(&format!("{prefix}{msg}"));
 }
 
 /// Emit stage-end telemetry summary (always emitted, not gated by GREMLINS_TELEMETRY).
@@ -3075,7 +2512,7 @@ fn emit_summary(
     total_cached: Option<u64>,
     total_cache_creation: Option<u64>,
     total_reasoning: Option<u64>,
-    plug: &LoopPlug,
+    hooks: &LoopHooks,
 ) {
     let wall = loop_start.elapsed();
     let total_prompt_u = total_prompt.unwrap_or(0);
@@ -3122,31 +2559,215 @@ fn emit_summary(
         total_cache_creation.unwrap_or(0),
         reasoning_pct,
     );
-    plug.log(log::Level::Info, &format!("{prefix}{msg}"));
+    let full = format!("{prefix}{msg}");
+    log::info!("{full}");
+    hooks.log(&full);
 }
 
-pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str, plug: &LoopPlug) {
+pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str, hooks: &LoopHooks) {
     let msg = format!("final: turns={turns} cost=not-reported{suffix}");
-    plug.log(log::Level::Info, &format!("{prefix}{msg}"));
+    let full = format!("{prefix}{msg}");
+    log::info!("{full}");
+    hooks.log(&full);
+}
+
+// ── lifted test helpers (used by conversation/standard.rs tests) ────────
+
+#[cfg(test)]
+pub(crate) fn gm(
+    model: rig_core::driver::DynModel<rig_core::operation::Completion>,
+) -> GremlinsModel {
+    GremlinsModel::new(model, crate::config::DEFAULT_MAX_PROMPT_BYTES)
+}
+
+#[cfg(test)]
+pub(crate) struct LogSink {
+    pub(crate) tx: std::sync::mpsc::Sender<String>,
+}
+
+#[cfg(test)]
+impl LogSink {
+    pub(crate) fn new() -> (Self, std::sync::mpsc::Receiver<String>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (Self { tx }, rx)
+    }
+}
+
+/// Process-global logger installed exactly once for tests. Records are
+/// forwarded to whichever sink the currently active [`LogGuard`] installed;
+/// when no guard is active the records are dropped.
+#[cfg(test)]
+struct GlobalLogSink;
+
+#[cfg(test)]
+static ACTIVE_SINK: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+impl log::Log for GlobalLogSink {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::max_level()
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        if let Ok(guard) = ACTIVE_SINK.lock() {
+            if let Some(tx) = guard.as_ref() {
+                let _ = tx.send(record.args().to_string());
+            }
+        }
+    }
+    fn flush(&self) {}
+}
+
+/// Serializes log-capturing tests and scopes the active sink to the guard's
+/// lifetime. The process-global logger itself is installed only once, so a
+/// second test still captures its own records.
+#[cfg(test)]
+pub(crate) struct LogGuard {
+    prior_level: log::LevelFilter,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn log_guard(sink: LogSink) -> LogGuard {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    let lock = LOG_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    INSTALL.call_once(|| {
+        log::set_boxed_logger(Box::new(GlobalLogSink)).ok();
+    });
+    let prior_level = log::max_level();
+    log::set_max_level(log::LevelFilter::Trace);
+    *ACTIVE_SINK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some(sink.tx);
+    LogGuard {
+        prior_level,
+        _lock: lock,
+    }
+}
+
+#[cfg(test)]
+impl Drop for LogGuard {
+    fn drop(&mut self) {
+        *ACTIVE_SINK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
+        log::set_max_level(self.prior_level);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn loop_opts(filter: Option<&[String]>) -> LoopOpts<'_> {
+    LoopOpts {
+        extra: None,
+        tool_filter: filter,
+        classify_error: None,
+        temperature: None,
+        max_tokens: None,
+        preserve_reasoning_in_history: false,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn loop_opts_preserve_reasoning(filter: Option<&[String]>) -> LoopOpts<'_> {
+    LoopOpts {
+        extra: None,
+        tool_filter: filter,
+        classify_error: None,
+        temperature: None,
+        max_tokens: None,
+        preserve_reasoning_in_history: true,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_ctx(
+    cwd: Option<std::path::PathBuf>,
+    raw_path: Option<std::path::PathBuf>,
+) -> RunContext {
+    let conv: Box<dyn super::conversation::Conversation> =
+        Box::new(super::conversation::ConversationStub::new("hi"));
+    RunContext {
+        params: super::backend::RunParams {
+            prompt: "hi".into(),
+            label: "t".into(),
+            model: Some("mock".into()),
+            raw_path,
+            capture_events: true,
+            on_timeout_prompt: None,
+            max_retries: 0,
+            cwd,
+            artifact_dir: None,
+            idle_timeout: Some(0.05),
+            extra_env: None,
+            expected_artifact_paths: vec![],
+            system_prompt: None,
+            gremlin_id: None,
+            log_tx: None,
+            base_env: None,
+            allow_all: false,
+            task_models: None,
+            cancel_token: None,
+            stream_events: None,
+            prepopulated_conversation: conv.clone(),
+            skills_available: false,
+            discovered_skills: None,
+            active_skills: None,
+            token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
+            scratchpad_path: None,
+            hooks: None,
+        },
+        prefix: "[t] ".into(),
+        idle_timeout: 0.05,
+        expected_artifact_paths: vec![],
+        reminder_budget: 0,
+        completion_nudge_budget: 0,
+        stream_events: None,
+        prepopulated_conversation: conv,
+        hooks: super::plug::LoopHooks::new(),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_tool_ctx() -> super::tools::AgentLoopRuntime {
+    super::tools::AgentLoopRuntime {
+        cwd: None,
+        extra_env: None,
+        base_env: None,
+        sandbox: super::tools::SandboxMode::Roots(vec![]),
+        audit_log: None,
+        allowed_tools: None,
+        task_fn: None,
+        audit_lock: Some(std::sync::Arc::new(std::sync::Mutex::new(()))),
+        id_prefix: String::new(),
+        telemetry: super::tools::AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clients::format::{key_arg, ledger_key_arg};
+    use crate::clients::conversation::ConversationStub;
+    use crate::clients::format::key_arg;
     use crate::clients::interactive::InteractiveChannels;
-    use crate::clients_plugins::tool_ledger::ToolLedger;
     use http::StatusCode;
-    use rig_core::driver::DynModel;
     use rig_core::message::{Issuer, Reasoning, ReasoningContent, ToolFunction, UserContent};
     use rig_core::operation::Completion;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::broadcast::error::RecvError;
-
-    fn gm(model: DynModel<Completion>) -> GremlinsModel {
-        GremlinsModel::new(model, crate::config::DEFAULT_MAX_PROMPT_BYTES)
-    }
 
     #[test]
     fn turn_stats_passes_through_partial_usage_without_zero_filling() {
@@ -3246,29 +2867,6 @@ mod tests {
             "echo hi"
         );
         assert_eq!(key_arg(&serde_json::json!({})), "");
-    }
-
-    #[test]
-    fn ledger_key_arg_covers_extra_fields_and_truncates() {
-        assert_eq!(ledger_key_arg(&serde_json::json!({"path": "/tmp"})), "/tmp");
-        assert_eq!(
-            ledger_key_arg(&serde_json::json!({"kind": "Scout"})),
-            "Scout"
-        );
-        assert_eq!(ledger_key_arg(&serde_json::json!({"pattern": ""})), "");
-        let long = ledger_key_arg(&serde_json::json!({"command": "x".repeat(200)}));
-        assert_eq!(long.chars().count(), 80);
-        assert!(long.contains('…'));
-        assert!(ledger_key_arg(&serde_json::json!({
-            "file_path": format!("{}/deep/path.txt", "d".repeat(200))
-        }))
-        .ends_with("path.txt"));
-
-        // Multiline commands must stay on one ledger line.
-        assert_eq!(
-            ledger_key_arg(&serde_json::json!({"command": "a\nb\r\nc"})),
-            "a b  c"
-        );
     }
 
     #[test]
@@ -3586,27 +3184,6 @@ mod tests {
     }
 
     #[test]
-    fn ledger_key_arg_includes_summary() {
-        assert_eq!(
-            ledger_key_arg(&serde_json::json!({"summary": "Fixed the bug"})),
-            "Fixed the bug"
-        );
-        // summary is lower priority than file_path, command, pattern.
-        assert_eq!(
-            ledger_key_arg(&serde_json::json!({"file_path": "/tmp/x", "summary": "ignored"})),
-            "/tmp/x"
-        );
-        assert_eq!(
-            ledger_key_arg(&serde_json::json!({"command": "ls", "summary": "ignored"})),
-            "ls"
-        );
-        assert_eq!(
-            ledger_key_arg(&serde_json::json!({"pattern": "fn", "summary": "ignored"})),
-            "fn"
-        );
-    }
-
-    #[test]
     fn key_arg_includes_summary() {
         assert_eq!(
             key_arg(&serde_json::json!({"summary": "Completed task"})),
@@ -3674,370 +3251,6 @@ mod tests {
             matches!(result, Ok(false)),
             "cancellation must interrupt a blocked stream send and report not sent"
         );
-    }
-
-    fn loop_opts(filter: Option<&[String]>) -> LoopOpts<'_> {
-        LoopOpts {
-            extra: None,
-            tool_filter: filter,
-            classify_error: None,
-            temperature: None,
-            max_tokens: None,
-            preserve_reasoning_in_history: false,
-        }
-    }
-
-    fn loop_opts_preserve_reasoning(filter: Option<&[String]>) -> LoopOpts<'_> {
-        LoopOpts {
-            extra: None,
-            tool_filter: filter,
-            classify_error: None,
-            temperature: None,
-            max_tokens: None,
-            preserve_reasoning_in_history: true,
-        }
-    }
-
-    fn test_ctx(
-        cwd: Option<std::path::PathBuf>,
-        raw_path: Option<std::path::PathBuf>,
-    ) -> RunContext {
-        RunContext {
-            params: RunParams {
-                prompt: "hi".into(),
-                label: "t".into(),
-                model: Some("mock".into()),
-                raw_path,
-                capture_events: true,
-                on_timeout_prompt: None,
-                max_retries: 0,
-                cwd,
-                artifact_dir: None,
-                idle_timeout: Some(0.05),
-                extra_env: None,
-                expected_artifact_paths: vec![],
-                system_prompt: None,
-                gremlin_id: None,
-                log_tx: None,
-                base_env: None,
-                allow_all: false,
-                task_models: None,
-                cancel_token: None,
-                stream_events: None,
-                prepopulated_messages: None,
-                compaction_opts: None,
-                skills_available: false,
-                discovered_skills: None,
-                compactor: None,
-                active_skills: None,
-                token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
-                scratchpad_path: None,
-                plug: None,
-            },
-            prefix: "[t] ".into(),
-            idle_timeout: 0.05,
-            expected_artifact_paths: vec![],
-            reminder_budget: 0,
-            completion_nudge_budget: 0,
-            stream_events: None,
-            prepopulated_messages: None,
-            compaction_opts: None,
-            plug: {
-                // Seed a ToolLedger so tests that assert on ledger behavior work.
-                let mut plug = LoopPlug::new();
-                let mut ledger = ToolLedger::new();
-                ledger.capture_turn_transcript(0);
-                plug.register_contexts(vec![Box::new(ledger) as Box<dyn MutableModelContext>]);
-                plug
-            },
-        }
-    }
-
-    fn padded_history(rounds: usize, assistant_text_len: usize) -> Vec<Message> {
-        let mut history = vec![Message::user("operator prompt")];
-        for index in 0..rounds {
-            history.push(assistant_tool_message(
-                &"x".repeat(assistant_text_len),
-                &[],
-                &[],
-                true,
-            ));
-            history.push(Message::user(format!("[turn {}]: round {index}", index)));
-        }
-        history
-    }
-
-    fn bash_history(rounds: usize, output_len: usize) -> Vec<Message> {
-        let mut history = vec![Message::user("operator prompt")];
-        for index in 0..rounds {
-            let call = ToolCall::from_dual_wire(
-                "",
-                format!("bash_{index}"),
-                ToolFunction::new(
-                    ToolName::new("Bash".to_string()).unwrap(),
-                    serde_json::json!({"command": format!("cargo check {index}")}),
-                ),
-            );
-            history.push(assistant_tool_message("", &[], &[call], true));
-            history.push(Message::tool_result(
-                CallId::from_wire(format!("bash_{index}")),
-                ToolName::new("Bash".to_string()).unwrap(),
-                format!("output for batch {index}\n{}", "x".repeat(output_len)),
-            ));
-            history.push(Message::user(format!(
-                "[turn {}]: Bash cargo check {index}",
-                index
-            )));
-        }
-        history
-    }
-
-    #[test]
-    fn build_request_messages_compacts_mid_turn_with_sticky_prefix() {
-        let mut history = padded_history(6, 3_000);
-        let full_len = compaction::token_len(&history);
-        let opts = CompactionOpts {
-            threshold_tokens: full_len as u64 - 1,
-            target_tokens: full_len as u64 / 2,
-        };
-
-        let mut compacted = None;
-        let compactor: Arc<dyn crate::clients::compaction::Compactor> =
-            Arc::new(crate::executor::conversation::ConversationCompactor);
-        let first = build_request_messages(
-            &history,
-            &mut compacted,
-            0,
-            Some(opts),
-            Some(compactor.clone()),
-            0,
-            0,
-        );
-        assert!(
-            compacted.is_some(),
-            "an over-threshold multi-round turn must compact"
-        );
-        assert!(compaction::token_len(&first) < full_len);
-
-        let prefix_before = compacted.as_ref().unwrap().prefix.clone();
-        let cut_before = compacted.as_ref().unwrap().cut;
-
-        // Append several small rounds. The cached prefix must stay
-        // byte-identical and no second compaction pass may run while the view
-        // is under threshold.
-        for round in 0..5 {
-            history.push(assistant_tool_message("small", &[], &[], true));
-            history.push(Message::user(format!("[turn {}]: small {round}", round)));
-            let request = build_request_messages(
-                &history,
-                &mut compacted,
-                0,
-                Some(opts),
-                Some(compactor.clone()),
-                0,
-                0,
-            );
-            assert!(compacted.is_some());
-            assert_eq!(compacted.as_ref().unwrap().prefix, prefix_before);
-            assert_eq!(compacted.as_ref().unwrap().cut, cut_before);
-            let mut expected = prefix_before.clone();
-            expected.extend_from_slice(&history[cut_before..]);
-            assert_eq!(request, expected);
-        }
-    }
-
-    #[test]
-    fn build_request_messages_runs_two_passes_and_keeps_earlier_facts() {
-        let mut history = bash_history(6, 2_000);
-        let full_len = compaction::token_len(&history);
-        let opts = CompactionOpts {
-            threshold_tokens: full_len as u64 - 1,
-            target_tokens: full_len as u64 / 2,
-        };
-
-        let mut compacted = None;
-        let compactor: Arc<dyn crate::clients::compaction::Compactor> =
-            Arc::new(crate::executor::conversation::ConversationCompactor);
-        let first = build_request_messages(
-            &history,
-            &mut compacted,
-            0,
-            Some(opts),
-            Some(compactor.clone()),
-            0,
-            0,
-        );
-        assert!(compacted.is_some(), "first pass must compact");
-        assert!(compaction::token_len(&first) < full_len);
-        let first_cut = compacted.as_ref().unwrap().cut;
-        let first_prefix = compacted.as_ref().unwrap().prefix.clone();
-        assert!(user_message_text(&first_prefix[0]).contains("Bash: cargo check 0"));
-
-        // Push the materialized view back over the soft threshold.
-        for batch in 6..12 {
-            let index = batch;
-            let call = ToolCall::from_dual_wire(
-                "",
-                format!("bash_{index}"),
-                ToolFunction::new(
-                    ToolName::new("Bash".to_string()).unwrap(),
-                    serde_json::json!({"command": format!("cargo check {index}")}),
-                ),
-            );
-            history.push(assistant_tool_message("", &[], &[call], true));
-            history.push(Message::tool_result(
-                CallId::from_wire(format!("bash_{index}")),
-                ToolName::new("Bash".to_string()).unwrap(),
-                format!("output for batch {index}\n{}", "x".repeat(2_000)),
-            ));
-            history.push(Message::user(format!(
-                "[turn {}]: Bash cargo check {index}",
-                index
-            )));
-        }
-
-        let second = build_request_messages(
-            &history,
-            &mut compacted,
-            0,
-            Some(opts),
-            Some(compactor.clone()),
-            0,
-            0,
-        );
-        let fresh = compacted
-            .as_ref()
-            .expect("a second compaction pass must be cached");
-        assert!(
-            fresh.cut != first_cut || fresh.prefix != first_prefix,
-            "the second over-threshold pass must choose a new sticky prefix"
-        );
-        assert!(compaction::token_len(&second) < compaction::token_len(&history));
-
-        let memory = user_message_text(&fresh.prefix[0]);
-        assert!(
-            memory.contains("Bash: cargo check 0"),
-            "facts from the first pass must survive into the second pass"
-        );
-        assert!(
-            memory.contains("Bash: cargo check 5"),
-            "facts from rounds before the second pass must be present"
-        );
-    }
-
-    #[test]
-    fn build_request_messages_uses_verbatim_history_without_opts() {
-        let history = padded_history(3, 1_000);
-        let mut compacted = None;
-        let request = build_request_messages(&history, &mut compacted, 0, None, None, 0, 0);
-        assert_eq!(request, history);
-        assert!(compacted.is_none());
-    }
-
-    #[test]
-    fn build_request_messages_resets_cached_cut_after_history_pop() {
-        let mut history = padded_history(6, 3_000);
-        let full_len = compaction::token_len(&history);
-        let opts = CompactionOpts {
-            threshold_tokens: full_len as u64 - 1,
-            target_tokens: full_len as u64 / 2,
-        };
-
-        let mut compacted = None;
-        let compactor: Arc<dyn crate::clients::compaction::Compactor> =
-            Arc::new(crate::executor::conversation::ConversationCompactor);
-        let _ = build_request_messages(
-            &history,
-            &mut compacted,
-            0,
-            Some(opts),
-            Some(compactor.clone()),
-            0,
-            0,
-        );
-        assert!(compacted.is_some());
-
-        // Simulate a mid-tool pause re-run popping messages back below the cut.
-        while history.len() > compacted.as_ref().unwrap().cut {
-            history.pop();
-        }
-        history.pop();
-
-        let request = build_request_messages(
-            &history,
-            &mut compacted,
-            0,
-            Some(opts),
-            Some(compactor.clone()),
-            0,
-            0,
-        );
-        assert!(
-            compacted.is_none() || compacted.as_ref().is_some_and(|c| c.cut <= history.len()),
-            "a stale cached cut must not survive a history pop"
-        );
-        assert_eq!(request, history);
-    }
-
-    #[test]
-    fn build_request_messages_can_drop_scratchpad_under_aggressive_compaction() {
-        // Verify that aggressive compaction can drop a scratchpad-injected
-        // user message from history. The recovery check in
-        // run_agent_loop_core detects this by scanning the assembled request
-        // for "## Scratchpad" and forces re-injection when it's missing.
-        let scratchpad_user = Message::user(
-            "## Scratchpad\n\nThe following is your persistent scratchpad content:\n\nremember: fix bug #42\n\n---\n\nPlease fix the bug",
-        );
-        let call = ToolCall::from_dual_wire(
-            "",
-            "read_1",
-            ToolFunction::new(
-                ToolName::new("Read".to_string()).unwrap(),
-                serde_json::json!({"file_path": "src/main.rs"}),
-            ),
-        );
-        let history = vec![
-            scratchpad_user,
-            assistant_tool_message("", &[], &[call], true),
-            Message::tool_result(
-                CallId::from_wire("read_1".to_string()),
-                ToolName::new("Read".to_string()).unwrap(),
-                "fn main() {\n    println!(\"hello\");\n}\n".repeat(200),
-            ),
-            Message::user("[turn 1]: Read src/main.rs"),
-        ];
-
-        // Aggressive compaction: force compaction on tiny histories.
-        let opts = CompactionOpts {
-            threshold_tokens: 10,
-            target_tokens: 10,
-        };
-
-        let mut compacted = None;
-        let compactor: Arc<dyn crate::clients::compaction::Compactor> =
-            Arc::new(crate::executor::conversation::ConversationCompactor);
-        let request = build_request_messages(
-            &history,
-            &mut compacted,
-            0,
-            Some(opts),
-            Some(compactor),
-            0,
-            0,
-        );
-
-        let has_scratchpad = request
-            .iter()
-            .any(|msg| user_message_text(msg).contains("## Scratchpad"));
-        // The scratchpad may or may not survive compaction depending on the
-        // token budget. When it doesn't, the recovery code in
-        // run_agent_loop_core must detect the absence via this same check
-        // and force re-injection into next_prompt.
-        if !has_scratchpad {
-            // The recovery check would find "## Scratchpad" absent and
-            // trigger re-injection. This path validates the detection logic.
-            assert!(!has_scratchpad);
-        }
     }
 
     #[tokio::test]
@@ -4552,99 +3765,6 @@ mod tests {
             .iter()
             .find(|c| matches!(c, AssistantContent::ToolCall(_)));
         assert!(call.is_some(), "tool call must survive into the replay");
-    }
-
-    /// A reasoning-only turn (reasoning deltas but no text and no tool call)
-    /// must still record an assistant message carrying the structured
-    /// reasoning item before nudging with "Continue.". Dropping it would both
-    /// omit the item from the next request and leave two consecutive user
-    /// messages — breaking the replay invariant the provider relies on.
-    #[tokio::test]
-    async fn loop_replays_reasoning_item_on_reasoning_only_turn() {
-        let dir = std::env::temp_dir().join(format!(
-            "gremlins-oa-reasoning-only-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        // Turn 0: reasoning only (rs_0), no text, no tool call — the loop
-        // records the reasoning item and continues with "Continue.".
-        // Turn 1: Done. The second request must carry rs_0 as an assistant
-        // message, not as two consecutive user messages.
-        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
-            vec![
-                rig_core::test_utils::MockStreamEvent::reasoning_delta_with_id("rs_0", "thinking"),
-                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-            ],
-            vec![
-                rig_core::test_utils::MockStreamEvent::tool_call(
-                    "done1",
-                    "Done",
-                    serde_json::json!({ "summary": "done" }),
-                ),
-                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-            ],
-        ]);
-        let mut ctx = test_ctx(Some(dir.clone()), None);
-        ctx.idle_timeout = 5.0;
-        ctx.params.idle_timeout = Some(5.0);
-        let cancel = CancelToken::new();
-        let result = run_agent_loop(
-            gm(model.clone().erase()),
-            "think then finish",
-            ctx,
-            cancel,
-            loop_opts_preserve_reasoning(None),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(result.exit_code, 0);
-
-        let reqs = model.requests();
-        assert_eq!(reqs.len(), 2);
-        let second = &reqs[1];
-
-        // The reasoning-only turn must be replayed as an assistant message.
-        let assistant = second
-            .chat_history
-            .iter()
-            .find(|m| matches!(m, Message::Assistant { .. }))
-            .expect("second request carries the prior assistant turn");
-        let Message::Assistant { content, .. } = assistant else {
-            unreachable!()
-        };
-        let reasoning = content.iter().find_map(|c| match c {
-            AssistantContent::Reasoning(sealed) => {
-                sealed.open(&Issuer::from("mock")).map(|r| r.id.clone())
-            }
-            _ => None,
-        });
-        assert_eq!(
-            reasoning.flatten().as_deref(),
-            Some("rs_0"),
-            "reasoning-only turn's structured item must survive into the replay"
-        );
-
-        // No two consecutive user messages: the assistant turn (with its
-        // reasoning item) must sit between the original prompt and "Continue.".
-        let mut prev_user = false;
-        for m in &second.chat_history {
-            match m {
-                Message::User { .. } => {
-                    assert!(
-                        !prev_user,
-                        "replayed history must not contain consecutive user messages"
-                    );
-                    prev_user = true;
-                }
-                _ => prev_user = false,
-            }
-        }
     }
 
     /// A 429 on turn N must back off and retry turn N in place — not restart
@@ -5307,16 +4427,8 @@ mod tests {
         let history_debug = format!("{:?}", history);
         assert!(
             history_debug.contains("Write"),
-            "denied call must appear in the ledger: {history_debug}"
+            "denied call must appear in history: {history_debug}"
         );
-        // Empty ledger produces no system message — the system prompt
-        // is absent or does not contain [seen].
-        if let Some(Message::System { content }) = history.first() {
-            assert!(
-                !content.contains("[seen]"),
-                "empty ledger must not produce [seen] block"
-            );
-        }
     }
 
     #[tokio::test]
@@ -5659,178 +4771,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loop_ledger_injected_into_history() {
-        let dir = std::env::temp_dir().join(format!(
-            "gremlins-oa-ledger-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let f = dir.join("x.txt");
-        std::fs::write(&f, "content").unwrap();
-
-        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
-            vec![
-                rig_core::test_utils::MockStreamEvent::tool_call(
-                    "c1",
-                    "Read",
-                    serde_json::json!({"file_path": f.to_str().unwrap()}),
-                ),
-                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-            ],
-            vec![
-                rig_core::test_utils::MockStreamEvent::text("done"),
-                rig_core::test_utils::MockStreamEvent::tool_call(
-                    "done1",
-                    "Done",
-                    serde_json::json!({"summary": "done"}),
-                ),
-                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-            ],
-        ]);
-        let mut ctx = test_ctx(Some(dir.clone()), None);
-        ctx.idle_timeout = 5.0;
-        ctx.params.idle_timeout = Some(5.0);
-        let cancel = CancelToken::new();
-        run_agent_loop(
-            gm(model.clone().erase()),
-            "read",
-            ctx.clone(),
-            cancel,
-            loop_opts(None),
-            None,
-        )
-        .await
-        .unwrap();
-
-        let reqs = model.requests();
-        assert_eq!(reqs.len(), 2);
-        let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
-        let key = ledger_key_arg(&serde_json::json!({"file_path": f.to_str().unwrap()}));
-        assert!(key.contains("x.txt"), "ledger must name the file: {key}");
-        // The [seen] block travels through user-message transcript blocks
-        // (The ledger's system_message() returns None to keep the system
-        // prompt cache-stable).
-        assert!(history.len() >= 3, "unexpected history: {history:#?}");
-        let seen_msg = history
-            .iter()
-            .rev()
-            .find_map(|m| match m {
-                Message::User { content: _ } => {
-                    let text = user_message_text(m);
-                    if text.contains("[seen]") {
-                        Some(text)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("[seen] block not found in any user message: {history:#?}"));
-        assert!(
-            seen_msg.contains(&key),
-            "ledger must name the file: {seen_msg}"
-        );
-        assert!(
-            seen_msg.contains("R("),
-            "ledger must show Read indicator: {seen_msg}"
-        );
-        // The history must contain a tool result.
-        let has_result = history.iter().any(|m| {
-            matches!(m, Message::User { content } if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))
-        });
-        assert!(has_result, "history must contain a tool result");
-        // The history must contain an assistant message.
-        let has_assistant = history
-            .iter()
-            .any(|m| matches!(m, Message::Assistant { .. }));
-        assert!(has_assistant, "history must contain an assistant message");
-    }
-
-    #[tokio::test]
-    async fn loop_ledger_follows_all_tool_results() {
-        let dir = std::env::temp_dir().join(format!(
-            "gremlins-oa-ledger-multi-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let f1 = dir.join("a.txt");
-        let f2 = dir.join("b.txt");
-        std::fs::write(&f1, "alpha").unwrap();
-        std::fs::write(&f2, "beta").unwrap();
-        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
-            vec![
-                rig_core::test_utils::MockStreamEvent::tool_call(
-                    "c1",
-                    "Read",
-                    serde_json::json!({"file_path": f1.to_str().unwrap()}),
-                ),
-                rig_core::test_utils::MockStreamEvent::tool_call(
-                    "c2",
-                    "Read",
-                    serde_json::json!({"file_path": f2.to_str().unwrap()}),
-                ),
-                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-            ],
-            vec![
-                rig_core::test_utils::MockStreamEvent::text("done"),
-                rig_core::test_utils::MockStreamEvent::tool_call(
-                    "done1",
-                    "Done",
-                    serde_json::json!({"summary": "done"}),
-                ),
-                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-            ],
-        ]);
-        let mut ctx = test_ctx(Some(dir.clone()), None);
-        ctx.idle_timeout = 5.0;
-        ctx.params.idle_timeout = Some(5.0);
-        run_agent_loop(
-            gm(model.clone().erase()),
-            "read both",
-            ctx.clone(),
-            CancelToken::new(),
-            loop_opts(None),
-            None,
-        )
-        .await
-        .unwrap();
-
-        let reqs = model.requests();
-        let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
-        // The [seen] block travels through user-message transcript blocks
-        // (The ledger's system_message() returns None to keep the system
-        // prompt cache-stable).
-        assert!(history.len() >= 4, "unexpected history: {history:#?}");
-        let seen_msg = history
-            .iter()
-            .rev()
-            .find_map(|m| match m {
-                Message::User { content: _ } => {
-                    let text = user_message_text(m);
-                    if text.contains("[seen]") {
-                        Some(text)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("[seen] block not found in any user message: {history:#?}"));
-        assert!(
-            seen_msg.contains("a.txt") && seen_msg.contains("b.txt"),
-            "ledger must list both actions: {seen_msg}"
-        );
-    }
-
-    #[tokio::test]
     async fn reminder_writes_missing_artifact_on_second_turn() {
         let dir = std::env::temp_dir().join(format!(
             "gremlins-oa-remind-{}-{}",
@@ -6149,8 +5089,8 @@ mod tests {
         assert_eq!(model.requests().len(), 1);
     }
 
-    /// A single message can request at most `TASK_MAX_PER_TURN` Task calls;
-    /// the excess short-circuit instead of spawning more child loops.
+    /// A single message can request at most the Task fan-out cap; the excess
+    /// short-circuit instead of spawning more child loops.
     #[tokio::test]
     async fn task_calls_are_capped_per_message() {
         let dir = std::env::temp_dir().join(format!(
@@ -6163,7 +5103,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let over = tools::TASK_MAX_PER_TURN + 1;
+        let cap = tools::max_per_message("Task").expect("Task must be capped");
+        let over = cap + 1;
         let mut turn = Vec::new();
         for i in 0..over {
             turn.push(rig_core::test_utils::MockStreamEvent::tool_call(
@@ -6343,230 +5284,7 @@ mod tests {
         );
     }
 
-    /// Regression: a Scout child that reads a file must have those contents
-    /// attached to the Task tool result in the parent's durable history, not
-    /// only the ephemeral next_prompt. After a further tool round the evidence
-    /// must still be present even though the ledger marks the file as read.
-    #[tokio::test]
-    async fn scout_read_observations_ride_the_task_tool_result() {
-        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
-
-        let dir = tempfile::tempdir().unwrap();
-        let note = dir.path().join("note.txt");
-        std::fs::write(&note, "evidence-from-child").unwrap();
-
-        let task_call = MockStreamEvent::tool_call(
-            "t1",
-            "Task",
-            serde_json::json!({ "kind": "Scout", "prompt": "inspect note.txt" }),
-        );
-        let done_call = |id: &str, summary: &str| {
-            MockStreamEvent::tool_call(id, "Done", serde_json::json!({ "summary": summary }))
-        };
-
-        // Parent: delegate, then finish.
-        let parent = MockCompletionModel::from_stream_turns([
-            vec![
-                task_call,
-                MockStreamEvent::final_response_with_default_usage(),
-            ],
-            vec![
-                done_call("d1", "outer done"),
-                MockStreamEvent::final_response_with_default_usage(),
-            ],
-        ]);
-        // Child (Scout): Read the file, then finish.
-        let child = MockCompletionModel::from_stream_turns([
-            vec![
-                MockStreamEvent::tool_call(
-                    "r1",
-                    "Read",
-                    serde_json::json!({ "file_path": note.to_str().unwrap() }),
-                ),
-                MockStreamEvent::final_response_with_default_usage(),
-            ],
-            vec![
-                MockStreamEvent::text("scout result"),
-                done_call("d2", "scout result"),
-                MockStreamEvent::final_response_with_default_usage(),
-            ],
-        ]);
-
-        let child_handle = child.clone();
-        let factory: super::super::task::TaskModelFactory = Arc::new(move |_spec: &str| {
-            Ok(super::super::task::TaskModel {
-                model: gm(child_handle.clone().erase()),
-                temperature: None,
-                max_tokens: None,
-                extra: None,
-                preserve_reasoning: None,
-            })
-        });
-        let selector = super::super::task::TaskModelSelector::new(
-            HashMap::from([(crate::task_kind::TaskKind::Scout, "openai/mini".to_string())]),
-            factory,
-        )
-        .expect("configured");
-        let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
-        ctx.idle_timeout = 5.0;
-        ctx.params.idle_timeout = Some(5.0);
-        ctx.params.task_models = Some(selector);
-
-        run_agent_loop(
-            gm(parent.clone().erase()),
-            "go",
-            ctx,
-            CancelToken::new(),
-            loop_opts(None),
-            None,
-        )
-        .await
-        .unwrap();
-
-        // The parent's second request must carry the child's Read evidence
-        // inside the Task tool result (durable history).
-        let reqs = parent.requests();
-        let parent_history = &reqs.last().unwrap().chat_history;
-        let task_result = parent_history
-            .iter()
-            .flat_map(|m| match m {
-                Message::User { content } => content
-                    .iter()
-                    .filter_map(|c| match c {
-                        UserContent::ToolResult(r) => Some(
-                            r.content
-                                .iter()
-                                .filter_map(|rc| match rc {
-                                    rig_core::completion::message::ToolResultContent::Text(t) => {
-                                        Some(t.text.clone())
-                                    }
-                                    _ => None,
-                                })
-                                .collect::<String>(),
-                        ),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>(),
-                _ => vec![],
-            })
-            .find(|t| t.contains("scout result"))
-            .expect("task result must reach the parent history");
-        assert!(
-            task_result.contains("evidence-from-child"),
-            "joined Read observations must ride the Task tool result, got: {task_result}"
-        );
-    }
-
     // ── max_tokens propagation tests ─────────────────────────────────
-
-    /// A parent agent-loop turn with prior assistant/tool-result history that
-    /// emits `Task(kind="Fork")` must hand the child the snapshot of that
-    /// history (including the current user prompt), followed by the Fork
-    /// prompt, in exact order. This exercises the agent-loop snapshot path and
-    /// the `tools::invoke` handoff rather than calling the task runner directly.
-    #[tokio::test]
-    async fn fork_child_receives_parent_history_then_fork_prompt() {
-        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
-
-        let dir = tempfile::tempdir().unwrap();
-        let note = dir.path().join("note.txt");
-        std::fs::write(&note, "hello from parent").unwrap();
-
-        let read_call = MockStreamEvent::tool_call(
-            "r1",
-            "Read",
-            serde_json::json!({ "file_path": note.to_str().unwrap() }),
-        );
-        let fork_call = MockStreamEvent::tool_call(
-            "f1",
-            "Task",
-            serde_json::json!({"kind": "Fork", "prompt": "finish as fork"}),
-        );
-        let done_call = |id: &str, summary: &str| {
-            MockStreamEvent::tool_call(id, "Done", serde_json::json!({ "summary": summary }))
-        };
-
-        // One model drives every loop: parent Read turn, parent Fork turn,
-        // forked child turn, then parent wrap-up turn.
-        let model = MockCompletionModel::from_stream_turns([
-            vec![
-                read_call,
-                MockStreamEvent::final_response_with_default_usage(),
-            ],
-            vec![
-                fork_call,
-                MockStreamEvent::final_response_with_default_usage(),
-            ],
-            vec![
-                MockStreamEvent::text("fork reply"),
-                done_call("d2", "fork reply"),
-                MockStreamEvent::final_response_with_default_usage(),
-            ],
-            vec![
-                MockStreamEvent::text("parent done"),
-                done_call("d1", "parent done"),
-                MockStreamEvent::final_response_with_default_usage(),
-            ],
-        ]);
-        let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
-        ctx.idle_timeout = 5.0;
-        ctx.params.idle_timeout = Some(5.0);
-
-        run_agent_loop(
-            gm(model.clone().erase()),
-            "parent go",
-            ctx,
-            CancelToken::new(),
-            loop_opts(None),
-            None,
-        )
-        .await
-        .unwrap();
-
-        let requests = model.requests();
-        let fork_req = requests
-            .iter()
-            .find(|req| {
-                matches!(
-                    req.chat_history.first(),
-                    Some(Message::System { content })
-                        if content.contains("This is a forked child agent")
-                )
-            })
-            .expect("the forked child must issue its own request");
-
-        let history = &fork_req.chat_history;
-        // The child inherits the parent's conversation but no longer sees a
-        // separate [seen] block — context content travels through
-        // compose_model_transcript.  The inherited ledger is cleared via
-        // clear_transcript so the context blocks are empty.
-        assert_eq!(history.len(), 4, "unexpected fork history: {history:#?}");
-
-        // Fork system prompt leads the child history.
-        assert!(matches!(
-            &history[0],
-            Message::System { content }
-                if content.contains("<tools>") && content.contains("Do not call")
-        ));
-
-        // Inherited parent conversation — the fork prompt is the last message.
-        assert!(
-            history
-                .iter()
-                .any(|m| matches!(m, Message::Assistant { .. })),
-            "history must contain an assistant message"
-        );
-        assert!(
-            history.iter().any(|m| matches!(m, Message::User { content } if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))),
-            "history must contain a tool result"
-        );
-        // The Fork prompt is the last message in chat_history.
-        assert!(
-            user_message_text(history.last().unwrap()).contains("finish as fork"),
-            "last message should be fork prompt: {:?}",
-            history.last()
-        );
-    }
 
     /// When `LoopOpts.max_tokens` is `Some(8192)`, every turn's
     /// `CompletionRequest` must carry `max_tokens: Some(8192)`.
@@ -7025,30 +5743,6 @@ mod tests {
 
     // ── Interactive session tests ───────────────────────────────────────
 
-    /// Helper: build a minimal AgentLoopRuntime for interactive tests.
-    fn test_tool_ctx() -> AgentLoopRuntime {
-        AgentLoopRuntime {
-            cwd: None,
-            extra_env: None,
-            base_env: None,
-            sandbox: tools::SandboxMode::Roots(vec![]),
-            audit_log: None,
-            allowed_tools: None,
-            task_fn: None,
-            audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
-            parent_history: None,
-            id_prefix: String::new(),
-            telemetry: AgentLoopTelemetry {
-                stream_events: None,
-                tool_output: None,
-            },
-            active_skills: None,
-            skills_available: false,
-            discovered_skills: None,
-            log_tx: None,
-        }
-    }
-
     /// Pause at turn boundary: the agent loop checks `pause.is_paused()`
     /// before making the API call, enters interactive mode, broadcasts
     /// Ready, and waits for a command.
@@ -7102,12 +5796,10 @@ mod tests {
                 &[],
                 0,
                 0,
-                &LoopPlug::new(),
+                &LoopHooks::new(),
                 Some(session),
                 None,
-                None,
-                None,
-                None,
+                Box::new(ConversationStub::new("hi")),
             )
             .await
         });
@@ -7215,12 +5907,10 @@ mod tests {
                 &[],
                 0,
                 0,
-                &LoopPlug::new(),
+                &LoopHooks::new(),
                 Some(session),
                 None,
-                None,
-                None,
-                None,
+                Box::new(ConversationStub::new("hi")),
             )
             .await
         });
@@ -7315,12 +6005,10 @@ mod tests {
                 &[],
                 0,
                 0,
-                &LoopPlug::new(),
+                &LoopHooks::new(),
                 Some(session),
                 None,
-                None,
-                None,
-                None,
+                Box::new(ConversationStub::new("hi")),
             )
             .await
         });
@@ -7404,12 +6092,10 @@ mod tests {
                 &[],
                 0,
                 0,
-                &LoopPlug::new(),
+                &LoopHooks::new(),
                 Some(session),
                 None,
-                None,
-                None,
-                None,
+                Box::new(ConversationStub::new("hi")),
             )
             .await
         });
@@ -7544,11 +6230,8 @@ mod tests {
         let tool_defs = tools::tool_definitions(None, false);
         let cancel = CancelToken::new();
         let opts = loop_opts(None);
-        let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let mut plug = LoopPlug::new();
-        plug.register_logger(move |_level, msg| {
-            let _ = log_tx.send(msg.to_string());
-        });
+        let (sink, log_rx) = LogSink::new();
+        let _guard = log_guard(sink);
 
         let result = run_agent_loop_core(
             &model,
@@ -7567,12 +6250,10 @@ mod tests {
             &[],
             0,
             0,
-            &plug,
+            &LoopHooks::new(),
             None,
             None,
-            None,
-            None,
-            None,
+            Box::new(ConversationStub::new("hi")),
         )
         .await
         .unwrap();
@@ -7589,7 +6270,11 @@ mod tests {
         );
 
         // The Done action ledger must be persisted in the returned history.
-        let messages = result.messages.expect("Done run must return messages");
+        let messages = result
+            .conversation
+            .as_ref()
+            .expect("Done run must return conversation")
+            .messages();
         let ledger = messages
             .iter()
             .find_map(|m| match m {
@@ -7651,17 +6336,21 @@ mod tests {
             &[],
             0,
             0,
-            &LoopPlug::new(),
+            &LoopHooks::new(),
             None,
             None,
-            None,
-            None,
-            None,
+            // Run against the shipped implementation, not the stub: this test
+            // guards the prompt-commit invariant in `StandardConversation`.
+            crate::conversation::new_blank_conversation("hi", false, None),
         )
         .await
         .unwrap();
 
-        let messages = result.messages.expect("Done run must return messages");
+        let messages = result
+            .conversation
+            .as_ref()
+            .expect("Done run must return conversation")
+            .messages();
 
         // Assert no consecutive user messages.
         let mut prev_was_user = false;
@@ -7783,6 +6472,9 @@ mod tests {
         ctx.expected_artifact_paths = vec![target.clone()];
         ctx.reminder_budget = 0; // exhausted — Done accepted with missing artifacts
         ctx.completion_nudge_budget = 0;
+        // Guard the shipped prompt-commit invariant, not the test stub.
+        ctx.prepopulated_conversation =
+            crate::conversation::new_blank_conversation("hi", false, None);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
             gm(model.clone().erase()),
@@ -7795,7 +6487,11 @@ mod tests {
         .await
         .unwrap();
 
-        let messages = result.messages.expect("Done run must return messages");
+        let messages = result
+            .conversation
+            .as_ref()
+            .expect("Done run must return conversation")
+            .messages();
 
         // No consecutive User messages.
         let mut prev_was_user = false;

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gremlins", "crates/gremlins-cli", "crates/drag"]
+members = ["crates/gremlins", "crates/gremlins-cli", "crates/drag", "crates/gremlins-landscape"]
 resolver = "2"
 
 # Fast CI test builds — avoids full release optimizations.

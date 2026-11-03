@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use tokio::process::Command;
 
 use crate::clients::format::format_tool_call_parts;
-use crate::clients::tools::{parse_args, req_str, AgentLoopRuntime, ToolHandler};
+use crate::clients::tools::{
+    parse_args, push_u64_arg, req_str, str_detail, AgentLoopRuntime, ToolHandler, ToolOutcome,
+};
 
 use super::bash::{apply_env_to_command, emit_live_lines, LineScanner, ProcessGroupGuard};
 
@@ -15,8 +17,28 @@ pub(crate) struct WebSearchTool;
 
 #[async_trait]
 impl ToolHandler for WebSearchTool {
-    async fn invoke(&self, id: &str, ctx: &AgentLoopRuntime, args_json: &str) -> String {
-        websearch_invoke(ctx, args_json, id).await
+    fn title_detail(&self, args: &serde_json::Value) -> Option<String> {
+        str_detail(args, "url")
+    }
+
+    fn secondary_args(&self, args: &serde_json::Value, _string_cap: Option<usize>) -> Vec<String> {
+        let mut out = Vec::new();
+        push_u64_arg(&mut out, args, "timeout");
+        out
+    }
+
+    fn output_cap(&self) -> bool {
+        true
+    }
+
+    async fn invoke(
+        &self,
+        id: &str,
+        ctx: &AgentLoopRuntime,
+        _conv: &dyn crate::clients::conversation::Conversation,
+        args_json: &str,
+    ) -> ToolOutcome {
+        ToolOutcome::text(websearch_invoke(ctx, args_json, id).await)
     }
 }
 

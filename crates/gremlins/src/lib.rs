@@ -3,19 +3,18 @@
 pub mod artifacts;
 pub mod builders;
 pub mod clients;
-pub(crate) mod clients_plugins;
 pub mod config;
+pub(crate) mod conversation;
 pub mod core;
 pub mod definition;
 pub mod executor;
-pub mod landscape;
+pub use gremlins_landscape as landscape;
 pub mod model_uri;
 pub mod prelude;
 pub mod schemas;
 pub mod skills;
 pub mod stage_spec;
 pub(crate) mod task_kind;
-pub(crate) mod toolbox;
 
 /// Build version shared by CLI and daemon.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

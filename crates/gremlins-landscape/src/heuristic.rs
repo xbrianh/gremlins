@@ -59,7 +59,7 @@ pub fn scan(extension: &str, content: &str, collapse_tests: bool) -> Vec<Outline
     Vec::new()
 }
 
-pub(crate) fn recognizes(extension: &str) -> bool {
+pub fn recognizes(extension: &str) -> bool {
     RECOGNIZED_EXTENSIONS.contains(&extension)
 }
 
