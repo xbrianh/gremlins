@@ -454,19 +454,10 @@ async fn run_agent(
         }
     }
 
-    // Substitute {scratchpad_path} placeholder in the system prompt with the
-    // concrete absolute scratchpad path for both chat and headless stages.
-    let scratchpad_model_path = prepared
-        .implicit_artifacts
-        .first()
-        .map(|a| a.placeholder_path())
-        .unwrap_or_default();
-    let mut prompt = prepared.system_prompt();
-    if !scratchpad_model_path.is_empty() {
-        prompt = prompt.replace("{scratchpad_path}", &scratchpad_model_path);
-    }
+    // Scratchpad path is populated by prepare_agent — ready for the workspace
+    // preamble that user_prompt() emits.
 
-    let system_prompt = prompt;
+    let system_prompt = prepared.system_prompt();
 
     let stage_env = gremlin.env.clone();
 

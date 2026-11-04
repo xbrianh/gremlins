@@ -5893,8 +5893,8 @@ model-profiles:
             "the chat prompt must describe the persistent scratchpad"
         );
         assert!(
-            prompt.contains("{scratchpad_path}"),
-            "the chat prompt must name the scratchpad placeholder"
+            !prompt.contains("{scratchpad_path}"),
+            "the chat prompt must not contain the scratchpad placeholder"
         );
         // The scratchpad guidance must precede the trailing Guidelines section.
         let scratchpad = prompt.find("## Scratchpad").unwrap();

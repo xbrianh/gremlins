@@ -37,7 +37,7 @@ ALWAYS use Landscape first when exploring unknown code — it maps structure wit
 Work root:     {work}\n\
 </directories>\n\
 <scratchpad>\n\
-You have a persistent scratchpad at {{scratchpad_path}}. Use the Write tool to update it with findings, decisions, and\n\
+You have a persistent scratchpad file. Use the Write tool to update it with findings, decisions, and\n\
 context you want to preserve across turns — file paths, discovered\n\
 patterns, TODO items, architectural notes. Keep it concise.\n\
 \n\
@@ -216,8 +216,8 @@ mod tests {
             "agent prompt must describe the scratchpad; got: {prompt}"
         );
         assert!(
-            prompt.contains("{scratchpad_path}"),
-            "agent prompt must name the scratchpad placeholder; got: {prompt}"
+            !prompt.contains("{scratchpad_path}"),
+            "agent prompt must not contain the scratchpad placeholder; got: {prompt}"
         );
     }
 

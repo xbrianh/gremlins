@@ -43,6 +43,10 @@ pub struct AgentPrepared {
     /// [`commit_agent`] persists it under the artifact URI. Best-effort — the
     /// stage may never write any of them.
     pub(crate) implicit_artifacts: Vec<ImplicitArtifact>,
+    /// Absolute filesystem path of the scratchpad, derived from the first
+    /// implicit artifact. Emitted in the workspace preamble so the model
+    /// knows where to write.
+    pub(crate) scratchpad_path: String,
 } // AgentError
   // ---------------------------------------------------------------------------
 
@@ -227,6 +231,7 @@ pub async fn prepare_agent(
         artifact_dir: String::new(),
         allow_all,
         system_prompt,
+        scratchpad_path: scratchpad.placeholder_path(),
         implicit_artifacts: vec![scratchpad],
     })
 }
@@ -428,10 +433,13 @@ pub(crate) fn reset_scratchpad(path: &Path) -> std::io::Result<()> {
 // Workspace preamble assembly
 // ---------------------------------------------------------------------------
 
-pub(crate) fn build_workspace_preamble(cwd: &str) -> String {
+pub(crate) fn build_workspace_preamble(cwd: &str, scratchpad_path: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     if !cwd.is_empty() {
         parts.push(format!("Your working directory is: {cwd}"));
+    }
+    if !scratchpad_path.is_empty() {
+        parts.push(format!("Scratchpad path: {scratchpad_path}"));
     }
     parts.push("Relevant environment variable: $GREMLIN_WORKDIR".to_string());
     parts.join("\n")
@@ -450,7 +458,7 @@ impl AgentPrepared {
 
     /// Workspace preamble + stage prompt (no harness system content).
     pub fn user_prompt(&self) -> String {
-        let preamble = build_workspace_preamble(&self.cwd);
+        let preamble = build_workspace_preamble(&self.cwd, &self.scratchpad_path);
         format!("{preamble}\n\n{}", self.prompt)
     }
 }
@@ -706,6 +714,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_prepare_user_prompt_includes_scratchpad_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ad = ensure_artifact_dir(&tmp);
+        let store = make_state_store(ad.clone());
+        let agent = Agent {
+            name: "test".to_string(),
+            prompts: vec!["hi".to_string()],
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            outputs_map: HashMap::new(),
+            landscape: true,
+        };
+        let fw = HashMap::new();
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+            .await
+            .unwrap();
+        let up = prepared.user_prompt();
+        assert!(
+            up.contains("Scratchpad path:"),
+            "user_prompt must include the scratchpad path; got: {up}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_prepare_workspace_preamble_absent() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
@@ -723,7 +755,8 @@ mod tests {
             .await
             .unwrap();
         prepared.cwd = String::new();
-        let preamble = build_workspace_preamble(&prepared.cwd);
+        prepared.scratchpad_path = String::new();
+        let preamble = build_workspace_preamble(&prepared.cwd, &prepared.scratchpad_path);
         assert_eq!(preamble, "Relevant environment variable: $GREMLIN_WORKDIR");
         let full = format!("{preamble}\n\n{}", prepared.prompt);
         assert!(!full.contains("Your working directory is"));
@@ -747,7 +780,7 @@ mod tests {
             .await
             .unwrap();
         prepared.cwd = "/work".to_string();
-        let preamble = build_workspace_preamble(&prepared.cwd);
+        let preamble = build_workspace_preamble(&prepared.cwd, &prepared.scratchpad_path);
         let full = format!("{preamble}\n\n{}", prepared.prompt);
         assert!(full.contains("Your working directory is: /work"));
         assert!(!full.contains("Project worktree:"));
@@ -1065,12 +1098,14 @@ mod tests {
 
     #[test]
     fn test_build_workspace_preamble_both_present() {
-        let p = build_workspace_preamble("/work/dir");
+        let p = build_workspace_preamble("/work/dir", "/tmp/scratchpad.md");
         assert!(p.contains("Your working directory is: /work/dir"));
+        assert!(p.contains("Scratchpad path: /tmp/scratchpad.md"));
         assert!(!p.contains("Project worktree:"));
 
-        let p2 = build_workspace_preamble("/tmp/run");
+        let p2 = build_workspace_preamble("/tmp/run", "");
         assert!(p2.contains("Your working directory is: /tmp/run"));
+        assert!(!p2.contains("Scratchpad path:"));
         assert!(!p2.contains("Project worktree:"));
     }
 
