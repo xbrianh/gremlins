@@ -37,6 +37,7 @@ pub fn default_native_block() -> HashMap<String, Vec<String>> {
             "Grep".to_string(),
             "Glob".to_string(),
             "Landscape".to_string(),
+            "WebSearch".to_string(),
         ],
     )])
 }
@@ -324,11 +325,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_allowlist_has_seven_tools() {
+    fn default_allowlist_has_eight_tools() {
         let block = default_native_block();
         let tools = block.get("allowed_tools").unwrap();
-        assert_eq!(tools.len(), 7);
-        for name in ["Bash", "Edit", "Read", "Write", "Grep", "Glob", "Landscape"] {
+        assert_eq!(tools.len(), 8);
+        for name in [
+            "Bash",
+            "Edit",
+            "Read",
+            "Write",
+            "Grep",
+            "Glob",
+            "Landscape",
+            "WebSearch",
+        ] {
             assert!(tools.contains(&name.to_string()), "missing {name}");
         }
     }
