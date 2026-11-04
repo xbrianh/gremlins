@@ -215,6 +215,10 @@ mod tests {
             prompt.contains("<scratchpad>"),
             "agent prompt must describe the scratchpad; got: {prompt}"
         );
+        assert!(
+            !prompt.contains("{scratchpad_path}"),
+            "agent prompt must not contain the scratchpad placeholder; got: {prompt}"
+        );
     }
 
     #[test]

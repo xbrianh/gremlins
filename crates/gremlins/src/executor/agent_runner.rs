@@ -46,7 +46,7 @@ pub struct AgentPrepared {
     /// Absolute filesystem path of the scratchpad, derived from the first
     /// implicit artifact. Emitted in the workspace preamble so the model
     /// knows where to write.
-    pub scratchpad_path: String,
+    pub(crate) scratchpad_path: String,
 } // AgentError
   // ---------------------------------------------------------------------------
 
@@ -220,8 +220,6 @@ pub async fn prepare_agent(
         .and_then(|v| v.as_str())
         .map(str::to_owned);
 
-    // AgentPrepared fields that aren't set by prepare_agent are filled in by
-    // the caller (run_stage) after preparation.
     Ok(AgentPrepared {
         name: name.clone(),
         prompt,
@@ -233,8 +231,8 @@ pub async fn prepare_agent(
         artifact_dir: String::new(),
         allow_all,
         system_prompt,
+        scratchpad_path: scratchpad.placeholder_path(),
         implicit_artifacts: vec![scratchpad],
-        scratchpad_path: String::new(),
     })
 }
 
@@ -716,6 +714,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_prepare_user_prompt_includes_scratchpad_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ad = ensure_artifact_dir(&tmp);
+        let store = make_state_store(ad.clone());
+        let agent = Agent {
+            name: "test".to_string(),
+            prompts: vec!["hi".to_string()],
+            options: HashMap::new(),
+            interpolation_map: HashMap::new(),
+            outputs_map: HashMap::new(),
+            landscape: true,
+        };
+        let fw = HashMap::new();
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+            .await
+            .unwrap();
+        let up = prepared.user_prompt();
+        assert!(
+            up.contains("Scratchpad path:"),
+            "user_prompt must include the scratchpad path; got: {up}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_prepare_workspace_preamble_absent() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
@@ -733,6 +755,7 @@ mod tests {
             .await
             .unwrap();
         prepared.cwd = String::new();
+        prepared.scratchpad_path = String::new();
         let preamble = build_workspace_preamble(&prepared.cwd, &prepared.scratchpad_path);
         assert_eq!(preamble, "Relevant environment variable: $GREMLIN_WORKDIR");
         let full = format!("{preamble}\n\n{}", prepared.prompt);

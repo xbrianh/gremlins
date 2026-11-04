@@ -454,14 +454,8 @@ async fn run_agent(
         }
     }
 
-    // Populate the scratchpad path for the workspace preamble before the
-    // system prompt is consumed. The system prompt is now a pure static
-    // string — the path lives only in the user-prompt preamble.
-    prepared.scratchpad_path = prepared
-        .implicit_artifacts
-        .first()
-        .map(|a| a.placeholder_path())
-        .unwrap_or_default();
+    // Scratchpad path is populated by prepare_agent — ready for the workspace
+    // preamble that user_prompt() emits.
 
     let system_prompt = prepared.system_prompt();
 
