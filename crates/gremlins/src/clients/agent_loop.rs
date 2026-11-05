@@ -392,7 +392,15 @@ impl LoopState {
         timeout_retry_backoff: &[f64],
     ) -> Result<StreamTurnOutcome, ClientError> {
         // Phase 1: assemble the request (messages, scratchpad, gen params).
-        let builder = self.prepare_stream_request(tool_defs, opts, nested).await;
+        // Race against cancellation so an unresponsive compaction endpoint
+        // cannot block shutdown.
+        let builder = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Err(cancelled_error("cancelled during request preparation", &self.conv.messages()));
+            }
+            b = self.prepare_stream_request(tool_defs, opts, nested) => b,
+        };
 
         // Dump the full prompt to the state directory when
         // GREMLINS_LOG_LEVEL=DEBUG and a debug store is configured.
@@ -2200,6 +2208,13 @@ pub(crate) async fn run_agent_loop_core(
             tool_calls.len(),
             ended,
         );
+
+        // Record input token count immediately so compaction decisions see
+        // the latest usage even when this turn continues through
+        // reasoning-only, reminder, nudge, or Done-rejected paths.
+        state
+            .conv
+            .record_input_tokens(turn_usage.as_ref().and_then(|u| u.input_tokens));
 
         let turn_stats = turn_stats(state.turn_num, turn_usage.as_ref());
         let totals = state.fold_turn_usage(turn_usage.as_ref());

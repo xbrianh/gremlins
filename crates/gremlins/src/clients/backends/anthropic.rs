@@ -17,7 +17,7 @@ use crate::clients::model::GremlinsModel;
 use crate::clients::native::NativeRunState;
 use crate::clients::openai_protocol;
 use crate::clients::params::{self, ResolvedParams};
-use crate::clients::protocol::{CompactionBlock, CompletedRun};
+use crate::clients::protocol::{CompactionBlock, CompactionResult, CompletedRun};
 use crate::clients::token_provider::{self, TokenProvider};
 use rig_reqwest::ReqwestClient;
 
@@ -292,12 +292,13 @@ impl Backend for AnthropicBackend {
         messages: &[rig_core::completion::Message],
         system_prompt: Option<&str>,
         instructions: Option<&str>,
-    ) -> Result<Option<CompactionBlock>, ClientError> {
+        model: &str,
+    ) -> Result<Option<CompactionResult>, ClientError> {
         use http::{Request, StatusCode};
         use rig_core::http_client::HttpClientExt;
 
         let mut body = serde_json::Map::new();
-        body.insert("model".into(), self.state.model.clone().into());
+        body.insert("model".into(), model.into());
         body.insert("max_tokens".into(), 4096.into());
         body.insert("messages".into(), serde_json::to_value(messages).map_err(|e| {
             ClientError::Runtime {
@@ -393,6 +394,23 @@ impl Backend for AnthropicBackend {
         struct CompactionResponse {
             stop_reason: Option<String>,
             content: Vec<CompactionContent>,
+            usage: Option<CompactionUsageRaw>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct CompactionUsageRaw {
+            #[serde(default)]
+            iterations: Vec<IterationUsage>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct IterationUsage {
+            #[serde(rename = "type", default)]
+            r#type: String,
+            #[serde(default)]
+            input_tokens: Option<u64>,
+            #[serde(default)]
+            output_tokens: Option<u64>,
         }
 
         let resp_data: CompactionResponse =
@@ -408,6 +426,15 @@ impl Backend for AnthropicBackend {
                 ),
             });
         }
+
+        // Extract compaction iteration usage: the top-level `usage` fields
+        // are always zero for compaction calls; real cost is in iterations.
+        let compaction_usage = resp_data
+            .usage
+            .as_ref()
+            .and_then(|u| u.iterations.iter().find(|i| i.r#type == "compaction"));
+        let input_tokens = compaction_usage.and_then(|u| u.input_tokens);
+        let output_tokens = compaction_usage.and_then(|u| u.output_tokens);
 
         let block = resp_data
             .content
@@ -426,11 +453,15 @@ impl Backend for AnthropicBackend {
                 let signature = cc.signature.ok_or_else(|| ClientError::Runtime {
                     message: "compaction block missing signature".into(),
                 })?;
-                Ok(Some(CompactionBlock {
-                    content,
-                    signature,
-                    encrypted_content: cc.encrypted_content,
-                    tool_changes: cc.tool_changes,
+                Ok(Some(CompactionResult {
+                    block: CompactionBlock {
+                        content,
+                        signature,
+                        encrypted_content: cc.encrypted_content,
+                        tool_changes: cc.tool_changes,
+                    },
+                    input_tokens,
+                    output_tokens,
                 }))
             }
             None => Err(ClientError::Runtime {

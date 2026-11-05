@@ -35,6 +35,11 @@ pub(crate) trait Conversation: Send + Sync {
     /// classification decides whether to record or reject the turn).
     fn record_prose(&mut self, text: &str);
 
+    /// Record the API-reported input token count for this turn.
+    /// Called immediately after every response so compaction decisions see
+    /// the latest usage even when the turn continues before `record_turn`.
+    fn record_input_tokens(&mut self, _input_tokens: Option<u64>) {}
+
     /// Record the assistant turn (text, reasoning, tool calls) into history.
     /// The findings ledger is already fed by a prior `record_prose` call, so
     /// this method should NOT re-feed the ledger — it only commits the message.

@@ -37,6 +37,7 @@ use crate::clients::protocol::CompactionBlock;
 #[derive(Clone)]
 pub(crate) struct CompactionConfig {
     backend: std::sync::Arc<dyn Backend>,
+    model: String,
     threshold: u64,
     keep_recent: usize,
     instructions: Option<String>,
@@ -46,12 +47,14 @@ impl CompactionConfig {
     #[allow(dead_code)]
     pub(crate) fn new(
         backend: std::sync::Arc<dyn Backend>,
+        model: String,
         threshold: u64,
         keep_recent: usize,
         instructions: Option<String>,
     ) -> Self {
         Self {
             backend,
+            model,
             threshold,
             keep_recent,
             instructions,
@@ -74,28 +77,63 @@ impl CompactionConfig {
         kept: &[Message],
         system_prompt: Option<&str>,
     ) -> Result<Option<(CompactionBlock, Vec<Message>)>, crate::clients::backend::ClientError> {
-        let server_block = self
+        let result = self
             .backend
-            .compact(to_compact, system_prompt, self.instructions.as_deref())
+            .compact(
+                to_compact,
+                system_prompt,
+                self.instructions.as_deref(),
+                &self.model,
+            )
             .await?;
-        let block = match server_block {
-            Some(b) => b,
+        let server_block = match result {
+            Some(r) => r,
             None => return Ok(None),
         };
         let mut new_history = Vec::with_capacity(1 + kept.len());
-        new_history.push(compaction_block_as_message(&block));
+        new_history.push(compaction_block_as_message(&server_block.block));
         new_history.extend_from_slice(kept);
-        Ok(Some((block, new_history)))
+        Ok(Some((server_block.block, new_history)))
     }
 }
 
 /// Wrap a [`CompactionBlock`] as an assistant [`Message`] suitable for
 /// inclusion in the message history.
+///
+/// The block is stored as a text assistant message whose `additional_params`
+/// carry the signature and other signed fields so the block survives
+/// round-tripping through request serialization and transcript persistence.
 fn compaction_block_as_message(block: &CompactionBlock) -> Message {
-    // Store as a text-only assistant message so the transcript alternation
-    // stays valid. The signed block is kept separately on
-    // StandardConversation for round-tripping via `compaction_block`.
-    Message::assistant(format!("[compacted]: {}", block.content))
+    use rig_core::completion::message::{AdditionalParams, AssistantContent, Text};
+    let mut params = serde_json::Map::new();
+    params.insert(
+        "signature".into(),
+        serde_json::Value::String(block.signature.clone()),
+    );
+    if let Some(ref ec) = block.encrypted_content {
+        params.insert(
+            "encrypted_content".into(),
+            serde_json::Value::String(ec.clone()),
+        );
+    }
+    if let Some(ref tc) = block.tool_changes {
+        params.insert(
+            "tool_changes".into(),
+            serde_json::to_value(tc).unwrap_or_default(),
+        );
+    }
+    // cache_control enables prompt caching for the compaction block.
+    let mut cache = serde_json::Map::new();
+    cache.insert("type".into(), serde_json::Value::String("ephemeral".into()));
+    params.insert("cache_control".into(), serde_json::Value::Object(cache));
+    let text = Text {
+        text: format!("[compacted]: {}", block.content),
+        additional_params: AdditionalParams::new(params),
+    };
+    Message::Assistant {
+        id: None,
+        content: vec![AssistantContent::Text(text)],
+    }
 }
 
 /// Compute a cut index so `to_compact = &history[..cut]` and
@@ -149,7 +187,7 @@ fn is_user_tool_result(msg: &Message) -> bool {
     match msg {
         Message::User { content } => content
             .iter()
-            .all(|c| matches!(c, UserContent::ToolResult(_))),
+            .any(|c| matches!(c, UserContent::ToolResult(_))),
         _ => false,
     }
 }
@@ -273,6 +311,12 @@ impl Conversation for StandardConversation {
 
     fn record_prose(&mut self, text: &str) {
         self.feed_text(text);
+    }
+
+    fn record_input_tokens(&mut self, input_tokens: Option<u64>) {
+        if input_tokens.is_some() {
+            self.last_input_tokens = input_tokens;
+        }
     }
 
     fn record_turn(

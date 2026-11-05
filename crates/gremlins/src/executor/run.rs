@@ -52,6 +52,39 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
     Ok(fs.root_dir().join(&blob_name))
 }
 
+/// Build a [`CompactionConfig`] from the global config and the resolved backend.
+/// Returns `None` when compaction is disabled (threshold == 0) or the backend
+/// is not an Anthropic backend (the only one supporting the on-demand API).
+fn build_compaction_config(
+    client: &Client,
+    model: String,
+    is_chat: bool,
+) -> Option<CompactionConfig> {
+    let backend = match client.get_or_build_backend() {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("compaction: failed to build backend: {e}");
+            return None;
+        }
+    };
+    // Only Anthropic supports on-demand compaction.
+    if backend.name() != "anthropic" {
+        return None;
+    }
+    let threshold = if is_chat {
+        crate::config::compaction_threshold_tokens_chat()
+    } else {
+        crate::config::compaction_threshold_tokens()
+    };
+    if threshold == 0 {
+        return None;
+    }
+    Some(CompactionConfig::new(
+        backend, model, threshold, 10,   // keep_recent: preserve 10 most recent turns
+        None, // no custom instructions by default
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Scope bookkeeping
 // ---------------------------------------------------------------------------
@@ -535,8 +568,14 @@ async fn run_agent(
         None
     };
 
-    // TODO: wire compaction config from stage definition
-    let compaction: Option<CompactionConfig> = None;
+    let compaction: Option<CompactionConfig> = build_compaction_config(
+        &client,
+        prepared
+            .model
+            .clone()
+            .unwrap_or_else(|| client.model().to_string()),
+        is_chat,
+    );
     let conv = crate::conversation::standard::StandardConversation::new(
         "",
         false,
