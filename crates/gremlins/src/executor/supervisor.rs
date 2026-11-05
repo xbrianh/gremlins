@@ -2829,11 +2829,24 @@ async fn handle_chat(
         &[], // chat stages sort correctly lexically
     )
     .await;
+    // The dynamic preamble (repo context + skills) is part of the user turn,
+    // not the system prompt, so the static system prompt stays cache-stable.
+    // Inject it only on the first turn: the context snapshot and the active
+    // skill bodies are already part of the conversation once the first turn
+    // is committed, so re-injecting them would duplicate them into every
+    // later turn's history and re-send (and re-bill) them on each request.
+    let is_first_chat_turn = gremlin
+        .definition
+        .as_any_mut()
+        .and_then(|a| a.downcast_ref::<ChatDefinition>())
+        .is_none_or(|c| c.turn_count() == 0);
     let mut text = text.to_string();
-    // Prepend dynamic preamble (repo context + skills) so the system prompt stays cache-stable.
-    let dynamic_preamble = crate::clients::system_prompts::build_chat_preamble(context, &trusted_section);
-    if !dynamic_preamble.is_empty() {
-        text = format!("{dynamic_preamble}\n---\n{text}");
+    if is_first_chat_turn {
+        let dynamic_preamble =
+            crate::clients::system_prompts::build_chat_preamble(context, &trusted_section);
+        if !dynamic_preamble.is_empty() {
+            text = format!("{dynamic_preamble}\n---\n{text}");
+        }
     }
     // Inject XDG project-level scratchpad on the first turn when there are
     // no accumulated scratchpads from prior turns. On subsequent turns the

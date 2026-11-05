@@ -34,7 +34,7 @@ The request carries the conversation to summarize and a `compaction` param:
 
 ```json
 {
-  "model": "claude-sonnet-4-5",
+  "model": "claude-sonnet-4-6",
   "max_tokens": 4096,
   "system": "You are a helpful assistant...",
   "messages": [
@@ -67,7 +67,7 @@ HTTP 200 with `stop_reason: "compaction"` and a single compaction block:
   "id": "msg_013Zva2CMHLNnXjNJJKqJ2EF",
   "type": "message",
   "role": "assistant",
-  "model": "claude-sonnet-4-5",
+  "model": "claude-sonnet-4-6",
   "content": [
     {
       "type": "compaction",
@@ -154,7 +154,10 @@ compaction summary changes:
 
 ### Models supporting on-demand compaction
 
-All current models except Haiku 4.5, Opus 4.5, and Sonnet 4.5.
+On-demand compaction is available on Claude Sonnet 4.6 and later
+models. Current-generation Haiku 4.5, Opus 4.5, and Sonnet 4.5 do **not**
+support it. The examples in this document use `claude-sonnet-4-6`, a
+supporting model.
 
 Check via Models API: read `capabilities.compaction` with the beta header.
 
@@ -184,8 +187,8 @@ render_turn() {
 | `run.rs` | Extracts config, builds backend, constructs `CompactionConfig`, passes to `StandardConversation::new` |
 | `Backend::compact()` | Default `Ok(None)`; `AnthropicBackend` overrides |
 | `CompactionConfig` (struct) | Holds backend, threshold, keep-recent, instructions; exposes accessors + `async compact()` for server-side/client-side paths |
-| `Conversation` trait | `render_turn` becomes `async` (no new backend-coupled methods) |
-| `StandardConversation` | Holds `Option<CompactionConfig>` + `CompactionBlock`; owns `should_compact()` and `last_input_tokens()`; triggers and applies compaction in `render_turn` |
+| `Conversation` trait | `render_turn` becomes `async`; adds `has_signed_compaction_block()` (no new backend-coupled methods) |
+| `StandardConversation` | Holds `Option<CompactionConfig>` + `CompactionBlock`; owns `should_compact()`, `last_input_tokens()`, turn-boundary cut logic, and `has_signed_compaction_block()`; triggers and applies compaction in `render_turn` |
 
 ---
 
@@ -280,6 +283,10 @@ rendering:
 pub(crate) trait Conversation: Send + Sync {
     // ... all existing methods unchanged ...
 
+    /// True when a server-issued signed compaction block is active and must
+    /// be sent with the beta header on ordinary completion requests.
+    fn has_signed_compaction_block(&self) -> bool { false }
+
     /// Now async — may trigger compaction before building the turn.
     async fn render_turn(
         &mut self,
@@ -302,7 +309,7 @@ It owns the backend handle, all configuration, and the compaction logic.
 /// cheap to clone.
 pub(crate) struct CompactionConfig {
     backend: Arc<dyn Backend>,
-    model_spec: String,                     // "anthropic/claude-sonnet-4-5"
+    model_spec: String,                     // "anthropic/claude-sonnet-4-6"
     threshold: u64,                         // token threshold for triggering
     keep_recent: usize,                     // user+assistant pairs to preserve verbatim
     instructions: Option<String>,           // custom summarization prompt
@@ -328,31 +335,40 @@ impl CompactionConfig {
     pub(crate) fn keep_recent(&self) -> usize { self.keep_recent }
 
     /// Run compaction on `messages`: try server-side, fall back to client-side.
-    /// Returns the new block and a replacement message list (block first, then
-    /// `kept`) on success. `kept` is the tail of the original history that the
-    /// caller wants to preserve verbatim — it is not re-compacted, just
-    /// appended after the block in the returned list.
+    /// Returns the active signed block (if server-side succeeded) and a
+    /// replacement message list. The replacement list starts with either the
+    /// signed compaction block or a plain client-side summary message, followed
+    /// by `kept` (the tail of the original history the caller wants to preserve
+    /// verbatim — it is not re-compacted, just appended).
     pub(crate) async fn compact(
         &self,
         to_compact: &[Message],
         kept: &[Message],
         system_prompt: Option<&str>,
-    ) -> Option<(CompactionBlock, Vec<Message>)> {
-        // 1. Try server-side
-        let block = self.compact_server_side(to_compact, system_prompt).await;
+    ) -> Option<(Option<CompactionBlock>, Vec<Message>)> {
+        // 1. Try server-side — returns a signed block that must be round-tripped.
+        let server_block = self.compact_server_side(to_compact, system_prompt).await;
 
-        // 2. Fall back to client-side
-        let block = if block.is_some() { block } else {
+        // 2. Fall back to client-side — returns a plain assistant text message.
+        //    Never fabricate a signed compaction block: an empty/forged
+        //    signature would fail signature validation on every later request.
+        let summary_msg = if server_block.is_some() {
+            None
+        } else {
             self.compact_client_side(to_compact).await
         };
 
-        // 3. Build replacement history: block first, then the kept messages
-        block.map(|b| {
-            let mut new_history = Vec::with_capacity(1 + kept.len());
-            new_history.push(compaction_block_as_message(&b));
-            new_history.extend_from_slice(kept);
-            (b, new_history)
-        })
+        // 3. Build replacement history: compaction block (or client summary)
+        //    first, then the kept messages.
+        let first = match (&server_block, &summary_msg) {
+            (Some(b), _) => compaction_block_as_message(b),
+            (None, Some(m)) => m.clone(),
+            (None, None) => return None,
+        };
+        let mut new_history = Vec::with_capacity(1 + kept.len());
+        new_history.push(first);
+        new_history.extend_from_slice(kept);
+        Some((server_block, new_history))
     }
 
     async fn compact_server_side(
@@ -366,18 +382,32 @@ impl CompactionConfig {
         }
     }
 
-    async fn compact_client_side(&self, messages: &[Message]) -> Option<CompactionBlock> {
+    async fn compact_client_side(&self, messages: &[Message]) -> Option<Message> {
         let model = self.backend.make_model(&self.model_spec)?;
         let prompt = self.instructions.clone()
             .unwrap_or_else(|| DEFAULT_COMPACTION_PROMPT.into());
 
         // Single-turn completion: system = prompt, messages = the history.
-        // Parse response text into a CompactionBlock (unsigned — empty signature).
+        // Render the returned summary as a plain assistant text message — do
+        // NOT construct a CompactionBlock, which requires a server signature.
+        // The caller records this attempt and does not retry every turn (see
+        // the "failure backoff" note below).
         // ...
         None // placeholder
     }
 }
 ```
+
+#### Failure backoff
+
+Compaction is best-effort, but a persistently failing backend must not add
+up to two full-history API calls to every turn. `StandardConversation` tracks
+the last failed attempt (`last_compaction_attempt: Option<CompactionAttempt>`
+keyed by the history length / token count at the time of the attempt) and
+suppresses retries until enough new material has accumulated — e.g. `N` new
+turns or `M` additional input tokens. This way a failing server-side call
+doesn't also trigger the client-side fallback (and vice versa) on every
+single turn.
 
 ### 6. `StandardConversation` (`conversation/standard.rs`)
 
@@ -388,7 +418,9 @@ pub(crate) struct StandardConversation {
     // ... existing fields (history, next_prompt, rendered_prompt, ...) ...
 
     compaction: Option<CompactionConfig>,   // None → compaction disabled
-    compaction_block: Option<CompactionBlock>,  // active block, if any
+    compaction_block: Option<CompactionBlock>,  // active *signed* block, if any
+    compaction_applied: bool,               // true once any summary has been swapped in
+    last_compaction_attempt: Option<CompactionAttempt>, // failure-backoff state
 }
 ```
 
@@ -403,8 +435,9 @@ pub(crate) fn new(
 ) -> Self { ... }
 ```
 
-`clone_box` and `fork`: `.clone()` the `CompactionConfig` and
-compaction block (the `Arc<dyn Backend>` inside is cheap to clone).
+`clone_box` and `fork`: `.clone()` the `CompactionConfig`, the
+compaction block, `compaction_applied`, and `last_compaction_attempt`
+(the `Arc<dyn Backend>` inside is cheap to clone).
 
 #### `should_compact()`
 
@@ -421,16 +454,47 @@ fn should_compact(&self) -> bool {
     if self.last_input_tokens() <= comp.threshold() {
         return false;
     }
-    // Don't re-compact if nothing new after the block
-    if self.compaction_block.is_some() {
-        let post_block_msgs = self.history.len().saturating_sub(
-            comp.keep_recent().saturating_mul(2) + 1 // +1 for the block message
-        );
-        if post_block_msgs == 0 {
+    // After a summary (signed block or client-side text) has been swapped in,
+    // don't re-compact until there is genuinely new material after it.
+    if self.compaction_applied {
+        let cut = compaction_cut_index(&self.history, comp.keep_recent());
+        if cut == 0 {
             return false;
         }
     }
     true
+}
+```
+
+#### Turn-boundary cut point
+
+`keep_recent` is a count of *whole user/assistant turns*, not raw messages.
+Agent history interleaves assistant `tool_use` and user `tool_result`
+messages, so `history.len() - 2*keep_recent` can split a tool call from its
+result (leaving `to_compact` ending in an unanswered tool call, which the API
+rejects, and `kept` starting with an orphan `tool_result`). Compute the cut by
+walking backwards over completed turns:
+
+```rust
+/// Compute a cut index so `to_compact = &history[..cut]` and
+/// `kept = &history[cut..]`. The cut lands on a completed-turn boundary:
+/// `keep_recent` whole user/assistant exchanges are kept verbatim and
+/// `to_compact` never ends in an unanswered tool call.
+fn compaction_cut_index(history: &[Message], keep_recent: usize) -> usize {
+    let mut cut = history.len();
+    let mut kept_turns = 0;
+    while cut > 0 && kept_turns < keep_recent {
+        // A run of user tool_result messages belongs to the preceding turn;
+        // skip them before counting the boundary.
+        while cut > 0 && is_user_tool_result(&history[cut - 1]) {
+            cut -= 1;
+        }
+        // Step back over this turn's user opener and its assistant/tool
+        // messages to the previous completed-turn boundary.
+        cut = previous_turn_boundary(history, cut);
+        kept_turns += 1;
+    }
+    cut
 }
 ```
 
@@ -446,13 +510,14 @@ async fn render_turn(
     // Phase 0: compaction (main loop only; not in nested/fork contexts)
     if !nested && self.should_compact() {
         if let Some(ref comp) = self.compaction {
-            let keep_msgs = comp.keep_recent().saturating_mul(2);
-            let cut = self.history.len().saturating_sub(keep_msgs);
+            let cut = compaction_cut_index(&self.history, comp.keep_recent());
             let kept = self.history[cut..].to_vec();
             let to_compact = self.history[..cut].to_vec();
-            if let Some((block, new_history)) = comp.compact(&to_compact, &kept, system_prompt.as_deref()).await {
+            if let Some((signed_block, new_history)) = comp.compact(&to_compact, &kept, system_prompt.as_deref()).await {
                 self.history = new_history;
-                self.compaction_block = Some(block);
+                self.compaction_applied = true;
+                // `None` after a client-side fallback summary.
+                self.compaction_block = signed_block;
             }
         }
     }
@@ -493,12 +558,13 @@ The change requires one new field on `StandardConversation`
 
 #### Block storage
 
-The compaction block is stored in `history` as an assistant message with a
-compaction content block. This ensures:
+Only a server-issued *signed* compaction block is stored in `history` as an
+assistant message with a compaction content block. This ensures:
 - `messages()` returns it in the transcript
 - `conversation.json` persistence includes it
 - `clone_box` / `fork` propagate it
-- The agent loop sends it to the model on every subsequent turn
+- The agent loop sends it to the model on every subsequent turn (with the
+  beta header — see section 7)
 
 ```rust
 fn compaction_block_as_message(block: &CompactionBlock) -> Message {
@@ -545,7 +611,15 @@ async fn prepare_stream_request(&mut self, ...) -> CompletionRequest {
 let builder = self.prepare_stream_request(tool_defs, opts, nested).await; // ← .await
 ```
 
-No other changes to the agent loop.
+Whenever a signed compaction block is present in the conversation, the
+ordinary completion path must also attach the `compact-2026-09-04` beta
+header (see the API rules above: the beta header must accompany every
+request carrying the block). The compaction block is stored in `history`, so
+the agent loop is the component that adds this header. Concretely, the
+completion request builder checks `self.conv.has_signed_compaction_block()`
+and, when true, adds the beta header and applies the `cache_control`
+breakpoint from the caching section. No other changes to the agent loop are
+required.
 
 ### 8. Injection (`run.rs`)
 
@@ -592,7 +666,7 @@ stages:
     type: agent
     model:
       provider: anthropic
-      model: claude-sonnet-4-5
+      model: claude-sonnet-4-6
       compaction:
         threshold: 100000      # input tokens; omit to disable
         keep-recent: 3         # user+assistant pairs preserved verbatim
@@ -614,8 +688,8 @@ Path from YAML to `StandardConversation`:
 
 | Component | Changes |
 |---|---|
-| `ConversationStub` (test) | `render_turn` must become `async`; `record_turn` gains `input_tokens` param (ignored by stub) |
-| `Conversation::fork` / `spawn_child` | `.clone()` the `CompactionConfig` and compaction block (the `Arc<dyn Backend>` inside is cheap) |
+| `ConversationStub` (test) | `render_turn` must become `async`; `record_turn` gains `input_tokens` param (ignored by stub); `has_signed_compaction_block` returns `false` |
+| `Conversation::fork` / `spawn_child` | `.clone()` the `CompactionConfig`, compaction block, `compaction_applied`, and `last_compaction_attempt` (the `Arc<dyn Backend>` inside is cheap) |
 | `conversation.json` persistence | Compaction block stored in `history` → serializes normally |
 | Non-Anthropic backends | Default `compact()` returns `None` → conversation falls through to client-side |
 | `Task`/`Implement` fork children | `nested=true` in `render_turn` → compaction skipped |
@@ -630,8 +704,8 @@ Path from YAML to `StandardConversation`:
    `{"type": "compaction", ...}`? If not, `StandardConversation` needs a
    separate `compaction_block` field and `messages()` must prepend it.
 
-2. **Client-side compaction 4xx errors on antrhopic backend**: How do we handle
-   the case where the client-side compaction uses the antrhopic backend but the
+2. **Client-side compaction 4xx errors on Anthropic backend**: How do we handle
+   the case where the client-side compaction uses the Anthropic backend but the
    server blocks it due to missing/incorrect API keys?
 
 3. **Token estimation precision**: Resolved — use the last response's
