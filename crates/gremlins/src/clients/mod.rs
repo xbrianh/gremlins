@@ -7,6 +7,7 @@ pub mod backends;
 pub(crate) mod cancel;
 pub(crate) mod cancels;
 pub mod client;
+pub(crate) mod compaction;
 pub mod config;
 pub mod conversation;
 pub(crate) mod done_helpers;

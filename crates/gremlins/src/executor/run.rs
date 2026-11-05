@@ -12,8 +12,8 @@ use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::{Client, ModelURI};
+use crate::clients::compaction::CompactionConfig;
 use crate::config;
-use crate::conversation::standard::CompactionConfig;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
 use crate::executor::bootstrap::run_definition_bootstrap;
@@ -576,12 +576,7 @@ async fn run_agent(
             .unwrap_or_else(|| client.model().to_string()),
         is_chat,
     );
-    let conv = crate::conversation::standard::StandardConversation::new(
-        "",
-        false,
-        verbatim_history,
-        compaction,
-    );
+    let conv = crate::new_conversation("", false, verbatim_history, compaction);
 
     // ── Live usage tracker for failure persistence ─────
     // Stores (combined_usage, stage_local_usage, cost_usd).
@@ -672,8 +667,7 @@ async fn run_agent(
             },
         );
     }
-    let prepopulated_conversation: Box<dyn crate::clients::conversation::Conversation> =
-        Box::new(conv);
+    let prepopulated_conversation = conv;
 
     let params = RunParams {
         prompt: prepared.user_prompt(),
