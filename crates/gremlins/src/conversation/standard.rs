@@ -76,13 +76,17 @@ fn previous_turn_boundary(history: &[Message], mut cut: usize) -> usize {
     cut
 }
 
-/// True when the message is a user message containing only tool results.
+/// True when the message is a user message containing exclusively tool
+/// results (no mixed text + tool-result blocks).
 fn is_user_tool_result(msg: &Message) -> bool {
     use rig_core::completion::message::UserContent;
     match msg {
-        Message::User { content } => content
-            .iter()
-            .any(|c| matches!(c, UserContent::ToolResult(_))),
+        Message::User { content } => {
+            !content.is_empty()
+                && content
+                    .iter()
+                    .all(|c| matches!(c, UserContent::ToolResult(_)))
+        }
         _ => false,
     }
 }
@@ -123,6 +127,9 @@ pub(crate) struct StandardConversation {
     compaction_applied: bool,
     /// The `input_tokens` count from the most recent API response.
     last_input_tokens: Option<u64>,
+    /// Set after a compaction call fails or produces no summary. Prevents
+    /// retrying the expensive API call on every subsequent turn.
+    compaction_cooldown: bool,
 }
 
 impl StandardConversation {
@@ -146,6 +153,7 @@ impl StandardConversation {
             compaction_block: None,
             compaction_applied: false,
             last_input_tokens: None,
+            compaction_cooldown: false,
         }
     }
 
@@ -169,6 +177,9 @@ impl StandardConversation {
             Some(c) => c,
             None => return false,
         };
+        if self.compaction_cooldown {
+            return false;
+        }
         let tokens = self.last_input_tokens.unwrap_or(0);
         if tokens <= comp.threshold() {
             return false;
@@ -201,6 +212,7 @@ impl Conversation for StandardConversation {
             compaction_block: self.compaction_block.clone(),
             compaction_applied: self.compaction_applied,
             last_input_tokens: self.last_input_tokens,
+            compaction_cooldown: self.compaction_cooldown,
         })
     }
 
@@ -275,29 +287,42 @@ impl Conversation for StandardConversation {
         if !nested && self.should_compact() {
             if let Some(comp) = self.compaction.as_ref() {
                 let cut = compaction_cut_index(&self.history, comp.keep_recent());
-                let kept = self.history[cut..].to_vec();
-                let to_compact = self.history[..cut].to_vec();
-                match comp
-                    .compact(&to_compact, &kept, system_prompt.as_deref())
-                    .await
-                {
-                    Ok(Some((signed_block, new_history))) => {
-                        log::info!(
-                            "Compaction applied: {} messages → block + {}",
-                            to_compact.len(),
-                            kept.len()
-                        );
-                        self.history = new_history;
-                        self.compaction_applied = true;
-                        self.compaction_block = Some(signed_block);
-                        // Reset token count so we don't re-compact immediately.
-                        self.last_input_tokens = Some(0);
-                    }
-                    Ok(None) => {
-                        // Backend doesn't support compaction — skip.
-                    }
-                    Err(e) => {
-                        log::warn!("Compaction failed: {e}");
+                // Guard: nothing to compact (e.g. one huge initial prompt
+                // shorter than keep_recent turns).
+                if cut == 0 {
+                    self.compaction_cooldown = true;
+                } else {
+                    let kept = self.history[cut..].to_vec();
+                    let to_compact = self.history[..cut].to_vec();
+                    match comp
+                        .compact(&to_compact, &kept, system_prompt.as_deref())
+                        .await
+                    {
+                        Ok(Some((signed_block, new_history, usage))) => {
+                            log::info!(
+                                "Compaction applied: {} messages → block + {} (compaction cost: {:?} in, {:?} out)",
+                                to_compact.len(),
+                                kept.len(),
+                                usage.input_tokens,
+                                usage.output_tokens,
+                            );
+                            self.history = new_history;
+                            self.compaction_applied = true;
+                            self.compaction_block = Some(signed_block);
+                            // Reset token count so we don't re-compact immediately.
+                            self.last_input_tokens = Some(0);
+                        }
+                        Ok(None) => {
+                            // Backend returned null content — skip and
+                            // don't retry until the cooldown clears.
+                            self.compaction_cooldown = true;
+                        }
+                        Err(e) => {
+                            log::warn!("Compaction failed: {e}");
+                            // Don't retry every turn — cooldown prevents
+                            // expensive repeated failures.
+                            self.compaction_cooldown = true;
+                        }
                     }
                 }
             }
@@ -461,6 +486,7 @@ impl Conversation for StandardConversation {
             compaction_block: self.compaction_block.clone(),
             compaction_applied: self.compaction_applied,
             last_input_tokens: self.last_input_tokens,
+            compaction_cooldown: self.compaction_cooldown,
         })
     }
 

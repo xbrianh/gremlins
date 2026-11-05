@@ -364,11 +364,22 @@ impl Backend for AnthropicBackend {
         };
 
         if resp.status() != StatusCode::OK {
+            let status = resp.status().as_u16();
+            // Read (a truncated portion of) the error body so compaction
+            // failures are diagnosable from logs.
+            let body_snippet = match resp.into_body().await {
+                Ok(data) => {
+                    let text = String::from_utf8_lossy(&data);
+                    if text.len() > 500 {
+                        format!("{}…", &text[..500])
+                    } else {
+                        text.to_string()
+                    }
+                }
+                Err(_) => String::from("(body unavailable)"),
+            };
             return Err(ClientError::ApiServerError {
-                message: format!(
-                    "compaction returned HTTP {}",
-                    resp.status().as_u16()
-                ),
+                message: format!("compaction returned HTTP {status}: {body_snippet}"),
             });
         }
 

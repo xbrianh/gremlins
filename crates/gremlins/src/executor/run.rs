@@ -52,6 +52,9 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
     Ok(fs.root_dir().join(&blob_name))
 }
 
+/// Default number of most-recent turns to keep verbatim during compaction.
+const DEFAULT_COMPACTION_KEEP_RECENT: usize = 10;
+
 /// Build a [`CompactionConfig`] from the global config and the resolved backend.
 /// Returns `None` when compaction is disabled (threshold == 0) or the backend
 /// is not an Anthropic backend (the only one supporting the on-demand API).
@@ -80,7 +83,10 @@ fn build_compaction_config(
         return None;
     }
     Some(CompactionConfig::new(
-        backend, model, threshold, 10,   // keep_recent: preserve 10 most recent turns
+        backend,
+        model,
+        threshold,
+        DEFAULT_COMPACTION_KEEP_RECENT,
         None, // no custom instructions by default
     ))
 }

@@ -121,9 +121,11 @@ pub(crate) trait Conversation: Send + Sync {
     /// run's actual preserve-reasoning setting rather than a hardcoded `false`.
     fn set_preserve_reasoning(&mut self, _preserve: bool) {}
 
-    /// True when a server-issued signed compaction block is active and must
-    /// be sent with the beta header on ordinary completion requests.
-    #[allow(dead_code)] // wired when agent_loop conditionally attaches beta header
+    /// True when a server-issued signed compaction block is active.
+    /// The agent loop attaches the `compact-2026-09-04` beta header
+    /// unconditionally at client construction; this method is available
+    /// for future conditional attachment or diagnostic use.
+    #[allow(dead_code)]
     fn has_signed_compaction_block(&self) -> bool {
         false
     }
