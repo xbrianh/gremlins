@@ -12,7 +12,7 @@ use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::{Client, ModelURI};
-use crate::clients::compaction::CompactionConfig;
+use crate::clients::compaction::Compaction;
 use crate::config;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
@@ -55,14 +55,14 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
 /// Default number of most-recent turns to keep verbatim during compaction.
 const DEFAULT_COMPACTION_KEEP_RECENT: usize = 10;
 
-/// Build a [`CompactionConfig`] from the global config and the resolved backend.
+/// Build a [`Compaction`] from the global config and the resolved backend.
 /// Returns `None` when compaction is disabled (threshold == 0) or the backend
 /// is not an Anthropic backend (the only one supporting the on-demand API).
 fn build_compaction_config(
     client: &Client,
     model: String,
     is_chat: bool,
-) -> Option<CompactionConfig> {
+) -> Option<Compaction> {
     let backend = match client.get_or_build_backend() {
         Ok(b) => b,
         Err(e) => {
@@ -82,7 +82,7 @@ fn build_compaction_config(
     if threshold == 0 {
         return None;
     }
-    Some(CompactionConfig::new(
+    Some(Compaction::new(
         backend,
         model,
         threshold,
@@ -574,7 +574,7 @@ async fn run_agent(
         None
     };
 
-    let compaction: Option<CompactionConfig> = build_compaction_config(
+    let compaction: Option<Compaction> = build_compaction_config(
         &client,
         prepared
             .model
