@@ -576,7 +576,12 @@ async fn run_agent(
             .unwrap_or_else(|| client.model().to_string()),
         is_chat,
     );
-    let conv = crate::new_conversation("", false, verbatim_history, compaction);
+    let conv = crate::conversation::standard::StandardConversation::new(
+        "",
+        false,
+        verbatim_history,
+        compaction,
+    );
 
     // ── Live usage tracker for failure persistence ─────
     // Stores (combined_usage, stage_local_usage, cost_usd).
@@ -667,7 +672,8 @@ async fn run_agent(
             },
         );
     }
-    let prepopulated_conversation = conv;
+    let prepopulated_conversation: Box<dyn crate::clients::conversation::Conversation> =
+        Box::new(conv);
 
     let params = RunParams {
         prompt: prepared.user_prompt(),
