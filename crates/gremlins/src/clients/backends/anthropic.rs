@@ -43,7 +43,12 @@ enum AnthropicClientState {
 
 pub struct AnthropicBackend {
     state: NativeRunState<AnthropicClientState>,
-    /// Raw HTTP client for compaction API calls that bypass rig.
+    /// API key for static auth, used by `compact()` to authenticate.
+    api_key: Option<String>,
+    /// Token provider + scope for dynamic auth, used by `compact()`.
+    token_provider: Option<Arc<dyn TokenProvider>>,
+    auth_scope: String,
+    /// HTTP client for compaction API calls that bypass rig.
     raw_http: DynHttpClient,
     /// Base URL for the Anthropic API (e.g. https://api.anthropic.com).
     base_url: String,
@@ -109,14 +114,14 @@ impl AnthropicBackend {
 
         let client_state = match auth_method {
             ProviderAuth::ApiKey(key) => {
-                let client = AnthropicConfig::new(key)
+                let client = AnthropicConfig::new(key.clone())
                     .with_beta("compact-2026-09-04")
                     .with_base_url(&base_url)
                     .connect(http_client.clone());
                 AnthropicClientState::Static(client)
             }
             ProviderAuth::Token(token) => {
-                let client = AnthropicConfig::new(token)
+                let client = AnthropicConfig::new(token.clone())
                     .with_beta("compact-2026-09-04")
                     .with_base_url(&base_url)
                     .connect(http_client.clone());
@@ -148,6 +153,18 @@ impl AnthropicBackend {
             },
         };
 
+        // Extract auth material for compaction.
+        let (api_key, token_provider) = match &client_state {
+            AnthropicClientState::Static(client) => {
+                // api_key may be an API key or a bearer token — both
+                // authenticate as `x-api-key`.
+                (Some(client.config().api_key.expose().to_string()), None)
+            }
+            AnthropicClientState::Dynamic {
+                ref token_provider, ..
+            } => (None, Some(token_provider.clone())),
+        };
+
         Ok(Self {
             state: NativeRunState {
                 client_state,
@@ -159,6 +176,9 @@ impl AnthropicBackend {
                 next_id: AtomicU64::new(1),
                 log_label: "AnthropicBackend".to_string(),
             },
+            api_key,
+            token_provider,
+            auth_scope,
             raw_http: http_client,
             base_url,
         })
@@ -302,20 +322,45 @@ impl Backend for AnthropicBackend {
             })?
             .into();
 
-        let url = format!("{}/v1/messages", self.base_url);
-        let req = Request::post(&url)
+        // Strip trailing slash from base_url to avoid double slashes.
+        let base = self.base_url.trim_end_matches('/');
+        let url = format!("{base}/v1/messages");
+        let mut req_builder = Request::post(&url)
             .header("content-type", "application/json")
             .header("anthropic-version", "2023-06-01")
-            .header("anthropic-beta", "compact-2026-09-04")
+            .header("anthropic-beta", "compact-2026-09-04");
+
+        // Authenticate: static → x-api-key; dynamic → acquire bearer token.
+        if let Some(ref api_key) = self.api_key {
+            req_builder = req_builder.header("x-api-key", api_key.as_str());
+        }
+        let req = req_builder
             .body(body_bytes)
             .map_err(|e| ClientError::Runtime {
                 message: format!("failed to build compaction request: {e}"),
             })?;
 
-        let resp: http::Response<rig_core::http_client::LazyBody<Vec<u8>>> =
+        // For dynamic auth, wrap the raw HTTP client in a bearer client.
+        let resp: http::Response<rig_core::http_client::LazyBody<Vec<u8>>> = if let Some(ref tp) = self.token_provider {
+            let token = tp
+                .get_token(&self.auth_scope)
+                .await
+                .map_err(|e| ClientError::Runtime {
+                    message: format!("compaction token acquisition failed: {e}"),
+                })?;
+            let bearer = BearerHttpClient::new(self.raw_http.clone(), token).map_err(|e| {
+                ClientError::Runtime {
+                    message: format!("failed to build bearer HTTP client: {e}"),
+                }
+            })?;
+            bearer.send(req).await.map_err(|e| ClientError::Runtime {
+                message: format!("compaction HTTP request failed: {e}"),
+            })?
+        } else {
             self.raw_http.send(req).await.map_err(|e| ClientError::Runtime {
                 message: format!("compaction HTTP request failed: {e}"),
-            })?;
+            })?
+        };
 
         if resp.status() != StatusCode::OK {
             return Err(ClientError::ApiServerError {
@@ -371,9 +416,13 @@ impl Backend for AnthropicBackend {
 
         match block {
             Some(cc) => {
-                let content = cc.content.ok_or_else(|| ClientError::Runtime {
-                    message: "compaction block returned null content".into(),
-                })?;
+                // A null content block means no summary was produced
+                // (e.g. max_tokens exceeded). Skip compaction for this
+                // turn and retry later.
+                let content = match cc.content {
+                    Some(c) => c,
+                    None => return Ok(None),
+                };
                 let signature = cc.signature.ok_or_else(|| ClientError::Runtime {
                     message: "compaction block missing signature".into(),
                 })?;
@@ -647,6 +696,9 @@ mod tests {
         backlog.insert("gr-sibling", 3, sibling.clone()).unwrap();
 
         let backend = AnthropicBackend {
+            api_key: Some("sk-ant-test".into()),
+            token_provider: None,
+            auth_scope: "https://cognitiveservices.azure.com/.default".into(),
             raw_http: DynHttpClient::new(ReqwestClient::default()),
             base_url: "https://api.anthropic.com".into(),
             state: NativeRunState {

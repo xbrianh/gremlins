@@ -92,10 +92,10 @@ impl CompactionConfig {
 /// Wrap a [`CompactionBlock`] as an assistant [`Message`] suitable for
 /// inclusion in the message history.
 fn compaction_block_as_message(block: &CompactionBlock) -> Message {
-    // Store the compaction summary as a user message in history.
-    // The signed block is kept separately on StandardConversation
-    // for round-tripping via `compaction_block`.
-    Message::user(format!("[compacted]: {}", block.content))
+    // Store as a text-only assistant message so the transcript alternation
+    // stays valid. The signed block is kept separately on
+    // StandardConversation for round-tripping via `compaction_block`.
+    Message::assistant(format!("[compacted]: {}", block.content))
 }
 
 /// Compute a cut index so `to_compact = &history[..cut]` and
@@ -122,9 +122,19 @@ fn compaction_cut_index(history: &[Message], keep_recent: usize) -> usize {
 /// Walk backward from `cut` (exclusive) to the start of the preceding
 /// completed user+assistant turn, skipping assistant/tool messages.
 fn previous_turn_boundary(history: &[Message], mut cut: usize) -> usize {
-    // Step back over the assistant message (if present).
-    if cut > 0 && matches!(history[cut - 1], Message::Assistant { .. }) {
-        cut -= 1;
+    // Step back over a chain of (assistant, user tool_result) pairs until
+    // we hit a user message that is NOT a tool result (the turn opener).
+    loop {
+        // Skip the assistant message.
+        if cut > 0 && matches!(history[cut - 1], Message::Assistant { .. }) {
+            cut -= 1;
+        } else {
+            break;
+        }
+        // Skip any user tool_result messages after the assistant.
+        while cut > 0 && is_user_tool_result(&history[cut - 1]) {
+            cut -= 1;
+        }
     }
     // Step back over the user opener.
     if cut > 0 && matches!(history[cut - 1], Message::User { .. }) {
@@ -139,7 +149,7 @@ fn is_user_tool_result(msg: &Message) -> bool {
     match msg {
         Message::User { content } => content
             .iter()
-            .any(|c| matches!(c, UserContent::ToolResult(_))),
+            .all(|c| matches!(c, UserContent::ToolResult(_))),
         _ => false,
     }
 }
@@ -276,7 +286,9 @@ impl Conversation for StandardConversation {
         // do NOT call feed_text here to avoid double-counting findings.
 
         // Record the API-reported input token count for compaction decisions.
-        self.last_input_tokens = input_tokens;
+        if input_tokens.is_some() {
+            self.last_input_tokens = input_tokens;
+        }
 
         // Commit the exact rendered user prompt (with scratchpad/findings
         // prefixes) so the transcript matches what the model saw.
@@ -339,6 +351,8 @@ impl Conversation for StandardConversation {
                         self.history = new_history;
                         self.compaction_applied = true;
                         self.compaction_block = Some(signed_block);
+                        // Reset token count so we don't re-compact immediately.
+                        self.last_input_tokens = Some(0);
                     }
                     Ok(None) => {
                         // Backend doesn't support compaction — skip.
@@ -603,6 +617,10 @@ impl Conversation for StandardConversation {
             all.push(self.next_prompt.clone());
         }
         all
+    }
+
+    fn has_signed_compaction_block(&self) -> bool {
+        self.compaction_block.is_some()
     }
 }
 

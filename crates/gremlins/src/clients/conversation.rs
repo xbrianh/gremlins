@@ -116,6 +116,13 @@ pub(crate) trait Conversation: Send + Sync {
     /// run's actual preserve-reasoning setting rather than a hardcoded `false`.
     fn set_preserve_reasoning(&mut self, _preserve: bool) {}
 
+    /// True when a server-issued signed compaction block is active and must
+    /// be sent with the beta header on ordinary completion requests.
+    #[allow(dead_code)] // wired when agent_loop conditionally attaches beta header
+    fn has_signed_compaction_block(&self) -> bool {
+        false
+    }
+
     /// Compact digest of the Read/Grep evidence still present in the durable
     /// transcript. Fan-out tools fold this into the parent's tool result so a
     /// child loop's discoveries survive after the child is gone.
@@ -476,5 +483,9 @@ impl Conversation for ConversationStub {
 
     fn set_preserve_reasoning(&mut self, preserve: bool) {
         self.preserve_reasoning = preserve;
+    }
+
+    fn has_signed_compaction_block(&self) -> bool {
+        false
     }
 }
