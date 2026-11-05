@@ -285,6 +285,7 @@ impl ConversationStub {
 }
 
 #[cfg(test)]
+#[async_trait]
 impl Conversation for ConversationStub {
     fn clone_box(&self) -> Box<dyn Conversation> {
         self.box_self()

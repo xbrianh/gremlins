@@ -647,6 +647,8 @@ mod tests {
         backlog.insert("gr-sibling", 3, sibling.clone()).unwrap();
 
         let backend = AnthropicBackend {
+            raw_http: DynHttpClient::new(ReqwestClient::default()),
+            base_url: "https://api.anthropic.com".into(),
             state: NativeRunState {
                 client_state: AnthropicClientState::Static(client),
                 model: "claude-sonnet-4-6".into(),

@@ -43,6 +43,7 @@ pub(crate) struct CompactionConfig {
 }
 
 impl CompactionConfig {
+    #[allow(dead_code)]
     pub(crate) fn new(
         backend: std::sync::Arc<dyn Backend>,
         threshold: u64,
