@@ -537,8 +537,12 @@ async fn run_agent(
 
     // TODO: wire compaction config from stage definition
     let compaction: Option<CompactionConfig> = None;
-    let conv =
-        crate::conversation::standard::StandardConversation::new("", false, verbatim_history, compaction);
+    let conv = crate::conversation::standard::StandardConversation::new(
+        "",
+        false,
+        verbatim_history,
+        compaction,
+    );
 
     // ── Live usage tracker for failure persistence ─────
     // Stores (combined_usage, stage_local_usage, cost_usd).

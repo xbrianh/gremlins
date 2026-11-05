@@ -49,12 +49,21 @@ impl CompactionConfig {
         keep_recent: usize,
         instructions: Option<String>,
     ) -> Self {
-        Self { backend, threshold, keep_recent, instructions }
+        Self {
+            backend,
+            threshold,
+            keep_recent,
+            instructions,
+        }
     }
 
-    pub(crate) fn threshold(&self) -> u64 { self.threshold }
+    pub(crate) fn threshold(&self) -> u64 {
+        self.threshold
+    }
 
-    pub(crate) fn keep_recent(&self) -> usize { self.keep_recent }
+    pub(crate) fn keep_recent(&self) -> usize {
+        self.keep_recent
+    }
 
     /// Run server-side compaction on `to_compact`.
     /// Returns `Ok(None)` when the backend doesn't support compaction.
@@ -64,7 +73,10 @@ impl CompactionConfig {
         kept: &[Message],
         system_prompt: Option<&str>,
     ) -> Result<Option<(CompactionBlock, Vec<Message>)>, crate::clients::backend::ClientError> {
-        let server_block = self.backend.compact(to_compact, system_prompt, self.instructions.as_deref()).await?;
+        let server_block = self
+            .backend
+            .compact(to_compact, system_prompt, self.instructions.as_deref())
+            .await?;
         let block = match server_block {
             Some(b) => b,
             None => return Ok(None),
@@ -124,7 +136,9 @@ fn previous_turn_boundary(history: &[Message], mut cut: usize) -> usize {
 fn is_user_tool_result(msg: &Message) -> bool {
     use rig_core::completion::message::UserContent;
     match msg {
-        Message::User { content } => content.iter().any(|c| matches!(c, UserContent::ToolResult(_))),
+        Message::User { content } => content
+            .iter()
+            .any(|c| matches!(c, UserContent::ToolResult(_))),
         _ => false,
     }
 }
@@ -311,7 +325,10 @@ impl Conversation for StandardConversation {
                 let cut = compaction_cut_index(&self.history, comp.keep_recent());
                 let kept = self.history[cut..].to_vec();
                 let to_compact = self.history[..cut].to_vec();
-                match comp.compact(&to_compact, &kept, system_prompt.as_deref()).await {
+                match comp
+                    .compact(&to_compact, &kept, system_prompt.as_deref())
+                    .await
+                {
                     Ok(Some((signed_block, new_history))) => {
                         log::info!(
                             "Compaction applied: {} messages → block + {}",
@@ -494,7 +511,12 @@ impl Conversation for StandardConversation {
     }
 
     fn spawn_child(&self, prompt: &str) -> Box<dyn Conversation> {
-        Box::new(Self::new(prompt, self.preserve_reasoning_in_history, None, self.compaction.clone()))
+        Box::new(Self::new(
+            prompt,
+            self.preserve_reasoning_in_history,
+            None,
+            self.compaction.clone(),
+        ))
     }
 
     fn set_next_prompt(&mut self, prompt: &str) {
