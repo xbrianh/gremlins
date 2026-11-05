@@ -17,7 +17,7 @@ use crate::clients::model::GremlinsModel;
 use crate::clients::native::NativeRunState;
 use crate::clients::openai_protocol;
 use crate::clients::params::{self, ResolvedParams};
-use crate::clients::protocol::CompletedRun;
+use crate::clients::protocol::{CompactionBlock, CompletedRun};
 use crate::clients::token_provider::{self, TokenProvider};
 use rig_reqwest::ReqwestClient;
 
@@ -43,6 +43,10 @@ enum AnthropicClientState {
 
 pub struct AnthropicBackend {
     state: NativeRunState<AnthropicClientState>,
+    /// Raw HTTP client for compaction API calls that bypass rig.
+    raw_http: DynHttpClient,
+    /// Base URL for the Anthropic API (e.g. https://api.anthropic.com).
+    base_url: String,
 }
 
 impl AnthropicBackend {
@@ -106,37 +110,39 @@ impl AnthropicBackend {
         let client_state = match auth_method {
             ProviderAuth::ApiKey(key) => {
                 let client = AnthropicConfig::new(key)
+                    .with_beta("compact-2026-09-04")
                     .with_base_url(&base_url)
                     .connect(http_client.clone());
                 AnthropicClientState::Static(client)
             }
             ProviderAuth::Token(token) => {
                 let client = AnthropicConfig::new(token)
+                    .with_beta("compact-2026-09-04")
                     .with_base_url(&base_url)
                     .connect(http_client.clone());
                 AnthropicClientState::Static(client)
             }
             ProviderAuth::ClientSecret => AnthropicClientState::Dynamic {
                 token_provider: Arc::new(token_provider::ClientSecretProvider::new()),
-                base_url,
+                base_url: base_url.clone(),
                 http_client: http_client.clone(),
                 auth_scope: auth_scope.clone(),
             },
             ProviderAuth::Cli => AnthropicClientState::Dynamic {
                 token_provider: Arc::new(token_provider::AzureCliProvider::new()),
-                base_url,
+                base_url: base_url.clone(),
                 http_client: http_client.clone(),
                 auth_scope: auth_scope.clone(),
             },
             ProviderAuth::ManagedIdentity => AnthropicClientState::Dynamic {
                 token_provider: Arc::new(token_provider::ManagedIdentityProvider::new()),
-                base_url,
+                base_url: base_url.clone(),
                 http_client: http_client.clone(),
                 auth_scope: auth_scope.clone(),
             },
             ProviderAuth::DefaultAzure => AnthropicClientState::Dynamic {
                 token_provider: Arc::new(token_provider::DefaultAzureProvider::new()),
-                base_url,
+                base_url: base_url.clone(),
                 http_client: http_client.clone(),
                 auth_scope: auth_scope.clone(),
             },
@@ -153,6 +159,8 @@ impl AnthropicBackend {
                 next_id: AtomicU64::new(1),
                 log_label: "AnthropicBackend".to_string(),
             },
+            raw_http: http_client,
+            base_url,
         })
     }
 }
@@ -184,6 +192,7 @@ impl Backend for AnthropicBackend {
                         auth_scope.clone(),
                     );
                     let client = AnthropicConfig::new("unused")
+                        .with_beta("compact-2026-09-04")
                         .with_base_url(base_url)
                         .connect(wrapped);
                     Some(GremlinsModel::new(
@@ -233,6 +242,7 @@ impl Backend for AnthropicBackend {
                             }
                         })?;
                     let client = AnthropicConfig::new("unused")
+                        .with_beta("compact-2026-09-04")
                         .with_base_url(base_url)
                         .connect(wrapped);
                     Ok(GremlinsModel::new(
@@ -256,6 +266,129 @@ impl Backend for AnthropicBackend {
     }
 
     super::delegate_native_run_state!(state);
+
+    async fn compact(
+        &self,
+        messages: &[rig_core::completion::Message],
+        system_prompt: Option<&str>,
+        instructions: Option<&str>,
+    ) -> Result<Option<CompactionBlock>, ClientError> {
+        use http::{Request, StatusCode};
+        use rig_core::http_client::HttpClientExt;
+
+        let mut body = serde_json::Map::new();
+        body.insert("model".into(), self.state.model.clone().into());
+        body.insert("max_tokens".into(), 4096.into());
+        body.insert("messages".into(), serde_json::to_value(messages).map_err(|e| {
+            ClientError::Runtime {
+                message: format!("failed to serialize messages for compaction: {e}"),
+            }
+        })?);
+
+        let mut compaction = serde_json::Map::new();
+        compaction.insert("type".into(), "summarize".into());
+        if let Some(inst) = instructions {
+            compaction.insert("instructions".into(), inst.into());
+        }
+        body.insert("compaction".into(), compaction.into());
+
+        if let Some(sys) = system_prompt {
+            body.insert("system".into(), sys.into());
+        }
+
+        let body_bytes: bytes::Bytes = serde_json::to_vec(&body)
+            .map_err(|e| ClientError::Runtime {
+                message: format!("failed to serialize compaction request: {e}"),
+            })?
+            .into();
+
+        let url = format!("{}/v1/messages", self.base_url);
+        let req = Request::post(&url)
+            .header("content-type", "application/json")
+            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "compact-2026-09-04")
+            .body(body_bytes)
+            .map_err(|e| ClientError::Runtime {
+                message: format!("failed to build compaction request: {e}"),
+            })?;
+
+        let resp: http::Response<rig_core::http_client::LazyBody<Vec<u8>>> =
+            self.raw_http.send(req).await.map_err(|e| ClientError::Runtime {
+                message: format!("compaction HTTP request failed: {e}"),
+            })?;
+
+        if resp.status() != StatusCode::OK {
+            return Err(ClientError::ApiServerError {
+                message: format!(
+                    "compaction returned HTTP {}",
+                    resp.status().as_u16()
+                ),
+            });
+        }
+
+        let body_bytes = resp
+            .into_body()
+            .await
+            .map_err(|e| ClientError::Runtime {
+                message: format!("failed to read compaction response body: {e}"),
+            })?;
+
+        #[derive(serde::Deserialize)]
+        struct CompactionContent {
+            r#type: String,
+            content: Option<String>,
+            signature: Option<String>,
+            #[serde(default)]
+            encrypted_content: Option<String>,
+            #[serde(default)]
+            tool_changes: Option<Vec<serde_json::Value>>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct CompactionResponse {
+            stop_reason: Option<String>,
+            content: Vec<CompactionContent>,
+        }
+
+        let resp_data: CompactionResponse =
+            serde_json::from_slice(&body_bytes).map_err(|e| ClientError::Runtime {
+                message: format!("failed to parse compaction response: {e}"),
+            })?;
+
+        if resp_data.stop_reason.as_deref() != Some("compaction") {
+            return Err(ClientError::Runtime {
+                message: format!(
+                    "unexpected stop_reason in compaction response: {:?}",
+                    resp_data.stop_reason
+                ),
+            });
+        }
+
+        let block = resp_data
+            .content
+            .into_iter()
+            .find(|c| c.r#type == "compaction");
+
+        match block {
+            Some(cc) => {
+                let content = cc.content.ok_or_else(|| ClientError::Runtime {
+                    message: "compaction block returned null content".into(),
+                })?;
+                let signature = cc.signature.ok_or_else(|| ClientError::Runtime {
+                    message: "compaction block missing signature".into(),
+                })?;
+                Ok(Some(CompactionBlock {
+                    content,
+                    signature,
+                    encrypted_content: cc.encrypted_content,
+                    tool_changes: cc.tool_changes,
+                }))
+            }
+            None => Err(ClientError::Runtime {
+                message: "no compaction block in response".into(),
+            }),
+        }
+    }
 
     fn resolve_params(raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
         let mut additional = serde_json::Map::new();

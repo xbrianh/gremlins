@@ -392,7 +392,7 @@ impl LoopState {
         timeout_retry_backoff: &[f64],
     ) -> Result<StreamTurnOutcome, ClientError> {
         // Phase 1: assemble the request (messages, scratchpad, gen params).
-        let builder = self.prepare_stream_request(tool_defs, opts, nested);
+        let builder = self.prepare_stream_request(tool_defs, opts, nested).await;
 
         // Dump the full prompt to the state directory when
         // GREMLINS_LOG_LEVEL=DEBUG and a debug store is configured.
@@ -470,17 +470,20 @@ impl LoopState {
     /// Build the [`CompletionRequest`] for one model turn: assemble the request
     /// messages, re-inject the scratchpad when a prior injection is missing,
     /// and apply the caller's generation parameters.
-    fn prepare_stream_request(
+    async fn prepare_stream_request(
         &mut self,
         tool_defs: &[ToolDefinition],
         opts: &LoopOpts<'_>,
         nested: bool,
     ) -> CompletionRequest {
-        let script = self.conv.render_turn(
-            nested,
-            self.hooks.read_scratchpad(),
-            self.system_prompt.clone(),
-        );
+        let script = self
+            .conv
+            .render_turn(
+                nested,
+                self.hooks.read_scratchpad(),
+                self.system_prompt.clone(),
+            )
+            .await;
 
         let mut builder = CompletionRequest::new(script.next_user_prompt)
             .messages(script.messages)
@@ -1538,7 +1541,7 @@ impl LoopState {
         // the structured reasoning items for the next request.
         if text.is_empty() && !reasoning.is_empty() {
             log::debug!("reasoning-only turn: turn={} — continuing", self.turn_num);
-            self.conv.record_turn("", reasoning_items, &[]);
+            self.conv.record_turn("", reasoning_items, &[], None);
             self.conv.set_next_prompt("Continue.");
             return EmptyTurnAction::ContinueLoop;
         }
@@ -1561,7 +1564,7 @@ impl LoopState {
                     missing.len(),
                     self.reminder_budget,
                 ));
-                self.conv.record_turn(text, reasoning_items, &[]);
+                self.conv.record_turn(text, reasoning_items, &[], None);
                 let reminder = artifact_reminder(&missing);
                 write_raw(
                     raw,
@@ -1592,7 +1595,7 @@ impl LoopState {
             if let Some(evts) = captured.as_mut() {
                 evts.push(serde_json::json!({"type": "reminder", "message": nudge_msg}));
             }
-            self.conv.record_turn(text, reasoning_items, &[]);
+            self.conv.record_turn(text, reasoning_items, &[], None);
             self.conv.set_next_prompt(nudge_msg);
             return EmptyTurnAction::ContinueLoop;
         }
@@ -1645,8 +1648,10 @@ impl LoopState {
         text: &str,
         reasoning_items: &[Sealed<Reasoning>],
         tool_calls: &[ToolCall],
+        input_tokens: Option<u64>,
     ) {
-        self.conv.record_turn(text, reasoning_items, tool_calls);
+        self.conv
+            .record_turn(text, reasoning_items, tool_calls, input_tokens);
     }
 }
 
@@ -2275,7 +2280,12 @@ pub(crate) async fn run_agent_loop_core(
             }
         }
 
-        state.commit_turn_to_history(&text, &reasoning_items, &tool_calls);
+        state.commit_turn_to_history(
+            &text,
+            &reasoning_items,
+            &tool_calls,
+            turn_usage.as_ref().and_then(|u| u.input_tokens),
+        );
 
         state
             .execute_tools(

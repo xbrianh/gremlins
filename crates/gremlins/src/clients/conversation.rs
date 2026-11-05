@@ -1,5 +1,7 @@
 // ── conversation machinery ──────────────────────────────────────────────────
 
+use async_trait::async_trait;
+
 /// The transcript produced for one model turn.
 #[derive(Clone, Debug)]
 pub(crate) struct TurnScript {
@@ -23,6 +25,7 @@ pub(crate) struct RunArtifact {
 /// Owns agent-loop conversation state: durable [`Message`] history plus the
 /// pending user prompt. The loop narrates what happened; the conversation
 /// assembles the transcript.
+#[async_trait]
 pub(crate) trait Conversation: Send + Sync {
     /// Clone this conversation into a new heap allocation.
     fn clone_box(&self) -> Box<dyn Conversation>;
@@ -42,6 +45,7 @@ pub(crate) trait Conversation: Send + Sync {
             rig_core::completion::message::Reasoning,
         >],
         tool_calls: &[rig_core::completion::message::ToolCall],
+        input_tokens: Option<u64>,
     );
 
     /// Record tool-result messages into history.
@@ -52,7 +56,10 @@ pub(crate) trait Conversation: Send + Sync {
     fn pop_last_assistant_turn(&mut self);
 
     /// Build the outgoing request for the current turn.
-    fn render_turn(
+    ///
+    /// May trigger compaction before building the turn script when
+    /// token thresholds are exceeded.
+    async fn render_turn(
         &mut self,
         nested: bool,
         scratchpad: Option<String>,
@@ -294,6 +301,7 @@ impl Conversation for ConversationStub {
             rig_core::completion::message::Reasoning,
         >],
         tool_calls: &[rig_core::completion::message::ToolCall],
+        _input_tokens: Option<u64>,
     ) {
         // Commit the pending user prompt before the assistant message.
         let prompt = self.next_prompt.clone();
@@ -328,7 +336,7 @@ impl Conversation for ConversationStub {
         self.prompt_committed = false;
     }
 
-    fn render_turn(
+    async fn render_turn(
         &mut self,
         _nested: bool,
         _scratchpad: Option<String>,

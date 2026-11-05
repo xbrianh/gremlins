@@ -11,14 +11,123 @@
 //! message the model saw rather than the raw `next_prompt`. A
 //! `prompt_committed` flag prevents `messages()` from appending a
 //! duplicate when `record_turn` has already committed the prompt.
+//!
+//! ## Compaction
+//!
+//! When [`CompactionConfig`] is set, `render_turn` checks whether input tokens
+//! exceed a threshold and triggers server-side compaction via the
+//! `compact-2026-09-04` Anthropic API beta. The oldest turns are replaced with
+//! a signed compaction block; the most recent `keep_recent` user+assistant
+//! pairs are preserved verbatim.
 
+use async_trait::async_trait;
 use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
 use rig_core::completion::Message;
 
+use crate::clients::backend::Backend;
 use crate::clients::conversation::{Conversation, RunArtifact, TurnScript};
 use crate::clients::done_helpers::done_user_message;
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
+use crate::clients::protocol::CompactionBlock;
+
+/// Compaction strategy and execution. Built once in `run.rs` and passed
+/// to `StandardConversation::new`. Holds an `Arc<dyn Backend>` so it is
+/// cheap to clone.
+#[derive(Clone)]
+pub(crate) struct CompactionConfig {
+    backend: std::sync::Arc<dyn Backend>,
+    threshold: u64,
+    keep_recent: usize,
+    instructions: Option<String>,
+}
+
+impl CompactionConfig {
+    pub(crate) fn new(
+        backend: std::sync::Arc<dyn Backend>,
+        threshold: u64,
+        keep_recent: usize,
+        instructions: Option<String>,
+    ) -> Self {
+        Self { backend, threshold, keep_recent, instructions }
+    }
+
+    pub(crate) fn threshold(&self) -> u64 { self.threshold }
+
+    pub(crate) fn keep_recent(&self) -> usize { self.keep_recent }
+
+    /// Run server-side compaction on `to_compact`.
+    /// Returns `Ok(None)` when the backend doesn't support compaction.
+    pub(crate) async fn compact(
+        &self,
+        to_compact: &[Message],
+        kept: &[Message],
+        system_prompt: Option<&str>,
+    ) -> Result<Option<(CompactionBlock, Vec<Message>)>, crate::clients::backend::ClientError> {
+        let server_block = self.backend.compact(to_compact, system_prompt, self.instructions.as_deref()).await?;
+        let block = match server_block {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let mut new_history = Vec::with_capacity(1 + kept.len());
+        new_history.push(compaction_block_as_message(&block));
+        new_history.extend_from_slice(kept);
+        Ok(Some((block, new_history)))
+    }
+}
+
+/// Wrap a [`CompactionBlock`] as an assistant [`Message`] suitable for
+/// inclusion in the message history.
+fn compaction_block_as_message(block: &CompactionBlock) -> Message {
+    // Store the compaction summary as a user message in history.
+    // The signed block is kept separately on StandardConversation
+    // for round-tripping via `compaction_block`.
+    Message::user(format!("[compacted]: {}", block.content))
+}
+
+/// Compute a cut index so `to_compact = &history[..cut]` and
+/// `kept = &history[cut..]`. The cut lands on a completed-turn boundary:
+/// `keep_recent` whole user/assistant exchanges are kept verbatim and
+/// `to_compact` never ends in an unanswered tool call.
+fn compaction_cut_index(history: &[Message], keep_recent: usize) -> usize {
+    let mut cut = history.len();
+    let mut kept_turns = 0;
+    while cut > 0 && kept_turns < keep_recent {
+        // Skip trailing user tool_result messages belonging to the
+        // preceding turn.
+        while cut > 0 && is_user_tool_result(&history[cut - 1]) {
+            cut -= 1;
+        }
+        // Step back over this turn's user opener and its assistant/tool
+        // messages to the previous completed-turn boundary.
+        cut = previous_turn_boundary(history, cut);
+        kept_turns += 1;
+    }
+    cut
+}
+
+/// Walk backward from `cut` (exclusive) to the start of the preceding
+/// completed user+assistant turn, skipping assistant/tool messages.
+fn previous_turn_boundary(history: &[Message], mut cut: usize) -> usize {
+    // Step back over the assistant message (if present).
+    if cut > 0 && matches!(history[cut - 1], Message::Assistant { .. }) {
+        cut -= 1;
+    }
+    // Step back over the user opener.
+    if cut > 0 && matches!(history[cut - 1], Message::User { .. }) {
+        cut -= 1;
+    }
+    cut
+}
+
+/// True when the message is a user message containing only tool results.
+fn is_user_tool_result(msg: &Message) -> bool {
+    use rig_core::completion::message::UserContent;
+    match msg {
+        Message::User { content } => content.iter().any(|c| matches!(c, UserContent::ToolResult(_))),
+        _ => false,
+    }
+}
 
 /// The standard [`Conversation`] implementation.
 pub(crate) struct StandardConversation {
@@ -48,6 +157,14 @@ pub(crate) struct StandardConversation {
     /// Once set, [`Conversation::messages`] returns this final transcript so
     /// persistence consumers see the exact durable message list.
     finalized_messages: Option<Vec<Message>>,
+    /// Compaction configuration. `None` → compaction disabled.
+    compaction: Option<CompactionConfig>,
+    /// Active signed compaction block, if any has been applied.
+    compaction_block: Option<CompactionBlock>,
+    /// True once any summary has been swapped into history.
+    compaction_applied: bool,
+    /// The `input_tokens` count from the most recent API response.
+    last_input_tokens: Option<u64>,
 }
 
 impl StandardConversation {
@@ -55,6 +172,7 @@ impl StandardConversation {
         prompt: &str,
         preserve_reasoning: bool,
         prepopulated_messages: Option<Vec<Message>>,
+        compaction: Option<CompactionConfig>,
     ) -> Self {
         let history = prepopulated_messages.unwrap_or_default();
         Self {
@@ -66,6 +184,10 @@ impl StandardConversation {
             preserve_reasoning_in_history: preserve_reasoning,
             last_text: String::new(),
             finalized_messages: None,
+            compaction,
+            compaction_block: None,
+            compaction_applied: false,
+            last_input_tokens: None,
         }
     }
 
@@ -82,8 +204,30 @@ impl StandardConversation {
         }
         self.findings_ledger.feed(text);
     }
+
+    /// Decide whether to trigger compaction on this turn.
+    fn should_compact(&self) -> bool {
+        let comp = match &self.compaction {
+            Some(c) => c,
+            None => return false,
+        };
+        let tokens = self.last_input_tokens.unwrap_or(0);
+        if tokens <= comp.threshold() {
+            return false;
+        }
+        // After compaction has been applied, don't re-compact until there is
+        // genuinely new material after the block.
+        if self.compaction_applied {
+            let cut = compaction_cut_index(&self.history, comp.keep_recent());
+            if cut == 0 {
+                return false;
+            }
+        }
+        true
+    }
 }
 
+#[async_trait]
 impl Conversation for StandardConversation {
     fn clone_box(&self) -> Box<dyn Conversation> {
         Box::new(Self {
@@ -95,6 +239,10 @@ impl Conversation for StandardConversation {
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: self.last_text.clone(),
             finalized_messages: self.finalized_messages.clone(),
+            compaction: self.compaction.clone(),
+            compaction_block: self.compaction_block.clone(),
+            compaction_applied: self.compaction_applied,
+            last_input_tokens: self.last_input_tokens,
         })
     }
 
@@ -107,9 +255,13 @@ impl Conversation for StandardConversation {
         text: &str,
         reasoning_items: &[Sealed<Reasoning>],
         tool_calls: &[ToolCall],
+        input_tokens: Option<u64>,
     ) {
         // record_prose already fed the findings ledger and updated last_text;
         // do NOT call feed_text here to avoid double-counting findings.
+
+        // Record the API-reported input token count for compaction decisions.
+        self.last_input_tokens = input_tokens;
 
         // Commit the exact rendered user prompt (with scratchpad/findings
         // prefixes) so the transcript matches what the model saw.
@@ -147,12 +299,39 @@ impl Conversation for StandardConversation {
         self.prompt_committed = false;
     }
 
-    fn render_turn(
+    async fn render_turn(
         &mut self,
         nested: bool,
         scratchpad: Option<String>,
         system_prompt: Option<String>,
     ) -> TurnScript {
+        // Phase 0: compaction (main loop only; not in nested/fork contexts)
+        if !nested && self.should_compact() {
+            if let Some(comp) = self.compaction.as_ref() {
+                let cut = compaction_cut_index(&self.history, comp.keep_recent());
+                let kept = self.history[cut..].to_vec();
+                let to_compact = self.history[..cut].to_vec();
+                match comp.compact(&to_compact, &kept, system_prompt.as_deref()).await {
+                    Ok(Some((signed_block, new_history))) => {
+                        log::info!(
+                            "Compaction applied: {} messages → block + {}",
+                            to_compact.len(),
+                            kept.len()
+                        );
+                        self.history = new_history;
+                        self.compaction_applied = true;
+                        self.compaction_block = Some(signed_block);
+                    }
+                    Ok(None) => {
+                        // Backend doesn't support compaction — skip.
+                    }
+                    Err(e) => {
+                        log::warn!("Compaction failed: {e}");
+                    }
+                }
+            }
+        }
+
         let combined_system = system_prompt;
 
         let next_user_prompt = if nested {
@@ -307,11 +486,15 @@ impl Conversation for StandardConversation {
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: String::new(),
             finalized_messages: None,
+            compaction: self.compaction.clone(),
+            compaction_block: self.compaction_block.clone(),
+            compaction_applied: self.compaction_applied,
+            last_input_tokens: self.last_input_tokens,
         })
     }
 
     fn spawn_child(&self, prompt: &str) -> Box<dyn Conversation> {
-        Box::new(Self::new(prompt, self.preserve_reasoning_in_history, None))
+        Box::new(Self::new(prompt, self.preserve_reasoning_in_history, None, self.compaction.clone()))
     }
 
     fn set_next_prompt(&mut self, prompt: &str) {
