@@ -1,5 +1,7 @@
 // ── conversation machinery ──────────────────────────────────────────────────
 
+use async_trait::async_trait;
+
 /// The transcript produced for one model turn.
 #[derive(Clone, Debug)]
 pub(crate) struct TurnScript {
@@ -23,6 +25,7 @@ pub(crate) struct RunArtifact {
 /// Owns agent-loop conversation state: durable [`Message`] history plus the
 /// pending user prompt. The loop narrates what happened; the conversation
 /// assembles the transcript.
+#[async_trait]
 pub(crate) trait Conversation: Send + Sync {
     /// Clone this conversation into a new heap allocation.
     fn clone_box(&self) -> Box<dyn Conversation>;
@@ -31,6 +34,11 @@ pub(crate) trait Conversation: Send + Sync {
     /// (used to update the findings ledger and `last_text` before completion
     /// classification decides whether to record or reject the turn).
     fn record_prose(&mut self, text: &str);
+
+    /// Record the API-reported input token count for this turn.
+    /// Called immediately after every response so compaction decisions see
+    /// the latest usage even when the turn continues before `record_turn`.
+    fn record_input_tokens(&mut self, _input_tokens: Option<u64>) {}
 
     /// Record the assistant turn (text, reasoning, tool calls) into history.
     /// The findings ledger is already fed by a prior `record_prose` call, so
@@ -42,6 +50,7 @@ pub(crate) trait Conversation: Send + Sync {
             rig_core::completion::message::Reasoning,
         >],
         tool_calls: &[rig_core::completion::message::ToolCall],
+        input_tokens: Option<u64>,
     );
 
     /// Record tool-result messages into history.
@@ -52,7 +61,10 @@ pub(crate) trait Conversation: Send + Sync {
     fn pop_last_assistant_turn(&mut self);
 
     /// Build the outgoing request for the current turn.
-    fn render_turn(
+    ///
+    /// May trigger compaction before building the turn script when
+    /// token thresholds are exceeded.
+    async fn render_turn(
         &mut self,
         nested: bool,
         scratchpad: Option<String>,
@@ -108,6 +120,15 @@ pub(crate) trait Conversation: Send + Sync {
     /// conversations built from raw messages (chat continuation) inherit the
     /// run's actual preserve-reasoning setting rather than a hardcoded `false`.
     fn set_preserve_reasoning(&mut self, _preserve: bool) {}
+
+    /// True when a server-issued signed compaction block is active.
+    /// The agent loop attaches the `compact-2026-09-04` beta header
+    /// unconditionally at client construction; this method is available
+    /// for future conditional attachment or diagnostic use.
+    #[allow(dead_code)]
+    fn has_signed_compaction_block(&self) -> bool {
+        false
+    }
 
     /// Compact digest of the Read/Grep evidence still present in the durable
     /// transcript. Fan-out tools fold this into the parent's tool result so a
@@ -278,6 +299,7 @@ impl ConversationStub {
 }
 
 #[cfg(test)]
+#[async_trait]
 impl Conversation for ConversationStub {
     fn clone_box(&self) -> Box<dyn Conversation> {
         self.box_self()
@@ -294,6 +316,7 @@ impl Conversation for ConversationStub {
             rig_core::completion::message::Reasoning,
         >],
         tool_calls: &[rig_core::completion::message::ToolCall],
+        _input_tokens: Option<u64>,
     ) {
         // Commit the pending user prompt before the assistant message.
         let prompt = self.next_prompt.clone();
@@ -328,7 +351,7 @@ impl Conversation for ConversationStub {
         self.prompt_committed = false;
     }
 
-    fn render_turn(
+    async fn render_turn(
         &mut self,
         _nested: bool,
         _scratchpad: Option<String>,
@@ -467,5 +490,9 @@ impl Conversation for ConversationStub {
 
     fn set_preserve_reasoning(&mut self, preserve: bool) {
         self.preserve_reasoning = preserve;
+    }
+
+    fn has_signed_compaction_block(&self) -> bool {
+        false
     }
 }

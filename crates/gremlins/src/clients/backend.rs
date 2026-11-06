@@ -8,7 +8,7 @@ use super::interactive::{InteractiveSession, StreamEventSender};
 use super::model::GremlinsModel;
 use super::params::ResolvedParams;
 pub(crate) use super::plug::LoopHooks;
-use super::protocol::CompletedRun;
+use super::protocol::{CompactionResult, CompletedRun};
 use super::task_models::TaskModelSelector;
 use async_trait::async_trait;
 use indexmap::IndexMap;
@@ -179,6 +179,19 @@ pub trait Backend: Send + Sync {
 
     fn resolved_params(&self) -> Option<ResolvedParams> {
         None
+    }
+
+    /// Request server-side compaction.
+    /// Returns `Ok(None)` when the backend doesn't support compaction (the
+    /// caller skips compaction for this turn).
+    async fn compact(
+        &self,
+        _messages: &[rig_core::completion::Message],
+        _system_prompt: Option<&str>,
+        _instructions: Option<&str>,
+        _model: &str,
+    ) -> Result<Option<CompactionResult>, ClientError> {
+        Ok(None)
     }
 }
 

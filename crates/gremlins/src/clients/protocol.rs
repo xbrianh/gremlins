@@ -3,6 +3,30 @@ use serde::{Deserialize, Serialize};
 use super::conversation::Conversation;
 use rig_core::completion::Message;
 
+/// A signed compaction block from the Anthropic on-demand compaction API
+/// (`compact-2026-09-04`). Round-tripped verbatim in subsequent requests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionBlock {
+    pub content: String,
+    pub signature: String,
+    #[serde(default)]
+    pub encrypted_content: Option<String>,
+    #[serde(default)]
+    pub tool_changes: Option<Vec<serde_json::Value>>,
+}
+
+/// The result of a successful server-side compaction call: the signed block
+/// plus optional token usage from the compaction API call itself (reported
+/// in `usage.iterations` rather than the top-level `usage` fields).
+#[derive(Debug, Clone)]
+pub struct CompactionResult {
+    pub block: CompactionBlock,
+    /// Input tokens consumed by the compaction summarization.
+    pub input_tokens: Option<u64>,
+    /// Output tokens produced by the compaction summarization.
+    pub output_tokens: Option<u64>,
+}
+
 /// Aggregated token usage summary from an agent run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageStats {

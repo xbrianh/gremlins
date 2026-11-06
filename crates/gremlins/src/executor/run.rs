@@ -12,6 +12,7 @@ use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::{Client, ModelURI};
+use crate::clients::compaction::Compaction;
 use crate::config;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
@@ -49,6 +50,41 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
         .open(&blob_name, state::BlobMode::Append)
         .map_err(|e| RunError::Message(format!("agent raw stream: {e}")))?;
     Ok(fs.root_dir().join(&blob_name))
+}
+
+/// Default number of most-recent turns to keep verbatim during compaction.
+const DEFAULT_COMPACTION_KEEP_RECENT: usize = 10;
+
+/// Build a [`Compaction`] from the global config and the resolved backend.
+/// Returns `None` when compaction is disabled (threshold == 0) or the backend
+/// is not an Anthropic backend (the only one supporting the on-demand API).
+fn build_compaction_config(client: &Client, model: String, is_chat: bool) -> Option<Compaction> {
+    let backend = match client.get_or_build_backend() {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("compaction: failed to build backend: {e}");
+            return None;
+        }
+    };
+    // Only Anthropic supports on-demand compaction.
+    if backend.name() != "anthropic" {
+        return None;
+    }
+    let threshold = if is_chat {
+        crate::config::compaction_threshold_tokens_chat()
+    } else {
+        crate::config::compaction_threshold_tokens()
+    };
+    if threshold == 0 {
+        return None;
+    }
+    Some(Compaction::new(
+        backend,
+        model,
+        threshold,
+        DEFAULT_COMPACTION_KEEP_RECENT,
+        None, // no custom instructions by default
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -534,8 +570,20 @@ async fn run_agent(
         None
     };
 
-    let conv =
-        crate::conversation::standard::StandardConversation::new("", false, verbatim_history);
+    let compaction: Option<Compaction> = build_compaction_config(
+        &client,
+        prepared
+            .model
+            .clone()
+            .unwrap_or_else(|| client.model().to_string()),
+        is_chat,
+    );
+    let conv = crate::conversation::standard::StandardConversation::new(
+        "",
+        false,
+        verbatim_history,
+        compaction,
+    );
 
     // ── Live usage tracker for failure persistence ─────
     // Stores (combined_usage, stage_local_usage, cost_usd).
