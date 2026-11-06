@@ -24,71 +24,11 @@ use async_trait::async_trait;
 use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
 use rig_core::completion::Message;
 
-use crate::clients::compaction::Compaction;
+use crate::clients::compaction::{compaction_cut_index, Compaction};
 use crate::clients::conversation::{Conversation, RunArtifact, TurnScript};
 use crate::clients::done_helpers::done_user_message;
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
-
-/// Compute a cut index so `to_compact = &history[..cut]` and
-/// `kept = &history[cut..]`. The cut lands on a completed-turn boundary:
-/// `keep_recent` whole user/assistant exchanges are kept verbatim and
-/// `to_compact` never ends in an unanswered tool call.
-pub(crate) fn compaction_cut_index(history: &[Message], keep_recent: usize) -> usize {
-    let mut cut = history.len();
-    let mut kept_turns = 0;
-    while cut > 0 && kept_turns < keep_recent {
-        // Skip trailing user tool_result messages belonging to the
-        // preceding turn.
-        while cut > 0 && is_user_tool_result(&history[cut - 1]) {
-            cut -= 1;
-        }
-        // Step back over this turn's user opener and its assistant/tool
-        // messages to the previous completed-turn boundary.
-        cut = previous_turn_boundary(history, cut);
-        kept_turns += 1;
-    }
-    cut
-}
-
-/// Walk backward from `cut` (exclusive) to the start of the preceding
-/// completed user+assistant turn, skipping assistant/tool messages.
-fn previous_turn_boundary(history: &[Message], mut cut: usize) -> usize {
-    // Step back over a chain of (assistant, user tool_result) pairs until
-    // we hit a user message that is NOT a tool result (the turn opener).
-    loop {
-        // Skip the assistant message.
-        if cut > 0 && matches!(history[cut - 1], Message::Assistant { .. }) {
-            cut -= 1;
-        } else {
-            break;
-        }
-        // Skip any user tool_result messages after the assistant.
-        while cut > 0 && is_user_tool_result(&history[cut - 1]) {
-            cut -= 1;
-        }
-    }
-    // Step back over the user opener.
-    if cut > 0 && matches!(history[cut - 1], Message::User { .. }) {
-        cut -= 1;
-    }
-    cut
-}
-
-/// True when the message is a user message containing exclusively tool
-/// results (no mixed text + tool-result blocks).
-fn is_user_tool_result(msg: &Message) -> bool {
-    use rig_core::completion::message::UserContent;
-    match msg {
-        Message::User { content } => {
-            !content.is_empty()
-                && content
-                    .iter()
-                    .all(|c| matches!(c, UserContent::ToolResult(_)))
-        }
-        _ => false,
-    }
-}
 
 /// The standard [`Conversation`] implementation.
 pub(crate) struct StandardConversation {
@@ -277,8 +217,7 @@ impl Conversation for StandardConversation {
                                 usage.output_tokens,
                             );
                             self.history = new_history;
-                            comp.set_applied();
-                            comp.set_block(Some(signed_block));
+                            comp.mark_applied(signed_block);
                             // Reset token count so we don't re-compact immediately.
                             self.last_input_tokens = Some(0);
                         }

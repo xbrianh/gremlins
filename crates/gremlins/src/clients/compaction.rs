@@ -7,15 +7,77 @@
 
 use std::sync::Arc;
 
+use rig_core::completion::message::UserContent;
 use rig_core::completion::Message;
 
 use crate::clients::backend::{Backend, ClientError};
 use crate::clients::protocol::{CompactionBlock, CompactionResult};
-use crate::conversation::standard::compaction_cut_index;
+
+/// Compute a cut index so `to_compact = &history[..cut]` and
+/// `kept = &history[cut..]`. The cut lands on a completed-turn boundary:
+/// `keep_recent` whole user/assistant exchanges are kept verbatim and
+/// `to_compact` never ends in an unanswered tool call.
+pub(crate) fn compaction_cut_index(history: &[Message], keep_recent: usize) -> usize {
+    let mut cut = history.len();
+    let mut kept_turns = 0;
+    while cut > 0 && kept_turns < keep_recent {
+        // Skip trailing user tool_result messages belonging to the
+        // preceding turn.
+        while cut > 0 && is_user_tool_result(&history[cut - 1]) {
+            cut -= 1;
+        }
+        // Step back over this turn's user opener and its assistant/tool
+        // messages to the previous completed-turn boundary.
+        cut = previous_turn_boundary(history, cut);
+        kept_turns += 1;
+    }
+    cut
+}
+
+/// Walk backward from `cut` (exclusive) to the start of the preceding
+/// completed user+assistant turn, skipping assistant/tool messages.
+fn previous_turn_boundary(history: &[Message], mut cut: usize) -> usize {
+    // Step back over a chain of (assistant, user tool_result) pairs until
+    // we hit a user message that is NOT a tool result (the turn opener).
+    loop {
+        // Skip the assistant message.
+        if cut > 0 && matches!(history[cut - 1], Message::Assistant { .. }) {
+            cut -= 1;
+        } else {
+            break;
+        }
+        // Skip any user tool_result messages after the assistant.
+        while cut > 0 && is_user_tool_result(&history[cut - 1]) {
+            cut -= 1;
+        }
+    }
+    // Step back over the user opener.
+    if cut > 0 && matches!(history[cut - 1], Message::User { .. }) {
+        cut -= 1;
+    }
+    cut
+}
+
+/// True when the message is a user message containing exclusively tool
+/// results (no mixed text + tool-result blocks).
+fn is_user_tool_result(msg: &Message) -> bool {
+    match msg {
+        Message::User { content } => {
+            !content.is_empty()
+                && content
+                    .iter()
+                    .all(|c| matches!(c, UserContent::ToolResult(_)))
+        }
+        _ => false,
+    }
+}
 
 /// Compaction strategy, execution, and runtime state. Built once in
-/// `run.rs` and passed to `StandardConversation::new`. Holds an
-/// `Arc<dyn Backend>` so it is cheap to clone.
+/// `run.rs` and passed to `StandardConversation::new`.
+///
+/// Cloning creates a snapshot of the runtime state (`block`, `applied`,
+/// `cooldown`) — forked conversations inherit but do not share
+/// compaction state.
 #[derive(Clone)]
 pub(crate) struct Compaction {
     backend: Arc<dyn Backend>,
@@ -62,11 +124,11 @@ impl Compaction {
         self.block.as_ref()
     }
 
-    pub(crate) fn set_block(&mut self, block: Option<CompactionBlock>) {
-        self.block = block;
-    }
-
-    pub(crate) fn set_applied(&mut self) {
+    /// Record that a compaction block has been applied to history.
+    /// Sets `applied` and stores the block atomically, preserving
+    /// the invariant that `applied` is `true` iff a block is set.
+    pub(crate) fn mark_applied(&mut self, block: CompactionBlock) {
+        self.block = Some(block);
         self.applied = true;
     }
 

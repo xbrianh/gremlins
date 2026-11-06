@@ -58,11 +58,7 @@ const DEFAULT_COMPACTION_KEEP_RECENT: usize = 10;
 /// Build a [`Compaction`] from the global config and the resolved backend.
 /// Returns `None` when compaction is disabled (threshold == 0) or the backend
 /// is not an Anthropic backend (the only one supporting the on-demand API).
-fn build_compaction_config(
-    client: &Client,
-    model: String,
-    is_chat: bool,
-) -> Option<Compaction> {
+fn build_compaction_config(client: &Client, model: String, is_chat: bool) -> Option<Compaction> {
     let backend = match client.get_or_build_backend() {
         Ok(b) => b,
         Err(e) => {
