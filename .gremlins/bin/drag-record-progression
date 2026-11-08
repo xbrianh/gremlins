@@ -150,12 +150,27 @@ fi
 
 info "record-progression: current target=$CURRENT_TARGET, common root=$NEW_TARGET"
 
-# ── step 2: recompute progression if target broadened ───────────────────────
+# Guard: if common_prefix bottomed out to empty (no shared directory between
+# the original target and changed files), fall back to the original target.
+if [ -z "$NEW_TARGET" ]; then
+    info "record-progression: no common prefix — keeping target=$TARGET_DIR"
+    NEW_TARGET="$TARGET_DIR"
+fi
+
+# ── step 2: write broadened target to config BEFORE recomputing ─────────────
 
 if [ "$NEW_TARGET" != "$TARGET_DIR" ]; then
     info "record-progression: target broadened from $CURRENT_TARGET to $NEW_TARGET"
 
+    # Update the mutable config with the broadened target NOW, before any
+    # gremlins-drag calls, so recomputed scores use the new target.
+    jq --arg target "$NEW_TARGET" '.path = $target' "$CONFIG_PATH" > "$CONFIG_PATH.tmp" \
+        && mv "$CONFIG_PATH.tmp" "$CONFIG_PATH"
+
     HEAD_SAVED=$(git -C "$WORKDIR" rev-parse HEAD)
+
+    # Install an EXIT trap to restore HEAD if the script exits mid-recompute.
+    trap 'git -C "$WORKDIR" checkout --quiet "$HEAD_SAVED" 2>/dev/null || true' EXIT
 
     # Recompute each prior entry.
     PREV_DRAG=0
@@ -191,16 +206,21 @@ if [ "$NEW_TARGET" != "$TARGET_DIR" ]; then
         PREV_DRAG=$DRAG
     done < <(jq -c '.[]' "$PROGRESSION_IN")
 
-    # Restore HEAD.
+    # Restore HEAD and clear trap.
     git -C "$WORKDIR" checkout --quiet "$HEAD_SAVED"
+    trap - EXIT
 
     # Compute current iteration drag at HEAD with the new target.
     CURRENT_DRAG=$(drag_sum)
     DRAG_BEFORE="$PREV_DRAG"
     DRAG_AFTER="$CURRENT_DRAG"
 
-    # Update state files so the next iteration sees consistent numbers.
-    printf '%s' "$CURRENT_DRAG" > "$STATE_DIR/artifacts/drag_best.txt"
+    # Record the new best drag, but only if it's lower than the previous best.
+    PREV_BEST=$(cat "$STATE_DIR/artifacts/drag_best.txt" 2>/dev/null || echo "999999")
+    if awk -v cur="$CURRENT_DRAG" -v prev="$PREV_BEST" 'BEGIN { exit (cur < prev) ? 0 : 1 }' 2>/dev/null; then
+        printf '%s' "$CURRENT_DRAG" > "$STATE_DIR/artifacts/drag_best.txt"
+        info "record-progression: new best drag=$CURRENT_DRAG"
+    fi
 
     # Re-run to get the full report for drag_current.json.
     gremlins-drag > "$STATE_DIR/drag_current.json"

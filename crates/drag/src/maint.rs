@@ -143,12 +143,7 @@ pub(crate) async fn score_package_maintainability(
 
         // Cache miss: spawn `estimates × N` tasks — one per dimension per estimate.
         for dim in &maint_config.dimensions {
-            let prompt = build_dim_prompt(
-                &pkg_name,
-                &full_source,
-                &maint_config.preamble,
-                dim,
-            );
+            let prompt = build_dim_prompt(&pkg_name, &full_source, &maint_config.preamble, dim);
 
             for _ in 0..estimates {
                 let pkg_key = pkg_key.clone();
@@ -480,7 +475,10 @@ fn collect_package_source(pkg: &PackageInfo) -> Result<String, String> {
     };
 
     let files = crate::lang::collect_source_files(&src_dir).map_err(|e| {
-        format!("failed to collect source files in {}: {e}", src_dir.display())
+        format!(
+            "failed to collect source files in {}: {e}",
+            src_dir.display()
+        )
     })?;
 
     if files.is_empty() {
@@ -509,9 +507,8 @@ fn collect_package_source(pkg: &PackageInfo) -> Result<String, String> {
         buf.push_str(&header);
         total += header.len();
 
-        let content = std::fs::read_to_string(f).unwrap_or_else(|e| {
-            format!("[failed to read: {e}]")
-        });
+        let content =
+            std::fs::read_to_string(f).unwrap_or_else(|e| format!("[failed to read: {e}]"));
         let remaining = DEFAULT_BYTE_LIMIT.saturating_sub(total);
         if remaining == 0 {
             return Err(format!(

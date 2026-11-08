@@ -49,12 +49,18 @@
         "key": "test_hygiene",
         "label": "test_hygiene",
         "description": "Are tests inline and dominant, or cleanly separated from production code?"
+      },
+      {
+        "key": "duplication",
+        "label": "duplication",
+        "description": "Semantic and literal duplication: Does the same intent appear in multiple places — either as copy-paste or as distinct-looking code that accomplishes the same thing? This catches convergent solutions, not just verbatim repetition."
       }
     ],
     "structural_anchors": {
       "cohesion": "0=dumping ground (5+ unrelated concerns), 1=3-4 concerns with informal boundaries,\n2=2-3 concerns with one dominant, 3=primary responsibility + minor secondary,\n4=single crystal-clear responsibility.",
       "sizing": "0=multiple 200+ line functions, 1=at least one 150+ line function,\n2=mostly reasonable with 1-2 outliers, 3=consistently well-sized (max ~60-80 lines),\n4=every function fits on screen, minimal params, state in context structs.",
-      "test_hygiene": "0=tests >50% of file inline, 1=30-50% inline,\n2=<30% inline, 3=cleanly separated at bottom in single test module,\n4=tests in dedicated test files, zero test code in production file."
+      "test_hygiene": "0=tests >50% of file inline, 1=30-50% inline,\n2=<30% inline, 3=cleanly separated at bottom in single test module,\n4=tests in dedicated test files, zero test code in production file.",
+      "duplication": "0=3+ distinct implementations of the same concept with different surface forms,\n1=2-3 instances of convergent logic doing the same thing differently,\n2=one or two near-miss duplications with divergent approaches,\n3=minimal semantic overlap; each concept has a single canonical expression,\n4=zero duplication of any kind — every idea has exactly one home."
     }
   },
   "maintainability": {
@@ -87,8 +93,8 @@
       {
         "key": "duplication",
         "label": "duplication",
-        "description": "Code duplication: Are repeated blocks of logic extracted into shared helpers? Is copy-paste minimal across the package?",
-        "anchors": "0: Substantial copy-paste across files; the same logic appears verbatim in 3+ places.\n1: Several duplicated blocks exist; some could be extracted but aren't.\n2: Occasional duplication where extraction would add more indirection than value; mostly DRY.\n3: Very little duplication; shared logic is extracted into appropriate helpers or base types.\n4: No meaningful duplication anywhere; every piece of logic has a single canonical home."
+        "description": "Semantic and literal duplication: Does the same intent appear in multiple places across the package — either as copy-paste or as distinct-looking code that accomplishes the same thing? This captures convergent solutions and notional repetition, not just verbatim copying.",
+        "anchors": "0: The same concepts are reimplemented pervasively — copy-paste, near-miss copies, and convergent code that solves identical problems with different surface forms.\n1: Multiple instances of both literal and semantic duplication; several abstractions are missing.\n2: Occasional literal or semantic duplication where extraction would add more indirection than value; mostly DRY.\n3: Very little duplication of any kind; shared logic is extracted into appropriate helpers or base types.\n4: Zero duplication — literal or semantic. Every idea has a single canonical home; the package never solves the same problem twice."
       },
       {
         "key": "locality",

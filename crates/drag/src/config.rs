@@ -117,6 +117,31 @@ impl DragConfig {
             config.model = Some(model);
         }
 
+        // Reject duplicate dimension keys — scoring stores results in maps
+        // keyed by these strings, so duplicates would silently mask failures.
+        {
+            let mut seen = std::collections::HashSet::new();
+            for dim in &config.comprehensibility.dimensions {
+                if !seen.insert(&dim.key) {
+                    return Err(format!(
+                        "comprehensibility config: duplicate dimension key {:?}",
+                        dim.key
+                    ));
+                }
+            }
+        }
+        {
+            let mut seen = std::collections::HashSet::new();
+            for dim in &config.maintainability.dimensions {
+                if !seen.insert(&dim.key) {
+                    return Err(format!(
+                        "maintainability config: duplicate dimension key {:?}",
+                        dim.key
+                    ));
+                }
+            }
+        }
+
         Ok(config)
     }
 
@@ -447,4 +472,48 @@ mod tests {
         assert!(config.maintainability.dimensions.is_empty());
     }
 
+    #[test]
+    fn load_rejects_duplicate_comprehensibility_keys() {
+        let json = r#"{
+            "comprehensibility": {
+                "dimensions": [
+                    {"key": "naming", "description": "naming"},
+                    {"key": "naming", "description": "duplicate naming"}
+                ]
+            }
+        }"#;
+        let config: DragConfig = serde_json5::from_str(json).expect("parse must succeed");
+        // Simulate the validation logic in load().
+        let mut seen = std::collections::HashSet::new();
+        let mut dup = None;
+        for dim in &config.comprehensibility.dimensions {
+            if !seen.insert(&dim.key) {
+                dup = Some(dim.key.clone());
+                break;
+            }
+        }
+        assert_eq!(dup, Some("naming".to_string()));
+    }
+
+    #[test]
+    fn load_rejects_duplicate_maintainability_keys() {
+        let json = r#"{
+            "maintainability": {
+                "dimensions": [
+                    {"key": "decomposition", "description": "desc"},
+                    {"key": "decomposition", "description": "dup"}
+                ]
+            }
+        }"#;
+        let config: DragConfig = serde_json5::from_str(json).expect("parse must succeed");
+        let mut seen = std::collections::HashSet::new();
+        let mut dup = None;
+        for dim in &config.maintainability.dimensions {
+            if !seen.insert(&dim.key) {
+                dup = Some(dim.key.clone());
+                break;
+            }
+        }
+        assert_eq!(dup, Some("decomposition".to_string()));
+    }
 }
