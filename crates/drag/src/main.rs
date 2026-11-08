@@ -6,7 +6,7 @@ mod util;
 
 use config::{ComprehensibilityConfig, ComprehensibilityDimensionDef, DragConfig, OutputFormat};
 use scoring::{build_drag_tree, compute_drag, compute_footprint, DragNode};
-use util::{extract_json, median, truncate, CacheState, CompAgentError};
+use util::{extract_json, mean_with_ci, truncate, CacheState, CompAgentError};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -709,10 +709,10 @@ struct CacheEntry {
     model: String,
     /// Token count from tiktoken BPE (model-independent; stored here for convenience).
     token_count: usize,
-    /// Number of estimates used to produce the median.
+    /// Number of estimates used to produce the mean.
     #[serde(default = "default_estimates")]
     estimates: usize,
-    /// Median comprehensibility score (0–1).
+    /// Mean comprehensibility score (0–1).
     comprehensibility: f64,
     /// The four dimension scores from the LLM response.
     breakdown: ComprehensibilityScores,
@@ -926,7 +926,7 @@ fn build_file_skeleton(source: &str, extension: &str) -> String {
 }
 
 /// Handle for a single comprehensibility scoring task.
-/// On success returns all the info needed to compute the median and write the cache.
+/// On success returns all the info needed to compute the mean and write the cache.
 /// On failure returns a human-readable reason.
 type ComprehensionTask = tokio::task::JoinHandle<Result<CompEstimate, String>>;
 
@@ -934,7 +934,7 @@ type ComprehensionTask = tokio::task::JoinHandle<Result<CompEstimate, String>>;
 struct CompEstimate {
     module: String,
     score: f64,
-    /// Fields for deferred cache writing (after median is computed).
+    /// Fields for deferred cache writing (after mean is computed).
     abs_path: String,
     model_spec: String,
     cache_key: String,
@@ -1165,11 +1165,11 @@ async fn score_comprehensibility(
             continue;
         };
 
-        let med = median(&scores_for_module);
-        if med >= 1.0 {
+        let (com, lo, hi) = mean_with_ci(&scores_for_module);
+        if com >= 1.0 {
             eprintln!("  [{module}] WARNING: perfect score (all 4s)");
         }
-        eprintln!("  {module}: {med:.3}");
+        eprintln!("  {module}: {com:.3} (95% CI: {lo:.3}–{hi:.3})");
         let s = match scores.iter_mut().find(|s| s.module == *module) {
             Some(s) => s,
             None => {
@@ -1179,9 +1179,9 @@ async fn score_comprehensibility(
                 continue;
             }
         };
-        s.comprehensibility = Some(med);
+        s.comprehensibility = Some(com);
 
-        // ── Write a single cache entry with the median score (cache-miss only) ──
+        // ── Write a single cache entry with the mean score (cache-miss only) ──
         if let Some(estimates_vec) = estimates_map.get(module.as_str()) {
             if let Some(first) = estimates_vec.first() {
                 let cp = &cache_state;
@@ -1191,7 +1191,7 @@ async fn score_comprehensibility(
                     model: first.model_spec.clone(),
                     token_count: first.token_count,
                     estimates,
-                    comprehensibility: med,
+                    comprehensibility: com,
                     breakdown: first.breakdown.clone(),
                 };
                 if let Err(e) = append_cache_entry(cp, &entry) {
@@ -1696,30 +1696,35 @@ mod tests {
         assert!(extract_json("just some text, no json here").is_none());
     }
 
-    // ── median tests ──
+    // ── mean_with_ci tests ──
 
     #[test]
-    fn median_odd_length() {
-        let vals = [3.0, 1.0, 2.0];
-        assert!((median(&vals) - 2.0).abs() < 1e-12);
+    fn mean_three_values() {
+        let vals = [1.0, 2.0, 3.0];
+        let (m, lo, hi) = mean_with_ci(&vals);
+        assert!((m - 2.0).abs() < 1e-12);
+        // n=3, df=2, t_crit ≈ 4.3027, sd=1.0, se=1/√3≈0.577, margin≈2.484
+        assert!((lo - (2.0 - 2.484_05)).abs() < 1e-4);
+        assert!((hi - (2.0 + 2.484_05)).abs() < 1e-4);
     }
 
     #[test]
-    fn median_even_length() {
-        let vals = [1.0, 4.0, 2.0, 3.0];
-        assert!((median(&vals) - 2.5).abs() < 1e-12);
-    }
-
-    #[test]
-    fn median_single_value() {
+    fn mean_single_value_ci_degenerate() {
         let vals = [7.0];
-        assert!((median(&vals) - 7.0).abs() < 1e-12);
+        let (m, lo, hi) = mean_with_ci(&vals);
+        assert!((m - 7.0).abs() < 1e-12);
+        assert!((lo - 7.0).abs() < 1e-12);
+        assert!((hi - 7.0).abs() < 1e-12);
     }
 
     #[test]
-    fn median_identical_values() {
+    fn mean_identical_values_ci_zero() {
         let vals = [0.5, 0.5, 0.5];
-        assert!((median(&vals) - 0.5).abs() < 1e-12);
+        let (m, lo, hi) = mean_with_ci(&vals);
+        assert!((m - 0.5).abs() < 1e-12);
+        // All identical → variance = 0 → no margin.
+        assert!((lo - 0.5).abs() < 1e-12);
+        assert!((hi - 0.5).abs() < 1e-12);
     }
 
     // ── cache tests ──

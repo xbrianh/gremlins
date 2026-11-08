@@ -55,19 +55,86 @@ pub(crate) fn truncate(s: &str, max_len: usize) -> &str {
 // Statistics
 // ---------------------------------------------------------------------------
 
-/// Return the median of a non-empty slice of f64 values.
-/// Odd-length: middle element after sort. Even-length: average of the two
-/// middle elements.
-pub(crate) fn median(values: &[f64]) -> f64 {
-    debug_assert!(!values.is_empty(), "median of empty slice");
-    let mut sorted: Vec<f64> = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = sorted.len();
-    if n % 2 == 1 {
-        sorted[n / 2]
-    } else {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+/// Critical value of Student's t-distribution for a two-sided 95% CI
+/// (α = 0.05, so α/2 = 0.025).
+///
+/// Uses a lookup table with linear interpolation for df 1–1000;
+/// falls back to the normal quantile (1.96) for df > 1000.
+fn t_critical_95(df: usize) -> f64 {
+    // t_{0.975, df} for selected degrees of freedom.
+    // Sorted by df so binary search + interpolation works.
+    const TABLE: &[(usize, f64)] = &[
+        (1, 12.706_205),
+        (2, 4.302_653),
+        (3, 3.182_446),
+        (4, 2.776_445),
+        (5, 2.570_582),
+        (6, 2.446_912),
+        (7, 2.364_624),
+        (8, 2.306_004),
+        (9, 2.262_157),
+        (10, 2.228_139),
+        (12, 2.178_813),
+        (14, 2.144_787),
+        (16, 2.119_905),
+        (18, 2.100_922),
+        (20, 2.085_963),
+        (25, 2.059_539),
+        (30, 2.042_272),
+        (40, 2.021_075),
+        (50, 2.008_559),
+        (60, 2.000_298),
+        (80, 1.990_063),
+        (100, 1.983_972),
+        (150, 1.975_905),
+        (200, 1.971_896),
+        (500, 1.964_720),
+        (1000, 1.962_339),
+    ];
+
+    // Binary search for the bracket.
+    let idx = TABLE.partition_point(|&(d, _)| d < df);
+    if idx == 0 {
+        return TABLE[0].1;
     }
+    if idx >= TABLE.len() {
+        // df > 1000: asymptote to normal quantile.
+        return 1.959_963_984_540_054;
+    }
+    let (d_lo, t_lo) = TABLE[idx - 1];
+    let (d_hi, t_hi) = TABLE[idx];
+    if d_lo == df {
+        return t_lo;
+    }
+    // Linear interpolation between d_lo and d_hi.
+    let frac = (df - d_lo) as f64 / (d_hi - d_lo) as f64;
+    t_lo + frac * (t_hi - t_lo)
+}
+
+/// Return the sample mean of a non-empty slice of f64 values.
+pub(crate) fn mean(values: &[f64]) -> f64 {
+    debug_assert!(!values.is_empty(), "mean of empty slice");
+    let sum: f64 = values.iter().sum();
+    sum / values.len() as f64
+}
+
+/// Compute the sample mean and its 95% confidence interval using
+/// Student's t-distribution.
+///
+/// Returns `(mean, ci_lower, ci_upper)`. When n == 1 the CI is
+/// degenerate: both bounds equal the mean.
+pub(crate) fn mean_with_ci(values: &[f64]) -> (f64, f64, f64) {
+    debug_assert!(!values.is_empty(), "mean_with_ci of empty slice");
+    let n = values.len();
+    let m = mean(values);
+    if n < 2 {
+        return (m, m, m);
+    }
+    let variance: f64 = values.iter().map(|v| (v - m).powi(2)).sum::<f64>() / (n - 1) as f64;
+    let std_err = variance.sqrt() / (n as f64).sqrt();
+    let t_crit = t_critical_95(n - 1);
+    let margin = t_crit * std_err;
+    (m, m - margin, m + margin)
 }
 
 // ---------------------------------------------------------------------------

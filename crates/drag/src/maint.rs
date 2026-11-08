@@ -6,7 +6,7 @@
 //   dimension (from `MaintainabilityConfig`), run concurrently, each scoring
 //   a single dimension (0–4) with tailored anchors so every dimension gets
 //   focused attention.
-// - Caching the median score per package (one entry per scored package,
+// - Caching the mean score per package (one entry per scored package,
 //   not per estimate).
 // - Computing the package-level drag formula.
 
@@ -21,7 +21,7 @@ use gremlins::model_uri::ModelURI;
 
 use crate::config::{MaintainabilityConfig, MaintainabilityDimensionDef};
 use crate::lang::PackageInfo;
-use crate::util::{median, truncate, CacheState, CompAgentError};
+use crate::util::{mean_with_ci, truncate, CacheState, CompAgentError};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -35,7 +35,7 @@ use crate::util::{median, truncate, CacheState, CompAgentError};
 pub(crate) type PackageMaintainability = HashMap<String, u8>;
 
 /// Build a `PackageMaintainability` breakdown from a map of dimension
-/// key → median score (f64), rounding each to u8 for the cacheable breakdown.
+/// key → mean score (f64), rounding each to u8 for the cacheable breakdown.
 fn build_maint_breakdown(dims: &HashMap<&str, f64>) -> HashMap<String, u8> {
     dims.iter()
         .map(|(k, v)| (k.to_string(), v.round() as u8))
@@ -43,7 +43,7 @@ fn build_maint_breakdown(dims: &HashMap<&str, f64>) -> HashMap<String, u8> {
 }
 
 /// Compute the maintainability score (0–1) directly from unrounded f64
-/// dimension medians, avoiding the upward bias of per-dimension rounding.
+/// dimension means, avoiding the upward bias of per-dimension rounding.
 ///
 /// The maximum possible sum is `dims.len() * 4`. An empty dimension set
 /// yields the neutral 0.5.
@@ -66,7 +66,7 @@ type DimTask = tokio::task::JoinHandle<(String, String, Result<u8, String>)>;
 /// One line in the maintainability cache file.
 ///
 /// Unlike module-level comprehensibility (which stores one entry per estimate),
-/// this stores one entry per *scored package* with the median score.
+/// this stores one entry per *scored package* with the mean score.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub(crate) struct MaintCacheEntry {
     /// `pkg_key || "\0" || blake3(landscape)` — hex, first 16 chars.
@@ -258,9 +258,9 @@ pub(crate) async fn score_package_maintainability(
             continue;
         }
 
-        // Compute the median per dimension, keeping f64 precision
-        // so maint_score is not biased by per-dimension rounding.
-        let mut dim_medians: HashMap<&str, f64> = HashMap::new();
+        // Compute the mean per dimension with 95% CI, keeping f64
+        // precision so maint_score is not biased by per-dimension rounding.
+        let mut dim_means: HashMap<&str, f64> = HashMap::new();
 
         for dim in &maint_config.dimensions {
             let key = (pkg_key.clone(), dim.key.to_string());
@@ -270,26 +270,29 @@ pub(crate) async fn score_package_maintainability(
                         "  [{pkg_name}] {label}: no estimates — defaulting to 2.0",
                         label = dim.label
                     );
-                    dim_medians.insert(dim.key.as_str(), 2.0);
+                    dim_means.insert(dim.key.as_str(), 2.0);
                 } else {
                     let f64_scores: Vec<f64> = scores.iter().map(|&s| s as f64).collect();
-                    let med = median(&f64_scores);
+                    let (m, lo, hi) = mean_with_ci(&f64_scores);
                     if verbose {
-                        eprintln!("  [{pkg_name}] {label}: {med:.1}", label = dim.label);
+                        eprintln!(
+                            "  [{pkg_name}] {label}: {m:.1} (95% CI: {lo:.1}–{hi:.1})",
+                            label = dim.label
+                        );
                     }
-                    dim_medians.insert(dim.key.as_str(), med);
+                    dim_means.insert(dim.key.as_str(), m);
                 }
             } else {
                 eprintln!(
                     "  [{pkg_name}] {label}: no estimates collected — defaulting to 2.0",
                     label = dim.label
                 );
-                dim_medians.insert(dim.key.as_str(), 2.0);
+                dim_means.insert(dim.key.as_str(), 2.0);
             }
         }
 
-        // Compute maint_score from the unrounded f64 medians.
-        let maint_score = compute_maint_score_from_map(&dim_medians);
+        // Compute maint_score from the unrounded f64 means.
+        let maint_score = compute_maint_score_from_map(&dim_means);
 
         eprintln!("  [{pkg_name}] maint: {maint_score:.3}");
 
@@ -309,7 +312,7 @@ pub(crate) async fn score_package_maintainability(
         }
 
         // Build breakdown with rounded values for the cache.
-        let breakdown = build_maint_breakdown(&dim_medians);
+        let breakdown = build_maint_breakdown(&dim_means);
 
         let cache_key = compute_pkg_cache_key(&pkg_key, pkg, estimates, config_hash)
             .map_err(|e| format!("[{pkg_name}] cache key computation failed: {e}"))?;
