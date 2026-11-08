@@ -27,20 +27,11 @@ use crate::util::{extract_json, mean_with_ci, truncate, CacheState, CompAgentErr
 // Data types
 // ---------------------------------------------------------------------------
 
-/// Maintainability breakdown: dimension key → rounded score (0–4).
+/// Maintainability breakdown: dimension key → raw score (0–4).
 ///
 /// The dimension set is config-driven, so this is a plain map rather than a
-/// fixed struct. Older caches that stored the former fixed dimension fields
-/// still deserialize correctly.
+/// fixed struct.
 pub(crate) type PackageMaintainability = HashMap<String, u8>;
-
-/// Build a `PackageMaintainability` breakdown from a map of dimension
-/// key → mean score (f64), rounding each to u8 for the cacheable breakdown.
-fn build_maint_breakdown(dims: &HashMap<&str, f64>) -> HashMap<String, u8> {
-    dims.iter()
-        .map(|(k, v)| (k.to_string(), v.round() as u8))
-        .collect()
-}
 
 /// Compute the maintainability score (0–1) directly from unrounded f64
 /// dimension means, avoiding the upward bias of per-dimension rounding.
@@ -66,7 +57,8 @@ type MaintEstimateTask = tokio::task::JoinHandle<(String, Result<HashMap<String,
 /// One line in the maintainability cache file.
 ///
 /// Unlike module-level comprehensibility (which stores one entry per estimate),
-/// this stores one entry per *scored package* with the mean score.
+/// this stores one entry per *scored package* with all raw per-estimate
+/// dimension scores. Aggregation to a 0–1 score is recomputed from these.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub(crate) struct MaintCacheEntry {
     /// `pkg_key || "\0" || blake3(all source files)` — hex, first 16 chars.
@@ -74,8 +66,10 @@ pub(crate) struct MaintCacheEntry {
     pub package: String,
     pub model: String,
     pub estimates: usize,
-    pub maint_score: f64,
-    pub breakdown: PackageMaintainability,
+    /// Per-estimate raw dimension scores (0–4 per dimension).
+    /// Aggregation to a 0–1 score is pure math — recomputed from these.
+    #[serde(default)]
+    pub raw_estimates: Vec<PackageMaintainability>,
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +114,9 @@ pub(crate) async fn score_package_maintainability(
     );
 
     let mut handles: Vec<MaintEstimateTask> = Vec::new();
-    let mut cache_hits: HashMap<String, f64> = HashMap::new();
+    // Cache hits store raw_estimates here; cache misses are collected after awaits.
+    let mut estimates_map: HashMap<String, Vec<HashMap<String, u8>>> = HashMap::new();
+    let mut cache_miss_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for pkg in scoring_packages {
         let pkg_key = pkg.key();
@@ -136,10 +132,12 @@ pub(crate) async fn score_package_maintainability(
         if let Some(entry) = cache_map.get(&cache_key) {
             if entry.estimates == estimates && entry.model == model_spec {
                 eprintln!("  [{pkg_name}] cache hit ({})", entry.key);
-                cache_hits.insert(pkg_key.clone(), entry.maint_score);
+                estimates_map.insert(pkg_key.clone(), entry.raw_estimates.clone());
                 continue;
             }
         }
+
+        cache_miss_keys.insert(pkg_key.clone());
 
         // Build the multi-dimension prompt (manifest-based, no source embedded).
         let prompt = build_multi_dim_prompt(&pkg_name, &manifest, maint_config);
@@ -208,12 +206,12 @@ pub(crate) async fn score_package_maintainability(
         }
     }
 
-    // --- Collect results: group dimension scores per pkg_key across estimates ---
-    let mut estimates_map: HashMap<String, Vec<HashMap<String, u8>>> = HashMap::new();
+    // --- Collect fresh results: group per-pkg_key across estimates ---
+    let mut fresh_estimates: HashMap<String, Vec<HashMap<String, u8>>> = HashMap::new();
     for handle in handles {
         match handle.await {
             Ok((pkg_key, Ok(scores))) => {
-                estimates_map.entry(pkg_key).or_default().push(scores);
+                fresh_estimates.entry(pkg_key).or_default().push(scores);
             }
             Ok((_pkg_key, Err(e))) => {
                 eprintln!("  WARNING: {e}");
@@ -224,7 +222,12 @@ pub(crate) async fn score_package_maintainability(
         }
     }
 
-    // --- Build result map: merge cache hits with fresh estimates ---
+    // Merge fresh estimates into estimates_map (which already has cache hits).
+    for (pkg_key, scores) in fresh_estimates {
+        estimates_map.entry(pkg_key).or_default().extend(scores);
+    }
+
+    // --- Build result map: unified aggregation for cache hits and misses ---
     let cache_mutex = Mutex::new(());
     let mut result: HashMap<String, f64> = HashMap::new();
 
@@ -232,12 +235,7 @@ pub(crate) async fn score_package_maintainability(
         let pkg_key = pkg.key();
         let pkg_name = pkg.name().to_string();
 
-        if let Some(score) = cache_hits.get(&pkg_key) {
-            result.insert(pkg_key, *score);
-            continue;
-        }
-
-        // Aggregate: per-dimension, compute mean across estimates (f64).
+        // Both cache hits and misses land in estimates_map.
         let estimate_batch = match estimates_map.get(&pkg_key) {
             Some(b) if !b.is_empty() => b,
             _ => {
@@ -246,6 +244,7 @@ pub(crate) async fn score_package_maintainability(
             }
         };
 
+        // Aggregate: per-dimension, compute mean across estimates (f64).
         let mut dim_means: HashMap<&str, f64> = HashMap::new();
 
         for dim in &maint_config.dimensions {
@@ -294,23 +293,35 @@ pub(crate) async fn score_package_maintainability(
             continue;
         }
 
-        // Build breakdown with rounded values for the cache.
-        let breakdown = build_maint_breakdown(&dim_means);
+        // Write raw estimates to cache (cache-miss only).
+        // Skip the write when we don't have the expected number of estimates
+        // (e.g. some LLM tasks failed), so a later cache hit doesn't aggregate
+        // over a smaller sample without warning.
+        if estimate_batch.len() != estimates {
+            eprintln!(
+                "  [{pkg_name}] WARNING: {}/{} estimates collected — skipping cache write",
+                estimate_batch.len(),
+                estimates
+            );
+            continue;
+        }
 
-        let cache_key = compute_pkg_cache_key(&pkg_key, pkg, estimates, config_hash)
-            .map_err(|e| format!("[{pkg_name}] cache key computation failed: {e}"))?;
+        let was_cache_miss = cache_miss_keys.contains(&pkg_key);
+        if was_cache_miss {
+            let cache_key = compute_pkg_cache_key(&pkg_key, pkg, estimates, config_hash)
+                .map_err(|e| format!("[{pkg_name}] cache key computation failed: {e}"))?;
 
-        let entry = MaintCacheEntry {
-            key: cache_key,
-            package: pkg_name.clone(),
-            model: model_spec.to_string(),
-            estimates,
-            maint_score,
-            breakdown,
-        };
-        let _guard = cache_mutex.lock().unwrap();
-        if let Err(e) = append_maint_cache_entry(&maint_cache_path, &entry) {
-            eprintln!("  [{pkg_name}] WARNING: failed to append maint cache: {e}");
+            let entry = MaintCacheEntry {
+                key: cache_key,
+                package: pkg_name.clone(),
+                model: model_spec.to_string(),
+                estimates,
+                raw_estimates: estimate_batch.clone(),
+            };
+            let _guard = cache_mutex.lock().unwrap();
+            if let Err(e) = append_maint_cache_entry(&maint_cache_path, &entry) {
+                eprintln!("  [{pkg_name}] WARNING: failed to append maint cache: {e}");
+            }
         }
 
         result.insert(pkg_key, maint_score);
@@ -638,33 +649,6 @@ fn append_maint_cache_entry(path: &Path, entry: &MaintCacheEntry) -> Result<(), 
 mod tests {
     use super::*;
 
-    // ── build_maint_breakdown ──
-
-    #[test]
-    fn build_maint_breakdown_all_present() {
-        let mut m: HashMap<&str, f64> = HashMap::new();
-        m.insert("decomposition", 3.0);
-        m.insert("interface_design", 2.0);
-        m.insert("consistency", 4.0);
-
-        let p = build_maint_breakdown(&m);
-        assert_eq!(p.get("decomposition"), Some(&3));
-        assert_eq!(p.get("interface_design"), Some(&2));
-        assert_eq!(p.get("consistency"), Some(&4));
-        assert_eq!(p.len(), 3);
-    }
-
-    #[test]
-    fn build_maint_breakdown_rounds_f64() {
-        let mut m: HashMap<&str, f64> = HashMap::new();
-        // 2.7 rounds to 3, 2.2 rounds to 2.
-        m.insert("decomposition", 2.7);
-        m.insert("interface_design", 2.2);
-        let p = build_maint_breakdown(&m);
-        assert_eq!(p.get("decomposition"), Some(&3));
-        assert_eq!(p.get("interface_design"), Some(&2));
-    }
-
     // ── compute_maint_score_from_map ──
 
     /// The ten dimensions from the bundled config, used to exercise the
@@ -780,5 +764,58 @@ mod tests {
         let cfg = make_config(&[]);
         let scores: HashMap<String, u8> = HashMap::new();
         assert!(validate_maint_scores(&scores, &cfg).is_ok());
+    }
+
+    // ── MaintCacheEntry round-trip ──
+
+    #[test]
+    fn maint_cache_entry_round_trip() {
+        let dir = std::env::temp_dir().join("drag-test-maint-roundtrip");
+        let _ = std::fs::create_dir_all(&dir);
+        let cache_path = dir.join("maint-cache.jsonl");
+        let raw_estimates: Vec<PackageMaintainability> = vec![[
+            ("modularity", 3),
+            ("interface_cohesion", 2),
+            ("error_propagation", 1),
+            ("dependency_harmony", 2),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect()];
+        let entry = MaintCacheEntry {
+            key: "b33fdeadb33fdead".to_string(),
+            package: "test-pkg".to_string(),
+            model: "openai/gpt-4o".to_string(),
+            estimates: 1,
+            raw_estimates,
+        };
+        append_maint_cache_entry(&cache_path, &entry).unwrap();
+        let map = load_maint_cache(&cache_path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(map.len(), 1);
+        let loaded = map.get("b33fdeadb33fdead").unwrap();
+        assert_eq!(loaded.raw_estimates.len(), 1);
+        assert_eq!(loaded.raw_estimates[0].get("modularity"), Some(&3));
+        assert_eq!(loaded.package, "test-pkg");
+        assert_eq!(loaded.model, "openai/gpt-4o");
+    }
+
+    #[test]
+    fn maint_cache_entry_deser_old_format_falls_back() {
+        // Old cache entries with maint_score/breakdown (instead of raw_estimates)
+        // should deserialize with an empty raw_estimates vec, triggering re-score.
+        let dir = std::env::temp_dir().join("drag-test-maint-oldformat");
+        let _ = std::fs::create_dir_all(&dir);
+        let cache_path = dir.join("maint-cache.jsonl");
+        std::fs::write(
+            &cache_path,
+            "{\"key\":\"oldkey0000000000\",\"package\":\"pkg\",\"model\":\"m\",\"estimates\":3,\"maint_score\":0.6,\"breakdown\":{\"a\":3}}\n",
+        )
+        .unwrap();
+        let map = load_maint_cache(&cache_path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(map.len(), 1);
+        let entry = map.get("oldkey0000000000").unwrap();
+        assert!(entry.raw_estimates.is_empty());
     }
 }
