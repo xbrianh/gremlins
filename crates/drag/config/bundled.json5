@@ -15,7 +15,7 @@
   // Tokenizer name for tiktoken-rs.
   "tokenizer": "o200k_base",
   // Number of independent LLM estimates per survey (median is used).
-  "estimates_per_survey": 1,
+  "estimates_per_survey": 5,
   // Skip package-level maintainability scoring.
   "skip_maintainability": false,
   // Print diagnostic information.
