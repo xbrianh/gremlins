@@ -271,9 +271,9 @@ mod tests {
         assert_eq!(config.estimates_per_survey, 1);
         assert!(!config.skip_maintainability);
         assert!(config.model.is_none());
-        assert_eq!(config.comprehensibility.dimensions.len(), 7);
+        assert_eq!(config.comprehensibility.dimensions.len(), 8);
         assert_eq!(config.maintainability.dimensions.len(), 10);
-        // Structural anchors cover the three structural dimensions.
+        // Structural anchors cover the four structural dimensions.
         assert!(config
             .comprehensibility
             .structural_anchors
@@ -286,6 +286,10 @@ mod tests {
             .comprehensibility
             .structural_anchors
             .contains_key("test_hygiene"));
+        assert!(config
+            .comprehensibility
+            .structural_anchors
+            .contains_key("duplication"));
     }
 
     #[test]
@@ -390,7 +394,7 @@ mod tests {
     fn load_bundled_parses_with_expected_values() {
         let config: DragConfig =
             serde_json5::from_str(BUNDLED_CONFIG).expect("bundled config must parse");
-        assert_eq!(config.comprehensibility.dimensions.len(), 7);
+        assert_eq!(config.comprehensibility.dimensions.len(), 8);
         assert_eq!(config.maintainability.dimensions.len(), 10);
         assert_eq!(config.tokenizer, "o200k_base");
         assert_eq!(config.weights.w2, 0.5);
@@ -406,7 +410,7 @@ mod tests {
         config.model = Some("openai/gpt-4o".to_string());
         assert_eq!(config.model.as_deref(), Some("openai/gpt-4o"));
         // Other fields unchanged.
-        assert_eq!(config.comprehensibility.dimensions.len(), 7);
+        assert_eq!(config.comprehensibility.dimensions.len(), 8);
     }
 
     #[test]
