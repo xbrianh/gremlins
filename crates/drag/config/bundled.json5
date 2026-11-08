@@ -27,7 +27,7 @@
 
   // ── Comprehensibility survey (module-level) ──
   "comprehensibility": {
-    "preamble": "Score the above source file on comprehensibility.\n\nThe FILE SHAPE section is a structural skeleton — use it to\nassess the file's organization before reading the source.\n\nTarget reader: a competent developer familiar with the language\nbut unfamiliar with this file.  Do not assume shorter code is\nbetter or longer code is clearer.  Do not judge correctness.",
+    "preamble": "Score the above source file on comprehensibility.\n\nTarget reader: a competent developer familiar with the language\nbut unfamiliar with this file.  Do not assume shorter code is\nbetter or longer code is clearer.  Do not judge correctness.",
 
     "generic_anchors": "4: Clear on a first careful reading.\n3: Clear with minor rereading or navigation.\n2: Requires substantial tracing or inference.\n1: Important behavior is obscured.\n0: Cannot reliably understand from supplied context.",
 

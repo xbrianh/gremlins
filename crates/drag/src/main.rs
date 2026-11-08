@@ -816,115 +816,6 @@ fn resolve_comprehensibility_model(model_opt: Option<&str>) -> Result<String, St
     gremlins::config::resolve_model_with_global(&spec)
 }
 
-/// Build a compact structural skeleton for a source file, suitable for
-/// prepending to the LLM prompt. Uses the landscape scanner for item-level
-/// structure and source text for line counts.
-fn build_file_skeleton(source: &str, extension: &str) -> String {
-    use std::collections::BTreeMap;
-
-    let total_lines = source.lines().count();
-
-    // Run the landscape scanner on the raw source (same regex the explorer
-    // uses) to get outline items with test modules collapsed.
-    let items = gremlins::landscape::heuristic::scan(extension, source, true);
-    let items_no_collapse = gremlins::landscape::heuristic::scan(extension, source, false);
-
-    // Count production functions (non-test)
-    let prod_fns: Vec<_> = items.iter().filter(|i| i.kind == "fn").collect();
-    let test_fns: Vec<_> = items_no_collapse
-        .iter()
-        .filter(|i| i.kind == "fn")
-        .collect();
-    let test_fn_count = test_fns.len().saturating_sub(prod_fns.len());
-
-    // Submodule count (mod items not named "tests")
-    let submodule_count = items
-        .iter()
-        .filter(|i| i.kind == "mod" && i.name != "tests")
-        .count();
-
-    // Largest function: approximate by computing spans between consecutive items
-    let mut largest_fn_lines = 0usize;
-    let mut all_items_sorted: Vec<(usize, &str, &str)> = items
-        .iter()
-        .map(|i| (i.line, i.kind, i.name.as_str()))
-        .collect();
-    all_items_sorted.sort_by_key(|(l, _, _)| *l);
-    for w in all_items_sorted.windows(2) {
-        if w[0].1 == "fn" {
-            let span = w[1].0.saturating_sub(w[0].0);
-            if span > largest_fn_lines {
-                largest_fn_lines = span;
-            }
-        }
-    }
-    // Also check the last item if it's a function
-    if let Some(last) = all_items_sorted.last() {
-        if last.1 == "fn" {
-            let span = total_lines.saturating_sub(last.0);
-            if span > largest_fn_lines {
-                largest_fn_lines = span;
-            }
-        }
-    }
-
-    // Estimate test ratio: find the mod tests entry and compute its span
-    let test_ratio_pct =
-        if let Some(test_mod) = items.iter().find(|i| i.name == "tests" && i.kind == "mod") {
-            // Approximate: the test module starts at test_mod.line and goes to end of file
-            let test_lines = total_lines.saturating_sub(test_mod.line.saturating_sub(1));
-            ((test_lines as f64 / total_lines as f64) * 100.0) as usize
-        } else {
-            0
-        };
-
-    // Concern clusters: group fns by prefix heuristic
-    let mut clusters: BTreeMap<String, usize> = BTreeMap::new();
-    for item in &prod_fns {
-        let prefix = item.name.split('_').next().unwrap_or(&item.name);
-        *clusters.entry(prefix.to_string()).or_default() += 1;
-    }
-    // Only show clusters with >= 2 fns
-    let cluster_parts: Vec<String> = clusters
-        .iter()
-        .filter(|(_, &c)| c >= 2)
-        .map(|(prefix, count)| format!("{prefix} ({count} fns)"))
-        .collect();
-
-    // Format outline items compactly
-    let mut outline_parts: Vec<String> = Vec::new();
-    for item in &items {
-        outline_parts.push(format!(
-            "  {}|{}|{}",
-            item.line,
-            item.kind,
-            gremlins::landscape::escape_landscape_delimiters(&item.name)
-        ));
-    }
-
-    let mut skeleton = String::new();
-    skeleton.push_str(&format!(
-        "FILE SHAPE: {total_lines} lines, {} functions, {} submodules, {} test functions\n",
-        prod_fns.len(),
-        submodule_count,
-        test_fn_count,
-    ));
-    if largest_fn_lines > 0 {
-        skeleton.push_str(&format!(
-            "Largest function span: ~{largest_fn_lines} lines\n"
-        ));
-    }
-    skeleton.push_str(&format!("Test ratio: {test_ratio_pct}% of file\n"));
-    skeleton.push_str(&format!("Submodule count: {submodule_count}\n"));
-    if !cluster_parts.is_empty() {
-        skeleton.push_str(&format!("Concern clusters: {}\n", cluster_parts.join(", ")));
-    }
-    skeleton.push_str("\nStructure:\n");
-    skeleton.push_str(&outline_parts.join("\n"));
-
-    skeleton
-}
-
 /// Handle for a single comprehensibility scoring task.
 /// On success returns all the info needed to compute the mean and write the cache.
 /// On failure returns a human-readable reason.
@@ -1031,9 +922,7 @@ async fn score_comprehensibility(
             .into_owned();
 
         let fence = lang::code_fence(file);
-        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("rs");
-        let skeleton = build_file_skeleton(&source, ext);
-        let prompt = format!("{skeleton}\n\nSOURCE FILE ({module}):\n\n```{fence}\n{source}\n```");
+        let prompt = format!("SOURCE FILE ({module}):\n\n```{fence}\n{source}\n```");
 
         let token_count = module_tokens.get(module.as_str()).copied().unwrap_or(0);
 
