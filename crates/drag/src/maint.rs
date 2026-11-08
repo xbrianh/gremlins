@@ -127,10 +127,7 @@ pub(crate) async fn score_package_maintainability(
         let pkg_name = pkg.name().to_string();
 
         // Collect and format all source files in the package.
-        let full_source = collect_package_source(pkg).unwrap_or_else(|e| {
-            eprintln!("  [{pkg_name}] WARNING: failed to collect source: {e}");
-            String::new()
-        });
+        let full_source = collect_package_source(pkg)?;
 
         // Cache key: pkg_key + hash of all source file contents + estimates.
         let cache_key = compute_pkg_cache_key(&pkg_key, pkg, estimates, config_hash)
@@ -474,8 +471,8 @@ fn extract_dim_score(content: &str) -> Option<u8> {
 // ---------------------------------------------------------------------------
 
 /// Collect all recognized source files in a package and format them as a
-/// single string with `## file/path.rs` headers, truncating to
-/// [`DEFAULT_BYTE_LIMIT`] with a trailing note when exceeded.
+/// single string with `## file/path.rs` headers.  Returns an error when the
+/// total content exceeds [`DEFAULT_BYTE_LIMIT`] — no truncation, no fallback.
 fn collect_package_source(pkg: &PackageInfo) -> Result<String, String> {
     let (src_dir, pkg_dir) = match pkg {
         PackageInfo::Rust(r) => (r.dir.join("src"), r.dir.clone()),
@@ -497,7 +494,6 @@ fn collect_package_source(pkg: &PackageInfo) -> Result<String, String> {
     let mut total = 0_usize;
     let cap = (files.len() + 1) * 64 + DEFAULT_BYTE_LIMIT;
     let mut buf = String::with_capacity(cap);
-    let mut truncated = false;
 
     for f in &files {
         let rel = f.strip_prefix(&pkg_dir).unwrap_or(f);
@@ -505,8 +501,10 @@ fn collect_package_source(pkg: &PackageInfo) -> Result<String, String> {
 
         // Check against limit *before* reading the file.
         if total + header.len() >= DEFAULT_BYTE_LIMIT {
-            truncated = true;
-            break;
+            return Err(format!(
+                "package {} exceeds byte limit ({DEFAULT_BYTE_LIMIT}); cannot score",
+                pkg_dir.display()
+            ));
         }
         buf.push_str(&header);
         total += header.len();
@@ -516,22 +514,19 @@ fn collect_package_source(pkg: &PackageInfo) -> Result<String, String> {
         });
         let remaining = DEFAULT_BYTE_LIMIT.saturating_sub(total);
         if remaining == 0 {
-            truncated = true;
-            break;
+            return Err(format!(
+                "package {} exceeds byte limit ({DEFAULT_BYTE_LIMIT}); cannot score",
+                pkg_dir.display()
+            ));
         }
         if content.len() > remaining {
-            buf.push_str(truncate(&content, remaining));
-            truncated = true;
-            break;
+            return Err(format!(
+                "package {} exceeds byte limit ({DEFAULT_BYTE_LIMIT}); cannot score",
+                pkg_dir.display()
+            ));
         }
         buf.push_str(&content);
         total += content.len();
-    }
-
-    if truncated {
-        buf.push_str(
-            "\n\n[Source listing truncated at byte limit; some files are not shown in full.]\n",
-        );
     }
 
     Ok(buf)
