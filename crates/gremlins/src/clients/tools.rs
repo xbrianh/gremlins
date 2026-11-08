@@ -682,11 +682,19 @@ pub(crate) async fn invoke_with_conversation(
     args_json: &str,
     conv: &dyn super::conversation::Conversation,
 ) -> ToolOutcome {
+    // Chat-only tools (Mischief, WebSearch) are never available in headless
+    // mode. Reject them unconditionally before the allowlist check — even
+    // when allowed_tools is None (no filter) or explicitly lists them.
+    let chat = ctx.skills_available;
+    if !chat && (name == "Mischief" || name == "WebSearch") {
+        return ToolOutcome {
+            output: format!("Error: unknown tool {name}"),
+        };
+    }
     if let Some(allowed) = &ctx.allowed_tools {
-        // Mischief is chat-only; allow it through the gate only when the
-        // session is chat. LoadSkill keeps its old bypass: the handler returns
-        // an error when skills aren't configured.
-        let chat = ctx.skills_available;
+        // Pass through the gate only when the tool is always-available,
+        // LoadSkill (with handler-side reject), chat-only, or listed in
+        // the allowlist.
         if !always_available(name)
             && name != "LoadSkill"
             && !chat_only_always_available(name, chat)
@@ -1642,14 +1650,13 @@ mod tests {
     #[test]
     fn tool_definitions_filter() {
         let all = tool_definitions(None, false);
-        assert_eq!(all.len(), 11);
+        assert_eq!(all.len(), 10);
         let all_names: Vec<_> = all.iter().map(|t| t.name.as_str()).collect();
         assert!(all_names.contains(&"Landscape"), "got: {all_names:?}");
-        assert!(all_names.contains(&"WebSearch"), "got: {all_names:?}");
         let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), false);
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
         // Task and Done are always available regardless of the filter.
-        // Mischief is chat-only, so it is absent from headless filters.
+        // Mischief and WebSearch are chat-only, absent from headless filters.
         assert_eq!(names, ["Read", "Bash", "Done", "Task"]);
         assert!(!names.contains(&"WebSearch"), "got: {names:?}");
         assert!(!names.contains(&"Mischief"), "got: {names:?}");
@@ -1667,11 +1674,12 @@ mod tests {
 
     #[test]
     fn mischief_passes_filter_when_chat_mode() {
-        // Mischief is always available to chat sessions even when the
-        // default native_block filter does not list it.
+        // Mischief and WebSearch are always available to chat sessions even
+        // when the default native_block filter does not list them.
         let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), true);
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"Mischief"), "got: {names:?}");
+        assert!(names.contains(&"WebSearch"), "got: {names:?}");
         assert!(names.contains(&"Read"), "got: {names:?}");
         assert!(names.contains(&"Bash"), "got: {names:?}");
     }
@@ -1705,6 +1713,120 @@ mod tests {
         assert!(
             out.contains("unknown tool"),
             "headless Mischief must be rejected, got: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn websearch_invoke_blocked_in_headless() {
+        // WebSearch is chat-only. Headless gremlins with an allowlist that
+        // omits WebSearch must get "unknown tool".
+        let dir = tmp();
+        let c = AgentLoopRuntime {
+            cwd: Some(dir.clone()),
+            extra_env: None,
+            base_env: None,
+            sandbox: SandboxMode::Roots(vec![dir.clone()]),
+            audit_log: None,
+            allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
+            task_fn: None,
+            audit_lock: None,
+
+            id_prefix: String::new(),
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
+            active_skills: None,
+            skills_available: false,
+            discovered_skills: None,
+            log_tx: None,
+        };
+        let out = invoke(
+            "tool-test-id",
+            "WebSearch",
+            &c,
+            r#"{"url":"https://example.com"}"#,
+        )
+        .await;
+        assert!(
+            out.contains("unknown tool"),
+            "headless WebSearch must be rejected, got: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn websearch_invoke_blocked_in_headless_no_filter() {
+        // WebSearch is chat-only. Without any allowlist the gate must still
+        // reject it — the None branch must not open a bypass.
+        let dir = tmp();
+        let c = AgentLoopRuntime {
+            cwd: Some(dir.clone()),
+            extra_env: None,
+            base_env: None,
+            sandbox: SandboxMode::Roots(vec![dir.clone()]),
+            audit_log: None,
+            allowed_tools: None,
+            task_fn: None,
+            audit_lock: None,
+
+            id_prefix: String::new(),
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
+            active_skills: None,
+            skills_available: false,
+            discovered_skills: None,
+            log_tx: None,
+        };
+        let out = invoke(
+            "tool-test-id",
+            "WebSearch",
+            &c,
+            r#"{"url":"https://example.com"}"#,
+        )
+        .await;
+        assert!(
+            out.contains("unknown tool"),
+            "headless WebSearch (no filter) must be rejected, got: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn websearch_invoke_blocked_in_headless_explicit_allowlist() {
+        // WebSearch is chat-only. Even when a headless allowlist explicitly
+        // includes it the gate must reject the call.
+        let dir = tmp();
+        let c = AgentLoopRuntime {
+            cwd: Some(dir.clone()),
+            extra_env: None,
+            base_env: None,
+            sandbox: SandboxMode::Roots(vec![dir.clone()]),
+            audit_log: None,
+            allowed_tools: Some(vec!["Read".into(), "WebSearch".into()]),
+            task_fn: None,
+            audit_lock: None,
+
+            id_prefix: String::new(),
+            telemetry: AgentLoopTelemetry {
+                stream_events: None,
+                tool_output: None,
+            },
+            active_skills: None,
+            skills_available: false,
+            discovered_skills: None,
+            log_tx: None,
+        };
+        let out = invoke(
+            "tool-test-id",
+            "WebSearch",
+            &c,
+            r#"{"url":"https://example.com"}"#,
+        )
+        .await;
+        assert!(
+            out.contains("unknown tool"),
+            "headless WebSearch (explicit allowlist) must be rejected, got: {out}"
         );
     }
 
