@@ -1,14 +1,16 @@
-# Write a commit message
+# Write a QA commit message
 
-Describe the changes below as a git commit message.
+Write a single git commit message that describes the **QA fixes** applied to the
+changes under review. The diff of the original changes is provided below for
+context, but the commit message must center on what the QA pass fixed.
 
-## The diff
+## Diff (context only)
 
 <diff>
 {diff}
 </diff>
 
-## Fixes made in response to review
+## QA fixes applied
 
 <summary>
 {address_summary}
@@ -21,8 +23,9 @@ files or run commands — the two inputs above are all you need.
 
 A git commit message has this structure:
 
-- A subject line: a concise, imperative-mood summary of the change, at most
-  72 characters.
+- A subject line: must start with "QA fixes for" followed by a short description
+  of what was fixed, at most 72 characters total.
 - A blank line.
-- A body: a few short paragraphs describing what changed and why, including
-  any notable fixes. Write fresh prose — do not paste the diff verbatim.
+- A body: a few short paragraphs summarizing the categories and nature of
+  fixes applied during QA. Write fresh prose — do not paste the diff or the
+  summary verbatim.
