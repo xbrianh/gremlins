@@ -64,55 +64,37 @@
     }
   },
   "maintainability": {
-    "preamble": "Target audience: an experienced developer evaluating whether the package is well-organized for long-term maintenance. Judge the package's structure — not correctness, not performance.\n\nScore this single dimension on a 0–4 scale using these anchors:",
+    "preamble": "Target audience: an experienced developer evaluating whether the package is well-organized for long-term maintenance. Judge the package's structure — not correctness, not performance. Do not answer questions that a linter could answer (unused imports, file sizes, dep graph depth, naming conventions). Focus on what requires human judgment.\n\nScore all dimensions below on a 0–4 scale and return a JSON object mapping each dimension key to its integer score.",
     "dimensions": [
       {
         "key": "decomposition",
         "label": "decomposition",
-        "description": "Decomposition: Are modules appropriately sized and focused? Does each module have a clear, singular responsibility?",
-        "anchors": "0: Nearly every module is a dumping ground — files mix unrelated concerns and responsibilities are scattered.\n1: Some modules have a clear focus, but several are overloaded or split arbitrarily.\n2: Most modules have a discernible responsibility, though a few could be split or merged.\n3: Modules are focused and responsibilities are clearly separated; minor boundary adjustments possible.\n4: Every module has a single, well-chosen responsibility; the decomposition would serve as a model for other packages."
+        "description": "Decomposition: Does each module have a clear, singular responsibility that a developer would recognize as a coherent unit? Ignore file size — a 3,000-line module with one clear responsibility is fine. Judge whether modules mix unrelated concerns or split one concern across arbitrary boundaries.",
+        "anchors": "0: Nearly every module is a dumping ground — files mix unrelated concerns and responsibilities are scattered across arbitrary split points.\n1: Some modules have a clear focus, but several are overloaded with unrelated concerns or split without reason.\n2: Most modules have a discernible responsibility, though a few could be split or merged.\n3: Modules are focused and responsibilities are clearly separated; minor boundary questions exist.\n4: Every module has a single, well-chosen responsibility; the decomposition would serve as a model for other packages."
       },
       {
         "key": "interface_design",
         "label": "interface design",
-        "description": "Interface design: Are cross-module contracts minimal and clear? Are public APIs narrow and well-defined?",
-        "anchors": "0: Public APIs expose internal details indiscriminately; modules expose dozens of unrelated items.\n1: Some modules have reasonable public surfaces, but several are bloated or leaky.\n2: Most public APIs are reasonably narrow; a few modules expose more than necessary.\n3: Public APIs are consistently narrow and well-chosen; imports are mostly what you'd expect.\n4: Every public item is intentionally exposed; the API surface is minimal, coherent, and discoverable."
-      },
-      {
-        "key": "consistency",
-        "label": "consistency",
-        "description": "Consistency: Do naming, error handling, and abstraction levels stay uniform across the package?",
-        "anchors": "0: Naming conventions, error strategies, and abstraction levels vary wildly across files.\n1: Some patterns are repeated, but the package feels like it was written by several teams with different conventions.\n2: Conventions are mostly followed; a few outliers exist but don't dominate.\n3: The package reads uniformly; naming, error handling, and abstraction levels are consistent with only minor deviations.\n4: The entire package feels like a single author wrote it with a clear style guide; consistency is exemplary."
+        "description": "Interface design: Beyond 'are there dead pub items?' (that's a linter), ask: is the public surface coherent, discoverable, and shaped around the package's actual responsibilities? Do the abstractions earn their conceptual weight — or are there traits defined for one impl, wrapper types that add no semantics, interfaces that exist only to satisfy a pattern?",
+        "anchors": "0: The public surface is a grab-bag of unrelated items; abstractions exist for abstraction's sake — traits with one impl, wrappers that delegate trivially, patterns followed dogmatically without benefit.\n1: Several unnecessary interfaces or over-engineered patterns exist; the public surface feels unfocused.\n2: Most public items are justified and the surface is reasonably coherent; a few unnecessary abstractions remain.\n3: The public surface is well-designed and coherent; every abstraction justifies its existence.\n4: The public surface is exemplary — minimal, orthogonal, instantly grokkable. Every public item is essential and every abstraction reveals intent."
       },
       {
         "key": "change_isolation",
         "label": "change isolation",
-        "description": "Change isolation: Would a typical feature change touch one module or scatter across many?",
+        "description": "Change isolation: Would a typical feature change touch one module or scatter across many? How coupled are modules in practice?",
         "anchors": "0: Any non-trivial change ripples across most of the package; modules are tightly coupled.\n1: Some changes are local, but many require coordinated edits across several files.\n2: Most feature changes touch 1–2 modules; cross-cutting changes are the exception.\n3: Modules are well-isolated; typical changes are confined to a single module with rare cross-module impact.\n4: The package is organized so that every likely change is local to one module; coupling is minimal and intentional."
-      },
-      {
-        "key": "duplication",
-        "label": "duplication",
-        "description": "Semantic and literal duplication: Does the same intent appear in multiple places across the package — either as copy-paste or as distinct-looking code that accomplishes the same thing? This captures convergent solutions and notional repetition, not just verbatim copying.",
-        "anchors": "0: The same concepts are reimplemented pervasively — copy-paste, near-miss copies, and convergent code that solves identical problems with different surface forms.\n1: Multiple instances of both literal and semantic duplication; several abstractions are missing.\n2: Occasional literal or semantic duplication where extraction would add more indirection than value; mostly DRY.\n3: Very little duplication of any kind; shared logic is extracted into appropriate helpers or base types.\n4: Zero duplication — literal or semantic. Every idea has a single canonical home; the package never solves the same problem twice."
-      },
-      {
-        "key": "locality",
-        "label": "locality",
-        "description": "Locality: Can a developer understand what a module does by reading it and its direct dependencies, or does understanding require tracing deep transitive chains across the package?",
-        "anchors": "0: Every module transitively imports 80%+ of the package; nothing can be understood in isolation.\n1: Many modules have deep transitive dependency chains; understanding one requires tracing through half the package.\n2: Most modules can be understood from their direct deps plus 1–2 levels of transitive deps.\n3: Modules are mostly understandable from their direct dependencies alone; transitive knowledge is rarely needed.\n4: Every module is understandable from its direct dependencies alone; the dependency graph is shallow and clear."
       },
       {
         "key": "abstraction_clarity",
         "label": "abstraction clarity",
-        "description": "Abstraction clarity: When reading the code, is the core intent immediately visible, or is it buried under layers of indirection, framework machinery, and cross-cutting concerns?",
-        "anchors": "0: The core logic is buried under so many layers of indirection that the reader cannot discern what the code actually does.\n1: Heavy use of indirection; the reader must untangle several layers to find the essential logic.\n2: Some indirection exists, but the main flow is discernible with moderate effort.\n3: Abstractions are mostly helpful; the core intent is clear after a quick skim.\n4: Abstractions reveal rather than hide intent; the code reads like a well-written narrative."
+        "description": "Abstraction clarity: Can a developer form an accurate mental model of the package quickly? When reading the code, is the core intent immediately visible, or is it buried under layers of indirection, framework machinery, and cross-cutting concerns? Consider both per-file readability and the package-wide conceptual load — how much must a developer hold in their head to make changes confidently?",
+        "anchors": "0: The core logic is buried under so many layers of indirection that the reader cannot discern what the package actually does. The conceptual surface is enormous — hundreds of interacting items with subtle interactions.\n1: Heavy use of indirection; the reader must untangle several layers to find the essential logic. The mental model required is large and fragile.\n2: Some indirection exists, but the main flow is discernible with moderate effort. The conceptual surface is manageable with a few complex interactions.\n3: Abstractions are mostly helpful; the core intent is clear after a quick skim. The conceptual surface is small enough to internalize.\n4: Abstractions reveal rather than hide intent; the package reads like a well-written narrative. The conceptual surface is minimal, orthogonal, and instantly grokkable."
       },
       {
-        "key": "conceptual_surface",
-        "label": "conceptual surface area",
-        "description": "Conceptual surface area: Is the package's public API surface small, focused, and easy to internalize? Or does it expose so many distinct types, traits, functions, and behavioral modes that a developer cannot make changes confidently?",
-        "anchors": "0: The surface area is enormous — hundreds of public items with subtle interactions; no one can hold it in their head.\n1: The surface is large and several concepts interact in surprising ways; developers must consult docs constantly.\n2: The surface is manageable; most concepts are straightforward, with a few complex interactions.\n3: The surface is small and well-documented; a developer can internalize it quickly.\n4: The surface is minimal, orthogonal, and instantly grokkable; every public concept pulls its weight."
+        "key": "responsibility_placement",
+        "label": "responsibility placement",
+        "description": "Responsibility placement: Are concerns allocated to the right modules? When a module handles multiple unrelated concerns, does the package suffer from misplaced responsibilities that belong elsewhere? This catches code that is correctly implemented but lives in the wrong home — subsystems that should have been extracted to dedicated modules, utility sprawl, and logic that violates the package's architectural boundaries.",
+        "anchors": "0: Multiple modules are dumping grounds for unrelated subsystems; concerns are scattered or crammed into wrong homes throughout the package.\n1: Several modules carry concerns that clearly belong elsewhere; the package's architectural boundaries are routinely violated.\n2: Most concerns are in appropriate modules; a few misplaced subsystems or cross-boundary leaks exist.\n3: Responsibilities are well-placed; nearly every concern lives in the module a developer would expect.\n4: The allocation of responsibilities is exemplary — every concern has exactly one natural home, and architectural boundaries are perfectly respected."
       },
       {
         "key": "predictability",
