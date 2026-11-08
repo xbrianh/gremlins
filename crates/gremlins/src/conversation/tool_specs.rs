@@ -19,11 +19,11 @@ pub(crate) fn always_available(name: &str) -> bool {
     ALWAYS_AVAILABLE.contains(&name)
 }
 
-/// Mischief is a chat-only tool that bypasses tool filters in chat sessions.
-/// Headless gremlins must get it from their native block (which never lists
-/// it), so this helper keeps it out of headless loops.
+/// Mischief and WebSearch are chat-only tools that bypass tool filters in chat
+/// sessions. Headless gremlins must get them from their native block (which
+/// never lists them), so this helper keeps them out of headless loops.
 pub(crate) fn chat_only_always_available(name: &str, chat: bool) -> bool {
-    chat && name == "Mischief"
+    chat && (name == "Mischief" || name == "WebSearch")
 }
 
 /// One tool parameter: the name and description shown in the JSON schema,
@@ -419,9 +419,9 @@ fn tool_parameters(spec: &ToolSpec) -> serde_json::Value {
 pub(crate) fn tool_definitions(filter: Option<&[String]>, is_chat: bool) -> Vec<ToolDefinition> {
     let mut all: Vec<ToolDefinition> = Vec::new();
     for spec in TOOL_SPECS {
-        // LoadSkill is chat-only; every other tool is always constructed so
-        // the filter below can still admit it via `always_available`.
-        if spec.name == "LoadSkill" && !is_chat {
+        // LoadSkill and WebSearch are chat-only; every other tool is always
+        // constructed so the filter below can still admit it via `always_available`.
+        if (spec.name == "LoadSkill" || spec.name == "WebSearch") && !is_chat {
             continue;
         }
         let description = spec
