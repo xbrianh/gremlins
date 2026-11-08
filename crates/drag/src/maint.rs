@@ -1,7 +1,7 @@
 // Package maintainability scoring for gremlins-drag.
 //
 // This module handles:
-// - Building a landscape of a package directory.
+// - Collecting and formatting all source files in a package.
 // - Prompting one independent Agent stage per configured maintainability
 //   dimension (from `MaintainabilityConfig`), run concurrently, each scoring
 //   a single dimension (0–4) with tailored anchors so every dimension gets
@@ -21,7 +21,7 @@ use gremlins::model_uri::ModelURI;
 
 use crate::config::{MaintainabilityConfig, MaintainabilityDimensionDef};
 use crate::lang::PackageInfo;
-use crate::util::{mean_with_ci, truncate, CacheState, CompAgentError};
+use crate::util::{mean_with_ci, truncate, CacheState, CompAgentError, DEFAULT_BYTE_LIMIT};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -69,7 +69,7 @@ type DimTask = tokio::task::JoinHandle<(String, String, Result<u8, String>)>;
 /// this stores one entry per *scored package* with the mean score.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub(crate) struct MaintCacheEntry {
-    /// `pkg_key || "\0" || blake3(landscape)` — hex, first 16 chars.
+    /// `pkg_key || "\0" || blake3(all source files)` — hex, first 16 chars.
     pub key: String,
     pub package: String,
     pub model: String,
@@ -119,24 +119,18 @@ pub(crate) async fn score_package_maintainability(
         scoring_packages.len()
     );
 
-    let explorer = gremlins::landscape::LandscapeExplorer;
-
     let mut handles: Vec<DimTask> = Vec::new();
     let mut cache_hits: HashMap<String, f64> = HashMap::new();
 
     for pkg in scoring_packages {
         let pkg_key = pkg.key();
         let pkg_name = pkg.name().to_string();
-        let pkg_dir = package_root_dir(pkg);
 
-        // Build landscape of package directory.
-        let outlines = explorer
-            .build(&pkg_dir, 10)
-            .map_err(|e| format!("[{pkg_name}] landscape build failed: {e}"))?;
-        let landscape = gremlins::landscape::format_landscape(&outlines, &pkg_dir);
-
-        // Read public API root module.
-        let pub_api_source = read_public_api_module(pkg);
+        // Collect and format all source files in the package.
+        let full_source = collect_package_source(pkg).unwrap_or_else(|e| {
+            eprintln!("  [{pkg_name}] WARNING: failed to collect source: {e}");
+            String::new()
+        });
 
         // Cache key: pkg_key + hash of all source file contents + estimates.
         let cache_key = compute_pkg_cache_key(&pkg_key, pkg, estimates, config_hash)
@@ -154,8 +148,7 @@ pub(crate) async fn score_package_maintainability(
         for dim in &maint_config.dimensions {
             let prompt = build_dim_prompt(
                 &pkg_name,
-                &landscape,
-                &pub_api_source,
+                &full_source,
                 &maint_config.preamble,
                 dim,
             );
@@ -340,26 +333,23 @@ pub(crate) async fn score_package_maintainability(
 // Prompt
 // ---------------------------------------------------------------------------
 
-/// Build a per-dimension prompt containing the package context and tailored
+/// Build a per-dimension prompt containing the package source and tailored
 /// anchors for a single dimension.
 fn build_dim_prompt(
     pkg_name: &str,
-    landscape: &str,
-    pub_api_source: &str,
+    full_source: &str,
     preamble: &str,
     dim: &MaintainabilityDimensionDef,
 ) -> String {
-    let api_section = if pub_api_source.is_empty() {
-        "(no public API root module found)".to_string()
+    let source_section = if full_source.is_empty() {
+        "(no source files found)".to_string()
     } else {
-        format!("Source of the package's public API root module:\n\n```\n{pub_api_source}\n```")
+        full_source.to_string()
     };
     format!(
         "PACKAGE: {pkg_name}\n\n\
-         ## Package structure (landscape)\n\n\
-         ```\n{landscape}```\n\n\
-         ## Public API\n\n\
-         {api_section}\n\n\
+         ## Package source\n\n\
+         {source_section}\n\n\
          **Scope**: If this package contains sub-packages, limit your assessment\n\
          to this package's own modules and organization — sub-package internals\n\
          are scored independently.\n\n\
@@ -483,51 +473,68 @@ fn extract_dim_score(content: &str) -> Option<u8> {
 // Package utilities
 // ---------------------------------------------------------------------------
 
-/// Get the root source directory for a package.
-fn package_root_dir(pkg: &PackageInfo) -> PathBuf {
-    match pkg {
-        PackageInfo::Rust(r) => r.dir.clone(),
-        PackageInfo::Python(p) => p.dir.clone(),
-    }
-}
+/// Collect all recognized source files in a package and format them as a
+/// single string with `## file/path.rs` headers, truncating to
+/// [`DEFAULT_BYTE_LIMIT`] with a trailing note when exceeded.
+fn collect_package_source(pkg: &PackageInfo) -> Result<String, String> {
+    let (src_dir, pkg_dir) = match pkg {
+        PackageInfo::Rust(r) => (r.dir.join("src"), r.dir.clone()),
+        PackageInfo::Python(p) => (p.dir.clone(), p.dir.clone()),
+    };
 
-/// Read the public API root module source for a package.
-/// Returns an empty string when no recognized entry-point file exists.
-fn read_public_api_module(pkg: &PackageInfo) -> String {
-    match pkg {
-        PackageInfo::Rust(r) => {
-            let candidates = [
-                r.dir.join("src").join("lib.rs"),
-                r.dir.join("src").join("main.rs"),
-                r.dir.join("src").join("mod.rs"),
-            ];
-            for candidate in &candidates {
-                if candidate.exists() {
-                    return std::fs::read_to_string(candidate).unwrap_or_else(|e| {
-                        eprintln!("  WARNING: failed to read {}: {e}", candidate.display());
-                        String::new()
-                    });
-                }
-            }
-            eprintln!(
-                "  WARNING: no lib.rs, main.rs, or mod.rs in {}",
-                r.dir.join("src").display()
-            );
-            String::new()
-        }
-        PackageInfo::Python(p) => {
-            let init = p.dir.join("__init__.py");
-            if init.exists() {
-                std::fs::read_to_string(&init).unwrap_or_else(|e| {
-                    eprintln!("  WARNING: failed to read {}: {e}", init.display());
-                    String::new()
-                })
-            } else {
-                eprintln!("  WARNING: {} not found", init.display());
-                String::new()
-            }
-        }
+    let files = crate::lang::collect_source_files(&src_dir).map_err(|e| {
+        format!("failed to collect source files in {}: {e}", src_dir.display())
+    })?;
+
+    if files.is_empty() {
+        return Err(format!("no source files found in {}", src_dir.display()));
     }
+
+    // Sort for deterministic output.
+    let mut files = files;
+    files.sort();
+
+    let mut total = 0_usize;
+    let cap = (files.len() + 1) * 64 + DEFAULT_BYTE_LIMIT;
+    let mut buf = String::with_capacity(cap);
+    let mut truncated = false;
+
+    for f in &files {
+        let rel = f.strip_prefix(&pkg_dir).unwrap_or(f);
+        let header = format!("\n## {}\n\n", rel.display());
+
+        // Check against limit *before* reading the file.
+        if total + header.len() >= DEFAULT_BYTE_LIMIT {
+            truncated = true;
+            break;
+        }
+        buf.push_str(&header);
+        total += header.len();
+
+        let content = std::fs::read_to_string(f).unwrap_or_else(|e| {
+            format!("[failed to read: {e}]")
+        });
+        let remaining = DEFAULT_BYTE_LIMIT.saturating_sub(total);
+        if remaining == 0 {
+            truncated = true;
+            break;
+        }
+        if content.len() > remaining {
+            buf.push_str(truncate(&content, remaining));
+            truncated = true;
+            break;
+        }
+        buf.push_str(&content);
+        total += content.len();
+    }
+
+    if truncated {
+        buf.push_str(
+            "\n\n[Source listing truncated at byte limit; some files are not shown in full.]\n",
+        );
+    }
+
+    Ok(buf)
 }
 
 // ---------------------------------------------------------------------------

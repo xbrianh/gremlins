@@ -39,6 +39,11 @@ impl std::fmt::Display for CompAgentError {
 // String utilities
 // ---------------------------------------------------------------------------
 
+/// Maximum bytes of total source content to send to the model for
+/// maintainability scoring.  When a package's source exceeds this the
+/// content is truncated with a note so the prompt size stays bounded.
+pub(crate) const DEFAULT_BYTE_LIMIT: usize = 128_000;
+
 /// Truncate `s` to `max_len` bytes, respecting UTF-8 character boundaries.
 pub(crate) fn truncate(s: &str, max_len: usize) -> &str {
     if s.len() <= max_len {
