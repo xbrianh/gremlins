@@ -35,15 +35,6 @@ impl PackageInfo {
         }
     }
 
-    /// Package root directory for use as agent working directory.
-    #[allow(dead_code)]
-    pub fn dir(&self) -> &Path {
-        match self {
-            PackageInfo::Rust(r) => &r.dir,
-            PackageInfo::Python(p) => &p.dir,
-        }
-    }
-
     /// The directory where source files live (for source collection and
     /// directory enumeration).
     pub fn src_dir(&self) -> PathBuf {

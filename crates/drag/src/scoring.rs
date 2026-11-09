@@ -162,7 +162,10 @@ pub(crate) fn build_drag_tree(
             .collect();
         let sep = path_separator(&module_paths);
 
-        let src_dir = pkg_src_dirs.get(pkg_key).cloned().unwrap_or_default();
+        let src_dir = pkg_src_dirs
+            .get(pkg_key)
+            .cloned()
+            .expect("pkg_src_dirs must contain every package key");
 
         // Build a directory trie for this package's modules.
         let mut dir_trie = DirTrieNode::default();
@@ -350,7 +353,7 @@ fn dir_trie_to_drag_node(
         .children
         .iter()
         .map(|(seg, child_trie)| {
-            let child_rel = if rel_dir.is_empty() {
+            let child_rel_path = if rel_dir.is_empty() {
                 seg.clone()
             } else {
                 format!("{rel_dir}/{seg}")
@@ -364,7 +367,7 @@ fn dir_trie_to_drag_node(
                 child_trie,
                 modules,
                 src_dir,
-                &child_rel,
+                &child_rel_path,
                 child_name,
                 dir_maints,
                 p,
@@ -1143,5 +1146,92 @@ mod tests {
         } else {
             panic!("expected container");
         }
+    }
+
+    #[test]
+    fn tree_python_dotted_paths_build_nested_containers() {
+        // Python packages use `.` separator; verify containers are named
+        // with dots.
+        let src = std::path::PathBuf::from("/pkg");
+        let modules = vec![
+            mdl("pkg.core", "/pkg/core.py", 10.0),
+            mdl("pkg.sub.core", "/pkg/sub/core.py", 20.0),
+        ];
+        let module_pkg = HashMap::from([
+            (
+                ("pkg.core".to_string(), "/pkg/core.py".to_string()),
+                "pkg".to_string(),
+            ),
+            (
+                ("pkg.sub.core".to_string(), "/pkg/sub/core.py".to_string()),
+                "pkg".to_string(),
+            ),
+        ]);
+        let dir_segments = HashMap::from([
+            (("pkg.core".to_string(), "/pkg/core.py".to_string()), vec![]),
+            (
+                ("pkg.sub.core".to_string(), "/pkg/sub/core.py".to_string()),
+                vec!["sub".to_string()],
+            ),
+        ]);
+        let dir_maints = HashMap::from([("/pkg".to_string(), 1.0), ("/pkg/sub".to_string(), 1.0)]);
+        let pkg_names = HashMap::from([("pkg".to_string(), "pkg".to_string())]);
+        let src_dirs = HashMap::from([("pkg".to_string(), src)]);
+
+        let tree = build_rust_tree(
+            &modules,
+            &module_pkg,
+            &dir_segments,
+            &dir_maints,
+            &pkg_names,
+            &src_dirs,
+            2.5,
+            false,
+        );
+
+        // maint=1.0 ⇒ flat sum.
+        assert!((drag_of(&tree) - 30.0).abs() < 1e-9);
+
+        // Must contain a pkg.sub container.
+        if let DragNode::Container { children, .. } = &tree {
+            let sub = children
+                .iter()
+                .find(|c| matches!(c, DragNode::Container { name, .. } if name == "pkg.sub"));
+            assert!(sub.is_some(), "expected pkg.sub container");
+        } else {
+            panic!("expected container root");
+        }
+    }
+
+    #[test]
+    fn tree_missing_dir_maint_defaults_to_neutral() {
+        // When a directory has no maint score in dir_maints, the fallback
+        // multiplier is exp(p * 0.5), matching the neutral 0.5 default.
+        let src = std::path::PathBuf::from("/pkg/src");
+        let modules = vec![mdl("pkg::m", "/pkg/src/m.rs", 10.0)];
+        let module_pkg = HashMap::from([(
+            ("pkg::m".to_string(), "/pkg/src/m.rs".to_string()),
+            "pkg".to_string(),
+        )]);
+        let dir_segments =
+            HashMap::from([(("pkg::m".to_string(), "/pkg/src/m.rs".to_string()), vec![])]);
+        // dir_maints is empty — neither /pkg/src nor any sub-dir has a score.
+        let dir_maints: HashMap<String, f64> = HashMap::new();
+        let pkg_names = HashMap::from([("pkg".to_string(), "pkg".to_string())]);
+        let src_dirs = HashMap::from([("pkg".to_string(), src)]);
+
+        let tree = build_rust_tree(
+            &modules,
+            &module_pkg,
+            &dir_segments,
+            &dir_maints,
+            &pkg_names,
+            &src_dirs,
+            2.5,
+            false,
+        );
+
+        let mult = (2.5 * 0.5_f64).exp();
+        assert!((drag_of(&tree) - mult * 10.0).abs() < 1e-9);
     }
 }

@@ -888,7 +888,7 @@ fn has_cfg_test_mod_decl(parent_src: &str, module_name: &str) -> bool {
 /// that the file lives in.
 ///
 /// - `src/lib.rs` / `src/main.rs` → `[]` (package root)
-/// - `src/foo.rs` → `["foo"]`
+/// - `src/foo.rs` → `[]` (package root)
 /// - `src/foo/bar.rs` → `["foo"]`
 /// - `src/foo/mod.rs` → `["foo"]`
 /// - `src/foo/bar/baz.rs` → `["foo", "bar"]`

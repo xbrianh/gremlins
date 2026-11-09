@@ -326,22 +326,6 @@ pub(crate) async fn score_directory_maintainability(
     Ok(result)
 }
 
-/// Legacy alias for callers that haven't migrated yet.
-#[allow(dead_code)]
-pub(crate) async fn score_package_maintainability(
-    _model_spec: &str,
-    _verbose: bool,
-    _estimates: usize,
-    _scoring_packages: &[&crate::lang::PackageInfo],
-    _cache_state: CacheState,
-    _maint_config: &MaintainabilityConfig,
-    _config_hash: &str,
-) -> Result<HashMap<String, f64>, String> {
-    // This function is no longer used directly — callers should use
-    // score_directory_maintainability instead.
-    Ok(HashMap::new())
-}
-
 // ---------------------------------------------------------------------------
 // Directory manifest (for tools-based exploration)
 // ---------------------------------------------------------------------------
@@ -371,16 +355,6 @@ fn build_dir_manifest(dir: &Path) -> Result<String, String> {
     manifest.push_str(&format!("\n({} source files total)\n", files.len()));
 
     Ok(manifest)
-}
-
-/// Legacy: build a manifest from a PackageInfo (delegates to dir manifest).
-#[allow(dead_code)]
-fn build_package_manifest(pkg: &crate::lang::PackageInfo) -> Result<String, String> {
-    let src_dir = match pkg {
-        crate::lang::PackageInfo::Rust(r) => r.dir.join("src"),
-        crate::lang::PackageInfo::Python(p) => p.dir.clone(),
-    };
-    build_dir_manifest(&src_dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -596,21 +570,6 @@ fn compute_dir_cache_key(
     hasher.update(b"\0");
     hasher.update(config_hash.as_bytes());
     Ok(hasher.finalize().to_hex()[..16].to_string())
-}
-
-/// Legacy: kept for backward compat with tests.
-#[allow(dead_code)]
-fn compute_pkg_cache_key(
-    _pkg_key: &str,
-    pkg: &crate::lang::PackageInfo,
-    estimates: usize,
-    config_hash: &str,
-) -> Result<String, String> {
-    let src_dir = match pkg {
-        crate::lang::PackageInfo::Rust(r) => r.dir.join("src"),
-        crate::lang::PackageInfo::Python(p) => p.dir.clone(),
-    };
-    compute_dir_cache_key(&src_dir, estimates, config_hash)
 }
 
 /// Load the maintainability JSONL cache file.

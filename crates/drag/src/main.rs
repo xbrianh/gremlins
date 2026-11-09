@@ -452,24 +452,24 @@ async fn run() -> Result<(), String> {
     // ── Directory-level maintainability ──
     // Enumerate every directory under each scoring package's source tree
     // that contains source files, then score each one.
-    let scoring_dirs: Vec<PathBuf> = {
-        let mut dirs = Vec::new();
-        for pkg in &scoring_packages {
-            match lang::enumerate_source_dirs(pkg) {
-                Ok(pkg_dirs) => dirs.extend(pkg_dirs),
-                Err(e) => eprintln!(
-                    "gremlins-drag: directory enumeration skipped for {}: {e}",
-                    pkg.name()
-                ),
-            }
-        }
-        // Deduplicate (shared roots possible across nested Python packages).
-        dirs.sort();
-        dirs.dedup();
-        dirs
-    };
-
     let maint_scores: HashMap<String, f64> = if !config.skip_maintainability {
+        let scoring_dirs: Vec<PathBuf> = {
+            let mut dirs = Vec::new();
+            for pkg in &scoring_packages {
+                match lang::enumerate_source_dirs(pkg) {
+                    Ok(pkg_dirs) => dirs.extend(pkg_dirs),
+                    Err(e) => eprintln!(
+                        "gremlins-drag: directory enumeration skipped for {}: {e}",
+                        pkg.name()
+                    ),
+                }
+            }
+            // Deduplicate (shared roots possible across nested Python packages).
+            dirs.sort();
+            dirs.dedup();
+            dirs
+        };
+
         maint::score_directory_maintainability(
             &model_spec,
             cli.verbose || config.verbose,
@@ -1437,7 +1437,7 @@ fn print_human_table(tree: &DragNode, skip_maint: bool) {
                 "{:<55} {:>8} {:>10} {:>6} {:>6} {:>14}",
                 "module", "tokens", "footprint", "comp", "maint", "drag"
             );
-            println!("{}", "-".repeat(103));
+            println!("{}", "-".repeat(104));
         }
         (true, false) => {
             println!(
