@@ -893,7 +893,9 @@ async fn run_agent(
                         messages.clone()
                     }
                 };
-            persist_chat_conversation_turn(gremlin, turn_num, &diff).await;
+            if let Err(e) = persist_chat_conversation_turn(gremlin, turn_num, &diff).await {
+                log::warn!("chat: failed to persist conversation turn {turn_num}: {e}");
+            }
         }
     }
 
@@ -1403,21 +1405,19 @@ fn messages_from_conversation(json: &str) -> Result<Vec<rig_core::completion::Me
 }
 
 /// Persist messages to `artifact://conversation/{turn:04}.json`.
+///
+/// Returns the canonical artifact path on success. Write errors are
+/// propagated so callers never mistake a lost write for a persisted turn.
 async fn persist_chat_conversation_turn(
     gremlin: &Gremlin,
     turn: usize,
     messages: &[rig_core::completion::Message],
-) {
-    match serde_json::to_string(messages) {
-        Ok(json) => {
-            if let Ok(uri) = Uri::parse(&conversation_uri(turn)) {
-                let _ = gremlin.state.write_into_registry(&uri, &json).await;
-            }
-        }
-        Err(e) => {
-            log::warn!("chat: failed to serialize conversation artifact for turn {turn}: {e}")
-        }
-    }
+) -> Result<String, Box<dyn std::error::Error>> {
+    let json = serde_json::to_string(messages).map_err(|e| {
+        format!("chat: failed to serialize conversation artifact for turn {turn}: {e}")
+    })?;
+    let uri = Uri::parse(&conversation_uri(turn))?;
+    gremlin.state.write_into_registry(&uri, &json).await
 }
 
 /// Format a per-turn conversation artifact URI.
@@ -1501,28 +1501,49 @@ pub(crate) async fn append_chat_conversation_turn(
         }
     };
     existing.extend_from_slice(messages);
-    persist_chat_conversation_turn(gremlin, turn, &existing).await;
+    if let Err(e) = persist_chat_conversation_turn(gremlin, turn, &existing).await {
+        log::warn!("chat: failed to persist current-turn artifact after append: {e}");
+    }
 }
 
 /// Overwrite per-turn conversation artifacts from a compacted conversation.
-/// Writes the full compacted history as turn 0001 and clears turns 2+.
-pub(crate) async fn persist_compacted_conversation(gremlin: &Gremlin, messages: &[Message]) {
-    persist_chat_conversation_turn(gremlin, 1, messages).await;
-    // Clear subsequent turn artifacts so they don't double-count.
-    // Scan a bounded range to catch noncontiguous artifacts (e.g. turn 2 was
-    // already deleted but turn 3 remained).
-    for turn in 2..1000 {
-        let uri_str = conversation_uri(turn);
-        let Ok(uri) = Uri::parse(&uri_str) else {
-            break;
+///
+/// Writes the full compacted history as turn 0001 and clears every other
+/// registered `conversation/NNNN.json` artifact. The replacement write must
+/// succeed before any later artifact is cleared — otherwise a failure would
+/// destroy the only stored copies of those messages while still reporting
+/// success.
+pub(crate) async fn persist_compacted_conversation(
+    gremlin: &Gremlin,
+    messages: &[Message],
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Save the compacted replacement first. Only after it is durably bound do
+    // we consider clearing the artifacts it subsumed.
+    persist_chat_conversation_turn(gremlin, 1, messages).await?;
+
+    // Enumerate the registered conversation artifacts rather than assuming a
+    // numeric range. Turn counts are unbounded, and scanning only 2..1000
+    // would leave later artifacts in place to be replayed as duplicate history.
+    let keys = gremlin.state.keys().await;
+    for key in keys {
+        let Some(name) = key.strip_prefix("artifact://conversation/") else {
+            continue;
         };
-        // Drop the error before the next await to keep the future Send
-        // (Box<dyn StdError> is !Send).
-        let exists = gremlin.state.content(&uri_str, None).await.is_ok();
-        if exists {
-            let _ = gremlin.state.write_into_registry(&uri, "[]").await;
+        let Some(turn) = name
+            .strip_suffix(".json")
+            .and_then(|s| s.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        if turn == 1 {
+            continue;
         }
+        let Ok(uri) = Uri::parse(&key) else {
+            continue;
+        };
+        gremlin.state.write_into_registry(&uri, "[]").await?;
     }
+    Ok(())
 }
 
 /// Strip trailing messages left dangling by a mid-tool-call cancellation.
@@ -1779,7 +1800,9 @@ mod tests {
             Message::user("world".to_string()),
         ];
 
-        persist_chat_conversation_turn(&gremlin, 1, &messages).await;
+        persist_chat_conversation_turn(&gremlin, 1, &messages)
+            .await
+            .unwrap();
 
         let json = gremlin
             .state
@@ -1802,13 +1825,62 @@ mod tests {
         let turn1 = vec![Message::user("hello".to_string())];
         let turn2 = vec![Message::user("world".to_string())];
 
-        persist_chat_conversation_turn(&gremlin, 1, &turn1).await;
-        persist_chat_conversation_turn(&gremlin, 2, &turn2).await;
+        persist_chat_conversation_turn(&gremlin, 1, &turn1)
+            .await
+            .unwrap();
+        persist_chat_conversation_turn(&gremlin, 2, &turn2)
+            .await
+            .unwrap();
 
         let history = read_chat_conversation(&gremlin, None).await;
         assert_eq!(history.len(), 2);
         assert_eq!(history[0], turn1[0]);
         assert_eq!(history[1], turn2[0]);
+    }
+
+    #[tokio::test]
+    async fn persist_compacted_conversation_clears_turns_beyond_1000() {
+        use rig_core::completion::Message;
+
+        let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
+
+        // A long-running chat can accumulate arbitrary turn numbers; the
+        // old bounded scan missed 1000+ and replayed duplicate history.
+        persist_chat_conversation_turn(&gremlin, 1, &[Message::user("old".to_string())])
+            .await
+            .unwrap();
+        persist_chat_conversation_turn(&gremlin, 1000, &[Message::user("late".to_string())])
+            .await
+            .unwrap();
+
+        let compacted = vec![Message::user("summary".to_string())];
+        persist_compacted_conversation(&gremlin, &compacted)
+            .await
+            .unwrap();
+
+        // Turn 1 holds the replacement; turn 1000 is cleared to `[]`.
+        let turn1: Vec<Message> = serde_json::from_str(
+            &gremlin
+                .state
+                .content("artifact://conversation/0001.json", None)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(turn1, compacted);
+
+        let turn1000: Vec<Message> = serde_json::from_str(
+            &gremlin
+                .state
+                .content("artifact://conversation/1000.json", None)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            turn1000.is_empty(),
+            "registered later turns must be cleared after compaction"
+        );
     }
 
     #[tokio::test]
@@ -1820,7 +1892,9 @@ mod tests {
         // Write an empty diff — this must produce a valid [] artifact so
         // a rollback's stale artifact is overwritten rather than preserved.
         let empty: Vec<Message> = vec![];
-        persist_chat_conversation_turn(&gremlin, 1, &empty).await;
+        persist_chat_conversation_turn(&gremlin, 1, &empty)
+            .await
+            .expect("persisting an empty diff must succeed");
 
         let json = gremlin
             .state
@@ -1843,7 +1917,9 @@ mod tests {
 
         // Write turn 1 with one message.
         let turn1 = vec![Message::user("hello".to_string())];
-        persist_chat_conversation_turn(&gremlin, 1, &turn1).await;
+        persist_chat_conversation_turn(&gremlin, 1, &turn1)
+            .await
+            .unwrap();
 
         // Append a partial message to turn 2 only.
         let partial = vec![Message::user("partial".to_string())];
@@ -1877,7 +1953,9 @@ mod tests {
         let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
 
         let t1 = vec![Message::user("ghost".to_string())];
-        persist_chat_conversation_turn(&gremlin, 1, &t1).await;
+        persist_chat_conversation_turn(&gremlin, 1, &t1)
+            .await
+            .unwrap();
 
         // Clear must overwrite the ghost.
         clear_chat_turn_artifact(&gremlin, 1).await;

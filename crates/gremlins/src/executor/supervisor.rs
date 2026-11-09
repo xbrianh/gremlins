@@ -18,7 +18,6 @@ use tokio::sync::watch;
 
 use crate::clients::cancel::CancelToken;
 use crate::clients::client::{Client, ModelURI};
-use crate::clients::conversation::Conversation;
 use crate::clients::interactive::{
     InteractiveChannels, InteractiveCommand, InteractiveEvent, InteractiveHandle, StreamEventSender,
 };
@@ -2163,16 +2162,33 @@ async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
     // Extract the data we need under the lock, then drop it before the
     // expensive compaction call so other supervisor commands are not blocked.
     let (client, model, verbatim_history) = {
-        let s = session.lock().await;
+        let mut s = session.lock().await;
         let id = match s.chat_ids.iter().next() {
             Some(id) => id.clone(),
             None => return error_response("no active chat session to compact"),
         };
-        let Some(gremlin) = s.chat_gremlins.get(&id) else {
+        if s.current_turn.as_ref().is_some_and(|cur| cur.id == *id) {
+            return error_response("cannot compact while a chat turn is active");
+        }
+        let Some(gremlin) = s.chat_gremlins.get_mut(&id) else {
             return error_response("active chat gremlin not found");
         };
+        // A soft-interrupt artifact is parked in the current turn. Compacting
+        // it would fold canceled partial messages into turn 1 while leaving
+        // the original artifact behind for a later hard cancel to replay.
+        let chat = gremlin
+            .definition
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<ChatDefinition>())
+            .expect("chat gremlin must carry a ChatDefinition");
+        if chat.interrupted() {
+            return error_response("cannot compact an interrupted chat turn");
+        }
         let client = gremlin.client.clone();
-        let model = gremlin.definition.default_model().model().to_string();
+        // The active client is authoritative: a `/model` change and a
+        // subsequent turn rebuild it, while `default_model` on the definition
+        // may still name the original model (or provider).
+        let model = client.model().to_string();
         let verbatim_history = crate::executor::run::read_chat_conversation(gremlin, None).await;
         (client, model, verbatim_history)
     };
@@ -2191,8 +2207,10 @@ async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
 
     match conv.compact(Some(system_prompt)).await {
         Some(report) => {
-            // Persist the compacted history back as turn 1, clear later turns.
-            let messages = conv.messages();
+            // Persist only the committed transcript — the conversation was
+            // built with an empty pending prompt, so `messages()` would append
+            // a synthetic empty user message that must not become durable.
+            let messages = conv.committed_history();
             {
                 let s = session.lock().await;
                 let id = match s.chat_ids.iter().next() {
@@ -2202,7 +2220,11 @@ async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
                 let Some(gremlin) = s.chat_gremlins.get(id) else {
                     return error_response("active chat gremlin vanished");
                 };
-                crate::executor::run::persist_compacted_conversation(gremlin, &messages).await;
+                if let Err(e) =
+                    crate::executor::run::persist_compacted_conversation(gremlin, &messages).await
+                {
+                    return error_response(&format!("failed to persist compacted history: {e}"));
+                }
             }
             ok_response(serde_json::to_value(&report).unwrap_or_default())
         }

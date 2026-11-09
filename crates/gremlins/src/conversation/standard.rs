@@ -137,6 +137,14 @@ impl StandardConversation {
         state.should_compact(self.last_input_tokens, &self.history)
     }
 
+    /// The committed durable transcript only — excludes the unsubmitted
+    /// pending prompt that [`messages`](Self::messages) appends. Persistence
+    /// callers (e.g. the `/compact` handler) want exactly what was committed,
+    /// not a synthetic placeholder prompt.
+    pub(crate) fn committed_history(&self) -> Vec<Message> {
+        self.history.clone()
+    }
+
     /// Run compaction on the current history. Called by the `/compact` TUI
     /// command handler and by the auto-compaction path in `render_turn`.
     /// Returns `None` when there is nothing to compact or every path fails.
