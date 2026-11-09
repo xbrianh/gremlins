@@ -68,6 +68,8 @@ pub(crate) struct StandardConversation {
     /// Once set, [`Conversation::messages`] returns this final transcript so
     /// persistence consumers see the exact durable message list.
     finalized_messages: Option<Vec<Message>>,
+    /// Backend for model construction and server-side API calls.
+    backend: Option<Arc<dyn Backend>>,
 }
 
 impl StandardConversation {
@@ -75,6 +77,7 @@ impl StandardConversation {
         prompt: &str,
         preserve_reasoning: bool,
         prepopulated_messages: Option<Vec<Message>>,
+        backend: Option<Arc<dyn Backend>>,
     ) -> Self {
         let history = prepopulated_messages.unwrap_or_default();
         Self {
@@ -86,6 +89,7 @@ impl StandardConversation {
             preserve_reasoning_in_history: preserve_reasoning,
             last_text: String::new(),
             finalized_messages: None,
+            backend,
         }
     }
 
@@ -114,16 +118,20 @@ impl StandardConversation {
     /// Run compaction on the current history. Called by the `/compact` TUI
     /// command handler.
     ///
-    /// Takes all compaction plumbing as parameters — the conversation does
-    /// not store any compaction state. Returns `None` when there is nothing
-    /// to compact or every path fails.
+    /// Returns `None` when there is nothing to compact or every path fails.
     pub(crate) async fn compact(
         &mut self,
-        backend: &Arc<dyn Backend>,
         model: &str,
         instructions: Option<&str>,
         system_prompt: Option<&str>,
     ) -> Option<CompactionReport> {
+        let backend = match &self.backend {
+            Some(b) => b,
+            None => {
+                log::error!("Compaction unavailable: no backend");
+                return None;
+            }
+        };
         let cut = compaction_cut_index(&self.history, KEEP_RECENT);
         if cut == 0 {
             return None;
@@ -209,6 +217,7 @@ impl Conversation for StandardConversation {
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: self.last_text.clone(),
             finalized_messages: self.finalized_messages.clone(),
+            backend: self.backend.clone(),
         })
     }
 
@@ -407,6 +416,7 @@ impl Conversation for StandardConversation {
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: String::new(),
             finalized_messages: None,
+            backend: self.backend.clone(),
         })
     }
 
@@ -415,6 +425,7 @@ impl Conversation for StandardConversation {
             prompt,
             self.preserve_reasoning_in_history,
             None,
+            self.backend.clone(),
         ))
     }
 

@@ -488,10 +488,12 @@ async fn run_agent(
         None
     };
 
+    let backend = client.get_or_build_backend().ok();
     let conv = crate::conversation::standard::StandardConversation::new(
         "",
         false,
         verbatim_history,
+        backend,
     );
 
     // ── Live usage tracker for failure persistence ─────

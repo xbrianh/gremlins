@@ -2138,6 +2138,7 @@ async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
         "",
         false,
         Some(verbatim_history),
+        Some(backend.clone()),
     );
 
     // Use the default chat system prompt — the same one passed to
@@ -2145,7 +2146,7 @@ async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
     // was built against.
     let system_prompt = crate::clients::system_prompts::chat_system_prompt();
 
-    match conv.compact(&backend, &model, None, Some(system_prompt)).await {
+    match conv.compact(&model, None, Some(system_prompt)).await {
         Some(report) => {
             // Persist only the committed transcript — the conversation was
             // built with an empty pending prompt, so `messages()` would append
