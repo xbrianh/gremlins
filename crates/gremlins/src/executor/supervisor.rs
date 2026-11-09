@@ -2130,10 +2130,6 @@ async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
             return error_response(&format!("failed to build backend for compaction: {e}"));
         }
     };
-    // The active client is authoritative: a `/model` change and a
-    // subsequent turn rebuild it, while `default_model` on the definition
-    // may still name the original model (or provider).
-    let model = client.model().to_string();
     let mut conv = crate::conversation::standard::StandardConversation::new(
         "",
         false,
@@ -2146,7 +2142,7 @@ async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
     // was built against.
     let system_prompt = crate::clients::system_prompts::chat_system_prompt();
 
-    match conv.compact(&model, None, Some(system_prompt)).await {
+    match conv.compact(None, Some(system_prompt)).await {
         Some(report) => {
             // Persist only the committed transcript — the conversation was
             // built with an empty pending prompt, so `messages()` would append

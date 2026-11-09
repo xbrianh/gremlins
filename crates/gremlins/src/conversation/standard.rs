@@ -121,7 +121,6 @@ impl StandardConversation {
     /// Returns `None` when there is nothing to compact or every path fails.
     pub(crate) async fn compact(
         &mut self,
-        model: &str,
         instructions: Option<&str>,
         system_prompt: Option<&str>,
     ) -> Option<CompactionReport> {
@@ -142,7 +141,7 @@ impl StandardConversation {
         // ── Server-side compaction ──
         if backend.supports_compaction() {
             let result = backend
-                .compact(&to_compact, system_prompt, instructions, model)
+                .compact(&to_compact, system_prompt, instructions, "")
                 .await;
             match result {
                 Ok(Some(r)) if r.block.is_some() => {
@@ -172,7 +171,7 @@ impl StandardConversation {
         }
 
         // ── Local compaction ──
-        if let Some(local) = backend.make_model(model) {
+        if let Some(local) = backend.make_model("") {
             match crate::conversation::compaction::compact_local_with_retry(
                 &local,
                 &to_compact,
@@ -198,7 +197,7 @@ impl StandardConversation {
                 None => { /* fall through */ }
             }
         } else {
-            log::error!("Local compaction unavailable: make_model failed for '{model}'");
+            log::error!("Local compaction unavailable: make_model failed");
         }
 
         None

@@ -1177,20 +1177,6 @@ pub(crate) fn max_tool_output_bytes() -> u64 {
         .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES)
 }
 
-/// Soft token trigger for headless (pipeline) conversation compaction.
-/// Default 100 000. 0 disables proactive compaction; the hard
-/// `max-prompt-bytes` ceiling still applies. Settings.yaml
-/// `compaction.threshold-tokens` takes precedence over the env var.
-pub(crate) fn compaction_threshold_tokens() -> u64 {
-    get_global()
-        .map(|c| c.compaction_threshold_tokens())
-        .or_else(|| {
-            std::env::var("GREMLINS_COMPACTION_THRESHOLD_TOKENS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-        })
-        .unwrap_or(DEFAULT_COMPACTION_THRESHOLD_TOKENS)
-}
 
 /// Effective turn-level retry schedule from the global config, falling back
 /// to the in-code default when the global config is uninitialized.
@@ -2447,29 +2433,6 @@ model-profiles:
     }
 
     // --- compaction thresholds -----------------------------------------------
-
-    #[test]
-    fn test_compaction_threshold_tokens_default() {
-        let _env = EnvGuard::lock();
-        assert_eq!(
-            compaction_threshold_tokens(),
-            DEFAULT_COMPACTION_THRESHOLD_TOKENS
-        );
-    }
-
-    #[test]
-    fn test_compaction_threshold_tokens_from_env() {
-        let mut env = EnvGuard::lock();
-        env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS", "5000");
-        assert_eq!(compaction_threshold_tokens(), 5000);
-    }
-
-    #[test]
-    fn test_compaction_threshold_tokens_zero_from_env() {
-        let mut env = EnvGuard::lock();
-        env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS", "0");
-        assert_eq!(compaction_threshold_tokens(), 0);
-    }
 
     #[test]
     fn test_compaction_threshold_tokens_from_settings_yaml() {
