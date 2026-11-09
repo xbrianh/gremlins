@@ -96,7 +96,7 @@ impl DragConfig {
         // If an external config is present, parse it and merge its keys on top
         // of the bundled Value.  Shallow key-level merge: when a key appears in
         // both, the external value wins (including nested objects wholesale).
-        match (&config_path, &env_val) {
+        let external_source: Option<String> = match (&config_path, &env_val) {
             (Some(_), Some(_)) => {
                 return Err(
                     "--config and GREMLINS_DRAG_CLI_CONFIG are mutually exclusive. \
@@ -109,23 +109,33 @@ impl DragConfig {
                     .map_err(|e| format!("failed to read config file {}: {e}", path.display()))?;
                 let external: serde_json::Value = serde_json5::from_str(&content)
                     .map_err(|e| format!("invalid config in {}: {e}", path.display()))?;
-                merge_json_values(&mut merged, &external);
+                merge_json_values(&mut merged, &external)
+                    .map_err(|e| format!("invalid config in {}: {e}", path.display()))?;
+                Some(path.display().to_string())
             }
             (None, Some(env_path)) => {
                 let content = std::fs::read_to_string(env_path)
                     .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: {}: {e}", env_path))?;
                 let external: serde_json::Value = serde_json5::from_str(&content)
                     .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: {}: {e}", env_path))?;
-                merge_json_values(&mut merged, &external);
+                merge_json_values(&mut merged, &external)
+                    .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: {}: {e}", env_path))?;
+                Some(env_path.to_string())
             }
             (None, None) => {
                 // No external config; use bundled as-is.
+                None
             }
-        }
+        };
 
         // Deserialize the merged Value into DragConfig.
-        let mut config: DragConfig = serde_json::from_value(merged)
-            .map_err(|e| format!("failed to deserialize merged config: {e}"))?;
+        let mut config: DragConfig = serde_json::from_value(merged).map_err(|e| {
+            if let Some(ref src) = external_source {
+                format!("invalid config in {src}: {e}")
+            } else {
+                format!("internal error: failed to deserialize bundled config: {e}")
+            }
+        })?;
 
         // --model always wins (single-field surgical override).
         if let Some(model) = model_override {
@@ -186,13 +196,26 @@ impl DragConfig {
 /// When `external` contains a key present in `base`, the external value
 /// replaces the base value wholesale (including nested objects).  Keys
 /// only in `external` are inserted into `base`.
-fn merge_json_values(base: &mut serde_json::Value, external: &serde_json::Value) {
-    if let (serde_json::Value::Object(base_map), serde_json::Value::Object(ext_map)) =
-        (base, external)
-    {
-        for (k, v) in ext_map {
-            base_map.insert(k.clone(), v.clone());
+///
+/// Returns an error if `external` is not a JSON object (e.g. an array,
+/// string, or number).
+fn merge_json_values(
+    base: &mut serde_json::Value,
+    external: &serde_json::Value,
+) -> Result<(), String> {
+    match (base, external) {
+        (serde_json::Value::Object(base_map), serde_json::Value::Object(ext_map)) => {
+            for (k, v) in ext_map {
+                base_map.insert(k.clone(), v.clone());
+            }
+            Ok(())
         }
+        (_, serde_json::Value::Object(_)) => {
+            // base is not an object — this is a programming error (bundled
+            // config is always an object).
+            Err("internal error: bundled config is not a JSON object".to_string())
+        }
+        _ => Err("config must be a JSON object, not an array, string, or scalar".to_string()),
     }
 }
 
@@ -469,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn file_config_overrides_bundled_fields() {
+    fn direct_deserialization_of_partial_json_gets_schema_defaults() {
         // Direct deserialization without merge: when a partial JSON is
         // deserialized directly (not via load()), omitted fields get schema
         // defaults.  The merge step in load() fills those in from bundled.json5
@@ -490,7 +513,7 @@ mod tests {
             serde_json5::from_str(BUNDLED_CONFIG).expect("bundled must parse");
         let external: serde_json::Value =
             serde_json5::from_str(r#"{"tokenizer": "cl100k_base"}"#).expect("external must parse");
-        merge_json_values(&mut bundled, &external);
+        merge_json_values(&mut bundled, &external).expect("merge must succeed");
         let config: DragConfig = serde_json::from_value(bundled).expect("merged config must parse");
         // External override wins.
         assert_eq!(config.tokenizer, "cl100k_base");
@@ -514,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_file_config_gets_schema_defaults_for_survey() {
+    fn direct_deserialization_of_partial_json_gets_empty_surveys() {
         // Direct deserialization without merge: a config that sets only
         // weights gets empty surveys.  The load() merge step would fill
         // these in from bundled.json5.
@@ -568,5 +591,63 @@ mod tests {
             }
         }
         assert_eq!(dup, Some("decomposition".to_string()));
+    }
+
+    #[test]
+    fn load_with_config_file_merges_over_bundled() {
+        // End-to-end test: write a minimal config to a temp file, call
+        // load() with --config, and verify the merge worked.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("drag-config.json5");
+        let external = r#"{"tokenizer": "cl100k_base"}"#;
+        std::fs::write(&config_path, external).expect("write temp config");
+
+        let config = DragConfig::load(Some(config_path), None).expect("load must succeed");
+
+        // External override wins.
+        assert_eq!(config.tokenizer, "cl100k_base");
+        // Bundled survey dimensions are preserved.
+        assert_eq!(config.comprehensibility.dimensions.len(), 8);
+        assert_eq!(config.maintainability.dimensions.len(), 10);
+        assert_eq!(config.weights.w2, 0.5);
+        assert_eq!(config.estimates_per_survey, 5);
+        // Bundled model is null; no override given.
+        assert!(config.model.is_none());
+    }
+
+    #[test]
+    fn load_with_config_file_and_model_override() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("drag-config.json5");
+        let external = r#"{"tokenizer": "cl100k_base"}"#;
+        std::fs::write(&config_path, external).expect("write temp config");
+
+        let config = DragConfig::load(Some(config_path), Some("openai/gpt-4o".into()))
+            .expect("load must succeed");
+
+        assert_eq!(config.tokenizer, "cl100k_base");
+        // --model wins over everything.
+        assert_eq!(config.model.as_deref(), Some("openai/gpt-4o"));
+        assert_eq!(config.comprehensibility.dimensions.len(), 8);
+    }
+
+    #[test]
+    fn merge_json_values_rejects_non_object_external() {
+        let mut base: serde_json::Value =
+            serde_json5::from_str(BUNDLED_CONFIG).expect("bundled must parse");
+        let external: serde_json::Value =
+            serde_json5::from_str(r#"[1, 2, 3]"#).expect("array parse");
+        let err = merge_json_values(&mut base, &external).unwrap_err();
+        assert!(err.contains("JSON object"));
+    }
+
+    #[test]
+    fn merge_json_values_rejects_scalar_external() {
+        let mut base: serde_json::Value =
+            serde_json5::from_str(BUNDLED_CONFIG).expect("bundled must parse");
+        let external: serde_json::Value =
+            serde_json5::from_str(r#""a string""#).expect("string parse");
+        let err = merge_json_values(&mut base, &external).unwrap_err();
+        assert!(err.contains("JSON object"));
     }
 }
