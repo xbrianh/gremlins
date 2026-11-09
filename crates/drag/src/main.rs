@@ -523,7 +523,7 @@ async fn run() -> Result<(), String> {
         &pkg_src_dirs,
         config.weights.p,
         config.skip_maintainability,
-    );
+    )?;
 
     // 9. Output
     if matches!(config.format, OutputFormat::Json) {

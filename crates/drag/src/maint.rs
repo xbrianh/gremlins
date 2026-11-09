@@ -253,7 +253,11 @@ pub(crate) async fn score_directory_maintainability(
         let estimate_batch = match estimates_map.get(&dir_str) {
             Some(b) if !b.is_empty() => b,
             _ => {
-                eprintln!("  [{dir_name}] no estimates collected — skipping");
+                eprintln!(
+                    "  [{dir_name}] no estimates collected for '{}' — \
+                     skipping result (will be absent from dir_maints)",
+                    dir_str
+                );
                 continue;
             }
         };
@@ -299,16 +303,20 @@ pub(crate) async fn score_directory_maintainability(
 
         if !all_dims_complete {
             eprintln!(
-                "  [{dir_name}] WARNING: incomplete estimates — skipping cache write and result"
+                "  [{dir_name}] WARNING: incomplete dimension coverage for '{}' — \
+                 skipping cache write and result (will be absent from dir_maints)",
+                dir_str
             );
             continue;
         }
 
         if estimate_batch.len() != estimates {
             eprintln!(
-                "  [{dir_name}] WARNING: {}/{} estimates collected — skipping cache write",
+                "  [{dir_name}] WARNING: {}/{} estimates collected for '{}' — \
+                 skipping cache write and result (will be absent from dir_maints)",
                 estimate_batch.len(),
-                estimates
+                estimates,
+                dir_str
             );
             continue;
         }

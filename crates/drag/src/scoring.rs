@@ -131,7 +131,7 @@ pub(crate) fn build_drag_tree(
     pkg_src_dirs: &HashMap<String, std::path::PathBuf>,
     p: f64,
     skip_maintainability: bool,
-) -> DragNode {
+) -> Result<DragNode, String> {
     // ── 1. Group by package: each pkg_key → list of module indices ──
     let mut pkg_module_indices: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     let mut orphan_indices: Vec<usize> = Vec::new();
@@ -188,7 +188,7 @@ pub(crate) fn build_drag_tree(
             p,
             skip_maintainability,
             sep,
-        );
+        )?;
 
         package_containers.push(container);
     }
@@ -216,16 +216,16 @@ pub(crate) fn build_drag_tree(
     all_children.extend(orphan_nodes);
 
     if all_children.len() == 1 {
-        return all_children.remove(0);
+        return Ok(all_children.remove(0));
     }
 
     let total_drag: f64 = all_children.iter().map(drag_of).sum();
-    DragNode::Container {
+    Ok(DragNode::Container {
         name: String::new(),
         maint_score: None,
         drag: total_drag,
         children: all_children,
-    }
+    })
 }
 
 /// Return the drag value of any node (module or container).
@@ -313,7 +313,7 @@ fn dir_trie_to_drag_node(
     p: f64,
     skip_maintainability: bool,
     sep: &str,
-) -> DragNode {
+) -> Result<DragNode, String> {
     // Build the absolute directory path for this trie node.
     let abs_dir = if rel_dir.is_empty() {
         src_dir.to_path_buf()
@@ -325,7 +325,17 @@ fn dir_trie_to_drag_node(
     let (maint_score, maint_mult) = if skip_maintainability {
         (None, 1.0)
     } else {
-        let s = dir_maints.get(&abs_dir_str).copied().unwrap_or(0.5);
+        let s = dir_maints
+            .get(&abs_dir_str)
+            .copied()
+            .ok_or_else(|| {
+                format!(
+                    "maintainability score missing for directory '{}' — \
+                     this is a bug: scoring was enabled but this directory was \
+                     skipped or never scored",
+                    abs_dir_str
+                )
+            })?;
         (Some(s), (p * (1.0 - s)).exp())
     };
 
@@ -363,7 +373,7 @@ fn dir_trie_to_drag_node(
             } else {
                 format!("{display_name}{sep}{seg}")
             };
-            dir_trie_to_drag_node(
+            Ok(dir_trie_to_drag_node(
                 child_trie,
                 modules,
                 src_dir,
@@ -373,9 +383,9 @@ fn dir_trie_to_drag_node(
                 p,
                 skip_maintainability,
                 sep,
-            )
+            )?)
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
 
     let mut all_children: Vec<DragNode> = Vec::new();
     all_children.extend(direct_modules);
@@ -426,12 +436,12 @@ fn dir_trie_to_drag_node(
         }
     });
 
-    DragNode::Container {
+    Ok(DragNode::Container {
         name: display_name,
         maint_score,
         drag,
         children: all_children,
-    }
+    })
 }
 
 /// Recursively convert a module-path trie (orphans) into a [`DragNode`]
@@ -686,7 +696,7 @@ mod tests {
         src_dirs: &HashMap<String, std::path::PathBuf>,
         p: f64,
         skip: bool,
-    ) -> DragNode {
+    ) -> Result<DragNode, String> {
         build_drag_tree(
             modules,
             module_pkg,
@@ -787,7 +797,7 @@ mod tests {
             &src_dirs,
             2.5,
             false,
-        );
+        ).unwrap();
 
         let flat_sum: f64 = modules.iter().map(|m| m.drag).sum();
         assert!((drag_of(&tree) - flat_sum).abs() < 1e-9);
@@ -824,7 +834,7 @@ mod tests {
             &src_dirs,
             2.5,
             false,
-        );
+        ).unwrap();
 
         // a/ (maint 1.0) contains one module with drag 10.0, so:
         //   drag(a) = exp(p·(1−1.0)) · 10 = 10
@@ -924,7 +934,7 @@ mod tests {
             &src_dirs,
             2.5,
             false,
-        );
+        ).unwrap();
 
         if let DragNode::Container { name, children, .. } = &tree {
             assert_eq!(name, "pkg");
@@ -976,7 +986,7 @@ mod tests {
             &src_dirs,
             2.5,
             false,
-        );
+        ).unwrap();
 
         if let DragNode::Container { name, children, .. } = &tree {
             assert_eq!(name, "pkg");
@@ -1069,7 +1079,7 @@ mod tests {
             &src_dirs,
             2.5,
             false,
-        );
+        ).unwrap();
 
         assert!(matches!(tree, DragNode::Container { .. }));
         assert!((drag_of(&tree) - 60.0).abs() < 1e-9);
@@ -1087,7 +1097,7 @@ mod tests {
             &HashMap::new(),
             2.5,
             false,
-        );
+        ).unwrap();
         assert!(matches!(tree, DragNode::Module { .. }));
         assert!((drag_of(&tree) - 42.0).abs() < 1e-9);
     }
@@ -1107,7 +1117,7 @@ mod tests {
             &HashMap::new(),
             2.5,
             false,
-        );
+        ).unwrap();
         assert!(matches!(tree, DragNode::Container { .. }));
         if let DragNode::Container { name, children, .. } = &tree {
             assert_eq!(name, "orphan");
@@ -1138,7 +1148,7 @@ mod tests {
             &src_dirs,
             2.5,
             true,
-        );
+        ).unwrap();
 
         assert!((drag_of(&tree) - 10.0).abs() < 1e-9);
         if let DragNode::Container { maint_score, .. } = &tree {
@@ -1187,7 +1197,7 @@ mod tests {
             &src_dirs,
             2.5,
             false,
-        );
+        ).unwrap();
 
         // maint=1.0 ⇒ flat sum.
         assert!((drag_of(&tree) - 30.0).abs() < 1e-9);
@@ -1204,9 +1214,10 @@ mod tests {
     }
 
     #[test]
-    fn tree_missing_dir_maint_defaults_to_neutral() {
-        // When a directory has no maint score in dir_maints, the fallback
-        // multiplier is exp(p * 0.5), matching the neutral 0.5 default.
+    fn tree_missing_dir_maint_is_an_error() {
+        // When maintainability scoring is enabled and a directory has no
+        // score in dir_maints, build_drag_tree must return an error instead
+        // of silently defaulting to the neutral 0.5.
         let src = std::path::PathBuf::from("/pkg/src");
         let modules = vec![mdl("pkg::m", "/pkg/src/m.rs", 10.0)];
         let module_pkg = HashMap::from([(
@@ -1220,7 +1231,7 @@ mod tests {
         let pkg_names = HashMap::from([("pkg".to_string(), "pkg".to_string())]);
         let src_dirs = HashMap::from([("pkg".to_string(), src)]);
 
-        let tree = build_rust_tree(
+        let result = build_rust_tree(
             &modules,
             &module_pkg,
             &dir_segments,
@@ -1231,7 +1242,15 @@ mod tests {
             false,
         );
 
-        let mult = (2.5 * 0.5_f64).exp();
-        assert!((drag_of(&tree) - mult * 10.0).abs() < 1e-9);
+        assert!(result.is_err(), "expected error for missing maint score, got Ok");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("maintainability score missing"),
+            "unexpected error message: {err}"
+        );
+        assert!(
+            err.contains("/pkg/src"),
+            "error should mention the missing directory: {err}"
+        );
     }
 }
