@@ -579,10 +579,15 @@ fn validate_maint_scores(
 // Cache
 // ---------------------------------------------------------------------------
 
-/// Compute a BLAKE3-based cache key using a Merkle-tree of all source
-/// file contents plus the estimate count and the maintainability config
-/// hash.  Any change to any source file, the number of estimates, or the
-/// dimension configuration invalidates the entry.
+/// Compute a BLAKE3-based cache key from the directory path, a Merkle-tree
+/// of all source file contents, the estimate count, and the maintainability
+/// config hash. Any change to the directory path, any source file, the
+/// number of estimates, or the dimension configuration invalidates the
+/// entry.
+///
+/// Directories with no recognized source files are valid and produce a
+/// key derived from the directory path, estimate count, and config hash
+/// alone — so two distinct empty directories never collide.
 fn compute_dir_cache_key(
     dir: &Path,
     estimates: usize,
@@ -771,13 +776,28 @@ mod tests {
     // ── compute_dir_cache_key ──
 
     #[test]
-    fn compute_dir_cache_key_no_source_files_succeeds() {
+    fn compute_dir_cache_key_empty_dir_is_deterministic_and_sensitive() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
 
         let key = compute_dir_cache_key(tmp.path(), 2, "config-hash")
             .expect("empty directory should produce a valid cache key");
-
         assert!(!key.is_empty(), "cache key should not be empty: {key}");
+
+        // Same inputs must yield the same key.
+        let key_again =
+            compute_dir_cache_key(tmp.path(), 2, "config-hash").expect("repeat key computation");
+        assert_eq!(key, key_again, "cache key must be deterministic");
+
+        // The config hash must influence the key even when there are no files.
+        let key_other_config = compute_dir_cache_key(tmp.path(), 2, "other-config-hash")
+            .expect("alternate config key");
+        assert_ne!(key, key_other_config, "config hash must affect the key");
+
+        // Distinct empty directories must not collide.
+        let tmp2 = tempfile::TempDir::new().expect("tempdir");
+        let key_other_dir =
+            compute_dir_cache_key(tmp2.path(), 2, "config-hash").expect("alternate directory key");
+        assert_ne!(key, key_other_dir, "directory path must affect the key");
     }
 
     // ── validate_maint_scores ──
