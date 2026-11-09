@@ -336,8 +336,15 @@ pub(crate) async fn score_directory_maintainability(
 /// The agent is expected to use its tools (Landscape, Read, Grep, Glob) to
 /// explore these files — full source is not embedded in the prompt.
 fn build_dir_manifest(dir: &Path) -> Result<String, String> {
-    let files = crate::lang::collect_source_files(dir)
-        .map_err(|e| format!("failed to collect source files in {}: {e}", dir.display()))?;
+    // `collect_source_files` recurses into subdirectories, but each nested
+    // directory is scored independently. Keep only files whose immediate
+    // parent is `dir` so the manifest doesn't leak subdirectory files into
+    // this directory's score.
+    let files: Vec<_> = crate::lang::collect_source_files(dir)
+        .map_err(|e| format!("failed to collect source files in {}: {e}", dir.display()))?
+        .into_iter()
+        .filter(|f| f.parent().is_some_and(|p| p == dir))
+        .collect();
 
     if files.is_empty() {
         return Err(format!("no source files found in {}", dir.display()));
@@ -682,6 +689,24 @@ mod tests {
         let score = compute_maint_score_from_map(&dims);
         // sum=5, max=8 → 0.625
         assert!((score - 0.625).abs() < 1e-10);
+    }
+
+    // ── build_dir_manifest ──
+
+    #[test]
+    fn build_dir_manifest_excludes_nested_files() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        std::fs::create_dir(tmp.path().join("sub")).expect("create sub");
+        std::fs::write(tmp.path().join("a.rs"), "fn a() {}").expect("write a.rs");
+        std::fs::write(tmp.path().join("sub/b.rs"), "fn b() {}").expect("write b.rs");
+
+        let manifest = build_dir_manifest(tmp.path()).expect("manifest");
+
+        assert!(manifest.contains("a.rs"), "manifest should list a.rs: {manifest}");
+        assert!(
+            !manifest.contains("sub/b.rs") && !manifest.contains("b.rs"),
+            "manifest should not list nested sub/b.rs: {manifest}"
+        );
     }
 
     // ── validate_maint_scores ──
