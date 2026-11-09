@@ -15,8 +15,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -861,7 +859,6 @@ mod tests {
             enclosing_model: None,
             discovered_skills: None,
             active_skills: None,
-            force_compact: Arc::new(AtomicBool::new(false)),
             extra_sandbox_roots: Vec::new(),
         };
         (sandbox, gremlin)

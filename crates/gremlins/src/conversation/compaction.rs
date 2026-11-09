@@ -1,8 +1,8 @@
-//! Cut-point helpers, compaction orchestration state, and local-compaction
-//! helpers.
+//! Cut-point helpers, compaction orchestration state, local-compaction
+//! helpers, and the on-demand `CompactionReport` return type.
 //!
 //! Cut-point functions operate purely on [`Message`] slices — they have no
-//! dependency on [`Backend`], [`Compaction`], or any Anthropic-specific type.
+//! dependency on [`Backend`] or any Anthropic-specific type.
 //!
 //! Local-compaction helpers (`compact_local_raw`, `compact_local_with_retry`,
 //! and their truncation/validation support) live here so that
@@ -10,11 +10,10 @@
 //! when the backend does not support server-side compaction.
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::completion::{CompletionRequest, CompletionResponse, Message};
+use serde::Serialize;
 
 use crate::clients::model::GremlinsModel;
 use crate::clients::protocol::CompactionBlock;
@@ -78,17 +77,33 @@ fn is_user_tool_result(msg: &Message) -> bool {
     }
 }
 
-// ── Orchestration state ──────────────────────────────────────────────
+// ── Compaction report ────────────────────────────────────────────────
 
-/// What triggers compaction for a conversation.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CompactionTrigger {
-    /// Auto-compaction fires when input tokens exceed the threshold.
-    Threshold,
-    /// No automatic trigger; only fires when the force flag is set
-    /// (via the `/compact` TUI command).
-    Immediate,
+/// Which compaction strategy was used.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(crate) enum CompactionStrategy {
+    Server,
+    Local,
 }
+
+/// Result of an on-demand compaction call.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CompactionReport {
+    /// Which strategy was used.
+    pub strategy: CompactionStrategy,
+    /// How many messages were replaced.
+    pub messages_compacted: usize,
+    /// How many messages were kept verbatim.
+    pub messages_kept: usize,
+    /// Input tokens consumed by the compaction call itself.
+    pub compaction_input_tokens: Option<u64>,
+    /// Output tokens produced by the compaction call.
+    pub compaction_output_tokens: Option<u64>,
+    /// Whether a signed block was produced (server compaction only).
+    pub signed: bool,
+}
+
+// ── Orchestration state ──────────────────────────────────────────────
 
 /// Per-conversation compaction orchestration state. Built once in `run.rs`
 /// and passed to `StandardConversation::new`.
@@ -103,29 +118,16 @@ pub(crate) struct CompactionState {
     block: Option<CompactionBlock>,
     applied: bool,
     cooldown: bool,
-    /// One-shot flag: when `true`, `should_compact()` skips threshold and
-    /// cooldown checks, clears the flag, and runs compaction if there is
-    /// material to compact. Set by the TUI `/compact` command.
-    force: Arc<AtomicBool>,
-    /// What triggers compaction for this conversation.
-    trigger: CompactionTrigger,
 }
 
 impl CompactionState {
-    pub(crate) fn new(
-        threshold: u64,
-        keep_recent: usize,
-        force: Arc<AtomicBool>,
-        trigger: CompactionTrigger,
-    ) -> Self {
+    pub(crate) fn new(threshold: u64, keep_recent: usize) -> Self {
         Self {
             threshold,
             keep_recent,
             block: None,
             applied: false,
             cooldown: false,
-            force,
-            trigger,
         }
     }
 
@@ -140,45 +142,27 @@ impl CompactionState {
     /// Record that a compaction result has been applied to history.
     /// Sets `applied` and stores the block (if any) atomically, preserving
     /// the invariant that `block` is set iff a server-side compaction was used.
-    /// Clears the one-shot force flag — it is only consumed on success.
     /// Server strategy → `Some(signed_block)`
     /// Local strategy  → `None`
     pub(crate) fn mark_applied(&mut self, block: Option<CompactionBlock>) {
         self.block = block;
         self.applied = true;
-        self.force.store(false, Ordering::Release);
     }
 
     /// Prevent retrying the expensive API call on every subsequent turn.
-    ///
-    /// Also clears the one-shot force flag: cooldown means a `/compact` was
-    /// attempted this turn (and failed or produced no summary), so it must not
-    /// re-fire on later turns. Pending requests are only preserved while there
-    /// is insufficient material, which is handled in `should_compact` and never
-    /// reaches this method.
     pub(crate) fn set_cooldown(&mut self) {
         self.cooldown = true;
-        self.force.store(false, Ordering::Release);
     }
 
-    /// Decide whether to trigger compaction on this turn.
+    /// Decide whether to trigger auto-compaction on this turn.
+    /// Only checks threshold, cooldown, and applied state — no force flag,
+    /// no trigger variant. On-demand compaction goes through
+    /// [`StandardConversation::compact`].
     pub(crate) fn should_compact(
         &self,
         last_input_tokens: Option<u64>,
         history: &[Message],
     ) -> bool {
-        // One-shot: operator forced this turn. The flag is cleared on success
-        // (mark_applied) and on failure (set_cooldown). If there is not enough
-        // material yet (cut == 0), leave it set so it fires once material
-        // accumulates.
-        if self.force.load(Ordering::Acquire) {
-            let cut = compaction_cut_index(history, self.keep_recent);
-            return cut > 0;
-        }
-        // Auto path — only active for Threshold trigger.
-        if matches!(self.trigger, CompactionTrigger::Immediate) {
-            return false;
-        }
         if self.cooldown {
             return false;
         }
@@ -590,12 +574,7 @@ mod tests {
     /// Return a [`CompactionState`] with defaults, accepting overrides via a
     /// builder closure.
     fn make_state(f: impl FnOnce(&mut CompactionState)) -> CompactionState {
-        let mut s = CompactionState::new(
-            1000,
-            10,
-            Arc::new(AtomicBool::new(false)),
-            CompactionTrigger::Threshold,
-        );
+        let mut s = CompactionState::new(1000, 10);
         f(&mut s);
         s
     }
@@ -618,42 +597,6 @@ mod tests {
     }
 
     #[test]
-    fn should_compact_immediate_trigger_ignores_threshold() {
-        // Immediate trigger skips auto — should return false even above threshold.
-        let history = paired_history(20);
-        let s = make_state(|s| {
-            s.trigger = CompactionTrigger::Immediate;
-        });
-        assert!(!s.should_compact(Some(1500), &history));
-    }
-
-    #[test]
-    fn should_compact_force_overrides_all() {
-        // force=true should return true even if cooldown, threshold=0, trigger=Immediate.
-        let history = paired_history(20);
-        let s = make_state(|s| {
-            s.trigger = CompactionTrigger::Immediate;
-            s.cooldown = true;
-            s.threshold = 0;
-        });
-        s.force.store(true, Ordering::Release);
-        assert!(s.should_compact(Some(0), &history));
-    }
-
-    #[test]
-    fn should_compact_force_with_insufficient_material_returns_false_preserves_flag() {
-        // 1 pair + keep_recent=10 → cut=0. Force stays set for next turn.
-        let history = paired_history(1);
-        let s = make_state(|_| {});
-        s.force.store(true, Ordering::Release);
-        assert!(!s.should_compact(Some(0), &history));
-        assert!(
-            s.force.load(Ordering::Acquire),
-            "force flag must survive insufficient material"
-        );
-    }
-
-    #[test]
     fn should_compact_cooldown_returns_false() {
         let history = paired_history(20);
         let s = make_state(|s| {
@@ -673,20 +616,19 @@ mod tests {
     }
 
     #[test]
-    fn mark_applied_clears_force_flag() {
-        let s = make_state(|_| {});
-        s.force.store(true, Ordering::Release);
-        let mut s = s.clone();
+    fn mark_applied_stores_block_and_sets_applied() {
+        let mut s = make_state(|_| {});
+        assert!(!s.applied);
         s.mark_applied(None);
-        assert!(!s.force.load(Ordering::Acquire));
+        assert!(s.applied);
+        assert!(s.block().is_none());
     }
 
     #[test]
-    fn set_cooldown_clears_force_flag() {
-        let s = make_state(|_| {});
-        s.force.store(true, Ordering::Release);
-        let mut s = s.clone();
+    fn set_cooldown_sets_cooldown() {
+        let mut s = make_state(|_| {});
+        assert!(!s.cooldown);
         s.set_cooldown();
-        assert!(!s.force.load(Ordering::Acquire));
+        assert!(s.cooldown);
     }
 }

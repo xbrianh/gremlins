@@ -29,7 +29,6 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -312,9 +311,6 @@ pub struct Gremlin {
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
     /// Active skill names — shared with LoadSkill tool and supervisor session.
     pub(crate) active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
-    /// One-shot force-compact signal set by the TUI `/compact` command.
-    /// The per-turn Compaction consumes and clears it via `should_compact()`.
-    pub(crate) force_compact: Arc<AtomicBool>,
     /// Additional sandbox roots carried forward from [`GremlinConfig`].
     /// Threaded through [`Gremlin::cwd_extra_sandbox_roots`] →
     /// [`crate::clients::backend::RunParams::extra_sandbox_roots`] →
@@ -514,7 +510,6 @@ impl Gremlin {
             enclosing_model: None,
             discovered_skills: None,
             active_skills: None,
-            force_compact: Arc::new(AtomicBool::new(false)),
             extra_sandbox_roots: config.extra_sandbox_roots.clone(),
         };
 
@@ -639,7 +634,6 @@ impl Gremlin {
             enclosing_model: None,
             discovered_skills: None,
             active_skills: None,
-            force_compact: Arc::new(AtomicBool::new(false)),
             extra_sandbox_roots: Vec::new(),
         })
     }
@@ -1013,7 +1007,6 @@ impl Gremlin {
             enclosing_model: effective_model.cloned(),
             discovered_skills: None,
             active_skills: None,
-            force_compact: Arc::new(AtomicBool::new(false)),
             extra_sandbox_roots: self.extra_sandbox_roots.clone(),
         })
     }
@@ -2214,7 +2207,6 @@ mod tests {
             enclosing_model: None,
             discovered_skills: None,
             active_skills: None,
-            force_compact: Arc::new(AtomicBool::new(false)),
             extra_sandbox_roots: Vec::new(),
         }
     }

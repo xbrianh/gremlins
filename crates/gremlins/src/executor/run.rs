@@ -5,18 +5,16 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
 use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
-use crate::clients::backend::{ClientError, RunParams};
+use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::client::{Client, ModelURI};
-use crate::clients::compaction::Compaction;
 use crate::config;
-use crate::conversation::compaction::{CompactionState, CompactionTrigger};
+use crate::conversation::compaction::CompactionState;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
 use crate::executor::bootstrap::run_definition_bootstrap;
@@ -58,49 +56,44 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
 /// Default number of most-recent turns to keep verbatim during compaction.
 const DEFAULT_COMPACTION_KEEP_RECENT: usize = 10;
 
-/// Build the [`Compaction`] dispatch and [`CompactionState`] pair from the
-/// global config and the resolved backend.
-/// Returns `None` when compaction is disabled (threshold == 0) and the trigger
-/// is [`CompactionTrigger::Threshold`] — for [`CompactionTrigger::Immediate`]
-/// (chat), a pair is always returned so the `/compact` force flag can
-/// fire on demand.
-fn build_compaction_config(
+/// Build the compaction parts needed by [`StandardConversation::new`].
+/// Returns backend, state, model, instructions, and optional local model.
+/// Returns `None` when compaction is disabled (threshold == 0 and not in chat
+/// mode — chat always returns parts so `/compact` can fire on demand).
+pub(crate) fn build_compaction_parts(
     client: &Client,
     model: String,
     is_chat: bool,
-    force_compact: Arc<AtomicBool>,
-) -> Option<(Compaction, CompactionState)> {
-    let trigger = if is_chat {
-        CompactionTrigger::Immediate
-    } else {
-        CompactionTrigger::Threshold
-    };
-
+) -> Option<(
+    Arc<dyn Backend>,
+    CompactionState,
+    String,
+    Option<String>,
+    Option<crate::clients::model::GremlinsModel>,
+)> {
     let backend = match client.get_or_build_backend() {
         Ok(b) => b,
         Err(e) => {
             log::warn!("compaction: failed to build backend: {e}");
-            force_compact.store(false, Ordering::Release);
             return None;
         }
     };
 
     let threshold = if is_chat {
-        // Threshold is irrelevant for Immediate trigger; use 0 to
-        // signal "disabled" to readers without affecting behavior.
+        // Chat always returns parts so /compact can fire on demand;
+        // threshold is irrelevant for the on-demand path.
         0
     } else {
         crate::config::compaction_threshold_tokens()
     };
 
-    // For Threshold trigger, zero threshold means compaction is disabled.
-    if matches!(trigger, CompactionTrigger::Threshold) && threshold == 0 {
-        force_compact.store(false, Ordering::Release);
+    // Zero threshold means compaction is disabled (non-chat only).
+    if !is_chat && threshold == 0 {
         return None;
     }
 
-    // Build a local model when possible — Compaction::compact uses it when
-    // the backend doesn't support server-side compaction.
+    // Build a local model when possible — used when the backend doesn't
+    // support server-side compaction.
     let qualified = format!("{}/{}", client.provider(), model);
     let local_model = backend.make_model(&qualified);
     if local_model.is_none() {
@@ -111,13 +104,11 @@ fn build_compaction_config(
     }
 
     Some((
-        Compaction::new(backend, model, None, local_model),
-        CompactionState::new(
-            threshold,
-            DEFAULT_COMPACTION_KEEP_RECENT,
-            force_compact,
-            trigger,
-        ),
+        backend,
+        CompactionState::new(threshold, DEFAULT_COMPACTION_KEEP_RECENT),
+        model,
+        None,
+        local_model,
     ))
 }
 
@@ -604,22 +595,28 @@ async fn run_agent(
         None
     };
 
-    let (compaction_dispatch, compaction_state) = build_compaction_config(
-        &client,
-        prepared
-            .model
-            .clone()
-            .unwrap_or_else(|| client.model().to_string()),
-        is_chat,
-        gremlin.force_compact.clone(),
-    )
-    .map_or((None, None), |(d, s)| (Some(d), Some(s)));
+    let (backend, compaction_state, compaction_model, compaction_instructions, local_model) =
+        build_compaction_parts(
+            &client,
+            prepared
+                .model
+                .clone()
+                .unwrap_or_else(|| client.model().to_string()),
+            is_chat,
+        )
+        .map_or(
+            (None, None, None, None, None),
+            |(b, s, m, i, l)| (Some(b), Some(s), Some(m), i, l),
+        );
     let conv = crate::conversation::standard::StandardConversation::new(
         "",
         false,
         verbatim_history,
-        compaction_dispatch,
+        backend,
         compaction_state,
+        compaction_model,
+        compaction_instructions,
+        local_model,
     );
 
     // ── Live usage tracker for failure persistence ─────
@@ -1494,6 +1491,29 @@ pub(crate) async fn append_chat_conversation_turn(
     persist_chat_conversation_turn(gremlin, turn, &existing).await;
 }
 
+/// Overwrite per-turn conversation artifacts from a compacted conversation.
+/// Writes the full compacted history as turn 0001 and clears turns 2+.
+pub(crate) async fn persist_compacted_conversation(
+    gremlin: &Gremlin,
+    messages: &[Message],
+) {
+    persist_chat_conversation_turn(gremlin, 1, messages).await;
+    // Clear subsequent turn artifacts so they don't double-count.
+    for turn in 2.. {
+        let uri_str = conversation_uri(turn);
+        let Ok(uri) = Uri::parse(&uri_str) else {
+            break;
+        };
+        // Check if the artifact exists; drop the error before the next await
+        // to keep the future Send (Box<dyn StdError> is !Send).
+        let exists = gremlin.state.content(&uri_str, None).await.is_ok();
+        if !exists {
+            break;
+        }
+        let _ = gremlin.state.write_into_registry(&uri, "[]").await;
+    }
+}
+
 /// Strip trailing messages left dangling by a mid-tool-call cancellation.
 pub(crate) fn strip_unpaired_tool_messages(messages: &mut Vec<Message>) {
     fn count_tool_calls(m: &Message) -> (bool, usize) {
@@ -1645,7 +1665,6 @@ mod tests {
             enclosing_model: None,
             discovered_skills: None,
             active_skills: None,
-            force_compact: Arc::new(AtomicBool::new(false)),
             extra_sandbox_roots: Vec::new(),
         };
         (sandbox, gremlin)
