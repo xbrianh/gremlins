@@ -1662,7 +1662,7 @@ mod tests {
         assert!((v["ci_lower"].as_f64().unwrap() - 0.70).abs() < 1e-12);
         assert!((v["ci_upper"].as_f64().unwrap() - 0.80).abs() < 1e-12);
 
-        // None CI fields serialize as null / absent.
+        // None CI fields are omitted entirely by skip_serializing_if.
         let node_no_ci = scoring::DragNode::Module {
             name: "no_ci".into(),
             file: "src/no_ci.rs".into(),
@@ -1676,9 +1676,10 @@ mod tests {
         let output_no_ci = DragNodeOutput::from(&node_no_ci);
         let json_no_ci = serde_json::to_string(&output_no_ci).unwrap();
         let v2: serde_json::Value = serde_json::from_str(&json_no_ci).unwrap();
-        assert_eq!(v2["comprehensibility"], serde_json::Value::Null);
-        assert_eq!(v2["ci_lower"], serde_json::Value::Null);
-        assert_eq!(v2["ci_upper"], serde_json::Value::Null);
+        let obj = v2.as_object().unwrap();
+        assert!(!obj.contains_key("comprehensibility"));
+        assert!(!obj.contains_key("ci_lower"));
+        assert!(!obj.contains_key("ci_upper"));
     }
 
     // ── cache tests ──
