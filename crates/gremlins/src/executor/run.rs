@@ -56,21 +56,24 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
 /// Default number of most-recent turns to keep verbatim during compaction.
 const DEFAULT_COMPACTION_KEEP_RECENT: usize = 10;
 
+/// Tuple returned by [`build_compaction_parts`]: backend, state, model,
+/// instructions, and optional local model.
+pub(crate) type CompactionParts = (
+    Arc<dyn Backend>,
+    CompactionState,
+    String,
+    Option<String>,
+    Option<crate::clients::model::GremlinsModel>,
+);
+
 /// Build the compaction parts needed by [`StandardConversation::new`].
-/// Returns backend, state, model, instructions, and optional local model.
 /// Returns `None` when compaction is disabled (threshold == 0 and not in chat
 /// mode — chat always returns parts so `/compact` can fire on demand).
 pub(crate) fn build_compaction_parts(
     client: &Client,
     model: String,
     is_chat: bool,
-) -> Option<(
-    Arc<dyn Backend>,
-    CompactionState,
-    String,
-    Option<String>,
-    Option<crate::clients::model::GremlinsModel>,
-)> {
+) -> Option<CompactionParts> {
     let backend = match client.get_or_build_backend() {
         Ok(b) => b,
         Err(e) => {
