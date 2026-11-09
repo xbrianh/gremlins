@@ -1227,22 +1227,6 @@ pub(crate) fn compaction_threshold_tokens() -> u64 {
         .unwrap_or(DEFAULT_COMPACTION_THRESHOLD_TOKENS)
 }
 
-/// Soft token trigger for chat conversation compaction. Default 64 000.
-/// 0 disables proactive compaction; the hard `max-prompt-bytes` ceiling still
-/// applies. Settings.yaml `compaction.threshold-tokens-chat` takes precedence
-/// over the env var.
-#[allow(dead_code)]
-pub(crate) fn compaction_threshold_tokens_chat() -> u64 {
-    get_global()
-        .map(|c| c.compaction_threshold_tokens_chat())
-        .or_else(|| {
-            std::env::var("GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-        })
-        .unwrap_or(DEFAULT_COMPACTION_THRESHOLD_TOKENS_CHAT)
-}
-
 /// Effective turn-level retry schedule from the global config, falling back
 /// to the in-code default when the global config is uninitialized.
 pub(crate) fn turn_retry_backoff() -> Vec<f64> {
@@ -2529,15 +2513,6 @@ model-profiles:
     }
 
     #[test]
-    fn test_compaction_threshold_tokens_chat_default() {
-        let _env = EnvGuard::lock();
-        assert_eq!(
-            compaction_threshold_tokens_chat(),
-            DEFAULT_COMPACTION_THRESHOLD_TOKENS_CHAT
-        );
-    }
-
-    #[test]
     fn test_compaction_threshold_tokens_from_env() {
         let mut env = EnvGuard::lock();
         env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS", "5000");
@@ -2545,24 +2520,10 @@ model-profiles:
     }
 
     #[test]
-    fn test_compaction_threshold_tokens_chat_from_env() {
-        let mut env = EnvGuard::lock();
-        env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT", "6000");
-        assert_eq!(compaction_threshold_tokens_chat(), 6000);
-    }
-
-    #[test]
     fn test_compaction_threshold_tokens_zero_from_env() {
         let mut env = EnvGuard::lock();
         env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS", "0");
         assert_eq!(compaction_threshold_tokens(), 0);
-    }
-
-    #[test]
-    fn test_compaction_threshold_tokens_chat_zero_from_env() {
-        let mut env = EnvGuard::lock();
-        env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS_CHAT", "0");
-        assert_eq!(compaction_threshold_tokens_chat(), 0);
     }
 
     #[test]

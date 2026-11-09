@@ -2157,12 +2157,16 @@ async fn handle_chat_model(_request: &Value, session: &SessionHandle) -> Value {
 /// parked chat gremlin so the next turn triggers compaction unconditionally.
 async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
     let s = session.lock().await;
-    let Some(gremlin) = s.chat_gremlins.values().next() else {
-        return error_response("no active chat session to compact");
+    // Pick the chat gremlin deterministically via chat_ids rather than
+    // the arbitrary .next() iteration order on chat_gremlins.
+    let id = match s.chat_ids.iter().next() {
+        Some(id) => id,
+        None => return error_response("no active chat session to compact"),
     };
-    gremlin
-        .force_compact
-        .store(true, std::sync::atomic::Ordering::Release);
+    let Some(gremlin) = s.chat_gremlins.get(id) else {
+        return error_response("active chat gremlin not found");
+    };
+    gremlin.force_compact.store(true, Ordering::Release);
     ok_response(serde_json::json!({"compacted": false, "queued": true}))
 }
 
@@ -4535,9 +4539,9 @@ fn validate_launch_inputs(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_usage_stats, create_chat_gremlin, handle_artifact, handle_chat_model, handle_launch,
-        handle_model, parallel_runtime_keys, resolve_chat_env, resolve_filepath_source_values,
-        usage_stats_from_state,
+        add_usage_stats, create_chat_gremlin, handle_artifact, handle_chat_model, handle_compact,
+        handle_launch, handle_model, parallel_runtime_keys, resolve_chat_env,
+        resolve_filepath_source_values, usage_stats_from_state,
     };
     use crate::clients::client::{Client, ModelURI};
     use crate::clients::interactive::InteractiveEvent;
@@ -6033,5 +6037,74 @@ model-profiles:
         assert_eq!(v["kind"], "text");
         assert_eq!(v["text"], "hi");
         assert_eq!(v["offset"], 3);
+    }
+
+    // ── handle_compact ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn handle_compact_empty_session_errors() {
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new("test-compact-empty".to_string()),
+        ));
+        let resp = handle_compact(&serde_json::Value::Null, &session).await;
+        assert_eq!(resp["type"], "error");
+        assert!(resp["message"]
+            .as_str()
+            .unwrap()
+            .contains("no active chat session"));
+    }
+
+    #[tokio::test]
+    async fn handle_compact_parked_gremlin_queues() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path().join("proj");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new("test-compact-parked".to_string()),
+        ));
+        let gremlin = create_chat_gremlin(
+            &model("cmd/echo"),
+            "helpful",
+            &project_root,
+            &HashMap::new(),
+        )
+        .unwrap();
+        let id = gremlin.id.to_string();
+        // Verify force starts false.
+        assert!(!gremlin
+            .force_compact
+            .load(std::sync::atomic::Ordering::Acquire));
+        {
+            let mut s = session.lock().await;
+            s.chat_ids.insert(id.clone());
+            s.chat_gremlins.insert(id.clone(), gremlin);
+        }
+        let resp = handle_compact(&serde_json::Value::Null, &session).await;
+        assert_eq!(resp["type"], "ok");
+        assert_eq!(resp["queued"], true);
+        // Force should now be set.
+        {
+            let s = session.lock().await;
+            let g = s.chat_gremlins.get(&id).unwrap();
+            assert!(g.force_compact.load(std::sync::atomic::Ordering::Acquire));
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_compact_id_in_ids_but_not_gremlins_errors() {
+        let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
+            super::ClientSession::new("test-compact-missing".to_string()),
+        ));
+        {
+            let mut s = session.lock().await;
+            s.chat_ids.insert("ghost-id".to_string());
+            // chat_gremlins intentionally left empty
+        }
+        let resp = handle_compact(&serde_json::Value::Null, &session).await;
+        assert_eq!(resp["type"], "error");
+        assert!(resp["message"]
+            .as_str()
+            .unwrap()
+            .contains("chat gremlin not found"));
     }
 }

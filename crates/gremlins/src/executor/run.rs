@@ -80,6 +80,7 @@ fn build_compaction_config(
         Ok(b) => b,
         Err(e) => {
             log::warn!("compaction: failed to build backend: {e}");
+            force_compact.store(false, std::sync::atomic::Ordering::Release);
             return None;
         }
     };
@@ -94,6 +95,7 @@ fn build_compaction_config(
 
     // For Threshold trigger, zero threshold means compaction is disabled.
     if matches!(trigger, CompactionTrigger::Threshold) && threshold == 0 {
+        force_compact.store(false, std::sync::atomic::Ordering::Release);
         return None;
     }
 
@@ -112,6 +114,7 @@ fn build_compaction_config(
                     "compaction: make_model failed for '{}'; disabling local compaction",
                     qualified
                 );
+                force_compact.store(false, std::sync::atomic::Ordering::Release);
                 return None;
             }
         }
