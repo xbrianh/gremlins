@@ -127,6 +127,7 @@ pub(crate) fn build_drag_tree(
     module_pkg: &HashMap<(String, String), String>,
     module_dir_segments: &HashMap<(String, String), Vec<String>>,
     dir_maints: &HashMap<String, f64>,
+    skipped_dirs: &HashSet<String>,
     pkg_name_for_key: &HashMap<String, String>,
     pkg_src_dirs: &HashMap<String, std::path::PathBuf>,
     p: f64,
@@ -185,6 +186,7 @@ pub(crate) fn build_drag_tree(
             "",
             pkg_display_name,
             dir_maints,
+            skipped_dirs,
             p,
             skip_maintainability,
             sep,
@@ -310,6 +312,7 @@ fn dir_trie_to_drag_node(
     rel_dir: &str,
     display_name: String,
     dir_maints: &HashMap<String, f64>,
+    skipped_dirs: &HashSet<String>,
     p: f64,
     skip_maintainability: bool,
     sep: &str,
@@ -322,7 +325,12 @@ fn dir_trie_to_drag_node(
     };
     let abs_dir_str = abs_dir.to_string_lossy().into_owned();
 
-    let (maint_score, maint_mult) = if skip_maintainability {
+    // Intentionally skipped intermediate directories (no direct source
+    // files, e.g. `pkg/a` when only `pkg/a/b/c.py` exists) are structural
+    // containers with no maintainability penalty.
+    let is_skipped = skipped_dirs.contains(&abs_dir_str);
+
+    let (maint_score, maint_mult) = if skip_maintainability || is_skipped {
         (None, 1.0)
     } else {
         let s = dir_maints.get(&abs_dir_str).copied().ok_or_else(|| {
@@ -378,6 +386,7 @@ fn dir_trie_to_drag_node(
                 &child_rel_path,
                 child_name,
                 dir_maints,
+                skipped_dirs,
                 p,
                 skip_maintainability,
                 sep,
@@ -690,6 +699,7 @@ mod tests {
         module_pkg: &HashMap<(String, String), String>,
         dir_segments: &HashMap<(String, String), Vec<String>>,
         dir_maints: &HashMap<String, f64>,
+        skipped_dirs: &HashSet<String>,
         pkg_names: &HashMap<String, String>,
         src_dirs: &HashMap<String, std::path::PathBuf>,
         p: f64,
@@ -700,6 +710,7 @@ mod tests {
             module_pkg,
             dir_segments,
             dir_maints,
+            skipped_dirs,
             pkg_names,
             src_dirs,
             p,
@@ -791,6 +802,7 @@ mod tests {
             &module_pkg,
             &dir_segments,
             &dir_maints,
+            &HashSet::new(),
             &pkg_names,
             &src_dirs,
             2.5,
@@ -829,6 +841,7 @@ mod tests {
             &module_pkg,
             &dir_segments,
             &dir_maints,
+            &HashSet::new(),
             &pkg_names,
             &src_dirs,
             2.5,
@@ -930,6 +943,7 @@ mod tests {
             &module_pkg,
             &dir_segments,
             &dir_maints,
+            &HashSet::new(),
             &pkg_names,
             &src_dirs,
             2.5,
@@ -983,6 +997,7 @@ mod tests {
             &module_pkg,
             &dir_segments,
             &dir_maints,
+            &HashSet::new(),
             &pkg_names,
             &src_dirs,
             2.5,
@@ -1077,6 +1092,7 @@ mod tests {
             &module_pkg,
             &dir_segments,
             &dir_maints,
+            &HashSet::new(),
             &pkg_names,
             &src_dirs,
             2.5,
@@ -1096,6 +1112,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashSet::new(),
             &HashMap::new(),
             &HashMap::new(),
             2.5,
@@ -1117,6 +1134,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashSet::new(),
             &HashMap::new(),
             &HashMap::new(),
             2.5,
@@ -1149,6 +1167,7 @@ mod tests {
             &module_pkg,
             &dir_segments,
             &dir_maints,
+            &HashSet::new(),
             &pkg_names,
             &src_dirs,
             2.5,
@@ -1199,6 +1218,7 @@ mod tests {
             &module_pkg,
             &dir_segments,
             &dir_maints,
+            &HashSet::new(),
             &pkg_names,
             &src_dirs,
             2.5,
@@ -1243,6 +1263,7 @@ mod tests {
             &module_pkg,
             &dir_segments,
             &dir_maints,
+            &HashSet::new(),
             &pkg_names,
             &src_dirs,
             2.5,
@@ -1262,5 +1283,87 @@ mod tests {
             err.contains("/pkg/src"),
             "error should mention the missing directory: {err}"
         );
+    }
+
+    #[test]
+    fn tree_skipped_intermediate_dir_is_container_not_error() {
+        // When `pkg/a` is enumerated in scoring_dirs but has no direct
+        // source files (all source lives in `pkg/a/b/`), the maint pass
+        // marks it in `skipped_dirs`.  The trie still contains a node for
+        // `a/` as an intermediate ancestor of `pkg::a::b::mod`, and
+        // `dir_trie_to_drag_node` must treat it as a structural container
+        // (no maint_score, no penalty) rather than erroring.
+        let src = std::path::PathBuf::from("/pkg");
+        let modules = vec![mdl("pkg.a.b.mod", "/pkg/a/b/mod.py", 10.0)];
+        let module_pkg = HashMap::from([(
+            ("pkg.a.b.mod".to_string(), "/pkg/a/b/mod.py".to_string()),
+            "pkg".to_string(),
+        )]);
+        let dir_segments = HashMap::from([(
+            ("pkg.a.b.mod".to_string(), "/pkg/a/b/mod.py".to_string()),
+            vec!["a".to_string(), "b".to_string()],
+        )]);
+        // Only /pkg and /pkg/a/b are scored; /pkg/a is intentionally skipped.
+        let dir_maints = HashMap::from([("/pkg".to_string(), 0.9), ("/pkg/a/b".to_string(), 0.7)]);
+        let skipped: HashSet<String> = ["/pkg/a".to_string()].into_iter().collect();
+        let pkg_names = HashMap::from([("pkg".to_string(), "pkg".to_string())]);
+        let src_dirs = HashMap::from([("pkg".to_string(), src)]);
+
+        let tree = build_rust_tree(
+            &modules,
+            &module_pkg,
+            &dir_segments,
+            &dir_maints,
+            &skipped,
+            &pkg_names,
+            &src_dirs,
+            2.5,
+            false,
+        );
+        assert!(
+            tree.is_ok(),
+            "skipped dir should not error: {:?}",
+            tree.err()
+        );
+
+        let tree = tree.unwrap();
+        // pkg container should have maint_score=Some(0.9)
+        if let DragNode::Container {
+            name,
+            maint_score,
+            children,
+            ..
+        } = &tree
+        {
+            assert_eq!(name, "pkg");
+            assert_eq!(*maint_score, Some(0.9));
+            // pkg::a should be a container with maint_score=None (skipped)
+            assert_eq!(children.len(), 1);
+            if let DragNode::Container {
+                name,
+                maint_score,
+                children,
+                ..
+            } = &children[0]
+            {
+                assert_eq!(name, "pkg.a");
+                assert_eq!(*maint_score, None);
+                // pkg::a::b should contain the module
+                assert_eq!(children.len(), 1);
+                if let DragNode::Container {
+                    name, maint_score, ..
+                } = &children[0]
+                {
+                    assert_eq!(name, "pkg.a.b");
+                    assert_eq!(*maint_score, Some(0.7));
+                } else {
+                    panic!("expected pkg.a.b container");
+                }
+            } else {
+                panic!("expected pkg.a container");
+            }
+        } else {
+            panic!("expected pkg container");
+        }
     }
 }
