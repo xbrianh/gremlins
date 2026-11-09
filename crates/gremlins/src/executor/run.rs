@@ -14,9 +14,8 @@ use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::{Client, ModelURI};
-use crate::clients::compaction::{
-    Compaction, CompactionConfig, CompactionStrategy, CompactionTrigger,
-};
+use crate::clients::compaction::{Compaction, CompactionStrategy};
+use crate::conversation::compaction::{CompactionState, CompactionTrigger};
 use crate::config;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
@@ -59,17 +58,18 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
 /// Default number of most-recent turns to keep verbatim during compaction.
 const DEFAULT_COMPACTION_KEEP_RECENT: usize = 10;
 
-/// Build a [`Compaction`] from the global config and the resolved backend.
+/// Build the [`Compaction`] dispatch and [`CompactionState`] pair from the
+/// global config and the resolved backend.
 /// Returns `None` when compaction is disabled (threshold == 0) and the trigger
 /// is [`CompactionTrigger::Threshold`] — for [`CompactionTrigger::Immediate`]
-/// (chat), a `Compaction` is always returned so the `/compact` force flag can
+/// (chat), a pair is always returned so the `/compact` force flag can
 /// fire on demand.
 fn build_compaction_config(
     client: &Client,
     model: String,
     is_chat: bool,
     force_compact: Arc<AtomicBool>,
-) -> Option<Compaction> {
+) -> Option<(Compaction, CompactionState)> {
     let trigger = if is_chat {
         CompactionTrigger::Immediate
     } else {
@@ -120,17 +120,21 @@ fn build_compaction_config(
         }
     };
 
-    Some(Compaction::new(CompactionConfig {
-        backend,
-        model,
-        threshold,
-        keep_recent: DEFAULT_COMPACTION_KEEP_RECENT,
-        instructions: None, // no custom instructions by default
-        strategy,
-        local_model,
-        force: force_compact,
-        trigger,
-    }))
+    Some((
+        Compaction::new(
+            backend,
+            model,
+            None, // no custom instructions by default
+            strategy,
+            local_model,
+        ),
+        CompactionState::new(
+            threshold,
+            DEFAULT_COMPACTION_KEEP_RECENT,
+            force_compact,
+            trigger,
+        ),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -616,7 +620,7 @@ async fn run_agent(
         None
     };
 
-    let compaction: Option<Compaction> = build_compaction_config(
+    let (compaction_dispatch, compaction_state) = match build_compaction_config(
         &client,
         prepared
             .model
@@ -624,12 +628,16 @@ async fn run_agent(
             .unwrap_or_else(|| client.model().to_string()),
         is_chat,
         gremlin.force_compact.clone(),
-    );
+    ) {
+        Some((dispatch, state)) => (Some(dispatch), Some(state)),
+        None => (None, None),
+    };
     let conv = crate::conversation::standard::StandardConversation::new(
         "",
         false,
         verbatim_history,
-        compaction,
+        compaction_dispatch,
+        compaction_state,
     );
 
     // ── Live usage tracker for failure persistence ─────
