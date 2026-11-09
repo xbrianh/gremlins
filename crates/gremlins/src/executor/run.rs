@@ -604,10 +604,9 @@ async fn run_agent(
                 .unwrap_or_else(|| client.model().to_string()),
             is_chat,
         )
-        .map_or(
-            (None, None, None, None, None),
-            |(b, s, m, i, l)| (Some(b), Some(s), Some(m), i, l),
-        );
+        .map_or((None, None, None, None, None), |(b, s, m, i, l)| {
+            (Some(b), Some(s), Some(m), i, l)
+        });
     let conv = crate::conversation::standard::StandardConversation::new(
         "",
         false,
@@ -1493,10 +1492,7 @@ pub(crate) async fn append_chat_conversation_turn(
 
 /// Overwrite per-turn conversation artifacts from a compacted conversation.
 /// Writes the full compacted history as turn 0001 and clears turns 2+.
-pub(crate) async fn persist_compacted_conversation(
-    gremlin: &Gremlin,
-    messages: &[Message],
-) {
+pub(crate) async fn persist_compacted_conversation(gremlin: &Gremlin, messages: &[Message]) {
     persist_chat_conversation_turn(gremlin, 1, messages).await;
     // Clear subsequent turn artifacts so they don't double-count.
     for turn in 2.. {

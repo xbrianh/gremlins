@@ -2172,8 +2172,7 @@ async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
     };
 
     // Load prior-turn message history.
-    let verbatim_history =
-        crate::executor::run::read_chat_conversation(gremlin, None).await;
+    let verbatim_history = crate::executor::run::read_chat_conversation(gremlin, None).await;
 
     // Build compaction parts.
     let parts = crate::executor::run::build_compaction_parts(
@@ -2202,7 +2201,7 @@ async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
     // to the default chat system prompt.
     let system_prompt = crate::clients::system_prompts::chat_system_prompt();
 
-    match conv.compact(Some(&system_prompt)).await {
+    match conv.compact(Some(system_prompt)).await {
         Ok(Some(report)) => {
             // Persist the compacted history back as turn 1, clear later turns.
             let messages = conv.messages();
@@ -2212,9 +2211,7 @@ async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
         Ok(None) => {
             ok_response(serde_json::json!({"compacted": false, "reason": "nothing to compact"}))
         }
-        Err(e) => {
-            error_response(&format!("compaction failed: {e}"))
-        }
+        Err(e) => error_response(&format!("compaction failed: {e}")),
     }
 }
 

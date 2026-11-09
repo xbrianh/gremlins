@@ -169,8 +169,7 @@ impl StandardConversation {
                 {
                     Ok(Some(result)) => {
                         if let Some(signed) = result.block {
-                            let mut new_history =
-                                Vec::with_capacity(1 + kept.len());
+                            let mut new_history = Vec::with_capacity(1 + kept.len());
                             new_history.push(compaction_block_as_message(&signed));
                             new_history.extend_from_slice(&kept);
                             self.history = new_history;
