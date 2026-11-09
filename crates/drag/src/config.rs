@@ -112,7 +112,7 @@ impl DragConfig {
                 merge_json_values(&mut merged, &external);
             }
             (None, Some(env_path)) => {
-                let content = std::fs::read_to_string(&env_path)
+                let content = std::fs::read_to_string(env_path)
                     .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: {}: {e}", env_path))?;
                 let external: serde_json::Value = serde_json5::from_str(&content)
                     .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: {}: {e}", env_path))?;
@@ -489,11 +489,9 @@ mod tests {
         let mut bundled: serde_json::Value =
             serde_json5::from_str(BUNDLED_CONFIG).expect("bundled must parse");
         let external: serde_json::Value =
-            serde_json5::from_str(r#"{"tokenizer": "cl100k_base"}"#)
-                .expect("external must parse");
+            serde_json5::from_str(r#"{"tokenizer": "cl100k_base"}"#).expect("external must parse");
         merge_json_values(&mut bundled, &external);
-        let config: DragConfig =
-            serde_json::from_value(bundled).expect("merged config must parse");
+        let config: DragConfig = serde_json::from_value(bundled).expect("merged config must parse");
         // External override wins.
         assert_eq!(config.tokenizer, "cl100k_base");
         // Bundled survey dimensions are preserved.
