@@ -2493,9 +2493,7 @@ model-profiles:
 
     #[test]
     fn test_compaction_threshold_tokens_from_settings_yaml() {
-        let _sandbox = Sandbox::with_config(Some(
-            r#"{"compaction": {"threshold-tokens": 12345}}"#,
-        ));
+        let _sandbox = Sandbox::with_config(Some(r#"{"compaction": {"threshold-tokens": 12345}}"#));
         let cfg = Config::load().unwrap();
         assert_eq!(cfg.compaction_threshold_tokens(), 12345);
     }
