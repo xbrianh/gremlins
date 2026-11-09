@@ -83,6 +83,8 @@ pub(crate) enum DragNode {
         token_count: usize,
         footprint: usize,
         comprehensibility: Option<f64>,
+        ci_lower: Option<f64>,
+        ci_upper: Option<f64>,
         drag: f64,
     },
     Container {
@@ -368,6 +370,8 @@ fn trie_to_drag_node(
                 token_count: m.token_count,
                 footprint: m.footprint,
                 comprehensibility: m.comprehensibility,
+                ci_lower: m.ci_lower,
+                ci_upper: m.ci_upper,
                 drag: m.drag,
             }
         })
@@ -580,6 +584,8 @@ mod tests {
             token_count: 100,
             footprint: 0,
             comprehensibility: Some(0.5),
+            ci_lower: Some(0.5),
+            ci_upper: Some(0.5),
             drag,
         }
     }
@@ -603,6 +609,8 @@ mod tests {
             token_count: 100,
             footprint: 0,
             comprehensibility: Some(0.5),
+            ci_lower: Some(0.5),
+            ci_upper: Some(0.5),
             drag,
         }
     }
