@@ -742,10 +742,9 @@ replayed verbatim for the whole run, so the only ceiling is the hard
 Exceeding it fails the request with `PromptTooLarge` rather than silently
 dropping earlier turns.
 
-The `compaction:` block in `settings.yaml` (`threshold-tokens`,
-`threshold-tokens-chat`) and the `GREMLINS_COMPACTION_THRESHOLD_TOKENS*` env
-vars are still parsed and accepted but have no effect; they are reserved for
-the replacement compaction design.
+The `compaction:` block in `settings.yaml` (`threshold-tokens`) and the
+`GREMLINS_COMPACTION_THRESHOLD_TOKENS` env var are still parsed and accepted
+but have no effect; they are reserved for the replacement compaction design.
 
 ### Model specifier syntax
 
