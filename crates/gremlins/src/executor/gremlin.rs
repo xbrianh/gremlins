@@ -29,6 +29,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -307,6 +308,9 @@ pub struct Gremlin {
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
     /// Active skill names — shared with LoadSkill tool and supervisor session.
     pub(crate) active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    /// One-shot force-compact signal set by the TUI `/compact` command.
+    /// The per-turn Compaction consumes and clears it via `should_compact()`.
+    pub(crate) force_compact: Arc<AtomicBool>,
 }
 
 impl Gremlin {
@@ -501,6 +505,7 @@ impl Gremlin {
             enclosing_model: None,
             discovered_skills: None,
             active_skills: None,
+            force_compact: Arc::new(AtomicBool::new(false)),
         };
 
         // 5. Create an empty log file.
@@ -624,6 +629,7 @@ impl Gremlin {
             enclosing_model: None,
             discovered_skills: None,
             active_skills: None,
+            force_compact: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -996,6 +1002,7 @@ impl Gremlin {
             enclosing_model: effective_model.cloned(),
             discovered_skills: None,
             active_skills: None,
+            force_compact: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -2195,6 +2202,7 @@ mod tests {
             enclosing_model: None,
             discovered_skills: None,
             active_skills: None,
+            force_compact: Arc::new(AtomicBool::new(false)),
         }
     }
 

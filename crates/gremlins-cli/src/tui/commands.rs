@@ -246,6 +246,10 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
             }
             Some(CommandResult::ActivateSkill(name.to_string()))
         }
+        "compact" => Some(CommandResult::SocketOp {
+            op: "compact".to_string(),
+            payload: serde_json::json!({"op": "compact"}),
+        }),
         _ => Some(CommandResult::Lines(vec![format!(
             "unknown command: /{cmd} — type /help for available commands"
         )])),
@@ -299,6 +303,7 @@ fn help_text() -> Vec<String> {
             .to_string(),
         "  /skills          — list available operator skills".to_string(),
         "  /skill <name>    — activate a skill for the chat session".to_string(),
+        "  /compact         — compact conversation history to reduce context usage".to_string(),
         "  /chat            — chat is always active (type directly)".to_string(),
         "  /clear, /new     — restart chat".to_string(),
         "  /help            — show this help".to_string(),
@@ -346,6 +351,7 @@ mod tests {
             "/model",
             "/skills",
             "/skill",
+            "/compact",
             "/chat",
             "/clear",
             "/new",

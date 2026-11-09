@@ -12,6 +12,7 @@
 //!
 //! There is no fallback chain. Server fails → error. Local fails → error.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use rig_core::completion::Message;
@@ -27,6 +28,16 @@ pub(crate) enum CompactionStrategy {
     Server,
     /// Local model-driven summarization.
     Local,
+}
+
+/// What triggers compaction for a conversation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompactionTrigger {
+    /// Auto-compaction fires when input tokens exceed the threshold.
+    Threshold,
+    /// No automatic trigger; only fires when the force flag is set
+    /// (via the `/compact` TUI command).
+    Immediate,
 }
 
 /// Compaction strategy, execution, and runtime state. Built once in
@@ -52,6 +63,12 @@ pub(crate) struct Compaction {
     /// Set after a compaction call fails or produces no summary. Prevents
     /// retrying the expensive API call on every subsequent turn.
     cooldown: bool,
+    /// One-shot flag: when `true`, `should_compact()` skips threshold and
+    /// cooldown checks, clears the flag, and runs compaction if there is
+    /// material to compact. Set by the TUI `/compact` command.
+    force: Arc<AtomicBool>,
+    /// What triggers compaction for this conversation.
+    trigger: CompactionTrigger,
 }
 
 impl Compaction {
@@ -63,6 +80,8 @@ impl Compaction {
         instructions: Option<String>,
         strategy: CompactionStrategy,
         local_model: Option<crate::clients::model::GremlinsModel>,
+        force: Arc<AtomicBool>,
+        trigger: CompactionTrigger,
     ) -> Self {
         Self {
             backend,
@@ -75,6 +94,8 @@ impl Compaction {
             block: None,
             applied: false,
             cooldown: false,
+            force,
+            trigger,
         }
     }
 
@@ -108,6 +129,16 @@ impl Compaction {
         last_input_tokens: Option<u64>,
         history: &[Message],
     ) -> bool {
+        // One-shot: operator forced this turn.
+        if self.force.load(Ordering::Acquire) {
+            self.force.store(false, Ordering::Release);
+            let cut = compaction_cut_index(history, self.keep_recent);
+            return cut > 0;
+        }
+        // Auto path — only active for Threshold trigger.
+        if matches!(self.trigger, CompactionTrigger::Immediate) {
+            return false;
+        }
         if self.cooldown {
             return false;
         }

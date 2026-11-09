@@ -56,6 +56,7 @@ this section — do not try to run them yourself.
 | `/watch` | show the running gremlins table; j/k/arrow keys select, `Ctrl+O` toggles an inline live log |
 | `/debug <id>` | open a full-screen interactive debug session |
 | `/model` / `/model <spec>` / `/model clear` | show, set, or clear the TUI chat model (`model://provider/model` or `provider/model`) |
+| `/compact` | compact conversation history to reduce context usage |
 | `/chat` | chat is always active (type directly) |
 | `/clear` / `/new` | restart chat |
 | `/help` | show this help |
@@ -97,6 +98,7 @@ to you. For run management, use the `gremlins` CLI through your Bash tool.
 | `/artifact <id> --list` / `/artifact <id> <uri>` | none — TUI-only |
 | `/watch` | none — TUI-only |
 | `/model` | none — TUI-only |
+| `/compact` | none — TUI-only |
 | `/chat` | none — TUI-only |
 | `/clear` / `/new` | none — TUI-only |
 | `/help` | none — TUI-only |

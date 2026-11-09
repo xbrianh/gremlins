@@ -1231,6 +1231,7 @@ pub(crate) fn compaction_threshold_tokens() -> u64 {
 /// 0 disables proactive compaction; the hard `max-prompt-bytes` ceiling still
 /// applies. Settings.yaml `compaction.threshold-tokens-chat` takes precedence
 /// over the env var.
+#[allow(dead_code)]
 pub(crate) fn compaction_threshold_tokens_chat() -> u64 {
     get_global()
         .map(|c| c.compaction_threshold_tokens_chat())

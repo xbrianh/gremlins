@@ -864,6 +864,11 @@ async fn handle_session_op(
             handle_cancel_chat(request, writer, session).await;
             SessionOp::Continue
         }
+        "compact" => {
+            let resp = handle_compact(request, session).await;
+            let _ = writer.write_json_line(&resp).await;
+            SessionOp::Continue
+        }
         "stop" => {
             let resp = handle_session_stop(request, session).await;
             let _ = writer.write_json_line(&resp).await;
@@ -2146,6 +2151,19 @@ async fn handle_chat_model(_request: &Value, session: &SessionHandle) -> Value {
         Some(model) => ok_response(serde_json::json!({ "model": model })),
         None => ok_response(serde_json::json!({ "model": Value::Null })),
     }
+}
+
+/// Handle the `/compact` TUI command: set the force-compact flag on the
+/// parked chat gremlin so the next turn triggers compaction unconditionally.
+async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
+    let s = session.lock().await;
+    let Some(gremlin) = s.chat_gremlins.values().next() else {
+        return error_response("no active chat session to compact");
+    };
+    gremlin
+        .force_compact
+        .store(true, std::sync::atomic::Ordering::Release);
+    ok_response(serde_json::json!({"compacted": false, "queued": true}))
 }
 
 // ---------------------------------------------------------------------------
@@ -3827,6 +3845,7 @@ fn create_chat_gremlin(
         enclosing_model: None,
         discovered_skills: None,
         active_skills: None,
+        force_compact: Arc::new(AtomicBool::new(false)),
     })
 }
 /// Resolve state store: live run-map handle, or persisted under `config::state_root()`.
