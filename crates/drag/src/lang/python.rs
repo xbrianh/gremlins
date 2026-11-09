@@ -354,6 +354,46 @@ pub(super) fn python_dependency_graph(
     Ok(raw.into_iter().map(|[src, dst]| (src, dst)).collect())
 }
 
+// ---------------------------------------------------------------------------
+// Directory segments (for filesystem trie)
+// ---------------------------------------------------------------------------
+
+/// Map a Python source file to its directory segments relative to the
+/// package's source root (`dir`). Returns the sequence of subdirectory
+/// names.
+///
+/// - `<dir>/__init__.py` → `[]` (package root)
+/// - `<dir>/core.py` → `[]` (package root child)
+/// - `<dir>/utils/helpers.py` → `["utils"]`
+/// - `<dir>/utils/__init__.py` → `["utils"]`
+/// - `<dir>/pkg/sub/mod.py` → `["pkg", "sub"]`
+pub(crate) fn file_to_python_dir_segments(file: &Path, pkg: &PythonPackage) -> Option<Vec<String>> {
+    let rel = file.strip_prefix(&pkg.dir).ok()?;
+    let rel_str = rel.to_string_lossy();
+
+    // Strip .py suffix.
+    let stripped = rel_str.strip_suffix(".py")?;
+
+    // For __init__.py, the file belongs to its containing directory.
+    // `<dir>/__init__.py` → empty (root)
+    // `<dir>/utils/__init__.py` → parent is `utils`
+    let dir_path = if stripped.ends_with("/__init__") {
+        Path::new(stripped.strip_suffix("/__init__").unwrap())
+    } else if stripped == "__init__" {
+        return Some(Vec::new());
+    } else {
+        Path::new(stripped).parent()?
+    };
+
+    let segments: Vec<String> = dir_path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty() && s != ".")
+        .collect();
+
+    Some(segments)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,6 +404,37 @@ mod tests {
             root_dir: root.to_path_buf(),
             dir: dir.to_path_buf(),
         })
+    }
+
+    #[test]
+    fn file_to_python_dir_segments_maps_files_and_dunders() {
+        let root = Path::new("src");
+        let dir = root.join("pkg");
+        let pkg = match py_pkg("pkg", root, &dir) {
+            crate::lang::PackageInfo::Python(p) => p,
+            _ => unreachable!(),
+        };
+
+        assert_eq!(
+            file_to_python_dir_segments(&dir.join("__init__.py"), &pkg),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            file_to_python_dir_segments(&dir.join("core.py"), &pkg),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            file_to_python_dir_segments(&dir.join("utils/helpers.py"), &pkg),
+            Some(vec!["utils".to_string()])
+        );
+        assert_eq!(
+            file_to_python_dir_segments(&dir.join("utils/__init__.py"), &pkg),
+            Some(vec!["utils".to_string()])
+        );
+        assert_eq!(
+            file_to_python_dir_segments(&dir.join("pkg/sub/mod.py"), &pkg),
+            Some(vec!["pkg".to_string(), "sub".to_string()])
+        );
     }
 
     #[test]

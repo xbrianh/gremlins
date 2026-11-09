@@ -449,13 +449,32 @@ async fn run() -> Result<(), String> {
         s.drag = compute_drag(config.weights.w2, config.weights.m, s.footprint, comp);
     }
 
-    // ── Package-level maintainability ──
+    // ── Directory-level maintainability ──
+    // Enumerate every directory under each scoring package's source tree
+    // that contains source files, then score each one.
     let maint_scores: HashMap<String, f64> = if !config.skip_maintainability {
-        maint::score_package_maintainability(
+        let scoring_dirs: Vec<PathBuf> = {
+            let mut dirs = Vec::new();
+            for pkg in &scoring_packages {
+                match lang::enumerate_source_dirs(pkg) {
+                    Ok(pkg_dirs) => dirs.extend(pkg_dirs),
+                    Err(e) => eprintln!(
+                        "gremlins-drag: directory enumeration skipped for {}: {e}",
+                        pkg.name()
+                    ),
+                }
+            }
+            // Deduplicate (shared roots possible across nested Python packages).
+            dirs.sort();
+            dirs.dedup();
+            dirs
+        };
+
+        maint::score_directory_maintainability(
             &model_spec,
             cli.verbose || config.verbose,
             config.estimates_per_survey,
-            &scoring_packages,
+            &scoring_dirs,
             cache_state.clone(),
             &config.maintainability,
             &maint_config_hash,
@@ -465,23 +484,43 @@ async fn run() -> Result<(), String> {
         HashMap::new()
     };
 
-    // Build module→pkg and pkg_key→pkg_name maps for tree construction.
+    // Build module→pkg, pkg_key→pkg_name, and per-module directory-segment maps.
     let module_pkg: HashMap<(String, String), String> = target_modules
         .iter()
         .map(|(m, f, pkg)| ((m.clone(), f.to_string_lossy().into_owned()), pkg.clone()))
         .collect();
+
+    let module_dir_segments: HashMap<(String, String), Vec<String>> = {
+        let mut map = HashMap::new();
+        for (m, f, pkg_key) in &target_modules {
+            if let Some(pkg) = scoring_packages.iter().find(|p| p.key() == *pkg_key) {
+                let file = PathBuf::from(f);
+                if let Some(segs) = lang::file_to_dir_segments(&file, pkg) {
+                    map.insert((m.clone(), f.to_string_lossy().into_owned()), segs);
+                }
+            }
+        }
+        map
+    };
 
     let pkg_names: HashMap<String, String> = scoring_packages
         .iter()
         .map(|p| (p.key(), p.name().to_string()))
         .collect();
 
+    let pkg_src_dirs: HashMap<String, PathBuf> = scoring_packages
+        .iter()
+        .map(|p| (p.key(), p.src_dir()))
+        .collect();
+
     // ── Build drag tree ──
     let tree = build_drag_tree(
         &scores,
         &module_pkg,
+        &module_dir_segments,
         &maint_scores,
         &pkg_names,
+        &pkg_src_dirs,
         config.weights.p,
         config.skip_maintainability,
     );
@@ -1201,7 +1240,10 @@ async fn run_comp_agent(
     // irrelevant — we just need an extant path.
     let cwd = std::env::current_dir().map_err(|e| CompAgentError::Fatal(format!("cwd: {e}")))?;
 
-    let config = GremlinConfig { ephemeral: true };
+    let config = GremlinConfig {
+        ephemeral: true,
+        ..Default::default()
+    };
     let mut gremlin = Gremlin::init(
         "drag-comp",
         &cwd,
@@ -1285,7 +1327,8 @@ fn print_explain(config: &DragConfig) {
     println!("  drag(m) = (1+footprint)^w2 · exp(m·(1−comprehensibility))");
     println!("  drag(C) = exp(p·(1−maint)) · Σ_{{direct modules}} drag(m) + Σ_{{child containers}} drag(C')");
     println!("  (each module pays exactly one maintainability penalty — from its");
-    println!("   immediate container; subtrees inherit the nearest package's maint score)\n");
+    println!("   immediate directory container; nesting is captured by summing");
+    println!("   child container drags up the tree, not by multiplying ancestors)\n");
     println!("  The total minimized is the root drag.\n");
     println!("  `footprint` is the token count of a module plus every module it");
     println!("  transitively reaches (including itself). Higher drag means the");
@@ -1333,7 +1376,7 @@ fn print_explain(config: &DragConfig) {
     println!("  depress the score directly.\n");
 
     let n_maint = config.maintainability.dimensions.len();
-    println!("## Package maintainability survey\n");
+    println!("## Directory maintainability survey\n");
     if !config.maintainability.preamble.is_empty() {
         println!("### Preamble\n");
         for line in config.maintainability.preamble.lines() {
@@ -1341,12 +1384,13 @@ fn print_explain(config: &DragConfig) {
         }
         println!();
     }
-    println!("  Package maintainability is scored on {n_maint} dimensions, each 0–4,");
+    println!("  Directory maintainability is scored on {n_maint} dimensions, each 0–4,");
     println!(
-        "  normalized over {} points ({n_maint}×4). Only computed when packages are",
+        "  normalized over {} points ({n_maint}×4). Every directory containing",
         n_maint * 4
     );
-    println!("  present and skip_maintainability is not set.\n");
+    println!("  source files (including package roots and single-file directories)");
+    println!("  carries its own score, computed only when skip_maintainability is unset.\n");
     for (i, dim) in config.maintainability.dimensions.iter().enumerate() {
         println!("  {}. {}", i + 1, dim.description);
         if !dim.anchors.is_empty() {
@@ -1378,7 +1422,7 @@ fn print_explain(config: &DragConfig) {
 
     println!("\n  All factors are multiplied together; larger values mean more drag.");
     println!("  Comprehensibility below 1.0 amplifies drag by up to exp(m).");
-    println!("  Maintainability below 1.0 amplifies package drag by up to exp(p).");
+    println!("  Maintainability below 1.0 amplifies directory drag by up to exp(p).");
 }
 
 // ---------------------------------------------------------------------------
@@ -1388,22 +1432,52 @@ fn print_explain(config: &DragConfig) {
 fn print_human_table(tree: &DragNode, skip_maint: bool) {
     // Only show the "comp" column when EVERY module has a score.
     let has_comp = tree_has_comp(tree);
+    let has_maint = !skip_maint && tree_has_maint(tree);
 
-    if has_comp {
-        println!(
-            "{:<55} {:>8} {:>10} {:>6} {:>14}",
-            "module", "tokens", "footprint", "comp", "drag"
-        );
-        println!("{}", "-".repeat(97));
-    } else {
-        println!(
-            "{:<55} {:>8} {:>10} {:>14}",
-            "module", "tokens", "footprint", "drag"
-        );
-        println!("{}", "-".repeat(90));
+    match (has_comp, has_maint) {
+        (true, true) => {
+            println!(
+                "{:<55} {:>8} {:>10} {:>6} {:>6} {:>14}",
+                "module", "tokens", "footprint", "comp", "maint", "drag"
+            );
+            println!("{}", "-".repeat(104));
+        }
+        (true, false) => {
+            println!(
+                "{:<55} {:>8} {:>10} {:>6} {:>14}",
+                "module", "tokens", "footprint", "comp", "drag"
+            );
+            println!("{}", "-".repeat(97));
+        }
+        (false, true) => {
+            println!(
+                "{:<55} {:>8} {:>10} {:>6} {:>14}",
+                "module", "tokens", "footprint", "maint", "drag"
+            );
+            println!("{}", "-".repeat(97));
+        }
+        (false, false) => {
+            println!(
+                "{:<55} {:>8} {:>10} {:>14}",
+                "module", "tokens", "footprint", "drag"
+            );
+            println!("{}", "-".repeat(90));
+        }
     }
 
-    print_node(tree, 0, has_comp, skip_maint);
+    print_node(tree, 0, has_comp, has_maint);
+}
+
+/// Check whether any container in the tree has a maintainability score.
+fn tree_has_maint(node: &DragNode) -> bool {
+    match node {
+        DragNode::Module { .. } => false,
+        DragNode::Container {
+            maint_score,
+            children,
+            ..
+        } => maint_score.is_some() || children.iter().any(tree_has_maint),
+    }
 }
 
 /// Check whether every module in the tree has a comprehensibility score.
@@ -1417,7 +1491,7 @@ fn tree_has_comp(node: &DragNode) -> bool {
 }
 
 /// Recursively print a drag tree node with indentation.
-fn print_node(node: &DragNode, depth: usize, has_comp: bool, _skip_maint: bool) {
+fn print_node(node: &DragNode, depth: usize, has_comp: bool, has_maint: bool) {
     let indent = "  ".repeat(depth);
 
     match node {
@@ -1431,58 +1505,112 @@ fn print_node(node: &DragNode, depth: usize, has_comp: bool, _skip_maint: bool) 
         } => {
             // elide the common package prefix for display brevity
             let display = truncate(name, (54usize).saturating_sub(depth * 2));
-            if has_comp {
-                let c = comprehensibility.expect("has_comp guarantees Some");
-                println!(
-                    "{indent}{:<w$} {:>8} {:>10} {:>6.2} {:>14.1}",
-                    display,
-                    token_count,
-                    footprint,
-                    c,
-                    drag,
-                    w = (55usize).saturating_sub(depth * 2),
-                );
-            } else {
-                println!(
-                    "{indent}{:<w$} {:>8} {:>10} {:>14.1}",
-                    display,
-                    token_count,
-                    footprint,
-                    drag,
-                    w = (55usize).saturating_sub(depth * 2),
-                );
+            let w = (55usize).saturating_sub(depth * 2);
+            match (has_comp, has_maint) {
+                (true, true) => {
+                    let c = comprehensibility.expect("has_comp guarantees Some");
+                    println!(
+                        "{indent}{:<w$} {:>8} {:>10} {:>6.2} {:>6} {:>14.1}",
+                        display,
+                        token_count,
+                        footprint,
+                        c,
+                        "",
+                        drag,
+                        w = w,
+                    );
+                }
+                (true, false) => {
+                    let c = comprehensibility.expect("has_comp guarantees Some");
+                    println!(
+                        "{indent}{:<w$} {:>8} {:>10} {:>6.2} {:>14.1}",
+                        display,
+                        token_count,
+                        footprint,
+                        c,
+                        drag,
+                        w = w,
+                    );
+                }
+                (false, true) => {
+                    println!(
+                        "{indent}{:<w$} {:>8} {:>10} {:>6} {:>14.1}",
+                        display,
+                        token_count,
+                        footprint,
+                        "",
+                        drag,
+                        w = w,
+                    );
+                }
+                (false, false) => {
+                    println!(
+                        "{indent}{:<w$} {:>8} {:>10} {:>14.1}",
+                        display,
+                        token_count,
+                        footprint,
+                        drag,
+                        w = w,
+                    );
+                }
             }
         }
         DragNode::Container {
             name,
+            maint_score,
             drag,
             children,
-            ..
         } => {
             // Print container header (skip nameless workspace root).
             if !name.is_empty() {
                 let display = truncate(name, (54usize).saturating_sub(depth * 2));
                 let w = (55usize).saturating_sub(depth * 2);
-                // Match module column count: 5 cols when has_comp, 4 otherwise.
-                if has_comp {
-                    println!(
-                        "{indent}{:<w$} {:>8} {:>10} {:>6} {:>14.1}",
-                        display,
-                        "",
-                        "",
-                        "",
-                        drag,
-                        w = w,
-                    );
-                } else {
-                    println!(
-                        "{indent}{:<w$} {:>8} {:>10} {:>14.1}",
-                        display,
-                        "",
-                        "",
-                        drag,
-                        w = w,
-                    );
+                let maint = maint_score.map(|s| format!("{s:.2}"));
+                match (has_comp, has_maint) {
+                    (true, true) => {
+                        println!(
+                            "{indent}{:<w$} {:>8} {:>10} {:>6} {:>6} {:>14.1}",
+                            display,
+                            "",
+                            "",
+                            "",
+                            maint.as_deref().unwrap_or(""),
+                            drag,
+                            w = w,
+                        );
+                    }
+                    (true, false) => {
+                        println!(
+                            "{indent}{:<w$} {:>8} {:>10} {:>6} {:>14.1}",
+                            display,
+                            "",
+                            "",
+                            "",
+                            drag,
+                            w = w,
+                        );
+                    }
+                    (false, true) => {
+                        println!(
+                            "{indent}{:<w$} {:>8} {:>10} {:>6} {:>14.1}",
+                            display,
+                            "",
+                            "",
+                            maint.as_deref().unwrap_or(""),
+                            drag,
+                            w = w,
+                        );
+                    }
+                    (false, false) => {
+                        println!(
+                            "{indent}{:<w$} {:>8} {:>10} {:>14.1}",
+                            display,
+                            "",
+                            "",
+                            drag,
+                            w = w,
+                        );
+                    }
                 }
             }
 
@@ -1491,7 +1619,7 @@ fn print_node(node: &DragNode, depth: usize, has_comp: bool, _skip_maint: bool) 
                     child,
                     if name.is_empty() { depth } else { depth + 1 },
                     has_comp,
-                    _skip_maint,
+                    has_maint,
                 );
             }
         }
