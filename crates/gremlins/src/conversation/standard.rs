@@ -14,17 +14,13 @@
 //!
 //! ## Compaction
 //!
-//! `StandardConversation` carries a [`CompactionState`] and the raw parts
-//! needed to dispatch compaction: a backend, model, instructions, and an
-//! optional local model. On each turn `render_turn` checks whether input
-//! tokens exceed a threshold and triggers compaction. The oldest turns are
-//! replaced with a signed compaction block (server) or a plain summary
-//! message (local); the most recent `keep_recent` user+assistant pairs are
-//! preserved verbatim.
-//!
-//! The public [`StandardConversation::compact`] method is the single dispatch
-//! site — both auto-compaction (`render_turn`) and on-demand compaction
-//! (`/compact` TUI command) go through it.
+//! [`StandardConversation::compact`] is an on-demand method that takes
+//! its compaction plumbing (backend, model, instructions) as parameters
+//! and replaces the oldest history messages with a signed compaction
+//! block (server) or a plain summary (local). The most recent
+//! `KEEP_RECENT` user+assistant pairs are preserved verbatim.
+//! It is called by the `/compact` TUI command handler; there is no
+//! automatic compaction.
 
 use async_trait::async_trait;
 use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
@@ -37,10 +33,12 @@ use crate::clients::conversation::{Conversation, RunArtifact, TurnScript};
 use crate::clients::done_helpers::done_user_message;
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
-use crate::clients::model::GremlinsModel;
 use crate::conversation::compaction::{
-    compaction_cut_index, CompactionReport, CompactionState, CompactionStrategy,
+    compaction_cut_index, CompactionReport, CompactionStrategy,
 };
+
+/// Default number of most-recent turns to keep verbatim during compaction.
+const KEEP_RECENT: usize = 10;
 
 /// The standard [`Conversation`] implementation.
 pub(crate) struct StandardConversation {
@@ -70,31 +68,13 @@ pub(crate) struct StandardConversation {
     /// Once set, [`Conversation::messages`] returns this final transcript so
     /// persistence consumers see the exact durable message list.
     finalized_messages: Option<Vec<Message>>,
-    /// Backend for server-side compaction.
-    backend: Option<Arc<dyn Backend>>,
-    /// Model spec for server-side compaction.
-    compaction_model: Option<String>,
-    /// Custom compaction instructions.
-    compaction_instructions: Option<String>,
-    /// Pre-built model for local compaction fallback.
-    local_model: Option<GremlinsModel>,
-    /// Compaction orchestration state (`None` → compaction disabled).
-    compaction_state: Option<CompactionState>,
-    /// The `input_tokens` count from the most recent API response.
-    last_input_tokens: Option<u64>,
 }
 
 impl StandardConversation {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         prompt: &str,
         preserve_reasoning: bool,
         prepopulated_messages: Option<Vec<Message>>,
-        backend: Option<Arc<dyn Backend>>,
-        compaction_state: Option<CompactionState>,
-        compaction_model: Option<String>,
-        compaction_instructions: Option<String>,
-        local_model: Option<GremlinsModel>,
     ) -> Self {
         let history = prepopulated_messages.unwrap_or_default();
         Self {
@@ -106,12 +86,6 @@ impl StandardConversation {
             preserve_reasoning_in_history: preserve_reasoning,
             last_text: String::new(),
             finalized_messages: None,
-            backend,
-            compaction_model,
-            compaction_instructions,
-            local_model,
-            compaction_state,
-            last_input_tokens: None,
         }
     }
 
@@ -129,14 +103,6 @@ impl StandardConversation {
         self.findings_ledger.feed(text);
     }
 
-    /// Decide whether to trigger auto-compaction on this turn.
-    fn should_compact_auto(&self) -> bool {
-        let Some(state) = &self.compaction_state else {
-            return false;
-        };
-        state.should_compact(self.last_input_tokens, &self.history)
-    }
-
     /// The committed durable transcript only — excludes the unsubmitted
     /// pending prompt that [`messages`](Self::messages) appends. Persistence
     /// callers (e.g. the `/compact` handler) want exactly what was committed,
@@ -146,72 +112,63 @@ impl StandardConversation {
     }
 
     /// Run compaction on the current history. Called by the `/compact` TUI
-    /// command handler and by the auto-compaction path in `render_turn`.
-    /// Returns `None` when there is nothing to compact or every path fails.
+    /// command handler.
+    ///
+    /// Takes all compaction plumbing as parameters — the conversation does
+    /// not store any compaction state. Returns `None` when there is nothing
+    /// to compact or every path fails.
     pub(crate) async fn compact(
         &mut self,
+        backend: &Arc<dyn Backend>,
+        model: &str,
+        instructions: Option<&str>,
         system_prompt: Option<&str>,
     ) -> Option<CompactionReport> {
-        let state = match &self.compaction_state {
-            Some(s) => s,
-            None => return None,
-        };
-        let cut = compaction_cut_index(&self.history, state.keep_recent());
+        let cut = compaction_cut_index(&self.history, KEEP_RECENT);
         if cut == 0 {
             return None;
         }
         let kept = self.history[cut..].to_vec();
         let to_compact = self.history[..cut].to_vec();
 
-        // ── Try server compaction ──
-        if let Some(backend) = &self.backend {
-            if let Some(model) = &self.compaction_model {
-                if backend.supports_compaction() {
-                    match backend
-                        .compact(
-                            &to_compact,
-                            system_prompt,
-                            self.compaction_instructions.as_deref(),
-                            model,
-                        )
-                        .await
-                    {
-                        Ok(Some(result)) => {
-                            if let Some(signed) = result.block {
-                                let mut new_history = Vec::with_capacity(1 + kept.len());
-                                new_history.push(compaction_block_as_message(&signed));
-                                new_history.extend_from_slice(&kept);
-                                self.history = new_history;
-                                self.last_input_tokens = Some(0);
-                                return Some(CompactionReport {
-                                    strategy: CompactionStrategy::Server,
-                                    messages_compacted: to_compact.len(),
-                                    messages_kept: kept.len(),
-                                    compaction_input_tokens: result.input_tokens,
-                                    compaction_output_tokens: result.output_tokens,
-                                    compaction_block: Some(signed),
-                                });
-                            }
-                        }
-                        Ok(None) => {
-                            log::warn!(
-                                "Server compaction returned Ok(None); falling back to local"
-                            );
-                        }
-                        Err(e) => {
-                            log::warn!("Server compaction failed: {e}; falling back to local");
-                        }
-                    }
+        // ── Server-side compaction ──
+        if backend.supports_compaction() {
+            let result = backend
+                .compact(&to_compact, system_prompt, instructions, model)
+                .await;
+            match result {
+                Ok(Some(r)) if r.block.is_some() => {
+                    let signed = r.block.unwrap();
+                    let mut new_history = Vec::with_capacity(1 + kept.len());
+                    new_history.push(compaction_block_as_message(&signed));
+                    new_history.extend_from_slice(&kept);
+                    self.history = new_history;
+                    return Some(CompactionReport {
+                        strategy: CompactionStrategy::Server,
+                        messages_compacted: to_compact.len(),
+                        messages_kept: kept.len(),
+                        compaction_input_tokens: r.input_tokens,
+                        compaction_output_tokens: r.output_tokens,
+                        compaction_block: Some(signed),
+                    });
+                }
+                Ok(_) => {
+                    log::error!("Server compaction returned no block; compaction failed");
+                    return None;
+                }
+                Err(e) => {
+                    log::error!("Server compaction failed: {e}");
+                    return None;
                 }
             }
         }
 
-        // ── Fall back to local ──
-        if let Some(model) = &self.local_model {
+        // ── Local compaction ──
+        if let Some(local) = backend.make_model(model) {
             match crate::conversation::compaction::compact_local_with_retry(
-                model,
+                &local,
                 &to_compact,
-                self.compaction_instructions.as_deref(),
+                instructions,
                 system_prompt,
             )
             .await
@@ -221,7 +178,6 @@ impl StandardConversation {
                     new_history.push(summary_msg);
                     new_history.extend_from_slice(&kept);
                     self.history = new_history;
-                    self.last_input_tokens = Some(0);
                     return Some(CompactionReport {
                         strategy: CompactionStrategy::Local,
                         messages_compacted: to_compact.len(),
@@ -231,8 +187,10 @@ impl StandardConversation {
                         compaction_block: None,
                     });
                 }
-                None => { /* nothing — fall through to None */ }
+                None => { /* fall through */ }
             }
+        } else {
+            log::error!("Local compaction unavailable: make_model failed for '{model}'");
         }
 
         None
@@ -251,12 +209,6 @@ impl Conversation for StandardConversation {
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: self.last_text.clone(),
             finalized_messages: self.finalized_messages.clone(),
-            backend: self.backend.clone(),
-            compaction_model: self.compaction_model.clone(),
-            compaction_instructions: self.compaction_instructions.clone(),
-            local_model: self.local_model.clone(),
-            compaction_state: self.compaction_state.clone(),
-            last_input_tokens: self.last_input_tokens,
         })
     }
 
@@ -264,26 +216,15 @@ impl Conversation for StandardConversation {
         self.feed_text(text);
     }
 
-    fn record_input_tokens(&mut self, input_tokens: Option<u64>) {
-        if input_tokens.is_some() {
-            self.last_input_tokens = input_tokens;
-        }
-    }
-
     fn record_turn(
         &mut self,
         text: &str,
         reasoning_items: &[Sealed<Reasoning>],
         tool_calls: &[ToolCall],
-        input_tokens: Option<u64>,
+        _input_tokens: Option<u64>,
     ) {
         // record_prose already fed the findings ledger and updated last_text;
         // do NOT call feed_text here to avoid double-counting findings.
-
-        // Record the API-reported input token count for compaction decisions.
-        if input_tokens.is_some() {
-            self.last_input_tokens = input_tokens;
-        }
 
         // Commit the exact rendered user prompt (with findings
         // prefixes) so the transcript matches what the model saw.
@@ -322,27 +263,6 @@ impl Conversation for StandardConversation {
     }
 
     async fn render_turn(&mut self, nested: bool, system_prompt: Option<String>) -> TurnScript {
-        // Phase 0: auto-compaction (main loop only; not in nested/fork contexts)
-        if !nested && self.should_compact_auto() {
-            if let Some(report) = self.compact(system_prompt.as_deref()).await {
-                // Update orchestration state — pass the signed block through
-                // so CompactionState.block preserves the server-vs-local invariant.
-                if let Some(state) = self.compaction_state.as_mut() {
-                    state.mark_applied(report.compaction_block.clone());
-                }
-                log::info!(
-                    "Compaction applied: {} messages → block + {} (strategy={:?}, cost: {:?} in, {:?} out)",
-                    report.messages_compacted,
-                    report.messages_kept,
-                    report.strategy,
-                    report.compaction_input_tokens,
-                    report.compaction_output_tokens,
-                );
-            } else if let Some(state) = self.compaction_state.as_mut() {
-                state.set_cooldown();
-            }
-        }
-
         let combined_system = system_prompt;
 
         let next_user_prompt = if nested {
@@ -487,12 +407,6 @@ impl Conversation for StandardConversation {
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: String::new(),
             finalized_messages: None,
-            backend: self.backend.clone(),
-            compaction_model: self.compaction_model.clone(),
-            compaction_instructions: self.compaction_instructions.clone(),
-            local_model: self.local_model.clone(),
-            compaction_state: self.compaction_state.clone(),
-            last_input_tokens: self.last_input_tokens,
         })
     }
 
@@ -501,11 +415,6 @@ impl Conversation for StandardConversation {
             prompt,
             self.preserve_reasoning_in_history,
             None,
-            self.backend.clone(),
-            self.compaction_state.clone(),
-            self.compaction_model.clone(),
-            self.compaction_instructions.clone(),
-            self.local_model.clone(),
         ))
     }
 
@@ -592,13 +501,6 @@ impl Conversation for StandardConversation {
             all.push(self.next_prompt.clone());
         }
         all
-    }
-
-    fn has_signed_compaction_block(&self) -> bool {
-        self.compaction_state
-            .as_ref()
-            .and_then(|c| c.block())
-            .is_some()
     }
 }
 

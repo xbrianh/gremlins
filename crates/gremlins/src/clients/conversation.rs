@@ -35,11 +35,6 @@ pub(crate) trait Conversation: Send + Sync {
     /// classification decides whether to record or reject the turn).
     fn record_prose(&mut self, text: &str);
 
-    /// Record the API-reported input token count for this turn.
-    /// Called immediately after every response so compaction decisions see
-    /// the latest usage even when the turn continues before `record_turn`.
-    fn record_input_tokens(&mut self, _input_tokens: Option<u64>) {}
-
     /// Record the assistant turn (text, reasoning, tool calls) into history.
     /// The findings ledger is already fed by a prior `record_prose` call, so
     /// this method should NOT re-feed the ledger — it only commits the message.
@@ -115,15 +110,6 @@ pub(crate) trait Conversation: Send + Sync {
     /// conversations built from raw messages (chat continuation) inherit the
     /// run's actual preserve-reasoning setting rather than a hardcoded `false`.
     fn set_preserve_reasoning(&mut self, _preserve: bool) {}
-
-    /// True when a server-issued signed compaction block is active.
-    /// The agent loop attaches the `compact-2026-09-04` beta header
-    /// unconditionally at client construction; this method is available
-    /// for future conditional attachment or diagnostic use.
-    #[allow(dead_code)]
-    fn has_signed_compaction_block(&self) -> bool {
-        false
-    }
 
     /// Compact digest of the Read/Grep evidence still present in the durable
     /// transcript. Fan-out tools fold this into the parent's tool result so a
@@ -480,9 +466,5 @@ impl Conversation for ConversationStub {
 
     fn set_preserve_reasoning(&mut self, preserve: bool) {
         self.preserve_reasoning = preserve;
-    }
-
-    fn has_signed_compaction_block(&self) -> bool {
-        false
     }
 }

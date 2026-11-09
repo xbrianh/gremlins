@@ -2208,13 +2208,6 @@ pub(crate) async fn run_agent_loop_core(
             ended,
         );
 
-        // Record input token count immediately so compaction decisions see
-        // the latest usage even when this turn continues through
-        // reasoning-only, reminder, nudge, or Done-rejected paths.
-        state
-            .conv
-            .record_input_tokens(turn_usage.as_ref().and_then(|u| u.input_tokens));
-
         let turn_stats = turn_stats(state.turn_num, turn_usage.as_ref());
         let totals = state.fold_turn_usage(turn_usage.as_ref());
 
