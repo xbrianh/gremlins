@@ -591,10 +591,6 @@ fn compute_dir_cache_key(
     let files = crate::lang::collect_source_files(dir)
         .map_err(|e| format!("failed to collect source files in {}: {e}", dir.display()))?;
 
-    if files.is_empty() {
-        return Err(format!("no source files found in {}", dir.display()));
-    }
-
     // Per-file hashes, sorted by relative path for determinism.
     let mut file_hashes: Vec<(String, String)> = Vec::with_capacity(files.len());
     for f in &files {
@@ -770,6 +766,18 @@ mod tests {
             None,
             "directories with only nested source files should produce an empty manifest"
         );
+    }
+
+    // ── compute_dir_cache_key ──
+
+    #[test]
+    fn compute_dir_cache_key_no_source_files_succeeds() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+
+        let key = compute_dir_cache_key(tmp.path(), 2, "config-hash")
+            .expect("empty directory should produce a valid cache key");
+
+        assert!(!key.is_empty(), "cache key should not be empty: {key}");
     }
 
     // ── validate_maint_scores ──
