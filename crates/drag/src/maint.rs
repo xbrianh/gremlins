@@ -122,7 +122,18 @@ pub(crate) async fn score_directory_maintainability(
             .unwrap_or_else(|| dir_str.clone());
 
         // Build the directory source manifest for the agent to explore.
-        let manifest = build_dir_manifest(dir)?;
+        // A directory whose source files are all in nested subdirectories
+        // (i.e. no direct children) is legitimate — `enumerate_source_dirs`
+        // includes every intermediate ancestor. Skip it gracefully rather
+        // than erroring.
+        let manifest = match build_dir_manifest(dir) {
+            Ok(Some(m)) => m,
+            Ok(None) => {
+                eprintln!("  [{dir_name}] skipping: no direct source files");
+                continue;
+            }
+            Err(e) => return Err(format!("[{dir_name}] {e}")),
+        };
 
         // Cache key: dir_path + hash of all source file contents + estimates.
         let cache_key = compute_dir_cache_key(dir, estimates, config_hash)
@@ -331,16 +342,27 @@ pub(crate) async fn score_directory_maintainability(
 // ---------------------------------------------------------------------------
 
 /// Build a manifest string listing the directory path and sorted relative
-/// file paths for every recognized source file under it.
+/// file paths for every recognized source file directly under it.
 ///
 /// The agent is expected to use its tools (Landscape, Read, Grep, Glob) to
 /// explore these files — full source is not embedded in the prompt.
-fn build_dir_manifest(dir: &Path) -> Result<String, String> {
-    let files = crate::lang::collect_source_files(dir)
-        .map_err(|e| format!("failed to collect source files in {}: {e}", dir.display()))?;
+///
+/// Returns `Ok(None)` when the directory has no direct source files (they
+/// may all live in nested subdirectories, which are scored independently).
+/// Collection failures are returned as `Err` so callers can propagate them.
+fn build_dir_manifest(dir: &Path) -> Result<Option<String>, String> {
+    // `collect_source_files` recurses into subdirectories, but each nested
+    // directory is scored independently. Keep only files whose immediate
+    // parent is `dir` so the manifest doesn't leak subdirectory files into
+    // this directory's score.
+    let files: Vec<_> = crate::lang::collect_source_files(dir)
+        .map_err(|e| format!("failed to collect source files in {}: {e}", dir.display()))?
+        .into_iter()
+        .filter(|f| f.parent() == Some(dir))
+        .collect();
 
     if files.is_empty() {
-        return Err(format!("no source files found in {}", dir.display()));
+        return Ok(None);
     }
 
     // Sort for deterministic output.
@@ -354,7 +376,7 @@ fn build_dir_manifest(dir: &Path) -> Result<String, String> {
     }
     manifest.push_str(&format!("\n({} source files total)\n", files.len()));
 
-    Ok(manifest)
+    Ok(Some(manifest))
 }
 
 // ---------------------------------------------------------------------------
@@ -560,7 +582,7 @@ fn compute_dir_cache_key(
     file_hashes.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"v7\0");
+    hasher.update(b"v8\0");
     hasher.update(dir.to_string_lossy().as_bytes());
     hasher.update(b"\0");
     for (path, hash) in &file_hashes {
@@ -682,6 +704,43 @@ mod tests {
         let score = compute_maint_score_from_map(&dims);
         // sum=5, max=8 → 0.625
         assert!((score - 0.625).abs() < 1e-10);
+    }
+
+    // ── build_dir_manifest ──
+
+    #[test]
+    fn build_dir_manifest_excludes_nested_files() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        std::fs::create_dir(tmp.path().join("sub")).expect("create sub");
+        std::fs::write(tmp.path().join("a.rs"), "fn a() {}").expect("write a.rs");
+        std::fs::write(tmp.path().join("sub/b.rs"), "fn b() {}").expect("write b.rs");
+
+        let manifest = build_dir_manifest(tmp.path())
+            .expect("manifest")
+            .expect("direct files");
+
+        assert!(
+            manifest.contains("a.rs"),
+            "manifest should list a.rs: {manifest}"
+        );
+        assert!(
+            !manifest.contains("b.rs"),
+            "manifest should not list nested b.rs: {manifest}"
+        );
+    }
+
+    #[test]
+    fn build_dir_manifest_only_nested_files_is_empty() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        std::fs::create_dir(tmp.path().join("sub")).expect("create sub");
+        std::fs::write(tmp.path().join("sub/b.rs"), "fn b() {}").expect("write b.rs");
+
+        let result = build_dir_manifest(tmp.path());
+        assert_eq!(
+            result.expect("collection should succeed"),
+            None,
+            "directories with only nested source files should produce an empty manifest"
+        );
     }
 
     // ── validate_maint_scores ──
