@@ -127,11 +127,12 @@ pub(crate) async fn score_directory_maintainability(
         // includes every intermediate ancestor. Skip it gracefully rather
         // than erroring.
         let manifest = match build_dir_manifest(dir) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("  [{dir_name}] skipping: {e}");
+            Ok(Some(m)) => m,
+            Ok(None) => {
+                eprintln!("  [{dir_name}] skipping: no direct source files");
                 continue;
             }
+            Err(e) => return Err(format!("[{dir_name}] {e}")),
         };
 
         // Cache key: dir_path + hash of all source file contents + estimates.
@@ -341,11 +342,15 @@ pub(crate) async fn score_directory_maintainability(
 // ---------------------------------------------------------------------------
 
 /// Build a manifest string listing the directory path and sorted relative
-/// file paths for every recognized source file under it.
+/// file paths for every recognized source file directly under it.
 ///
 /// The agent is expected to use its tools (Landscape, Read, Grep, Glob) to
 /// explore these files — full source is not embedded in the prompt.
-fn build_dir_manifest(dir: &Path) -> Result<String, String> {
+///
+/// Returns `Ok(None)` when the directory has no direct source files (they
+/// may all live in nested subdirectories, which are scored independently).
+/// Collection failures are returned as `Err` so callers can propagate them.
+fn build_dir_manifest(dir: &Path) -> Result<Option<String>, String> {
     // `collect_source_files` recurses into subdirectories, but each nested
     // directory is scored independently. Keep only files whose immediate
     // parent is `dir` so the manifest doesn't leak subdirectory files into
@@ -357,7 +362,7 @@ fn build_dir_manifest(dir: &Path) -> Result<String, String> {
         .collect();
 
     if files.is_empty() {
-        return Err(format!("no source files found in {}", dir.display()));
+        return Ok(None);
     }
 
     // Sort for deterministic output.
@@ -371,7 +376,7 @@ fn build_dir_manifest(dir: &Path) -> Result<String, String> {
     }
     manifest.push_str(&format!("\n({} source files total)\n", files.len()));
 
-    Ok(manifest)
+    Ok(Some(manifest))
 }
 
 // ---------------------------------------------------------------------------
@@ -577,7 +582,7 @@ fn compute_dir_cache_key(
     file_hashes.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"v7\0");
+    hasher.update(b"v8\0");
     hasher.update(dir.to_string_lossy().as_bytes());
     hasher.update(b"\0");
     for (path, hash) in &file_hashes {
@@ -710,7 +715,9 @@ mod tests {
         std::fs::write(tmp.path().join("a.rs"), "fn a() {}").expect("write a.rs");
         std::fs::write(tmp.path().join("sub/b.rs"), "fn b() {}").expect("write b.rs");
 
-        let manifest = build_dir_manifest(tmp.path()).expect("manifest");
+        let manifest = build_dir_manifest(tmp.path())
+            .expect("manifest")
+            .expect("direct files");
 
         assert!(
             manifest.contains("a.rs"),
@@ -729,9 +736,10 @@ mod tests {
         std::fs::write(tmp.path().join("sub/b.rs"), "fn b() {}").expect("write b.rs");
 
         let result = build_dir_manifest(tmp.path());
-        assert!(
-            result.is_err(),
-            "directories with only nested source files should error"
+        assert_eq!(
+            result.expect("collection should succeed"),
+            None,
+            "directories with only nested source files should produce an empty manifest"
         );
     }
 
