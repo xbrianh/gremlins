@@ -5,8 +5,9 @@
 //! dependency on [`Backend`], [`Compaction`], or any Anthropic-specific type.
 //!
 //! Local-compaction helpers (`compact_local_raw`, `compact_local_with_retry`,
-//! and their truncation/validation support) live here so that the
-//! [`crate::clients::compaction::Compaction`] dispatcher stays pure.
+//! and their truncation/validation support) live here so that
+//! [`crate::conversation::standard::StandardConversation`] can call them
+//! when the backend does not support server-side compaction.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};

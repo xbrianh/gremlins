@@ -185,6 +185,14 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    /// Whether this backend natively supports server-side compaction.
+    /// The default is `false`; only [`AnthropicBackend`] returns `true`.
+    /// Callers use this to branch: server compaction vs. local compaction
+    /// is a construction-time decision, not a runtime fallback.
+    fn supports_compaction(&self) -> bool {
+        false
+    }
+
     /// Request server-side compaction.
     /// Returns `Ok(None)` when the backend doesn't support compaction (the
     /// caller skips compaction for this turn).

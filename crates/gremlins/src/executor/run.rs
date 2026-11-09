@@ -60,6 +60,9 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
 const DEFAULT_COMPACTION_KEEP_RECENT: usize = 10;
 
 /// Built compaction parts: `(backend, model, local_model, state)`.
+/// `local_model` is `Some` when a local model could be built; `None`
+/// when it couldn't — `StandardConversation::compact()` decides which
+/// strategy to use based on `Backend::supports_compaction()`.
 type CompactionParts = (
     Arc<dyn Backend>,
     String,
@@ -67,11 +70,15 @@ type CompactionParts = (
     CompactionState,
 );
 
-/// Build the compaction parts — backend, model, optional local model fallback,
-/// and orchestration state. Returns `None` when compaction is disabled
-/// (threshold == 0) and the trigger is [`CompactionTrigger::Threshold`] — for
-/// [`CompactionTrigger::Immediate`] (chat), parts are always returned so the
-/// `/compact` force flag can fire on demand.
+/// Build the compaction parts — backend, model, optional local model,
+/// and orchestration state. Always tries to build a local model; if it
+/// fails, `local_model` is `None` and `compact()` will warn but not
+/// error (non-server backends without a local model just skip compaction).
+///
+/// Returns `None` when compaction is disabled: threshold == 0 for
+/// [`CompactionTrigger::Threshold`], or failed backend construction.
+/// For [`CompactionTrigger::Immediate`] (chat), parts are always returned
+/// so the `/compact` force flag can fire on demand.
 fn build_compaction_parts(
     client: &Client,
     model: String,
@@ -107,14 +114,13 @@ fn build_compaction_parts(
         return None;
     }
 
-    // Always build a local model when possible — it serves as fallback
-    // even for backends that support server compaction, or for backends
-    // that do but occasionally return Ok(None).
+    // Build a local model when possible — render_turn uses it when the
+    // backend doesn't support server-side compaction.
     let qualified = format!("{}/{}", client.provider(), model);
     let local_model = backend.make_model(&qualified);
     if local_model.is_none() {
         log::warn!(
-            "compaction: make_model failed for '{}'; local fallback will not be available",
+            "compaction: make_model failed for '{}'; local compaction will not be available",
             qualified
         );
     }

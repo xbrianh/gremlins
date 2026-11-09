@@ -7,8 +7,9 @@
 //! Compaction dispatch (formerly the [`Compaction`] struct and
 //! [`CompactionStrategy`] enum) is now inlined into
 //! [`crate::conversation::standard::StandardConversation::render_turn`], which
-//! tries server compaction first and falls back to local compaction on failure
-//! or when the backend returns `Ok(None)`.
+//! branches on [`Backend::supports_compaction`] at construction time:
+//! server-capable backends use server compaction exclusively (with errors
+//! surfaced), while other backends use local LLM summarization.
 //!
 //! Orchestration state lives in [`crate::conversation::compaction::CompactionState`].
 //! Local-compaction helpers live in [`crate::conversation::compaction`].
