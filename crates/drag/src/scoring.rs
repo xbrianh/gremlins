@@ -325,17 +325,14 @@ fn dir_trie_to_drag_node(
     let (maint_score, maint_mult) = if skip_maintainability {
         (None, 1.0)
     } else {
-        let s = dir_maints
-            .get(&abs_dir_str)
-            .copied()
-            .ok_or_else(|| {
-                format!(
-                    "maintainability score missing for directory '{}' — \
+        let s = dir_maints.get(&abs_dir_str).copied().ok_or_else(|| {
+            format!(
+                "maintainability score missing for directory '{}' — \
                      this is a bug: scoring was enabled but this directory was \
                      skipped or never scored",
-                    abs_dir_str
-                )
-            })?;
+                abs_dir_str
+            )
+        })?;
         (Some(s), (p * (1.0 - s)).exp())
     };
 
@@ -373,7 +370,7 @@ fn dir_trie_to_drag_node(
             } else {
                 format!("{display_name}{sep}{seg}")
             };
-            Ok(dir_trie_to_drag_node(
+            dir_trie_to_drag_node(
                 child_trie,
                 modules,
                 src_dir,
@@ -383,7 +380,7 @@ fn dir_trie_to_drag_node(
                 p,
                 skip_maintainability,
                 sep,
-            )?)
+            )
         })
         .collect::<Result<Vec<_>, String>>()?;
 
@@ -797,7 +794,8 @@ mod tests {
             &src_dirs,
             2.5,
             false,
-        ).unwrap();
+        )
+        .unwrap();
 
         let flat_sum: f64 = modules.iter().map(|m| m.drag).sum();
         assert!((drag_of(&tree) - flat_sum).abs() < 1e-9);
@@ -834,7 +832,8 @@ mod tests {
             &src_dirs,
             2.5,
             false,
-        ).unwrap();
+        )
+        .unwrap();
 
         // a/ (maint 1.0) contains one module with drag 10.0, so:
         //   drag(a) = exp(p·(1−1.0)) · 10 = 10
@@ -934,7 +933,8 @@ mod tests {
             &src_dirs,
             2.5,
             false,
-        ).unwrap();
+        )
+        .unwrap();
 
         if let DragNode::Container { name, children, .. } = &tree {
             assert_eq!(name, "pkg");
@@ -986,7 +986,8 @@ mod tests {
             &src_dirs,
             2.5,
             false,
-        ).unwrap();
+        )
+        .unwrap();
 
         if let DragNode::Container { name, children, .. } = &tree {
             assert_eq!(name, "pkg");
@@ -1079,7 +1080,8 @@ mod tests {
             &src_dirs,
             2.5,
             false,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!(matches!(tree, DragNode::Container { .. }));
         assert!((drag_of(&tree) - 60.0).abs() < 1e-9);
@@ -1097,7 +1099,8 @@ mod tests {
             &HashMap::new(),
             2.5,
             false,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(matches!(tree, DragNode::Module { .. }));
         assert!((drag_of(&tree) - 42.0).abs() < 1e-9);
     }
@@ -1117,7 +1120,8 @@ mod tests {
             &HashMap::new(),
             2.5,
             false,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(matches!(tree, DragNode::Container { .. }));
         if let DragNode::Container { name, children, .. } = &tree {
             assert_eq!(name, "orphan");
@@ -1148,7 +1152,8 @@ mod tests {
             &src_dirs,
             2.5,
             true,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!((drag_of(&tree) - 10.0).abs() < 1e-9);
         if let DragNode::Container { maint_score, .. } = &tree {
@@ -1197,7 +1202,8 @@ mod tests {
             &src_dirs,
             2.5,
             false,
-        ).unwrap();
+        )
+        .unwrap();
 
         // maint=1.0 ⇒ flat sum.
         assert!((drag_of(&tree) - 30.0).abs() < 1e-9);
@@ -1242,7 +1248,10 @@ mod tests {
             false,
         );
 
-        assert!(result.is_err(), "expected error for missing maint score, got Ok");
+        assert!(
+            result.is_err(),
+            "expected error for missing maint score, got Ok"
+        );
         let err = result.unwrap_err();
         assert!(
             err.contains("maintainability score missing"),
