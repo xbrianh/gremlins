@@ -2,8 +2,9 @@
 //
 // The bundled config (compiled in via include_str!) captures the current
 // hard-coded defaults.  When --config or GREMLINS_DRAG_CLI_CONFIG is used
-// the bundled config is NOT merged — omitted fields get serde schema
-// defaults instead.
+// the external config is merged on top of the bundled config: keys present
+// in the external config replace bundled values (including nested objects
+// wholesale), while omitted keys keep their bundled defaults.
 //
 // The --model CLI flag always wins: it replaces the model field from
 // whichever source was resolved.
@@ -88,7 +89,14 @@ impl DragConfig {
             .ok()
             .filter(|v| !v.is_empty());
 
-        let mut config: DragConfig = match (&config_path, env_val) {
+        // Load the bundled config as a JSON Value to serve as the base.
+        let mut merged: serde_json::Value = serde_json5::from_str(BUNDLED_CONFIG)
+            .map_err(|e| format!("internal error: bundled config is invalid: {e}"))?;
+
+        // If an external config is present, parse it and merge its keys on top
+        // of the bundled Value.  Shallow key-level merge: when a key appears in
+        // both, the external value wins (including nested objects wholesale).
+        match (&config_path, &env_val) {
             (Some(_), Some(_)) => {
                 return Err(
                     "--config and GREMLINS_DRAG_CLI_CONFIG are mutually exclusive. \
@@ -99,18 +107,25 @@ impl DragConfig {
             (Some(path), None) => {
                 let content = std::fs::read_to_string(path)
                     .map_err(|e| format!("failed to read config file {}: {e}", path.display()))?;
-                serde_json5::from_str(&content)
-                    .map_err(|e| format!("invalid config in {}: {e}", path.display()))?
+                let external: serde_json::Value = serde_json5::from_str(&content)
+                    .map_err(|e| format!("invalid config in {}: {e}", path.display()))?;
+                merge_json_values(&mut merged, &external);
             }
             (None, Some(env_path)) => {
                 let content = std::fs::read_to_string(&env_path)
                     .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: {}: {e}", env_path))?;
-                serde_json5::from_str(&content)
-                    .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: {}: {e}", env_path))?
+                let external: serde_json::Value = serde_json5::from_str(&content)
+                    .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: {}: {e}", env_path))?;
+                merge_json_values(&mut merged, &external);
             }
-            (None, None) => serde_json5::from_str(BUNDLED_CONFIG)
-                .map_err(|e| format!("internal error: bundled config is invalid: {e}"))?,
-        };
+            (None, None) => {
+                // No external config; use bundled as-is.
+            }
+        }
+
+        // Deserialize the merged Value into DragConfig.
+        let mut config: DragConfig = serde_json::from_value(merged)
+            .map_err(|e| format!("failed to deserialize merged config: {e}"))?;
 
         // --model always wins (single-field surgical override).
         if let Some(model) = model_override {
@@ -163,6 +178,21 @@ impl DragConfig {
         let json = serde_json::to_string(&self.maintainability)
             .expect("maintainability config must serialize");
         blake3::hash(json.as_bytes()).to_hex()[..16].to_string()
+    }
+}
+
+/// Shallow key-level merge of JSON objects.
+///
+/// When `external` contains a key present in `base`, the external value
+/// replaces the base value wholesale (including nested objects).  Keys
+/// only in `external` are inserted into `base`.
+fn merge_json_values(base: &mut serde_json::Value, external: &serde_json::Value) {
+    if let (serde_json::Value::Object(base_map), serde_json::Value::Object(ext_map)) =
+        (base, external)
+    {
+        for (k, v) in ext_map {
+            base_map.insert(k.clone(), v.clone());
+        }
     }
 }
 
@@ -440,14 +470,37 @@ mod tests {
 
     #[test]
     fn file_config_overrides_bundled_fields() {
-        // When a file is given, its fields replace the bundled config
-        // (no merging of survey text).
+        // Direct deserialization without merge: when a partial JSON is
+        // deserialized directly (not via load()), omitted fields get schema
+        // defaults.  The merge step in load() fills those in from bundled.json5
+        // before deserialization.
         let json = r#"{"tokenizer": "cl100k_base", "verbose": true}"#;
         let config: DragConfig = serde_json5::from_str(json).expect("file config must parse");
         assert_eq!(config.tokenizer, "cl100k_base");
         assert!(config.verbose);
-        // Omitted fields get schema defaults, not bundled values.
+        // Without merge, omitted fields get schema defaults.
         assert!(config.comprehensibility.dimensions.is_empty());
+    }
+
+    #[test]
+    fn merge_external_config_preserves_bundled_survey() {
+        // Simulate load()'s merge step: start with bundled, merge an external
+        // config that only sets tokenizer on top, then deserialize.
+        let mut bundled: serde_json::Value =
+            serde_json5::from_str(BUNDLED_CONFIG).expect("bundled must parse");
+        let external: serde_json::Value =
+            serde_json5::from_str(r#"{"tokenizer": "cl100k_base"}"#)
+                .expect("external must parse");
+        merge_json_values(&mut bundled, &external);
+        let config: DragConfig =
+            serde_json::from_value(bundled).expect("merged config must parse");
+        // External override wins.
+        assert_eq!(config.tokenizer, "cl100k_base");
+        // Bundled survey dimensions are preserved.
+        assert_eq!(config.comprehensibility.dimensions.len(), 8);
+        assert_eq!(config.maintainability.dimensions.len(), 10);
+        // Bundled weights preserved.
+        assert_eq!(config.weights.w2, 0.5);
     }
 
     #[test]
@@ -464,7 +517,9 @@ mod tests {
 
     #[test]
     fn partial_file_config_gets_schema_defaults_for_survey() {
-        // A file that sets only weights leaves survey dimensions empty.
+        // Direct deserialization without merge: a config that sets only
+        // weights gets empty surveys.  The load() merge step would fill
+        // these in from bundled.json5.
         let json = r#"{"weights": {"w2": 1.0}}"#;
         let config: DragConfig = serde_json5::from_str(json).expect("partial config must parse");
         assert_eq!(config.weights.w2, 1.0);
