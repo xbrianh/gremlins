@@ -620,7 +620,7 @@ async fn run_agent(
         None
     };
 
-    let (compaction_dispatch, compaction_state) = match build_compaction_config(
+    let (compaction_dispatch, compaction_state) = build_compaction_config(
         &client,
         prepared
             .model
@@ -628,10 +628,8 @@ async fn run_agent(
             .unwrap_or_else(|| client.model().to_string()),
         is_chat,
         gremlin.force_compact.clone(),
-    ) {
-        Some((dispatch, state)) => (Some(dispatch), Some(state)),
-        None => (None, None),
-    };
+    )
+    .map_or((None, None), |(d, s)| (Some(d), Some(s)));
     let conv = crate::conversation::standard::StandardConversation::new(
         "",
         false,

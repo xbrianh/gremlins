@@ -62,6 +62,7 @@ pub(crate) struct StandardConversation {
     /// Compaction dispatch (`None` → compaction disabled).
     compaction_dispatch: Option<Compaction>,
     /// Compaction orchestration state (`None` → compaction disabled).
+    /// Invariant: always `Some` iff `compaction_dispatch` is `Some`.
     compaction_state: Option<CompactionState>,
     /// The `input_tokens` count from the most recent API response.
     last_input_tokens: Option<u64>,
@@ -105,11 +106,13 @@ impl StandardConversation {
         self.findings_ledger.feed(text);
     }
 
-    /// Decide whether to trigger compaction on this turn.
+    /// Decide whether to trigger compaction on this turn. Both halves of the
+    /// compaction configuration must be present; otherwise compaction is
+    /// disabled and no force flag can be consumed.
     fn should_compact(&self) -> bool {
-        match &self.compaction_state {
-            Some(state) => state.should_compact(self.last_input_tokens, &self.history),
-            None => false,
+        match (&self.compaction_state, &self.compaction_dispatch) {
+            (Some(state), Some(_)) => state.should_compact(self.last_input_tokens, &self.history),
+            _ => false,
         }
     }
 }
@@ -201,6 +204,8 @@ impl Conversation for StandardConversation {
     ) -> TurnScript {
         // Phase 0: compaction (main loop only; not in nested/fork contexts)
         if !nested && self.should_compact() {
+            // `should_compact` verified both halves are present, so this
+            // destructuring cannot diverge.
             if let (Some(dispatch), Some(state)) =
                 (&self.compaction_dispatch, &mut self.compaction_state)
             {
