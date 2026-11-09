@@ -10,7 +10,7 @@
 //   not per estimate).
 // - Computing the directory-level drag formula.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -77,7 +77,12 @@ pub(crate) struct MaintCacheEntry {
 // ---------------------------------------------------------------------------
 
 /// Score maintainability for each scoring directory.
-/// Returns a map from absolute directory path to maintainability score (0–1).
+///
+/// Returns a map from absolute directory path to maintainability score
+/// (0–1) plus the set of directories that were intentionally skipped
+/// because they have no direct source files (only nested subdirectories).
+/// Callers should treat skipped directories as containers with no
+/// maintainability penalty rather than as scoring failures.
 pub(crate) async fn score_directory_maintainability(
     model_spec: &str,
     verbose: bool,
@@ -86,9 +91,9 @@ pub(crate) async fn score_directory_maintainability(
     cache_state: CacheState,
     maint_config: &MaintainabilityConfig,
     config_hash: &str,
-) -> Result<HashMap<String, f64>, String> {
+) -> Result<(HashMap<String, f64>, HashSet<String>), String> {
     if scoring_dirs.is_empty() {
-        return Ok(HashMap::new());
+        return Ok((HashMap::new(), HashSet::new()));
     }
 
     // Resolve maintainability cache path.
@@ -113,6 +118,7 @@ pub(crate) async fn score_directory_maintainability(
     let mut handles: Vec<MaintEstimateTask> = Vec::new();
     let mut estimates_map: HashMap<String, Vec<HashMap<String, u8>>> = HashMap::new();
     let mut cache_miss_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut skipped_dirs: HashSet<String> = HashSet::new();
 
     for dir in scoring_dirs {
         let dir_str = dir.to_string_lossy().into_owned();
@@ -129,7 +135,8 @@ pub(crate) async fn score_directory_maintainability(
         let manifest = match build_dir_manifest(dir) {
             Ok(Some(m)) => m,
             Ok(None) => {
-                eprintln!("  [{dir_name}] skipping: no direct source files");
+                eprintln!("  [{dir_name}] skipping: no direct source files (intermediate container directory)");
+                skipped_dirs.insert(dir_str);
                 continue;
             }
             Err(e) => return Err(format!("[{dir_name}] {e}")),
@@ -250,11 +257,24 @@ pub(crate) async fn score_directory_maintainability(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| dir_str.clone());
 
+        // Intentionally skipped: intermediate container directory with no
+        // direct source files.  No score needed — it's a pure structural
+        // node in the directory trie.
+        if skipped_dirs.contains(&dir_str) {
+            continue;
+        }
+
         let estimate_batch = match estimates_map.get(&dir_str) {
             Some(b) if !b.is_empty() => b,
             _ => {
-                eprintln!("  [{dir_name}] no estimates collected — skipping");
-                continue;
+                eprintln!(
+                    "  [{dir_name}] no estimates collected for '{dir_str}' — \
+                     aborting (scoring cannot proceed without estimates)",
+                );
+                return Err(format!(
+                    "[{dir_name}] no estimates collected for '{dir_str}' — \
+                     all retries exhausted or agent failures prevented scoring"
+                ));
             }
         };
 
@@ -299,18 +319,27 @@ pub(crate) async fn score_directory_maintainability(
 
         if !all_dims_complete {
             eprintln!(
-                "  [{dir_name}] WARNING: incomplete estimates — skipping cache write and result"
+                "  [{dir_name}] WARNING: incomplete dimension coverage for '{dir_str}' — \
+                 aborting (not all dimensions reached the required estimate count)",
             );
-            continue;
+            return Err(format!(
+                "[{dir_name}] incomplete dimension coverage for '{dir_str}' — \
+                 not all dimensions reached the required {estimates} estimate(s)"
+            ));
         }
 
         if estimate_batch.len() != estimates {
             eprintln!(
-                "  [{dir_name}] WARNING: {}/{} estimates collected — skipping cache write",
+                "  [{dir_name}] WARNING: {}/{} estimates collected for '{dir_str}' — \
+                 aborting (estimate count does not match expected)",
                 estimate_batch.len(),
-                estimates
+                estimates,
             );
-            continue;
+            return Err(format!(
+                "[{dir_name}] estimate count mismatch for '{dir_str}': \
+                 got {} estimates, expected {estimates}",
+                estimate_batch.len(),
+            ));
         }
 
         let was_cache_miss = cache_miss_keys.contains(&dir_str);
@@ -334,7 +363,7 @@ pub(crate) async fn score_directory_maintainability(
         result.insert(dir_str, maint_score);
     }
 
-    Ok(result)
+    Ok((result, skipped_dirs))
 }
 
 // ---------------------------------------------------------------------------

@@ -452,37 +452,39 @@ async fn run() -> Result<(), String> {
     // ── Directory-level maintainability ──
     // Enumerate every directory under each scoring package's source tree
     // that contains source files, then score each one.
-    let maint_scores: HashMap<String, f64> = if !config.skip_maintainability {
-        let scoring_dirs: Vec<PathBuf> = {
-            let mut dirs = Vec::new();
-            for pkg in &scoring_packages {
-                match lang::enumerate_source_dirs(pkg) {
-                    Ok(pkg_dirs) => dirs.extend(pkg_dirs),
-                    Err(e) => eprintln!(
-                        "gremlins-drag: directory enumeration skipped for {}: {e}",
-                        pkg.name()
-                    ),
+    let (maint_scores, skipped_dirs): (HashMap<String, f64>, HashSet<String>) =
+        if !config.skip_maintainability {
+            let scoring_dirs: Vec<PathBuf> = {
+                let mut dirs = Vec::new();
+                for pkg in &scoring_packages {
+                    match lang::enumerate_source_dirs(pkg) {
+                        Ok(pkg_dirs) => dirs.extend(pkg_dirs),
+                        Err(e) => eprintln!(
+                            "gremlins-drag: directory enumeration skipped for {}: {e}",
+                            pkg.name()
+                        ),
+                    }
                 }
-            }
-            // Deduplicate (shared roots possible across nested Python packages).
-            dirs.sort();
-            dirs.dedup();
-            dirs
-        };
+                // Deduplicate (shared roots possible across nested Python packages).
+                dirs.sort();
+                dirs.dedup();
+                dirs
+            };
 
-        maint::score_directory_maintainability(
-            &model_spec,
-            cli.verbose || config.verbose,
-            config.estimates_per_survey,
-            &scoring_dirs,
-            cache_state.clone(),
-            &config.maintainability,
-            &maint_config_hash,
-        )
-        .await?
-    } else {
-        HashMap::new()
-    };
+            let (maint_scores, skipped_dirs) = maint::score_directory_maintainability(
+                &model_spec,
+                cli.verbose || config.verbose,
+                config.estimates_per_survey,
+                &scoring_dirs,
+                cache_state.clone(),
+                &config.maintainability,
+                &maint_config_hash,
+            )
+            .await?;
+            (maint_scores, skipped_dirs)
+        } else {
+            (HashMap::new(), HashSet::new())
+        };
 
     // Build module→pkg, pkg_key→pkg_name, and per-module directory-segment maps.
     let module_pkg: HashMap<(String, String), String> = target_modules
@@ -519,11 +521,12 @@ async fn run() -> Result<(), String> {
         &module_pkg,
         &module_dir_segments,
         &maint_scores,
+        &skipped_dirs,
         &pkg_names,
         &pkg_src_dirs,
         config.weights.p,
         config.skip_maintainability,
-    );
+    )?;
 
     // 9. Output
     if matches!(config.format, OutputFormat::Json) {
