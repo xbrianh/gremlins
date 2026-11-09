@@ -29,7 +29,7 @@ use crate::clients::conversation::{Conversation, RunArtifact, TurnScript};
 use crate::clients::done_helpers::done_user_message;
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
-use crate::conversation::compaction::compaction_cut_index;
+use crate::conversation::compaction::{compaction_cut_index, CompactionState};
 
 /// The standard [`Conversation`] implementation.
 pub(crate) struct StandardConversation {
@@ -59,8 +59,11 @@ pub(crate) struct StandardConversation {
     /// Once set, [`Conversation::messages`] returns this final transcript so
     /// persistence consumers see the exact durable message list.
     finalized_messages: Option<Vec<Message>>,
-    /// Compaction strategy and runtime state. `None` → compaction disabled.
-    compaction: Option<Compaction>,
+    /// Compaction dispatch (`None` → compaction disabled).
+    compaction_dispatch: Option<Compaction>,
+    /// Compaction orchestration state (`None` → compaction disabled).
+    /// Invariant: always `Some` iff `compaction_dispatch` is `Some`.
+    compaction_state: Option<CompactionState>,
     /// The `input_tokens` count from the most recent API response.
     last_input_tokens: Option<u64>,
 }
@@ -70,7 +73,8 @@ impl StandardConversation {
         prompt: &str,
         preserve_reasoning: bool,
         prepopulated_messages: Option<Vec<Message>>,
-        compaction: Option<Compaction>,
+        compaction_dispatch: Option<Compaction>,
+        compaction_state: Option<CompactionState>,
     ) -> Self {
         let history = prepopulated_messages.unwrap_or_default();
         Self {
@@ -82,7 +86,8 @@ impl StandardConversation {
             preserve_reasoning_in_history: preserve_reasoning,
             last_text: String::new(),
             finalized_messages: None,
-            compaction,
+            compaction_dispatch,
+            compaction_state,
             last_input_tokens: None,
         }
     }
@@ -101,11 +106,13 @@ impl StandardConversation {
         self.findings_ledger.feed(text);
     }
 
-    /// Decide whether to trigger compaction on this turn.
+    /// Decide whether to trigger compaction on this turn. Both halves of the
+    /// compaction configuration must be present; otherwise compaction is
+    /// disabled and no force flag can be consumed.
     fn should_compact(&self) -> bool {
-        match &self.compaction {
-            Some(comp) => comp.should_compact(self.last_input_tokens, &self.history),
-            None => false,
+        match (&self.compaction_state, &self.compaction_dispatch) {
+            (Some(state), Some(_)) => state.should_compact(self.last_input_tokens, &self.history),
+            _ => false,
         }
     }
 }
@@ -122,7 +129,8 @@ impl Conversation for StandardConversation {
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: self.last_text.clone(),
             finalized_messages: self.finalized_messages.clone(),
-            compaction: self.compaction.clone(),
+            compaction_dispatch: self.compaction_dispatch.clone(),
+            compaction_state: self.compaction_state.clone(),
             last_input_tokens: self.last_input_tokens,
         })
     }
@@ -196,16 +204,20 @@ impl Conversation for StandardConversation {
     ) -> TurnScript {
         // Phase 0: compaction (main loop only; not in nested/fork contexts)
         if !nested && self.should_compact() {
-            if let Some(comp) = self.compaction.as_mut() {
-                let cut = compaction_cut_index(&self.history, comp.keep_recent());
+            // `should_compact` verified both halves are present, so this
+            // destructuring cannot diverge.
+            if let (Some(dispatch), Some(state)) =
+                (&self.compaction_dispatch, &mut self.compaction_state)
+            {
+                let cut = compaction_cut_index(&self.history, state.keep_recent());
                 // Guard: nothing to compact (e.g. one huge initial prompt
                 // shorter than keep_recent turns).
                 if cut == 0 {
-                    comp.set_cooldown();
+                    state.set_cooldown();
                 } else {
                     let kept = self.history[cut..].to_vec();
                     let to_compact = self.history[..cut].to_vec();
-                    match comp
+                    match dispatch
                         .compact(&to_compact, &kept, system_prompt.as_deref())
                         .await
                     {
@@ -218,20 +230,20 @@ impl Conversation for StandardConversation {
                                 usage.output_tokens,
                             );
                             self.history = new_history;
-                            comp.mark_applied(signed_block);
+                            state.mark_applied(signed_block);
                             // Reset token count so we don't re-compact immediately.
                             self.last_input_tokens = Some(0);
                         }
                         Ok(None) => {
                             // Backend returned null content — skip and
                             // don't retry until the cooldown clears.
-                            comp.set_cooldown();
+                            state.set_cooldown();
                         }
                         Err(e) => {
                             log::warn!("Compaction failed: {e}");
                             // Don't retry every turn — cooldown prevents
                             // expensive repeated failures.
-                            comp.set_cooldown();
+                            state.set_cooldown();
                         }
                     }
                 }
@@ -392,7 +404,8 @@ impl Conversation for StandardConversation {
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: String::new(),
             finalized_messages: None,
-            compaction: self.compaction.clone(),
+            compaction_dispatch: self.compaction_dispatch.clone(),
+            compaction_state: self.compaction_state.clone(),
             last_input_tokens: self.last_input_tokens,
         })
     }
@@ -402,7 +415,8 @@ impl Conversation for StandardConversation {
             prompt,
             self.preserve_reasoning_in_history,
             None,
-            self.compaction.clone(),
+            self.compaction_dispatch.clone(),
+            self.compaction_state.clone(),
         ))
     }
 
@@ -492,7 +506,10 @@ impl Conversation for StandardConversation {
     }
 
     fn has_signed_compaction_block(&self) -> bool {
-        self.compaction.as_ref().and_then(|c| c.block()).is_some()
+        self.compaction_state
+            .as_ref()
+            .and_then(|c| c.block())
+            .is_some()
     }
 }
 

@@ -19,5 +19,6 @@ pub(crate) fn new_blank_conversation(
         preserve_reasoning,
         prepopulated_messages,
         None,
+        None,
     ))
 }
