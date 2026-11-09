@@ -122,7 +122,17 @@ pub(crate) async fn score_directory_maintainability(
             .unwrap_or_else(|| dir_str.clone());
 
         // Build the directory source manifest for the agent to explore.
-        let manifest = build_dir_manifest(dir)?;
+        // A directory whose source files are all in nested subdirectories
+        // (i.e. no direct children) is legitimate — `enumerate_source_dirs`
+        // includes every intermediate ancestor. Skip it gracefully rather
+        // than erroring.
+        let manifest = match build_dir_manifest(dir) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("  [{dir_name}] skipping: {e}");
+                continue;
+            }
+        };
 
         // Cache key: dir_path + hash of all source file contents + estimates.
         let cache_key = compute_dir_cache_key(dir, estimates, config_hash)
@@ -343,7 +353,7 @@ fn build_dir_manifest(dir: &Path) -> Result<String, String> {
     let files: Vec<_> = crate::lang::collect_source_files(dir)
         .map_err(|e| format!("failed to collect source files in {}: {e}", dir.display()))?
         .into_iter()
-        .filter(|f| f.parent().is_some_and(|p| p == dir))
+        .filter(|f| f.parent() == Some(dir))
         .collect();
 
     if files.is_empty() {
@@ -707,8 +717,21 @@ mod tests {
             "manifest should list a.rs: {manifest}"
         );
         assert!(
-            !manifest.contains("sub/b.rs") && !manifest.contains("b.rs"),
-            "manifest should not list nested sub/b.rs: {manifest}"
+            !manifest.contains("b.rs"),
+            "manifest should not list nested b.rs: {manifest}"
+        );
+    }
+
+    #[test]
+    fn build_dir_manifest_only_nested_files_is_empty() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        std::fs::create_dir(tmp.path().join("sub")).expect("create sub");
+        std::fs::write(tmp.path().join("sub/b.rs"), "fn b() {}").expect("write b.rs");
+
+        let result = build_dir_manifest(tmp.path());
+        assert!(
+            result.is_err(),
+            "directories with only nested source files should error"
         );
     }
 
