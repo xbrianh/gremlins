@@ -1,14 +1,14 @@
-// Package maintainability scoring for gremlins-drag.
+// Directory maintainability scoring for gremlins-drag.
 //
 // This module handles:
-// - Prompting one Agent stage per package per estimate, scoring all
+// - Prompting one Agent stage per directory per estimate, scoring all
 //   configured maintainability dimensions in a single JSON-returning call.
 // - Tools-based exploration: the agent uses Landscape, Read, Grep, and Glob
-//   to explore the package source files rather than having source embedded
-//   in the prompt.
-// - Caching the mean score per package (one entry per scored package,
+//   to explore the directory's source files rather than having source
+//   embedded in the prompt.
+// - Caching the mean score per directory (one entry per scored directory,
 //   not per estimate).
-// - Computing the package-level drag formula.
+// - Computing the directory-level drag formula.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,7 +20,6 @@ use gremlins::executor::gremlin::{Gremlin, GremlinConfig};
 use gremlins::model_uri::ModelURI;
 
 use crate::config::MaintainabilityConfig;
-use crate::lang::PackageInfo;
 use crate::util::{extract_json, mean_with_ci, truncate, CacheState, CompAgentError};
 
 // ---------------------------------------------------------------------------
@@ -31,7 +30,7 @@ use crate::util::{extract_json, mean_with_ci, truncate, CacheState, CompAgentErr
 ///
 /// The dimension set is config-driven, so this is a plain map rather than a
 /// fixed struct.
-pub(crate) type PackageMaintainability = HashMap<String, u8>;
+pub(crate) type DirMaintainability = HashMap<String, u8>;
 
 /// Compute the maintainability score (0–1) directly from unrounded f64
 /// dimension means, avoiding the upward bias of per-dimension rounding.
@@ -51,48 +50,46 @@ const MAX_MAINT_RETRIES: u32 = 3;
 const MAINT_BACKOFF: [f64; 2] = [1.0, 2.0];
 
 /// Handle for a single per-estimate multi-dimension maintainability task.
-/// Returns (pkg_key, dimension_scores) — all dimensions scored in one call.
+/// Returns (dir_path, dimension_scores) — all dimensions scored in one call.
 type MaintEstimateTask = tokio::task::JoinHandle<(String, Result<HashMap<String, u8>, String>)>;
 
 /// One line in the maintainability cache file.
 ///
 /// Unlike module-level comprehensibility (which stores one entry per estimate),
-/// this stores one entry per *scored package* with all raw per-estimate
+/// this stores one entry per *scored directory* with all raw per-estimate
 /// dimension scores. Aggregation to a 0–1 score is recomputed from these.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub(crate) struct MaintCacheEntry {
-    /// `pkg_key || "\0" || blake3(all source files)` — hex, first 16 chars.
+    /// `dir_path || "\0" || blake3(all source files)` — hex, first 16 chars.
     pub key: String,
-    pub package: String,
+    #[serde(alias = "package")]
+    pub dir: String,
     pub model: String,
     pub estimates: usize,
     /// Per-estimate raw dimension scores (0–4 per dimension).
     /// Aggregation to a 0–1 score is pure math — recomputed from these.
     #[serde(default)]
-    pub raw_estimates: Vec<PackageMaintainability>,
+    pub raw_estimates: Vec<DirMaintainability>,
 }
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Score package maintainability for each scoring package.
-/// Returns a map from package key to maintainability score (0–1).
-pub(crate) async fn score_package_maintainability(
+/// Score maintainability for each scoring directory.
+/// Returns a map from absolute directory path to maintainability score (0–1).
+pub(crate) async fn score_directory_maintainability(
     model_spec: &str,
     verbose: bool,
     estimates: usize,
-    scoring_packages: &[&PackageInfo],
+    scoring_dirs: &[PathBuf],
     cache_state: CacheState,
     maint_config: &MaintainabilityConfig,
     config_hash: &str,
 ) -> Result<HashMap<String, f64>, String> {
-    if scoring_packages.is_empty() {
+    if scoring_dirs.is_empty() {
         return Ok(HashMap::new());
     }
-
-    // The dimension set is fully config-driven. `config_hash` poisons the
-    // cache key so a changed dimension set cannot reuse stale cache entries.
 
     // Resolve maintainability cache path.
     let maint_cache_path = if let Some(parent) = cache_state.parent() {
@@ -109,69 +106,71 @@ pub(crate) async fn score_package_maintainability(
     );
 
     eprintln!(
-        "Scoring package maintainability for {} packages...",
-        scoring_packages.len()
+        "Scoring maintainability for {} directories...",
+        scoring_dirs.len()
     );
 
     let mut handles: Vec<MaintEstimateTask> = Vec::new();
-    // Cache hits store raw_estimates here; cache misses are collected after awaits.
     let mut estimates_map: HashMap<String, Vec<HashMap<String, u8>>> = HashMap::new();
     let mut cache_miss_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for pkg in scoring_packages {
-        let pkg_key = pkg.key();
-        let pkg_name = pkg.name().to_string();
+    for dir in scoring_dirs {
+        let dir_str = dir.to_string_lossy().into_owned();
+        let dir_name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| dir_str.clone());
 
-        // Build the package source manifest for the agent to explore.
-        let manifest = build_package_manifest(pkg)?;
+        // Build the directory source manifest for the agent to explore.
+        let manifest = build_dir_manifest(dir)?;
 
-        // Cache key: pkg_key + hash of all source file contents + estimates.
-        let cache_key = compute_pkg_cache_key(&pkg_key, pkg, estimates, config_hash)
-            .map_err(|e| format!("[{pkg_name}] cache key computation failed: {e}"))?;
+        // Cache key: dir_path + hash of all source file contents + estimates.
+        let cache_key = compute_dir_cache_key(dir, estimates, config_hash)
+            .map_err(|e| format!("[{dir_name}] cache key computation failed: {e}"))?;
 
         if let Some(entry) = cache_map.get(&cache_key) {
             if entry.estimates == estimates && entry.model == model_spec {
-                eprintln!("  [{pkg_name}] cache hit ({})", entry.key);
-                estimates_map.insert(pkg_key.clone(), entry.raw_estimates.clone());
+                eprintln!("  [{dir_name}] cache hit ({})", entry.key);
+                estimates_map.insert(dir_str.clone(), entry.raw_estimates.clone());
                 continue;
             }
         }
 
-        cache_miss_keys.insert(pkg_key.clone());
+        cache_miss_keys.insert(dir_str.clone());
 
         // Build the multi-dimension prompt (manifest-based, no source embedded).
-        let prompt = build_multi_dim_prompt(&pkg_name, &manifest, maint_config);
+        let prompt = build_multi_dim_prompt(&dir_name, &manifest, maint_config);
 
-        // Cache miss: spawn `estimates` tasks — one full survey per estimate.
+        // Cache miss: spawn `estimates` tasks.
         for _ in 0..estimates {
-            let pkg_key = pkg_key.clone();
-            let pkg_name = pkg_name.clone();
+            let dir_str = dir_str.clone();
+            let dir_name = dir_name.clone();
             let prompt = prompt.clone();
             let model_spec = model_spec.to_string();
             let maint_config = maint_config.clone();
-            let pkg_dir = pkg.dir().to_path_buf();
+            let dir_clone = dir.clone();
 
             handles.push(tokio::spawn(async move {
                 for attempt in 0..MAX_MAINT_RETRIES {
                     match run_maint_agent(
-                        &pkg_name,
+                        &dir_name,
                         &prompt,
                         &model_spec,
                         verbose,
                         &maint_config,
-                        &pkg_dir,
+                        &dir_clone,
                     )
                     .await
                     {
                         Ok(scores) => {
-                            return (pkg_key, Ok(scores));
+                            return (dir_str, Ok(scores));
                         }
                         Err(e) => {
                             if matches!(&e, CompAgentError::Retryable(_))
                                 && attempt + 1 < MAX_MAINT_RETRIES
                             {
                                 eprintln!(
-                                    "  [{pkg_name}] maintainability attempt {}/{}: {e} — retrying in {:.0}s",
+                                    "  [{dir_name}] maintainability attempt {}/{}: {e} — retrying in {:.0}s",
                                     attempt + 1,
                                     MAX_MAINT_RETRIES,
                                     MAINT_BACKOFF[attempt as usize]
@@ -183,9 +182,9 @@ pub(crate) async fn score_package_maintainability(
                                 continue;
                             }
                             return (
-                                pkg_key,
+                                dir_str,
                                 Err(format!(
-                                    "[{pkg_name}] maintainability failed after {} attempts: {}",
+                                    "[{dir_name}] maintainability failed after {} attempts: {}",
                                     attempt + 1,
                                     match &e {
                                         CompAgentError::Retryable(s)
@@ -198,9 +197,9 @@ pub(crate) async fn score_package_maintainability(
                 }
 
                 (
-                    pkg_key,
+                    dir_str,
                     Err(format!(
-                        "[{pkg_name}] maintainability exhausted {} retries",
+                        "[{dir_name}] maintainability exhausted {} retries",
                         MAX_MAINT_RETRIES
                     )),
                 )
@@ -208,14 +207,14 @@ pub(crate) async fn score_package_maintainability(
         }
     }
 
-    // --- Collect fresh results: group per-pkg_key across estimates ---
+    // --- Collect fresh results: group per-dir across estimates ---
     let mut fresh_estimates: HashMap<String, Vec<HashMap<String, u8>>> = HashMap::new();
     for handle in handles {
         match handle.await {
-            Ok((pkg_key, Ok(scores))) => {
-                fresh_estimates.entry(pkg_key).or_default().push(scores);
+            Ok((dir_str, Ok(scores))) => {
+                fresh_estimates.entry(dir_str).or_default().push(scores);
             }
-            Ok((_pkg_key, Err(e))) => {
+            Ok((_dir_str, Err(e))) => {
                 eprintln!("  WARNING: {e}");
             }
             Err(e) => {
@@ -224,24 +223,26 @@ pub(crate) async fn score_package_maintainability(
         }
     }
 
-    // Merge fresh estimates into estimates_map (which already has cache hits).
-    for (pkg_key, scores) in fresh_estimates {
-        estimates_map.entry(pkg_key).or_default().extend(scores);
+    // Merge fresh estimates into estimates_map.
+    for (dir_str, scores) in fresh_estimates {
+        estimates_map.entry(dir_str).or_default().extend(scores);
     }
 
     // --- Build result map: unified aggregation for cache hits and misses ---
     let cache_mutex = Mutex::new(());
     let mut result: HashMap<String, f64> = HashMap::new();
 
-    for pkg in scoring_packages {
-        let pkg_key = pkg.key();
-        let pkg_name = pkg.name().to_string();
+    for dir in scoring_dirs {
+        let dir_str = dir.to_string_lossy().into_owned();
+        let dir_name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| dir_str.clone());
 
-        // Both cache hits and misses land in estimates_map.
-        let estimate_batch = match estimates_map.get(&pkg_key) {
+        let estimate_batch = match estimates_map.get(&dir_str) {
             Some(b) if !b.is_empty() => b,
             _ => {
-                eprintln!("  [{pkg_name}] no estimates collected — skipping");
+                eprintln!("  [{dir_name}] no estimates collected — skipping");
                 continue;
             }
         };
@@ -257,7 +258,7 @@ pub(crate) async fn score_package_maintainability(
 
             if f64_scores.is_empty() {
                 eprintln!(
-                    "  [{pkg_name}] {label}: no estimates — defaulting to 2.0",
+                    "  [{dir_name}] {label}: no estimates — defaulting to 2.0",
                     label = dim.label
                 );
                 dim_means.insert(dim.key.as_str(), 2.0);
@@ -265,7 +266,7 @@ pub(crate) async fn score_package_maintainability(
                 let (m, lo, hi) = mean_with_ci(&f64_scores);
                 if verbose {
                     eprintln!(
-                        "  [{pkg_name}] {label}: {m:.1} (95% CI: {lo:.1}–{hi:.1})",
+                        "  [{dir_name}] {label}: {m:.1} (95% CI: {lo:.1}–{hi:.1})",
                         label = dim.label
                     );
                 }
@@ -273,13 +274,10 @@ pub(crate) async fn score_package_maintainability(
             }
         }
 
-        // Compute maint_score from the unrounded f64 means.
         let maint_score = compute_maint_score_from_map(&dim_means);
 
-        eprintln!("  [{pkg_name}] maint: {maint_score:.3}");
+        eprintln!("  [{dir_name}] maint: {maint_score:.3}");
 
-        // Only cache and return when EVERY dimension got at least one real
-        // estimate per configured `estimates`.
         let all_dims_complete = maint_config.dimensions.iter().all(|dim| {
             let count = estimate_batch
                 .iter()
@@ -290,81 +288,84 @@ pub(crate) async fn score_package_maintainability(
 
         if !all_dims_complete {
             eprintln!(
-                "  [{pkg_name}] WARNING: incomplete estimates — skipping cache write and result"
+                "  [{dir_name}] WARNING: incomplete estimates — skipping cache write and result"
             );
             continue;
         }
 
-        // Write raw estimates to cache (cache-miss only).
-        // Skip the write when we don't have the expected number of estimates
-        // (e.g. some LLM tasks failed), so a later cache hit doesn't aggregate
-        // over a smaller sample without warning.
         if estimate_batch.len() != estimates {
             eprintln!(
-                "  [{pkg_name}] WARNING: {}/{} estimates collected — skipping cache write",
+                "  [{dir_name}] WARNING: {}/{} estimates collected — skipping cache write",
                 estimate_batch.len(),
                 estimates
             );
             continue;
         }
 
-        let was_cache_miss = cache_miss_keys.contains(&pkg_key);
+        let was_cache_miss = cache_miss_keys.contains(&dir_str);
         if was_cache_miss {
-            let cache_key = compute_pkg_cache_key(&pkg_key, pkg, estimates, config_hash)
-                .map_err(|e| format!("[{pkg_name}] cache key computation failed: {e}"))?;
+            let cache_key = compute_dir_cache_key(dir, estimates, config_hash)
+                .map_err(|e| format!("[{dir_name}] cache key computation failed: {e}"))?;
 
             let entry = MaintCacheEntry {
                 key: cache_key,
-                package: pkg_name.clone(),
+                dir: dir_str.clone(),
                 model: model_spec.to_string(),
                 estimates,
                 raw_estimates: estimate_batch.clone(),
             };
             let _guard = cache_mutex.lock().unwrap();
             if let Err(e) = append_maint_cache_entry(&maint_cache_path, &entry) {
-                eprintln!("  [{pkg_name}] WARNING: failed to append maint cache: {e}");
+                eprintln!("  [{dir_name}] WARNING: failed to append maint cache: {e}");
             }
         }
 
-        result.insert(pkg_key, maint_score);
+        result.insert(dir_str, maint_score);
     }
 
     Ok(result)
 }
 
+/// Legacy alias for callers that haven't migrated yet.
+#[allow(dead_code)]
+pub(crate) async fn score_package_maintainability(
+    _model_spec: &str,
+    _verbose: bool,
+    _estimates: usize,
+    _scoring_packages: &[&crate::lang::PackageInfo],
+    _cache_state: CacheState,
+    _maint_config: &MaintainabilityConfig,
+    _config_hash: &str,
+) -> Result<HashMap<String, f64>, String> {
+    // This function is no longer used directly — callers should use
+    // score_directory_maintainability instead.
+    Ok(HashMap::new())
+}
+
 // ---------------------------------------------------------------------------
-// Package manifest (for tools-based exploration)
+// Directory manifest (for tools-based exploration)
 // ---------------------------------------------------------------------------
 
-/// Collect all recognized source files in a package and build a manifest
-/// string listing the package root directory and sorted relative file paths.
+/// Build a manifest string listing the directory path and sorted relative
+/// file paths for every recognized source file under it.
 ///
 /// The agent is expected to use its tools (Landscape, Read, Grep, Glob) to
 /// explore these files — full source is not embedded in the prompt.
-fn build_package_manifest(pkg: &PackageInfo) -> Result<String, String> {
-    let (src_dir, pkg_dir) = match pkg {
-        PackageInfo::Rust(r) => (r.dir.join("src"), r.dir.clone()),
-        PackageInfo::Python(p) => (p.dir.clone(), p.dir.clone()),
-    };
-
-    let files = crate::lang::collect_source_files(&src_dir).map_err(|e| {
-        format!(
-            "failed to collect source files in {}: {e}",
-            src_dir.display()
-        )
-    })?;
+fn build_dir_manifest(dir: &Path) -> Result<String, String> {
+    let files = crate::lang::collect_source_files(dir)
+        .map_err(|e| format!("failed to collect source files in {}: {e}", dir.display()))?;
 
     if files.is_empty() {
-        return Err(format!("no source files found in {}", src_dir.display()));
+        return Err(format!("no source files found in {}", dir.display()));
     }
 
     // Sort for deterministic output.
     let mut files = files;
     files.sort();
 
-    let mut manifest = format!("PACKAGE ROOT: {}\n\nSOURCE FILES:\n", pkg_dir.display());
+    let mut manifest = format!("DIRECTORY: {}\n\nSOURCE FILES:\n", dir.display());
     for f in &files {
-        let rel = f.strip_prefix(&pkg_dir).unwrap_or(f);
+        let rel = f.strip_prefix(dir).unwrap_or(f);
         manifest.push_str(&format!("  {}\n", rel.display()));
     }
     manifest.push_str(&format!("\n({} source files total)\n", files.len()));
@@ -372,14 +373,24 @@ fn build_package_manifest(pkg: &PackageInfo) -> Result<String, String> {
     Ok(manifest)
 }
 
+/// Legacy: build a manifest from a PackageInfo (delegates to dir manifest).
+#[allow(dead_code)]
+fn build_package_manifest(pkg: &crate::lang::PackageInfo) -> Result<String, String> {
+    let src_dir = match pkg {
+        crate::lang::PackageInfo::Rust(r) => r.dir.join("src"),
+        crate::lang::PackageInfo::Python(p) => p.dir.clone(),
+    };
+    build_dir_manifest(&src_dir)
+}
+
 // ---------------------------------------------------------------------------
 // Prompt
 // ---------------------------------------------------------------------------
 
 /// Build a multi-dimension prompt listing all dimensions and asking for a
-/// JSON object output. The agent explores the package source via tools.
+/// JSON object output. The agent explores the directory source via tools.
 fn build_multi_dim_prompt(
-    pkg_name: &str,
+    dir_name: &str,
     manifest: &str,
     config: &MaintainabilityConfig,
 ) -> String {
@@ -406,16 +417,17 @@ fn build_multi_dim_prompt(
         .join(", ");
 
     format!(
-        "PACKAGE: {pkg_name}\n\n\
+        "DIRECTORY: {dir_name}\n\n\
          {manifest}\n\n\
          {preamble}\n\n\
          ## Dimensions to score (0–4 scale)\n\n\
          {dim_list}\n\n\
          ## Instructions\n\n\
-         **Scope**: Limit your assessment to this package's own source files
-         listed above.  Sub-package internals are scored independently.
+         **Scope**: Limit your assessment to the source files under this\n\
+         directory listed above.  Nested directories are scored independently.
 
-         Explore the package source files using Landscape, Read, Grep, and Glob tools.\n\
+\
+         Explore the directory source files using Landscape, Read, Grep, and Glob tools.\n\
          Score each of the {n} dimensions above on a 0–4 integer scale.\n\
          Produce a single JSON object with these fields: {dim_keys}.\n\
          Write the JSON to {{maintainability}}.",
@@ -430,15 +442,15 @@ fn build_multi_dim_prompt(
 
 /// Run a single multi-dimension maintainability estimate through an ephemeral
 /// gremlin Agent stage.  Returns a HashMap<String, u8> of dimension scores.
-/// `pkg_dir` is used as the agent's working directory so it can access
+/// `dir` is used as the agent's working directory so it can access
 /// source files via its tools.
 async fn run_maint_agent(
-    package: &str,
+    dir_name: &str,
     prompt: &str,
     model_spec: &str,
     verbose: bool,
     maint_config: &MaintainabilityConfig,
-    pkg_dir: &Path,
+    dir: &Path,
 ) -> Result<HashMap<String, u8>, CompAgentError> {
     if maint_config.dimensions.is_empty() {
         return Err(CompAgentError::Fatal(
@@ -463,7 +475,7 @@ async fn run_maint_agent(
         .build()
         .map_err(|e| CompAgentError::Fatal(format!("def build: {e}")))?;
 
-    let cwd = pkg_dir.to_path_buf();
+    let cwd = dir.to_path_buf();
 
     let config = GremlinConfig { ephemeral: true };
     let mut gremlin = Gremlin::init(
@@ -477,7 +489,7 @@ async fn run_maint_agent(
     .map_err(|e| CompAgentError::Fatal(format!("gremlin init: {e}")))?;
 
     if verbose {
-        eprintln!("  [{package}] running maint agent (model={model_spec})...");
+        eprintln!("  [{dir_name}] running maint agent (model={model_spec})...");
     }
 
     let exit_code = gremlin
@@ -543,26 +555,16 @@ fn validate_maint_scores(
 /// file contents plus the estimate count and the maintainability config
 /// hash.  Any change to any source file, the number of estimates, or the
 /// dimension configuration invalidates the entry.
-fn compute_pkg_cache_key(
-    pkg_key: &str,
-    pkg: &PackageInfo,
+fn compute_dir_cache_key(
+    dir: &Path,
     estimates: usize,
     config_hash: &str,
 ) -> Result<String, String> {
-    let src_dir = match pkg {
-        PackageInfo::Rust(r) => r.dir.join("src"),
-        PackageInfo::Python(p) => p.dir.clone(),
-    };
-
-    let files = crate::lang::collect_source_files(&src_dir).map_err(|e| {
-        format!(
-            "failed to collect source files in {}: {e}",
-            src_dir.display()
-        )
-    })?;
+    let files = crate::lang::collect_source_files(dir)
+        .map_err(|e| format!("failed to collect source files in {}: {e}", dir.display()))?;
 
     if files.is_empty() {
-        return Err(format!("no source files found in {}", src_dir.display()));
+        return Err(format!("no source files found in {}", dir.display()));
     }
 
     // Per-file hashes, sorted by relative path for determinism.
@@ -572,7 +574,7 @@ fn compute_pkg_cache_key(
             std::fs::read(f).map_err(|e| format!("failed to read {}: {e}", f.display()))?;
         let hash = blake3::hash(&content).to_hex();
         let rel = f
-            .strip_prefix(&src_dir)
+            .strip_prefix(dir)
             .unwrap_or(f)
             .to_string_lossy()
             .to_string();
@@ -581,8 +583,8 @@ fn compute_pkg_cache_key(
     file_hashes.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"v6\0");
-    hasher.update(pkg_key.as_bytes());
+    hasher.update(b"v7\0");
+    hasher.update(dir.to_string_lossy().as_bytes());
     hasher.update(b"\0");
     for (path, hash) in &file_hashes {
         hasher.update(path.as_bytes());
@@ -594,6 +596,21 @@ fn compute_pkg_cache_key(
     hasher.update(b"\0");
     hasher.update(config_hash.as_bytes());
     Ok(hasher.finalize().to_hex()[..16].to_string())
+}
+
+/// Legacy: kept for backward compat with tests.
+#[allow(dead_code)]
+fn compute_pkg_cache_key(
+    _pkg_key: &str,
+    pkg: &crate::lang::PackageInfo,
+    estimates: usize,
+    config_hash: &str,
+) -> Result<String, String> {
+    let src_dir = match pkg {
+        crate::lang::PackageInfo::Rust(r) => r.dir.join("src"),
+        crate::lang::PackageInfo::Python(p) => p.dir.clone(),
+    };
+    compute_dir_cache_key(&src_dir, estimates, config_hash)
 }
 
 /// Load the maintainability JSONL cache file.
@@ -778,7 +795,7 @@ mod tests {
         let dir = std::env::temp_dir().join("drag-test-maint-roundtrip");
         let _ = std::fs::create_dir_all(&dir);
         let cache_path = dir.join("maint-cache.jsonl");
-        let raw_estimates: Vec<PackageMaintainability> = vec![[
+        let raw_estimates: Vec<DirMaintainability> = vec![[
             ("modularity", 3),
             ("interface_cohesion", 2),
             ("error_propagation", 1),
@@ -789,7 +806,7 @@ mod tests {
         .collect()];
         let entry = MaintCacheEntry {
             key: "b33fdeadb33fdead".to_string(),
-            package: "test-pkg".to_string(),
+            dir: "test-dir".to_string(),
             model: "openai/gpt-4o".to_string(),
             estimates: 1,
             raw_estimates,
@@ -801,7 +818,7 @@ mod tests {
         let loaded = map.get("b33fdeadb33fdead").unwrap();
         assert_eq!(loaded.raw_estimates.len(), 1);
         assert_eq!(loaded.raw_estimates[0].get("modularity"), Some(&3));
-        assert_eq!(loaded.package, "test-pkg");
+        assert_eq!(loaded.dir, "test-dir");
         assert_eq!(loaded.model, "openai/gpt-4o");
     }
 
@@ -814,7 +831,7 @@ mod tests {
         let cache_path = dir.join("maint-cache.jsonl");
         std::fs::write(
             &cache_path,
-            "{\"key\":\"oldkey0000000000\",\"package\":\"pkg\",\"model\":\"m\",\"estimates\":3,\"maint_score\":0.6,\"breakdown\":{\"a\":3}}\n",
+            "{\"key\":\"oldkey0000000000\",\"dir\":\"dir\",\"model\":\"m\",\"estimates\":3,\"maint_score\":0.6,\"breakdown\":{\"a\":3}}\n",
         )
         .unwrap();
         let map = load_maint_cache(&cache_path).unwrap();
@@ -822,5 +839,24 @@ mod tests {
         assert_eq!(map.len(), 1);
         let entry = map.get("oldkey0000000000").unwrap();
         assert!(entry.raw_estimates.is_empty());
+    }
+
+    /// Legacy `package` field is accepted via #[serde(alias = "package")].
+    #[test]
+    fn maint_cache_entry_deser_legacy_package_field() {
+        let dir = std::env::temp_dir().join("drag-test-maint-legacypkg");
+        let _ = std::fs::create_dir_all(&dir);
+        let cache_path = dir.join("maint-cache.jsonl");
+        std::fs::write(
+            &cache_path,
+            "{\"key\":\"legacy0000000000\",\"package\":\"legacy-pkg\",\"model\":\"m\",\"estimates\":1,\"raw_estimates\":[{\"a\":3}]}\n",
+        )
+        .unwrap();
+        let map = load_maint_cache(&cache_path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(map.len(), 1);
+        let entry = map.get("legacy0000000000").unwrap();
+        assert_eq!(entry.dir, "legacy-pkg");
+        assert_eq!(entry.raw_estimates.len(), 1);
     }
 }

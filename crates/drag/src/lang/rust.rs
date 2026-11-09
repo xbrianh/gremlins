@@ -878,6 +878,52 @@ fn has_cfg_test_mod_decl(parent_src: &str, module_name: &str) -> bool {
 
     false
 }
+
+// ---------------------------------------------------------------------------
+// Directory segments (for filesystem trie)
+// ---------------------------------------------------------------------------
+
+/// Map a Rust source file to its directory segments relative to the
+/// package's `src/` dir. Returns the sequence of subdirectory names
+/// that the file lives in.
+///
+/// - `src/lib.rs` / `src/main.rs` → `[]` (package root)
+/// - `src/foo.rs` → `["foo"]`
+/// - `src/foo/bar.rs` → `["foo"]`
+/// - `src/foo/mod.rs` → `["foo"]`
+/// - `src/foo/bar/baz.rs` → `["foo", "bar"]`
+pub(crate) fn file_to_rust_dir_segments(file: &Path, pkg: &RustPackage) -> Option<Vec<String>> {
+    let src_dir = pkg.dir.join("src");
+    let rel = file.strip_prefix(&src_dir).ok()?;
+    let rel_str = rel.to_string_lossy();
+
+    // Crate root files: empty segment list.
+    if rel_str == "lib.rs" || rel_str == "main.rs" {
+        return Some(Vec::new());
+    }
+
+    // Strip .rs suffix.
+    let stripped = rel_str.strip_suffix(".rs")?;
+
+    // For mod.rs files, the parent dir is the containing directory.
+    // `foo/mod.rs` → parent is `foo`, segments: ["foo"]
+    let dir_path = if stripped.ends_with("/mod") {
+        // foo/mod → parent is "foo"
+        Path::new(stripped.strip_suffix("/mod").unwrap())
+    } else {
+        // foo/bar → parent is "foo"
+        Path::new(stripped).parent()?
+    };
+
+    let segments: Vec<String> = dir_path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty() && s != ".")
+        .collect();
+
+    Some(segments)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1111,6 +1157,33 @@ mod tests {
             target_name: "crate".to_string(),
             is_bin: false,
         }
+    }
+
+    #[test]
+    fn file_to_rust_dir_segments_roots_and_mod_rs() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let pkg = test_pkg(tmp.path());
+
+        assert_eq!(
+            file_to_rust_dir_segments(&tmp.path().join("src/lib.rs"), &pkg),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            file_to_rust_dir_segments(&tmp.path().join("src/foo.rs"), &pkg),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            file_to_rust_dir_segments(&tmp.path().join("src/foo/bar.rs"), &pkg),
+            Some(vec!["foo".to_string()])
+        );
+        assert_eq!(
+            file_to_rust_dir_segments(&tmp.path().join("src/foo/mod.rs"), &pkg),
+            Some(vec!["foo".to_string()])
+        );
+        assert_eq!(
+            file_to_rust_dir_segments(&tmp.path().join("src/foo/bar/baz.rs"), &pkg),
+            Some(vec!["foo".to_string(), "bar".to_string()])
+        );
     }
 
     #[test]
