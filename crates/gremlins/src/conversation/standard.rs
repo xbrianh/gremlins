@@ -29,7 +29,7 @@ use crate::clients::conversation::{Conversation, RunArtifact, TurnScript};
 use crate::clients::done_helpers::done_user_message;
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
-use crate::conversation::compaction::{CompactionState, compaction_cut_index};
+use crate::conversation::compaction::{compaction_cut_index, CompactionState};
 
 /// The standard [`Conversation`] implementation.
 pub(crate) struct StandardConversation {
