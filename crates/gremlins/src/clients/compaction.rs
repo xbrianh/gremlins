@@ -8,7 +8,7 @@
 //!
 //! - **Server**: Native server-side compaction (Anthropic on-demand API).
 //! - **Local**: Model-driven summarization via
-//!   [`crate::conversation::compaction::compact_local`].
+//!   [`crate::conversation::compaction::compact_local_with_retry`].
 //!
 //! There is no fallback chain. Server fails → error. Local fails → error.
 
@@ -132,7 +132,7 @@ impl Compaction {
     /// - **Server**: calls `backend.compact()` (Anthropic on-demand API).
     ///   Returns `Ok(None)` when the API returns a null content block.
     /// - **Local**: calls
-    ///   [`compact_local`](crate::conversation::compaction::compact_local)
+    ///   [`compact_local_with_retry`](crate::conversation::compaction::compact_local_with_retry)
     ///   on the same model. Returns `Ok(None)` when the model can't be
     ///   built or the summarization call fails.
     ///
@@ -187,7 +187,7 @@ impl Compaction {
                 };
 
                 let (summary_msg, input_tokens, output_tokens) =
-                    match crate::conversation::compaction::compact_local(
+                    match crate::conversation::compaction::compact_local_with_retry(
                         model,
                         to_compact,
                         self.instructions.as_deref(),
