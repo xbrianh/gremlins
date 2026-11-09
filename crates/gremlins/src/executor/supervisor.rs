@@ -1370,7 +1370,10 @@ async fn handle_launch(
         &gremlin_def,
         &resolved_stage_inputs,
         model_override,
-        &GremlinConfig { ephemeral },
+        &GremlinConfig {
+            ephemeral,
+            extra_sandbox_roots: Vec::new(),
+        },
     ) {
         Ok(g) => g,
         Err(e) => return error_response(&format!("failed to create gremlin: {e}")),
@@ -3850,6 +3853,7 @@ fn create_chat_gremlin(
         discovered_skills: None,
         active_skills: None,
         force_compact: Arc::new(AtomicBool::new(false)),
+        extra_sandbox_roots: Vec::new(),
     })
 }
 /// Resolve state store: live run-map handle, or persisted under `config::state_root()`.

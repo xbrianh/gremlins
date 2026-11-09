@@ -862,6 +862,7 @@ mod tests {
             discovered_skills: None,
             active_skills: None,
             force_compact: Arc::new(AtomicBool::new(false)),
+            extra_sandbox_roots: Vec::new(),
         };
         (sandbox, gremlin)
     }

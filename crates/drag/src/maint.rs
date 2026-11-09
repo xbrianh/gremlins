@@ -451,7 +451,10 @@ async fn run_maint_agent(
 
     let cwd = dir.to_path_buf();
 
-    let config = GremlinConfig { ephemeral: true };
+    let config = GremlinConfig {
+        ephemeral: true,
+        extra_sandbox_roots: vec![cwd.clone()],
+    };
     let mut gremlin = Gremlin::init(
         "drag-maint",
         &cwd,

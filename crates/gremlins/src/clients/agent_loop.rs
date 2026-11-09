@@ -1735,13 +1735,16 @@ pub(crate) async fn run_agent_loop(
     let audit_log = raw_path.as_ref().map(|p| tools::audit_log_path(p));
     let max_turns = crate::config::max_agent_turns();
     // When the run requests allow-all, skip building the roots list entirely;
-    // otherwise assemble [worktree, artifact_dir].
+    // otherwise assemble [worktree, artifact_dir, extra_sandbox_roots…].
     let sandbox = if ctx.params.allow_all {
         tools::SandboxMode::AllowAll
     } else {
         let mut allowed_roots = vec![worktree];
         if let Some(ref artifact_dir) = ctx.params.artifact_dir {
             allowed_roots.push(crate::core::paths::canonicalize_or_ancestor(artifact_dir));
+        }
+        for root in &ctx.params.extra_sandbox_roots {
+            allowed_roots.push(crate::core::paths::canonicalize_or_ancestor(root));
         }
         tools::SandboxMode::Roots(allowed_roots)
     };
@@ -2745,6 +2748,7 @@ pub(crate) fn test_ctx(
             active_skills: None,
             token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
             scratchpad_path: None,
+            extra_sandbox_roots: Vec::new(),
             hooks: None,
         },
         prefix: "[t] ".into(),

@@ -60,6 +60,10 @@ pub struct GremlinConfig {
     /// [`tempfile::TempDir`]s that vanish when the gremlin is dropped.
     /// The runtime operates identically regardless of backing.
     pub ephemeral: bool,
+    /// Additional filesystem roots to expose to the agent's tools
+    /// sandbox beyond the worktree and artifact directory.
+    /// Programmatic-only — not settable from YAML.
+    pub extra_sandbox_roots: Vec<PathBuf>,
 }
 
 /// Private enum for workspace storage: persistent path or temp dir.
@@ -311,6 +315,11 @@ pub struct Gremlin {
     /// One-shot force-compact signal set by the TUI `/compact` command.
     /// The per-turn Compaction consumes and clears it via `should_compact()`.
     pub(crate) force_compact: Arc<AtomicBool>,
+    /// Additional sandbox roots carried forward from [`GremlinConfig`].
+    /// Threaded through [`Gremlin::cwd_extra_sandbox_roots`] →
+    /// [`crate::clients::backend::RunParams::extra_sandbox_roots`] →
+    /// the agent-loop sandbox assembly.
+    pub(crate) extra_sandbox_roots: Vec<PathBuf>,
 }
 
 impl Gremlin {
@@ -506,6 +515,7 @@ impl Gremlin {
             discovered_skills: None,
             active_skills: None,
             force_compact: Arc::new(AtomicBool::new(false)),
+            extra_sandbox_roots: config.extra_sandbox_roots.clone(),
         };
 
         // 5. Create an empty log file.
@@ -630,6 +640,7 @@ impl Gremlin {
             discovered_skills: None,
             active_skills: None,
             force_compact: Arc::new(AtomicBool::new(false)),
+            extra_sandbox_roots: Vec::new(),
         })
     }
 
@@ -1003,6 +1014,7 @@ impl Gremlin {
             discovered_skills: None,
             active_skills: None,
             force_compact: Arc::new(AtomicBool::new(false)),
+            extra_sandbox_roots: self.extra_sandbox_roots.clone(),
         })
     }
 
@@ -2203,6 +2215,7 @@ mod tests {
             discovered_skills: None,
             active_skills: None,
             force_compact: Arc::new(AtomicBool::new(false)),
+            extra_sandbox_roots: Vec::new(),
         }
     }
 
@@ -2761,7 +2774,10 @@ mod tests {
 
         let definition =
             StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
-        let cfg = GremlinConfig { ephemeral: true };
+        let cfg = GremlinConfig {
+            ephemeral: true,
+            ..Default::default()
+        };
         let gremlin = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -2806,7 +2822,10 @@ mod tests {
 
         let definition =
             StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
-        let cfg = GremlinConfig { ephemeral: true };
+        let cfg = GremlinConfig {
+            ephemeral: true,
+            ..Default::default()
+        };
         let parent = Gremlin::init(
             "gr-test",
             fx.definition_path(),
@@ -2864,7 +2883,10 @@ mod tests {
 
         let definition =
             StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
-        let cfg = GremlinConfig { ephemeral: true };
+        let cfg = GremlinConfig {
+            ephemeral: true,
+            ..Default::default()
+        };
         let gremlin = Gremlin::init(
             "gr-test",
             fx.definition_path(),

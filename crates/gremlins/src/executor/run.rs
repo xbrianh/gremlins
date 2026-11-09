@@ -761,6 +761,7 @@ async fn run_agent(
         active_skills: gremlin.active_skills.clone(),
         token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
         scratchpad_path: None,
+        extra_sandbox_roots: gremlin.extra_sandbox_roots.clone(),
         hooks: Some(hooks),
     };
 
@@ -1655,6 +1656,7 @@ mod tests {
             discovered_skills: None,
             active_skills: None,
             force_compact: Arc::new(AtomicBool::new(false)),
+            extra_sandbox_roots: Vec::new(),
         };
         (sandbox, gremlin)
     }

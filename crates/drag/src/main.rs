@@ -1240,7 +1240,10 @@ async fn run_comp_agent(
     // irrelevant — we just need an extant path.
     let cwd = std::env::current_dir().map_err(|e| CompAgentError::Fatal(format!("cwd: {e}")))?;
 
-    let config = GremlinConfig { ephemeral: true };
+    let config = GremlinConfig {
+        ephemeral: true,
+        ..Default::default()
+    };
     let mut gremlin = Gremlin::init(
         "drag-comp",
         &cwd,
