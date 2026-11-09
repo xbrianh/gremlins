@@ -5,16 +5,16 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
 use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
-use crate::clients::backend::{ClientError, RunParams};
+use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::client::{Client, ModelURI};
-use crate::clients::compaction::{Compaction, CompactionStrategy};
+use crate::clients::model::GremlinsModel;
 use crate::config;
 use crate::conversation::compaction::{CompactionState, CompactionTrigger};
 use crate::definition::ExecutorStage;
@@ -58,18 +58,17 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
 /// Default number of most-recent turns to keep verbatim during compaction.
 const DEFAULT_COMPACTION_KEEP_RECENT: usize = 10;
 
-/// Build the [`Compaction`] dispatch and [`CompactionState`] pair from the
-/// global config and the resolved backend.
-/// Returns `None` when compaction is disabled (threshold == 0) and the trigger
-/// is [`CompactionTrigger::Threshold`] — for [`CompactionTrigger::Immediate`]
-/// (chat), a pair is always returned so the `/compact` force flag can
-/// fire on demand.
-fn build_compaction_config(
+/// Build the compaction parts — backend, model, optional local model fallback,
+/// and orchestration state. Returns `None` when compaction is disabled
+/// (threshold == 0) and the trigger is [`CompactionTrigger::Threshold`] — for
+/// [`CompactionTrigger::Immediate`] (chat), parts are always returned so the
+/// `/compact` force flag can fire on demand.
+fn build_compaction_parts(
     client: &Client,
     model: String,
     is_chat: bool,
     force_compact: Arc<AtomicBool>,
-) -> Option<(Compaction, CompactionState)> {
+) -> Option<(Arc<dyn Backend>, String, Option<GremlinsModel>, CompactionState)> {
     let trigger = if is_chat {
         CompactionTrigger::Immediate
     } else {
@@ -80,7 +79,7 @@ fn build_compaction_config(
         Ok(b) => b,
         Err(e) => {
             log::warn!("compaction: failed to build backend: {e}");
-            force_compact.store(false, std::sync::atomic::Ordering::Release);
+            force_compact.store(false, Ordering::Release);
             return None;
         }
     };
@@ -95,39 +94,20 @@ fn build_compaction_config(
 
     // For Threshold trigger, zero threshold means compaction is disabled.
     if matches!(trigger, CompactionTrigger::Threshold) && threshold == 0 {
-        force_compact.store(false, std::sync::atomic::Ordering::Release);
+        force_compact.store(false, Ordering::Release);
         return None;
     }
 
-    // Pick the compaction strategy at construction time. For local,
-    // build the model once so we don't construct it on every compaction
-    // call. The model must be qualified as `provider/model` because
-    // `make_model()` parses and validates the provider prefix.
-    let (strategy, local_model) = if backend.name() == "anthropic" {
-        (CompactionStrategy::Server, None)
-    } else {
-        let qualified = format!("{}/{}", client.provider(), model);
-        match backend.make_model(&qualified) {
-            Some(m) => (CompactionStrategy::Local, Some(m)),
-            None => {
-                log::warn!(
-                    "compaction: make_model failed for '{}'; disabling local compaction",
-                    qualified
-                );
-                force_compact.store(false, std::sync::atomic::Ordering::Release);
-                return None;
-            }
-        }
-    };
+    // Always build a local model when possible — it serves as fallback
+    // even for backends that support server compaction, or for backends
+    // that do but occasionally return Ok(None).
+    let qualified = format!("{}/{}", client.provider(), model);
+    let local_model = backend.make_model(&qualified);
 
     Some((
-        Compaction::new(
-            backend,
-            model,
-            None, // no custom instructions by default
-            strategy,
-            local_model,
-        ),
+        backend,
+        model,
+        local_model,
         CompactionState::new(
             threshold,
             DEFAULT_COMPACTION_KEEP_RECENT,
@@ -620,22 +600,28 @@ async fn run_agent(
         None
     };
 
-    let (compaction_dispatch, compaction_state) = build_compaction_config(
-        &client,
-        prepared
-            .model
-            .clone()
-            .unwrap_or_else(|| client.model().to_string()),
-        is_chat,
-        gremlin.force_compact.clone(),
-    )
-    .map_or((None, None), |(d, s)| (Some(d), Some(s)));
+    let (backend, compaction_model, local_model, compaction_state) =
+        match build_compaction_parts(
+            &client,
+            prepared
+                .model
+                .clone()
+                .unwrap_or_else(|| client.model().to_string()),
+            is_chat,
+            gremlin.force_compact.clone(),
+        ) {
+            Some((b, m, lm, s)) => (Some(b), m, lm, Some(s)),
+            None => (None, String::new(), None, None),
+        };
     let conv = crate::conversation::standard::StandardConversation::new(
         "",
         false,
         verbatim_history,
-        compaction_dispatch,
+        backend,
         compaction_state,
+        compaction_model,
+        None, // no custom instructions
+        local_model,
     );
 
     // ── Live usage tracker for failure persistence ─────
