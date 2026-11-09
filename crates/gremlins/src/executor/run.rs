@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
@@ -14,7 +14,7 @@ use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::{Client, ModelURI};
-use crate::clients::compaction::{Compaction, CompactionStrategy};
+use crate::clients::compaction::Compaction;
 use crate::config;
 use crate::conversation::compaction::{CompactionState, CompactionTrigger};
 use crate::definition::ExecutorStage;
@@ -80,7 +80,7 @@ fn build_compaction_config(
         Ok(b) => b,
         Err(e) => {
             log::warn!("compaction: failed to build backend: {e}");
-            force_compact.store(false, std::sync::atomic::Ordering::Release);
+            force_compact.store(false, Ordering::Release);
             return None;
         }
     };
@@ -95,39 +95,23 @@ fn build_compaction_config(
 
     // For Threshold trigger, zero threshold means compaction is disabled.
     if matches!(trigger, CompactionTrigger::Threshold) && threshold == 0 {
-        force_compact.store(false, std::sync::atomic::Ordering::Release);
+        force_compact.store(false, Ordering::Release);
         return None;
     }
 
-    // Pick the compaction strategy at construction time. For local,
-    // build the model once so we don't construct it on every compaction
-    // call. The model must be qualified as `provider/model` because
-    // `make_model()` parses and validates the provider prefix.
-    let (strategy, local_model) = if backend.name() == "anthropic" {
-        (CompactionStrategy::Server, None)
-    } else {
-        let qualified = format!("{}/{}", client.provider(), model);
-        match backend.make_model(&qualified) {
-            Some(m) => (CompactionStrategy::Local, Some(m)),
-            None => {
-                log::warn!(
-                    "compaction: make_model failed for '{}'; disabling local compaction",
-                    qualified
-                );
-                force_compact.store(false, std::sync::atomic::Ordering::Release);
-                return None;
-            }
-        }
-    };
+    // Build a local model when possible — Compaction::compact uses it when
+    // the backend doesn't support server-side compaction.
+    let qualified = format!("{}/{}", client.provider(), model);
+    let local_model = backend.make_model(&qualified);
+    if local_model.is_none() {
+        log::warn!(
+            "compaction: make_model failed for '{}'; local compaction will not be available",
+            qualified
+        );
+    }
 
     Some((
-        Compaction::new(
-            backend,
-            model,
-            None, // no custom instructions by default
-            strategy,
-            local_model,
-        ),
+        Compaction::new(backend, model, None, local_model),
         CompactionState::new(
             threshold,
             DEFAULT_COMPACTION_KEEP_RECENT,

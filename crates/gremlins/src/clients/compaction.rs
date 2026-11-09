@@ -1,37 +1,23 @@
-//! Compaction dispatch.
+//! Compaction dispatch and [`compaction_block_as_message`].
 //!
-//! [`Compaction`] holds the backend reference, model, instructions, strategy,
-//! and (for local compaction) a pre-built model instance. Runtime orchestration
-//! state — threshold, cooldown, applied flag, force flag — lives in
-//! [`crate::conversation::compaction::CompactionState`].
+//! [`Compaction`] holds the backend, model, instructions, and optional
+//! local model. Its [`compact`](Compaction::compact) method dispatches
+//! to server-side or local compaction based on
+//! [`Backend::supports_compaction`] — no fallback chain, no strategy enum.
+//! The caller receives a uniform `(replacement_message, signed_block, usage)`
+//! result and applies it through a single code path.
 //!
-//! The strategy is picked at construction time:
-//!
-//! - **Server**: Native server-side compaction (Anthropic on-demand API).
-//! - **Local**: Model-driven summarization on a pre-built model instance.
-//!
-//! There is no fallback chain. Server fails → error. Local fails → error.
-//!
-//! Local-compaction helpers (`compact_local_raw`, `compact_local_with_retry`,
-//! and their truncation/validation support) live in
-//! [`crate::conversation::compaction`] — this module is pure dispatch.
+//! Runtime orchestration state — threshold, cooldown, applied flag,
+//! force flag — lives in [`crate::conversation::compaction::CompactionState`].
+//! Local-compaction helpers live in [`crate::conversation::compaction`].
 
 use std::sync::Arc;
 
 use rig_core::completion::Message;
 
-use crate::clients::backend::{Backend, ClientError};
+use crate::clients::backend::Backend;
 use crate::clients::model::GremlinsModel;
 use crate::clients::protocol::{CompactionBlock, CompactionResult};
-
-/// The compaction strategy, picked at construction time.
-#[derive(Clone)]
-pub(crate) enum CompactionStrategy {
-    /// Native server-side compaction (Anthropic on-demand API).
-    Server,
-    /// Local model-driven summarization.
-    Local,
-}
 
 /// Compaction dispatch. Built once in `run.rs` and passed to
 /// `StandardConversation::new`.
@@ -40,8 +26,8 @@ pub(crate) struct Compaction {
     backend: Arc<dyn Backend>,
     model: String,
     instructions: Option<String>,
-    strategy: CompactionStrategy,
-    /// Model instance for local compaction, built once at construction.
+    /// Pre-built model for local compaction. `None` when unavailable;
+    /// `compact()` skips local compaction in that case.
     local_model: Option<GremlinsModel>,
 }
 
@@ -50,102 +36,117 @@ impl Compaction {
         backend: Arc<dyn Backend>,
         model: String,
         instructions: Option<String>,
-        strategy: CompactionStrategy,
         local_model: Option<GremlinsModel>,
     ) -> Self {
         Self {
             backend,
             model,
             instructions,
-            strategy,
             local_model,
         }
     }
 
-    /// Run compaction on `to_compact`. Dispatches to the active strategy
-    /// with no fallback chaining.
+    /// Run compaction on `to_compact`.
     ///
-    /// - **Server**: calls `backend.compact()` (Anthropic on-demand API).
-    ///   Returns `Ok(None)` when the API returns a null content block.
-    /// - **Local**: runs a single-turn summarization completion on the
-    ///   pre-built model with a single retry on transient failure. Returns
-    ///   `Ok(None)` when the model can't be built or the summarization
-    ///   call fails.
+    /// Tries server compaction first when the backend supports it. On
+    /// any server failure (error, `Ok(None)`, or result without a block),
+    /// falls back to local compaction. If the backend doesn't support
+    /// server compaction, local is tried directly.
     ///
-    /// `Err(...)` from either path propagates up to `render_turn`, which
-    /// logs it and sets cooldown. There is no fallback.
+    /// Returns `(replacement_message, signed_block, usage)` on success.
+    /// `signed_block` is `Some` for server compaction, `None` for local.
+    /// `usage` carries token counts for logging.
+    ///
+    /// Returns `None` only when every available path has been exhausted
+    /// (server failed and local is unavailable or also failed). Errors
+    /// are logged internally.
     pub(crate) async fn compact(
         &self,
         to_compact: &[Message],
-        kept: &[Message],
         system_prompt: Option<&str>,
-    ) -> Result<Option<(Option<CompactionBlock>, Vec<Message>, CompactionResult)>, ClientError>
-    {
-        match self.strategy {
-            CompactionStrategy::Server => {
-                let result = self
-                    .backend
-                    .compact(
-                        to_compact,
-                        system_prompt,
-                        self.instructions.as_deref(),
-                        &self.model,
-                    )
-                    .await?;
-
-                let server_block = match result {
-                    Some(r) => r,
-                    None => return Ok(None),
-                };
-
-                let signed: CompactionBlock = match server_block.block.clone() {
-                    Some(b) => b,
-                    // Server returned a compaction result with no block —
-                    // unexpected but not fatal; return Ok(None) so the
-                    // caller sets cooldown rather than panicking.
-                    None => {
-                        log::warn!("Server compaction result had no block; dropping");
-                        return Ok(None);
-                    }
-                };
-                let mut new_history = Vec::with_capacity(1 + kept.len());
-                new_history.push(compaction_block_as_message(&signed));
-                new_history.extend_from_slice(kept);
-                Ok(Some((Some(signed), new_history, server_block)))
+    ) -> Option<(Message, Option<CompactionBlock>, CompactionResult)> {
+        // Try server compaction first when the backend supports it.
+        if self.backend.supports_compaction() {
+            if let Some(result) = self.compact_server(to_compact, system_prompt).await {
+                return Some(result);
             }
-            CompactionStrategy::Local => {
-                let model = match &self.local_model {
-                    Some(m) => m,
-                    None => {
-                        log::warn!("Compaction: local model not available");
-                        return Ok(None);
-                    }
-                };
+            // Server failed or returned nothing useful — fall through to local.
+        }
 
-                let (summary_msg, input_tokens, output_tokens) =
-                    match crate::conversation::compaction::compact_local_with_retry(
-                        model,
-                        to_compact,
-                        self.instructions.as_deref(),
-                        system_prompt,
-                    )
-                    .await
-                    {
-                        Some(v) => v,
-                        None => return Ok(None),
-                    };
+        // Try local compaction as fallback (or primary path).
+        if let Some(model) = &self.local_model {
+            return self.compact_local(model, to_compact, system_prompt).await;
+        }
 
-                let mut new_history = Vec::with_capacity(1 + kept.len());
-                new_history.push(summary_msg);
-                new_history.extend_from_slice(kept);
-                let result = CompactionResult {
-                    block: None,
-                    input_tokens,
-                    output_tokens,
-                };
-                Ok(Some((None, new_history, result)))
+        log::warn!(
+            "Compaction: no path succeeded; {} messages not compacted",
+            to_compact.len()
+        );
+        None
+    }
+
+    async fn compact_server(
+        &self,
+        to_compact: &[Message],
+        system_prompt: Option<&str>,
+    ) -> Option<(Message, Option<CompactionBlock>, CompactionResult)> {
+        match self
+            .backend
+            .compact(
+                to_compact,
+                system_prompt,
+                self.instructions.as_deref(),
+                &self.model,
+            )
+            .await
+        {
+            Ok(Some(result)) => {
+                let signed = result.block.clone()?;
+                let msg = compaction_block_as_message(&signed);
+                Some((msg, Some(signed), result))
+            }
+            Ok(None) => {
+                log::error!(
+                    "Server compaction returned Ok(None) despite supports_compaction; \
+                     {} messages not compacted",
+                    to_compact.len()
+                );
+                None
+            }
+            Err(e) => {
+                log::error!(
+                    "Server compaction failed: {e}; {} messages not compacted",
+                    to_compact.len()
+                );
+                None
             }
         }
+    }
+
+    async fn compact_local(
+        &self,
+        model: &GremlinsModel,
+        to_compact: &[Message],
+        system_prompt: Option<&str>,
+    ) -> Option<(Message, Option<CompactionBlock>, CompactionResult)> {
+        let (summary_msg, input_tokens, output_tokens) =
+            crate::conversation::compaction::compact_local_with_retry(
+                model,
+                to_compact,
+                self.instructions.as_deref(),
+                system_prompt,
+            )
+            .await?;
+
+        Some((
+            summary_msg,
+            None,
+            CompactionResult {
+                block: None,
+                input_tokens,
+                output_tokens,
+            },
+        ))
     }
 }
 

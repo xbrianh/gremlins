@@ -287,6 +287,10 @@ impl Backend for AnthropicBackend {
 
     super::delegate_native_run_state!(state);
 
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
     async fn compact(
         &self,
         messages: &[rig_core::completion::Message],
