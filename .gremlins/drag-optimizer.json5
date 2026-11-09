@@ -60,6 +60,10 @@
         type: "string",
         optional: true,
       },
+      "drag-config": {
+        type: "filepath",
+        optional: true,
+      },
     },
     launch_cmds: [
       'printf "%s" {target} > "$GREMLINS_STATE_DIR/artifacts/target.txt"',
@@ -69,12 +73,16 @@
       'printf "%s" {p} > "$GREMLINS_STATE_DIR/artifacts/p.txt"',
       'printf "%s" {skip-maintainability} > "$GREMLINS_STATE_DIR/artifacts/skip_maint.txt"',
       'BASE_REF={base_ref} && SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "${BASE_REF:-HEAD}") && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && printf "%s" "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"',
-      // Build a drag config JSON file from the bundled config with bootstrap
-      // parameter overrides.  gremlins-drag no longer accepts scoring flags
-      // (--estimates-per-survey, --p, --skip-maintainability) on the CLI;
-      // all scoring parameters live in the config file.
-      'sed "s|^[[:space:]]*//.*||" "$GREMLINS_PROJECT_ROOT/crates/drag/config/bundled.json5" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"',
-      "MODEL_VAL=\"{drag-model}\" && ESTIMATES_VAL=\"{estimates-per-survey}\" && P_VAL=\"{p}\" && SKIP_MAINT_VAL=\"{skip-maintainability}\" && [ -z \"$ESTIMATES_VAL\" ] && ESTIMATES_VAL=\"5\" && [ -z \"$P_VAL\" ] && P_VAL=\"2.5\" && jq --arg model \"$MODEL_VAL\" --argjson estimates \"$ESTIMATES_VAL\" --argjson p_val \"$P_VAL\" --arg skip_maint \"$SKIP_MAINT_VAL\" 'if $model != \"\" then .model = $model else . end | .estimates_per_survey = $estimates | .weights.p = $p_val | if $skip_maint != \"\" and $skip_maint != \"false\" then .skip_maintainability = true else . end' \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\" > \"$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json\" && mv \"$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json\" \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\"",
+      // Build the drag config JSON file.  Scoring parameters come from the
+      // project config (or --drag-config override) with bootstrap overrides.
+      // The config file is written to TWO places:
+      //   1. $GREMLINS_STATE_DIR/artifacts/drag_config.json — immutable artifact
+      //   2. $GREMLINS_STATE_DIR/drag_config.json — mutable, pointed to by
+      //      GREMLINS_DRAG_CLI_CONFIG so agents pick it up automatically.
+      // The target is injected as the "path" field so gremlins-drag needs
+      // no positional arguments.
+      'CONFIG_SRC="{drag-config}"; if [ -n "$CONFIG_SRC" ] && [ -f "$CONFIG_SRC" ]; then echo "using drag config: $CONFIG_SRC"; sed "s|^[[:space:]]*//.*||" "$CONFIG_SRC" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"; else sed "s|^[[:space:]]*//.*||" "$GREMLINS_PROJECT_ROOT/.gremlins/drag-config.json" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"; fi',
+      "MODEL_VAL=\"{drag-model}\" && ESTIMATES_VAL=\"{estimates-per-survey}\" && P_VAL=\"{p}\" && SKIP_MAINT_VAL=\"{skip-maintainability}\" && [ -z \"$ESTIMATES_VAL\" ] && ESTIMATES_VAL=\"5\" && [ -z \"$P_VAL\" ] && P_VAL=\"2.5\" && jq --arg model \"$MODEL_VAL\" --argjson estimates \"$ESTIMATES_VAL\" --argjson p_val \"$P_VAL\" --arg skip_maint \"$SKIP_MAINT_VAL\" --arg target \"{target}\" 'if $model != \"\" then .model = $model else . end | .estimates_per_survey = $estimates | .weights.p = $p_val | if $skip_maint != \"\" and $skip_maint != \"false\" then .skip_maintainability = true else . end | .path = $target' \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\" > \"$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json\" && mv \"$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json\" \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\" && cp \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\" \"$GREMLINS_STATE_DIR/drag_config.json\"",
     ],
     cli_out: {
       target: "artifact://target.txt",
@@ -85,7 +93,7 @@
       p: "artifact://p.txt",
       skip_maintainability: "artifact://skip_maint.txt",
     },
-    env: "export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'\nTHE_ENV=\"${GREMLINS_PROJECT_ROOT}/.gremlins/env\"\nif [ -f \"$THE_ENV\" ]; then\n    source \"$THE_ENV\"\nfi\nexport PATH=\"${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}\"\n# Drag config is built as a JSON file during launch_cmds from the bundled\n# config with bootstrap parameter overrides.  All gremlins-drag invocations\n# reference it via --config, so every invocation — pipeline stages AND\n# agent self-assessments — uses identical scoring parameters.\n",
+    env: "export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'\nTHE_ENV=\"${GREMLINS_PROJECT_ROOT}/.gremlins/env\"\nif [ -f \"$THE_ENV\" ]; then\n    source \"$THE_ENV\"\nfi\nexport PATH=\"${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}\"\nexport GREMLINS_DRAG_CLI_CONFIG=\"$GREMLINS_STATE_DIR/drag_config.json\"\n# GREMLINS_DRAG_CLI_CONFIG points to the mutable drag config file, which\n# includes the target path.  All gremlins-drag invocations — pipeline\n# stages AND agent self-assessments — read from this config, so every\n# invocation uses identical scoring parameters and the correct target.",
   },
   stages: [
     // ── baseline ──────────────────────────────────────────────────────────
@@ -105,7 +113,7 @@
       },
       options: {
         cmds: [
-          'gremlins-drag --config "$GREMLINS_STATE_DIR/artifacts/drag_config.json" "{target}" > {report}',
+          'gremlins-drag > {report}',
           'cp {report} "$GREMLINS_STATE_DIR/drag_current.json"',
           "cat {report} | jq '.drag' > {drag_best}\n",
           'echo "baseline sum drag = $(cat {drag_best})"',
@@ -124,7 +132,7 @@
       },
       options: {
         cmds: [
-          'gremlins-drag --config "$GREMLINS_STATE_DIR/artifacts/drag_config.json" --explain > {explain}',
+          'gremlins-drag --explain > {explain}',
         ],
       },
     },
@@ -145,11 +153,22 @@
             outputs: {
               context: "artifact://{loop_iter}/drag_context.md",
               iter_start_sha: "artifact://{loop_iter}/iter_start_sha.txt",
+              progression_in: "artifact://{loop_iter}/progression_in.json",
+              target: "artifact://{loop_iter}/scored_target.txt",
             },
           },
           options: {
             cmds: [
               'git -C "$GREMLIN_WORKDIR" rev-parse HEAD > "$GREMLINS_STATE_DIR/artifacts/{loop_iter}/iter_start_sha.txt"',
+              // Update the mutable drag config with this iteration's target.
+              // Iteration 1 reads the bootstrap config; subsequent iterations
+              // read the previous iteration's drag config artifact (which may
+              // have been broadened by record-progression).
+              'PREV_CONFIG="$GREMLINS_STATE_DIR/artifacts/drag_config.json"; if [ "{loop_iter}" != "1" ]; then PREV=$(({loop_iter} - 1)); ALT="$GREMLINS_STATE_DIR/artifacts/$PREV/drag_config.json"; if [ -f "$ALT" ]; then PREV_CONFIG="$ALT"; fi; fi; TARGET=$(jq -r ".path" "$PREV_CONFIG"); jq --arg t "$TARGET" '.path = $t' "$GREMLINS_STATE_DIR/drag_config.json" > "$GREMLINS_STATE_DIR/drag_config_tmp.json" && mv "$GREMLINS_STATE_DIR/drag_config_tmp.json" "$GREMLINS_STATE_DIR/drag_config.json"; printf "%s" "$TARGET" > "{target}"; echo "prepare-context: target=$TARGET"',
+              // Copy the latest cumulative progression into a scoped artifact
+              // for this iteration.  Iteration 1 reads the baseline seed;
+              // subsequent iterations read the previous iteration's output.
+              'if [ "{loop_iter}" = "1" ]; then cp "$GREMLINS_STATE_DIR/artifacts/drag_progression.json" {progression_in}; else PREV=$(({loop_iter} - 1)); cp "$GREMLINS_STATE_DIR/artifacts/$PREV/drag_progression.json" {progression_in}; fi',
               'STATE_DIR="$GREMLINS_STATE_DIR"\n{\n  if [ -f "$STATE_DIR/drag_previous.json" ]; then\n    echo "## Drag report before the last refactor (previous state)"\n    echo \'```json\'\n    cat "$STATE_DIR/drag_previous.json"\n    echo \'```\'\n    echo ""\n  fi\n  echo "## Drag report after the last refactor (current state)"\n  echo \'```json\'\n  cat "$STATE_DIR/drag_current.json"\n  echo \'```\'\n} > {context}\n',
             ],
           },
@@ -160,10 +179,10 @@
           type: "agent",
           interpolation: {
             inputs: {
-              target: 'content("artifact://target.txt")',
               drag_context: 'content("artifact://{loop_iter}/drag_context.md")',
               instructions: 'content("artifact://instructions.txt")',
               explain: 'content("artifact://explain.txt")',
+              target: 'content("artifact://{loop_iter}/scored_target.txt")',
             },
             outputs: {
               plan: "artifact://{loop_iter}/plan.md",
@@ -206,7 +225,6 @@
           type: "exec",
           interpolation: {
             inputs: {
-              target: 'content("artifact://target.txt")',
             },
             outputs: {
               report: "artifact://{loop_iter}/report.json",
@@ -218,7 +236,7 @@
           },
           options: {
             cmds: [
-              'gremlins-drag --config "$GREMLINS_STATE_DIR/artifacts/drag_config.json" "{target}" > {report}',
+              'gremlins-drag > {report}',
               'STATE_DIR="$GREMLINS_STATE_DIR"\ndrag_sum() {\n  jq '.drag' < "$1"\n}\nif [ -f "$STATE_DIR/drag_current.json" ]; then\n  drag_sum "$STATE_DIR/drag_current.json" > {drag_before}\n  cp "$STATE_DIR/drag_current.json" "$STATE_DIR/drag_previous.json"\nelse\n  printf "0" > {drag_before}\nfi\ncp {report} "$STATE_DIR/drag_current.json"\n',
               'STATE_DIR="$GREMLINS_STATE_DIR"\ndrag_sum() {\n  jq '.drag' < "$1"\n}\nAFTER=$(drag_sum "$STATE_DIR/drag_current.json")\nprintf "%s" "$AFTER" > {drag_after}\nBEST=$(cat "$GREMLINS_STATE_DIR/artifacts/drag_best.txt" 2>/dev/null)\nif ! awk -v a="$AFTER" -v b="$BEST" \'BEGIN { exit (b < a) ? 0 : 1 }\' 2>/dev/null; then\n  BEST="$AFTER"\nfi\nprintf "%s" "$BEST" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"\necho "iteration {loop_iter} drag = $AFTER (best = $BEST)"\n',
               'git -C "$GREMLIN_WORKDIR" rev-parse HEAD | tr -d \'\n\' > {iter_end_sha}',
@@ -237,12 +255,12 @@
           type: "agent",
           interpolation: {
             inputs: {
-              target: 'content("artifact://target.txt")',
               plan: 'content("artifact://{loop_iter}/plan.md")',
               drag_before: 'content("artifact://{loop_iter}/drag_before.txt")',
               drag_after: 'content("artifact://{loop_iter}/drag_after.txt")',
               iter_start_sha: 'content("artifact://{loop_iter}/iter_start_sha.txt")',
-              progression: 'content("artifact://drag_progression.json")',
+              progression: 'content("artifact://{loop_iter}/progression_in.json")',
+              target: 'content("artifact://{loop_iter}/scored_target.txt")',
             },
             outputs: {
               drag_reduced: "artifact://{loop_iter}/drag_reduced.txt",
@@ -273,24 +291,46 @@
           },
         },
         // --- record-progression: append iteration entry to the progression artifact ---
+        // When the target broadens (changed files span a wider common root),
+        // this stage recomputes ALL prior progression entries by checking out
+        // each entry's iter_end_sha and re-running gremlins-drag with the new
+        // target.  It also updates the mutable drag config (pointed to by
+        // GREMLINS_DRAG_CLI_CONFIG) and saves a config snapshot artifact.
+        // Delegates to the helper script drag-record-progression.
         {
           name: "record-progression",
           type: "exec",
           interpolation: {
             inputs: {
-              drag_before_path: "artifact://{loop_iter}/drag_before.txt",
-              drag_after_path: "artifact://{loop_iter}/drag_after.txt",
-              iter_start_sha_path: "artifact://{loop_iter}/iter_start_sha.txt",
-              iter_end_sha_path: "artifact://{loop_iter}/iter_end_sha.txt",
-              commit_count_path: "artifact://{loop_iter}/commit_count.txt",
-              verdict_path: "artifact://{loop_iter}/drag_reduced.txt",
-              target: 'content("artifact://target.txt")',
-              progression_path: "artifact://drag_progression.json",
+              base_sha_val: 'content("artifact://base_sha")',
+              progression_in: "artifact://{loop_iter}/progression_in.json",
+            },
+            outputs: {
+              progression_out: "artifact://{loop_iter}/drag_progression.json",
+              config_out: "artifact://{loop_iter}/drag_config.json",
             },
           },
           options: {
             cmds: [
-              '# Read the existing progression artifact into a shell variable first,\n# then write the updated JSON back — this avoids truncating the file\n# before jq can read it (both {progression_path} and {progression_path} resolve\n# to the same artifact path).\nif [ ! -f {progression_path} ]; then\n  echo "drag_progression.json not found; skipping record-progression"\n  echo "[]" > {progression_path}\n  exit 0\nfi\nEXISTING=$(cat {progression_path})\n\n# Sanitize all values read from files — trim trailing newlines and\n# validate numeric fields so --argjson receives clean JSON scalars.\n_drag_before=$(tr -d \'\\n\' < {drag_before_path} 2>/dev/null || echo "0")\n_drag_after=$(tr -d \'\\n\' < {drag_after_path} 2>/dev/null || echo "0")\n_start_sha=$(tr -d \'\\n\' < {iter_start_sha_path} 2>/dev/null || echo "")\n_end_sha=$(tr -d \'\\n\' < {iter_end_sha_path} 2>/dev/null || echo "")\n_commits=$(tr -d \'\\n\' < {commit_count_path} 2>/dev/null || echo "0")\n_verdict=$(tr -d \'\\n\' < {verdict_path} 2>/dev/null || echo "")\n\n# Validate numeric fields — fall back to 0 if they are not numbers.\ncase "$_drag_before" in \'\'|*[!0-9.]*) _drag_before=0 ;; esac\ncase "$_drag_after"  in \'\'|*[!0-9.]*) _drag_after=0  ;; esac\ncase "$_commits"    in \'\'|*[!0-9]*)  _commits=0     ;; esac\n\n# Check for an existing entry with the same iteration to avoid duplicates\n# when the stage is re-run (e.g. pipeline resume).\nif echo "$EXISTING" | jq -e --arg iter "{loop_iter}" \'map(select(.iteration == $iter)) | length > 0\' > /dev/null 2>&1; then\n  echo "entry for iteration {loop_iter} already exists; skipping"\n  exit 0\nfi\n\n# Rolled-back iterations record iter_start_sha as iter_end_sha\n# because the rollback reset HEAD back to the starting commit.\nif [ "$_verdict" = "rolled_back" ]; then\n  _end_sha="$_start_sha"\nfi\n\n# Append the new entry.  Read from the shell variable, write to the\n# output path — no truncation race because we already slurped EXISTING.\necho "$EXISTING" | jq \\\n  --arg target "{target}" \\\n  --arg iter "{loop_iter}" \\\n  --argjson drag_before "$_drag_before" \\\n  --argjson drag_after "$_drag_after" \\\n  --arg iter_start_sha "$_start_sha" \\\n  --arg iter_end_sha "$_end_sha" \\\n  --argjson commits "$_commits" \\\n  --arg verdict "$_verdict" \\\n  \'. + [{"iteration":$iter,"target":$target,"iter_start_sha":$iter_start_sha,"iter_end_sha":$iter_end_sha,"drag_before":$drag_before,"drag_after":$drag_after,"drag_delta":($drag_after - $drag_before),"commits":$commits,"verdict":$verdict}]\' \\\n  > {progression_path}\n\necho "recorded progression entry for iteration {loop_iter} (verdict=$_verdict)"\nif [ "$_verdict" = "no_progress" ]; then\n  echo "bailing: no progress with 3+ entries"\n  exit 1\nfi\n',
+              'drag-record-progression \
+  "$GREMLIN_WORKDIR" \
+  "$GREMLINS_STATE_DIR" \
+  "{base_sha_val}" \
+  "{loop_iter}" \
+  "$GREMLINS_STATE_DIR/drag_config.json" \
+  {progression_in} \
+  {progression_out} \
+  {config_out}',
+            ],
+          },
+        },
+        // --- bail if no_progress signal was written by record-progression ---
+        {
+          name: "check-stop",
+          type: "exec",
+          options: {
+            cmds: [
+              'if [ -f "$GREMLINS_STATE_DIR/artifacts/stop_reason.txt" ]; then echo "stopping: $(cat $GREMLINS_STATE_DIR/artifacts/stop_reason.txt)"; exit 2; fi',
             ],
           },
         },
@@ -302,10 +342,8 @@
       type: "exec",
       interpolation: {
         inputs: {
-          target: 'content("artifact://target.txt")',
           baseline_report: "artifact://baseline/report.json",
           drag_best_val: 'content("artifact://drag_best.txt")',
-          progression_path: "artifact://drag_progression.json",
         },
         outputs: {
           commit_message: "artifact://commit_message.txt",
@@ -313,7 +351,10 @@
       },
       options: {
         cmds: [
-          'BEST="{drag_best_val}"\n[ -z "$BEST" ] && BEST="N/A"\nBASE_SUM=$(jq \'.drag\' < {baseline_report})\nITER_COUNT=$(jq \'. | length - 1\' {progression_path} 2>/dev/null || echo "0")\nTRAJECTORY=$(jq -r \'[.[] | select(.verdict == "reduced" or .verdict == "baseline") | "\\(.iteration): \\(.drag_after)"] | join(" → ")\' {progression_path} 2>/dev/null)\n{\n  echo "drag-optimizer: reduce drag for {target}"\n  echo ""\n  echo "Baseline drag sum: $BASE_SUM → Best: $BEST"\n  echo "Trajectory: $TRAJECTORY"\n  echo "Iterations: $ITER_COUNT"\n  echo "Target: {target}"\n} > {commit_message}\n',
+          // Find the latest cumulative progression and scoped target.
+          // Each iteration writes artifact://{N}/drag_progression.json
+          // and artifact://{N}/drag_config.json; pick the newest.
+          'LATEST=$(ls -t "$GREMLINS_STATE_DIR/artifacts/"*/drag_progression.json 2>/dev/null | head -1)\nFALLBACK="$GREMLINS_STATE_DIR/artifacts/drag_progression.json"\nPROGRESSION="${LATEST:-$FALLBACK}"\nLATEST_CONFIG=$(ls -t "$GREMLINS_STATE_DIR/artifacts/"*/drag_config.json 2>/dev/null | head -1)\nif [ -n "$LATEST_CONFIG" ]; then\n  TARGET=$(jq -r \'.path\' "$LATEST_CONFIG")\nelse\n  TARGET=$(jq -r \'.path\' "$GREMLINS_STATE_DIR/artifacts/drag_config.json")\nfi\nBEST="{drag_best_val}"\n[ -z "$BEST" ] && BEST="N/A"\nBASE_SUM=$(jq \'.drag\' < {baseline_report})\nITER_COUNT=$(jq \'. | length - 1\' "$PROGRESSION" 2>/dev/null || echo "0")\nTRAJECTORY=$(jq -r \'[.[] | select(.verdict == "reduced" or .verdict == "baseline") | "\\(.iteration): \\(.drag_after)"] | join(" → ")\' "$PROGRESSION" 2>/dev/null)\n{\n  echo "drag-optimizer: reduce drag for $TARGET"\n  echo ""\n  echo "Baseline drag sum: $BASE_SUM → Best: $BEST"\n  echo "Trajectory: $TRAJECTORY"\n  echo "Iterations: $ITER_COUNT"\n  echo "Target: $TARGET"\n} > {commit_message}\n',
         ],
       },
     },

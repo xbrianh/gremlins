@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# Record a drag-optimizer progression entry, broadening the target when
+# refactors span files outside the original target scope.
+#
+# Usage:
+#   drag-record-progression WORKDIR STATE_DIR BASE_SHA LOOP_ITER
+#                          CONFIG_PATH PROGRESSION_IN PROGRESSION_OUT
+#                          CONFIG_OUT
+#
+# The current target is read from CONFIG_PATH (which GREMLINS_DRAG_CLI_CONFIG
+# also points to).  All gremlins-drag invocations use the env var — no
+# --config or target arguments needed.
+#
+# When the target broadens (changed files span a wider common root), this
+# script recomputes ALL prior progression entries by checking out each
+# entry's iter_end_sha and re-running gremlins-drag with the new target.
+# It updates the mutable CONFIG_PATH and writes a snapshot to CONFIG_OUT.
+#
+# When the target is unchanged, the script reads drag values from the
+# score stage's artifacts and appends as before.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/logging.sh"
+
+# ── args ────────────────────────────────────────────────────────────────────
+
+WORKDIR="$1"
+STATE_DIR="$2"
+BASE_SHA="$3"
+LOOP_ITER="$4"
+CONFIG_PATH="$5"
+PROGRESSION_IN="$6"
+PROGRESSION_OUT="$7"
+CONFIG_OUT="$8"
+
+# ── per-iteration artifact paths ────────────────────────────────────────────
+
+ITER_DIR="$STATE_DIR/artifacts/$LOOP_ITER"
+DRAG_BEFORE_PATH="$ITER_DIR/drag_before.txt"
+DRAG_AFTER_PATH="$ITER_DIR/drag_after.txt"
+ITER_START_SHA_PATH="$ITER_DIR/iter_start_sha.txt"
+ITER_END_SHA_PATH="$ITER_DIR/iter_end_sha.txt"
+COMMIT_COUNT_PATH="$ITER_DIR/commit_count.txt"
+VERDICT_PATH="$ITER_DIR/drag_reduced.txt"
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+# longest common directory prefix of two paths
+common_prefix() {
+    local a="$1"
+    local b="$2"
+
+    # Split into components, handling leading/trailing slashes.
+    IFS='/' read -ra a_parts <<< "$a"
+    IFS='/' read -ra b_parts <<< "$b"
+
+    local result=""
+    local i=0
+    while [ "$i" -lt "${#a_parts[@]}" ] && [ "$i" -lt "${#b_parts[@]}" ]; do
+        if [ "${a_parts[$i]}" = "${b_parts[$i]}" ]; then
+            if [ -z "$result" ]; then
+                result="${a_parts[$i]}"
+            else
+                result="$result/${a_parts[$i]}"
+            fi
+        else
+            break
+        fi
+        i=$((i + 1))
+    done
+    printf '%s' "$result"
+}
+
+# Run gremlins-drag and extract the .drag field.
+# Config and target are read from GREMLINS_DRAG_CLI_CONFIG env var.
+drag_sum() {
+    gremlins-drag | jq '.drag'
+}
+
+# Sanitize a numeric value read from a file.
+sanitize_num() {
+    local val
+    val=$(tr -d '\n' < "$1" 2>/dev/null || echo "0")
+    case "$val" in ''|*[!0-9.]*) val=0 ;; esac
+    printf '%s' "$val"
+}
+
+# Read and trim a file.
+read_trimmed() {
+    tr -d '\n' < "$1" 2>/dev/null || echo ""
+}
+
+# ── guard: progression must exist ───────────────────────────────────────────
+
+if [ ! -f "$PROGRESSION_IN" ]; then
+    info "record-progression: progression_in not found; writing empty array"
+    echo "[]" > "$PROGRESSION_OUT"
+    exit 0
+fi
+
+# ── read per-iteration values from score stage ──────────────────────────────
+
+VERDICT=$(read_trimmed "$VERDICT_PATH")
+COMMITS=$(sanitize_num "$COMMIT_COUNT_PATH")
+ITER_START_SHA=$(read_trimmed "$ITER_START_SHA_PATH")
+ITER_END_SHA=$(read_trimmed "$ITER_END_SHA_PATH")
+
+# Rolled-back iterations: iter_end_sha is reset to iter_start_sha.
+if [ "$VERDICT" = "rolled_back" ]; then
+    ITER_END_SHA="$ITER_START_SHA"
+fi
+
+# ── check for duplicate entry (pipeline resume) ─────────────────────────────
+
+if jq -e --arg iter "$LOOP_ITER" \
+    'map(select(.iteration == $iter)) | length > 0' \
+    "$PROGRESSION_IN" > /dev/null 2>&1; then
+    info "record-progression: entry for iteration $LOOP_ITER already exists; skipping"
+    exit 0
+fi
+
+# ── step 1: read current target from config and compute common root ──────────
+
+CURRENT_TARGET=$(jq -r '.path // ""' "$CONFIG_PATH")
+if [ -z "$CURRENT_TARGET" ]; then
+    die "record-progression: no .path in config $CONFIG_PATH"
+fi
+
+# Initialize NEW_TARGET as the current target (not its directory).
+# For single-file targets this preserves the file path so comparisons
+# against TARGET_DIR detect when the target changes from file to dir.
+NEW_TARGET="$CURRENT_TARGET"
+
+# If the target is a single file, use its directory for the common-root
+# computation (gremlins-drag accepts both files and dirs).
+if [ -f "$WORKDIR/$CURRENT_TARGET" ]; then
+    TARGET_DIR="$(dirname "$CURRENT_TARGET")"
+else
+    TARGET_DIR="$CURRENT_TARGET"
+fi
+
+# Normalize NEW_TARGET to directory form for the common-root loop.
+# For directories, NEW_TARGET already equals TARGET_DIR; for files,
+# start the narrowing from the parent directory.
+COMMON_ROOT="$TARGET_DIR"
+
+# Gather all source files changed since the baseline commit.
+CHANGED_FILES=$(git -C "$WORKDIR" diff --name-only "$BASE_SHA..HEAD" -- '*.rs' '*.py' 2>/dev/null || true)
+
+if [ -n "$CHANGED_FILES" ]; then
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        f_dir="$(dirname "$f")"
+        COMMON_ROOT=$(common_prefix "$COMMON_ROOT" "$f_dir")
+    done <<< "$CHANGED_FILES"
+fi
+
+info "record-progression: current target=$CURRENT_TARGET, common root=$COMMON_ROOT"
+
+# Guard: if common_prefix bottomed out to empty (no shared directory between
+# the original target and changed files), broaden to repo root.
+if [ -z "$COMMON_ROOT" ]; then
+    info "record-progression: no common prefix — broadening to repo root"
+    NEW_TARGET="."
+else
+    NEW_TARGET="$COMMON_ROOT"
+fi
+
+# ── step 2: write broadened target to config BEFORE recomputing ─────────────
+
+if [ "$NEW_TARGET" != "$CURRENT_TARGET" ]; then
+    info "record-progression: target broadened from $CURRENT_TARGET to $NEW_TARGET"
+
+    # Update the mutable config with the broadened target NOW, before any
+    # gremlins-drag calls, so recomputed scores use the new target.
+    jq --arg target "$NEW_TARGET" '.path = $target' "$CONFIG_PATH" > "$CONFIG_PATH.tmp" \
+        && mv "$CONFIG_PATH.tmp" "$CONFIG_PATH"
+
+    HEAD_SAVED=$(git -C "$WORKDIR" rev-parse HEAD)
+
+    # Install an EXIT trap to restore HEAD if the script exits mid-recompute.
+    trap 'git -C "$WORKDIR" checkout --quiet "$HEAD_SAVED" 2>/dev/null || true' EXIT
+
+    # Recompute each prior entry.
+    PREV_DRAG=0
+    NEW_PROGRESSION="[]"
+    FIRST=true
+
+    while IFS= read -r entry; do
+        [ -z "$entry" ] && continue
+
+        SHA=$(echo "$entry" | jq -r '.iter_end_sha')
+        info "record-progression: recomputing at $SHA"
+
+        git -C "$WORKDIR" checkout --quiet "$SHA"
+
+        DRAG=$(drag_sum)
+
+        if [ "$FIRST" = true ]; then
+            # Baseline entry: drag_before stays null.
+            NEW_ENTRY=$(echo "$entry" | jq \
+                --arg target "$NEW_TARGET" \
+                --argjson drag_after "$DRAG" \
+                '.target = $target | .drag_after = $drag_after | .drag_delta = null')
+            FIRST=false
+        else
+            NEW_ENTRY=$(echo "$entry" | jq \
+                --arg target "$NEW_TARGET" \
+                --argjson drag_before "$PREV_DRAG" \
+                --argjson drag_after "$DRAG" \
+                '.target = $target | .drag_before = $drag_before | .drag_after = $drag_after | .drag_delta = ($drag_after - $drag_before)')
+        fi
+
+        NEW_PROGRESSION=$(echo "$NEW_PROGRESSION" | jq -c ". + [$NEW_ENTRY]")
+        PREV_DRAG=$DRAG
+    done < <(jq -c '.[]' "$PROGRESSION_IN")
+
+    # Restore HEAD and clear trap.
+    git -C "$WORKDIR" checkout --quiet "$HEAD_SAVED"
+    trap - EXIT
+
+    # Compute current iteration drag at HEAD with the new target.
+    CURRENT_DRAG=$(drag_sum)
+    DRAG_BEFORE="$PREV_DRAG"
+    DRAG_AFTER="$CURRENT_DRAG"
+
+    # Recompute best from rescored progression entries plus current drag.
+    # After broadening, the old drag_best.txt value is for a narrower target
+    # and would silently mask improvements at the new scope.
+    BEST_DRAG=$(echo "$NEW_PROGRESSION" | jq -r '[.[].drag_after // empty] + [$CURRENT_DRAG] | min')
+    printf '%s' "$BEST_DRAG" > "$STATE_DIR/artifacts/drag_best.txt"
+    info "record-progression: best drag reset to $BEST_DRAG (from rescored progression)"
+
+    # Re-run to get the full report for drag_current.json.
+    gremlins-drag > "$STATE_DIR/drag_current.json"
+
+    info "record-progression: recomputed progression with target=$NEW_TARGET, drag=$CURRENT_DRAG"
+else
+    # Target unchanged — use values from the score stage.
+    PROGRESSION_IN_CONTENT=$(cat "$PROGRESSION_IN")
+    NEW_PROGRESSION="$PROGRESSION_IN_CONTENT"
+    DRAG_BEFORE=$(sanitize_num "$DRAG_BEFORE_PATH")
+    DRAG_AFTER=$(sanitize_num "$DRAG_AFTER_PATH")
+fi
+
+# ── step 3: update mutable config and write config snapshot ─────────────────
+
+# Update the mutable config with the (possibly broadened) target.
+jq --arg target "$NEW_TARGET" '.path = $target' "$CONFIG_PATH" > "$CONFIG_PATH.tmp" \
+    && mv "$CONFIG_PATH.tmp" "$CONFIG_PATH"
+
+# Write the config snapshot artifact for the next iteration.
+cp "$CONFIG_PATH" "$CONFIG_OUT"
+
+info "record-progression: config target=$NEW_TARGET"
+
+# ── step 4: append current iteration entry ──────────────────────────────────
+
+DRAG_DELTA=$(awk "BEGIN { printf \"%.6f\", $DRAG_AFTER - $DRAG_BEFORE }")
+
+FINAL_PROGRESSION=$(echo "$NEW_PROGRESSION" | jq \
+    --arg target "$NEW_TARGET" \
+    --arg iter "$LOOP_ITER" \
+    --argjson drag_before "$DRAG_BEFORE" \
+    --argjson drag_after "$DRAG_AFTER" \
+    --argjson drag_delta "$DRAG_DELTA" \
+    --arg iter_start_sha "$ITER_START_SHA" \
+    --arg iter_end_sha "$ITER_END_SHA" \
+    --argjson commits "$COMMITS" \
+    --arg verdict "$VERDICT" \
+    '. + [{"iteration":$iter,"target":$target,"iter_start_sha":$iter_start_sha,"iter_end_sha":$iter_end_sha,"drag_before":$drag_before,"drag_after":$drag_after,"drag_delta":$drag_delta,"commits":$commits,"verdict":$verdict}]')
+
+echo "$FINAL_PROGRESSION" > "$PROGRESSION_OUT"
+info "record-progression: recorded iteration $LOOP_ITER (verdict=$VERDICT, drag=$DRAG_AFTER)"
+
+# ── step 5: signal no_progress for downstream stop decision ──────────────
+
+if [ "$VERDICT" = "no_progress" ]; then
+    info "record-progression: signaling no_progress — writing stop artifact"
+    echo "no_progress" > "$STATE_DIR/artifacts/stop_reason.txt"
+fi

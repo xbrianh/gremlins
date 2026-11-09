@@ -1,12 +1,12 @@
 // Package maintainability scoring for gremlins-drag.
 //
 // This module handles:
-// - Building a landscape of a package directory.
-// - Prompting one independent Agent stage per configured maintainability
-//   dimension (from `MaintainabilityConfig`), run concurrently, each scoring
-//   a single dimension (0–4) with tailored anchors so every dimension gets
-//   focused attention.
-// - Caching the median score per package (one entry per scored package,
+// - Prompting one Agent stage per package per estimate, scoring all
+//   configured maintainability dimensions in a single JSON-returning call.
+// - Tools-based exploration: the agent uses Landscape, Read, Grep, and Glob
+//   to explore the package source files rather than having source embedded
+//   in the prompt.
+// - Caching the mean score per package (one entry per scored package,
 //   not per estimate).
 // - Computing the package-level drag formula.
 
@@ -19,31 +19,22 @@ use gremlins::builders::{output, AgentBuilder, DefinitionBuilder};
 use gremlins::executor::gremlin::{Gremlin, GremlinConfig};
 use gremlins::model_uri::ModelURI;
 
-use crate::config::{MaintainabilityConfig, MaintainabilityDimensionDef};
+use crate::config::MaintainabilityConfig;
 use crate::lang::PackageInfo;
-use crate::util::{median, truncate, CacheState, CompAgentError};
+use crate::util::{extract_json, mean_with_ci, truncate, CacheState, CompAgentError};
 
 // ---------------------------------------------------------------------------
 // Data types
 // ---------------------------------------------------------------------------
 
-/// Maintainability breakdown: dimension key → rounded score (0–4).
+/// Maintainability breakdown: dimension key → raw score (0–4).
 ///
 /// The dimension set is config-driven, so this is a plain map rather than a
-/// fixed struct. Older caches that stored the former fixed dimension fields
-/// still deserialize correctly.
+/// fixed struct.
 pub(crate) type PackageMaintainability = HashMap<String, u8>;
 
-/// Build a `PackageMaintainability` breakdown from a map of dimension
-/// key → median score (f64), rounding each to u8 for the cacheable breakdown.
-fn build_maint_breakdown(dims: &HashMap<&str, f64>) -> HashMap<String, u8> {
-    dims.iter()
-        .map(|(k, v)| (k.to_string(), v.round() as u8))
-        .collect()
-}
-
 /// Compute the maintainability score (0–1) directly from unrounded f64
-/// dimension medians, avoiding the upward bias of per-dimension rounding.
+/// dimension means, avoiding the upward bias of per-dimension rounding.
 ///
 /// The maximum possible sum is `dims.len() * 4`. An empty dimension set
 /// yields the neutral 0.5.
@@ -59,23 +50,26 @@ fn compute_maint_score_from_map(dims: &HashMap<&str, f64>) -> f64 {
 const MAX_MAINT_RETRIES: u32 = 3;
 const MAINT_BACKOFF: [f64; 2] = [1.0, 2.0];
 
-/// Handle for a single per-dimension maintainability scoring task.
-/// Always returns the (pkg_key, dim_name) keys alongside the result
-/// so the collection loop can inject a default on failure.
-type DimTask = tokio::task::JoinHandle<(String, String, Result<u8, String>)>;
+/// Handle for a single per-estimate multi-dimension maintainability task.
+/// Returns (pkg_key, dimension_scores) — all dimensions scored in one call.
+type MaintEstimateTask = tokio::task::JoinHandle<(String, Result<HashMap<String, u8>, String>)>;
+
 /// One line in the maintainability cache file.
 ///
 /// Unlike module-level comprehensibility (which stores one entry per estimate),
-/// this stores one entry per *scored package* with the median score.
+/// this stores one entry per *scored package* with all raw per-estimate
+/// dimension scores. Aggregation to a 0–1 score is recomputed from these.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub(crate) struct MaintCacheEntry {
-    /// `pkg_key || "\0" || blake3(landscape)` — hex, first 16 chars.
+    /// `pkg_key || "\0" || blake3(all source files)` — hex, first 16 chars.
     pub key: String,
     pub package: String,
     pub model: String,
     pub estimates: usize,
-    pub maint_score: f64,
-    pub breakdown: PackageMaintainability,
+    /// Per-estimate raw dimension scores (0–4 per dimension).
+    /// Aggregation to a 0–1 score is pure math — recomputed from these.
+    #[serde(default)]
+    pub raw_estimates: Vec<PackageMaintainability>,
 }
 
 // ---------------------------------------------------------------------------
@@ -119,24 +113,17 @@ pub(crate) async fn score_package_maintainability(
         scoring_packages.len()
     );
 
-    let explorer = gremlins::landscape::LandscapeExplorer;
-
-    let mut handles: Vec<DimTask> = Vec::new();
-    let mut cache_hits: HashMap<String, f64> = HashMap::new();
+    let mut handles: Vec<MaintEstimateTask> = Vec::new();
+    // Cache hits store raw_estimates here; cache misses are collected after awaits.
+    let mut estimates_map: HashMap<String, Vec<HashMap<String, u8>>> = HashMap::new();
+    let mut cache_miss_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for pkg in scoring_packages {
         let pkg_key = pkg.key();
         let pkg_name = pkg.name().to_string();
-        let pkg_dir = package_root_dir(pkg);
 
-        // Build landscape of package directory.
-        let outlines = explorer
-            .build(&pkg_dir, 10)
-            .map_err(|e| format!("[{pkg_name}] landscape build failed: {e}"))?;
-        let landscape = gremlins::landscape::format_landscape(&outlines, &pkg_dir);
-
-        // Read public API root module.
-        let pub_api_source = read_public_api_module(pkg);
+        // Build the package source manifest for the agent to explore.
+        let manifest = build_package_manifest(pkg)?;
 
         // Cache key: pkg_key + hash of all source file contents + estimates.
         let cache_key = compute_pkg_cache_key(&pkg_key, pkg, estimates, config_hash)
@@ -145,99 +132,90 @@ pub(crate) async fn score_package_maintainability(
         if let Some(entry) = cache_map.get(&cache_key) {
             if entry.estimates == estimates && entry.model == model_spec {
                 eprintln!("  [{pkg_name}] cache hit ({})", entry.key);
-                cache_hits.insert(pkg_key.clone(), entry.maint_score);
+                estimates_map.insert(pkg_key.clone(), entry.raw_estimates.clone());
                 continue;
             }
         }
 
-        // Cache miss: spawn `estimates × N` tasks — one per dimension per estimate.
-        for dim in &maint_config.dimensions {
-            let prompt = build_dim_prompt(
-                &pkg_name,
-                &landscape,
-                &pub_api_source,
-                &maint_config.preamble,
-                dim,
-            );
+        cache_miss_keys.insert(pkg_key.clone());
 
-            for _ in 0..estimates {
-                let pkg_key = pkg_key.clone();
-                let pkg_name = pkg_name.clone();
-                let prompt = prompt.clone();
-                let model_spec = model_spec.to_string();
-                let dim_name = dim.key.to_string();
-                let dim_label = dim.label.to_string();
+        // Build the multi-dimension prompt (manifest-based, no source embedded).
+        let prompt = build_multi_dim_prompt(&pkg_name, &manifest, maint_config);
 
-                handles.push(tokio::spawn(async move {
-                    for attempt in 0..MAX_MAINT_RETRIES {
-                        match run_dim_agent(
-                            &pkg_name,
-                            &dim_label,
-                            &prompt,
-                            &model_spec,
-                            verbose,
-                        )
-                        .await
-                        {
-                            Ok(score) => {
-                                return (pkg_key.clone(), dim_name.clone(), Ok(score));
-                            }
-                            Err(e) => {
-                                if matches!(&e, CompAgentError::Retryable(_))
-                                    && attempt + 1 < MAX_MAINT_RETRIES
-                                {
-                                    eprintln!(
-                                        "  [{pkg_name}] {dim_label} attempt {}/{}: {e} — retrying in {:.0}s",
-                                        attempt + 1,
-                                        MAX_MAINT_RETRIES,
-                                        MAINT_BACKOFF[attempt as usize]
-                                    );
-                                    tokio::time::sleep(Duration::from_secs_f64(
-                                        MAINT_BACKOFF[attempt as usize],
-                                    ))
-                                    .await;
-                                    continue;
-                                }
-                                return (
-                                    pkg_key.clone(),
-                                    dim_name.clone(),
-                                    Err(format!(
-                                        "[{pkg_name}] {dim_label} failed after {} attempts: {}",
-                                        attempt + 1,
-                                        match &e {
-                                            CompAgentError::Retryable(s)
-                                            | CompAgentError::Fatal(s) => s.as_str(),
-                                        }
-                                    )),
+        // Cache miss: spawn `estimates` tasks — one full survey per estimate.
+        for _ in 0..estimates {
+            let pkg_key = pkg_key.clone();
+            let pkg_name = pkg_name.clone();
+            let prompt = prompt.clone();
+            let model_spec = model_spec.to_string();
+            let maint_config = maint_config.clone();
+            let pkg_dir = pkg.dir().to_path_buf();
+
+            handles.push(tokio::spawn(async move {
+                for attempt in 0..MAX_MAINT_RETRIES {
+                    match run_maint_agent(
+                        &pkg_name,
+                        &prompt,
+                        &model_spec,
+                        verbose,
+                        &maint_config,
+                        &pkg_dir,
+                    )
+                    .await
+                    {
+                        Ok(scores) => {
+                            return (pkg_key, Ok(scores));
+                        }
+                        Err(e) => {
+                            if matches!(&e, CompAgentError::Retryable(_))
+                                && attempt + 1 < MAX_MAINT_RETRIES
+                            {
+                                eprintln!(
+                                    "  [{pkg_name}] maintainability attempt {}/{}: {e} — retrying in {:.0}s",
+                                    attempt + 1,
+                                    MAX_MAINT_RETRIES,
+                                    MAINT_BACKOFF[attempt as usize]
                                 );
+                                tokio::time::sleep(Duration::from_secs_f64(
+                                    MAINT_BACKOFF[attempt as usize],
+                                ))
+                                .await;
+                                continue;
                             }
+                            return (
+                                pkg_key,
+                                Err(format!(
+                                    "[{pkg_name}] maintainability failed after {} attempts: {}",
+                                    attempt + 1,
+                                    match &e {
+                                        CompAgentError::Retryable(s)
+                                        | CompAgentError::Fatal(s) => s.as_str(),
+                                    }
+                                )),
+                            );
                         }
                     }
+                }
 
-                    (
-                        pkg_key.clone(),
-                        dim_name.clone(),
-                        Err(format!(
-                            "[{pkg_name}] {dim_label} exhausted {} retries",
-                            MAX_MAINT_RETRIES
-                        )),
-                    )
-                }));
-            }
+                (
+                    pkg_key,
+                    Err(format!(
+                        "[{pkg_name}] maintainability exhausted {} retries",
+                        MAX_MAINT_RETRIES
+                    )),
+                )
+            }));
         }
     }
 
-    // Collect task results, grouped by (pkg_key, dim_name).
-    let mut estimates_map: HashMap<(String, String), Vec<u8>> = HashMap::new();
+    // --- Collect fresh results: group per-pkg_key across estimates ---
+    let mut fresh_estimates: HashMap<String, Vec<HashMap<String, u8>>> = HashMap::new();
     for handle in handles {
         match handle.await {
-            Ok((pkg_key, dim_name, Ok(score))) => {
-                estimates_map
-                    .entry((pkg_key, dim_name))
-                    .or_default()
-                    .push(score);
+            Ok((pkg_key, Ok(scores))) => {
+                fresh_estimates.entry(pkg_key).or_default().push(scores);
             }
-            Ok((_pkg_key, _dim_name, Err(e))) => {
+            Ok((_pkg_key, Err(e))) => {
                 eprintln!("  WARNING: {e}");
             }
             Err(e) => {
@@ -245,7 +223,13 @@ pub(crate) async fn score_package_maintainability(
             }
         }
     }
-    // Build result map: merge cache hits with fresh estimates.
+
+    // Merge fresh estimates into estimates_map (which already has cache hits).
+    for (pkg_key, scores) in fresh_estimates {
+        estimates_map.entry(pkg_key).or_default().extend(scores);
+    }
+
+    // --- Build result map: unified aggregation for cache hits and misses ---
     let cache_mutex = Mutex::new(());
     let mut result: HashMap<String, f64> = HashMap::new();
 
@@ -253,52 +237,55 @@ pub(crate) async fn score_package_maintainability(
         let pkg_key = pkg.key();
         let pkg_name = pkg.name().to_string();
 
-        if let Some(score) = cache_hits.get(&pkg_key) {
-            result.insert(pkg_key, *score);
-            continue;
-        }
+        // Both cache hits and misses land in estimates_map.
+        let estimate_batch = match estimates_map.get(&pkg_key) {
+            Some(b) if !b.is_empty() => b,
+            _ => {
+                eprintln!("  [{pkg_name}] no estimates collected — skipping");
+                continue;
+            }
+        };
 
-        // Compute the median per dimension, keeping f64 precision
-        // so maint_score is not biased by per-dimension rounding.
-        let mut dim_medians: HashMap<&str, f64> = HashMap::new();
+        // Aggregate: per-dimension, compute mean across estimates (f64).
+        let mut dim_means: HashMap<&str, f64> = HashMap::new();
 
         for dim in &maint_config.dimensions {
-            let key = (pkg_key.clone(), dim.key.to_string());
-            if let Some(scores) = estimates_map.get(&key) {
-                if scores.is_empty() {
-                    eprintln!(
-                        "  [{pkg_name}] {label}: no estimates — defaulting to 2.0",
-                        label = dim.label
-                    );
-                    dim_medians.insert(dim.key.as_str(), 2.0);
-                } else {
-                    let f64_scores: Vec<f64> = scores.iter().map(|&s| s as f64).collect();
-                    let med = median(&f64_scores);
-                    if verbose {
-                        eprintln!("  [{pkg_name}] {label}: {med:.1}", label = dim.label);
-                    }
-                    dim_medians.insert(dim.key.as_str(), med);
-                }
-            } else {
+            let f64_scores: Vec<f64> = estimate_batch
+                .iter()
+                .filter_map(|est| est.get(&dim.key).map(|&s| s as f64))
+                .collect();
+
+            if f64_scores.is_empty() {
                 eprintln!(
-                    "  [{pkg_name}] {label}: no estimates collected — defaulting to 2.0",
+                    "  [{pkg_name}] {label}: no estimates — defaulting to 2.0",
                     label = dim.label
                 );
-                dim_medians.insert(dim.key.as_str(), 2.0);
+                dim_means.insert(dim.key.as_str(), 2.0);
+            } else {
+                let (m, lo, hi) = mean_with_ci(&f64_scores);
+                if verbose {
+                    eprintln!(
+                        "  [{pkg_name}] {label}: {m:.1} (95% CI: {lo:.1}–{hi:.1})",
+                        label = dim.label
+                    );
+                }
+                dim_means.insert(dim.key.as_str(), m);
             }
         }
 
-        // Compute maint_score from the unrounded f64 medians.
-        let maint_score = compute_maint_score_from_map(&dim_medians);
+        // Compute maint_score from the unrounded f64 means.
+        let maint_score = compute_maint_score_from_map(&dim_means);
 
         eprintln!("  [{pkg_name}] maint: {maint_score:.3}");
 
-        // Only cache and return when EVERY dimension got at least one real estimate.
+        // Only cache and return when EVERY dimension got at least one real
+        // estimate per configured `estimates`.
         let all_dims_complete = maint_config.dimensions.iter().all(|dim| {
-            let key = (pkg_key.clone(), dim.key.to_string());
-            estimates_map
-                .get(&key)
-                .is_some_and(|v| v.len() >= estimates)
+            let count = estimate_batch
+                .iter()
+                .filter(|est| est.contains_key(&dim.key))
+                .count();
+            count >= estimates
         });
 
         if !all_dims_complete {
@@ -308,23 +295,35 @@ pub(crate) async fn score_package_maintainability(
             continue;
         }
 
-        // Build breakdown with rounded values for the cache.
-        let breakdown = build_maint_breakdown(&dim_medians);
+        // Write raw estimates to cache (cache-miss only).
+        // Skip the write when we don't have the expected number of estimates
+        // (e.g. some LLM tasks failed), so a later cache hit doesn't aggregate
+        // over a smaller sample without warning.
+        if estimate_batch.len() != estimates {
+            eprintln!(
+                "  [{pkg_name}] WARNING: {}/{} estimates collected — skipping cache write",
+                estimate_batch.len(),
+                estimates
+            );
+            continue;
+        }
 
-        let cache_key = compute_pkg_cache_key(&pkg_key, pkg, estimates, config_hash)
-            .map_err(|e| format!("[{pkg_name}] cache key computation failed: {e}"))?;
+        let was_cache_miss = cache_miss_keys.contains(&pkg_key);
+        if was_cache_miss {
+            let cache_key = compute_pkg_cache_key(&pkg_key, pkg, estimates, config_hash)
+                .map_err(|e| format!("[{pkg_name}] cache key computation failed: {e}"))?;
 
-        let entry = MaintCacheEntry {
-            key: cache_key,
-            package: pkg_name.clone(),
-            model: model_spec.to_string(),
-            estimates,
-            maint_score,
-            breakdown,
-        };
-        let _guard = cache_mutex.lock().unwrap();
-        if let Err(e) = append_maint_cache_entry(&maint_cache_path, &entry) {
-            eprintln!("  [{pkg_name}] WARNING: failed to append maint cache: {e}");
+            let entry = MaintCacheEntry {
+                key: cache_key,
+                package: pkg_name.clone(),
+                model: model_spec.to_string(),
+                estimates,
+                raw_estimates: estimate_batch.clone(),
+            };
+            let _guard = cache_mutex.lock().unwrap();
+            if let Err(e) = append_maint_cache_entry(&maint_cache_path, &entry) {
+                eprintln!("  [{pkg_name}] WARNING: failed to append maint cache: {e}");
+            }
         }
 
         result.insert(pkg_key, maint_score);
@@ -334,40 +333,94 @@ pub(crate) async fn score_package_maintainability(
 }
 
 // ---------------------------------------------------------------------------
+// Package manifest (for tools-based exploration)
+// ---------------------------------------------------------------------------
+
+/// Collect all recognized source files in a package and build a manifest
+/// string listing the package root directory and sorted relative file paths.
+///
+/// The agent is expected to use its tools (Landscape, Read, Grep, Glob) to
+/// explore these files — full source is not embedded in the prompt.
+fn build_package_manifest(pkg: &PackageInfo) -> Result<String, String> {
+    let (src_dir, pkg_dir) = match pkg {
+        PackageInfo::Rust(r) => (r.dir.join("src"), r.dir.clone()),
+        PackageInfo::Python(p) => (p.dir.clone(), p.dir.clone()),
+    };
+
+    let files = crate::lang::collect_source_files(&src_dir).map_err(|e| {
+        format!(
+            "failed to collect source files in {}: {e}",
+            src_dir.display()
+        )
+    })?;
+
+    if files.is_empty() {
+        return Err(format!("no source files found in {}", src_dir.display()));
+    }
+
+    // Sort for deterministic output.
+    let mut files = files;
+    files.sort();
+
+    let mut manifest = format!("PACKAGE ROOT: {}\n\nSOURCE FILES:\n", pkg_dir.display());
+    for f in &files {
+        let rel = f.strip_prefix(&pkg_dir).unwrap_or(f);
+        manifest.push_str(&format!("  {}\n", rel.display()));
+    }
+    manifest.push_str(&format!("\n({} source files total)\n", files.len()));
+
+    Ok(manifest)
+}
+
+// ---------------------------------------------------------------------------
 // Prompt
 // ---------------------------------------------------------------------------
 
-/// Build a per-dimension prompt containing the package context and tailored
-/// anchors for a single dimension.
-fn build_dim_prompt(
+/// Build a multi-dimension prompt listing all dimensions and asking for a
+/// JSON object output. The agent explores the package source via tools.
+fn build_multi_dim_prompt(
     pkg_name: &str,
-    landscape: &str,
-    pub_api_source: &str,
-    preamble: &str,
-    dim: &MaintainabilityDimensionDef,
+    manifest: &str,
+    config: &MaintainabilityConfig,
 ) -> String {
-    let api_section = if pub_api_source.is_empty() {
-        "(no public API root module found)".to_string()
-    } else {
-        format!("Source of the package's public API root module:\n\n```\n{pub_api_source}\n```")
-    };
+    let dim_list: String = config
+        .dimensions
+        .iter()
+        .map(|d| {
+            format!(
+                "### {key}: {label}\n\n{description}\n\nAnchors:\n{anchors}",
+                key = d.key,
+                label = d.label,
+                description = d.description,
+                anchors = d.anchors,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    let dim_keys = config
+        .dimensions
+        .iter()
+        .map(|d| d.key.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+
     format!(
         "PACKAGE: {pkg_name}\n\n\
-         ## Package structure (landscape)\n\n\
-         ```\n{landscape}```\n\n\
-         ## Public API\n\n\
-         {api_section}\n\n\
-         **Scope**: If this package contains sub-packages, limit your assessment\n\
-         to this package's own modules and organization — sub-package internals\n\
-         are scored independently.\n\n\
-         ## Dimension: {label}\n\n\
-         {description}\n\n\
+         {manifest}\n\n\
          {preamble}\n\n\
-         {anchors}\n\n\
-         Output only a single integer (0–4). Write it to {{maintainability}}.",
-        label = dim.label,
-        description = dim.description,
-        anchors = dim.anchors,
+         ## Dimensions to score (0–4 scale)\n\n\
+         {dim_list}\n\n\
+         ## Instructions\n\n\
+         **Scope**: Limit your assessment to this package's own source files
+         listed above.  Sub-package internals are scored independently.
+
+         Explore the package source files using Landscape, Read, Grep, and Glob tools.\n\
+         Score each of the {n} dimensions above on a 0–4 integer scale.\n\
+         Produce a single JSON object with these fields: {dim_keys}.\n\
+         Write the JSON to {{maintainability}}.",
+        preamble = config.preamble,
+        n = config.dimensions.len(),
     )
 }
 
@@ -375,15 +428,24 @@ fn build_dim_prompt(
 // Agent
 // ---------------------------------------------------------------------------
 
-/// Run a single-dimension maintainability estimate through an ephemeral
-/// gremlin Agent stage.  Returns a u8 score (0–4).
-async fn run_dim_agent(
+/// Run a single multi-dimension maintainability estimate through an ephemeral
+/// gremlin Agent stage.  Returns a HashMap<String, u8> of dimension scores.
+/// `pkg_dir` is used as the agent's working directory so it can access
+/// source files via its tools.
+async fn run_maint_agent(
     package: &str,
-    dim_label: &str,
     prompt: &str,
     model_spec: &str,
     verbose: bool,
-) -> Result<u8, CompAgentError> {
+    maint_config: &MaintainabilityConfig,
+    pkg_dir: &Path,
+) -> Result<HashMap<String, u8>, CompAgentError> {
+    if maint_config.dimensions.is_empty() {
+        return Err(CompAgentError::Fatal(
+            "maintainability config has no dimensions".to_string(),
+        ));
+    }
+
     let model_uri = ModelURI::parse(model_spec)
         .map_err(|e| CompAgentError::Fatal(format!("invalid model: {e}")))?;
 
@@ -391,21 +453,21 @@ async fn run_dim_agent(
         .option("src", "")
         .prompt(prompt.to_string())
         .output("maintainability", output("artifact://maintainability"))
-        .landscape(false)
+        .landscape(true)
         .model(model_uri.clone())
         .build()
         .map_err(|e| CompAgentError::Fatal(format!("agent build: {e}")))?;
 
-    let def = DefinitionBuilder::new("drag-maint-dim", model_uri)
+    let def = DefinitionBuilder::new("drag-maint", model_uri)
         .stage(stage)
         .build()
         .map_err(|e| CompAgentError::Fatal(format!("def build: {e}")))?;
 
-    let cwd = std::env::current_dir().map_err(|e| CompAgentError::Fatal(format!("cwd: {e}")))?;
+    let cwd = pkg_dir.to_path_buf();
 
     let config = GremlinConfig { ephemeral: true };
     let mut gremlin = Gremlin::init(
-        "drag-maint-dim",
+        "drag-maint",
         &cwd,
         &def,
         &HashMap::new(),
@@ -415,7 +477,7 @@ async fn run_dim_agent(
     .map_err(|e| CompAgentError::Fatal(format!("gremlin init: {e}")))?;
 
     if verbose {
-        eprintln!("  [{package}] running dim agent ({dim_label}, model={model_spec})...");
+        eprintln!("  [{package}] running maint agent (model={model_spec})...");
     }
 
     let exit_code = gremlin
@@ -425,7 +487,7 @@ async fn run_dim_agent(
 
     if exit_code != 0 {
         return Err(CompAgentError::Fatal(format!(
-            "dim agent ({dim_label}) exited {exit_code} (bail/missing artifact)"
+            "maint agent exited {exit_code} (bail/missing artifact)"
         )));
     }
 
@@ -435,96 +497,42 @@ async fn run_dim_agent(
         .await
         .map_err(|e| CompAgentError::Fatal(format!("artifact read: {e}")))?;
 
-    let score = extract_dim_score(&content).ok_or_else(|| {
-        CompAgentError::Retryable(format!(
-            "no integer 0–4 in artifact: {}",
-            truncate(&content, 200)
-        ))
+    let json_str = extract_json(&content).ok_or_else(|| {
+        CompAgentError::Retryable(format!("no JSON in artifact: {}", truncate(&content, 200)))
     })?;
 
-    if score > 4 {
-        return Err(CompAgentError::Retryable(format!(
-            "{dim_label}={score} out of 0–4 range"
-        )));
-    }
+    let scores: HashMap<String, u8> = serde_json::from_str(&json_str)
+        .map_err(|e| CompAgentError::Retryable(format!("parse: {e}")))?;
 
-    Ok(score)
+    validate_maint_scores(&scores, maint_config)?;
+
+    Ok(scores)
 }
 
-/// Extract a single 0–4 integer from agent output.
-///
-/// Only accepts a whitespace-delimited token that is exactly a single
-/// digit 0–4 (after stripping trailing punctuation).  Multi-digit tokens
-/// ("10", "30") and prose with embedded digits are rejected so the agent
-/// is retried rather than silently locked to the wrong score.
-fn extract_dim_score(content: &str) -> Option<u8> {
-    for word in content.split_whitespace() {
-        let trimmed = word.trim_matches(|c: char| {
-            c == '.' || c == ',' || c == ';' || c == ':' || c == '"' || c == '\''
-        });
-        // Accept only if the trimmed token is exactly a single ASCII digit 0–4.
-        if trimmed.len() == 1 {
-            if let Some(ch) = trimmed.chars().next() {
-                if let Some(n) = ch.to_digit(10) {
-                    if n <= 4 {
-                        return Some(n as u8);
-                    }
-                }
+/// Validate that every configured dimension is present and in the 0–4
+/// range.  Extracted as a pure helper for test coverage.
+fn validate_maint_scores(
+    scores: &HashMap<String, u8>,
+    maint_config: &MaintainabilityConfig,
+) -> Result<(), CompAgentError> {
+    for dim in &maint_config.dimensions {
+        match scores.get(&dim.key) {
+            None => {
+                return Err(CompAgentError::Retryable(format!(
+                    "missing dimension {}",
+                    dim.key
+                )));
             }
+            Some(&val) if val > 4 => {
+                return Err(CompAgentError::Retryable(format!(
+                    "{}={val} out of 0–4 range",
+                    dim.key
+                )));
+            }
+            _ => {}
         }
     }
-
-    None
-}
-// ---------------------------------------------------------------------------
-// Package utilities
-// ---------------------------------------------------------------------------
-
-/// Get the root source directory for a package.
-fn package_root_dir(pkg: &PackageInfo) -> PathBuf {
-    match pkg {
-        PackageInfo::Rust(r) => r.dir.clone(),
-        PackageInfo::Python(p) => p.dir.clone(),
-    }
-}
-
-/// Read the public API root module source for a package.
-/// Returns an empty string when no recognized entry-point file exists.
-fn read_public_api_module(pkg: &PackageInfo) -> String {
-    match pkg {
-        PackageInfo::Rust(r) => {
-            let candidates = [
-                r.dir.join("src").join("lib.rs"),
-                r.dir.join("src").join("main.rs"),
-                r.dir.join("src").join("mod.rs"),
-            ];
-            for candidate in &candidates {
-                if candidate.exists() {
-                    return std::fs::read_to_string(candidate).unwrap_or_else(|e| {
-                        eprintln!("  WARNING: failed to read {}: {e}", candidate.display());
-                        String::new()
-                    });
-                }
-            }
-            eprintln!(
-                "  WARNING: no lib.rs, main.rs, or mod.rs in {}",
-                r.dir.join("src").display()
-            );
-            String::new()
-        }
-        PackageInfo::Python(p) => {
-            let init = p.dir.join("__init__.py");
-            if init.exists() {
-                std::fs::read_to_string(&init).unwrap_or_else(|e| {
-                    eprintln!("  WARNING: failed to read {}: {e}", init.display());
-                    String::new()
-                })
-            } else {
-                eprintln!("  WARNING: {} not found", init.display());
-                String::new()
-            }
-        }
-    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -573,7 +581,7 @@ fn compute_pkg_cache_key(
     file_hashes.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"v5\0");
+    hasher.update(b"v6\0");
     hasher.update(pkg_key.as_bytes());
     hasher.update(b"\0");
     for (path, hash) in &file_hashes {
@@ -587,6 +595,7 @@ fn compute_pkg_cache_key(
     hasher.update(config_hash.as_bytes());
     Ok(hasher.finalize().to_hex()[..16].to_string())
 }
+
 /// Load the maintainability JSONL cache file.
 fn load_maint_cache(path: &Path) -> Result<HashMap<String, MaintCacheEntry>, String> {
     if !path.exists() {
@@ -645,94 +654,6 @@ fn append_maint_cache_entry(path: &Path, entry: &MaintCacheEntry) -> Result<(), 
 mod tests {
     use super::*;
 
-    // ── extract_dim_score ──
-
-    #[test]
-    fn extract_bare_digit() {
-        assert_eq!(extract_dim_score("3"), Some(3));
-        assert_eq!(extract_dim_score("0"), Some(0));
-        assert_eq!(extract_dim_score("4"), Some(4));
-    }
-
-    #[test]
-    fn extract_digit_in_prose() {
-        // A standalone digit token among words.
-        assert_eq!(
-            extract_dim_score("The score is 3 for this dimension."),
-            Some(3)
-        );
-    }
-
-    #[test]
-    fn extract_digit_trailing_punctuation() {
-        assert_eq!(extract_dim_score("3."), Some(3));
-        assert_eq!(extract_dim_score("2,"), Some(2));
-        assert_eq!(extract_dim_score("4:"), Some(4));
-        assert_eq!(extract_dim_score("1;"), Some(1));
-        assert_eq!(extract_dim_score("\"3\""), Some(3));
-        assert_eq!(extract_dim_score("'0'"), Some(0));
-    }
-
-    #[test]
-    fn extract_digit_with_markdown_fence() {
-        assert_eq!(extract_dim_score("```\n3\n```"), Some(3));
-    }
-
-    #[test]
-    fn reject_multi_digit() {
-        // "10" should not be parsed as 1.
-        assert_eq!(extract_dim_score("10"), None);
-        assert_eq!(extract_dim_score("30"), None);
-        assert_eq!(extract_dim_score("100"), None);
-    }
-
-    #[test]
-    fn reject_out_of_range_single_digit() {
-        // 5–9 are single digits but out of range.
-        assert_eq!(extract_dim_score("5"), None);
-        assert_eq!(extract_dim_score("9"), None);
-    }
-
-    #[test]
-    fn reject_ambiguous_prose() {
-        // Embedded digits in words should not match.
-        assert_eq!(extract_dim_score("version 2.0"), None);
-        assert_eq!(extract_dim_score("0-4 scale"), None);
-    }
-
-    #[test]
-    fn empty_or_no_digit() {
-        assert_eq!(extract_dim_score(""), None);
-        assert_eq!(extract_dim_score("no digits here"), None);
-    }
-
-    // ── build_maint_breakdown ──
-
-    #[test]
-    fn build_maint_breakdown_all_present() {
-        let mut m: HashMap<&str, f64> = HashMap::new();
-        m.insert("decomposition", 3.0);
-        m.insert("interface_design", 2.0);
-        m.insert("consistency", 4.0);
-
-        let p = build_maint_breakdown(&m);
-        assert_eq!(p.get("decomposition"), Some(&3));
-        assert_eq!(p.get("interface_design"), Some(&2));
-        assert_eq!(p.get("consistency"), Some(&4));
-        assert_eq!(p.len(), 3);
-    }
-
-    #[test]
-    fn build_maint_breakdown_rounds_f64() {
-        let mut m: HashMap<&str, f64> = HashMap::new();
-        // 2.7 rounds to 3, 2.2 rounds to 2.
-        m.insert("decomposition", 2.7);
-        m.insert("interface_design", 2.2);
-        let p = build_maint_breakdown(&m);
-        assert_eq!(p.get("decomposition"), Some(&3));
-        assert_eq!(p.get("interface_design"), Some(&2));
-    }
-
     // ── compute_maint_score_from_map ──
 
     /// The ten dimensions from the bundled config, used to exercise the
@@ -741,46 +662,165 @@ mod tests {
         "decomposition",
         "interface_design",
         "consistency",
-        "change_isolation",
-        "duplication",
-        "locality",
-        "abstraction_clarity",
-        "conceptual_surface",
-        "predictability",
-        "evasion",
+        "dependency_hygiene",
+        "tool_awareness",
+        "naming",
+        "error_handling",
+        "state_management",
+        "logging",
+        "testability",
     ];
 
     #[test]
-    fn maint_score_from_f64_map() {
-        let mut m: HashMap<&str, f64> = HashMap::new();
-        // All ten dimensions at 2.0 → score = 20/40 = 0.5.
-        for key in TEN_DIMS {
-            m.insert(key, 2.0);
-        }
-        let score = compute_maint_score_from_map(&m);
-        assert!((score - 0.5).abs() < 1e-9);
-
-        // One dimension at 2.5 → sum = 20.5, score = 0.5125.
-        m.insert("decomposition", 2.5);
-        let score = compute_maint_score_from_map(&m);
-        assert!((score - 0.5125).abs() < 1e-9);
+    fn compute_maint_score_empty_is_neutral() {
+        let dims: HashMap<&str, f64> = HashMap::new();
+        assert_eq!(compute_maint_score_from_map(&dims), 0.5);
     }
 
     #[test]
-    fn maint_score_preserves_fraction() {
-        let mut m: HashMap<&str, f64> = HashMap::new();
-        for key in TEN_DIMS {
-            m.insert(key, 2.0);
-        }
-        m.insert("decomposition", 1.0);
-        // Sum = 1.0 + 9*2.0 = 19.0, score = 19/40 = 0.475.
-        let score = compute_maint_score_from_map(&m);
-        assert!((score - 0.475).abs() < 1e-9);
+    fn compute_maint_score_uniform() {
+        let dims: HashMap<&str, f64> = TEN_DIMS.iter().map(|&d| (d, 2.0)).collect();
+        assert!((compute_maint_score_from_map(&dims) - 0.5).abs() < 1e-10);
     }
 
     #[test]
-    fn maint_score_empty_dims_is_neutral() {
-        let m: HashMap<&str, f64> = HashMap::new();
-        assert!((compute_maint_score_from_map(&m) - 0.5).abs() < 1e-9);
+    fn compute_maint_score_all_zeros() {
+        let dims: HashMap<&str, f64> = TEN_DIMS.iter().map(|&d| (d, 0.0)).collect();
+        assert!((compute_maint_score_from_map(&dims) - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn compute_maint_score_all_fours() {
+        let dims: HashMap<&str, f64> = TEN_DIMS.iter().map(|&d| (d, 4.0)).collect();
+        assert!((compute_maint_score_from_map(&dims) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn compute_maint_score_mixed() {
+        let mut dims: HashMap<&str, f64> = HashMap::new();
+        dims.insert("decomposition", 3.0);
+        dims.insert("interface_design", 2.0);
+        let score = compute_maint_score_from_map(&dims);
+        // sum=5, max=8 → 0.625
+        assert!((score - 0.625).abs() < 1e-10);
+    }
+
+    // ── validate_maint_scores ──
+
+    use crate::config::{MaintainabilityConfig, MaintainabilityDimensionDef};
+
+    fn make_config(dim_keys: &[&str]) -> MaintainabilityConfig {
+        MaintainabilityConfig {
+            preamble: String::new(),
+            dimensions: dim_keys
+                .iter()
+                .map(|&k| MaintainabilityDimensionDef {
+                    key: k.to_string(),
+                    label: k.to_string(),
+                    description: String::new(),
+                    anchors: String::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn validate_all_dim_present() {
+        let cfg = make_config(&["naming", "cohesion"]);
+        let mut scores: HashMap<String, u8> = HashMap::new();
+        scores.insert("naming".into(), 3);
+        scores.insert("cohesion".into(), 2);
+        assert!(validate_maint_scores(&scores, &cfg).is_ok());
+    }
+
+    #[test]
+    fn validate_missing_dimension() {
+        let cfg = make_config(&["naming", "cohesion"]);
+        let mut scores: HashMap<String, u8> = HashMap::new();
+        scores.insert("naming".into(), 3);
+        let err = validate_maint_scores(&scores, &cfg).unwrap_err();
+        assert!(matches!(err, CompAgentError::Retryable(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("missing dimension") && msg.contains("cohesion"));
+    }
+
+    #[test]
+    fn validate_out_of_range() {
+        let cfg = make_config(&["naming"]);
+        let mut scores: HashMap<String, u8> = HashMap::new();
+        scores.insert("naming".into(), 5);
+        let err = validate_maint_scores(&scores, &cfg).unwrap_err();
+        assert!(matches!(err, CompAgentError::Retryable(_)));
+        assert!(err.to_string().contains("out of 0–4 range"));
+    }
+
+    #[test]
+    fn validate_extra_keys_allowed() {
+        // Extra keys in the JSON are fine — the agent may add commentary keys.
+        let cfg = make_config(&["naming"]);
+        let mut scores: HashMap<String, u8> = HashMap::new();
+        scores.insert("naming".into(), 3);
+        scores.insert("extra".into(), 2);
+        assert!(validate_maint_scores(&scores, &cfg).is_ok());
+    }
+
+    #[test]
+    fn validate_empty_config() {
+        let cfg = make_config(&[]);
+        let scores: HashMap<String, u8> = HashMap::new();
+        assert!(validate_maint_scores(&scores, &cfg).is_ok());
+    }
+
+    // ── MaintCacheEntry round-trip ──
+
+    #[test]
+    fn maint_cache_entry_round_trip() {
+        let dir = std::env::temp_dir().join("drag-test-maint-roundtrip");
+        let _ = std::fs::create_dir_all(&dir);
+        let cache_path = dir.join("maint-cache.jsonl");
+        let raw_estimates: Vec<PackageMaintainability> = vec![[
+            ("modularity", 3),
+            ("interface_cohesion", 2),
+            ("error_propagation", 1),
+            ("dependency_harmony", 2),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect()];
+        let entry = MaintCacheEntry {
+            key: "b33fdeadb33fdead".to_string(),
+            package: "test-pkg".to_string(),
+            model: "openai/gpt-4o".to_string(),
+            estimates: 1,
+            raw_estimates,
+        };
+        append_maint_cache_entry(&cache_path, &entry).unwrap();
+        let map = load_maint_cache(&cache_path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(map.len(), 1);
+        let loaded = map.get("b33fdeadb33fdead").unwrap();
+        assert_eq!(loaded.raw_estimates.len(), 1);
+        assert_eq!(loaded.raw_estimates[0].get("modularity"), Some(&3));
+        assert_eq!(loaded.package, "test-pkg");
+        assert_eq!(loaded.model, "openai/gpt-4o");
+    }
+
+    #[test]
+    fn maint_cache_entry_deser_old_format_falls_back() {
+        // Old cache entries with maint_score/breakdown (instead of raw_estimates)
+        // should deserialize with an empty raw_estimates vec, triggering re-score.
+        let dir = std::env::temp_dir().join("drag-test-maint-oldformat");
+        let _ = std::fs::create_dir_all(&dir);
+        let cache_path = dir.join("maint-cache.jsonl");
+        std::fs::write(
+            &cache_path,
+            "{\"key\":\"oldkey0000000000\",\"package\":\"pkg\",\"model\":\"m\",\"estimates\":3,\"maint_score\":0.6,\"breakdown\":{\"a\":3}}\n",
+        )
+        .unwrap();
+        let map = load_maint_cache(&cache_path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(map.len(), 1);
+        let entry = map.get("oldkey0000000000").unwrap();
+        assert!(entry.raw_estimates.is_empty());
     }
 }

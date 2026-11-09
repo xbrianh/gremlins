@@ -23,6 +23,11 @@ const BUNDLED_CONFIG: &str = include_str!("../config/bundled.json5");
 #[derive(Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct DragConfig {
+    /// Target path (file or directory) to score.
+    /// When GREMLINS_DRAG_CLI_CONFIG is set, this field provides the
+    /// target — no positional CLI argument is required.
+    #[serde(default)]
+    pub path: Option<String>,
     #[serde(default)]
     pub weights: WeightsConfig,
     #[serde(default)]
@@ -55,6 +60,7 @@ fn default_estimates() -> usize {
 impl Default for DragConfig {
     fn default() -> Self {
         Self {
+            path: None,
             weights: WeightsConfig::default(),
             model: None,
             tokenizer: String::new(),
@@ -96,8 +102,12 @@ impl DragConfig {
                 serde_json5::from_str(&content)
                     .map_err(|e| format!("invalid config in {}: {e}", path.display()))?
             }
-            (None, Some(env_json)) => serde_json5::from_str(&env_json)
-                .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: invalid JSON5: {e}"))?,
+            (None, Some(env_path)) => {
+                let content = std::fs::read_to_string(&env_path)
+                    .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: {}: {e}", env_path))?;
+                serde_json5::from_str(&content)
+                    .map_err(|e| format!("GREMLINS_DRAG_CLI_CONFIG: {}: {e}", env_path))?
+            }
             (None, None) => serde_json5::from_str(BUNDLED_CONFIG)
                 .map_err(|e| format!("internal error: bundled config is invalid: {e}"))?,
         };
@@ -283,12 +293,12 @@ mod tests {
         assert_eq!(config.weights.m, 2.5);
         assert_eq!(config.weights.p, 2.5);
         assert_eq!(config.tokenizer, "o200k_base");
-        assert_eq!(config.estimates_per_survey, 1);
+        assert_eq!(config.estimates_per_survey, 5);
         assert!(!config.skip_maintainability);
         assert!(config.model.is_none());
-        assert_eq!(config.comprehensibility.dimensions.len(), 7);
+        assert_eq!(config.comprehensibility.dimensions.len(), 8);
         assert_eq!(config.maintainability.dimensions.len(), 10);
-        // Structural anchors cover the three structural dimensions.
+        // Structural anchors cover the four structural dimensions.
         assert!(config
             .comprehensibility
             .structural_anchors
@@ -301,6 +311,10 @@ mod tests {
             .comprehensibility
             .structural_anchors
             .contains_key("test_hygiene"));
+        assert!(config
+            .comprehensibility
+            .structural_anchors
+            .contains_key("duplication"));
     }
 
     #[test]
@@ -405,7 +419,7 @@ mod tests {
     fn load_bundled_parses_with_expected_values() {
         let config: DragConfig =
             serde_json5::from_str(BUNDLED_CONFIG).expect("bundled config must parse");
-        assert_eq!(config.comprehensibility.dimensions.len(), 7);
+        assert_eq!(config.comprehensibility.dimensions.len(), 8);
         assert_eq!(config.maintainability.dimensions.len(), 10);
         assert_eq!(config.tokenizer, "o200k_base");
         assert_eq!(config.weights.w2, 0.5);
@@ -421,7 +435,7 @@ mod tests {
         config.model = Some("openai/gpt-4o".to_string());
         assert_eq!(config.model.as_deref(), Some("openai/gpt-4o"));
         // Other fields unchanged.
-        assert_eq!(config.comprehensibility.dimensions.len(), 7);
+        assert_eq!(config.comprehensibility.dimensions.len(), 8);
     }
 
     #[test]
@@ -469,8 +483,7 @@ mod tests {
             }
         }"#;
         let config: DragConfig = serde_json5::from_str(json).expect("parse must succeed");
-        // load() should reject duplicates, but we test via the same validation
-        // logic embedded in load(). Simulate what load() does after parsing.
+        // Simulate the validation logic in load().
         let mut seen = std::collections::HashSet::new();
         let mut dup = None;
         for dim in &config.comprehensibility.dimensions {

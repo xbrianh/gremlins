@@ -6,7 +6,7 @@ mod util;
 
 use config::{ComprehensibilityConfig, ComprehensibilityDimensionDef, DragConfig, OutputFormat};
 use scoring::{build_drag_tree, compute_drag, compute_footprint, DragNode};
-use util::{extract_json, median, truncate, CacheState, CompAgentError};
+use util::{extract_json, mean_with_ci, truncate, CacheState, CompAgentError};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -197,9 +197,14 @@ async fn run() -> Result<(), String> {
         return Ok(());
     }
 
-    let path = cli.path.ok_or_else(|| {
-        "<PATH> is required unless --explain or --clear-cache is used".to_string()
-    })?;
+    // When GREMLINS_DRAG_CLI_CONFIG is set, the target comes from
+    // config.path; otherwise it must be passed as a positional argument.
+    let path = cli
+        .path
+        .or_else(|| config.path.clone().map(PathBuf::from))
+        .ok_or_else(|| {
+            "<PATH> is required unless --explain or --clear-cache is used".to_string()
+        })?;
 
     // 1. Discover packages (Rust + Python, best-effort) anchored at the
     //    user-supplied path so that packages are found regardless of cwd.
@@ -253,8 +258,12 @@ async fn run() -> Result<(), String> {
             &comp_config_hash,
         );
         if let Some(entry) = cache_map.get(&key) {
-            // Only accept cached entries whose estimate count matches.
-            if entry.estimates == config.estimates_per_survey {
+            // Only accept cached entries whose estimate count matches and
+            // whose raw_estimates are populated (legacy entries may have
+            // an empty vec from #[serde(default)]).
+            if entry.estimates == config.estimates_per_survey
+                && entry.raw_estimates.len() == config.estimates_per_survey
+            {
                 module_cache.insert(module.clone(), entry.clone());
             }
         }
@@ -688,11 +697,9 @@ type ComprehensibilityScores = HashMap<String, u8>;
 ///
 /// The cache key is model-dependent: `blake3(content || "\0" || model_uri)`.
 ///
-/// **What the cache actually fast-paths:** only `token_count` and
-/// `comprehensibility` are restored on a cache hit. The remaining fields
-/// (`file`, `model`, `breakdown`) are stored for inspection/debugging but
-/// are never read back — dependency footprints are position/context-dependent
-/// and always recomputed fresh.
+/// **What the cache actually fast-paths:** the `raw_estimates` are restored
+/// on a cache hit and fed through the same aggregation path as fresh
+/// estimates.  Aggregation and scoring are pure math — always recomputed.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct CacheEntry {
     /// BLAKE3 hash of (content || "\0" || model_uri),
@@ -704,13 +711,13 @@ struct CacheEntry {
     model: String,
     /// Token count from tiktoken BPE (model-independent; stored here for convenience).
     token_count: usize,
-    /// Number of estimates used to produce the median.
+    /// Number of estimates used to produce the mean.
     #[serde(default = "default_estimates")]
     estimates: usize,
-    /// Median comprehensibility score (0–1).
-    comprehensibility: f64,
-    /// The four dimension scores from the LLM response.
-    breakdown: ComprehensibilityScores,
+    /// Per-estimate raw dimension scores (0–4 per dimension).
+    /// Aggregation to a 0–1 score is pure math — recomputed from these.
+    #[serde(default)]
+    raw_estimates: Vec<ComprehensibilityScores>,
 }
 
 fn default_estimates() -> usize {
@@ -811,130 +818,21 @@ fn resolve_comprehensibility_model(model_opt: Option<&str>) -> Result<String, St
     gremlins::config::resolve_model_with_global(&spec)
 }
 
-/// Build a compact structural skeleton for a source file, suitable for
-/// prepending to the LLM prompt. Uses the landscape scanner for item-level
-/// structure and source text for line counts.
-fn build_file_skeleton(source: &str, extension: &str) -> String {
-    use std::collections::BTreeMap;
-
-    let total_lines = source.lines().count();
-
-    // Run the landscape scanner on the raw source (same regex the explorer
-    // uses) to get outline items with test modules collapsed.
-    let items = gremlins::landscape::heuristic::scan(extension, source, true);
-    let items_no_collapse = gremlins::landscape::heuristic::scan(extension, source, false);
-
-    // Count production functions (non-test)
-    let prod_fns: Vec<_> = items.iter().filter(|i| i.kind == "fn").collect();
-    let test_fns: Vec<_> = items_no_collapse
-        .iter()
-        .filter(|i| i.kind == "fn")
-        .collect();
-    let test_fn_count = test_fns.len().saturating_sub(prod_fns.len());
-
-    // Submodule count (mod items not named "tests")
-    let submodule_count = items
-        .iter()
-        .filter(|i| i.kind == "mod" && i.name != "tests")
-        .count();
-
-    // Largest function: approximate by computing spans between consecutive items
-    let mut largest_fn_lines = 0usize;
-    let mut all_items_sorted: Vec<(usize, &str, &str)> = items
-        .iter()
-        .map(|i| (i.line, i.kind, i.name.as_str()))
-        .collect();
-    all_items_sorted.sort_by_key(|(l, _, _)| *l);
-    for w in all_items_sorted.windows(2) {
-        if w[0].1 == "fn" {
-            let span = w[1].0.saturating_sub(w[0].0);
-            if span > largest_fn_lines {
-                largest_fn_lines = span;
-            }
-        }
-    }
-    // Also check the last item if it's a function
-    if let Some(last) = all_items_sorted.last() {
-        if last.1 == "fn" {
-            let span = total_lines.saturating_sub(last.0);
-            if span > largest_fn_lines {
-                largest_fn_lines = span;
-            }
-        }
-    }
-
-    // Estimate test ratio: find the mod tests entry and compute its span
-    let test_ratio_pct =
-        if let Some(test_mod) = items.iter().find(|i| i.name == "tests" && i.kind == "mod") {
-            // Approximate: the test module starts at test_mod.line and goes to end of file
-            let test_lines = total_lines.saturating_sub(test_mod.line.saturating_sub(1));
-            ((test_lines as f64 / total_lines as f64) * 100.0) as usize
-        } else {
-            0
-        };
-
-    // Concern clusters: group fns by prefix heuristic
-    let mut clusters: BTreeMap<String, usize> = BTreeMap::new();
-    for item in &prod_fns {
-        let prefix = item.name.split('_').next().unwrap_or(&item.name);
-        *clusters.entry(prefix.to_string()).or_default() += 1;
-    }
-    // Only show clusters with >= 2 fns
-    let cluster_parts: Vec<String> = clusters
-        .iter()
-        .filter(|(_, &c)| c >= 2)
-        .map(|(prefix, count)| format!("{prefix} ({count} fns)"))
-        .collect();
-
-    // Format outline items compactly
-    let mut outline_parts: Vec<String> = Vec::new();
-    for item in &items {
-        outline_parts.push(format!(
-            "  {}|{}|{}",
-            item.line,
-            item.kind,
-            gremlins::landscape::escape_landscape_delimiters(&item.name)
-        ));
-    }
-
-    let mut skeleton = String::new();
-    skeleton.push_str(&format!(
-        "FILE SHAPE: {total_lines} lines, {} functions, {} submodules, {} test functions\n",
-        prod_fns.len(),
-        submodule_count,
-        test_fn_count,
-    ));
-    if largest_fn_lines > 0 {
-        skeleton.push_str(&format!(
-            "Largest function span: ~{largest_fn_lines} lines\n"
-        ));
-    }
-    skeleton.push_str(&format!("Test ratio: {test_ratio_pct}% of file\n"));
-    skeleton.push_str(&format!("Submodule count: {submodule_count}\n"));
-    if !cluster_parts.is_empty() {
-        skeleton.push_str(&format!("Concern clusters: {}\n", cluster_parts.join(", ")));
-    }
-    skeleton.push_str("\nStructure:\n");
-    skeleton.push_str(&outline_parts.join("\n"));
-
-    skeleton
-}
-
 /// Handle for a single comprehensibility scoring task.
-/// On success returns all the info needed to compute the median and write the cache.
+/// On success returns all the info needed to compute the mean and write the cache.
 /// On failure returns a human-readable reason.
 type ComprehensionTask = tokio::task::JoinHandle<Result<CompEstimate, String>>;
 
 /// Result of a single comprehensibility estimate — returned by each spawned task.
 struct CompEstimate {
     module: String,
-    score: f64,
-    /// Fields for deferred cache writing (after median is computed).
+    /// Per-dimension 0–4 scores from the LLM. Aggregation is deferred.
+    dim_scores: ComprehensibilityScores,
+    /// Fields for deferred cache writing of raw estimates.
     abs_path: String,
     model_spec: String,
     cache_key: String,
     token_count: usize,
-    breakdown: ComprehensibilityScores,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -985,8 +883,10 @@ async fn score_comprehensibility(
     // Cache misses spawn `estimates` LLM tasks.
     let mut handles: Vec<ComprehensionTask> = Vec::new();
 
-    // Scores collected so far (cache hits go straight here).
-    let mut by_module: HashMap<String, Vec<f64>> = HashMap::new();
+    // Cache hits store raw_estimates here (Vec of per-estimate dim scores).
+    // Cache misses are collected into estimates_map below, then both
+    // paths feed through the same aggregate_comprehensibility().
+    let mut by_module: HashMap<String, Vec<ComprehensibilityScores>> = HashMap::new();
 
     // Build a module → token count lookup from scores for cache-miss writeback.
     let module_tokens: HashMap<String, usize> = scores
@@ -998,10 +898,7 @@ async fn score_comprehensibility(
         // ── cache hit (pre-computed in run()) ──
         if let Some(entry) = module_cache.get(module.as_str()) {
             eprintln!("  [{module}] cache hit ({})", entry.key);
-            by_module
-                .entry(module.clone())
-                .or_default()
-                .resize(estimates, entry.comprehensibility);
+            by_module.insert(module.clone(), entry.raw_estimates.clone());
             continue;
         }
 
@@ -1013,10 +910,13 @@ async fn score_comprehensibility(
             }
         };
         if source.trim().is_empty() {
-            by_module
-                .entry(module.clone())
-                .or_default()
-                .resize(estimates, 1.0);
+            // Empty files: all dimensions at 4 (perfect score).
+            let dim_keys: HashMap<String, u8> = comprehensibility_config
+                .dimensions
+                .iter()
+                .map(|d| (d.key.clone(), 4u8))
+                .collect();
+            by_module.insert(module.clone(), vec![dim_keys; estimates]);
             continue;
         }
 
@@ -1026,9 +926,7 @@ async fn score_comprehensibility(
             .into_owned();
 
         let fence = lang::code_fence(file);
-        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("rs");
-        let skeleton = build_file_skeleton(&source, ext);
-        let prompt = format!("{skeleton}\n\nSOURCE FILE ({module}):\n\n```{fence}\n{source}\n```");
+        let prompt = format!("SOURCE FILE ({module}):\n\n```{fence}\n{source}\n```");
 
         let token_count = module_tokens.get(module.as_str()).copied().unwrap_or(0);
 
@@ -1043,11 +941,6 @@ async fn score_comprehensibility(
 
             handles.push(tokio::spawn(async move {
                 let cache_key = compute_cache_key(&source, &model_spec, estimates, &config_hash);
-                let dim_keys: Vec<String> = comp_config
-                    .dimensions
-                    .iter()
-                    .map(|d| d.key.clone())
-                    .collect();
 
                 for attempt in 0..MAX_COMP_RETRIES {
                     match run_comp_agent(
@@ -1060,22 +953,14 @@ async fn score_comprehensibility(
                     )
                     .await
                     {
-                        Ok(c) => {
-                            let sum: f64 = dim_keys
-                                .iter()
-                                .map(|k| *c.get(k).unwrap_or(&0) as f64)
-                                .sum();
-                            let raw = sum / (dim_keys.len() * 4) as f64;
-                            let score = raw.clamp(0.0, 1.0);
-
+                        Ok(dim_scores) => {
                             return Ok(CompEstimate {
                                 module,
-                                score,
+                                dim_scores,
                                 abs_path,
                                 model_spec,
                                 cache_key,
                                 token_count,
-                                breakdown: c,
                             });
                         }
                         Err(e) => {
@@ -1129,42 +1014,56 @@ async fn score_comprehensibility(
         }
     }
 
+    let dim_count = comprehensibility_config.dimensions.len();
+
     for (module, _file, _pkg) in modules.iter() {
-        // Determine the scores: either from cache hits or fresh estimates.
-        let scores_for_module: Vec<f64> = if let Some(estimates_vec) =
-            estimates_map.get(module.as_str())
-        {
-            // ── cache miss: scores come from fresh estimates ──
-            if estimates_vec.len() != estimates {
-                eprintln!(
-                        "  [{module}] WARNING: expected {estimates} estimates, got {} — skipping comprehensibility scoring",
+        // Gather raw estimates: cache-miss from estimates_map, cache-hit from by_module.
+        let raw_estimates: Vec<&ComprehensibilityScores> =
+            if let Some(estimates_vec) = estimates_map.get(module.as_str()) {
+                if estimates_vec.len() != estimates {
+                    eprintln!(
+                        "  [{module}] WARNING: expected {estimates} estimates, got {} — skipping",
                         estimates_vec.len()
                     );
-                continue;
-            }
-            estimates_vec.iter().map(|e| e.score).collect()
-        } else if let Some(scores_vec) = by_module.get(module.as_str()) {
-            // ── cache hit: scores were pre-populated ──
-            if scores_vec.len() != estimates {
-                eprintln!(
-                        "  [{module}] WARNING: cache-hit expected {estimates} scores, got {} — skipping comprehensibility scoring",
-                        scores_vec.len()
-                    );
-                continue;
-            }
-            scores_vec.clone()
-        } else {
-            eprintln!(
-                    "  [{module}] WARNING: no estimates collected — all tasks failed — skipping comprehensibility scoring"
+                    continue;
+                }
+                // Borrow dim_scores from estimates_vec for aggregation.
+                estimates_vec.iter().map(|e| &e.dim_scores).collect()
+            } else if let Some(raw_vec) = by_module.get(module.as_str()) {
+                if raw_vec.len() != estimates {
+                    eprintln!(
+                    "  [{module}] WARNING: expected {estimates} raw estimates, got {} — skipping",
+                    raw_vec.len()
                 );
-            continue;
-        };
+                    continue;
+                }
+                raw_vec.iter().collect()
+            } else {
+                eprintln!("  [{module}] WARNING: no estimates collected — skipping");
+                continue;
+            };
 
-        let med = median(&scores_for_module);
-        if med >= 1.0 {
+        // Aggregate: per-estimate 0-1 scores, then mean with CI.
+        let dim_keys: Vec<&str> = comprehensibility_config
+            .dimensions
+            .iter()
+            .map(|d| d.key.as_str())
+            .collect();
+        let per_estimate: Vec<f64> = raw_estimates
+            .iter()
+            .map(|dims| {
+                let sum: f64 = dim_keys
+                    .iter()
+                    .map(|k| *dims.get(*k).unwrap_or(&0) as f64)
+                    .sum();
+                (sum / (dim_count * 4) as f64).clamp(0.0, 1.0)
+            })
+            .collect();
+        let (com, lo, hi) = mean_with_ci(&per_estimate);
+        if com >= 1.0 {
             eprintln!("  [{module}] WARNING: perfect score (all 4s)");
         }
-        eprintln!("  {module}: {med:.3}");
+        eprintln!("  {module}: {com:.3} (95% CI: {lo:.3}–{hi:.3})");
         let s = match scores.iter_mut().find(|s| s.module == *module) {
             Some(s) => s,
             None => {
@@ -1174,20 +1073,21 @@ async fn score_comprehensibility(
                 continue;
             }
         };
-        s.comprehensibility = Some(med);
+        s.comprehensibility = Some(com);
 
-        // ── Write a single cache entry with the median score (cache-miss only) ──
+        // ── Write cache entry with all raw estimates (cache-miss only) ──
         if let Some(estimates_vec) = estimates_map.get(module.as_str()) {
             if let Some(first) = estimates_vec.first() {
                 let cp = &cache_state;
+                let raw: Vec<ComprehensibilityScores> =
+                    estimates_vec.iter().map(|e| e.dim_scores.clone()).collect();
                 let entry = CacheEntry {
                     key: first.cache_key.clone(),
                     file: first.abs_path.clone(),
                     model: first.model_spec.clone(),
                     token_count: first.token_count,
                     estimates,
-                    comprehensibility: med,
-                    breakdown: first.breakdown.clone(),
+                    raw_estimates: raw,
                 };
                 if let Err(e) = append_cache_entry(cp, &entry) {
                     eprintln!("  [{module}] WARNING: failed to append cache entry: {e}");
@@ -1691,30 +1591,35 @@ mod tests {
         assert!(extract_json("just some text, no json here").is_none());
     }
 
-    // ── median tests ──
+    // ── mean_with_ci tests ──
 
     #[test]
-    fn median_odd_length() {
-        let vals = [3.0, 1.0, 2.0];
-        assert!((median(&vals) - 2.0).abs() < 1e-12);
+    fn mean_three_values() {
+        let vals = [1.0, 2.0, 3.0];
+        let (m, lo, hi) = mean_with_ci(&vals);
+        assert!((m - 2.0).abs() < 1e-12);
+        // n=3, df=2, t_crit ≈ 4.3027, sd=1.0, se=1/√3≈0.577, margin≈2.484
+        assert!((lo - (2.0 - 2.484_05)).abs() < 1e-4);
+        assert!((hi - (2.0 + 2.484_05)).abs() < 1e-4);
     }
 
     #[test]
-    fn median_even_length() {
-        let vals = [1.0, 4.0, 2.0, 3.0];
-        assert!((median(&vals) - 2.5).abs() < 1e-12);
-    }
-
-    #[test]
-    fn median_single_value() {
+    fn mean_single_value_ci_degenerate() {
         let vals = [7.0];
-        assert!((median(&vals) - 7.0).abs() < 1e-12);
+        let (m, lo, hi) = mean_with_ci(&vals);
+        assert!((m - 7.0).abs() < 1e-12);
+        assert!((lo - 7.0).abs() < 1e-12);
+        assert!((hi - 7.0).abs() < 1e-12);
     }
 
     #[test]
-    fn median_identical_values() {
+    fn mean_identical_values_ci_zero() {
         let vals = [0.5, 0.5, 0.5];
-        assert!((median(&vals) - 0.5).abs() < 1e-12);
+        let (m, lo, hi) = mean_with_ci(&vals);
+        assert!((m - 0.5).abs() < 1e-12);
+        // All identical → variance = 0 → no margin.
+        assert!((lo - 0.5).abs() < 1e-12);
+        assert!((hi - 0.5).abs() < 1e-12);
     }
 
     // ── cache tests ──
@@ -1753,7 +1658,7 @@ mod tests {
         // Line 2 is blank; it should be skipped, leaving the valid entry.
         std::fs::write(
             &cache_path,
-            "{\"key\":\"abc\",\"file\":\"/f.rs\",\"model\":\"m\",\"token_count\":10,\"comprehensibility\":0.5,\"breakdown\":{\"naming\":2,\"control_flow\":2,\"data_flow\":2,\"abstractions\":2,\"cohesion\":1,\"sizing\":1,\"test_hygiene\":1}}\n\n",
+            "{\"key\":\"abc\",\"file\":\"/f.rs\",\"model\":\"m\",\"token_count\":10,\"raw_estimates\":[{\"naming\":2,\"control_flow\":2,\"data_flow\":2,\"abstractions\":2,\"cohesion\":1,\"sizing\":1,\"test_hygiene\":1}]}\n\n",
         )
         .unwrap();
         let map = load_cache(&cache_path).unwrap();
@@ -1778,22 +1683,22 @@ mod tests {
         let dir = std::env::temp_dir().join("drag-test-valid");
         let _ = std::fs::create_dir_all(&dir);
         let cache_path = dir.join("cache.jsonl");
-        let line = "{\"key\":\"deadbeef12345678\",\"file\":\"/src/main.rs\",\"model\":\"openai/gpt-4o\",\"token_count\":42,\"comprehensibility\":0.75,\"breakdown\":{\"naming\":3,\"control_flow\":3,\"data_flow\":3,\"abstractions\":3,\"cohesion\":3,\"sizing\":3,\"test_hygiene\":3}}\n";
+        let line = "{\"key\":\"deadbeef12345678\",\"file\":\"/src/main.rs\",\"model\":\"openai/gpt-4o\",\"token_count\":42,\"raw_estimates\":[{\"naming\":3,\"control_flow\":3,\"data_flow\":3,\"abstractions\":3,\"cohesion\":3,\"sizing\":3,\"test_hygiene\":3}]}\n";
         std::fs::write(&cache_path, line).unwrap();
         let map = load_cache(&cache_path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(map.len(), 1);
         let entry = map.get("deadbeef12345678").unwrap();
-        assert_eq!(entry.comprehensibility, 0.75);
-        assert_eq!(entry.breakdown.get("naming"), Some(&3));
+        assert_eq!(entry.raw_estimates.len(), 1);
+        assert_eq!(entry.raw_estimates[0].get("naming"), Some(&3));
     }
 
     #[test]
-    fn load_cache_accepts_v1_entries_ignoring_graph_fields() {
+    fn load_cache_accepts_entries_ignoring_extra_fields() {
         let dir = std::env::temp_dir().join("drag-test-v1-reject");
         let _ = std::fs::create_dir_all(&dir);
         let cache_path = dir.join("cache.jsonl");
-        let line = "{\"key\":\"deadbeef12345678\",\"file\":\"/src/main.rs\",\"model\":\"openai/gpt-4o\",\"token_count\":42,\"fan_in\":1,\"fan_out\":2,\"graph_complexity\":3,\"comprehensibility\":0.75,\"breakdown\":{\"naming\":3,\"control_flow\":3,\"data_flow\":3,\"abstractions\":3,\"cohesion\":3,\"sizing\":3,\"test_hygiene\":3}}\n";
+        let line = "{\"key\":\"deadbeef12345678\",\"file\":\"/src/main.rs\",\"model\":\"openai/gpt-4o\",\"token_count\":42,\"fan_in\":1,\"fan_out\":2,\"graph_complexity\":3,\"raw_estimates\":[{\"naming\":3,\"control_flow\":3,\"data_flow\":3,\"abstractions\":3,\"cohesion\":3,\"sizing\":3,\"test_hygiene\":3}]}\n";
         std::fs::write(&cache_path, line).unwrap();
         let map = load_cache(&cache_path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -1802,36 +1707,53 @@ mod tests {
     }
 
     #[test]
+    fn load_cache_deser_old_format_falls_back() {
+        // Old cache entries with comprehensibility/breakdown (instead of raw_estimates)
+        // should deserialize with an empty raw_estimates vec, triggering re-score.
+        let dir = std::env::temp_dir().join("drag-test-comp-oldformat");
+        let _ = std::fs::create_dir_all(&dir);
+        let cache_path = dir.join("cache.jsonl");
+        let line = "{\"key\":\"oldkey0000000000\",\"file\":\"/f.rs\",\"model\":\"m\",\"token_count\":10,\"comprehensibility\":0.5,\"breakdown\":{\"naming\":2}}\n";
+        std::fs::write(&cache_path, line).unwrap();
+        let map = load_cache(&cache_path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(map.len(), 1);
+        let entry = map.get("oldkey0000000000").unwrap();
+        assert!(entry.raw_estimates.is_empty());
+    }
+
+    #[test]
     fn append_and_load_roundtrip() {
         let dir = std::env::temp_dir().join("drag-test-roundtrip");
         let _ = std::fs::create_dir_all(&dir);
         let cache_path = dir.join("cache.jsonl");
+        let raw_estimates: Vec<ComprehensibilityScores> = vec![[
+            ("naming", 2),
+            ("control_flow", 2),
+            ("data_flow", 2),
+            ("abstractions", 2),
+            ("cohesion", 0),
+            ("sizing", 0),
+            ("test_hygiene", 0),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect()];
         let entry = CacheEntry {
             key: "abcd1234abcd1234".to_string(),
             file: "/abs/path/module.rs".to_string(),
             model: "openai/gpt-4o".to_string(),
             token_count: 100,
             estimates: 1,
-            comprehensibility: 0.5,
-            breakdown: [
-                ("naming", 2),
-                ("control_flow", 2),
-                ("data_flow", 2),
-                ("abstractions", 2),
-                ("cohesion", 0),
-                ("sizing", 0),
-                ("test_hygiene", 0),
-            ]
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect(),
+            raw_estimates,
         };
         append_cache_entry(&cache_path, &entry).unwrap();
         let map = load_cache(&cache_path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(map.len(), 1);
         let loaded = map.get("abcd1234abcd1234").unwrap();
-        assert_eq!(loaded.comprehensibility, 0.5);
+        assert_eq!(loaded.raw_estimates.len(), 1);
+        assert_eq!(loaded.raw_estimates[0].get("naming"), Some(&2));
         assert_eq!(loaded.file, "/abs/path/module.rs");
         assert_eq!(loaded.model, "openai/gpt-4o");
     }
