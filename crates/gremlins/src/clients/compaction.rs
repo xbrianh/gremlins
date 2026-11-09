@@ -71,31 +71,34 @@ pub(crate) struct Compaction {
     trigger: CompactionTrigger,
 }
 
+/// Configuration for [`Compaction`], bundling all construction parameters.
+pub(crate) struct CompactionConfig {
+    pub(crate) backend: Arc<dyn Backend>,
+    pub(crate) model: String,
+    pub(crate) threshold: u64,
+    pub(crate) keep_recent: usize,
+    pub(crate) instructions: Option<String>,
+    pub(crate) strategy: CompactionStrategy,
+    pub(crate) local_model: Option<crate::clients::model::GremlinsModel>,
+    pub(crate) force: Arc<AtomicBool>,
+    pub(crate) trigger: CompactionTrigger,
+}
+
 impl Compaction {
-    pub(crate) fn new(
-        backend: Arc<dyn Backend>,
-        model: String,
-        threshold: u64,
-        keep_recent: usize,
-        instructions: Option<String>,
-        strategy: CompactionStrategy,
-        local_model: Option<crate::clients::model::GremlinsModel>,
-        force: Arc<AtomicBool>,
-        trigger: CompactionTrigger,
-    ) -> Self {
+    pub(crate) fn new(cfg: CompactionConfig) -> Self {
         Self {
-            backend,
-            model,
-            threshold,
-            keep_recent,
-            instructions,
-            strategy,
-            local_model,
+            backend: cfg.backend,
+            model: cfg.model,
+            threshold: cfg.threshold,
+            keep_recent: cfg.keep_recent,
+            instructions: cfg.instructions,
+            strategy: cfg.strategy,
+            local_model: cfg.local_model,
             block: None,
             applied: false,
             cooldown: false,
-            force,
-            trigger,
+            force: cfg.force,
+            trigger: cfg.trigger,
         }
     }
 

@@ -14,7 +14,9 @@ use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::{Client, ModelURI};
-use crate::clients::compaction::{Compaction, CompactionStrategy, CompactionTrigger};
+use crate::clients::compaction::{
+    Compaction, CompactionConfig, CompactionStrategy, CompactionTrigger,
+};
 use crate::config;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
@@ -115,17 +117,17 @@ fn build_compaction_config(
         }
     };
 
-    Some(Compaction::new(
+    Some(Compaction::new(CompactionConfig {
         backend,
         model,
         threshold,
-        DEFAULT_COMPACTION_KEEP_RECENT,
-        None, // no custom instructions by default
+        keep_recent: DEFAULT_COMPACTION_KEEP_RECENT,
+        instructions: None, // no custom instructions by default
         strategy,
         local_model,
-        force_compact,
+        force: force_compact,
         trigger,
-    ))
+    }))
 }
 
 // ---------------------------------------------------------------------------
