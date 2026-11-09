@@ -106,6 +106,11 @@ impl ChatDefinition {
     pub fn turn_count(&self) -> usize {
         self.turn
     }
+
+    /// Whether a soft interrupt left a partial turn parked for the next prompt.
+    pub fn interrupted(&self) -> bool {
+        self.interrupted
+    }
 }
 
 #[async_trait]

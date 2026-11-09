@@ -2156,21 +2156,82 @@ async fn handle_chat_model(_request: &Value, session: &SessionHandle) -> Value {
     }
 }
 
-/// Handle the `/compact` TUI command: set the force-compact flag on the
-/// parked chat gremlin so the next turn triggers compaction unconditionally.
+/// Handle the `/compact` TUI command: build a StandardConversation from the
+/// parked chat gremlin's history, call `.compact()`, and return the result.
 async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
-    let s = session.lock().await;
-    // Pick the chat gremlin deterministically via chat_ids rather than
-    // the arbitrary .next() iteration order on chat_gremlins.
-    let id = match s.chat_ids.iter().next() {
-        Some(id) => id,
-        None => return error_response("no active chat session to compact"),
+    // Extract the data we need under the lock, then drop it before the
+    // expensive compaction call so other supervisor commands are not blocked.
+    let (client, model, verbatim_history) = {
+        let mut s = session.lock().await;
+        let id = match s.chat_ids.iter().next() {
+            Some(id) => id.clone(),
+            None => return error_response("no active chat session to compact"),
+        };
+        if s.current_turn.as_ref().is_some_and(|cur| cur.id == *id) {
+            return error_response("cannot compact while a chat turn is active");
+        }
+        let Some(gremlin) = s.chat_gremlins.get_mut(&id) else {
+            return error_response("active chat gremlin not found");
+        };
+        // A soft-interrupt artifact is parked in the current turn. Compacting
+        // it would fold canceled partial messages into turn 1 while leaving
+        // the original artifact behind for a later hard cancel to replay.
+        let chat = gremlin
+            .definition
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<ChatDefinition>())
+            .expect("chat gremlin must carry a ChatDefinition");
+        if chat.interrupted() {
+            return error_response("cannot compact an interrupted chat turn");
+        }
+        let client = gremlin.client.clone();
+        // The active client is authoritative: a `/model` change and a
+        // subsequent turn rebuild it, while `default_model` on the definition
+        // may still name the original model (or provider).
+        let model = client.model().to_string();
+        let verbatim_history = crate::executor::run::read_chat_conversation(gremlin, None).await;
+        (client, model, verbatim_history)
     };
-    let Some(gremlin) = s.chat_gremlins.get(id) else {
-        return error_response("active chat gremlin not found");
-    };
-    gremlin.force_compact.store(true, Ordering::Release);
-    ok_response(serde_json::json!({"compacted": false, "queued": true}))
+
+    let mut conv = crate::executor::run::build_compaction_conversation(
+        &client,
+        model,
+        true, // is_chat
+        Some(verbatim_history),
+    );
+
+    // Use the default chat system prompt — the same one passed to
+    // create_chat_gremlin and therefore the same one the conversation
+    // was built against.
+    let system_prompt = crate::clients::system_prompts::chat_system_prompt();
+
+    match conv.compact(Some(system_prompt)).await {
+        Some(report) => {
+            // Persist only the committed transcript — the conversation was
+            // built with an empty pending prompt, so `messages()` would append
+            // a synthetic empty user message that must not become durable.
+            let messages = conv.committed_history();
+            {
+                let s = session.lock().await;
+                let id = match s.chat_ids.iter().next() {
+                    Some(id) => id,
+                    None => return error_response("chat session vanished"),
+                };
+                let Some(gremlin) = s.chat_gremlins.get(id) else {
+                    return error_response("active chat gremlin vanished");
+                };
+                if let Err(e) =
+                    crate::executor::run::persist_compacted_conversation(gremlin, &messages).await
+                {
+                    return error_response(&format!("failed to persist compacted history: {e}"));
+                }
+            }
+            ok_response(serde_json::to_value(&report).unwrap_or_default())
+        }
+        None => {
+            ok_response(serde_json::json!({"compacted": false, "reason": "nothing to compact"}))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3852,7 +3913,6 @@ fn create_chat_gremlin(
         enclosing_model: None,
         discovered_skills: None,
         active_skills: None,
-        force_compact: Arc::new(AtomicBool::new(false)),
         extra_sandbox_roots: Vec::new(),
     })
 }
@@ -6059,7 +6119,7 @@ model-profiles:
     }
 
     #[tokio::test]
-    async fn handle_compact_parked_gremlin_queues() {
+    async fn handle_compact_parked_gremlin_no_history_returns_nothing_to_compact() {
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path().join("proj");
         std::fs::create_dir_all(&project_root).unwrap();
@@ -6074,24 +6134,17 @@ model-profiles:
         )
         .unwrap();
         let id = gremlin.id.to_string();
-        // Verify force starts false.
-        assert!(!gremlin
-            .force_compact
-            .load(std::sync::atomic::Ordering::Acquire));
         {
             let mut s = session.lock().await;
             s.chat_ids.insert(id.clone());
             s.chat_gremlins.insert(id.clone(), gremlin);
         }
         let resp = handle_compact(&serde_json::Value::Null, &session).await;
+        // Fresh chat gremlin has no conversation history, so there is nothing
+        // to compact.
         assert_eq!(resp["type"], "ok");
-        assert_eq!(resp["queued"], true);
-        // Force should now be set.
-        {
-            let s = session.lock().await;
-            let g = s.chat_gremlins.get(&id).unwrap();
-            assert!(g.force_compact.load(std::sync::atomic::Ordering::Acquire));
-        }
+        assert_eq!(resp["compacted"], false);
+        assert_eq!(resp["reason"], "nothing to compact");
     }
 
     #[tokio::test]

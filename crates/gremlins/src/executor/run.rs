@@ -5,18 +5,16 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
 use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
-use crate::clients::backend::{ClientError, RunParams};
+use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::client::{Client, ModelURI};
-use crate::clients::compaction::Compaction;
 use crate::config;
-use crate::conversation::compaction::{CompactionState, CompactionTrigger};
+use crate::conversation::compaction::CompactionState;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
 use crate::executor::bootstrap::run_definition_bootstrap;
@@ -58,49 +56,47 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
 /// Default number of most-recent turns to keep verbatim during compaction.
 const DEFAULT_COMPACTION_KEEP_RECENT: usize = 10;
 
-/// Build the [`Compaction`] dispatch and [`CompactionState`] pair from the
-/// global config and the resolved backend.
-/// Returns `None` when compaction is disabled (threshold == 0) and the trigger
-/// is [`CompactionTrigger::Threshold`] — for [`CompactionTrigger::Immediate`]
-/// (chat), a pair is always returned so the `/compact` force flag can
-/// fire on demand.
-fn build_compaction_config(
+/// Tuple returned by [`build_compaction_parts`]: backend, state, model,
+/// instructions, and optional local model.
+pub(crate) type CompactionParts = (
+    Arc<dyn Backend>,
+    CompactionState,
+    String,
+    Option<String>,
+    Option<crate::clients::model::GremlinsModel>,
+);
+
+/// Build the compaction parts needed by [`StandardConversation::new`].
+/// Returns `None` when compaction is disabled (threshold == 0 and not in chat
+/// mode — chat always returns parts so `/compact` can fire on demand).
+pub(crate) fn build_compaction_parts(
     client: &Client,
     model: String,
     is_chat: bool,
-    force_compact: Arc<AtomicBool>,
-) -> Option<(Compaction, CompactionState)> {
-    let trigger = if is_chat {
-        CompactionTrigger::Immediate
-    } else {
-        CompactionTrigger::Threshold
-    };
-
+) -> Option<CompactionParts> {
     let backend = match client.get_or_build_backend() {
         Ok(b) => b,
         Err(e) => {
             log::warn!("compaction: failed to build backend: {e}");
-            force_compact.store(false, Ordering::Release);
             return None;
         }
     };
 
     let threshold = if is_chat {
-        // Threshold is irrelevant for Immediate trigger; use 0 to
-        // signal "disabled" to readers without affecting behavior.
+        // Chat always returns parts so /compact can fire on demand;
+        // threshold is irrelevant for the on-demand path.
         0
     } else {
         crate::config::compaction_threshold_tokens()
     };
 
-    // For Threshold trigger, zero threshold means compaction is disabled.
-    if matches!(trigger, CompactionTrigger::Threshold) && threshold == 0 {
-        force_compact.store(false, Ordering::Release);
+    // Zero threshold means compaction is disabled (non-chat only).
+    if !is_chat && threshold == 0 {
         return None;
     }
 
-    // Build a local model when possible — Compaction::compact uses it when
-    // the backend doesn't support server-side compaction.
+    // Build a local model when possible — used when the backend doesn't
+    // support server-side compaction.
     let qualified = format!("{}/{}", client.provider(), model);
     let local_model = backend.make_model(&qualified);
     if local_model.is_none() {
@@ -111,14 +107,36 @@ fn build_compaction_config(
     }
 
     Some((
-        Compaction::new(backend, model, None, local_model),
-        CompactionState::new(
-            threshold,
-            DEFAULT_COMPACTION_KEEP_RECENT,
-            force_compact,
-            trigger,
-        ),
+        backend,
+        CompactionState::new(threshold, DEFAULT_COMPACTION_KEEP_RECENT),
+        model,
+        None,
+        local_model,
     ))
+}
+
+/// Build a [`StandardConversation`] with compaction wired in. A shared
+/// helper used by both [`run_agent`] and [`handle_compact`].
+pub(crate) fn build_compaction_conversation(
+    client: &Client,
+    model: String,
+    is_chat: bool,
+    verbatim_history: Option<Vec<Message>>,
+) -> crate::conversation::standard::StandardConversation {
+    let (backend, state, cm, ci, lm) = build_compaction_parts(client, model, is_chat)
+        .map_or((None, None, None, None, None), |(b, s, m, i, l)| {
+            (Some(b), Some(s), Some(m), i, l)
+        });
+    crate::conversation::standard::StandardConversation::new(
+        "",
+        false,
+        verbatim_history,
+        backend,
+        state,
+        cm,
+        ci,
+        lm,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -604,22 +622,14 @@ async fn run_agent(
         None
     };
 
-    let (compaction_dispatch, compaction_state) = build_compaction_config(
+    let conv = build_compaction_conversation(
         &client,
         prepared
             .model
             .clone()
             .unwrap_or_else(|| client.model().to_string()),
         is_chat,
-        gremlin.force_compact.clone(),
-    )
-    .map_or((None, None), |(d, s)| (Some(d), Some(s)));
-    let conv = crate::conversation::standard::StandardConversation::new(
-        "",
-        false,
         verbatim_history,
-        compaction_dispatch,
-        compaction_state,
     );
 
     // ── Live usage tracker for failure persistence ─────
@@ -883,7 +893,9 @@ async fn run_agent(
                         messages.clone()
                     }
                 };
-            persist_chat_conversation_turn(gremlin, turn_num, &diff).await;
+            if let Err(e) = persist_chat_conversation_turn(gremlin, turn_num, &diff).await {
+                log::warn!("chat: failed to persist conversation turn {turn_num}: {e}");
+            }
         }
     }
 
@@ -1393,21 +1405,19 @@ fn messages_from_conversation(json: &str) -> Result<Vec<rig_core::completion::Me
 }
 
 /// Persist messages to `artifact://conversation/{turn:04}.json`.
+///
+/// Returns the canonical artifact path on success. Write errors are
+/// propagated so callers never mistake a lost write for a persisted turn.
 async fn persist_chat_conversation_turn(
     gremlin: &Gremlin,
     turn: usize,
     messages: &[rig_core::completion::Message],
-) {
-    match serde_json::to_string(messages) {
-        Ok(json) => {
-            if let Ok(uri) = Uri::parse(&conversation_uri(turn)) {
-                let _ = gremlin.state.write_into_registry(&uri, &json).await;
-            }
-        }
-        Err(e) => {
-            log::warn!("chat: failed to serialize conversation artifact for turn {turn}: {e}")
-        }
-    }
+) -> Result<String, Box<dyn std::error::Error>> {
+    let json = serde_json::to_string(messages).map_err(|e| {
+        format!("chat: failed to serialize conversation artifact for turn {turn}: {e}")
+    })?;
+    let uri = Uri::parse(&conversation_uri(turn))?;
+    gremlin.state.write_into_registry(&uri, &json).await
 }
 
 /// Format a per-turn conversation artifact URI.
@@ -1491,7 +1501,49 @@ pub(crate) async fn append_chat_conversation_turn(
         }
     };
     existing.extend_from_slice(messages);
-    persist_chat_conversation_turn(gremlin, turn, &existing).await;
+    if let Err(e) = persist_chat_conversation_turn(gremlin, turn, &existing).await {
+        log::warn!("chat: failed to persist current-turn artifact after append: {e}");
+    }
+}
+
+/// Overwrite per-turn conversation artifacts from a compacted conversation.
+///
+/// Writes the full compacted history as turn 0001 and clears every other
+/// registered `conversation/NNNN.json` artifact. The replacement write must
+/// succeed before any later artifact is cleared — otherwise a failure would
+/// destroy the only stored copies of those messages while still reporting
+/// success.
+pub(crate) async fn persist_compacted_conversation(
+    gremlin: &Gremlin,
+    messages: &[Message],
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Save the compacted replacement first. Only after it is durably bound do
+    // we consider clearing the artifacts it subsumed.
+    persist_chat_conversation_turn(gremlin, 1, messages).await?;
+
+    // Enumerate the registered conversation artifacts rather than assuming a
+    // numeric range. Turn counts are unbounded, and scanning only 2..1000
+    // would leave later artifacts in place to be replayed as duplicate history.
+    let keys = gremlin.state.keys().await;
+    for key in keys {
+        let Some(name) = key.strip_prefix("artifact://conversation/") else {
+            continue;
+        };
+        let Some(turn) = name
+            .strip_suffix(".json")
+            .and_then(|s| s.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        if turn == 1 {
+            continue;
+        }
+        let Ok(uri) = Uri::parse(&key) else {
+            continue;
+        };
+        gremlin.state.write_into_registry(&uri, "[]").await?;
+    }
+    Ok(())
 }
 
 /// Strip trailing messages left dangling by a mid-tool-call cancellation.
@@ -1645,7 +1697,6 @@ mod tests {
             enclosing_model: None,
             discovered_skills: None,
             active_skills: None,
-            force_compact: Arc::new(AtomicBool::new(false)),
             extra_sandbox_roots: Vec::new(),
         };
         (sandbox, gremlin)
@@ -1749,7 +1800,9 @@ mod tests {
             Message::user("world".to_string()),
         ];
 
-        persist_chat_conversation_turn(&gremlin, 1, &messages).await;
+        persist_chat_conversation_turn(&gremlin, 1, &messages)
+            .await
+            .unwrap();
 
         let json = gremlin
             .state
@@ -1772,13 +1825,62 @@ mod tests {
         let turn1 = vec![Message::user("hello".to_string())];
         let turn2 = vec![Message::user("world".to_string())];
 
-        persist_chat_conversation_turn(&gremlin, 1, &turn1).await;
-        persist_chat_conversation_turn(&gremlin, 2, &turn2).await;
+        persist_chat_conversation_turn(&gremlin, 1, &turn1)
+            .await
+            .unwrap();
+        persist_chat_conversation_turn(&gremlin, 2, &turn2)
+            .await
+            .unwrap();
 
         let history = read_chat_conversation(&gremlin, None).await;
         assert_eq!(history.len(), 2);
         assert_eq!(history[0], turn1[0]);
         assert_eq!(history[1], turn2[0]);
+    }
+
+    #[tokio::test]
+    async fn persist_compacted_conversation_clears_turns_beyond_1000() {
+        use rig_core::completion::Message;
+
+        let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
+
+        // A long-running chat can accumulate arbitrary turn numbers; the
+        // old bounded scan missed 1000+ and replayed duplicate history.
+        persist_chat_conversation_turn(&gremlin, 1, &[Message::user("old".to_string())])
+            .await
+            .unwrap();
+        persist_chat_conversation_turn(&gremlin, 1000, &[Message::user("late".to_string())])
+            .await
+            .unwrap();
+
+        let compacted = vec![Message::user("summary".to_string())];
+        persist_compacted_conversation(&gremlin, &compacted)
+            .await
+            .unwrap();
+
+        // Turn 1 holds the replacement; turn 1000 is cleared to `[]`.
+        let turn1: Vec<Message> = serde_json::from_str(
+            &gremlin
+                .state
+                .content("artifact://conversation/0001.json", None)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(turn1, compacted);
+
+        let turn1000: Vec<Message> = serde_json::from_str(
+            &gremlin
+                .state
+                .content("artifact://conversation/1000.json", None)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            turn1000.is_empty(),
+            "registered later turns must be cleared after compaction"
+        );
     }
 
     #[tokio::test]
@@ -1790,7 +1892,9 @@ mod tests {
         // Write an empty diff — this must produce a valid [] artifact so
         // a rollback's stale artifact is overwritten rather than preserved.
         let empty: Vec<Message> = vec![];
-        persist_chat_conversation_turn(&gremlin, 1, &empty).await;
+        persist_chat_conversation_turn(&gremlin, 1, &empty)
+            .await
+            .expect("persisting an empty diff must succeed");
 
         let json = gremlin
             .state
@@ -1813,7 +1917,9 @@ mod tests {
 
         // Write turn 1 with one message.
         let turn1 = vec![Message::user("hello".to_string())];
-        persist_chat_conversation_turn(&gremlin, 1, &turn1).await;
+        persist_chat_conversation_turn(&gremlin, 1, &turn1)
+            .await
+            .unwrap();
 
         // Append a partial message to turn 2 only.
         let partial = vec![Message::user("partial".to_string())];
@@ -1847,7 +1953,9 @@ mod tests {
         let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
 
         let t1 = vec![Message::user("ghost".to_string())];
-        persist_chat_conversation_turn(&gremlin, 1, &t1).await;
+        persist_chat_conversation_turn(&gremlin, 1, &t1)
+            .await
+            .unwrap();
 
         // Clear must overwrite the ghost.
         clear_chat_turn_artifact(&gremlin, 1).await;

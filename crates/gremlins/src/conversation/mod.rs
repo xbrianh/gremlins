@@ -20,5 +20,8 @@ pub(crate) fn new_blank_conversation(
         prepopulated_messages,
         None,
         None,
+        None,
+        None,
+        None,
     ))
 }
