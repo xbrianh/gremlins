@@ -17,6 +17,7 @@ use crate::clients::client::{Client, ModelURI};
 use crate::clients::model::GremlinsModel;
 use crate::config;
 use crate::conversation::compaction::{CompactionState, CompactionTrigger};
+use crate::conversation::standard::CompactionConfig;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
 use crate::executor::bootstrap::run_definition_bootstrap;
@@ -58,6 +59,14 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
 /// Default number of most-recent turns to keep verbatim during compaction.
 const DEFAULT_COMPACTION_KEEP_RECENT: usize = 10;
 
+/// Built compaction parts: `(backend, model, local_model, state)`.
+type CompactionParts = (
+    Arc<dyn Backend>,
+    String,
+    Option<GremlinsModel>,
+    CompactionState,
+);
+
 /// Build the compaction parts — backend, model, optional local model fallback,
 /// and orchestration state. Returns `None` when compaction is disabled
 /// (threshold == 0) and the trigger is [`CompactionTrigger::Threshold`] — for
@@ -68,12 +77,7 @@ fn build_compaction_parts(
     model: String,
     is_chat: bool,
     force_compact: Arc<AtomicBool>,
-) -> Option<(
-    Arc<dyn Backend>,
-    String,
-    Option<GremlinsModel>,
-    CompactionState,
-)> {
+) -> Option<CompactionParts> {
     let trigger = if is_chat {
         CompactionTrigger::Immediate
     } else {
@@ -605,7 +609,7 @@ async fn run_agent(
         None
     };
 
-    let (backend, compaction_model, local_model, compaction_state) = match build_compaction_parts(
+    let compaction = match build_compaction_parts(
         &client,
         prepared
             .model
@@ -614,18 +618,20 @@ async fn run_agent(
         is_chat,
         gremlin.force_compact.clone(),
     ) {
-        Some((b, m, lm, s)) => (Some(b), m, lm, Some(s)),
-        None => (None, String::new(), None, None),
+        Some((backend, model, local_model, state)) => CompactionConfig {
+            backend: Some(backend),
+            state: Some(state),
+            model,
+            instructions: None,
+            local_model,
+        },
+        None => CompactionConfig::disabled(),
     };
     let conv = crate::conversation::standard::StandardConversation::new(
         "",
         false,
         verbatim_history,
-        backend,
-        compaction_state,
-        compaction_model,
-        None, // no custom instructions
-        local_model,
+        compaction,
     );
 
     // ── Live usage tracker for failure persistence ─────

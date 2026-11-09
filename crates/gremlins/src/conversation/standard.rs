@@ -79,16 +79,43 @@ pub(crate) struct StandardConversation {
     last_input_tokens: Option<u64>,
 }
 
+/// Compaction wiring for a [`StandardConversation`].
+///
+/// Grouping these fields keeps [`StandardConversation::new`] under the
+/// argument-count lint and documents the compaction configuration as one unit.
+pub(crate) struct CompactionConfig {
+    /// Backend for server-side compaction. `None` → compaction disabled.
+    pub(crate) backend: Option<Arc<dyn Backend>>,
+    /// Compaction orchestration state (`None` → compaction disabled).
+    /// Invariant: always `Some` iff `backend` is `Some`.
+    pub(crate) state: Option<CompactionState>,
+    /// Model name for server-side compaction requests.
+    pub(crate) model: String,
+    /// Custom compaction instructions (optional).
+    pub(crate) instructions: Option<String>,
+    /// Pre-built model for local compaction fallback.
+    pub(crate) local_model: Option<GremlinsModel>,
+}
+
+impl CompactionConfig {
+    /// Compaction disabled.
+    pub(crate) fn disabled() -> Self {
+        Self {
+            backend: None,
+            state: None,
+            model: String::new(),
+            instructions: None,
+            local_model: None,
+        }
+    }
+}
+
 impl StandardConversation {
     pub(crate) fn new(
         prompt: &str,
         preserve_reasoning: bool,
         prepopulated_messages: Option<Vec<Message>>,
-        backend: Option<Arc<dyn Backend>>,
-        compaction_state: Option<CompactionState>,
-        compaction_model: String,
-        compaction_instructions: Option<String>,
-        local_model: Option<GremlinsModel>,
+        compaction: CompactionConfig,
     ) -> Self {
         let history = prepopulated_messages.unwrap_or_default();
         Self {
@@ -100,11 +127,11 @@ impl StandardConversation {
             preserve_reasoning_in_history: preserve_reasoning,
             last_text: String::new(),
             finalized_messages: None,
-            backend,
-            compaction_state,
-            compaction_model,
-            compaction_instructions,
-            local_model,
+            backend: compaction.backend,
+            compaction_state: compaction.state,
+            compaction_model: compaction.model,
+            compaction_instructions: compaction.instructions,
+            local_model: compaction.local_model,
             last_input_tokens: None,
         }
     }
@@ -480,11 +507,13 @@ impl Conversation for StandardConversation {
             prompt,
             self.preserve_reasoning_in_history,
             None,
-            self.backend.clone(),
-            self.compaction_state.clone(),
-            self.compaction_model.clone(),
-            self.compaction_instructions.clone(),
-            self.local_model.clone(),
+            CompactionConfig {
+                backend: self.backend.clone(),
+                state: self.compaction_state.clone(),
+                model: self.compaction_model.clone(),
+                instructions: self.compaction_instructions.clone(),
+                local_model: self.local_model.clone(),
+            },
         ))
     }
 
