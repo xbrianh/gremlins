@@ -115,6 +115,30 @@ pub(crate) fn build_compaction_parts(
     ))
 }
 
+/// Build a [`StandardConversation`] with compaction wired in. A shared
+/// helper used by both [`run_agent`] and [`handle_compact`].
+pub(crate) fn build_compaction_conversation(
+    client: &Client,
+    model: String,
+    is_chat: bool,
+    verbatim_history: Option<Vec<Message>>,
+) -> crate::conversation::standard::StandardConversation {
+    let (backend, state, cm, ci, lm) = build_compaction_parts(client, model, is_chat)
+        .map_or((None, None, None, None, None), |(b, s, m, i, l)| {
+            (Some(b), Some(s), Some(m), i, l)
+        });
+    crate::conversation::standard::StandardConversation::new(
+        "",
+        false,
+        verbatim_history,
+        backend,
+        state,
+        cm,
+        ci,
+        lm,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Scope bookkeeping
 // ---------------------------------------------------------------------------
@@ -598,27 +622,14 @@ async fn run_agent(
         None
     };
 
-    let (backend, compaction_state, compaction_model, compaction_instructions, local_model) =
-        build_compaction_parts(
-            &client,
-            prepared
-                .model
-                .clone()
-                .unwrap_or_else(|| client.model().to_string()),
-            is_chat,
-        )
-        .map_or((None, None, None, None, None), |(b, s, m, i, l)| {
-            (Some(b), Some(s), Some(m), i, l)
-        });
-    let conv = crate::conversation::standard::StandardConversation::new(
-        "",
-        false,
+    let conv = build_compaction_conversation(
+        &client,
+        prepared
+            .model
+            .clone()
+            .unwrap_or_else(|| client.model().to_string()),
+        is_chat,
         verbatim_history,
-        backend,
-        compaction_state,
-        compaction_model,
-        compaction_instructions,
-        local_model,
     );
 
     // ── Live usage tracker for failure persistence ─────
@@ -1498,18 +1509,19 @@ pub(crate) async fn append_chat_conversation_turn(
 pub(crate) async fn persist_compacted_conversation(gremlin: &Gremlin, messages: &[Message]) {
     persist_chat_conversation_turn(gremlin, 1, messages).await;
     // Clear subsequent turn artifacts so they don't double-count.
-    for turn in 2.. {
+    // Scan a bounded range to catch noncontiguous artifacts (e.g. turn 2 was
+    // already deleted but turn 3 remained).
+    for turn in 2..1000 {
         let uri_str = conversation_uri(turn);
         let Ok(uri) = Uri::parse(&uri_str) else {
             break;
         };
-        // Check if the artifact exists; drop the error before the next await
-        // to keep the future Send (Box<dyn StdError> is !Send).
+        // Drop the error before the next await to keep the future Send
+        // (Box<dyn StdError> is !Send).
         let exists = gremlin.state.content(&uri_str, None).await.is_ok();
-        if !exists {
-            break;
+        if exists {
+            let _ = gremlin.state.write_into_registry(&uri, "[]").await;
         }
-        let _ = gremlin.state.write_into_registry(&uri, "[]").await;
     }
 }
 

@@ -99,8 +99,10 @@ pub(crate) struct CompactionReport {
     pub compaction_input_tokens: Option<u64>,
     /// Output tokens produced by the compaction call.
     pub compaction_output_tokens: Option<u64>,
-    /// Whether a signed block was produced (server compaction only).
-    pub signed: bool,
+    /// The signed compaction block (server compaction only). Stored so
+    /// [`CompactionState::mark_applied`] can preserve the
+    /// server-vs-local invariant.
+    pub compaction_block: Option<CompactionBlock>,
 }
 
 // ── Orchestration state ──────────────────────────────────────────────
@@ -158,11 +160,18 @@ impl CompactionState {
     /// Only checks threshold, cooldown, and applied state — no force flag,
     /// no trigger variant. On-demand compaction goes through
     /// [`StandardConversation::compact`].
+    ///
+    /// Returns `false` when `threshold == 0` (compaction disabled, e.g.
+    /// chat-only conversations where the `/compact` command is the sole
+    /// trigger).
     pub(crate) fn should_compact(
         &self,
         last_input_tokens: Option<u64>,
         history: &[Message],
     ) -> bool {
+        if self.threshold == 0 {
+            return false;
+        }
         if self.cooldown {
             return false;
         }

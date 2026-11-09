@@ -2160,58 +2160,55 @@ async fn handle_chat_model(_request: &Value, session: &SessionHandle) -> Value {
 /// Handle the `/compact` TUI command: build a StandardConversation from the
 /// parked chat gremlin's history, call `.compact()`, and return the result.
 async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
-    let s = session.lock().await;
-    // Pick the chat gremlin deterministically via chat_ids rather than
-    // the arbitrary .next() iteration order on chat_gremlins.
-    let id = match s.chat_ids.iter().next() {
-        Some(id) => id,
-        None => return error_response("no active chat session to compact"),
-    };
-    let Some(gremlin) = s.chat_gremlins.get(id) else {
-        return error_response("active chat gremlin not found");
-    };
-
-    // Load prior-turn message history.
-    let verbatim_history = crate::executor::run::read_chat_conversation(gremlin, None).await;
-
-    // Build compaction parts.
-    let parts = crate::executor::run::build_compaction_parts(
-        &gremlin.client,
-        gremlin.definition.default_model().model().to_string(),
-        true, // is_chat
-    );
-    let (backend, compaction_state, compaction_model, compaction_instructions, local_model) =
-        match parts {
-            Some((b, s, m, i, l)) => (Some(b), Some(s), Some(m), i, l),
-            None => return error_response("compaction not available"),
+    // Extract the data we need under the lock, then drop it before the
+    // expensive compaction call so other supervisor commands are not blocked.
+    let (client, model, verbatim_history) = {
+        let s = session.lock().await;
+        let id = match s.chat_ids.iter().next() {
+            Some(id) => id.clone(),
+            None => return error_response("no active chat session to compact"),
         };
+        let Some(gremlin) = s.chat_gremlins.get(&id) else {
+            return error_response("active chat gremlin not found");
+        };
+        let client = gremlin.client.clone();
+        let model = gremlin.definition.default_model().model().to_string();
+        let verbatim_history = crate::executor::run::read_chat_conversation(gremlin, None).await;
+        (client, model, verbatim_history)
+    };
 
-    let mut conv = crate::conversation::standard::StandardConversation::new(
-        "",
-        false,
+    let mut conv = crate::executor::run::build_compaction_conversation(
+        &client,
+        model,
+        true, // is_chat
         Some(verbatim_history),
-        backend,
-        compaction_state,
-        compaction_model,
-        compaction_instructions,
-        local_model,
     );
 
-    // Load the system prompt — use the chat gremlin's definition, or fall back
-    // to the default chat system prompt.
+    // Use the default chat system prompt — the same one passed to
+    // create_chat_gremlin and therefore the same one the conversation
+    // was built against.
     let system_prompt = crate::clients::system_prompts::chat_system_prompt();
 
     match conv.compact(Some(system_prompt)).await {
-        Ok(Some(report)) => {
+        Some(report) => {
             // Persist the compacted history back as turn 1, clear later turns.
             let messages = conv.messages();
-            crate::executor::run::persist_compacted_conversation(gremlin, &messages).await;
+            {
+                let s = session.lock().await;
+                let id = match s.chat_ids.iter().next() {
+                    Some(id) => id,
+                    None => return error_response("chat session vanished"),
+                };
+                let Some(gremlin) = s.chat_gremlins.get(id) else {
+                    return error_response("active chat gremlin vanished");
+                };
+                crate::executor::run::persist_compacted_conversation(gremlin, &messages).await;
+            }
             ok_response(serde_json::to_value(&report).unwrap_or_default())
         }
-        Ok(None) => {
+        None => {
             ok_response(serde_json::json!({"compacted": false, "reason": "nothing to compact"}))
         }
-        Err(e) => error_response(&format!("compaction failed: {e}")),
     }
 }
 
