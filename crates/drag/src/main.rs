@@ -87,6 +87,10 @@ struct ModuleDrag {
     /// reachable from it (including the module itself).
     footprint: usize,
     comprehensibility: Option<f64>,
+    /// Lower bound of the 95% CI for comprehensibility (None when no scoring ran).
+    ci_lower: Option<f64>,
+    /// Upper bound of the 95% CI for comprehensibility (None when no scoring ran).
+    ci_upper: Option<f64>,
     /// The drag metric: `(1+footprint)^w2 · exp(m·(1−comp))`.
     drag: f64,
 }
@@ -105,6 +109,10 @@ enum DragNodeOutput {
         footprint: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         comprehensibility: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ci_lower: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ci_upper: Option<f64>,
         drag: f64,
     },
     Container {
@@ -125,6 +133,8 @@ impl From<&DragNode> for DragNodeOutput {
                 token_count,
                 footprint,
                 comprehensibility,
+                ci_lower,
+                ci_upper,
                 drag,
             } => DragNodeOutput::Module {
                 name: name.clone(),
@@ -132,6 +142,8 @@ impl From<&DragNode> for DragNodeOutput {
                 token_count: *token_count,
                 footprint: *footprint,
                 comprehensibility: *comprehensibility,
+                ci_lower: *ci_lower,
+                ci_upper: *ci_upper,
                 drag: *drag,
             },
             DragNode::Container {
@@ -385,6 +397,8 @@ async fn run() -> Result<(), String> {
             token_count,
             footprint,
             comprehensibility: None,
+            ci_lower: None,
+            ci_upper: None,
             drag: 0.0,
         });
     }
@@ -1074,6 +1088,8 @@ async fn score_comprehensibility(
             }
         };
         s.comprehensibility = Some(com);
+        s.ci_lower = Some(lo);
+        s.ci_upper = Some(hi);
 
         // ── Write cache entry with all raw estimates (cache-miss only) ──
         if let Some(estimates_vec) = estimates_map.get(module.as_str()) {
@@ -1620,6 +1636,50 @@ mod tests {
         // All identical → variance = 0 → no margin.
         assert!((lo - 0.5).abs() < 1e-12);
         assert!((hi - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn ci_fields_round_trip_through_json() {
+        // ModuleDrag is not directly serialized, but DragNodeOutput is.
+        // Build a DragNode::Module with CI fields and round-trip through
+        // DragNodeOutput → serde_json.
+        let node = scoring::DragNode::Module {
+            name: "test_mod".into(),
+            file: "src/test.rs".into(),
+            token_count: 42,
+            footprint: 100,
+            comprehensibility: Some(0.75),
+            ci_lower: Some(0.70),
+            ci_upper: Some(0.80),
+            drag: 1.5,
+        };
+        let output = DragNodeOutput::from(&node);
+        let json = serde_json::to_string(&output).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "module");
+        assert_eq!(v["name"], "test_mod");
+        assert!((v["comprehensibility"].as_f64().unwrap() - 0.75).abs() < 1e-12);
+        assert!((v["ci_lower"].as_f64().unwrap() - 0.70).abs() < 1e-12);
+        assert!((v["ci_upper"].as_f64().unwrap() - 0.80).abs() < 1e-12);
+
+        // None CI fields are omitted entirely by skip_serializing_if.
+        let node_no_ci = scoring::DragNode::Module {
+            name: "no_ci".into(),
+            file: "src/no_ci.rs".into(),
+            token_count: 1,
+            footprint: 1,
+            comprehensibility: None,
+            ci_lower: None,
+            ci_upper: None,
+            drag: 0.0,
+        };
+        let output_no_ci = DragNodeOutput::from(&node_no_ci);
+        let json_no_ci = serde_json::to_string(&output_no_ci).unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&json_no_ci).unwrap();
+        let obj = v2.as_object().unwrap();
+        assert!(!obj.contains_key("comprehensibility"));
+        assert!(!obj.contains_key("ci_lower"));
+        assert!(!obj.contains_key("ci_upper"));
     }
 
     // ── cache tests ──
