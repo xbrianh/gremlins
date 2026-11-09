@@ -24,12 +24,12 @@ use async_trait::async_trait;
 use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
 use rig_core::completion::Message;
 
-use crate::conversation::compaction::compaction_cut_index;
 use crate::clients::compaction::Compaction;
 use crate::clients::conversation::{Conversation, RunArtifact, TurnScript};
 use crate::clients::done_helpers::done_user_message;
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
+use crate::conversation::compaction::compaction_cut_index;
 
 /// The standard [`Conversation`] implementation.
 pub(crate) struct StandardConversation {

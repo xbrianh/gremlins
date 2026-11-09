@@ -66,7 +66,7 @@ fn build_compaction_config(client: &Client, model: String, is_chat: bool) -> Opt
             return None;
         }
     };
-    
+
     let threshold = if is_chat {
         crate::config::compaction_threshold_tokens_chat()
     } else {

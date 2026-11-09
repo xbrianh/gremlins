@@ -113,10 +113,8 @@ impl Compaction {
         // After compaction has been applied, don't re-compact until there is
         // genuinely new material after the block.
         if self.applied {
-            let cut = crate::conversation::compaction::compaction_cut_index(
-                history,
-                self.keep_recent,
-            );
+            let cut =
+                crate::conversation::compaction::compaction_cut_index(history, self.keep_recent);
             if cut == 0 {
                 return false;
             }
@@ -160,7 +158,10 @@ impl Compaction {
                     None => return Ok(None),
                 };
 
-                let signed: CompactionBlock = server_block.block.clone().expect("server compaction must have a block");
+                let signed: CompactionBlock = server_block
+                    .block
+                    .clone()
+                    .expect("server compaction must have a block");
                 let mut new_history = Vec::with_capacity(1 + kept.len());
                 new_history.push(compaction_block_as_message(&signed));
                 new_history.extend_from_slice(kept);
@@ -177,17 +178,18 @@ impl Compaction {
                     }
                 };
 
-                let (summary_msg, input_tokens, output_tokens) = match crate::conversation::compaction::compact_local(
-                    &model,
-                    to_compact,
-                    system_prompt,
-                    self.instructions.as_deref(),
-                )
-                .await
-                {
-                    Some(v) => v,
-                    None => return Ok(None),
-                };
+                let (summary_msg, input_tokens, output_tokens) =
+                    match crate::conversation::compaction::compact_local(
+                        &model,
+                        to_compact,
+                        system_prompt,
+                        self.instructions.as_deref(),
+                    )
+                    .await
+                    {
+                        Some(v) => v,
+                        None => return Ok(None),
+                    };
 
                 let mut new_history = Vec::with_capacity(1 + kept.len());
                 new_history.push(summary_msg);
