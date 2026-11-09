@@ -327,10 +327,11 @@ fn dir_trie_to_drag_node(
     } else {
         let s = dir_maints.get(&abs_dir_str).copied().ok_or_else(|| {
             format!(
-                "maintainability score missing for directory '{}' — \
-                     this is a bug: scoring was enabled but this directory was \
-                     skipped or never scored",
-                abs_dir_str
+                "maintainability score missing for directory '{abs_dir_str}' — \
+                 scoring was enabled but this directory was not scored. \
+                 This indicates a mismatch between the maintainability \
+                 scoring pass and the directory trie; check whether the \
+                 directory was excluded from scoring_dirs."
             )
         })?;
         (Some(s), (p * (1.0 - s)).exp())

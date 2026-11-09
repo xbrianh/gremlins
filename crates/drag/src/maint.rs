@@ -254,11 +254,13 @@ pub(crate) async fn score_directory_maintainability(
             Some(b) if !b.is_empty() => b,
             _ => {
                 eprintln!(
-                    "  [{dir_name}] no estimates collected for '{}' — \
-                     skipping result (will be absent from dir_maints)",
-                    dir_str
+                    "  [{dir_name}] no estimates collected for '{dir_str}' — \
+                     aborting (scoring cannot proceed without estimates)",
                 );
-                continue;
+                return Err(format!(
+                    "[{dir_name}] no estimates collected for '{dir_str}' — \
+                     all retries exhausted or agent failures prevented scoring"
+                ));
             }
         };
 
@@ -303,22 +305,27 @@ pub(crate) async fn score_directory_maintainability(
 
         if !all_dims_complete {
             eprintln!(
-                "  [{dir_name}] WARNING: incomplete dimension coverage for '{}' — \
-                 skipping cache write and result (will be absent from dir_maints)",
-                dir_str
+                "  [{dir_name}] WARNING: incomplete dimension coverage for '{dir_str}' — \
+                 aborting (not all dimensions reached the required estimate count)",
             );
-            continue;
+            return Err(format!(
+                "[{dir_name}] incomplete dimension coverage for '{dir_str}' — \
+                 not all dimensions reached the required {estimates} estimate(s)"
+            ));
         }
 
         if estimate_batch.len() != estimates {
             eprintln!(
-                "  [{dir_name}] WARNING: {}/{} estimates collected for '{}' — \
-                 skipping cache write and result (will be absent from dir_maints)",
+                "  [{dir_name}] WARNING: {}/{} estimates collected for '{dir_str}' — \
+                 aborting (estimate count does not match expected)",
                 estimate_batch.len(),
                 estimates,
-                dir_str
             );
-            continue;
+            return Err(format!(
+                "[{dir_name}] estimate count mismatch for '{dir_str}': \
+                 got {} estimates, expected {estimates}",
+                estimate_batch.len(),
+            ));
         }
 
         let was_cache_miss = cache_miss_keys.contains(&dir_str);
