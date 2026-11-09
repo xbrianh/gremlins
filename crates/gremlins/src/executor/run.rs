@@ -68,7 +68,12 @@ fn build_compaction_parts(
     model: String,
     is_chat: bool,
     force_compact: Arc<AtomicBool>,
-) -> Option<(Arc<dyn Backend>, String, Option<GremlinsModel>, CompactionState)> {
+) -> Option<(
+    Arc<dyn Backend>,
+    String,
+    Option<GremlinsModel>,
+    CompactionState,
+)> {
     let trigger = if is_chat {
         CompactionTrigger::Immediate
     } else {
@@ -600,19 +605,18 @@ async fn run_agent(
         None
     };
 
-    let (backend, compaction_model, local_model, compaction_state) =
-        match build_compaction_parts(
-            &client,
-            prepared
-                .model
-                .clone()
-                .unwrap_or_else(|| client.model().to_string()),
-            is_chat,
-            gremlin.force_compact.clone(),
-        ) {
-            Some((b, m, lm, s)) => (Some(b), m, lm, Some(s)),
-            None => (None, String::new(), None, None),
-        };
+    let (backend, compaction_model, local_model, compaction_state) = match build_compaction_parts(
+        &client,
+        prepared
+            .model
+            .clone()
+            .unwrap_or_else(|| client.model().to_string()),
+        is_chat,
+        gremlin.force_compact.clone(),
+    ) {
+        Some((b, m, lm, s)) => (Some(b), m, lm, Some(s)),
+        None => (None, String::new(), None, None),
+    };
     let conv = crate::conversation::standard::StandardConversation::new(
         "",
         false,

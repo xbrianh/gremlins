@@ -226,9 +226,7 @@ impl Conversation for StandardConversation {
         if !nested && self.should_compact() {
             // `should_compact` verified both halves are present, so this
             // destructuring cannot diverge.
-            if let (Some(backend), Some(state)) =
-                (&self.backend, &mut self.compaction_state)
-            {
+            if let (Some(backend), Some(state)) = (&self.backend, &mut self.compaction_state) {
                 let cut = compaction_cut_index(&self.history, state.keep_recent());
                 // Guard: nothing to compact (e.g. one huge initial prompt
                 // shorter than keep_recent turns).
@@ -250,8 +248,7 @@ impl Conversation for StandardConversation {
                     {
                         Ok(Some(result)) => {
                             if let Some(signed) = result.block.clone() {
-                                let mut new_history =
-                                    Vec::with_capacity(1 + kept.len());
+                                let mut new_history = Vec::with_capacity(1 + kept.len());
                                 new_history.push(compaction_block_as_message(&signed));
                                 new_history.extend_from_slice(&kept);
                                 self.history = new_history;
@@ -296,8 +293,7 @@ impl Conversation for StandardConversation {
                             .await
                             {
                                 Some((summary_msg, _in, _out)) => {
-                                    let mut new_history =
-                                        Vec::with_capacity(1 + kept.len());
+                                    let mut new_history = Vec::with_capacity(1 + kept.len());
                                     new_history.push(summary_msg);
                                     new_history.extend_from_slice(&kept);
                                     self.history = new_history;
