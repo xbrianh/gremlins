@@ -89,6 +89,10 @@ const LOCAL_COMPACTION_MAX_TOKENS: u64 = 2048;
 
 /// Run a single-turn summarization completion on `to_compact`.
 ///
+/// `system_prompt` is the conversation's active system prompt — it is
+/// prepended to the summarization instructions in the system preamble
+/// so the model has context about its role and constraints.
+///
 /// Returns a plain assistant text message with token counts, or `None`
 /// if the call failed. Does not produce a signed `CompactionBlock` —
 /// the returned message is an ordinary `Message::Assistant` whose text
@@ -97,17 +101,27 @@ pub(crate) async fn compact_local(
     model: &GremlinsModel,
     to_compact: &[Message],
     instructions: Option<&str>,
+    system_prompt: Option<&str>,
 ) -> Option<(Message, Option<u64>, Option<u64>)> {
-    let prompt = instructions.unwrap_or(DEFAULT_LOCAL_COMPACTION_PROMPT);
+    let summarization_instructions = instructions.unwrap_or(DEFAULT_LOCAL_COMPACTION_PROMPT);
 
-    // Build a CompletionRequest with no tools and capped tokens.
-    // `CompletionRequest::messages()` inserts `to_compact` between the
-    // system preamble (already set below) and the prompt message (set
-    // via `new()` and kept last). The resulting order is: system,
-    // history messages, "summarize" instruction — so the model sees
-    // the conversation it should summarise before the summarise
-    // instruction.
-    let request = CompletionRequest::new(Message::user(prompt))
+    // Build a system preamble: the conversation's system prompt first
+    // (so the model has role/constraint context), then the summarization
+    // instructions.
+    let preamble = match system_prompt {
+        Some(sys) if !sys.is_empty() => {
+            format!("{sys}\n\n{summarization_instructions}")
+        }
+        _ => summarization_instructions.to_string(),
+    };
+
+    // Build a CompletionRequest with the preamble carrying both the
+    // conversation system context and the summarization instructions.
+    // `to_compact` is set as the message history and a short user
+    // message triggers the summarization turn. Order: preamble →
+    // history → trigger.
+    let request = CompletionRequest::new(Message::user("Summarize the conversation above."))
+        .preamble(preamble)
         .messages(to_compact.to_vec())
         .max_tokens(LOCAL_COMPACTION_MAX_TOKENS);
 

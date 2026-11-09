@@ -191,6 +191,7 @@ impl Compaction {
                         model,
                         to_compact,
                         self.instructions.as_deref(),
+                        system_prompt,
                     )
                     .await
                     {

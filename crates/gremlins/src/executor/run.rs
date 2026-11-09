@@ -78,13 +78,21 @@ fn build_compaction_config(client: &Client, model: String, is_chat: bool) -> Opt
 
     // Pick the compaction strategy at construction time. For local,
     // build the model once so we don't construct it on every compaction
-    // call.
+    // call. The model must be qualified as `provider/model` because
+    // `make_model()` parses and validates the provider prefix.
     let (strategy, local_model) = if backend.name() == "anthropic" {
         (CompactionStrategy::Server, None)
     } else {
-        {
-            let m = backend.make_model(&model)?;
-            (CompactionStrategy::Local, Some(m))
+        let qualified = format!("{}/{}", client.provider(), model);
+        match backend.make_model(&qualified) {
+            Some(m) => (CompactionStrategy::Local, Some(m)),
+            None => {
+                log::warn!(
+                    "compaction: make_model failed for '{}'; disabling local compaction",
+                    qualified
+                );
+                return None;
+            }
         }
     };
 
