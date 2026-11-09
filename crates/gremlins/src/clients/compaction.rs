@@ -1,75 +1,32 @@
-//! Server-side conversation compaction via the Anthropic compact API beta.
+//! Compaction strategy, execution, and runtime state.
 //!
 //! [`Compaction`] holds the backend reference, model, threshold, instructions,
-//! and the runtime compaction state (signed block, applied flag, cooldown).
-//! Its [`compact`](Compaction::compact) method calls the backend and wraps
-//! the result.
+//! and the runtime compaction state (block, applied flag, cooldown).
+//! It is built once in `run.rs` and passed to `StandardConversation::new`.
+//!
+//! The strategy is picked at construction time:
+//!
+//! - **Server**: Native server-side compaction (Anthropic on-demand API).
+//! - **Local**: Model-driven summarization via
+//!   [`crate::conversation::compaction::compact_local_with_retry`].
+//!
+//! There is no fallback chain. Server fails → error. Local fails → error.
 
 use std::sync::Arc;
 
-use rig_core::completion::message::UserContent;
 use rig_core::completion::Message;
 
 use crate::clients::backend::{Backend, ClientError};
 use crate::clients::protocol::{CompactionBlock, CompactionResult};
+use crate::conversation::compaction::compaction_cut_index;
 
-/// Compute a cut index so `to_compact = &history[..cut]` and
-/// `kept = &history[cut..]`. The cut lands on a completed-turn boundary:
-/// `keep_recent` whole user/assistant exchanges are kept verbatim and
-/// `to_compact` never ends in an unanswered tool call.
-pub(crate) fn compaction_cut_index(history: &[Message], keep_recent: usize) -> usize {
-    let mut cut = history.len();
-    let mut kept_turns = 0;
-    while cut > 0 && kept_turns < keep_recent {
-        // Skip trailing user tool_result messages belonging to the
-        // preceding turn.
-        while cut > 0 && is_user_tool_result(&history[cut - 1]) {
-            cut -= 1;
-        }
-        // Step back over this turn's user opener and its assistant/tool
-        // messages to the previous completed-turn boundary.
-        cut = previous_turn_boundary(history, cut);
-        kept_turns += 1;
-    }
-    cut
-}
-
-/// Walk backward from `cut` (exclusive) to the start of the preceding
-/// completed user+assistant turn, skipping assistant/tool messages.
-fn previous_turn_boundary(history: &[Message], mut cut: usize) -> usize {
-    // Step back over a chain of (assistant, user tool_result) pairs until
-    // we hit a user message that is NOT a tool result (the turn opener).
-    loop {
-        // Skip the assistant message.
-        if cut > 0 && matches!(history[cut - 1], Message::Assistant { .. }) {
-            cut -= 1;
-        } else {
-            break;
-        }
-        // Skip any user tool_result messages after the assistant.
-        while cut > 0 && is_user_tool_result(&history[cut - 1]) {
-            cut -= 1;
-        }
-    }
-    // Step back over the user opener.
-    if cut > 0 && matches!(history[cut - 1], Message::User { .. }) {
-        cut -= 1;
-    }
-    cut
-}
-
-/// True when the message is a user message containing exclusively tool
-/// results (no mixed text + tool-result blocks).
-fn is_user_tool_result(msg: &Message) -> bool {
-    match msg {
-        Message::User { content } => {
-            !content.is_empty()
-                && content
-                    .iter()
-                    .all(|c| matches!(c, UserContent::ToolResult(_)))
-        }
-        _ => false,
-    }
+/// The compaction strategy, picked at construction time.
+#[derive(Clone)]
+pub(crate) enum CompactionStrategy {
+    /// Native server-side compaction (Anthropic on-demand API).
+    Server,
+    /// Local model-driven summarization.
+    Local,
 }
 
 /// Compaction strategy, execution, and runtime state. Built once in
@@ -85,7 +42,10 @@ pub(crate) struct Compaction {
     threshold: u64,
     keep_recent: usize,
     instructions: Option<String>,
-    /// Active signed compaction block, if any has been applied.
+    strategy: CompactionStrategy,
+    /// Model instance for local compaction, built once at construction.
+    local_model: Option<crate::clients::model::GremlinsModel>,
+    /// Active signed compaction block, if any has been applied (server only).
     block: Option<CompactionBlock>,
     /// True once any summary has been swapped into history.
     applied: bool,
@@ -101,6 +61,8 @@ impl Compaction {
         threshold: u64,
         keep_recent: usize,
         instructions: Option<String>,
+        strategy: CompactionStrategy,
+        local_model: Option<crate::clients::model::GremlinsModel>,
     ) -> Self {
         Self {
             backend,
@@ -108,6 +70,8 @@ impl Compaction {
             threshold,
             keep_recent,
             instructions,
+            strategy,
+            local_model,
             block: None,
             applied: false,
             cooldown: false,
@@ -124,11 +88,13 @@ impl Compaction {
         self.block.as_ref()
     }
 
-    /// Record that a compaction block has been applied to history.
-    /// Sets `applied` and stores the block atomically, preserving
-    /// the invariant that `applied` is `true` iff a block is set.
-    pub(crate) fn mark_applied(&mut self, block: CompactionBlock) {
-        self.block = Some(block);
+    /// Record that a compaction result has been applied to history.
+    /// Sets `applied` and stores the block (if any) atomically, preserving
+    /// the invariant that `block` is set iff a server-side compaction was used.
+    /// Server strategy → `Some(signed_block)`
+    /// Local strategy  → `None`
+    pub(crate) fn mark_applied(&mut self, block: Option<CompactionBlock>) {
+        self.block = block;
         self.applied = true;
     }
 
@@ -160,32 +126,90 @@ impl Compaction {
         true
     }
 
-    /// Run server-side compaction on `to_compact`.
-    /// Returns `Ok(None)` when the backend doesn't support compaction.
+    /// Run compaction on `to_compact`. Dispatches to the active strategy
+    /// with no fallback chaining.
+    ///
+    /// - **Server**: calls `backend.compact()` (Anthropic on-demand API).
+    ///   Returns `Ok(None)` when the API returns a null content block.
+    /// - **Local**: calls
+    ///   [`compact_local_with_retry`](crate::conversation::compaction::compact_local_with_retry)
+    ///   on the same model. Returns `Ok(None)` when the model can't be
+    ///   built or the summarization call fails.
+    ///
+    /// `Err(...)` from either path propagates up to `render_turn`, which
+    /// logs it and sets cooldown. There is no fallback.
     pub(crate) async fn compact(
         &self,
         to_compact: &[Message],
         kept: &[Message],
         system_prompt: Option<&str>,
-    ) -> Result<Option<(CompactionBlock, Vec<Message>, CompactionResult)>, ClientError> {
-        let result = self
-            .backend
-            .compact(
-                to_compact,
-                system_prompt,
-                self.instructions.as_deref(),
-                &self.model,
-            )
-            .await?;
-        let server_block = match result {
-            Some(r) => r,
-            None => return Ok(None),
-        };
-        let signed = server_block.block.clone();
-        let mut new_history = Vec::with_capacity(1 + kept.len());
-        new_history.push(compaction_block_as_message(&signed));
-        new_history.extend_from_slice(kept);
-        Ok(Some((signed, new_history, server_block)))
+    ) -> Result<Option<(Option<CompactionBlock>, Vec<Message>, CompactionResult)>, ClientError>
+    {
+        match self.strategy {
+            CompactionStrategy::Server => {
+                let result = self
+                    .backend
+                    .compact(
+                        to_compact,
+                        system_prompt,
+                        self.instructions.as_deref(),
+                        &self.model,
+                    )
+                    .await?;
+
+                let server_block = match result {
+                    Some(r) => r,
+                    None => return Ok(None),
+                };
+
+                let signed: CompactionBlock = match server_block.block.clone() {
+                    Some(b) => b,
+                    // Server returned a compaction result with no block —
+                    // unexpected but not fatal; return Ok(None) so the
+                    // caller sets cooldown rather than panicking.
+                    None => {
+                        log::warn!("Server compaction result had no block; dropping");
+                        return Ok(None);
+                    }
+                };
+                let mut new_history = Vec::with_capacity(1 + kept.len());
+                new_history.push(compaction_block_as_message(&signed));
+                new_history.extend_from_slice(kept);
+                Ok(Some((Some(signed), new_history, server_block)))
+            }
+            CompactionStrategy::Local => {
+                let model = match &self.local_model {
+                    Some(m) => m,
+                    None => {
+                        log::warn!("Compaction: local model not available");
+                        return Ok(None);
+                    }
+                };
+
+                let (summary_msg, input_tokens, output_tokens) =
+                    match crate::conversation::compaction::compact_local_with_retry(
+                        model,
+                        to_compact,
+                        self.instructions.as_deref(),
+                        system_prompt,
+                    )
+                    .await
+                    {
+                        Some(v) => v,
+                        None => return Ok(None),
+                    };
+
+                let mut new_history = Vec::with_capacity(1 + kept.len());
+                new_history.push(summary_msg);
+                new_history.extend_from_slice(kept);
+                let result = CompactionResult {
+                    block: None,
+                    input_tokens,
+                    output_tokens,
+                };
+                Ok(Some((None, new_history, result)))
+            }
+        }
     }
 }
 

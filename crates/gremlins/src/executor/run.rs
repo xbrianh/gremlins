@@ -12,7 +12,7 @@ use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::{Client, ModelURI};
-use crate::clients::compaction::Compaction;
+use crate::clients::compaction::{Compaction, CompactionStrategy};
 use crate::config;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
@@ -57,7 +57,7 @@ const DEFAULT_COMPACTION_KEEP_RECENT: usize = 10;
 
 /// Build a [`Compaction`] from the global config and the resolved backend.
 /// Returns `None` when compaction is disabled (threshold == 0) or the backend
-/// is not an Anthropic backend (the only one supporting the on-demand API).
+/// supports neither server-side nor local compaction.
 fn build_compaction_config(client: &Client, model: String, is_chat: bool) -> Option<Compaction> {
     let backend = match client.get_or_build_backend() {
         Ok(b) => b,
@@ -66,10 +66,7 @@ fn build_compaction_config(client: &Client, model: String, is_chat: bool) -> Opt
             return None;
         }
     };
-    // Only Anthropic supports on-demand compaction.
-    if backend.name() != "anthropic" {
-        return None;
-    }
+
     let threshold = if is_chat {
         crate::config::compaction_threshold_tokens_chat()
     } else {
@@ -78,12 +75,35 @@ fn build_compaction_config(client: &Client, model: String, is_chat: bool) -> Opt
     if threshold == 0 {
         return None;
     }
+
+    // Pick the compaction strategy at construction time. For local,
+    // build the model once so we don't construct it on every compaction
+    // call. The model must be qualified as `provider/model` because
+    // `make_model()` parses and validates the provider prefix.
+    let (strategy, local_model) = if backend.name() == "anthropic" {
+        (CompactionStrategy::Server, None)
+    } else {
+        let qualified = format!("{}/{}", client.provider(), model);
+        match backend.make_model(&qualified) {
+            Some(m) => (CompactionStrategy::Local, Some(m)),
+            None => {
+                log::warn!(
+                    "compaction: make_model failed for '{}'; disabling local compaction",
+                    qualified
+                );
+                return None;
+            }
+        }
+    };
+
     Some(Compaction::new(
         backend,
         model,
         threshold,
         DEFAULT_COMPACTION_KEEP_RECENT,
         None, // no custom instructions by default
+        strategy,
+        local_model,
     ))
 }
 

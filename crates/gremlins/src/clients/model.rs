@@ -54,7 +54,6 @@ impl GremlinsModel {
     ///
     /// This mirrors `stream` for the unary path so both model surfaces stay
     /// governed by the same size check.
-    #[allow(dead_code)]
     pub(crate) async fn call(
         &self,
         request: CompletionRequest,

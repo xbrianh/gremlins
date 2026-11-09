@@ -1216,11 +1216,6 @@ pub(crate) fn max_tool_output_bytes() -> u64 {
 /// Default 50 000. 0 disables proactive compaction; the hard
 /// `max-prompt-bytes` ceiling still applies. Settings.yaml
 /// `compaction.threshold-tokens` takes precedence over the env var.
-///
-/// Compatibility accessor only: proactive compaction is not wired into the
-/// agent loop today, so long transcripts are bounded solely by the hard
-/// `max-prompt-bytes` ceiling. Retained for the replacement compaction design.
-#[allow(dead_code)]
 pub(crate) fn compaction_threshold_tokens() -> u64 {
     get_global()
         .map(|c| c.compaction_threshold_tokens())
@@ -1236,9 +1231,6 @@ pub(crate) fn compaction_threshold_tokens() -> u64 {
 /// 0 disables proactive compaction; the hard `max-prompt-bytes` ceiling still
 /// applies. Settings.yaml `compaction.threshold-tokens-chat` takes precedence
 /// over the env var.
-///
-/// Compatibility accessor only — see [`compaction_threshold_tokens`].
-#[allow(dead_code)]
 pub(crate) fn compaction_threshold_tokens_chat() -> u64 {
     get_global()
         .map(|c| c.compaction_threshold_tokens_chat())
