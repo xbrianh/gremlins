@@ -125,8 +125,15 @@ impl Compaction {
     }
 
     /// Prevent retrying the expensive API call on every subsequent turn.
+    ///
+    /// Also clears the one-shot force flag: cooldown means a `/compact` was
+    /// attempted this turn (and failed or produced no summary), so it must not
+    /// re-fire on later turns. Pending requests are only preserved while there
+    /// is insufficient material, which is handled in `should_compact` and never
+    /// reaches this method.
     pub(crate) fn set_cooldown(&mut self) {
         self.cooldown = true;
+        self.force.store(false, Ordering::Release);
     }
 
     /// Decide whether to trigger compaction on this turn.
@@ -135,9 +142,10 @@ impl Compaction {
         last_input_tokens: Option<u64>,
         history: &[Message],
     ) -> bool {
-        // One-shot: operator forced this turn. The flag is only cleared on
-        // success (mark_applied). If there is not enough material yet
-        // (cut == 0), leave it set so it fires once material accumulates.
+        // One-shot: operator forced this turn. The flag is cleared on success
+        // (mark_applied) and on failure (set_cooldown). If there is not enough
+        // material yet (cut == 0), leave it set so it fires once material
+        // accumulates.
         if self.force.load(Ordering::Acquire) {
             let cut = compaction_cut_index(history, self.keep_recent);
             return cut > 0;
@@ -456,6 +464,15 @@ mod tests {
         // Clone to get &mut.
         let mut c = c.clone();
         c.mark_applied(None);
+        assert!(!c.force.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn set_cooldown_clears_force_flag() {
+        let c = make_compaction(|_| {});
+        c.force.store(true, Ordering::Release);
+        let mut c = c.clone();
+        c.set_cooldown();
         assert!(!c.force.load(Ordering::Acquire));
     }
 }
