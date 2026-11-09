@@ -14,9 +14,8 @@
 //!
 //! ## Compaction
 //!
-//! [`StandardConversation::compact`] is an on-demand method that takes
-//! its compaction plumbing (backend, model, instructions) as parameters
-//! and replaces the oldest history messages with a signed compaction
+//! [`StandardConversation::compact`] is an on-demand method that
+//! replaces the oldest history messages with a signed compaction
 //! block (server) or a plain summary (local). The most recent
 //! `KEEP_RECENT` user+assistant pairs are preserved verbatim.
 //! It is called by the `/compact` TUI command handler; there is no
@@ -119,11 +118,7 @@ impl StandardConversation {
     /// command handler.
     ///
     /// Returns `None` when there is nothing to compact or every path fails.
-    pub(crate) async fn compact(
-        &mut self,
-        instructions: Option<&str>,
-        system_prompt: Option<&str>,
-    ) -> Option<CompactionReport> {
+    pub(crate) async fn compact(&mut self) -> Option<CompactionReport> {
         let backend = match &self.backend {
             Some(b) => b,
             None => {
@@ -138,10 +133,13 @@ impl StandardConversation {
         let kept = self.history[cut..].to_vec();
         let to_compact = self.history[..cut].to_vec();
 
+        let instructions: Option<&str> = None;
+        let system_prompt = crate::clients::system_prompts::chat_system_prompt();
+
         // ── Server-side compaction ──
         if backend.supports_compaction() {
             let result = backend
-                .compact(&to_compact, system_prompt, instructions, "")
+                .compact(&to_compact, Some(system_prompt), instructions, "")
                 .await;
             match result {
                 Ok(Some(r)) if r.block.is_some() => {
@@ -176,7 +174,7 @@ impl StandardConversation {
                 &local,
                 &to_compact,
                 instructions,
-                system_prompt,
+                Some(system_prompt),
             )
             .await
             {

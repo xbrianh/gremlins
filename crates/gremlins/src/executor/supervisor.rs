@@ -2137,12 +2137,7 @@ async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
         Some(backend.clone()),
     );
 
-    // Use the default chat system prompt — the same one passed to
-    // create_chat_gremlin and therefore the same one the conversation
-    // was built against.
-    let system_prompt = crate::clients::system_prompts::chat_system_prompt();
-
-    match conv.compact(None, Some(system_prompt)).await {
+    match conv.compact().await {
         Some(report) => {
             // Persist only the committed transcript — the conversation was
             // built with an empty pending prompt, so `messages()` would append
