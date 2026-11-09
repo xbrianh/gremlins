@@ -26,18 +26,13 @@
 use async_trait::async_trait;
 use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
 use rig_core::completion::Message;
-use std::sync::Arc;
 
-use crate::clients::backend::Backend;
-use crate::clients::compaction::compaction_block_as_message;
+use crate::clients::compaction::Compaction;
 use crate::clients::conversation::{Conversation, RunArtifact, TurnScript};
 use crate::clients::done_helpers::done_user_message;
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
-use crate::clients::model::GremlinsModel;
-use crate::conversation::compaction::{
-    compact_local_with_retry, compaction_cut_index, CompactionState,
-};
+use crate::conversation::compaction::{compaction_cut_index, CompactionState};
 
 /// The standard [`Conversation`] implementation.
 pub(crate) struct StandardConversation {
@@ -67,66 +62,13 @@ pub(crate) struct StandardConversation {
     /// Once set, [`Conversation::messages`] returns this final transcript so
     /// persistence consumers see the exact durable message list.
     finalized_messages: Option<Vec<Message>>,
-    /// Backend for server-side compaction. `None` → compaction disabled.
-    backend: Option<Arc<dyn Backend>>,
+    /// Compaction dispatch (`None` → compaction disabled).
+    compaction_dispatch: Option<Compaction>,
     /// Compaction orchestration state (`None` → compaction disabled).
-    /// Invariant: always `Some` iff `backend` is `Some`.
+    /// Invariant: always `Some` iff `compaction_dispatch` is `Some`.
     compaction_state: Option<CompactionState>,
-    /// Model name for server-side compaction requests.
-    compaction_model: String,
-    /// Custom compaction instructions (optional).
-    compaction_instructions: Option<String>,
-    /// Pre-built model for local compaction. When `Some`, this
-    /// conversation uses local-only compaction (the backend does not
-    /// support server compaction). When `None`, only server compaction
-    /// is attempted and errors are surfaced.
-    local_model: Option<GremlinsModel>,
     /// The `input_tokens` count from the most recent API response.
     last_input_tokens: Option<u64>,
-}
-
-/// Compaction wiring for a [`StandardConversation`].
-///
-/// Grouping these fields keeps [`StandardConversation::new`] under the
-/// argument-count lint and documents the compaction configuration as one unit.
-pub(crate) struct CompactionConfig {
-    backend: Option<Arc<dyn Backend>>,
-    state: Option<CompactionState>,
-    model: String,
-    instructions: Option<String>,
-    local_model: Option<GremlinsModel>,
-}
-
-impl CompactionConfig {
-    /// Enable compaction with the given backend, orchestration state, and
-    /// configuration. `backend` and `state` are always `Some` together —
-    /// use [`disabled`](Self::disabled) to disable compaction.
-    pub(crate) fn enabled(
-        backend: Arc<dyn Backend>,
-        state: CompactionState,
-        model: String,
-        instructions: Option<String>,
-        local_model: Option<GremlinsModel>,
-    ) -> Self {
-        Self {
-            backend: Some(backend),
-            state: Some(state),
-            model,
-            instructions,
-            local_model,
-        }
-    }
-
-    /// Compaction disabled.
-    pub(crate) fn disabled() -> Self {
-        Self {
-            backend: None,
-            state: None,
-            model: String::new(),
-            instructions: None,
-            local_model: None,
-        }
-    }
 }
 
 impl StandardConversation {
@@ -134,7 +76,8 @@ impl StandardConversation {
         prompt: &str,
         preserve_reasoning: bool,
         prepopulated_messages: Option<Vec<Message>>,
-        compaction: CompactionConfig,
+        compaction_dispatch: Option<Compaction>,
+        compaction_state: Option<CompactionState>,
     ) -> Self {
         let history = prepopulated_messages.unwrap_or_default();
         Self {
@@ -146,11 +89,8 @@ impl StandardConversation {
             preserve_reasoning_in_history: preserve_reasoning,
             last_text: String::new(),
             finalized_messages: None,
-            backend: compaction.backend,
-            compaction_state: compaction.state,
-            compaction_model: compaction.model,
-            compaction_instructions: compaction.instructions,
-            local_model: compaction.local_model,
+            compaction_dispatch,
+            compaction_state,
             last_input_tokens: None,
         }
     }
@@ -173,7 +113,7 @@ impl StandardConversation {
     /// compaction configuration must be present; otherwise compaction is
     /// disabled and no force flag can be consumed.
     fn should_compact(&self) -> bool {
-        match (&self.compaction_state, &self.backend) {
+        match (&self.compaction_state, &self.compaction_dispatch) {
             (Some(state), Some(_)) => state.should_compact(self.last_input_tokens, &self.history),
             _ => false,
         }
@@ -182,10 +122,11 @@ impl StandardConversation {
     /// Run compaction now.
     ///
     /// `should_compact` must have returned `true` on this turn before
-    /// calling this method — both `backend` and `compaction_state` are
-    /// assumed present.
+    /// calling this method — both `dispatch` and `state` are assumed present.
     async fn compact(&mut self, system_prompt: Option<&str>) {
-        let Some(backend) = &self.backend else { return };
+        let Some(dispatch) = &self.compaction_dispatch else {
+            return;
+        };
         let Some(state) = &mut self.compaction_state else {
             return;
         };
@@ -199,93 +140,25 @@ impl StandardConversation {
         let kept = self.history[cut..].to_vec();
         let to_compact = self.history[..cut].to_vec();
 
-        if backend.supports_compaction() {
-            // ── Server compaction ──
-            match backend
-                .compact(
-                    &to_compact,
-                    system_prompt,
-                    self.compaction_instructions.as_deref(),
-                    &self.compaction_model,
-                )
-                .await
-            {
-                Ok(Some(result)) => {
-                    if let Some(signed) = result.block.clone() {
-                        let mut new_history = Vec::with_capacity(1 + kept.len());
-                        new_history.push(compaction_block_as_message(&signed));
-                        new_history.extend_from_slice(&kept);
-                        self.history = new_history;
-                        state.mark_applied(Some(signed));
-                        self.last_input_tokens = Some(0);
-                        log::info!(
-                            "Compaction applied: {} messages → block + {} (compaction cost: {:?} in, {:?} out)",
-                            to_compact.len(),
-                            kept.len(),
-                            result.input_tokens,
-                            result.output_tokens,
-                        );
-                    } else {
-                        log::error!(
-                            "Server compaction returned no block; {} messages not compacted",
-                            to_compact.len()
-                        );
-                        state.set_cooldown();
-                    }
-                }
-                Ok(None) => {
-                    // Backend was flagged as server-capable but didn't
-                    // produce a result — shouldn't happen.
-                    log::error!(
-                        "Server compaction returned Ok(None) despite supports_compaction; {} messages not compacted",
-                        to_compact.len()
-                    );
-                    state.set_cooldown();
-                }
-                Err(e) => {
-                    log::error!(
-                        "Server compaction failed: {e}; {} messages not compacted",
-                        to_compact.len()
-                    );
-                    state.set_cooldown();
-                }
+        match dispatch.compact(&to_compact, system_prompt).await {
+            Some((replacement_msg, signed_block, usage)) => {
+                let mut new_history = Vec::with_capacity(1 + kept.len());
+                new_history.push(replacement_msg);
+                new_history.extend_from_slice(&kept);
+                self.history = new_history;
+                state.mark_applied(signed_block);
+                self.last_input_tokens = Some(0);
+                log::info!(
+                    "Compaction applied: {} messages → summary + {} (cost: {:?} in, {:?} out)",
+                    to_compact.len(),
+                    kept.len(),
+                    usage.input_tokens,
+                    usage.output_tokens,
+                );
             }
-        } else if let Some(model) = &self.local_model {
-            // ── Local compaction ──
-            match compact_local_with_retry(
-                model,
-                &to_compact,
-                self.compaction_instructions.as_deref(),
-                system_prompt,
-            )
-            .await
-            {
-                Some((summary_msg, in_tok, out_tok)) => {
-                    let mut new_history = Vec::with_capacity(1 + kept.len());
-                    new_history.push(summary_msg);
-                    new_history.extend_from_slice(&kept);
-                    self.history = new_history;
-                    state.mark_applied(None);
-                    self.last_input_tokens = Some(0);
-                    log::info!(
-                        "Compaction applied (local): {} messages → summary + {} (compaction cost: {:?} in, {:?} out)",
-                        to_compact.len(),
-                        kept.len(),
-                        in_tok,
-                        out_tok,
-                    );
-                }
-                None => {
-                    state.set_cooldown();
-                }
+            None => {
+                state.set_cooldown();
             }
-        } else {
-            // No server compaction and no local model — can't do anything.
-            log::warn!(
-                "Backend does not support server compaction and no local model available; {} messages not compacted",
-                to_compact.len()
-            );
-            state.set_cooldown();
         }
     }
 }
@@ -302,11 +175,8 @@ impl Conversation for StandardConversation {
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: self.last_text.clone(),
             finalized_messages: self.finalized_messages.clone(),
-            backend: self.backend.clone(),
+            compaction_dispatch: self.compaction_dispatch.clone(),
             compaction_state: self.compaction_state.clone(),
-            compaction_model: self.compaction_model.clone(),
-            compaction_instructions: self.compaction_instructions.clone(),
-            local_model: self.local_model.clone(),
             last_input_tokens: self.last_input_tokens,
         })
     }
@@ -537,31 +407,19 @@ impl Conversation for StandardConversation {
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: String::new(),
             finalized_messages: None,
-            backend: self.backend.clone(),
+            compaction_dispatch: self.compaction_dispatch.clone(),
             compaction_state: self.compaction_state.clone(),
-            compaction_model: self.compaction_model.clone(),
-            compaction_instructions: self.compaction_instructions.clone(),
-            local_model: self.local_model.clone(),
             last_input_tokens: self.last_input_tokens,
         })
     }
 
     fn spawn_child(&self, prompt: &str) -> Box<dyn Conversation> {
-        let compaction = match (&self.backend, &self.compaction_state) {
-            (Some(backend), Some(state)) => CompactionConfig::enabled(
-                backend.clone(),
-                state.clone(),
-                self.compaction_model.clone(),
-                self.compaction_instructions.clone(),
-                self.local_model.clone(),
-            ),
-            _ => CompactionConfig::disabled(),
-        };
         Box::new(Self::new(
             prompt,
             self.preserve_reasoning_in_history,
             None,
-            compaction,
+            self.compaction_dispatch.clone(),
+            self.compaction_state.clone(),
         ))
     }
 

@@ -18,6 +18,7 @@ pub(crate) fn new_blank_conversation(
         prompt,
         preserve_reasoning,
         prepopulated_messages,
-        standard::CompactionConfig::disabled(),
+        None,
+        None,
     ))
 }

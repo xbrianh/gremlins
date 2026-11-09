@@ -12,12 +12,11 @@ use serde_json::{Map, Value};
 
 use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
-use crate::clients::backend::{Backend, ClientError, RunParams};
+use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::{Client, ModelURI};
-use crate::clients::model::GremlinsModel;
+use crate::clients::compaction::Compaction;
 use crate::config;
 use crate::conversation::compaction::{CompactionState, CompactionTrigger};
-use crate::conversation::standard::CompactionConfig;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
 use crate::executor::bootstrap::run_definition_bootstrap;
@@ -59,32 +58,18 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
 /// Default number of most-recent turns to keep verbatim during compaction.
 const DEFAULT_COMPACTION_KEEP_RECENT: usize = 10;
 
-/// Built compaction parts: `(backend, model, local_model, state)`.
-/// `local_model` is `Some` when a local model could be built; `None`
-/// when it couldn't — `StandardConversation::compact()` decides which
-/// strategy to use based on `Backend::supports_compaction()`.
-type CompactionParts = (
-    Arc<dyn Backend>,
-    String,
-    Option<GremlinsModel>,
-    CompactionState,
-);
-
-/// Build the compaction parts — backend, model, optional local model,
-/// and orchestration state. Always tries to build a local model; if it
-/// fails, `local_model` is `None` and `compact()` will warn but not
-/// error (non-server backends without a local model just skip compaction).
-///
-/// Returns `None` when compaction is disabled: threshold == 0 for
-/// [`CompactionTrigger::Threshold`], or failed backend construction.
-/// For [`CompactionTrigger::Immediate`] (chat), parts are always returned
-/// so the `/compact` force flag can fire on demand.
-fn build_compaction_parts(
+/// Build the [`Compaction`] dispatch and [`CompactionState`] pair from the
+/// global config and the resolved backend.
+/// Returns `None` when compaction is disabled (threshold == 0) and the trigger
+/// is [`CompactionTrigger::Threshold`] — for [`CompactionTrigger::Immediate`]
+/// (chat), a pair is always returned so the `/compact` force flag can
+/// fire on demand.
+fn build_compaction_config(
     client: &Client,
     model: String,
     is_chat: bool,
     force_compact: Arc<AtomicBool>,
-) -> Option<CompactionParts> {
+) -> Option<(Compaction, CompactionState)> {
     let trigger = if is_chat {
         CompactionTrigger::Immediate
     } else {
@@ -114,8 +99,8 @@ fn build_compaction_parts(
         return None;
     }
 
-    // Build a local model when possible — render_turn uses it when the
-    // backend doesn't support server-side compaction.
+    // Build a local model when possible — Compaction::compact uses it when
+    // the backend doesn't support server-side compaction.
     let qualified = format!("{}/{}", client.provider(), model);
     let local_model = backend.make_model(&qualified);
     if local_model.is_none() {
@@ -126,9 +111,7 @@ fn build_compaction_parts(
     }
 
     Some((
-        backend,
-        model,
-        local_model,
+        Compaction::new(backend, model, None, local_model),
         CompactionState::new(
             threshold,
             DEFAULT_COMPACTION_KEEP_RECENT,
@@ -621,7 +604,7 @@ async fn run_agent(
         None
     };
 
-    let compaction = match build_compaction_parts(
+    let (compaction_dispatch, compaction_state) = build_compaction_config(
         &client,
         prepared
             .model
@@ -629,21 +612,14 @@ async fn run_agent(
             .unwrap_or_else(|| client.model().to_string()),
         is_chat,
         gremlin.force_compact.clone(),
-    ) {
-        Some((backend, model, local_model, state)) => CompactionConfig::enabled(
-            backend,
-            state,
-            model,
-            None, // no custom instructions by default
-            local_model,
-        ),
-        None => CompactionConfig::disabled(),
-    };
+    )
+    .map_or((None, None), |(d, s)| (Some(d), Some(s)));
     let conv = crate::conversation::standard::StandardConversation::new(
         "",
         false,
         verbatim_history,
-        compaction,
+        compaction_dispatch,
+        compaction_state,
     );
 
     // ── Live usage tracker for failure persistence ─────
