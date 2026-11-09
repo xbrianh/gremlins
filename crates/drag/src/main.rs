@@ -258,8 +258,12 @@ async fn run() -> Result<(), String> {
             &comp_config_hash,
         );
         if let Some(entry) = cache_map.get(&key) {
-            // Only accept cached entries whose estimate count matches.
-            if entry.estimates == config.estimates_per_survey {
+            // Only accept cached entries whose estimate count matches and
+            // whose raw_estimates are populated (legacy entries may have
+            // an empty vec from #[serde(default)]).
+            if entry.estimates == config.estimates_per_survey
+                && entry.raw_estimates.len() == config.estimates_per_survey
+            {
                 module_cache.insert(module.clone(), entry.clone());
             }
         }

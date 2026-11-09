@@ -149,6 +149,7 @@ pub(crate) async fn score_package_maintainability(
             let prompt = prompt.clone();
             let model_spec = model_spec.to_string();
             let maint_config = maint_config.clone();
+            let pkg_dir = pkg.dir().to_path_buf();
 
             handles.push(tokio::spawn(async move {
                 for attempt in 0..MAX_MAINT_RETRIES {
@@ -158,6 +159,7 @@ pub(crate) async fn score_package_maintainability(
                         &model_spec,
                         verbose,
                         &maint_config,
+                        &pkg_dir,
                     )
                     .await
                     {
@@ -428,12 +430,15 @@ fn build_multi_dim_prompt(
 
 /// Run a single multi-dimension maintainability estimate through an ephemeral
 /// gremlin Agent stage.  Returns a HashMap<String, u8> of dimension scores.
+/// `pkg_dir` is used as the agent's working directory so it can access
+/// source files via its tools.
 async fn run_maint_agent(
     package: &str,
     prompt: &str,
     model_spec: &str,
     verbose: bool,
     maint_config: &MaintainabilityConfig,
+    pkg_dir: &Path,
 ) -> Result<HashMap<String, u8>, CompAgentError> {
     if maint_config.dimensions.is_empty() {
         return Err(CompAgentError::Fatal(
@@ -458,7 +463,7 @@ async fn run_maint_agent(
         .build()
         .map_err(|e| CompAgentError::Fatal(format!("def build: {e}")))?;
 
-    let cwd = std::env::current_dir().map_err(|e| CompAgentError::Fatal(format!("cwd: {e}")))?;
+    let cwd = pkg_dir.to_path_buf();
 
     let config = GremlinConfig { ephemeral: true };
     let mut gremlin = Gremlin::init(

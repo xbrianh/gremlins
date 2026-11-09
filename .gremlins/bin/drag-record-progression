@@ -127,6 +127,11 @@ if [ -z "$CURRENT_TARGET" ]; then
     die "record-progression: no .path in config $CONFIG_PATH"
 fi
 
+# Initialize NEW_TARGET as the current target (not its directory).
+# For single-file targets this preserves the file path so comparisons
+# against TARGET_DIR detect when the target changes from file to dir.
+NEW_TARGET="$CURRENT_TARGET"
+
 # If the target is a single file, use its directory for the common-root
 # computation (gremlins-drag accepts both files and dirs).
 if [ -f "$WORKDIR/$CURRENT_TARGET" ]; then
@@ -135,7 +140,10 @@ else
     TARGET_DIR="$CURRENT_TARGET"
 fi
 
-NEW_TARGET="$TARGET_DIR"
+# Normalize NEW_TARGET to directory form for the common-root loop.
+# For directories, NEW_TARGET already equals TARGET_DIR; for files,
+# start the narrowing from the parent directory.
+COMMON_ROOT="$TARGET_DIR"
 
 # Gather all source files changed since the baseline commit.
 CHANGED_FILES=$(git -C "$WORKDIR" diff --name-only "$BASE_SHA..HEAD" -- '*.rs' '*.py' 2>/dev/null || true)
@@ -144,22 +152,24 @@ if [ -n "$CHANGED_FILES" ]; then
     while IFS= read -r f; do
         [ -z "$f" ] && continue
         f_dir="$(dirname "$f")"
-        NEW_TARGET=$(common_prefix "$NEW_TARGET" "$f_dir")
+        COMMON_ROOT=$(common_prefix "$COMMON_ROOT" "$f_dir")
     done <<< "$CHANGED_FILES"
 fi
 
-info "record-progression: current target=$CURRENT_TARGET, common root=$NEW_TARGET"
+info "record-progression: current target=$CURRENT_TARGET, common root=$COMMON_ROOT"
 
 # Guard: if common_prefix bottomed out to empty (no shared directory between
-# the original target and changed files), fall back to the original target.
-if [ -z "$NEW_TARGET" ]; then
-    info "record-progression: no common prefix — keeping target=$TARGET_DIR"
-    NEW_TARGET="$TARGET_DIR"
+# the original target and changed files), broaden to repo root.
+if [ -z "$COMMON_ROOT" ]; then
+    info "record-progression: no common prefix — broadening to repo root"
+    NEW_TARGET="."
+else
+    NEW_TARGET="$COMMON_ROOT"
 fi
 
 # ── step 2: write broadened target to config BEFORE recomputing ─────────────
 
-if [ "$NEW_TARGET" != "$TARGET_DIR" ]; then
+if [ "$NEW_TARGET" != "$CURRENT_TARGET" ]; then
     info "record-progression: target broadened from $CURRENT_TARGET to $NEW_TARGET"
 
     # Update the mutable config with the broadened target NOW, before any
@@ -215,12 +225,12 @@ if [ "$NEW_TARGET" != "$TARGET_DIR" ]; then
     DRAG_BEFORE="$PREV_DRAG"
     DRAG_AFTER="$CURRENT_DRAG"
 
-    # Record the new best drag, but only if it's lower than the previous best.
-    PREV_BEST=$(cat "$STATE_DIR/artifacts/drag_best.txt" 2>/dev/null || echo "999999")
-    if awk -v cur="$CURRENT_DRAG" -v prev="$PREV_BEST" 'BEGIN { exit (cur < prev) ? 0 : 1 }' 2>/dev/null; then
-        printf '%s' "$CURRENT_DRAG" > "$STATE_DIR/artifacts/drag_best.txt"
-        info "record-progression: new best drag=$CURRENT_DRAG"
-    fi
+    # Recompute best from rescored progression entries plus current drag.
+    # After broadening, the old drag_best.txt value is for a narrower target
+    # and would silently mask improvements at the new scope.
+    BEST_DRAG=$(echo "$NEW_PROGRESSION" | jq -r '[.[].drag_after // empty] + [$CURRENT_DRAG] | min')
+    printf '%s' "$BEST_DRAG" > "$STATE_DIR/artifacts/drag_best.txt"
+    info "record-progression: best drag reset to $BEST_DRAG (from rescored progression)"
 
     # Re-run to get the full report for drag_current.json.
     gremlins-drag > "$STATE_DIR/drag_current.json"
@@ -264,9 +274,9 @@ FINAL_PROGRESSION=$(echo "$NEW_PROGRESSION" | jq \
 echo "$FINAL_PROGRESSION" > "$PROGRESSION_OUT"
 info "record-progression: recorded iteration $LOOP_ITER (verdict=$VERDICT, drag=$DRAG_AFTER)"
 
-# ── step 5: bail on no_progress ─────────────────────────────────────────────
+# ── step 5: signal no_progress for downstream stop decision ──────────────
 
 if [ "$VERDICT" = "no_progress" ]; then
-    info "record-progression: bailing — no progress with 3+ entries"
-    exit 1
+    info "record-progression: signaling no_progress — writing stop artifact"
+    echo "no_progress" > "$STATE_DIR/artifacts/stop_reason.txt"
 fi

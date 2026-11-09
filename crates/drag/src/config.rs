@@ -293,7 +293,7 @@ mod tests {
         assert_eq!(config.weights.m, 2.5);
         assert_eq!(config.weights.p, 2.5);
         assert_eq!(config.tokenizer, "o200k_base");
-        assert_eq!(config.estimates_per_survey, 1);
+        assert_eq!(config.estimates_per_survey, 5);
         assert!(!config.skip_maintainability);
         assert!(config.model.is_none());
         assert_eq!(config.comprehensibility.dimensions.len(), 8);

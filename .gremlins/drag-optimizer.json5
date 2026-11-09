@@ -154,6 +154,7 @@
               context: "artifact://{loop_iter}/drag_context.md",
               iter_start_sha: "artifact://{loop_iter}/iter_start_sha.txt",
               progression_in: "artifact://{loop_iter}/progression_in.json",
+              target: "artifact://{loop_iter}/scored_target.txt",
             },
           },
           options: {
@@ -163,7 +164,7 @@
               // Iteration 1 reads the bootstrap config; subsequent iterations
               // read the previous iteration's drag config artifact (which may
               // have been broadened by record-progression).
-              'PREV_CONFIG="$GREMLINS_STATE_DIR/artifacts/drag_config.json"; if [ "{loop_iter}" != "1" ]; then PREV=$(({loop_iter} - 1)); ALT="$GREMLINS_STATE_DIR/artifacts/$PREV/drag_config.json"; if [ -f "$ALT" ]; then PREV_CONFIG="$ALT"; fi; fi; TARGET=$(jq -r ".path" "$PREV_CONFIG"); jq --arg t "$TARGET" ".path = $t" "$GREMLINS_STATE_DIR/drag_config.json" > "$GREMLINS_STATE_DIR/drag_config_tmp.json" && mv "$GREMLINS_STATE_DIR/drag_config_tmp.json" "$GREMLINS_STATE_DIR/drag_config.json"; echo "prepare-context: target=$TARGET"',
+              'PREV_CONFIG="$GREMLINS_STATE_DIR/artifacts/drag_config.json"; if [ "{loop_iter}" != "1" ]; then PREV=$(({loop_iter} - 1)); ALT="$GREMLINS_STATE_DIR/artifacts/$PREV/drag_config.json"; if [ -f "$ALT" ]; then PREV_CONFIG="$ALT"; fi; fi; TARGET=$(jq -r ".path" "$PREV_CONFIG"); jq --arg t "$TARGET" '.path = $t' "$GREMLINS_STATE_DIR/drag_config.json" > "$GREMLINS_STATE_DIR/drag_config_tmp.json" && mv "$GREMLINS_STATE_DIR/drag_config_tmp.json" "$GREMLINS_STATE_DIR/drag_config.json"; printf "%s" "$TARGET" > "{target}"; echo "prepare-context: target=$TARGET"',
               // Copy the latest cumulative progression into a scoped artifact
               // for this iteration.  Iteration 1 reads the baseline seed;
               // subsequent iterations read the previous iteration's output.
@@ -181,6 +182,7 @@
               drag_context: 'content("artifact://{loop_iter}/drag_context.md")',
               instructions: 'content("artifact://instructions.txt")',
               explain: 'content("artifact://explain.txt")',
+              target: 'content("artifact://{loop_iter}/scored_target.txt")',
             },
             outputs: {
               plan: "artifact://{loop_iter}/plan.md",
@@ -258,6 +260,7 @@
               drag_after: 'content("artifact://{loop_iter}/drag_after.txt")',
               iter_start_sha: 'content("artifact://{loop_iter}/iter_start_sha.txt")',
               progression: 'content("artifact://{loop_iter}/progression_in.json")',
+              target: 'content("artifact://{loop_iter}/scored_target.txt")',
             },
             outputs: {
               drag_reduced: "artifact://{loop_iter}/drag_reduced.txt",
@@ -318,6 +321,16 @@
   {progression_in} \
   {progression_out} \
   {config_out}',
+            ],
+          },
+        },
+        // --- bail if no_progress signal was written by record-progression ---
+        {
+          name: "check-stop",
+          type: "exec",
+          options: {
+            cmds: [
+              'if [ -f "$GREMLINS_STATE_DIR/artifacts/stop_reason.txt" ]; then echo "stopping: $(cat $GREMLINS_STATE_DIR/artifacts/stop_reason.txt)"; exit 2; fi',
             ],
           },
         },

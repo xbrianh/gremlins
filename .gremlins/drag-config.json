@@ -9,7 +9,7 @@
   "estimates_per_survey": 5,
   "skip_maintainability": false,
   "verbose": false,
-  "format": "human",
+  "format": "json",
   "cache": null,
   "comprehensibility": {
     "preamble": "Score the above source file on comprehensibility.\n\nThe FILE SHAPE section is a structural skeleton — use it to\nassess the file's organization before reading the source.\n\nTarget reader: a competent developer familiar with the language\nbut unfamiliar with this file.  Do not assume shorter code is\nbetter or longer code is clearer.  Do not judge correctness.",

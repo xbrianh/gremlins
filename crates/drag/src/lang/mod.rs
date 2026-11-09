@@ -33,6 +33,14 @@ impl PackageInfo {
             PackageInfo::Python(p) => format!("python:{}", p.dir.display()),
         }
     }
+
+    /// Package root directory for use as agent working directory.
+    pub fn dir(&self) -> &Path {
+        match self {
+            PackageInfo::Rust(r) => &r.dir,
+            PackageInfo::Python(p) => &p.dir,
+        }
+    }
 }
 
 /// Return the set of recognized source-file extensions.
