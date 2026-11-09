@@ -112,6 +112,12 @@ fn build_compaction_parts(
     // that do but occasionally return Ok(None).
     let qualified = format!("{}/{}", client.provider(), model);
     let local_model = backend.make_model(&qualified);
+    if local_model.is_none() {
+        log::warn!(
+            "compaction: make_model failed for '{}'; local fallback will not be available",
+            qualified
+        );
+    }
 
     Some((
         backend,
@@ -618,13 +624,13 @@ async fn run_agent(
         is_chat,
         gremlin.force_compact.clone(),
     ) {
-        Some((backend, model, local_model, state)) => CompactionConfig {
-            backend: Some(backend),
-            state: Some(state),
+        Some((backend, model, local_model, state)) => CompactionConfig::enabled(
+            backend,
+            state,
             model,
-            instructions: None,
+            None, // no custom instructions by default
             local_model,
-        },
+        ),
         None => CompactionConfig::disabled(),
     };
     let conv = crate::conversation::standard::StandardConversation::new(

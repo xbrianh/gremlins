@@ -84,20 +84,33 @@ pub(crate) struct StandardConversation {
 /// Grouping these fields keeps [`StandardConversation::new`] under the
 /// argument-count lint and documents the compaction configuration as one unit.
 pub(crate) struct CompactionConfig {
-    /// Backend for server-side compaction. `None` → compaction disabled.
-    pub(crate) backend: Option<Arc<dyn Backend>>,
-    /// Compaction orchestration state (`None` → compaction disabled).
-    /// Invariant: always `Some` iff `backend` is `Some`.
-    pub(crate) state: Option<CompactionState>,
-    /// Model name for server-side compaction requests.
-    pub(crate) model: String,
-    /// Custom compaction instructions (optional).
-    pub(crate) instructions: Option<String>,
-    /// Pre-built model for local compaction fallback.
-    pub(crate) local_model: Option<GremlinsModel>,
+    backend: Option<Arc<dyn Backend>>,
+    state: Option<CompactionState>,
+    model: String,
+    instructions: Option<String>,
+    local_model: Option<GremlinsModel>,
 }
 
 impl CompactionConfig {
+    /// Enable compaction with the given backend, orchestration state, and
+    /// configuration. `backend` and `state` are always `Some` together —
+    /// use [`disabled`](Self::disabled) to disable compaction.
+    pub(crate) fn enabled(
+        backend: Arc<dyn Backend>,
+        state: CompactionState,
+        model: String,
+        instructions: Option<String>,
+        local_model: Option<GremlinsModel>,
+    ) -> Self {
+        Self {
+            backend: Some(backend),
+            state: Some(state),
+            model,
+            instructions,
+            local_model,
+        }
+    }
+
     /// Compaction disabled.
     pub(crate) fn disabled() -> Self {
         Self {
@@ -297,8 +310,7 @@ impl Conversation for StandardConversation {
                             }
                         }
                         Ok(None) => {
-                            // Backend doesn't support compaction — fall through
-                            // to local.
+                            log::debug!("Server compaction not supported by this backend; falling back to local");
                             false
                         }
                         Err(e) => {
@@ -319,13 +331,20 @@ impl Conversation for StandardConversation {
                             )
                             .await
                             {
-                                Some((summary_msg, _in, _out)) => {
+                                Some((summary_msg, in_tok, out_tok)) => {
                                     let mut new_history = Vec::with_capacity(1 + kept.len());
                                     new_history.push(summary_msg);
                                     new_history.extend_from_slice(&kept);
                                     self.history = new_history;
                                     state.mark_applied(None);
                                     self.last_input_tokens = Some(0);
+                                    log::info!(
+                                        "Compaction applied (local): {} messages → summary + {} (compaction cost: {:?} in, {:?} out)",
+                                        to_compact.len(),
+                                        kept.len(),
+                                        in_tok,
+                                        out_tok,
+                                    );
                                 }
                                 None => {
                                     state.set_cooldown();
@@ -503,17 +522,21 @@ impl Conversation for StandardConversation {
     }
 
     fn spawn_child(&self, prompt: &str) -> Box<dyn Conversation> {
+        let compaction = match (&self.backend, &self.compaction_state) {
+            (Some(backend), Some(state)) => CompactionConfig::enabled(
+                backend.clone(),
+                state.clone(),
+                self.compaction_model.clone(),
+                self.compaction_instructions.clone(),
+                self.local_model.clone(),
+            ),
+            _ => CompactionConfig::disabled(),
+        };
         Box::new(Self::new(
             prompt,
             self.preserve_reasoning_in_history,
             None,
-            CompactionConfig {
-                backend: self.backend.clone(),
-                state: self.compaction_state.clone(),
-                model: self.compaction_model.clone(),
-                instructions: self.compaction_instructions.clone(),
-                local_model: self.local_model.clone(),
-            },
+            compaction,
         ))
     }
 
@@ -607,10 +630,6 @@ impl Conversation for StandardConversation {
             .as_ref()
             .and_then(|c| c.block())
             .is_some()
-    }
-
-    fn backend(&self) -> Option<&Arc<dyn Backend>> {
-        self.backend.as_ref()
     }
 }
 

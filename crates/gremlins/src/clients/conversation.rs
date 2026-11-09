@@ -1,9 +1,6 @@
 // ── conversation machinery ──────────────────────────────────────────────────
 
 use async_trait::async_trait;
-use std::sync::Arc;
-
-use crate::clients::backend::Backend;
 
 /// The transcript produced for one model turn.
 #[derive(Clone, Debug)]
@@ -131,14 +128,6 @@ pub(crate) trait Conversation: Send + Sync {
     #[allow(dead_code)]
     fn has_signed_compaction_block(&self) -> bool {
         false
-    }
-
-    /// The backend driving this conversation, if available.
-    /// `StandardConversation` overrides this so compaction can reach the
-    /// backend without a dispatch middleman.
-    #[allow(dead_code)]
-    fn backend(&self) -> Option<&Arc<dyn Backend>> {
-        None
     }
 
     /// Compact digest of the Read/Grep evidence still present in the durable
