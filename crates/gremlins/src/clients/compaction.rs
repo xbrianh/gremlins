@@ -48,32 +48,41 @@ impl Compaction {
 
     /// Run compaction on `to_compact`.
     ///
-    /// Dispatches to server-side or local compaction based on
-    /// [`Backend::supports_compaction`]. Each path succeeds or returns
-    /// `None` independently — there is no fallback chaining.
+    /// Tries server compaction first when the backend supports it. On
+    /// any server failure (error, `Ok(None)`, or result without a block),
+    /// falls back to local compaction. If the backend doesn't support
+    /// server compaction, local is tried directly.
     ///
     /// Returns `(replacement_message, signed_block, usage)` on success.
     /// `signed_block` is `Some` for server compaction, `None` for local.
     /// `usage` carries token counts for logging.
     ///
-    /// Returns `None` when compaction produces nothing useful. Errors
+    /// Returns `None` only when every available path has been exhausted
+    /// (server failed and local is unavailable or also failed). Errors
     /// are logged internally.
     pub(crate) async fn compact(
         &self,
         to_compact: &[Message],
         system_prompt: Option<&str>,
     ) -> Option<(Message, Option<CompactionBlock>, CompactionResult)> {
+        // Try server compaction first when the backend supports it.
         if self.backend.supports_compaction() {
-            self.compact_server(to_compact, system_prompt).await
-        } else if let Some(model) = &self.local_model {
-            self.compact_local(model, to_compact, system_prompt).await
-        } else {
-            log::warn!(
-                "Compaction: backend lacks server support and no local model; {} messages not compacted",
-                to_compact.len()
-            );
-            None
+            if let Some(result) = self.compact_server(to_compact, system_prompt).await {
+                return Some(result);
+            }
+            // Server failed or returned nothing useful — fall through to local.
         }
+
+        // Try local compaction as fallback (or primary path).
+        if let Some(model) = &self.local_model {
+            return self.compact_local(model, to_compact, system_prompt).await;
+        }
+
+        log::warn!(
+            "Compaction: no path succeeded; {} messages not compacted",
+            to_compact.len()
+        );
+        None
     }
 
     async fn compact_server(
