@@ -702,7 +702,10 @@ mod tests {
 
         let manifest = build_dir_manifest(tmp.path()).expect("manifest");
 
-        assert!(manifest.contains("a.rs"), "manifest should list a.rs: {manifest}");
+        assert!(
+            manifest.contains("a.rs"),
+            "manifest should list a.rs: {manifest}"
+        );
         assert!(
             !manifest.contains("sub/b.rs") && !manifest.contains("b.rs"),
             "manifest should not list nested sub/b.rs: {manifest}"
