@@ -18,6 +18,7 @@ use rig_core::completion::Message;
 
 use crate::clients::backend::{Backend, ClientError};
 use crate::clients::protocol::{CompactionBlock, CompactionResult};
+use crate::conversation::compaction::compaction_cut_index;
 
 /// The compaction strategy, picked at construction time.
 #[derive(Clone)]
@@ -42,6 +43,8 @@ pub(crate) struct Compaction {
     keep_recent: usize,
     instructions: Option<String>,
     strategy: CompactionStrategy,
+    /// Model instance for local compaction, built once at construction.
+    local_model: Option<crate::clients::model::GremlinsModel>,
     /// Active signed compaction block, if any has been applied (server only).
     block: Option<CompactionBlock>,
     /// True once any summary has been swapped into history.
@@ -59,6 +62,7 @@ impl Compaction {
         keep_recent: usize,
         instructions: Option<String>,
         strategy: CompactionStrategy,
+        local_model: Option<crate::clients::model::GremlinsModel>,
     ) -> Self {
         Self {
             backend,
@@ -67,6 +71,7 @@ impl Compaction {
             keep_recent,
             instructions,
             strategy,
+            local_model,
             block: None,
             applied: false,
             cooldown: false,
@@ -113,8 +118,7 @@ impl Compaction {
         // After compaction has been applied, don't re-compact until there is
         // genuinely new material after the block.
         if self.applied {
-            let cut =
-                crate::conversation::compaction::compaction_cut_index(history, self.keep_recent);
+            let cut = compaction_cut_index(history, self.keep_recent);
             if cut == 0 {
                 return false;
             }
@@ -158,31 +162,34 @@ impl Compaction {
                     None => return Ok(None),
                 };
 
-                let signed: CompactionBlock = server_block
-                    .block
-                    .clone()
-                    .expect("server compaction must have a block");
+                let signed: CompactionBlock = match server_block.block.clone() {
+                    Some(b) => b,
+                    // Server returned a compaction result with no block —
+                    // unexpected but not fatal; return Ok(None) so the
+                    // caller sets cooldown rather than panicking.
+                    None => {
+                        log::warn!("Server compaction result had no block; dropping");
+                        return Ok(None);
+                    }
+                };
                 let mut new_history = Vec::with_capacity(1 + kept.len());
                 new_history.push(compaction_block_as_message(&signed));
                 new_history.extend_from_slice(kept);
                 Ok(Some((Some(signed), new_history, server_block)))
             }
             CompactionStrategy::Local => {
-                let model = match self.backend.make_model(&self.model) {
+                let model = match &self.local_model {
                     Some(m) => m,
                     None => {
-                        log::warn!(
-                            "Compaction: backend could not build model for local compaction"
-                        );
+                        log::warn!("Compaction: local model not available");
                         return Ok(None);
                     }
                 };
 
                 let (summary_msg, input_tokens, output_tokens) =
                     match crate::conversation::compaction::compact_local(
-                        &model,
+                        model,
                         to_compact,
-                        system_prompt,
                         self.instructions.as_deref(),
                     )
                     .await
@@ -196,8 +203,8 @@ impl Compaction {
                 new_history.extend_from_slice(kept);
                 let result = CompactionResult {
                     block: None,
-                    input_tokens: Some(input_tokens),
-                    output_tokens: Some(output_tokens),
+                    input_tokens,
+                    output_tokens,
                 };
                 Ok(Some((None, new_history, result)))
             }

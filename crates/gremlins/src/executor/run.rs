@@ -76,13 +76,16 @@ fn build_compaction_config(client: &Client, model: String, is_chat: bool) -> Opt
         return None;
     }
 
-    // Pick the compaction strategy at construction time.
-    let strategy = if backend.name() == "anthropic" {
-        CompactionStrategy::Server
-    } else if backend.make_model(&model).is_some() {
-        CompactionStrategy::Local
+    // Pick the compaction strategy at construction time. For local,
+    // build the model once so we don't construct it on every compaction
+    // call.
+    let (strategy, local_model) = if backend.name() == "anthropic" {
+        (CompactionStrategy::Server, None)
     } else {
-        return None; // e.g. cmd backend — no compaction possible
+        {
+            let m = backend.make_model(&model)?;
+            (CompactionStrategy::Local, Some(m))
+        }
     };
 
     Some(Compaction::new(
@@ -92,6 +95,7 @@ fn build_compaction_config(client: &Client, model: String, is_chat: bool) -> Opt
         DEFAULT_COMPACTION_KEEP_RECENT,
         None, // no custom instructions by default
         strategy,
+        local_model,
     ))
 }
 

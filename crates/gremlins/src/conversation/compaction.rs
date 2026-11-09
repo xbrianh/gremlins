@@ -96,22 +96,19 @@ const LOCAL_COMPACTION_MAX_TOKENS: u64 = 2048;
 pub(crate) async fn compact_local(
     model: &GremlinsModel,
     to_compact: &[Message],
-    system_prompt: Option<&str>,
     instructions: Option<&str>,
-) -> Option<(Message, u64, u64)> {
+) -> Option<(Message, Option<u64>, Option<u64>)> {
     let prompt = instructions.unwrap_or(DEFAULT_LOCAL_COMPACTION_PROMPT);
 
-    // Build the system prompt: optional system_prompt for context,
-    // then the compaction instructions.
-    let system = match system_prompt {
-        Some(sys) if !sys.is_empty() => format!("{sys}\n\n{prompt}"),
-        _ => prompt.to_string(),
-    };
-
     // Build a CompletionRequest with no tools and capped tokens.
-    let request = CompletionRequest::new(Message::user("summarize"))
+    // `CompletionRequest::messages()` inserts `to_compact` between the
+    // system preamble (already set below) and the prompt message (set
+    // via `new()` and kept last). The resulting order is: system,
+    // history messages, "summarize" instruction — so the model sees
+    // the conversation it should summarise before the summarise
+    // instruction.
+    let request = CompletionRequest::new(Message::user(prompt))
         .messages(to_compact.to_vec())
-        .preamble(system)
         .max_tokens(LOCAL_COMPACTION_MAX_TOKENS);
 
     // Unary call — the summary is at most a few paragraphs.
@@ -138,8 +135,8 @@ pub(crate) async fn compact_local(
         return None;
     }
 
-    let input_tokens = response.usage.input_tokens.unwrap_or(0);
-    let output_tokens = response.usage.output_tokens.unwrap_or(0);
+    let input_tokens = response.usage.input_tokens;
+    let output_tokens = response.usage.output_tokens;
 
     let msg = Message::Assistant {
         id: None,
