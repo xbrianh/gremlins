@@ -21,6 +21,10 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+#[cfg(test)]
+use std::sync::Arc;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -695,6 +699,7 @@ mod tests {
             enclosing_model: None,
             discovered_skills: None,
             active_skills: None,
+            force_compact: Arc::new(AtomicBool::new(false)),
         };
         (sandbox, gremlin)
     }

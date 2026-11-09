@@ -1950,7 +1950,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                             let c = Arc::clone(&client);
                                             let tx = result_tx.clone();
                                             tokio::spawn(async move {
-                                                let lines = match c.send_control_request(payload).await {
+                                                let result = if op == "compact" {
+                                                    c.send_session_request(payload).await
+                                                } else {
+                                                    c.send_control_request(payload).await
+                                                };
+                                                let lines = match result {
                                                     Ok(resp) => format_socket_response(&op, &resp),
                                                     Err(e) => vec![format!("error: {e}")],
                                                 };

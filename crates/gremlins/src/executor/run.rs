@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
@@ -12,7 +14,9 @@ use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::{Client, ModelURI};
-use crate::clients::compaction::{Compaction, CompactionStrategy};
+use crate::clients::compaction::{
+    Compaction, CompactionConfig, CompactionStrategy, CompactionTrigger,
+};
 use crate::config;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
@@ -56,23 +60,42 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
 const DEFAULT_COMPACTION_KEEP_RECENT: usize = 10;
 
 /// Build a [`Compaction`] from the global config and the resolved backend.
-/// Returns `None` when compaction is disabled (threshold == 0) or the backend
-/// supports neither server-side nor local compaction.
-fn build_compaction_config(client: &Client, model: String, is_chat: bool) -> Option<Compaction> {
+/// Returns `None` when compaction is disabled (threshold == 0) and the trigger
+/// is [`CompactionTrigger::Threshold`] — for [`CompactionTrigger::Immediate`]
+/// (chat), a `Compaction` is always returned so the `/compact` force flag can
+/// fire on demand.
+fn build_compaction_config(
+    client: &Client,
+    model: String,
+    is_chat: bool,
+    force_compact: Arc<AtomicBool>,
+) -> Option<Compaction> {
+    let trigger = if is_chat {
+        CompactionTrigger::Immediate
+    } else {
+        CompactionTrigger::Threshold
+    };
+
     let backend = match client.get_or_build_backend() {
         Ok(b) => b,
         Err(e) => {
             log::warn!("compaction: failed to build backend: {e}");
+            force_compact.store(false, std::sync::atomic::Ordering::Release);
             return None;
         }
     };
 
     let threshold = if is_chat {
-        crate::config::compaction_threshold_tokens_chat()
+        // Threshold is irrelevant for Immediate trigger; use 0 to
+        // signal "disabled" to readers without affecting behavior.
+        0
     } else {
         crate::config::compaction_threshold_tokens()
     };
-    if threshold == 0 {
+
+    // For Threshold trigger, zero threshold means compaction is disabled.
+    if matches!(trigger, CompactionTrigger::Threshold) && threshold == 0 {
+        force_compact.store(false, std::sync::atomic::Ordering::Release);
         return None;
     }
 
@@ -91,20 +114,23 @@ fn build_compaction_config(client: &Client, model: String, is_chat: bool) -> Opt
                     "compaction: make_model failed for '{}'; disabling local compaction",
                     qualified
                 );
+                force_compact.store(false, std::sync::atomic::Ordering::Release);
                 return None;
             }
         }
     };
 
-    Some(Compaction::new(
+    Some(Compaction::new(CompactionConfig {
         backend,
         model,
         threshold,
-        DEFAULT_COMPACTION_KEEP_RECENT,
-        None, // no custom instructions by default
+        keep_recent: DEFAULT_COMPACTION_KEEP_RECENT,
+        instructions: None, // no custom instructions by default
         strategy,
         local_model,
-    ))
+        force: force_compact,
+        trigger,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +623,7 @@ async fn run_agent(
             .clone()
             .unwrap_or_else(|| client.model().to_string()),
         is_chat,
+        gremlin.force_compact.clone(),
     );
     let conv = crate::conversation::standard::StandardConversation::new(
         "",
@@ -1627,6 +1654,7 @@ mod tests {
             enclosing_model: None,
             discovered_skills: None,
             active_skills: None,
+            force_compact: Arc::new(AtomicBool::new(false)),
         };
         (sandbox, gremlin)
     }

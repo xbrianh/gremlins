@@ -12,6 +12,7 @@
 //!
 //! There is no fallback chain. Server fails → error. Local fails → error.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use rig_core::completion::Message;
@@ -27,6 +28,16 @@ pub(crate) enum CompactionStrategy {
     Server,
     /// Local model-driven summarization.
     Local,
+}
+
+/// What triggers compaction for a conversation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompactionTrigger {
+    /// Auto-compaction fires when input tokens exceed the threshold.
+    Threshold,
+    /// No automatic trigger; only fires when the force flag is set
+    /// (via the `/compact` TUI command).
+    Immediate,
 }
 
 /// Compaction strategy, execution, and runtime state. Built once in
@@ -52,29 +63,42 @@ pub(crate) struct Compaction {
     /// Set after a compaction call fails or produces no summary. Prevents
     /// retrying the expensive API call on every subsequent turn.
     cooldown: bool,
+    /// One-shot flag: when `true`, `should_compact()` skips threshold and
+    /// cooldown checks, clears the flag, and runs compaction if there is
+    /// material to compact. Set by the TUI `/compact` command.
+    force: Arc<AtomicBool>,
+    /// What triggers compaction for this conversation.
+    trigger: CompactionTrigger,
+}
+
+/// Configuration for [`Compaction`], bundling all construction parameters.
+pub(crate) struct CompactionConfig {
+    pub(crate) backend: Arc<dyn Backend>,
+    pub(crate) model: String,
+    pub(crate) threshold: u64,
+    pub(crate) keep_recent: usize,
+    pub(crate) instructions: Option<String>,
+    pub(crate) strategy: CompactionStrategy,
+    pub(crate) local_model: Option<crate::clients::model::GremlinsModel>,
+    pub(crate) force: Arc<AtomicBool>,
+    pub(crate) trigger: CompactionTrigger,
 }
 
 impl Compaction {
-    pub(crate) fn new(
-        backend: Arc<dyn Backend>,
-        model: String,
-        threshold: u64,
-        keep_recent: usize,
-        instructions: Option<String>,
-        strategy: CompactionStrategy,
-        local_model: Option<crate::clients::model::GremlinsModel>,
-    ) -> Self {
+    pub(crate) fn new(cfg: CompactionConfig) -> Self {
         Self {
-            backend,
-            model,
-            threshold,
-            keep_recent,
-            instructions,
-            strategy,
-            local_model,
+            backend: cfg.backend,
+            model: cfg.model,
+            threshold: cfg.threshold,
+            keep_recent: cfg.keep_recent,
+            instructions: cfg.instructions,
+            strategy: cfg.strategy,
+            local_model: cfg.local_model,
             block: None,
             applied: false,
             cooldown: false,
+            force: cfg.force,
+            trigger: cfg.trigger,
         }
     }
 
@@ -91,15 +115,25 @@ impl Compaction {
     /// Record that a compaction result has been applied to history.
     /// Sets `applied` and stores the block (if any) atomically, preserving
     /// the invariant that `block` is set iff a server-side compaction was used.
+    /// Clears the one-shot force flag — it is only consumed on success.
     /// Server strategy → `Some(signed_block)`
     /// Local strategy  → `None`
     pub(crate) fn mark_applied(&mut self, block: Option<CompactionBlock>) {
         self.block = block;
         self.applied = true;
+        self.force.store(false, Ordering::Release);
     }
 
+    /// Prevent retrying the expensive API call on every subsequent turn.
+    ///
+    /// Also clears the one-shot force flag: cooldown means a `/compact` was
+    /// attempted this turn (and failed or produced no summary), so it must not
+    /// re-fire on later turns. Pending requests are only preserved while there
+    /// is insufficient material, which is handled in `should_compact` and never
+    /// reaches this method.
     pub(crate) fn set_cooldown(&mut self) {
         self.cooldown = true;
+        self.force.store(false, Ordering::Release);
     }
 
     /// Decide whether to trigger compaction on this turn.
@@ -108,6 +142,18 @@ impl Compaction {
         last_input_tokens: Option<u64>,
         history: &[Message],
     ) -> bool {
+        // One-shot: operator forced this turn. The flag is cleared on success
+        // (mark_applied) and on failure (set_cooldown). If there is not enough
+        // material yet (cut == 0), leave it set so it fires once material
+        // accumulates.
+        if self.force.load(Ordering::Acquire) {
+            let cut = compaction_cut_index(history, self.keep_recent);
+            return cut > 0;
+        }
+        // Auto path — only active for Threshold trigger.
+        if matches!(self.trigger, CompactionTrigger::Immediate) {
+            return false;
+        }
         if self.cooldown {
             return false;
         }
@@ -277,5 +323,156 @@ pub(crate) fn compaction_block_as_message(block: &CompactionBlock) -> Message {
     Message::Assistant {
         id: None,
         content: vec![AssistantContent::Text(text)],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rig_core::completion::message::{AssistantContent, Text, UserContent};
+
+    /// Build a simple user message with one text block.
+    fn user_msg<S: Into<String>>(s: S) -> Message {
+        Message::User {
+            content: vec![UserContent::Text(Text {
+                text: s.into(),
+                additional_params: None,
+            })],
+        }
+    }
+
+    /// Build a simple assistant message with one text block.
+    fn asst_msg<S: Into<String>>(s: S) -> Message {
+        Message::Assistant {
+            id: None,
+            content: vec![AssistantContent::Text(Text {
+                text: s.into(),
+                additional_params: None,
+            })],
+        }
+    }
+
+    /// Build a history with `pairs` user→assistant exchanges.
+    fn paired_history(pairs: usize) -> Vec<Message> {
+        let mut h = Vec::with_capacity(pairs * 2);
+        for i in 0..pairs {
+            h.push(user_msg(format!("user {i}")));
+            h.push(asst_msg(format!("assistant {i}")));
+        }
+        h
+    }
+
+    /// Return a Compaction with defaults, accepting overrides via a builder closure.
+    fn make_compaction(f: impl FnOnce(&mut Compaction)) -> Compaction {
+        let backend: Arc<dyn Backend> =
+            Arc::new(crate::clients::backends::cmd::CmdBackend::new("echo ok").unwrap());
+        let mut c = Compaction {
+            backend,
+            model: "test".to_string(),
+            threshold: 1000,
+            keep_recent: 10,
+            instructions: None,
+            strategy: CompactionStrategy::Local,
+            local_model: None,
+            block: None,
+            applied: false,
+            cooldown: false,
+            force: Arc::new(AtomicBool::new(false)),
+            trigger: CompactionTrigger::Threshold,
+        };
+        f(&mut c);
+        c
+    }
+
+    #[test]
+    fn should_compact_threshold_below_returns_false() {
+        // 1 pair = 1 user + 1 asst. With keep_recent=10,
+        // compaction_cut_index returns 0 — no material to compact.
+        let history = paired_history(1);
+        let c = make_compaction(|_| {});
+        // last_input_tokens < threshold AND cut==0 → false.
+        assert!(!c.should_compact(Some(500), &history));
+    }
+
+    #[test]
+    fn should_compact_threshold_exceeded_returns_true() {
+        // 20 pairs = 40 messages. keep_recent=10 → cut > 0.
+        let history = paired_history(20);
+        let c = make_compaction(|_| {});
+        assert!(c.should_compact(Some(1500), &history));
+    }
+
+    #[test]
+    fn should_compact_immediate_trigger_ignores_threshold() {
+        // Immediate trigger skips auto — should return false even above threshold.
+        let history = paired_history(20);
+        let c = make_compaction(|c| {
+            c.trigger = CompactionTrigger::Immediate;
+        });
+        assert!(!c.should_compact(Some(1500), &history));
+    }
+
+    #[test]
+    fn should_compact_force_overrides_all() {
+        // force=true should return true even if cooldown, threshold=0, trigger=Immediate.
+        let history = paired_history(20);
+        let c = make_compaction(|c| {
+            c.trigger = CompactionTrigger::Immediate;
+            c.cooldown = true;
+            c.threshold = 0;
+        });
+        c.force.store(true, Ordering::Release);
+        assert!(c.should_compact(Some(0), &history));
+    }
+
+    #[test]
+    fn should_compact_force_with_insufficient_material_returns_false_preserves_flag() {
+        // 1 pair + keep_recent=10 → cut=0. Force stays set for next turn.
+        let history = paired_history(1);
+        let c = make_compaction(|_| {});
+        c.force.store(true, Ordering::Release);
+        assert!(!c.should_compact(Some(0), &history));
+        assert!(
+            c.force.load(Ordering::Acquire),
+            "force flag must survive insufficient material"
+        );
+    }
+
+    #[test]
+    fn should_compact_cooldown_returns_false() {
+        let history = paired_history(20);
+        let c = make_compaction(|c| {
+            c.cooldown = true;
+        });
+        assert!(!c.should_compact(Some(1500), &history));
+    }
+
+    #[test]
+    fn should_compact_applied_with_no_new_material_returns_false() {
+        // 10 pairs, keep_recent=10 → cut=0 after applied.
+        let history = paired_history(10);
+        let c = make_compaction(|c| {
+            c.applied = true;
+        });
+        assert!(!c.should_compact(Some(1500), &history));
+    }
+
+    #[test]
+    fn mark_applied_clears_force_flag() {
+        let c = make_compaction(|_| {});
+        c.force.store(true, Ordering::Release);
+        // Clone to get &mut.
+        let mut c = c.clone();
+        c.mark_applied(None);
+        assert!(!c.force.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn set_cooldown_clears_force_flag() {
+        let c = make_compaction(|_| {});
+        c.force.store(true, Ordering::Release);
+        let mut c = c.clone();
+        c.set_cooldown();
+        assert!(!c.force.load(Ordering::Acquire));
     }
 }
