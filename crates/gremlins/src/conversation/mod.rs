@@ -1,3 +1,4 @@
+pub(crate) mod compaction;
 pub(crate) mod standard;
 pub(crate) mod tool_specs;
 pub(crate) mod tools;

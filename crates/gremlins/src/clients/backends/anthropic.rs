@@ -465,12 +465,12 @@ impl Backend for AnthropicBackend {
                     message: "compaction block missing signature".into(),
                 })?;
                 Ok(Some(CompactionResult {
-                    block: CompactionBlock {
+                    block: Some(CompactionBlock {
                         content,
                         signature,
                         encrypted_content: cc.encrypted_content,
                         tool_changes: cc.tool_changes,
-                    },
+                    }),
                     input_tokens,
                     output_tokens,
                 }))

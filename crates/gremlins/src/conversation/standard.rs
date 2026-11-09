@@ -24,7 +24,8 @@ use async_trait::async_trait;
 use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
 use rig_core::completion::Message;
 
-use crate::clients::compaction::{compaction_cut_index, Compaction};
+use crate::conversation::compaction::compaction_cut_index;
+use crate::clients::compaction::Compaction;
 use crate::clients::conversation::{Conversation, RunArtifact, TurnScript};
 use crate::clients::done_helpers::done_user_message;
 use crate::clients::findings::FindingsLedger;

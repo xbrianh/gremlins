@@ -20,7 +20,7 @@ pub struct CompactionBlock {
 /// in `usage.iterations` rather than the top-level `usage` fields).
 #[derive(Debug, Clone)]
 pub struct CompactionResult {
-    pub block: CompactionBlock,
+    pub block: Option<CompactionBlock>,
     /// Input tokens consumed by the compaction summarization.
     pub input_tokens: Option<u64>,
     /// Output tokens produced by the compaction summarization.
