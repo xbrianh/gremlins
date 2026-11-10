@@ -349,7 +349,12 @@ fn dir_trie_to_drag_node(
                      directory was excluded from scoring_dirs."
                 )
             })?;
-            (Some(r.score), Some(r.ci_lower), Some(r.ci_upper), (p * (1.0 - r.score)).exp())
+            (
+                Some(r.score),
+                Some(r.ci_lower),
+                Some(r.ci_upper),
+                (p * (1.0 - r.score)).exp(),
+            )
         };
 
     // Direct module children (leaf modules at this trie node).
@@ -741,7 +746,9 @@ mod tests {
     }
 
     /// Build dir_maints map from f64 scores (for test convenience).
-    fn dir_maints_map<const N: usize>(entries: [(&str, f64); N]) -> HashMap<String, DirMaintResult> {
+    fn dir_maints_map<const N: usize>(
+        entries: [(&str, f64); N],
+    ) -> HashMap<String, DirMaintResult> {
         entries
             .into_iter()
             .map(|(k, v)| (k.to_string(), maint_result(v)))
@@ -819,11 +826,8 @@ mod tests {
                 vec!["executor".to_string()],
             ),
         ]);
-        let dir_maints = dir_maints_map([
-            ("/src", 1.0),
-            ("/src/clients", 1.0),
-            ("/src/executor", 1.0),
-        ]);
+        let dir_maints =
+            dir_maints_map([("/src", 1.0), ("/src/clients", 1.0), ("/src/executor", 1.0)]);
         let pkg_names = HashMap::from([("gremlins".to_string(), "gremlins".to_string())]);
         let src_dirs = HashMap::from([("gremlins".to_string(), src)]);
 
@@ -859,10 +863,7 @@ mod tests {
             ("pkg::a::b".to_string(), "/pkg/src/a/b.rs".to_string()),
             vec!["a".to_string()],
         )]);
-        let dir_maints = dir_maints_map([
-            ("/pkg/src", 0.5),
-            ("/pkg/src/a", 1.0),
-        ]);
+        let dir_maints = dir_maints_map([("/pkg/src", 0.5), ("/pkg/src/a", 1.0)]);
         let pkg_names = HashMap::from([("pkg".to_string(), "pkg".to_string())]);
         let src_dirs = HashMap::from([("pkg".to_string(), src)]);
 
@@ -961,10 +962,7 @@ mod tests {
                 vec!["foo".to_string()],
             ),
         ]);
-        let dir_maints = dir_maints_map([
-            ("/pkg/src", 1.0),
-            ("/pkg/src/foo", 1.0),
-        ]);
+        let dir_maints = dir_maints_map([("/pkg/src", 1.0), ("/pkg/src/foo", 1.0)]);
         let pkg_names = HashMap::from([("pkg".to_string(), "pkg".to_string())]);
         let src_dirs = HashMap::from([("pkg".to_string(), src)]);
 
@@ -1015,10 +1013,7 @@ mod tests {
             ("pkg::foo".to_string(), "/pkg/src/foo/mod.rs".to_string()),
             vec!["foo".to_string()],
         )]);
-        let dir_maints = dir_maints_map([
-            ("/pkg/src", 1.0),
-            ("/pkg/src/foo", 1.0),
-        ]);
+        let dir_maints = dir_maints_map([("/pkg/src", 1.0), ("/pkg/src/foo", 1.0)]);
         let pkg_names = HashMap::from([("pkg".to_string(), "pkg".to_string())]);
         let src_dirs = HashMap::from([("pkg".to_string(), src)]);
 
@@ -1107,10 +1102,7 @@ mod tests {
                 vec![],
             ),
         ]);
-        let dir_maints = dir_maints_map([
-            ("/ws/pkg_a/src", 1.0),
-            ("/ws/pkg_b/src", 1.0),
-        ]);
+        let dir_maints = dir_maints_map([("/ws/pkg_a/src", 1.0), ("/ws/pkg_b/src", 1.0)]);
         let pkg_names = HashMap::from([
             ("pkg_a".to_string(), "pkg_a".to_string()),
             ("pkg_b".to_string(), "pkg_b".to_string()),
@@ -1162,10 +1154,8 @@ mod tests {
             ("pkg::m".to_string(), "/pkg/src/m.rs".to_string()),
             "pkg".to_string(),
         )]);
-        let dir_segments = HashMap::from([(
-            ("pkg::m".to_string(), "/pkg/src/m.rs".to_string()),
-            vec![],
-        )]);
+        let dir_segments =
+            HashMap::from([(("pkg::m".to_string(), "/pkg/src/m.rs".to_string()), vec![])]);
         let mut dir_maints: HashMap<String, DirMaintResult> = HashMap::new();
         dir_maints.insert(
             "/pkg/src".to_string(),

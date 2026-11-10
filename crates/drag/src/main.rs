@@ -491,7 +491,10 @@ async fn run() -> Result<(), String> {
             .await?;
             (maint_scores, skipped_dirs)
         } else {
-            (HashMap::<String, maint::DirMaintResult>::new(), HashSet::new())
+            (
+                HashMap::<String, maint::DirMaintResult>::new(),
+                HashSet::new(),
+            )
         };
 
     // Build module→pkg, pkg_key→pkg_name, and per-module directory-segment maps.
