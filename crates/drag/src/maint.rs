@@ -12,15 +12,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use tokio::sync::Semaphore;
 
 use gremlins::builders::{output, AgentBuilder, DefinitionBuilder};
 use gremlins::executor::gremlin::{Gremlin, GremlinConfig};
 use gremlins::model_uri::ModelURI;
 
 use crate::config::MaintainabilityConfig;
-use crate::util::{extract_json, mean_with_ci, truncate, CacheState, CompAgentError};
+use crate::util::{extract_json, mean_with_ci, truncate, CacheState, CompAgentError, MAX_CONCURRENT_SCORING_RUNS};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -155,6 +157,9 @@ pub(crate) async fn score_directory_maintainability(
         scoring_dirs.len()
     );
 
+    // Shared semaphore to bound concurrent ephemeral gremlin runs.
+    let scoring_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_SCORING_RUNS));
+
     let mut handles: Vec<MaintEstimateTask> = Vec::new();
     let mut estimates_map: HashMap<String, Vec<HashMap<String, u8>>> = HashMap::new();
     let mut cache_miss_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -207,9 +212,16 @@ pub(crate) async fn score_directory_maintainability(
             let model_spec = model_spec.to_string();
             let maint_config = maint_config.clone();
             let dir_clone = dir.clone();
+            let sem = Arc::clone(&scoring_sem);
 
             handles.push(tokio::spawn(async move {
                 for attempt in 0..MAX_MAINT_RETRIES {
+                    // Acquire a semaphore permit before creating the
+                    // ephemeral gremlin so total open file descriptors
+                    // stay bounded.  The permit is dropped at the end of
+                    // each attempt so a sleeping/backoff task does not
+                    // hold a scoring slot.
+                    let _permit = sem.acquire().await;
                     match run_maint_agent(
                         &dir_name,
                         &prompt,
@@ -224,6 +236,8 @@ pub(crate) async fn score_directory_maintainability(
                             return (dir_str, Ok(scores));
                         }
                         Err(e) => {
+                            // Drop the permit before sleeping.
+                            drop(_permit);
                             if matches!(&e, CompAgentError::Retryable(_))
                                 && attempt + 1 < MAX_MAINT_RETRIES
                             {
