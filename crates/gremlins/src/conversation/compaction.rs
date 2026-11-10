@@ -281,7 +281,9 @@ pub(crate) async fn run_local_compaction(
     // a pathological `to_compact` that slips past the truncation floor cannot
     // reach the provider. `render_turn` enforces the same bound inside the
     // agent loop, but by then the request is already being assembled.
+    let prompt_len = LOCAL_COMPACTION_PROMPT.len() as u64;
     let actual = preamble.len() as u64
+        + prompt_len
         + truncated
             .iter()
             .map(crate::clients::conversation::message_text_byte_len)

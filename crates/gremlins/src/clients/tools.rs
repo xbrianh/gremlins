@@ -850,6 +850,7 @@ mod tests {
     };
     use crate::core::paths::*;
     use crate::test_support::EnvGuard;
+    use crate::conversation::tool_specs::ToolMode;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
@@ -1649,11 +1650,11 @@ mod tests {
 
     #[test]
     fn tool_definitions_filter() {
-        let all = tool_definitions(None, false);
+        let all = tool_definitions(None, false, ToolMode::Full);
         assert_eq!(all.len(), 10);
         let all_names: Vec<_> = all.iter().map(|t| t.name.as_str()).collect();
         assert!(all_names.contains(&"Landscape"), "got: {all_names:?}");
-        let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), false);
+        let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), false, ToolMode::Full);
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
         // Task and Done are always available regardless of the filter.
         // Mischief and WebSearch are chat-only, absent from headless filters.
@@ -1664,7 +1665,7 @@ mod tests {
 
     #[test]
     fn task_and_done_always_available() {
-        let filtered = tool_definitions(Some(&["Read".to_string()]), false);
+        let filtered = tool_definitions(Some(&["Read".to_string()]), false, ToolMode::Full);
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"Task"), "got: {names:?}");
         assert!(names.contains(&"Done"), "got: {names:?}");
@@ -1676,7 +1677,7 @@ mod tests {
     fn mischief_passes_filter_when_chat_mode() {
         // Mischief and WebSearch are always available to chat sessions even
         // when the default native_block filter does not list them.
-        let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), true);
+        let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), true, ToolMode::Full);
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"Mischief"), "got: {names:?}");
         assert!(names.contains(&"WebSearch"), "got: {names:?}");
@@ -1864,7 +1865,7 @@ mod tests {
 
     #[test]
     fn load_skill_in_tool_definitions_when_chat_mode() {
-        let defs = tool_definitions(None, true);
+        let defs = tool_definitions(None, true, ToolMode::Full);
         assert_eq!(defs.len(), 12);
         let names: Vec<_> = defs.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"LoadSkill"), "got: {names:?}");
@@ -1872,7 +1873,7 @@ mod tests {
 
     #[test]
     fn load_skill_not_in_tool_definitions_when_not_chat_mode() {
-        let defs = tool_definitions(None, false);
+        let defs = tool_definitions(None, false, ToolMode::Full);
         let names: Vec<_> = defs.iter().map(|t| t.name.as_str()).collect();
         assert!(!names.contains(&"LoadSkill"), "got: {names:?}");
     }
@@ -1882,7 +1883,7 @@ mod tests {
         // With is_chat=true, LoadSkill must appear even when a
         // restrictive filter is active — the default native_block filter
         // does not include LoadSkill, and chat sessions must always expose it.
-        let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), true);
+        let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), true, ToolMode::Full);
         let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"LoadSkill"), "got: {names:?}");
         assert!(names.contains(&"Read"), "got: {names:?}");

@@ -30,6 +30,7 @@ use super::plug::LoopHooks;
 use super::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
 use crate::clients::done_helpers::done_user_message;
+use crate::conversation::tool_specs::ToolMode;
 
 // ── Architecture ────────────────────────────────────────────────────────────
 // agent_loop.rs orchestrates a single agent turn-sequence:
@@ -186,6 +187,7 @@ impl RunContext {
 pub(crate) struct LoopOpts<'a> {
     pub(crate) extra: Option<serde_json::Value>,
     pub(crate) tool_filter: Option<&'a [String]>,
+    pub(crate) tool_mode: crate::conversation::tool_specs::ToolMode,
     pub(crate) classify_error: Option<ErrorClassifier>,
     pub(crate) temperature: Option<f64>,
     pub(crate) max_tokens: Option<u64>,
@@ -194,6 +196,11 @@ pub(crate) struct LoopOpts<'a> {
     /// system prompt (e.g. local compaction). Ignored when the rendered turn
     /// already carries a system prompt.
     pub(crate) preamble: Option<String>,
+    /// When true, the agent loop will not loop on reasoning-only or empty
+    /// turns — it immediately exhausts. Used by single-turn naked
+    /// completions (local compaction, etc.) where the conversation has no
+    /// record_turn support and budgets are zero.
+    pub(crate) single_turn: bool,
 }
 
 /// A single tool invocation queued for concurrent execution within a turn.
@@ -242,6 +249,9 @@ struct LoopState {
     remaining_turns: usize,
     reminder_budget: usize,
     completion_nudge_budget: usize,
+    /// When true, skip reasoning-only continuation and nudging — used
+    /// for single-turn naked completions (local compaction).
+    single_turn: bool,
     /// Inversion-of-control hooks carrying prompt-debug/token-usage callbacks.
     hooks: LoopHooks,
 }
@@ -315,6 +325,7 @@ impl LoopState {
         prepopulated_conversation: Box<dyn Conversation>,
         reminder_budget: usize,
         completion_nudge_budget: usize,
+        single_turn: bool,
         interactive: Option<InteractiveSession>,
         tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
         max_turns: usize,
@@ -368,6 +379,7 @@ impl LoopState {
             remaining_turns: max_turns,
             reminder_budget,
             completion_nudge_budget,
+            single_turn,
             hooks: hooks.clone(),
         }
     }
@@ -478,9 +490,10 @@ impl LoopState {
         opts: &LoopOpts<'_>,
         nested: bool,
     ) -> Result<CompletionRequest, ClientError> {
+        let effective_system = self.system_prompt.clone().or_else(|| opts.preamble.clone());
         let script = self
             .conv
-            .render_turn(nested, self.system_prompt.clone())
+            .render_turn(nested, effective_system)
             .await
             .map_err(|e| match e {
                 TurnScriptError::TooLarge { limit, actual } => {
@@ -1544,11 +1557,16 @@ impl LoopState {
 
         // Reasoning-only turn — the model is thinking. Just loop, preserving
         // the structured reasoning items for the next request.
+        // In single-turn mode (naked completions, local compaction) the
+        // conversation panics on record_turn; don't loop, let it exhaust.
         if text.is_empty() && !reasoning.is_empty() {
-            log::debug!("reasoning-only turn: turn={} — continuing", self.turn_num);
-            self.conv.record_turn("", reasoning_items, &[], None);
-            self.conv.set_next_prompt("Continue.");
-            return EmptyTurnAction::ContinueLoop;
+            if !self.single_turn {
+                log::debug!("reasoning-only turn: turn={} — continuing", self.turn_num);
+                self.conv.record_turn("", reasoning_items, &[], None);
+                self.conv.set_next_prompt("Continue.");
+                return EmptyTurnAction::ContinueLoop;
+            }
+            // Single-turn: fall through to exhaustion.
         }
 
         log::warn!(
@@ -1782,7 +1800,7 @@ pub(crate) async fn run_agent_loop(
         discovered_skills: ctx.params.discovered_skills.clone(),
         log_tx: ctx.params.log_tx.clone(),
     };
-    let tool_defs = tools::tool_definitions(opts.tool_filter, ctx.params.skills_available);
+    let tool_defs = tools::tool_definitions(opts.tool_filter, ctx.params.skills_available, opts.tool_mode);
 
     // Wire up the Task runner before entering the turn loop.
     let runner = super::task::make_task_runner(
@@ -1854,15 +1872,17 @@ pub(crate) async fn run_agent_loop_nested(
     let opts = LoopOpts {
         extra,
         tool_filter,
+        tool_mode: crate::conversation::tool_specs::ToolMode::Full,
         classify_error: None,
         temperature,
         max_tokens,
         preserve_reasoning_in_history,
         preamble: None,
+        single_turn: false,
     };
     // Nested loops never expose LoadSkill even when the parent has skills.
     let is_chat = false;
-    let tool_defs = tools::tool_definitions(tool_filter, is_chat);
+    let tool_defs = tools::tool_definitions(tool_filter, is_chat, ToolMode::Full);
     let mut raw: Option<std::fs::File> = None;
     let mut captured: Option<Vec<serde_json::Value>> = None;
     let mut nested_tool_ctx = tool_ctx.clone();
@@ -2130,6 +2150,7 @@ pub(crate) async fn run_agent_loop_core(
         prepopulated_conversation,
         reminder_budget,
         completion_nudge_budget,
+        opts.single_turn,
         interactive,
         tool_output_rx,
         max_turns,
@@ -2678,11 +2699,13 @@ pub(crate) fn loop_opts(filter: Option<&[String]>) -> LoopOpts<'_> {
     LoopOpts {
         extra: None,
         tool_filter: filter,
+        tool_mode: ToolMode::Full,
         classify_error: None,
         temperature: None,
         max_tokens: None,
         preserve_reasoning_in_history: false,
         preamble: None,
+        single_turn: false,
     }
 }
 
@@ -2691,11 +2714,13 @@ pub(crate) fn loop_opts_preserve_reasoning(filter: Option<&[String]>) -> LoopOpt
     LoopOpts {
         extra: None,
         tool_filter: filter,
+        tool_mode: ToolMode::Full,
         classify_error: None,
         temperature: None,
         max_tokens: None,
         preserve_reasoning_in_history: true,
         preamble: None,
+        single_turn: false,
     }
 }
 
@@ -3270,8 +3295,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_prompt_fails_hard_before_any_request() {
         let _env = crate::test_support::EnvGuard::lock();
-        std::env::set_var("GREMLINS_MAX_PROMPT_BYTES", "16");
-        crate::config::clear_global();
+        crate::config::set_test_max_prompt_bytes(16);
         let inner = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
             rig_core::test_utils::MockStreamEvent::text("should not run"),
         ]]);
@@ -5872,7 +5896,7 @@ mod tests {
 
         let mut tool_ctx = test_tool_ctx();
         tool_ctx.sandbox = tools::SandboxMode::Roots(vec![dir.clone()]);
-        let tool_defs = tools::tool_definitions(None, false);
+        let tool_defs = tools::tool_definitions(None, false, ToolMode::Full);
         let cancel = CancelToken::new();
         let opts = loop_opts(None);
 
@@ -6244,7 +6268,7 @@ mod tests {
         .erase();
 
         let tool_ctx = test_tool_ctx();
-        let tool_defs = tools::tool_definitions(None, false);
+        let tool_defs = tools::tool_definitions(None, false, ToolMode::Full);
         let cancel = CancelToken::new();
         let opts = loop_opts(None);
         let (sink, log_rx) = LogSink::new();
@@ -6330,7 +6354,7 @@ mod tests {
         .erase();
 
         let tool_ctx = test_tool_ctx();
-        let tool_defs = tools::tool_definitions(None, false);
+        let tool_defs = tools::tool_definitions(None, false, ToolMode::Full);
         let cancel = CancelToken::new();
         let opts = loop_opts(None);
 

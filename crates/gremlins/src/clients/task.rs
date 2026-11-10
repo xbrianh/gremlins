@@ -554,8 +554,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_task_prompt_returns_string_without_calling_model() {
         let _env = crate::test_support::EnvGuard::lock();
-        std::env::set_var("GREMLINS_MAX_PROMPT_BYTES", "16");
-        crate::config::clear_global();
+        crate::config::set_test_max_prompt_bytes(16);
         let ctx = depth_test_ctx();
         let inner = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
             rig_core::test_utils::MockStreamEvent::text("should not run"),

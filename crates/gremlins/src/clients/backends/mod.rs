@@ -143,6 +143,10 @@ macro_rules! declare_openai_backend {
             fn model(&self) -> &str {
                 &self.state.model
             }
+
+            fn name(&self) -> &'static str {
+                $provider
+            }
         }
     };
 }

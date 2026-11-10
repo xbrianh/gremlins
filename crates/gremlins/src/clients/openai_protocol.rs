@@ -297,11 +297,13 @@ pub(crate) async fn run_with_agent_loop(
         LoopOpts {
             extra,
             tool_filter,
+            tool_mode: crate::conversation::tool_specs::ToolMode::Full,
             classify_error,
             temperature,
             max_tokens,
             preserve_reasoning_in_history: false,
             preamble: None,
+            single_turn: false,
         },
         interactive,
     )

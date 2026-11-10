@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -748,6 +749,28 @@ pub fn clear_global() {
 }
 
 // ---------------------------------------------------------------------------
+// Thread-local test override for max_prompt_bytes
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static TEST_MAX_PROMPT_BYTES: Cell<Option<u64>> = Cell::new(None);
+}
+
+/// Set a test-local max-prompt-bytes override. Must be called while holding
+/// the [`crate::test_support::EnvGuard`] lock.
+///
+/// Only compiled during `#[cfg(test)]` — callers are guarded by `#[cfg(test)]`.
+#[cfg(test)]
+pub(crate) fn set_test_max_prompt_bytes(value: u64) {
+    TEST_MAX_PROMPT_BYTES.with(|cell| cell.set(Some(value)));
+}
+
+#[cfg(test)]
+pub(crate) fn clear_test_max_prompt_bytes() {
+    TEST_MAX_PROMPT_BYTES.with(|cell| cell.set(None));
+}
+
+// ---------------------------------------------------------------------------
 // Env-var helpers
 // ---------------------------------------------------------------------------
 
@@ -1139,6 +1162,10 @@ pub(crate) const DEFAULT_MAX_PROMPT_BYTES: u64 = 1_048_576;
 /// Default 1 048 576 (1 MiB). Settings.yaml `max-prompt-bytes` takes
 /// precedence over the env var.
 pub(crate) fn max_prompt_bytes() -> u64 {
+    // Test-local override takes highest priority.
+    if let Some(v) = TEST_MAX_PROMPT_BYTES.with(Cell::get) {
+        return v;
+    }
     get_global()
         .map(|c| c.max_prompt_bytes())
         .or_else(|| {

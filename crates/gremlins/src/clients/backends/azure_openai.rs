@@ -253,6 +253,10 @@ impl Backend for AzureOpenAiBackend {
         &self.state.model
     }
 
+    fn name(&self) -> &'static str {
+        "azure-openai"
+    }
+
     fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
         let (provider, model) = openai_protocol::provider_and_model(spec)?;
         if provider == "azure-openai" {

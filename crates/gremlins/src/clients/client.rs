@@ -366,12 +366,14 @@ pub(crate) async fn run_naked(
 
     let opts = LoopOpts {
         extra: task_model.extra,
-        tool_filter: Some(&[]), // no tools
+        tool_filter: Some(&[]),
+        tool_mode: crate::conversation::tool_specs::ToolMode::NoTools,
         classify_error: None,
         temperature: task_model.temperature,
         max_tokens,
         preserve_reasoning_in_history: task_model.preserve_reasoning.unwrap_or(false),
         preamble: Some(preamble),
+        single_turn: true,
     };
 
     let completed = run_agent_loop(

@@ -126,11 +126,13 @@ impl<C> NativeRunState<C> {
                 LoopOpts {
                     extra: self.extra_params(),
                     tool_filter: self.tool_filter.as_deref(),
+                    tool_mode: crate::conversation::tool_specs::ToolMode::Full,
                     classify_error: Some(default_classify as ErrorClassifier),
                     temperature: self.resolved.temperature,
                     max_tokens: self.resolved.max_tokens,
                     preserve_reasoning_in_history: preserve_reasoning.as_bool(),
                     preamble: None,
+                    single_turn: false,
                 },
                 interactive,
             )

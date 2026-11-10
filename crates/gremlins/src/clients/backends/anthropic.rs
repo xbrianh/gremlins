@@ -285,6 +285,10 @@ impl Backend for AnthropicBackend {
         &self.state.model
     }
 
+    fn name(&self) -> &'static str {
+        "anthropic"
+    }
+
     async fn compact(
         &self,
         messages: &[rig_core::completion::Message],

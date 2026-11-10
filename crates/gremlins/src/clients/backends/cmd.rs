@@ -636,6 +636,10 @@ impl Backend for CmdBackend {
         ""
     }
 
+    fn name(&self) -> &'static str {
+        "cmd"
+    }
+
     fn make_model(&self, _spec: &str) -> Option<DynModel<Completion>> {
         None
     }
