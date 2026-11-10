@@ -425,7 +425,11 @@ fn tool_parameters(spec: &ToolSpec) -> serde_json::Value {
     })
 }
 
-pub(crate) fn tool_definitions(filter: Option<&[String]>, is_chat: bool, mode: ToolMode) -> Vec<ToolDefinition> {
+pub(crate) fn tool_definitions(
+    filter: Option<&[String]>,
+    is_chat: bool,
+    mode: ToolMode,
+) -> Vec<ToolDefinition> {
     if mode == ToolMode::NoTools {
         return Vec::new();
     }

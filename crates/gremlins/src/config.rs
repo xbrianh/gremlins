@@ -753,7 +753,7 @@ pub fn clear_global() {
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    static TEST_MAX_PROMPT_BYTES: Cell<Option<u64>> = Cell::new(None);
+    static TEST_MAX_PROMPT_BYTES: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
 /// Set a test-local max-prompt-bytes override. Must be called while holding
@@ -763,11 +763,6 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn set_test_max_prompt_bytes(value: u64) {
     TEST_MAX_PROMPT_BYTES.with(|cell| cell.set(Some(value)));
-}
-
-#[cfg(test)]
-pub(crate) fn clear_test_max_prompt_bytes() {
-    TEST_MAX_PROMPT_BYTES.with(|cell| cell.set(None));
 }
 
 // ---------------------------------------------------------------------------

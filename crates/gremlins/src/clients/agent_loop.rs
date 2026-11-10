@@ -1559,15 +1559,13 @@ impl LoopState {
         // the structured reasoning items for the next request.
         // In single-turn mode (naked completions, local compaction) the
         // conversation panics on record_turn; don't loop, let it exhaust.
-        if text.is_empty() && !reasoning.is_empty() {
-            if !self.single_turn {
-                log::debug!("reasoning-only turn: turn={} — continuing", self.turn_num);
-                self.conv.record_turn("", reasoning_items, &[], None);
-                self.conv.set_next_prompt("Continue.");
-                return EmptyTurnAction::ContinueLoop;
-            }
-            // Single-turn: fall through to exhaustion.
+        if text.is_empty() && !reasoning.is_empty() && !self.single_turn {
+            log::debug!("reasoning-only turn: turn={} — continuing", self.turn_num);
+            self.conv.record_turn("", reasoning_items, &[], None);
+            self.conv.set_next_prompt("Continue.");
+            return EmptyTurnAction::ContinueLoop;
         }
+        // Single-turn: fall through to exhaustion.
 
         log::warn!(
             "empty turn: turn={} text_empty={} reasoning_empty={} budget={}",
@@ -1800,7 +1798,11 @@ pub(crate) async fn run_agent_loop(
         discovered_skills: ctx.params.discovered_skills.clone(),
         log_tx: ctx.params.log_tx.clone(),
     };
-    let tool_defs = tools::tool_definitions(opts.tool_filter, ctx.params.skills_available, opts.tool_mode);
+    let tool_defs = tools::tool_definitions(
+        opts.tool_filter,
+        ctx.params.skills_available,
+        opts.tool_mode,
+    );
 
     // Wire up the Task runner before entering the turn loop.
     let runner = super::task::make_task_runner(
