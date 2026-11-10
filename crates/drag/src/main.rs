@@ -849,10 +849,14 @@ fn load_cache(path: &Path) -> Result<HashMap<String, CacheEntry>, String> {
             Ok(entry) => {
                 match map.entry(entry.key.clone()) {
                     std::collections::hash_map::Entry::Occupied(mut e) => {
-                        // Duplicate key: merge the new raw estimates into the
-                        // existing entry and refresh the estimate count.
+                        // Duplicate key: merge raw estimates but cap at the
+                        // target count so stale lines from a previous
+                        // interrupted run don't cause overshoot.
                         let existing = e.get_mut();
-                        existing.raw_estimates.extend(entry.raw_estimates);
+                        let needed = entry.estimates.saturating_sub(existing.raw_estimates.len());
+                        existing
+                            .raw_estimates
+                            .extend(entry.raw_estimates.iter().take(needed).cloned());
                         existing.estimates = existing.raw_estimates.len();
                     }
                     std::collections::hash_map::Entry::Vacant(e) => {
@@ -980,10 +984,6 @@ async fn score_comprehensibility(
         .iter()
         .map(|s| (s.module.clone(), s.token_count))
         .collect();
-
-    // Clone the cache path so each spawned task can write its own entry as
-    // soon as its estimate succeeds.
-    let cache_state = cache_state.clone();
 
     for (module, file, _pkg) in modules.iter() {
         // ── cache hit (pre-computed in run()) ──

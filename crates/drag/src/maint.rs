@@ -245,7 +245,7 @@ pub(crate) async fn score_directory_maintainability(
                                 estimates,
                                 raw_estimates: vec![scores.clone()],
                             };
-                            let _guard = cache_mutex.lock().unwrap();
+                            let _guard = cache_mutex.lock().unwrap_or_else(|e| e.into_inner());
                             if let Err(e) = append_maint_cache_entry(&maint_cache_path, &entry) {
                                 eprintln!(
                                     "  [{dir_name}] WARNING: failed to append maint cache: {e}"
@@ -707,11 +707,16 @@ fn load_maint_cache(path: &Path) -> Result<HashMap<String, MaintCacheEntry>, Str
         match serde_json::from_str::<MaintCacheEntry>(line) {
             Ok(entry) => {
                 // Each estimate is appended as its own line with the same key.
-                // Merge duplicates so all raw estimates are retained.
+                // Merge duplicates so all raw estimates are retained, capped
+                // at the target count to prevent stale lines from a previous
+                // interrupted run from inflating the count.
                 match map.entry(entry.key.clone()) {
                     std::collections::hash_map::Entry::Occupied(mut slot) => {
                         let existing: &mut MaintCacheEntry = slot.get_mut();
-                        existing.raw_estimates.extend(entry.raw_estimates);
+                        let needed = entry.estimates.saturating_sub(existing.raw_estimates.len());
+                        existing
+                            .raw_estimates
+                            .extend(entry.raw_estimates.iter().take(needed).cloned());
                         existing.estimates = existing.raw_estimates.len();
                     }
                     std::collections::hash_map::Entry::Vacant(slot) => {
