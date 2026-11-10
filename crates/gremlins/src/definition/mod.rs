@@ -204,10 +204,9 @@ pub trait GremlinDefinition: Send + Sync {
 
     /// The ordered list of stage names in this definition.
     ///
-    /// Used by accumulation to order injected memory in
-    /// pipeline execution order rather than lexical order. Returns an empty
-    /// slice when the definition cannot enumerate its stages statically
-    /// (chat gremlins, where chat-* stage names already sort correctly).
+    /// Returns an empty slice when the definition cannot enumerate its
+    /// stages statically (chat gremlins, where chat-* stage names already
+    /// sort correctly).
     fn stage_names(&self) -> &[String] {
         &[]
     }

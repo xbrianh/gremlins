@@ -1141,28 +1141,13 @@ async fn handle_create_session(
 /// turn, then runs normal stop cleanup.
 async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value {
     if let Some(id) = request.get("id").and_then(|v| v.as_str()) {
-        // Snapshot the state store handle and the project root from the
-        // run-map before touching the session so we can persist the
-        let (_store, _project_root) = {
-            let map = get_run_map().lock().unwrap();
-            match map.get(id) {
-                Some(handle) => {
-                    let store = handle.store.clone();
-                    let pr = store
-                        .read_field("project_root")
-                        .and_then(|v| v.as_str().map(PathBuf::from));
-                    (Some(store), pr)
-                }
-                None => (None, None),
-            }
-        };
         let mut s = session.lock().await;
-        // Retain the Gremlin so its TempDir lives through the persist.
+        // Retain the Gremlin so its TempDir lives until we release the
+        // session lock.
         let _gremlin = s.chat_gremlins.remove(id);
         s.chat_ids.remove(id);
         // Clone done before releasing the lock, then await turn completion
-        // so the model finishes flushing before we
-        // accumulate — matching what stop_session_chat_gremlin does.
+        // so the in-flight turn finishes before handle_stop runs.
         let done = if let Some(cur) = &s.current_turn {
             if cur.id == id {
                 cur.soft_cancel.store(false, Ordering::Relaxed);
@@ -1185,27 +1170,15 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
 /// Remove a chat gremlin from whichever session owns it and cancel its turn.
 /// Called by control-socket `stop`.
 async fn stop_session_chat_gremlin(id: &str) {
-    // Snapshot the state store handle, project root, and liveness from the
-    // run-map before touching the session, so the persist step reads the
-    // final accumulated artifacts.
-    let (live, _store, _project_root) = {
+    // Check liveness before touching the session — only wait for a turn
+    // to drain when a live run-map entry confirms it is in flight.
+    let live = {
         let map = get_run_map().lock().unwrap();
-        match map.get(id) {
-            Some(handle) => {
-                let store = handle.store.clone();
-                let pr = store
-                    .read_field("project_root")
-                    .and_then(|v| v.as_str().map(PathBuf::from));
-                (true, Some(store), pr)
-            }
-            None => (false, None, None),
-        }
+        map.contains_key(id)
     };
 
     // Cancel the in-flight turn and wait for it to finish so the model
-    // doesn't race with our accumulation of committed artifacts.
-    // Keep the removed Gremlin alive until after the persist so its state
-    // store is not dropped before we read.
+    // doesn't keep writing after we remove the gremlin.
     let sessions: Vec<SessionHandle> = session_map().lock().unwrap().values().cloned().collect();
     for session in sessions {
         let mut s = session.lock().await;
@@ -3637,24 +3610,14 @@ async fn cleanup_chat_gremlin(id: &str) {
         return;
     }
 
-    // Snapshot the state store handle and project root before cancelling the
-    // turn and removing from the run-map, so the persist step reads the final
-    // accumulated artifacts.
-    let (_store, _project_root, cancel) = {
+    // Snapshot the cancel token before removing from the run-map
+    // so we can stop the in-flight turn.
+    let cancel = {
         let map = get_run_map().lock().unwrap();
-        match map.get(id) {
-            Some(handle) => {
-                let store = handle.store.clone();
-                let pr = store
-                    .read_field("project_root")
-                    .and_then(|v| v.as_str().map(PathBuf::from));
-                (Some(store), pr, Some(handle.cancel.clone()))
-            }
-            None => (None, None, None),
-        }
+        map.get(id).map(|h| h.cancel.clone())
     };
 
-    // Cancel the in-flight turn so the model stops writing before we persist.
+    // Cancel the in-flight turn so the model stops writing.
     if let Some(cancel) = cancel {
         cancel.cancel();
     }

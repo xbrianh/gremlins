@@ -72,7 +72,6 @@ pub async fn prepare_agent(
     local_state: &dyn StateStore,
     loop_iter: &str,
     framework_subs: &HashMap<String, String>,
-    _artifact_dir: &Path,
 ) -> Result<AgentPrepared, AgentError> {
     let name = &agent.name;
     let str_opts = vars::string_options(&agent.options);
@@ -296,7 +295,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
         assert!(prepared.prompt.contains("world-value"));
@@ -320,7 +319,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::from([("name".to_string(), "from-fw".to_string())]);
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
         assert!(prepared.prompt.contains("from-fw"));
@@ -345,7 +344,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
         // output_paths should contain the registered path, not "interp-val"
@@ -371,7 +370,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let err = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let err = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap_err();
         assert!(matches!(err, AgentError::Resolve { .. }));
@@ -394,7 +393,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "my-agent~3", &fw, &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "my-agent~3", &fw)
             .await
             .unwrap();
         assert_eq!(prepared.output_uris[0].1, "artifact://my-agent~3/out.txt");
@@ -424,7 +423,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "my-agent~2", &fw, &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "my-agent~2", &fw)
             .await
             .unwrap();
         assert!(prepared.prompt.contains("Plan: # Plan"));
@@ -444,7 +443,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
         assert_eq!(prepared.output_uris[0].0, "result");
@@ -472,7 +471,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
         assert_eq!(prepared.model, Some("openai/{variant}".to_string()));
@@ -492,7 +491,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
         assert!(prepared.model.is_none());
@@ -512,7 +511,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let mut prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
         prepared.cwd = String::new();
@@ -536,7 +535,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let mut prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
         prepared.cwd = "/work".to_string();
@@ -563,7 +562,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::from([("name".to_string(), "my-agent".to_string())]);
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
         assert_eq!(prepared.output_uris[0].0, "my-agent");
@@ -588,7 +587,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
         assert_eq!(prepared.prompt, "Line 1\n\nLine 2\n\nLine 3");
@@ -612,7 +611,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
         assert!(prepared.prompt.contains("value"));
@@ -638,7 +637,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
         // {string_k} and {num_k} are both substituted
@@ -663,7 +662,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::from([("cwd".to_string(), tmp.path().to_string_lossy().into_owned())]);
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
         // The three real binds.
@@ -685,7 +684,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
         assert!(prepared.prompt.ends_with("Static prompt"));
@@ -719,7 +718,7 @@ mod tests {
         let ad = ensure_artifact_dir(&tmp);
         let store = make_state_store(ad.clone());
         let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
             .unwrap();
         let err = commit_agent(&prepared, &store).await.unwrap_err();
@@ -733,7 +732,7 @@ mod tests {
         let ad = ensure_artifact_dir(&tmp);
         let store = make_state_store(ad.clone());
         let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
             .unwrap();
         std::fs::write(&prepared.output_paths["out"], "").unwrap();
@@ -747,7 +746,7 @@ mod tests {
         let ad = ensure_artifact_dir(&tmp);
         let store = make_state_store(ad.clone());
         let agent = agent_with_bind("out?", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
             .unwrap();
         commit_agent(&prepared, &store).await.unwrap();
@@ -770,7 +769,7 @@ mod tests {
             ]),
             landscape: true,
         };
-        let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
+        let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
             .unwrap();
         // Pin iteration order so the missing bind is evaluated last.
@@ -799,7 +798,7 @@ mod tests {
             ]),
             landscape: true,
         };
-        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
             .unwrap();
         std::fs::write(&prepared.output_paths["a"], "content").unwrap();
@@ -814,7 +813,7 @@ mod tests {
         let ad = ensure_artifact_dir(&tmp);
         let store = make_state_store(ad.clone());
         let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
             .unwrap();
         std::fs::write(&prepared.output_paths["out"], "content").unwrap();
@@ -839,7 +838,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
         assert_eq!(prepared.system_prompt(), "custom override prompt");
@@ -859,7 +858,7 @@ mod tests {
             landscape: true,
         };
         let fw = HashMap::new();
-        let mut prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
+        let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)
             .await
             .unwrap();
         prepared.cwd = "/work".to_string();

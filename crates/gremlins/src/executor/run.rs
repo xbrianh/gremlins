@@ -504,7 +504,6 @@ async fn run_agent(
         local_registry.as_ref(),
         &loop_iter,
         &framework_subs,
-        &artifact_dir,
     )
     .await
     .map_err(|e| agent_prepare_err(e, &agent.name))?;
@@ -514,8 +513,8 @@ async fn run_agent(
 
     let is_chat = gremlin.state.read_str("kind") == "chat";
 
-    // The checkout artifact directory must exist before the reset step — the
-    // implicit artifacts write directly into it.
+    // Ensure the checkout artifact directory exists so the agent's
+    // local state store can create files under it.
     std::fs::create_dir_all(&artifact_dir)?;
 
     let system_prompt = prepared.system_prompt();
