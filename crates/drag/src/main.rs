@@ -119,6 +119,10 @@ enum DragNodeOutput {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         maint_score: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        maint_ci_lower: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        maint_ci_upper: Option<f64>,
         drag: f64,
         children: Vec<DragNodeOutput>,
     },
@@ -149,11 +153,15 @@ impl From<&DragNode> for DragNodeOutput {
             DragNode::Container {
                 name,
                 maint_score,
+                maint_ci_lower,
+                maint_ci_upper,
                 drag,
                 children,
             } => DragNodeOutput::Container {
                 name: name.clone(),
                 maint_score: *maint_score,
+                maint_ci_lower: *maint_ci_lower,
+                maint_ci_upper: *maint_ci_upper,
                 drag: *drag,
                 children: children.iter().map(DragNodeOutput::from).collect(),
             },
@@ -452,7 +460,7 @@ async fn run() -> Result<(), String> {
     // ── Directory-level maintainability ──
     // Enumerate every directory under each scoring package's source tree
     // that contains source files, then score each one.
-    let (maint_scores, skipped_dirs): (HashMap<String, f64>, HashSet<String>) =
+    let (maint_scores, skipped_dirs): (HashMap<String, maint::DirMaintResult>, HashSet<String>) =
         if !config.skip_maintainability {
             let scoring_dirs: Vec<PathBuf> = {
                 let mut dirs = Vec::new();
@@ -483,7 +491,7 @@ async fn run() -> Result<(), String> {
             .await?;
             (maint_scores, skipped_dirs)
         } else {
-            (HashMap::new(), HashSet::new())
+            (HashMap::<String, maint::DirMaintResult>::new(), HashSet::new())
         };
 
     // Build module→pkg, pkg_key→pkg_name, and per-module directory-segment maps.
@@ -1440,10 +1448,10 @@ fn print_human_table(tree: &DragNode, skip_maint: bool) {
     match (has_comp, has_maint) {
         (true, true) => {
             println!(
-                "{:<55} {:>8} {:>10} {:>6} {:>6} {:>14}",
+                "{:<55} {:>8} {:>10} {:>6} {:>20} {:>14}",
                 "module", "tokens", "footprint", "comp", "maint", "drag"
             );
-            println!("{}", "-".repeat(104));
+            println!("{}", "-".repeat(118));
         }
         (true, false) => {
             println!(
@@ -1454,10 +1462,10 @@ fn print_human_table(tree: &DragNode, skip_maint: bool) {
         }
         (false, true) => {
             println!(
-                "{:<55} {:>8} {:>10} {:>6} {:>14}",
+                "{:<55} {:>8} {:>10} {:>20} {:>14}",
                 "module", "tokens", "footprint", "maint", "drag"
             );
-            println!("{}", "-".repeat(97));
+            println!("{}", "-".repeat(111));
         }
         (false, false) => {
             println!(
@@ -1513,7 +1521,7 @@ fn print_node(node: &DragNode, depth: usize, has_comp: bool, has_maint: bool) {
                 (true, true) => {
                     let c = comprehensibility.expect("has_comp guarantees Some");
                     println!(
-                        "{indent}{:<w$} {:>8} {:>10} {:>6.2} {:>6} {:>14.1}",
+                        "{indent}{:<w$} {:>8} {:>10} {:>6.2} {:>20} {:>14.1}",
                         display,
                         token_count,
                         footprint,
@@ -1537,7 +1545,7 @@ fn print_node(node: &DragNode, depth: usize, has_comp: bool, has_maint: bool) {
                 }
                 (false, true) => {
                     println!(
-                        "{indent}{:<w$} {:>8} {:>10} {:>6} {:>14.1}",
+                        "{indent}{:<w$} {:>8} {:>10} {:>20} {:>14.1}",
                         display,
                         token_count,
                         footprint,
@@ -1561,6 +1569,8 @@ fn print_node(node: &DragNode, depth: usize, has_comp: bool, has_maint: bool) {
         DragNode::Container {
             name,
             maint_score,
+            maint_ci_lower,
+            maint_ci_upper,
             drag,
             children,
         } => {
@@ -1568,11 +1578,17 @@ fn print_node(node: &DragNode, depth: usize, has_comp: bool, has_maint: bool) {
             if !name.is_empty() {
                 let display = truncate(name, (54usize).saturating_sub(depth * 2));
                 let w = (55usize).saturating_sub(depth * 2);
-                let maint = maint_score.map(|s| format!("{s:.2}"));
+                let maint = maint_score.map(|s| {
+                    if let (Some(lo), Some(hi)) = (maint_ci_lower, maint_ci_upper) {
+                        format!("{s:.2} ({lo:.2}–{hi:.2})")
+                    } else {
+                        format!("{s:.2}")
+                    }
+                });
                 match (has_comp, has_maint) {
                     (true, true) => {
                         println!(
-                            "{indent}{:<w$} {:>8} {:>10} {:>6} {:>6} {:>14.1}",
+                            "{indent}{:<w$} {:>8} {:>10} {:>6} {:>20} {:>14.1}",
                             display,
                             "",
                             "",
@@ -1595,7 +1611,7 @@ fn print_node(node: &DragNode, depth: usize, has_comp: bool, has_maint: bool) {
                     }
                     (false, true) => {
                         println!(
-                            "{indent}{:<w$} {:>8} {:>10} {:>6} {:>14.1}",
+                            "{indent}{:<w$} {:>8} {:>10} {:>20} {:>14.1}",
                             display,
                             "",
                             "",
@@ -1811,6 +1827,44 @@ mod tests {
         assert!(!obj.contains_key("comprehensibility"));
         assert!(!obj.contains_key("ci_lower"));
         assert!(!obj.contains_key("ci_upper"));
+    }
+
+    #[test]
+    fn container_ci_fields_round_trip_through_json() {
+        // Container CI fields round-trip through DragNodeOutput → JSON.
+        let node = scoring::DragNode::Container {
+            name: "my_pkg".into(),
+            maint_score: Some(0.72),
+            maint_ci_lower: Some(0.61),
+            maint_ci_upper: Some(0.83),
+            drag: 42.0,
+            children: vec![],
+        };
+        let output = DragNodeOutput::from(&node);
+        let json = serde_json::to_string(&output).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "container");
+        assert_eq!(v["name"], "my_pkg");
+        assert!((v["maint_score"].as_f64().unwrap() - 0.72).abs() < 1e-12);
+        assert!((v["maint_ci_lower"].as_f64().unwrap() - 0.61).abs() < 1e-12);
+        assert!((v["maint_ci_upper"].as_f64().unwrap() - 0.83).abs() < 1e-12);
+
+        // None CI fields are omitted.
+        let node_no_ci = scoring::DragNode::Container {
+            name: "orphan".into(),
+            maint_score: None,
+            maint_ci_lower: None,
+            maint_ci_upper: None,
+            drag: 1.0,
+            children: vec![],
+        };
+        let output_no_ci = DragNodeOutput::from(&node_no_ci);
+        let json_no_ci = serde_json::to_string(&output_no_ci).unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&json_no_ci).unwrap();
+        let obj = v2.as_object().unwrap();
+        assert!(!obj.contains_key("maint_score"));
+        assert!(!obj.contains_key("maint_ci_lower"));
+        assert!(!obj.contains_key("maint_ci_upper"));
     }
 
     // ── cache tests ──

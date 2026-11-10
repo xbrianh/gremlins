@@ -32,6 +32,14 @@ use crate::util::{extract_json, mean_with_ci, truncate, CacheState, CompAgentErr
 /// fixed struct.
 pub(crate) type DirMaintainability = HashMap<String, u8>;
 
+/// Aggregated maintainability result for a single directory:
+/// point estimate + 95% confidence interval on the overall score.
+pub(crate) struct DirMaintResult {
+    pub score: f64,
+    pub ci_lower: f64,
+    pub ci_upper: f64,
+}
+
 /// Compute the maintainability score (0–1) directly from unrounded f64
 /// dimension means, avoiding the upward bias of per-dimension rounding.
 ///
@@ -78,11 +86,12 @@ pub(crate) struct MaintCacheEntry {
 
 /// Score maintainability for each scoring directory.
 ///
-/// Returns a map from absolute directory path to maintainability score
-/// (0–1) plus the set of directories that were intentionally skipped
-/// because they have no direct source files (only nested subdirectories).
-/// Callers should treat skipped directories as containers with no
-/// maintainability penalty rather than as scoring failures.
+/// Returns a map from absolute directory path to maintainability result
+/// (score + 95% CI) plus the set of directories that were intentionally
+/// skipped because they have no direct source files (only nested
+/// subdirectories).  Callers should treat skipped directories as
+/// containers with no maintainability penalty rather than as scoring
+/// failures.
 pub(crate) async fn score_directory_maintainability(
     model_spec: &str,
     verbose: bool,
@@ -91,7 +100,7 @@ pub(crate) async fn score_directory_maintainability(
     cache_state: CacheState,
     maint_config: &MaintainabilityConfig,
     config_hash: &str,
-) -> Result<(HashMap<String, f64>, HashSet<String>), String> {
+) -> Result<(HashMap<String, DirMaintResult>, HashSet<String>), String> {
     if scoring_dirs.is_empty() {
         return Ok((HashMap::new(), HashSet::new()));
     }
@@ -248,7 +257,7 @@ pub(crate) async fn score_directory_maintainability(
 
     // --- Build result map: unified aggregation for cache hits and misses ---
     let cache_mutex = Mutex::new(());
-    let mut result: HashMap<String, f64> = HashMap::new();
+    let mut result: HashMap<String, DirMaintResult> = HashMap::new();
 
     for dir in scoring_dirs {
         let dir_str = dir.to_string_lossy().into_owned();
@@ -307,7 +316,27 @@ pub(crate) async fn score_directory_maintainability(
 
         let maint_score = compute_maint_score_from_map(&dim_means);
 
-        eprintln!("  [{dir_name}] maint: {maint_score:.3}");
+        // Aggregate 95% CI from per-estimate total scores.
+        let n_dims = maint_config.dimensions.len() as f64;
+        let mut per_estimate_scores: Vec<f64> = Vec::with_capacity(estimate_batch.len());
+        for est in estimate_batch {
+            let sum: f64 = maint_config
+                .dimensions
+                .iter()
+                .filter_map(|dim| est.get(&dim.key).copied().map(|s| s as f64))
+                .sum();
+            let score = if n_dims > 0.0 {
+                (sum / (n_dims * 4.0)).clamp(0.0, 1.0)
+            } else {
+                0.5
+            };
+            per_estimate_scores.push(score);
+        }
+        let (_, maint_ci_lower, maint_ci_upper) = mean_with_ci(&per_estimate_scores);
+
+        eprintln!(
+            "  [{dir_name}] maint: {maint_score:.3} (95% CI: {maint_ci_lower:.3}–{maint_ci_upper:.3})"
+        );
 
         let all_dims_complete = maint_config.dimensions.iter().all(|dim| {
             let count = estimate_batch
@@ -360,7 +389,14 @@ pub(crate) async fn score_directory_maintainability(
             }
         }
 
-        result.insert(dir_str, maint_score);
+        result.insert(
+            dir_str,
+            DirMaintResult {
+                score: maint_score,
+                ci_lower: maint_ci_lower,
+                ci_upper: maint_ci_upper,
+            },
+        );
     }
 
     Ok((result, skipped_dirs))

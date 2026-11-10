@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::maint::DirMaintResult;
+
 // ---------------------------------------------------------------------------
 // Module-level drag formula
 // ---------------------------------------------------------------------------
@@ -93,6 +95,8 @@ pub(crate) enum DragNode {
         /// only when maintainability is skipped or for the synthetic
         /// workspace/anchor root).
         maint_score: Option<f64>,
+        maint_ci_lower: Option<f64>,
+        maint_ci_upper: Option<f64>,
         drag: f64,
         children: Vec<DragNode>,
     },
@@ -126,7 +130,7 @@ pub(crate) fn build_drag_tree(
     modules: &[super::ModuleDrag],
     module_pkg: &HashMap<(String, String), String>,
     module_dir_segments: &HashMap<(String, String), Vec<String>>,
-    dir_maints: &HashMap<String, f64>,
+    dir_maints: &HashMap<String, DirMaintResult>,
     skipped_dirs: &HashSet<String>,
     pkg_name_for_key: &HashMap<String, String>,
     pkg_src_dirs: &HashMap<String, std::path::PathBuf>,
@@ -225,6 +229,8 @@ pub(crate) fn build_drag_tree(
     Ok(DragNode::Container {
         name: String::new(),
         maint_score: None,
+        maint_ci_lower: None,
+        maint_ci_upper: None,
         drag: total_drag,
         children: all_children,
     })
@@ -311,7 +317,7 @@ fn dir_trie_to_drag_node(
     src_dir: &std::path::Path,
     rel_dir: &str,
     display_name: String,
-    dir_maints: &HashMap<String, f64>,
+    dir_maints: &HashMap<String, DirMaintResult>,
     skipped_dirs: &HashSet<String>,
     p: f64,
     skip_maintainability: bool,
@@ -330,20 +336,21 @@ fn dir_trie_to_drag_node(
     // containers with no maintainability penalty.
     let is_skipped = skipped_dirs.contains(&abs_dir_str);
 
-    let (maint_score, maint_mult) = if skip_maintainability || is_skipped {
-        (None, 1.0)
-    } else {
-        let s = dir_maints.get(&abs_dir_str).copied().ok_or_else(|| {
-            format!(
-                "maintainability score missing for directory '{abs_dir_str}' — \
-                 scoring was enabled but this directory was not scored. \
-                 This indicates a mismatch between the maintainability \
-                 scoring pass and the directory trie; check whether the \
-                 directory was excluded from scoring_dirs."
-            )
-        })?;
-        (Some(s), (p * (1.0 - s)).exp())
-    };
+    let (maint_score, maint_ci_lower, maint_ci_upper, maint_mult) =
+        if skip_maintainability || is_skipped {
+            (None, None, None, 1.0)
+        } else {
+            let r = dir_maints.get(&abs_dir_str).ok_or_else(|| {
+                format!(
+                    "maintainability score missing for directory '{abs_dir_str}' — \
+                     scoring was enabled but this directory was not scored. \
+                     This indicates a mismatch between the maintainability \
+                     scoring pass and the directory trie; check whether the \
+                     directory was excluded from scoring_dirs."
+                )
+            })?;
+            (Some(r.score), Some(r.ci_lower), Some(r.ci_upper), (p * (1.0 - r.score)).exp())
+        };
 
     // Direct module children (leaf modules at this trie node).
     let direct_modules: Vec<DragNode> = trie
@@ -446,6 +453,8 @@ fn dir_trie_to_drag_node(
     Ok(DragNode::Container {
         name: display_name,
         maint_score,
+        maint_ci_lower,
+        maint_ci_upper,
         drag,
         children: all_children,
     })
@@ -506,6 +515,8 @@ fn trie_to_drag_node(
         return DragNode::Container {
             name,
             maint_score: None,
+            maint_ci_lower: None,
+            maint_ci_upper: None,
             drag: 0.0,
             children: Vec::new(),
         };
@@ -571,6 +582,8 @@ fn trie_to_drag_node(
     DragNode::Container {
         name,
         maint_score: None,
+        maint_ci_lower: None,
+        maint_ci_upper: None,
         drag,
         children: all_children,
     }
@@ -698,7 +711,7 @@ mod tests {
         modules: &[super::super::ModuleDrag],
         module_pkg: &HashMap<(String, String), String>,
         dir_segments: &HashMap<(String, String), Vec<String>>,
-        dir_maints: &HashMap<String, f64>,
+        dir_maints: &HashMap<String, DirMaintResult>,
         skipped_dirs: &HashSet<String>,
         pkg_names: &HashMap<String, String>,
         src_dirs: &HashMap<String, std::path::PathBuf>,
@@ -716,6 +729,23 @@ mod tests {
             p,
             skip,
         )
+    }
+
+    /// Build a DirMaintResult from a score, with degenerate CIs (score, score, score).
+    fn maint_result(score: f64) -> DirMaintResult {
+        DirMaintResult {
+            score,
+            ci_lower: score,
+            ci_upper: score,
+        }
+    }
+
+    /// Build dir_maints map from f64 scores (for test convenience).
+    fn dir_maints_map<const N: usize>(entries: [(&str, f64); N]) -> HashMap<String, DirMaintResult> {
+        entries
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), maint_result(v)))
+            .collect()
     }
 
     #[test]
@@ -789,10 +819,10 @@ mod tests {
                 vec!["executor".to_string()],
             ),
         ]);
-        let dir_maints = HashMap::from([
-            ("/src".to_string(), 1.0),
-            ("/src/clients".to_string(), 1.0),
-            ("/src/executor".to_string(), 1.0),
+        let dir_maints = dir_maints_map([
+            ("/src", 1.0),
+            ("/src/clients", 1.0),
+            ("/src/executor", 1.0),
         ]);
         let pkg_names = HashMap::from([("gremlins".to_string(), "gremlins".to_string())]);
         let src_dirs = HashMap::from([("gremlins".to_string(), src)]);
@@ -829,9 +859,9 @@ mod tests {
             ("pkg::a::b".to_string(), "/pkg/src/a/b.rs".to_string()),
             vec!["a".to_string()],
         )]);
-        let dir_maints = HashMap::from([
-            ("/pkg/src".to_string(), 0.5),
-            ("/pkg/src/a".to_string(), 1.0),
+        let dir_maints = dir_maints_map([
+            ("/pkg/src", 0.5),
+            ("/pkg/src/a", 1.0),
         ]);
         let pkg_names = HashMap::from([("pkg".to_string(), "pkg".to_string())]);
         let src_dirs = HashMap::from([("pkg".to_string(), src)]);
@@ -931,9 +961,9 @@ mod tests {
                 vec!["foo".to_string()],
             ),
         ]);
-        let dir_maints = HashMap::from([
-            ("/pkg/src".to_string(), 1.0),
-            ("/pkg/src/foo".to_string(), 1.0),
+        let dir_maints = dir_maints_map([
+            ("/pkg/src", 1.0),
+            ("/pkg/src/foo", 1.0),
         ]);
         let pkg_names = HashMap::from([("pkg".to_string(), "pkg".to_string())]);
         let src_dirs = HashMap::from([("pkg".to_string(), src)]);
@@ -985,9 +1015,9 @@ mod tests {
             ("pkg::foo".to_string(), "/pkg/src/foo/mod.rs".to_string()),
             vec!["foo".to_string()],
         )]);
-        let dir_maints = HashMap::from([
-            ("/pkg/src".to_string(), 1.0),
-            ("/pkg/src/foo".to_string(), 1.0),
+        let dir_maints = dir_maints_map([
+            ("/pkg/src", 1.0),
+            ("/pkg/src/foo", 1.0),
         ]);
         let pkg_names = HashMap::from([("pkg".to_string(), "pkg".to_string())]);
         let src_dirs = HashMap::from([("pkg".to_string(), src)]);
@@ -1077,9 +1107,9 @@ mod tests {
                 vec![],
             ),
         ]);
-        let dir_maints = HashMap::from([
-            ("/ws/pkg_a/src".to_string(), 1.0),
-            ("/ws/pkg_b/src".to_string(), 1.0),
+        let dir_maints = dir_maints_map([
+            ("/ws/pkg_a/src", 1.0),
+            ("/ws/pkg_b/src", 1.0),
         ]);
         let pkg_names = HashMap::from([
             ("pkg_a".to_string(), "pkg_a".to_string()),
@@ -1124,6 +1154,59 @@ mod tests {
     }
 
     #[test]
+    fn tree_container_ci_fields_preserved() {
+        // CI fields are propagated from DirMaintResult into DragNode::Container.
+        let src = std::path::PathBuf::from("/pkg/src");
+        let modules = vec![mdl("pkg::m", "/pkg/src/m.rs", 10.0)];
+        let module_pkg = HashMap::from([(
+            ("pkg::m".to_string(), "/pkg/src/m.rs".to_string()),
+            "pkg".to_string(),
+        )]);
+        let dir_segments = HashMap::from([(
+            ("pkg::m".to_string(), "/pkg/src/m.rs".to_string()),
+            vec![],
+        )]);
+        let mut dir_maints: HashMap<String, DirMaintResult> = HashMap::new();
+        dir_maints.insert(
+            "/pkg/src".to_string(),
+            DirMaintResult {
+                score: 0.75,
+                ci_lower: 0.65,
+                ci_upper: 0.85,
+            },
+        );
+        let pkg_names = HashMap::from([("pkg".to_string(), "pkg".to_string())]);
+        let src_dirs = HashMap::from([("pkg".to_string(), src)]);
+
+        let tree = build_rust_tree(
+            &modules,
+            &module_pkg,
+            &dir_segments,
+            &dir_maints,
+            &HashSet::new(),
+            &pkg_names,
+            &src_dirs,
+            2.5,
+            false,
+        )
+        .unwrap();
+
+        if let DragNode::Container {
+            maint_score,
+            maint_ci_lower,
+            maint_ci_upper,
+            ..
+        } = &tree
+        {
+            assert_eq!(*maint_score, Some(0.75));
+            assert_eq!(*maint_ci_lower, Some(0.65));
+            assert_eq!(*maint_ci_upper, Some(0.85));
+        } else {
+            panic!("expected Container");
+        }
+    }
+
+    #[test]
     fn tree_orphan_modules_nested_by_path() {
         let modules = vec![
             mdl("orphan::a", "/orphan/a.rs", 10.0),
@@ -1158,7 +1241,7 @@ mod tests {
         )]);
         let dir_segments =
             HashMap::from([(("pkg::m".to_string(), "/pkg/src/m.rs".to_string()), vec![])]);
-        let dir_maints = HashMap::new();
+        let dir_maints: HashMap<String, DirMaintResult> = HashMap::new();
         let pkg_names = HashMap::from([("pkg".to_string(), "pkg".to_string())]);
         let src_dirs = HashMap::from([("pkg".to_string(), src)]);
 
@@ -1209,7 +1292,7 @@ mod tests {
                 vec!["sub".to_string()],
             ),
         ]);
-        let dir_maints = HashMap::from([("/pkg".to_string(), 1.0), ("/pkg/sub".to_string(), 1.0)]);
+        let dir_maints = dir_maints_map([("/pkg", 1.0), ("/pkg/sub", 1.0)]);
         let pkg_names = HashMap::from([("pkg".to_string(), "pkg".to_string())]);
         let src_dirs = HashMap::from([("pkg".to_string(), src)]);
 
@@ -1254,7 +1337,7 @@ mod tests {
         let dir_segments =
             HashMap::from([(("pkg::m".to_string(), "/pkg/src/m.rs".to_string()), vec![])]);
         // dir_maints is empty — neither /pkg/src nor any sub-dir has a score.
-        let dir_maints: HashMap<String, f64> = HashMap::new();
+        let dir_maints: HashMap<String, DirMaintResult> = HashMap::new();
         let pkg_names = HashMap::from([("pkg".to_string(), "pkg".to_string())]);
         let src_dirs = HashMap::from([("pkg".to_string(), src)]);
 
@@ -1304,7 +1387,7 @@ mod tests {
             vec!["a".to_string(), "b".to_string()],
         )]);
         // Only /pkg and /pkg/a/b are scored; /pkg/a is intentionally skipped.
-        let dir_maints = HashMap::from([("/pkg".to_string(), 0.9), ("/pkg/a/b".to_string(), 0.7)]);
+        let dir_maints = dir_maints_map([("/pkg", 0.9), ("/pkg/a/b", 0.7)]);
         let skipped: HashSet<String> = ["/pkg/a".to_string()].into_iter().collect();
         let pkg_names = HashMap::from([("pkg".to_string(), "pkg".to_string())]);
         let src_dirs = HashMap::from([("pkg".to_string(), src)]);
