@@ -203,9 +203,15 @@ fn edit_not_found_diagnostic(
         None => (0, content.len()),
     };
 
-    let hint = if let Some(rel) = content[window_start..window_end].find(needle) {
+    // When a scope is set and the scope-window search finds nothing, fall
+    // back to a full-file search before giving up. If the needle exists
+    // elsewhere in the file the scope is stale (prior edits shifted line
+    // numbers); if it's nowhere, the content is genuinely wrong.
+    let scope_is_proper_subset = (scope_start.is_some() || scope_end.is_some())
+        && (window_start > 0 || window_end < content.len());
+    let scoped_hint = if let Some(rel) = content[window_start..window_end].find(needle) {
         let pos = window_start + rel;
-        let line_no = content[..pos].lines().count() + 1;
+        let line_no = line_number_at(&line_offsets, pos);
         let context_start = content[..pos].rfind('\n').map_or(0, |n| n + 1);
         let context_end = content[pos..].find('\n').map_or(content.len(), |n| pos + n);
         let cap_byte = content[context_start..]
@@ -219,7 +225,38 @@ fn edit_not_found_diagnostic(
         // stepping back across the scope boundary.
         let content_start = pos.saturating_sub(leading_ws).max(window_start);
         let divergence = divergence_report(content, content_start, window_end, old_str);
-        format!(" — did you mean to match near line {line_no}? Found:\n{context}\n{divergence}")
+        Some(format!(
+            " — did you mean to match near line {line_no}? Found:\n{context}\n{divergence}"
+        ))
+    } else {
+        None
+    };
+
+    // Full-file fallback: only when a scope was set and the scoped search
+    // came up empty. If the needle exists anywhere in the full file, the
+    // scope is stale rather than the content being wrong.
+    let hint = if let Some(scoped) = scoped_hint {
+        scoped
+    } else if scope_is_proper_subset {
+        if let Some(rel) = content.find(needle) {
+            // The trimmed needle matched, but verify the complete old_str
+            // also matches here before declaring this as an out-of-scope
+            // occurrence. A partial first-line match (e.g. "alpha" from
+            // "alpha\ngamma" matching "alpha\nbeta") is a genuine
+            // content mismatch, not a stale scope.
+            if content[rel..].starts_with(old_str) {
+                let line_no = line_number_at(&line_offsets, rel);
+                format!(
+                    " — first occurrence at line {line_no} (outside the requested scope; \
+                     prior edits may have shifted line numbers — try without \
+                     start_line/end_line or re-read the file)"
+                )
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        }
     } else {
         String::new()
     };
@@ -412,6 +449,27 @@ fn apply_edits(
         }
 
         if match_positions.is_empty() {
+            // When a batched edit (not the first) fails to find its
+            // old_string in the accumulated buffer, check whether it
+            // exists in the *original* file content. If so, the problem
+            // is a batch-order issue: prior edits modified the region
+            // and this edit should run first or in a separate call.
+            // Only fire the batch-order message when the old_string is
+            // genuinely absent from the accumulated buffer. If it still
+            // exists in the buffer (just outside a stale scope window),
+            // let edit_not_found_diagnostic produce the more precise
+            // scope-stale diagnostic from Change 2.
+            if i > 0 && !buffer.contains(old_str) && content.contains(old_str) {
+                return Err(format!(
+                    "Error: old_string not found in file after prior edits modified \
+                     lines surrounding the target (edit {}). The old_string \
+                     matches the original file content — try splitting this \
+                     into a separate Edit call, reorder edits so this one \
+                     runs first, or verify your edits don't target overlapping \
+                     regions.",
+                    i + 1
+                ));
+            }
             return Err(edit_not_found_diagnostic(
                 &buffer,
                 file_path,
@@ -553,7 +611,13 @@ struct SuccessPiece {
 /// `SUCCESS_EXPANDED_EDIT_CAP` edits are expanded (the remainder are summarized
 /// by a trailing count), and every snippet is capped at
 /// `SUCCESS_WINDOW_LINE_CAP` lines.
-fn render_success(content: &str, ranges: &[(usize, usize)], file_path: &str) -> String {
+fn render_success(
+    content: &str,
+    ranges: &[(usize, usize)],
+    file_path: &str,
+    original_lines: usize,
+    final_lines: usize,
+) -> String {
     let offsets = compute_line_offsets(content);
     let last_line = offsets.len();
 
@@ -615,10 +679,15 @@ fn render_success(content: &str, ranges: &[(usize, usize)], file_path: &str) -> 
         }
     }
 
+    let delta = final_lines as isize - original_lines as isize;
+    let delta_sign = if delta >= 0 { "+" } else { "" };
     let mut out = format!(
-        "Applied {} edit{} to {file_path}.\n",
+        "Applied {} edit{} to {file_path}. ({} lines, {}{} vs original)\n",
         ranges.len(),
-        if ranges.len() == 1 { "" } else { "s" }
+        if ranges.len() == 1 { "" } else { "s" },
+        final_lines,
+        delta_sign,
+        delta
     );
 
     if expanded < windows.len() {
@@ -685,6 +754,7 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
         Ok(c) => c,
         Err(e) => return format!("Error: {e}"),
     };
+    let original_lines = content.lines().count();
 
     let edits = match parse_edits(edits_arr, file_path) {
         Ok(e) => e,
@@ -695,11 +765,12 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
         Ok(u) => u,
         Err(e) => return e,
     };
+    let final_lines = updated.lines().count();
 
     if let Err(e) = std::fs::write(&path, &updated) {
         return format!("Error: {e}");
     }
-    render_success(&updated, &ranges, file_path)
+    render_success(&updated, &ranges, file_path, original_lines, final_lines)
 }
 
 #[cfg(test)]
@@ -1281,6 +1352,185 @@ mod tests {
         assert!(msg.contains(r#"actual:   "line2\n""#), "got: {msg}");
     }
 
+    // --- Scope-stale diagnostic tests ---
+
+    #[test]
+    fn diagnostic_scoped_miss_needle_exists_outside_scope() {
+        // Needle "target" is at line 5. Scope is lines 1-3. The scoped
+        // window search finds nothing, but the full-file fallback should
+        // locate it and report a scope-stale hint.
+        let content = "alpha\nbeta\ngamma\ndelta\ntarget\nzeta\n";
+        let old_str = "target";
+        let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, Some(1), Some(3));
+        assert!(msg.contains("between lines 1-3"), "got: {msg}");
+        assert!(msg.contains("first occurrence at line 5"), "got: {msg}");
+        assert!(msg.contains("outside the requested scope"), "got: {msg}");
+    }
+
+    #[test]
+    fn diagnostic_scoped_miss_needle_nowhere_in_file() {
+        // Needle is genuinely absent from the whole file. Neither the
+        // scoped window nor the full-file fallback finds it. No
+        // divergence report fires (that only triggers when the needle
+        // matches but the full old_str diverges). Result is a clean
+        // "not found" error with the scope label but no extra hints.
+        let content = "alpha\nbeta\ngamma\n";
+        let old_str = "nowhere";
+        let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, Some(1), Some(3));
+        assert!(msg.contains("between lines 1-3"), "got: {msg}");
+        assert!(!msg.contains("outside the requested scope"), "got: {msg}");
+        assert!(!msg.contains("first occurrence"), "got: {msg}");
+        assert!(!msg.contains("did you mean"), "got: {msg}");
+    }
+
+    #[test]
+    fn diagnostic_unscoped_still_works() {
+        // No scope at all — the scoped search and full-file fallback are
+        // both skipped, and the existing "did you mean" hint fires.
+        let content = "alpha\nbeta\ngamma\n";
+        let old_str = "beta";
+        let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, None, None);
+        assert!(!msg.contains("between lines"), "got: {msg}");
+        assert!(!msg.contains("outside the requested scope"), "got: {msg}");
+        assert!(msg.contains("did you mean"), "got: {msg}");
+    }
+
+    #[test]
+    fn diagnostic_scoped_miss_needle_match_but_full_old_str_diverges() {
+        // Regression: the trimmed first-line needle "alpha" matches at
+        // line 2, but the complete old_str "alpha\ngamma" does NOT match
+        // at that position (the content has "alpha\nbeta"). The scope-stale
+        // hint must NOT fire because retrying without the scope would still
+        // fail — this is a genuine content mismatch, not a stale scope.
+        let content = "header\nalpha\nbeta\n";
+        let old_str = "alpha\ngamma";
+        let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, Some(1), Some(1));
+        assert!(msg.contains("between lines 1-1"), "got: {msg}");
+        assert!(!msg.contains("outside the requested scope"), "got: {msg}");
+        assert!(!msg.contains("first occurrence"), "got: {msg}");
+    }
+
+    #[test]
+    fn diagnostic_scoped_miss_mid_line_match_reports_containing_line() {
+        // Regression: when the trimmed needle ("target") starts mid-line,
+        // the full-file fallback must report the containing line via
+        // line_number_at, not the naive .lines().count() + 1 which counts
+        // a partial prefix as a full line.
+        // Content: "alpha\n  target\nzeta\n"
+        // "target" at byte 8 starts on line 2. The old bug counted
+        // content[..8].lines() = ["alpha", "  "] → 2, then +1 = 3 (wrong).
+        let content = "alpha\n  target\nzeta\n";
+        let old_str = "target";
+        let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, Some(1), Some(1));
+        assert!(msg.contains("between lines 1-1"), "got: {msg}");
+        assert!(msg.contains("first occurrence at line 2"), "got: {msg}");
+        assert!(msg.contains("outside the requested scope"), "got: {msg}");
+    }
+
+    // --- Batch-order diagnostic tests ---
+
+    #[test]
+    fn apply_edits_batch_order_error_when_prior_edit_destroys_text() {
+        // Edit 1 replaces "234" with "x". Edit 2 looks for "456" which
+        // no longer exists in the accumulated buffer but does exist in
+        // the *original* content — this is a batch-order problem.
+        let content = "0123456789";
+        let edits = vec![
+            EditOp {
+                old_str: "234".into(),
+                new_str: "x".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+            EditOp {
+                old_str: "456".into(),
+                new_str: "y".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+        ];
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
+        assert!(
+            err.contains("old_string not found in file after prior edits"),
+            "got: {err}"
+        );
+        assert!(
+            err.contains("matches the original file content"),
+            "got: {err}"
+        );
+        assert!(
+            err.contains("try splitting this into a separate Edit call"),
+            "got: {err}"
+        );
+        assert!(
+            err.contains("verify your edits don't target overlapping regions"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_edits_batch_edit_not_found_in_either_buffer() {
+        // Edit 1 succeeds. Edit 2's old_str is absent from both the
+        // accumulated buffer AND the original — a genuine wrong-text
+        // error, not a batch-order problem.
+        let content = "hello world\nfoo bar\n";
+        let edits = vec![
+            EditOp {
+                old_str: "hello".into(),
+                new_str: "hi".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+            EditOp {
+                old_str: "nonexistent".into(),
+                new_str: "replacement".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+        ];
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
+        assert!(err.contains("old_string not found"), "got: {err}");
+        assert!(
+            !err.contains("matches the original file content"),
+            "batch-order message should not fire when old_str is absent from original too; got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_edits_scoped_batch_needle_in_buffer_outside_scope() {
+        // Edit 1 adds a line above, shifting content down. Edit 2 has a
+        // scope that was correct for the *original* file but is now stale
+        // because edit 1 shifted lines. The needle still exists in the
+        // buffer — just outside the stale scope window. The batch-order
+        // message must NOT fire; instead the scope-stale diagnostic from
+        // edit_not_found_diagnostic should produce the "outside the
+        // requested scope" hint.
+        let content = "line1\nline2\ntarget\nline4\n";
+        let edits = vec![
+            EditOp {
+                old_str: "line1".into(),
+                new_str: "line0\nline1".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+            EditOp {
+                old_str: "target".into(),
+                new_str: "TARGET".into(),
+                scope_start: Some(3),
+                scope_end: Some(3),
+            },
+        ];
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
+        assert!(
+            !err.contains("matches the original file content"),
+            "batch-order message should NOT fire when needle is still in buffer; got: {err}"
+        );
+        assert!(
+            err.contains("outside the requested scope"),
+            "scope-stale diagnostic should fire; got: {err}"
+        );
+    }
+
     // --- Success-report tests ---
 
     #[test]
@@ -1300,9 +1550,9 @@ mod tests {
     #[test]
     fn render_success_includes_context_around_single_edit() {
         let content = "one\ntwo\nTHREE\nfour\nfive\n";
-        let report = render_success(content, &[(3, 3)], "f.txt");
+        let report = render_success(content, &[(3, 3)], "f.txt", 5, 5);
         assert!(
-            report.starts_with("Applied 1 edit to f.txt.\n"),
+            report.starts_with("Applied 1 edit to f.txt. (5 lines, +0 vs original)\n"),
             "got: {report}"
         );
         assert!(report.contains("  1: one"), "got: {report}");
@@ -1337,8 +1587,11 @@ mod tests {
     #[test]
     fn render_success_coalesces_adjacent_windows() {
         let content = "a\nB\nC\nd\n";
-        let report = render_success(content, &[(2, 2), (3, 3)], "f.txt");
-        assert!(report.starts_with("Applied 2 edits"), "got: {report}");
+        let report = render_success(content, &[(2, 2), (3, 3)], "f.txt", 4, 4);
+        assert!(
+            report.starts_with("Applied 2 edits to f.txt. (4 lines, +0 vs original)\n"),
+            "got: {report}"
+        );
         assert_eq!(report.matches("  2: B").count(), 1, "got: {report}");
         assert_eq!(report.matches("  3: C").count(), 1, "got: {report}");
         assert!(
@@ -1350,8 +1603,11 @@ mod tests {
     #[test]
     fn render_success_coalesces_out_of_order_windows() {
         let content = "one\ntwo\nthree\nfour\nfive\n";
-        let report = render_success(content, &[(5, 5), (1, 1)], "f.txt");
-        assert!(report.starts_with("Applied 2 edits"), "got: {report}");
+        let report = render_success(content, &[(5, 5), (1, 1)], "f.txt", 5, 5);
+        assert!(
+            report.starts_with("Applied 2 edits to f.txt. (5 lines, +0 vs original)\n"),
+            "got: {report}"
+        );
         assert_eq!(report.matches("  1: one").count(), 1, "got: {report}");
         assert_eq!(report.matches("  5: five").count(), 1, "got: {report}");
         assert!(!report.contains("--"), "got: {report}");
@@ -1360,7 +1616,7 @@ mod tests {
     #[test]
     fn render_success_preserves_trailing_empty_line() {
         let content = "one\ntwo\n";
-        let report = render_success(content, &[(2, 2)], "f.txt");
+        let report = render_success(content, &[(2, 2)], "f.txt", 2, 2);
         assert!(report.contains("  3: "), "got: {report}");
     }
 
@@ -1395,8 +1651,11 @@ mod tests {
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let report = render_success(&content, &[(1, 40)], "f.txt");
-        assert!(report.starts_with("Applied 1 edit"), "got: {report}");
+        let report = render_success(&content, &[(1, 40)], "f.txt", 40, 40);
+        assert!(
+            report.starts_with("Applied 1 edit to f.txt. (40 lines, +0 vs original)\n"),
+            "got: {report}"
+        );
         assert!(report.contains("  1: line1"), "got: {report}");
         assert!(report.contains("  6: line6"), "got: {report}");
         assert!(!report.contains("  7: line7"), "got: {report}");
@@ -1421,8 +1680,11 @@ mod tests {
             (60, 60),
             (70, 70),
         ];
-        let report = render_success(&content, &ranges, "f.txt");
-        assert!(report.starts_with("Applied 8 edits"), "got: {report}");
+        let report = render_success(&content, &ranges, "f.txt", 70, 70);
+        assert!(
+            report.starts_with("Applied 8 edits to f.txt. (70 lines, +0 vs original)\n"),
+            "got: {report}"
+        );
         assert!(
             report.contains("(2 more context blocks not shown)"),
             "got: {report}"
@@ -1445,7 +1707,7 @@ mod tests {
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let report = render_success(&content, &[(10, 10), (17, 17), (24, 24)], "f.txt");
+        let report = render_success(&content, &[(10, 10), (17, 17), (24, 24)], "f.txt", 30, 30);
         assert!(report.contains("  10: line10"), "got: {report}");
         assert!(report.contains("  17: line17"), "got: {report}");
         assert!(report.contains("  24: line24"), "got: {report}");
