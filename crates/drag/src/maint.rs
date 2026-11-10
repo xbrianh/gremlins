@@ -161,8 +161,9 @@ pub(crate) async fn score_directory_maintainability(
 
     let mut handles: Vec<MaintEstimateTask> = Vec::new();
     let mut estimates_map: HashMap<String, Vec<HashMap<String, u8>>> = HashMap::new();
-    let mut cache_miss_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut skipped_dirs: HashSet<String> = HashSet::new();
+    // Serializes concurrent appends from the spawned per-estimate tasks.
+    let cache_mutex = Arc::new(Mutex::new(()));
 
     for dir in scoring_dirs {
         let dir_str = dir.to_string_lossy().into_owned();
@@ -198,8 +199,6 @@ pub(crate) async fn score_directory_maintainability(
             }
         }
 
-        cache_miss_keys.insert(dir_str.clone());
-
         // Build the multi-dimension prompt (manifest-based, no source embedded).
         let prompt = build_multi_dim_prompt(&dir_name, &manifest, maint_config);
 
@@ -212,6 +211,9 @@ pub(crate) async fn score_directory_maintainability(
             let maint_config = maint_config.clone();
             let dir_clone = dir.clone();
             let sem = Arc::clone(&scoring_sem);
+            let cache_key = cache_key.clone();
+            let maint_cache_path = maint_cache_path.clone();
+            let cache_mutex = Arc::clone(&cache_mutex);
 
             handles.push(tokio::spawn(async move {
                 for attempt in 0..MAX_MAINT_RETRIES {
@@ -233,6 +235,22 @@ pub(crate) async fn score_directory_maintainability(
                     .await
                     {
                         Ok(scores) => {
+                            // Persist this estimate immediately so it survives
+                            // a crash of a later estimate/directory.  Duplicate
+                            // keys are merged on load.
+                            let entry = MaintCacheEntry {
+                                key: cache_key.clone(),
+                                dir: dir_str.clone(),
+                                model: model_spec.clone(),
+                                estimates,
+                                raw_estimates: vec![scores.clone()],
+                            };
+                            let _guard = cache_mutex.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Err(e) = append_maint_cache_entry(&maint_cache_path, &entry) {
+                                eprintln!(
+                                    "  [{dir_name}] WARNING: failed to append maint cache: {e}"
+                                );
+                            }
                             return (dir_str, Ok(scores));
                         }
                         Err(e) => {
@@ -301,7 +319,6 @@ pub(crate) async fn score_directory_maintainability(
     }
 
     // --- Build result map: unified aggregation for cache hits and misses ---
-    let cache_mutex = Mutex::new(());
     let mut result: HashMap<String, DirMaintResult> = HashMap::new();
 
     for dir in scoring_dirs {
@@ -398,24 +415,6 @@ pub(crate) async fn score_directory_maintainability(
                  got {} estimates, expected {estimates}",
                 estimate_batch.len(),
             ));
-        }
-
-        let was_cache_miss = cache_miss_keys.contains(&dir_str);
-        if was_cache_miss {
-            let cache_key = compute_dir_cache_key(dir, estimates, config_hash)
-                .map_err(|e| format!("[{dir_name}] cache key computation failed: {e}"))?;
-
-            let entry = MaintCacheEntry {
-                key: cache_key,
-                dir: dir_str.clone(),
-                model: model_spec.to_string(),
-                estimates,
-                raw_estimates: estimate_batch.clone(),
-            };
-            let _guard = cache_mutex.lock().unwrap();
-            if let Err(e) = append_maint_cache_entry(&maint_cache_path, &entry) {
-                eprintln!("  [{dir_name}] WARNING: failed to append maint cache: {e}");
-            }
         }
 
         result.insert(
@@ -707,7 +706,39 @@ fn load_maint_cache(path: &Path) -> Result<HashMap<String, MaintCacheEntry>, Str
         }
         match serde_json::from_str::<MaintCacheEntry>(line) {
             Ok(entry) => {
-                map.insert(entry.key.clone(), entry);
+                // Each estimate is appended as its own line with the same key.
+                // Merge duplicates so all raw estimates are retained, capped
+                // at the target count to prevent stale lines from a previous
+                // interrupted run from inflating the count.
+                match map.entry(entry.key.clone()) {
+                    std::collections::hash_map::Entry::Occupied(mut slot) => {
+                        let existing: &mut MaintCacheEntry = slot.get_mut();
+                        // The cache key excludes the model, so a model
+                        // change means the existing entries belong to a
+                        // different scoring run.  Replace entirely
+                        // rather than merging estimates from different
+                        // models.
+                        if existing.model != entry.model {
+                            slot.insert(entry);
+                            continue;
+                        }
+                        let needed = entry.estimates.saturating_sub(existing.raw_estimates.len());
+                        existing
+                            .raw_estimates
+                            .extend(entry.raw_estimates.iter().take(needed).cloned());
+                        existing.estimates = existing.raw_estimates.len();
+                    }
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        // Normalize `estimates` to the actual raw count
+                        // so a partial entry from an interrupted run
+                        // (e.g. estimates=3 but only 1 raw_estimate
+                        // written before crash) is treated as a cache
+                        // miss rather than accepted with incomplete data.
+                        let mut entry = entry;
+                        entry.estimates = entry.raw_estimates.len();
+                        slot.insert(entry);
+                    }
+                }
             }
             Err(e) => {
                 eprintln!(
