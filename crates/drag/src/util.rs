@@ -8,6 +8,22 @@
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
+// Concurrency limiter
+// ---------------------------------------------------------------------------
+
+/// Maximum number of concurrent ephemeral gremlin runs during scoring.
+///
+/// Each run opens several file descriptors (state files, log files, raw
+/// stream, artifact files, sockets).  This cap keeps total open fds well
+/// under typical process soft limits (256 on macOS default; 1024 on Linux).
+///
+/// This is a compile-time constant that requires editing the source to
+/// change.  If you see "Too many open files" errors even with this bound,
+/// consider raising your process fd limit (`ulimit -n`) or lowering this
+/// value and rebuilding.
+pub(crate) const MAX_CONCURRENT_SCORING_RUNS: usize = 16;
+
+// ---------------------------------------------------------------------------
 // Cache state type
 // ---------------------------------------------------------------------------
 

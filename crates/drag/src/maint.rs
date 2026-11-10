@@ -12,8 +12,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use tokio::sync::Semaphore;
 
 use gremlins::builders::{output, AgentBuilder, DefinitionBuilder};
 use gremlins::executor::gremlin::{Gremlin, GremlinConfig};
@@ -123,6 +125,7 @@ pub(crate) struct MaintCacheEntry {
 /// subdirectories).  Callers should treat skipped directories as
 /// containers with no maintainability penalty rather than as scoring
 /// failures.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn score_directory_maintainability(
     model_spec: &str,
     verbose: bool,
@@ -131,6 +134,7 @@ pub(crate) async fn score_directory_maintainability(
     cache_state: CacheState,
     maint_config: &MaintainabilityConfig,
     config_hash: &str,
+    scoring_sem: Arc<Semaphore>,
 ) -> Result<(HashMap<String, DirMaintResult>, HashSet<String>), String> {
     if scoring_dirs.is_empty() {
         return Ok((HashMap::new(), HashSet::new()));
@@ -207,9 +211,17 @@ pub(crate) async fn score_directory_maintainability(
             let model_spec = model_spec.to_string();
             let maint_config = maint_config.clone();
             let dir_clone = dir.clone();
+            let sem = Arc::clone(&scoring_sem);
 
             handles.push(tokio::spawn(async move {
                 for attempt in 0..MAX_MAINT_RETRIES {
+                    // Acquire a semaphore permit before creating the
+                    // ephemeral gremlin so total open file descriptors
+                    // stay bounded.  The permit is dropped at the end of
+                    // each attempt so a sleeping/backoff task does not
+                    // hold a scoring slot.
+                    let _permit = sem.acquire().await
+                        .expect("scoring semaphore closed — cannot proceed without a permit");
                     match run_maint_agent(
                         &dir_name,
                         &prompt,
@@ -224,6 +236,8 @@ pub(crate) async fn score_directory_maintainability(
                             return (dir_str, Ok(scores));
                         }
                         Err(e) => {
+                            // Drop the permit before sleeping.
+                            drop(_permit);
                             if matches!(&e, CompAgentError::Retryable(_))
                                 && attempt + 1 < MAX_MAINT_RETRIES
                             {

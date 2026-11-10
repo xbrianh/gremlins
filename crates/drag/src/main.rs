@@ -6,14 +6,20 @@ mod util;
 
 use config::{ComprehensibilityConfig, ComprehensibilityDimensionDef, DragConfig, OutputFormat};
 use scoring::{build_drag_tree, compute_drag, compute_footprint, DragNode};
-use util::{extract_json, mean_with_ci, truncate, CacheState, CompAgentError};
+use util::{
+    extract_json, mean_with_ci, truncate, CacheState, CompAgentError, MAX_CONCURRENT_SCORING_RUNS,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+
+use tokio::sync::Semaphore;
 
 use gremlins::builders::{output, AgentBuilder, DefinitionBuilder};
 use gremlins::executor::gremlin::{Gremlin, GremlinConfig};
@@ -411,6 +417,11 @@ async fn run() -> Result<(), String> {
         });
     }
 
+    // Shared semaphore to bound concurrent ephemeral gremlin runs.
+    // Created once and passed to both scoring phases so the permit count
+    // is enforced globally regardless of how the phases are composed.
+    let scoring_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_SCORING_RUNS));
+
     // 7. Comprehensibility
     if config.estimates_per_survey < 1 {
         return Err("estimates_per_survey must be >= 1".to_string());
@@ -428,6 +439,7 @@ async fn run() -> Result<(), String> {
         module_cache,
         &config.comprehensibility,
         &comp_config_hash,
+        Arc::clone(&scoring_sem),
     )
     .await?;
 
@@ -487,6 +499,7 @@ async fn run() -> Result<(), String> {
                 cache_state.clone(),
                 &config.maintainability,
                 &maint_config_hash,
+                Arc::clone(&scoring_sem),
             )
             .await?;
             (maint_scores, skipped_dirs)
@@ -913,6 +926,7 @@ async fn score_comprehensibility(
     module_cache: HashMap<String, CacheEntry>,
     comprehensibility_config: &ComprehensibilityConfig,
     config_hash: &str,
+    scoring_sem: Arc<Semaphore>,
 ) -> Result<(), String> {
     // Validate dimensions before spawning any LLM tasks.
     if comprehensibility_config.dimensions.is_empty() {
@@ -1005,11 +1019,21 @@ async fn score_comprehensibility(
             let model_spec = model_spec.to_string();
             let comp_config = comprehensibility_config.clone();
             let config_hash = config_hash.to_string();
+            let sem = Arc::clone(&scoring_sem);
 
             handles.push(tokio::spawn(async move {
                 let cache_key = compute_cache_key(&source, &model_spec, estimates, &config_hash);
 
                 for attempt in 0..MAX_COMP_RETRIES {
+                    // Acquire a semaphore permit before creating the
+                    // ephemeral gremlin so total open file descriptors
+                    // stay bounded.  The permit is dropped at the end of
+                    // each attempt so a sleeping/backoff task does not
+                    // hold a scoring slot.
+                    let _permit = sem
+                        .acquire()
+                        .await
+                        .expect("scoring semaphore closed — cannot proceed without a permit");
                     match run_comp_agent(
                         &module,
                         &source,
@@ -1031,6 +1055,8 @@ async fn score_comprehensibility(
                             });
                         }
                         Err(e) => {
+                            // Drop the permit before sleeping.
+                            drop(_permit);
                             if matches!(&e, CompAgentError::Retryable(_))
                                 && attempt + 1 < MAX_COMP_RETRIES
                             {
