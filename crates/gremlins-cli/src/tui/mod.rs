@@ -253,6 +253,44 @@ fn start_watch_follow(
     *watch_follow_handle = Some(follow_task);
 }
 
+/// What a `Ctrl+W` press should do given the current app state.
+///
+/// Extracted from the event loop so the key routing can be unit-tested
+/// without constructing a terminal, live area, or daemon client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WatchKeyAction {
+    /// The chord is inert (history search or a screen-owned prompt).
+    NoOp,
+    /// From chat: enter the runs table and refresh its statuses.
+    EnterRuns,
+    /// From runs with an open pane: close the inline watch pane.
+    ClosePane,
+    /// From runs with a selection and no pane: open the pane for `id`.
+    OpenPane(String),
+    /// From runs with nothing to follow: return to chat.
+    ExitToChat,
+}
+
+/// Classify a `Ctrl+W` press from the current app state.
+fn watch_key_action(app: &App) -> WatchKeyAction {
+    if app.history_search.is_some() || app.screen.has_prompt() {
+        return WatchKeyAction::NoOp;
+    }
+    match &app.screen {
+        Screen::Chat => WatchKeyAction::EnterRuns,
+        Screen::Runs => {
+            if app.watch_following.is_some() {
+                WatchKeyAction::ClosePane
+            } else if let Some(selected) = app.watch_selection.clone() {
+                WatchKeyAction::OpenPane(selected)
+            } else {
+                WatchKeyAction::ExitToChat
+            }
+        }
+        Screen::Debug { .. } => WatchKeyAction::NoOp,
+    }
+}
+
 /// Ctrl+C is treated as a reset key (exactly like Esc). A second press
 /// within this window quits the TUI; a later press becomes a fresh first
 /// press. `/quit` and Ctrl+D on empty input remain the explicit exits.
@@ -1505,6 +1543,40 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     &mut watch_follow_handle,
                                     &mut watch_follow_generation,
                                 );
+                            }
+                        }
+                        KeyCode::Char('w')
+                            if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                        {
+                            // Ctrl+W enters/exits the watch (Runs) screen.
+                            match watch_key_action(&app) {
+                                WatchKeyAction::NoOp => continue,
+                                WatchKeyAction::EnterRuns => {
+                                    close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
+                                    app.show_runs();
+                                    live_area.show_runs();
+                                    app.ensure_watch_selection();
+                                    status_generation = status_generation.wrapping_add(1);
+                                    fetch_run_statuses(&client, &status_tx, status_generation);
+                                }
+                                WatchKeyAction::ClosePane => {
+                                    close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
+                                }
+                                WatchKeyAction::OpenPane(selected) => {
+                                    start_watch_follow(
+                                        &mut app,
+                                        live_area,
+                                        &client,
+                                        selected,
+                                        &log_tx,
+                                        &mut watch_follow_handle,
+                                        &mut watch_follow_generation,
+                                    );
+                                }
+                                WatchKeyAction::ExitToChat => {
+                                    app.exit_screen();
+                                    live_area.exit_screen_view();
+                                }
                             }
                         }
                         KeyCode::Char('g')
@@ -2938,7 +3010,8 @@ mod tests {
     use super::{
         build_chat_request, compact_tokens, ctrl_c_should_quit, format_cache_pct, format_cost_usd,
         format_ls_response, format_socket_response, format_token_count, interrupt_press,
-        stats_title, usage_field, usage_title_part, InterruptAction,
+        stats_title, usage_field, usage_title_part, watch_key_action, App, InterruptAction, Screen,
+        WatchKeyAction,
     };
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
@@ -3478,5 +3551,56 @@ mod tests {
         );
         // prompt_tokens of 0 should render as "0"
         assert!(row.contains('0'), "prompt 0 should render as 0: {row}");
+    }
+
+    // ── watch_key_action ──
+
+    #[test]
+    fn watch_key_action_enters_runs_from_chat() {
+        let app = App::new();
+        assert_eq!(watch_key_action(&app), WatchKeyAction::EnterRuns);
+    }
+
+    #[test]
+    fn watch_key_action_opens_selected_run_pane() {
+        let mut app = App::new();
+        app.screen = Screen::Runs;
+        app.watch_selection = Some("gr-1".to_string());
+        assert_eq!(
+            watch_key_action(&app),
+            WatchKeyAction::OpenPane("gr-1".to_string())
+        );
+    }
+
+    #[test]
+    fn watch_key_action_closes_open_pane_before_selection() {
+        let mut app = App::new();
+        app.screen = Screen::Runs;
+        app.watch_selection = Some("gr-1".to_string());
+        app.watch_following = Some("gr-1".to_string());
+        assert_eq!(watch_key_action(&app), WatchKeyAction::ClosePane);
+    }
+
+    #[test]
+    fn watch_key_action_exits_to_chat_when_runs_table_is_empty() {
+        let mut app = App::new();
+        app.screen = Screen::Runs;
+        assert_eq!(watch_key_action(&app), WatchKeyAction::ExitToChat);
+    }
+
+    #[test]
+    fn watch_key_action_is_inert_during_history_search() {
+        let mut app = App::new();
+        app.enter_search();
+        assert_eq!(watch_key_action(&app), WatchKeyAction::NoOp);
+    }
+
+    #[test]
+    fn watch_key_action_is_inert_when_debug_prompt_owns_input() {
+        let mut app = App::new();
+        app.screen = Screen::Debug {
+            id: "gr-1".to_string(),
+        };
+        assert_eq!(watch_key_action(&app), WatchKeyAction::NoOp);
     }
 }

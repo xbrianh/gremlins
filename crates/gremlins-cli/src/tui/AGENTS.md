@@ -143,6 +143,15 @@ typed `ScreenView` body across the whole terminal; the chat scene
 3. Add a match arm in the `CommandResult` handler in `mod.rs` `run_app()`
 4. Update `help_text()` in `commands.rs`
 
+## Adding a New Keybinding
+
+1. Add a `KeyCode` match arm in the `ct_rx` handler in `mod.rs` `run_app()`
+2. Mirror the guard logic from existing chords: inert during history search,
+   inert when a debug prompt owns input, screen-gated to Chat and/or Runs.
+3. Add the chord to the keybindings section of `help_text()` in `commands.rs`
+4. Update the keybindings table in `crates/gremlins/prompts/chat_system.md`
+5. Update `DESIGN.md` if the binding changes screen-level behaviour
+
 ## Adding a New ChatEvent
 
 1. Add variant to `ChatEvent` in `chat.rs`
