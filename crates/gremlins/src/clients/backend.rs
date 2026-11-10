@@ -140,11 +140,6 @@ pub trait Backend: Send + Sync {
         "unknown"
     }
 
-    /// List all models this backend can serve (unfiltered).
-    fn models(&self) -> IndexMap<String, DynModel<Completion>> {
-        IndexMap::new()
-    }
-
     /// Return the last `RunParams` that were used, for resume support.
     fn last_run_params(&self) -> Result<RunParams, ClientError> {
         Err(ClientError::Runtime {
