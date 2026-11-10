@@ -7,7 +7,10 @@ Multiple Task calls issued in the same message execute concurrently
 results in a single round-trip.
 
 Parallel Tasks launched in the same message share one working directory.
-Each worker can see the other workers' in-progress changes.
+Each worker can see the other workers' in-progress changes. Expect
+concurrent modifications from sibling Tasks — scope edits narrowly
+to your assigned files and avoid touching files owned by other
+parallel workers.
 
 Three `kind` variants:
 
