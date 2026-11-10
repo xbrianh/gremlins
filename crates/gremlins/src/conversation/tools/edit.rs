@@ -490,33 +490,88 @@ fn apply_edits(
 
         if match_positions.is_empty() {
             // Fuzzy fallback: normalize Unicode confusables and retry.
+            // Always attempt when exact match fails — both the query may
+            // contain confusables and the buffer may contain confusables.
             let normalized_old = normalize_for_fuzzy_match(old_str);
-            if normalized_old != *old_str {
-                let normalized_window = normalize_for_fuzzy_match(search_window);
-                if let Some(fuzzy_pos) = normalized_window.find(normalized_old.as_str()) {
-                    // Map the normalized position back to the original buffer.
-                    // Walk characters in parallel: advance `orig_pos` for each
-                    // char in the original until we've consumed `fuzzy_pos` chars
-                    // in the normalized view.
-                    let mut orig_pos = 0usize;
-                    let mut norm_consumed = 0usize;
-                    let orig_chars: Vec<char> = search_window.chars().collect();
-                    for &oc in &orig_chars {
-                        if norm_consumed >= fuzzy_pos {
-                            break;
-                        }
-                        let norm_char = normalize_for_fuzzy_match(&oc.to_string());
-                        norm_consumed += norm_char.chars().count();
-                        orig_pos += oc.len_utf8();
+            let normalized_window = normalize_for_fuzzy_match(search_window);
+            let mut fuzzy_search_from = 0;
+            while let Some(fuzzy_pos) =
+                normalized_window[fuzzy_search_from..].find(normalized_old.as_str())
+            {
+                let norm_match_start = fuzzy_search_from + fuzzy_pos;
+                fuzzy_search_from = norm_match_start + 1; // advance by 1 for overlapping
+
+                // Map the normalized byte position back to the original buffer.
+                // Walk original chars, accumulate normalized *byte* lengths.
+                let mut orig_pos = 0usize;
+                let mut norm_bytes_consumed = 0usize;
+                for (byte_idx, oc) in search_window.char_indices() {
+                    if norm_bytes_consumed >= norm_match_start {
+                        break;
                     }
-                    let abs_pos = orig_pos + window_offset;
-                    // Verify the original `old_str` at this position has the
-                    // same length — we already know the normalized forms match.
-                    let old_len = old_str.len();
-                    if abs_pos + old_len <= buffer.len() {
-                        match_positions.push(abs_pos);
-                    }
+                    let norm_char = normalize_for_fuzzy_match(&oc.to_string());
+                    norm_bytes_consumed += norm_char.len();
+                    orig_pos = byte_idx;
                 }
+                // If we haven't consumed enough, advance past the last char
+                if norm_bytes_consumed < norm_match_start {
+                    // Match starts beyond the last full char; skip.
+                    continue;
+                }
+                let abs_pos = orig_pos + window_offset;
+
+                // Compute the span length in the original buffer: walk
+                // forward until the accumulated normalized output reaches
+                // `normalized_old.len()` bytes.
+                let mut span_len = 0usize;
+                let mut norm_span_bytes = 0usize;
+                for (_, oc) in search_window[orig_pos..].char_indices() {
+                    if norm_span_bytes >= normalized_old.len() {
+                        break;
+                    }
+                    let norm_char = normalize_for_fuzzy_match(&oc.to_string());
+                    norm_span_bytes += norm_char.len();
+                    span_len += oc.len_utf8();
+                }
+                // Verify the collected span normalizes to the same string.
+                let matched_bytes =
+                    &buffer.as_bytes()[abs_pos..(abs_pos + span_len).min(buffer.len())];
+                let matched_str = String::from_utf8_lossy(matched_bytes);
+                if normalize_for_fuzzy_match(&matched_str) == normalized_old {
+                    match_positions.push(abs_pos);
+                }
+            }
+
+            if !match_positions.is_empty() {
+                // Fuzzy match(es) found. Compute the actual span length
+                // for the first match — it may differ from old_str.len().
+                let fuzzy_start = match_positions[0];
+                let mut fuzzy_span_len = 0usize;
+                let mut norm_span_bytes = 0usize;
+                for (_, oc) in buffer[fuzzy_start..].char_indices() {
+                    if norm_span_bytes >= normalized_old.len() {
+                        break;
+                    }
+                    let norm_char = normalize_for_fuzzy_match(&oc.to_string());
+                    norm_span_bytes += norm_char.len();
+                    fuzzy_span_len += oc.len_utf8();
+                }
+                // Apply the replacement with the computed span.
+                buffer.replace_range(fuzzy_start..fuzzy_start + fuzzy_span_len, &edit.new_str);
+                applied.push(AppliedEdit {
+                    start: fuzzy_start,
+                    old_len: fuzzy_span_len,
+                    new_len: edit.new_str.len(),
+                });
+                // Check uniqueness; bail if > 1 fuzzy match found.
+                if match_positions.len() > 1 {
+                    return Err(format!(
+                        "Error: old_string is not unique after fuzzy matching in {file_path} (edit {}) — {} ambiguous matches found. Try using the exact characters from the file.",
+                        i + 1,
+                        match_positions.len()
+                    ));
+                }
+                continue; // proceed to next edit
             }
 
             if match_positions.is_empty() {
@@ -689,6 +744,7 @@ fn render_success(
     file_path: &str,
     original_lines: usize,
     final_lines: usize,
+    diff: Option<&str>,
 ) -> String {
     let offsets = compute_line_offsets(content);
     let last_line = offsets.len();
@@ -768,6 +824,12 @@ fn render_success(
             "({remaining} more context block{} not shown)\n",
             if remaining == 1 { "" } else { "s" }
         ));
+    }
+
+    // Thread the diff block after the summary line but before context snippets.
+    if let Some(d) = diff {
+        out.push('\n');
+        out.push_str(d);
     }
 
     for (interval_idx, &(start, end)) in intervals.iter().enumerate() {
@@ -853,8 +915,12 @@ fn repair_edit_args(args: serde_json::Value) -> serde_json::Value {
 
 /// Compute a simple line-based unified diff between `original` and `updated`.
 /// Walk forward for a common prefix, backward for a common suffix, and emit
-/// the changed lines between them.
-fn compute_diff(original: &str, updated: &str) -> String {
+/// the changed lines between them. Falls back to a note when `lines()` obscures
+/// changes (e.g. a trailing newline was added/removed).
+fn compute_diff(original: &str, updated: &str) -> Option<String> {
+    if original == updated {
+        return None;
+    }
     let orig_lines: Vec<&str> = original.lines().collect();
     let upd_lines: Vec<&str> = updated.lines().collect();
 
@@ -878,31 +944,32 @@ fn compute_diff(original: &str, updated: &str) -> String {
     let upd_start = prefix;
     let upd_end = upd_lines.len().saturating_sub(suffix);
 
-    // If nothing changed, return empty
+    // If lines() obscured the change (e.g. trailing newline), produce a note.
     if orig_start >= orig_end && upd_start >= upd_end {
-        return String::new();
+        return Some("```diff\n(whitespace-only change)\n```\n".to_string());
     }
 
     let mut diff = String::from("```diff\n");
-    for line in &orig_lines[orig_start..orig_end] {
-        diff.push_str(&format!("-{}\n", line));
+    if orig_start < orig_end {
+        for line in &orig_lines[orig_start..orig_end] {
+            diff.push_str(&format!("-{}\n", line));
+        }
     }
-    for line in &upd_lines[upd_start..upd_end] {
-        diff.push_str(&format!("+{}\n", line));
+    if upd_start < upd_end {
+        for line in &upd_lines[upd_start..upd_end] {
+            diff.push_str(&format!("+{}\n", line));
+        }
     }
     diff.push_str("```\n");
-    diff
+    Some(diff)
 }
 
 /// Detect the line ending style from the first 1KB of content.
 /// Returns `"\r\n"` if CRLF is found, `None` for LF (the default).
 fn detect_line_ending(content: &str) -> Option<&'static str> {
-    let scan = if content.len() > 1024 {
-        &content[..1024]
-    } else {
-        content
-    };
-    if scan.contains("\r\n") {
+    let bytes = content.as_bytes();
+    let scan = &bytes[..bytes.len().min(1024)];
+    if scan.windows(2).any(|w| w == b"\r\n") {
         Some("\r\n")
     } else {
         None
@@ -944,7 +1011,8 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
     };
     let had_bom = content.starts_with('\u{FEFF}');
     let line_ending = detect_line_ending(&content);
-    let content = strip_bom(&content).to_string();
+    // Normalize to LF before editing so CRLF files don't double-convert.
+    let content = strip_bom(&content).replace("\r\n", "\n");
     let original_lines = content.lines().count();
 
     let edits = match parse_edits(edits_arr, file_path) {
@@ -956,24 +1024,31 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
         Ok(u) => u,
         Err(e) => return e,
     };
-    // Restore line endings
+    // Restore line endings (safe now: the buffer is pure LF so no double-convert).
     if line_ending == Some("\r\n") {
         updated = updated.replace('\n', "\r\n");
     }
-    // Restore BOM
+    let final_lines = updated.lines().count();
+
+    // Build result and diff against the BOM-stripped, LF-normalized content
+    // before the BOM is re-prepended, so the diff reflects real changes.
+    let diff = compute_diff(&content, &updated);
+    let result = render_success(
+        &updated,
+        &ranges,
+        file_path,
+        original_lines,
+        final_lines,
+        diff.as_deref(),
+    );
+
+    // Restore BOM after diff/render so it doesn't leak into context snippets.
     if had_bom {
         updated.insert(0, '\u{FEFF}');
     }
-    let final_lines = updated.lines().count();
 
     if let Err(e) = std::fs::write(&path, &updated) {
         return format!("Error: {e}");
-    }
-    let mut result = render_success(&updated, &ranges, file_path, original_lines, final_lines);
-    let diff = compute_diff(&content, &updated);
-    if !diff.is_empty() {
-        result.push('\n');
-        result.push_str(&diff);
     }
     result
 }
@@ -1755,7 +1830,7 @@ mod tests {
     #[test]
     fn render_success_includes_context_around_single_edit() {
         let content = "one\ntwo\nTHREE\nfour\nfive\n";
-        let report = render_success(content, &[(3, 3)], "f.txt", 5, 5);
+        let report = render_success(content, &[(3, 3)], "f.txt", 5, 5, None);
         assert!(
             report.starts_with("Applied 1 edit to f.txt. (5 lines, +0 vs original)\n"),
             "got: {report}"
@@ -1792,7 +1867,7 @@ mod tests {
     #[test]
     fn render_success_coalesces_adjacent_windows() {
         let content = "a\nB\nC\nd\n";
-        let report = render_success(content, &[(2, 2), (3, 3)], "f.txt", 4, 4);
+        let report = render_success(content, &[(2, 2), (3, 3)], "f.txt", 4, 4, None);
         assert!(
             report.starts_with("Applied 2 edits to f.txt. (4 lines, +0 vs original)\n"),
             "got: {report}"
@@ -1808,7 +1883,7 @@ mod tests {
     #[test]
     fn render_success_coalesces_out_of_order_windows() {
         let content = "one\ntwo\nthree\nfour\nfive\n";
-        let report = render_success(content, &[(5, 5), (1, 1)], "f.txt", 5, 5);
+        let report = render_success(content, &[(5, 5), (1, 1)], "f.txt", 5, 5, None);
         assert!(
             report.starts_with("Applied 2 edits to f.txt. (5 lines, +0 vs original)\n"),
             "got: {report}"
@@ -1821,7 +1896,7 @@ mod tests {
     #[test]
     fn render_success_preserves_trailing_empty_line() {
         let content = "one\ntwo\n";
-        let report = render_success(content, &[(2, 2)], "f.txt", 2, 2);
+        let report = render_success(content, &[(2, 2)], "f.txt", 2, 2, None);
         assert!(report.contains("  3: "), "got: {report}");
     }
 
@@ -1856,7 +1931,7 @@ mod tests {
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let report = render_success(&content, &[(1, 40)], "f.txt", 40, 40);
+        let report = render_success(&content, &[(1, 40)], "f.txt", 40, 40, None);
         assert!(
             report.starts_with("Applied 1 edit to f.txt. (40 lines, +0 vs original)\n"),
             "got: {report}"
@@ -1885,7 +1960,7 @@ mod tests {
             (60, 60),
             (70, 70),
         ];
-        let report = render_success(&content, &ranges, "f.txt", 70, 70);
+        let report = render_success(&content, &ranges, "f.txt", 70, 70, None);
         assert!(
             report.starts_with("Applied 8 edits to f.txt. (70 lines, +0 vs original)\n"),
             "got: {report}"
@@ -1912,7 +1987,14 @@ mod tests {
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let report = render_success(&content, &[(10, 10), (17, 17), (24, 24)], "f.txt", 30, 30);
+        let report = render_success(
+            &content,
+            &[(10, 10), (17, 17), (24, 24)],
+            "f.txt",
+            30,
+            30,
+            None,
+        );
         assert!(report.contains("  10: line10"), "got: {report}");
         assert!(report.contains("  17: line17"), "got: {report}");
         assert!(report.contains("  24: line24"), "got: {report}");
