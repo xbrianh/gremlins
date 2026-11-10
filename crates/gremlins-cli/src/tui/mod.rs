@@ -1514,7 +1514,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             if app.history_search.is_some() {
                                 continue;
                             }
-                            // Inert on Debug (prompt owns input).
+                            // Inert while any prompt owns the input bar.
                             if app.screen.has_prompt() {
                                 continue;
                             }
@@ -1523,6 +1523,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
                                     app.show_runs();
                                     live_area.show_runs();
+                                    app.ensure_watch_selection();
                                     status_generation = status_generation.wrapping_add(1);
                                     fetch_run_statuses(&client, &status_tx, status_generation);
                                 }
@@ -1530,9 +1531,19 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     if app.watch_following.is_some() {
                                         // Close the open inline pane.
                                         close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
+                                    } else if let Some(selected) = app.watch_selection.clone() {
+                                        // No pane open — open it, mirroring Ctrl+O.
+                                        start_watch_follow(
+                                            &mut app,
+                                            live_area,
+                                            &client,
+                                            selected,
+                                            &log_tx,
+                                            &mut watch_follow_handle,
+                                            &mut watch_follow_generation,
+                                        );
                                     } else {
-                                        // No pane open — exit back to chat.
-                                        close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
+                                        // Nothing to follow — exit back to chat.
                                         app.exit_screen();
                                         live_area.exit_screen_view();
                                     }
