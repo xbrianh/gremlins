@@ -839,7 +839,7 @@ fn load_cache(path: &Path) -> Result<HashMap<String, CacheEntry>, String> {
     }
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read cache file {}: {e}", path.display()))?;
-    let mut map = HashMap::new();
+    let mut map: HashMap<String, CacheEntry> = HashMap::new();
     for (line_no, line) in content.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
@@ -847,7 +847,18 @@ fn load_cache(path: &Path) -> Result<HashMap<String, CacheEntry>, String> {
         }
         match serde_json::from_str::<CacheEntry>(line) {
             Ok(entry) => {
-                map.insert(entry.key.clone(), entry);
+                match map.entry(entry.key.clone()) {
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        // Duplicate key: merge the new raw estimates into the
+                        // existing entry and refresh the estimate count.
+                        let existing = e.get_mut();
+                        existing.raw_estimates.extend(entry.raw_estimates);
+                        existing.estimates = existing.raw_estimates.len();
+                    }
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(entry);
+                    }
+                }
             }
             Err(e) => {
                 eprintln!(
@@ -908,11 +919,6 @@ struct CompEstimate {
     module: String,
     /// Per-dimension 0–4 scores from the LLM. Aggregation is deferred.
     dim_scores: ComprehensibilityScores,
-    /// Fields for deferred cache writing of raw estimates.
-    abs_path: String,
-    model_spec: String,
-    cache_key: String,
-    token_count: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -975,6 +981,10 @@ async fn score_comprehensibility(
         .map(|s| (s.module.clone(), s.token_count))
         .collect();
 
+    // Clone the cache path so each spawned task can write its own entry as
+    // soon as its estimate succeeds.
+    let cache_state = cache_state.clone();
+
     for (module, file, _pkg) in modules.iter() {
         // ── cache hit (pre-computed in run()) ──
         if let Some(entry) = module_cache.get(module.as_str()) {
@@ -1020,6 +1030,7 @@ async fn score_comprehensibility(
             let comp_config = comprehensibility_config.clone();
             let config_hash = config_hash.to_string();
             let sem = Arc::clone(&scoring_sem);
+            let cache_path = cache_state.clone();
 
             handles.push(tokio::spawn(async move {
                 let cache_key = compute_cache_key(&source, &model_spec, estimates, &config_hash);
@@ -1045,13 +1056,25 @@ async fn score_comprehensibility(
                     .await
                     {
                         Ok(dim_scores) => {
+                            // Persist this estimate immediately so a partial
+                            // run still records whatever succeeded.  A cache
+                            // write failure must not fail the estimate.
+                            let entry = CacheEntry {
+                                key: cache_key.clone(),
+                                file: abs_path.clone(),
+                                model: model_spec.clone(),
+                                token_count,
+                                estimates,
+                                raw_estimates: vec![dim_scores.clone()],
+                            };
+                            if let Err(e) = append_cache_entry(&cache_path, &entry) {
+                                eprintln!(
+                                    "  [{module}] WARNING: failed to append cache entry: {e}"
+                                );
+                            }
                             return Ok(CompEstimate {
                                 module,
                                 dim_scores,
-                                abs_path,
-                                model_spec,
-                                cache_key,
-                                token_count,
                             });
                         }
                         Err(e) => {
@@ -1169,26 +1192,6 @@ async fn score_comprehensibility(
         s.comprehensibility = Some(com);
         s.ci_lower = Some(lo);
         s.ci_upper = Some(hi);
-
-        // ── Write cache entry with all raw estimates (cache-miss only) ──
-        if let Some(estimates_vec) = estimates_map.get(module.as_str()) {
-            if let Some(first) = estimates_vec.first() {
-                let cp = &cache_state;
-                let raw: Vec<ComprehensibilityScores> =
-                    estimates_vec.iter().map(|e| e.dim_scores.clone()).collect();
-                let entry = CacheEntry {
-                    key: first.cache_key.clone(),
-                    file: first.abs_path.clone(),
-                    model: first.model_spec.clone(),
-                    token_count: first.token_count,
-                    estimates,
-                    raw_estimates: raw,
-                };
-                if let Err(e) = append_cache_entry(cp, &entry) {
-                    eprintln!("  [{module}] WARNING: failed to append cache entry: {e}");
-                }
-            }
-        }
     }
 
     Ok(())
