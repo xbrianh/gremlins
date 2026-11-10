@@ -2096,7 +2096,7 @@ async fn handle_chat_model(_request: &Value, session: &SessionHandle) -> Value {
 async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
     // Extract the data we need under the lock, then drop it before the
     // expensive compaction call so other supervisor commands are not blocked.
-    let (client, model, verbatim_history) = {
+    let (client, verbatim_history) = {
         let mut s = session.lock().await;
         let id = match s.chat_ids.iter().next() {
             Some(id) => id.clone(),
@@ -2120,27 +2120,26 @@ async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
             return error_response("cannot compact an interrupted chat turn");
         }
         let client = gremlin.client.clone();
-        // The active client is authoritative: a `/model` change and a
-        // subsequent turn rebuild it, while `default_model` on the definition
-        // may still name the original model (or provider).
-        let model = client.model().to_string();
         let verbatim_history = crate::executor::run::read_chat_conversation(gremlin, None).await;
-        (client, model, verbatim_history)
+        (client, verbatim_history)
     };
 
-    let mut conv = crate::executor::run::build_compaction_conversation(
-        &client,
-        model,
-        true, // is_chat
+    let backend = match client.get_or_build_backend() {
+        Ok(b) => b,
+        Err(e) => {
+            return error_response(&format!("failed to build backend for compaction: {e}"));
+        }
+    };
+    let mut conv = crate::conversation::standard::StandardConversation::new(
+        "",
+        false,
         Some(verbatim_history),
+        Some(backend.clone()),
     );
 
-    // Use the default chat system prompt — the same one passed to
-    // create_chat_gremlin and therefore the same one the conversation
-    // was built against.
     let system_prompt = crate::clients::system_prompts::chat_system_prompt();
 
-    match conv.compact(Some(system_prompt)).await {
+    match conv.compact(Some(system_prompt), None).await {
         Some(report) => {
             // Persist only the committed transcript — the conversation was
             // built with an empty pending prompt, so `messages()` would append

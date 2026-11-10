@@ -1,6 +1,15 @@
 use crate::task_kind::TaskKind;
 use rig_core::completion::ToolDefinition;
 
+/// Whether tools are available to the model. NoTools mode produces zero
+/// tool definitions, so the model cannot call any tool — including Task and
+/// Done. Used by single-turn naked completions (local compaction, etc.).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolMode {
+    Full,
+    NoTools,
+}
+
 /// Maximum number of concurrent tool calls the harness will execute from a
 /// single model message. General tools (Read, Write, Grep, Glob, etc.) queue
 /// when this limit is exceeded — only Task calls are subject to a hard
@@ -416,7 +425,14 @@ fn tool_parameters(spec: &ToolSpec) -> serde_json::Value {
     })
 }
 
-pub(crate) fn tool_definitions(filter: Option<&[String]>, is_chat: bool) -> Vec<ToolDefinition> {
+pub(crate) fn tool_definitions(
+    filter: Option<&[String]>,
+    is_chat: bool,
+    mode: ToolMode,
+) -> Vec<ToolDefinition> {
+    if mode == ToolMode::NoTools {
+        return Vec::new();
+    }
     let mut all: Vec<ToolDefinition> = Vec::new();
     for spec in TOOL_SPECS {
         // LoadSkill and WebSearch are chat-only; every other tool is always

@@ -127,7 +127,10 @@ macro_rules! declare_openai_backend {
                 Some(self.state.resolved.clone())
             }
 
-            fn make_model(&self, spec: &str) -> Option<$crate::clients::model::GremlinsModel> {
+            fn make_model(
+                &self,
+                spec: &str,
+            ) -> Option<rig_core::driver::DynModel<rig_core::operation::Completion>> {
                 $crate::clients::openai_protocol::make_model(&self.state, $provider, spec)
             }
 
@@ -135,6 +138,14 @@ macro_rules! declare_openai_backend {
                 raw: &indexmap::IndexMap<String, String>,
             ) -> Result<$crate::clients::params::ResolvedParams, String> {
                 $crate::clients::openai_protocol::resolve_openai_protocol($provider, raw)
+            }
+
+            fn model(&self) -> &str {
+                &self.state.model
+            }
+
+            fn name(&self) -> &'static str {
+                $provider
             }
         }
     };

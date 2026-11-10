@@ -17,12 +17,14 @@ use crate::clients::cancel::CancelToken;
 use crate::clients::cancels::CancelsMap;
 use crate::clients::github_auth;
 use crate::clients::interactive::InteractiveSession;
-use crate::clients::model::GremlinsModel;
+
 use crate::clients::native::NativeRunState;
 use crate::clients::openai_protocol;
 use crate::clients::params::{self, ResolvedParams};
 use crate::clients::protocol::CompletedRun;
 use crate::clients::token_provider::{TokenProvider, TokenProviderError};
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
 
 const PROVIDER_NAME: &str = "copilot";
 const DEFAULT_MODEL: &str = "gpt-4o";
@@ -572,7 +574,7 @@ impl CopilotBackend {
 
 #[async_trait]
 impl Backend for CopilotBackend {
-    fn make_model(&self, spec: &str) -> Option<GremlinsModel> {
+    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
         let (provider, model) = openai_protocol::provider_and_model(spec)?;
         if provider == PROVIDER_NAME {
             let mut mdl = self.state.client.completion(&model);
@@ -585,10 +587,7 @@ impl Backend for CopilotBackend {
             if self.state.tool_result_array_content {
                 mdl.wire = mdl.wire.with_tool_result_array_content();
             }
-            Some(GremlinsModel::new(
-                mdl.erase(),
-                crate::config::max_prompt_bytes(),
-            ))
+            Some(mdl.erase())
         } else {
             None
         }
@@ -619,10 +618,7 @@ impl Backend for CopilotBackend {
             if tool_result_array_content {
                 mdl.wire = mdl.wire.with_tool_result_array_content();
             }
-            Ok(GremlinsModel::new(
-                mdl.erase(),
-                crate::config::max_prompt_bytes(),
-            ))
+            Ok(mdl.erase())
         };
 
         self.state
@@ -639,6 +635,14 @@ impl Backend for CopilotBackend {
     }
 
     super::delegate_native_run_state!(state.native);
+
+    fn model(&self) -> &str {
+        &self.state.native.model
+    }
+
+    fn name(&self) -> &'static str {
+        "copilot"
+    }
 
     fn resolve_params(raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
         // Validate the typed flags strictly (so a malformed value errors at

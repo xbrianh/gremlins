@@ -1,9 +1,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use super::model::GremlinsModel;
 use super::tools::{self, AgentLoopRuntime};
 use crate::task_kind::TaskKind;
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
 
 pub(crate) use super::task_models::*;
 
@@ -58,7 +59,7 @@ fn task_prefix(base: &str, chain: &str) -> String {
 /// exhaust the bound between them. Only genuine nesting increments depth.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn make_task_runner(
-    model: GremlinsModel,
+    model: DynModel<Completion>,
     task_model_selector: Option<TaskModelSelector>,
     tool_filter: Option<Vec<String>>,
     cancel: Arc<super::cancel::CancelToken>,
@@ -95,7 +96,7 @@ pub(crate) fn make_task_runner(
 
 #[allow(clippy::too_many_arguments)]
 fn make_task_runner_at_depth(
-    model: GremlinsModel,
+    model: DynModel<Completion>,
     task_model_selector: Option<TaskModelSelector>,
     tool_filter: Option<Vec<String>>,
     cancel: Arc<super::cancel::CancelToken>,
@@ -291,14 +292,7 @@ mod tests {
     use super::*;
     use crate::clients::conversation::ConversationStub;
     use rig_core::completion::Message;
-    use rig_core::driver::DynModel;
-    use rig_core::operation::Completion;
-
     use std::collections::{HashMap, HashSet};
-
-    fn gm(model: DynModel<Completion>) -> GremlinsModel {
-        GremlinsModel::new(model, crate::config::DEFAULT_MAX_PROMPT_BYTES)
-    }
 
     /// A [`TaskModel`] wrapping a mock completion model with no request
     /// options, for selector tests that distinguish the built model by its
@@ -306,7 +300,7 @@ mod tests {
     fn gm_mock_task() -> TaskModel {
         let model = rig_core::test_utils::MockCompletionModel::from_turns([]);
         TaskModel {
-            model: gm(model.erase()),
+            model: model.erase(),
             temperature: None,
             max_tokens: None,
             extra: None,
@@ -358,7 +352,7 @@ mod tests {
     #[test]
     fn task_model_selector_builds_matched_model_or_defaults() {
         let target = TaskModel {
-            model: gm(rig_core::test_utils::MockCompletionModel::from_turns([]).erase()),
+            model: rig_core::test_utils::MockCompletionModel::from_turns([]).erase(),
             temperature: Some(0.2),
             max_tokens: Some(123),
             extra: Some(serde_json::json!({ "parallel_tool_calls": true })),
@@ -516,7 +510,7 @@ mod tests {
 
         let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             None,
             None,
             cancel,
@@ -559,11 +553,13 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_task_prompt_returns_string_without_calling_model() {
+        let _env = crate::test_support::EnvGuard::lock();
+        crate::config::set_test_max_prompt_bytes(16);
         let ctx = depth_test_ctx();
         let inner = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
             rig_core::test_utils::MockStreamEvent::text("should not run"),
         ]]);
-        let model = GremlinsModel::new(inner.clone().erase(), 16);
+        let model = inner.clone().erase();
         let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
             model,
@@ -589,16 +585,9 @@ mod tests {
         )
         .await;
         assert!(
-            output.output.starts_with("Task error: prompt size "),
-            "oversized task prompt must surface as a Task error string, got: {}",
-            output.output
-        );
-        assert!(
-            output
-                .output
-                .contains("exceeds configured limit of 16 bytes"),
-            "oversized task prompt must report limit and actual size, got: {}",
-            output.output
+            output.output.starts_with("Task error: prompt size"),
+            "oversized task prompt must be rejected before reaching the model, got: {}",
+            output.output,
         );
         assert!(
             inner.requests().is_empty(),
@@ -638,7 +627,7 @@ mod tests {
 
         let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
-            gm(child.clone().erase()),
+            child.clone().erase(),
             Some(selector),
             None,
             cancel,
@@ -687,6 +676,7 @@ mod tests {
     /// child provider.
     #[tokio::test]
     async fn task_override_uses_target_resolved_options() {
+        let _env = crate::test_support::EnvGuard::lock();
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
         let ctx = depth_test_ctx();
@@ -726,7 +716,7 @@ mod tests {
         let child_handle = child.clone();
         let factory: TaskModelFactory = Arc::new(move |_spec: &str| {
             Ok(TaskModel {
-                model: gm(child_handle.clone().erase()),
+                model: child_handle.clone().erase(),
                 temperature: Some(0.7),
                 max_tokens: Some(8192),
                 extra: Some(target_extra_for_factory.clone()),
@@ -741,7 +731,7 @@ mod tests {
 
         let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
-            gm(parent.clone().erase()),
+            parent.clone().erase(),
             Some(selector),
             None,
             cancel,
@@ -811,7 +801,7 @@ mod tests {
 
         let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
-            gm(parent.clone().erase()),
+            parent.clone().erase(),
             Some(selector),
             None,
             cancel,
@@ -857,7 +847,7 @@ mod tests {
         let model = rig_core::test_utils::MockCompletionModel::from_turns([]).erase();
         let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner_at_depth(
-            gm(model),
+            model,
             None,
             None,
             cancel,
@@ -892,6 +882,7 @@ mod tests {
     /// must back off and try again, yielding the successful text.
     #[tokio::test(start_paused = true)]
     async fn make_task_runner_retries_transient_errors() {
+        let _env = crate::test_support::EnvGuard::lock();
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
         let ctx = depth_test_ctx();
@@ -905,7 +896,7 @@ mod tests {
         .erase();
         let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
-            gm(model),
+            model,
             None,
             None,
             cancel,
@@ -954,7 +945,7 @@ mod tests {
         ]);
         let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             None,
             None,
             cancel,
@@ -1018,7 +1009,7 @@ mod tests {
         .erase();
         let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
-            gm(model),
+            model,
             None,
             None,
             cancel,
@@ -1127,7 +1118,7 @@ mod tests {
             let mut ctx = depth_test_ctx();
             ctx.log_tx = Some(log_tx);
             let runner = make_task_runner(
-                gm(rig_core::test_utils::MockCompletionModel::from_stream_turns(turns).erase()),
+                rig_core::test_utils::MockCompletionModel::from_stream_turns(turns).erase(),
                 None,
                 None,
                 crate::clients::cancel::CancelToken::new(),

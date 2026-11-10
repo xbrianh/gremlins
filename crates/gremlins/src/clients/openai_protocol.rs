@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use indexmap::IndexMap;
+use rig_core::driver::DynModel;
 use rig_core::http_client::DynHttpClient;
+use rig_core::operation::Completion;
 use rig_core::providers::openai::wire::Dialect;
 use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 
@@ -12,7 +14,6 @@ use super::backend::{ClientError, RunParams};
 use super::cancel::{CancelToken, ErrorClassifier};
 use super::cancels::CancelsMap;
 use super::interactive::InteractiveSession;
-use super::model::GremlinsModel;
 use super::params::{self, ResolvedParams};
 use super::protocol::CompletedRun;
 
@@ -284,10 +285,7 @@ pub(crate) async fn run_with_agent_loop(
     max_tokens: Option<u64>,
     interactive: Option<InteractiveSession>,
 ) -> Result<CompletedRun, ClientError> {
-    let model = GremlinsModel::new(
-        client.completion(model_name).erase(),
-        crate::config::max_prompt_bytes(),
-    );
+    let model = client.completion(model_name).erase();
     let mut ctx = ctx.clone();
     ctx.params.model = Some(model_name.to_string());
 
@@ -299,10 +297,13 @@ pub(crate) async fn run_with_agent_loop(
         LoopOpts {
             extra,
             tool_filter,
+            tool_mode: crate::conversation::tool_specs::ToolMode::Full,
             classify_error,
             temperature,
             max_tokens,
             preserve_reasoning_in_history: false,
+            preamble: None,
+            single_turn: false,
         },
         interactive,
     )
@@ -324,7 +325,7 @@ pub(crate) fn provider_and_model(spec: &str) -> Option<(String, String)> {
     Some((uri.provider().to_string(), uri.model().to_string()))
 }
 
-/// Build a [`GremlinsModel`] for `spec` when it names this provider.
+/// Build a [`DynModel<Completion>`] for `spec` when it names this provider.
 ///
 /// This is the single implementation shared by every OpenAI-protocol backend;
 /// the generated `Backend::make_model` impls just delegate here with their
@@ -333,13 +334,10 @@ pub(crate) fn make_model(
     state: &OpenAiRunState,
     provider: &str,
     spec: &str,
-) -> Option<GremlinsModel> {
+) -> Option<DynModel<Completion>> {
     let (parsed_provider, model) = provider_and_model(spec)?;
     if parsed_provider == provider {
-        Some(GremlinsModel::new(
-            state.client.completion(&model).erase(),
-            crate::config::max_prompt_bytes(),
-        ))
+        Some(state.client.completion(&model).erase())
     } else {
         None
     }

@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::model::GremlinsModel;
 use crate::task_kind::TaskKind;
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
 
 /// Build a [`TaskModelSelector`] from the raw `task-models` config map and a
 /// provider-agnostic model factory.
@@ -27,7 +28,7 @@ pub(crate) fn build_task_selector(
 /// Anthropic `cache_control`/128 000-token default onto an OpenAI model.
 #[derive(Clone, Debug)]
 pub(crate) struct TaskModel {
-    pub(crate) model: GremlinsModel,
+    pub(crate) model: DynModel<Completion>,
     pub(crate) temperature: Option<f64>,
     pub(crate) max_tokens: Option<u64>,
     pub(crate) extra: Option<serde_json::Value>,

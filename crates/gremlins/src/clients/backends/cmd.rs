@@ -10,9 +10,11 @@ use regex::Regex;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
+
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
-use crate::clients::model::GremlinsModel;
 use crate::clients::params::ResolvedParams;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::stream_json::{self, StreamState};
@@ -626,7 +628,19 @@ impl Backend for CmdBackend {
         }
     }
 
-    fn make_model(&self, _spec: &str) -> Option<GremlinsModel> {
+    /// Returns the empty string — the [`CmdBackend`] has no single model;
+    /// the shell command itself varies per run. See also
+    /// [`make_model`](Backend::make_model), which returns `None` for every
+    /// spec, ensuring local compaction never reaches this backend.
+    fn model(&self) -> &str {
+        ""
+    }
+
+    fn name(&self) -> &'static str {
+        "cmd"
+    }
+
+    fn make_model(&self, _spec: &str) -> Option<DynModel<Completion>> {
         None
     }
 

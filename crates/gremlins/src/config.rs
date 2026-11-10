@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -748,6 +749,23 @@ pub fn clear_global() {
 }
 
 // ---------------------------------------------------------------------------
+// Thread-local test override for max_prompt_bytes
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static TEST_MAX_PROMPT_BYTES: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// Set a test-local max-prompt-bytes override. Must be called while holding
+/// the [`crate::test_support::EnvGuard`] lock.
+///
+/// Only compiled during `#[cfg(test)]` — callers are guarded by `#[cfg(test)]`.
+#[cfg(test)]
+pub(crate) fn set_test_max_prompt_bytes(value: u64) {
+    TEST_MAX_PROMPT_BYTES.with(|cell| cell.set(Some(value)));
+}
+
+// ---------------------------------------------------------------------------
 // Env-var helpers
 // ---------------------------------------------------------------------------
 
@@ -1139,6 +1157,10 @@ pub(crate) const DEFAULT_MAX_PROMPT_BYTES: u64 = 1_048_576;
 /// Default 1 048 576 (1 MiB). Settings.yaml `max-prompt-bytes` takes
 /// precedence over the env var.
 pub(crate) fn max_prompt_bytes() -> u64 {
+    // Test-local override takes highest priority.
+    if let Some(v) = TEST_MAX_PROMPT_BYTES.with(Cell::get) {
+        return v;
+    }
     get_global()
         .map(|c| c.max_prompt_bytes())
         .or_else(|| {
@@ -1175,21 +1197,6 @@ pub(crate) fn max_tool_output_bytes() -> u64 {
                 .and_then(|v| v.parse().ok())
         })
         .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES)
-}
-
-/// Soft token trigger for headless (pipeline) conversation compaction.
-/// Default 100 000. 0 disables proactive compaction; the hard
-/// `max-prompt-bytes` ceiling still applies. Settings.yaml
-/// `compaction.threshold-tokens` takes precedence over the env var.
-pub(crate) fn compaction_threshold_tokens() -> u64 {
-    get_global()
-        .map(|c| c.compaction_threshold_tokens())
-        .or_else(|| {
-            std::env::var("GREMLINS_COMPACTION_THRESHOLD_TOKENS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-        })
-        .unwrap_or(DEFAULT_COMPACTION_THRESHOLD_TOKENS)
 }
 
 /// Effective turn-level retry schedule from the global config, falling back
@@ -2447,29 +2454,6 @@ model-profiles:
     }
 
     // --- compaction thresholds -----------------------------------------------
-
-    #[test]
-    fn test_compaction_threshold_tokens_default() {
-        let _env = EnvGuard::lock();
-        assert_eq!(
-            compaction_threshold_tokens(),
-            DEFAULT_COMPACTION_THRESHOLD_TOKENS
-        );
-    }
-
-    #[test]
-    fn test_compaction_threshold_tokens_from_env() {
-        let mut env = EnvGuard::lock();
-        env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS", "5000");
-        assert_eq!(compaction_threshold_tokens(), 5000);
-    }
-
-    #[test]
-    fn test_compaction_threshold_tokens_zero_from_env() {
-        let mut env = EnvGuard::lock();
-        env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS", "0");
-        assert_eq!(compaction_threshold_tokens(), 0);
-    }
 
     #[test]
     fn test_compaction_threshold_tokens_from_settings_yaml() {

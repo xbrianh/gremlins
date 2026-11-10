@@ -14,6 +14,64 @@ pub(crate) struct TurnScript {
     pub(crate) next_user_prompt: rig_core::completion::Message,
 }
 
+/// Errors that can occur while rendering a turn script.
+#[derive(Debug)]
+pub(crate) enum TurnScriptError {
+    /// The assembled prompt exceeds the configured byte ceiling.
+    TooLarge { limit: u64, actual: u64 },
+}
+
+impl std::fmt::Display for TurnScriptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TurnScriptError::TooLarge { limit, actual } => write!(
+                f,
+                "prompt size {actual} bytes exceeds configured limit of {limit} bytes"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TurnScriptError {}
+
+/// Coarse byte-length sum of a message's text content.
+///
+/// Used by `render_turn` for prompt-size gating. Tool-call arguments are
+/// counted (via their JSON serialization), but image/audio content blocks,
+/// tool-result images, and other non-text blobs pass through as `0` — the
+/// gate is intentionally coarse, not a substitute for exact token counting.
+pub(crate) fn message_text_byte_len(message: &rig_core::completion::Message) -> u64 {
+    use rig_core::completion::message::{AssistantContent, ToolResultContent, UserContent};
+    match message {
+        rig_core::completion::Message::User { content } => content
+            .iter()
+            .map(|c| match c {
+                UserContent::Text(t) => t.text.len() as u64,
+                UserContent::ToolResult(r) => r
+                    .content
+                    .iter()
+                    .map(|rc| match rc {
+                        ToolResultContent::Text(t) => t.text.len() as u64,
+                        _ => 0,
+                    })
+                    .sum(),
+                _ => 0,
+            })
+            .sum(),
+        rig_core::completion::Message::Assistant { content, .. } => content
+            .iter()
+            .map(|c| match c {
+                AssistantContent::Text(t) => t.text.len() as u64,
+                AssistantContent::ToolCall(call) => {
+                    call.function.arguments.to_string().len() as u64
+                }
+                _ => 0,
+            })
+            .sum(),
+        rig_core::completion::Message::System { content } => content.len() as u64,
+    }
+}
+
 /// The final snapshot of a completed agent run.
 #[derive(Clone, Debug)]
 pub(crate) struct RunArtifact {
@@ -34,11 +92,6 @@ pub(crate) trait Conversation: Send + Sync {
     /// (used to update the findings ledger and `last_text` before completion
     /// classification decides whether to record or reject the turn).
     fn record_prose(&mut self, text: &str);
-
-    /// Record the API-reported input token count for this turn.
-    /// Called immediately after every response so compaction decisions see
-    /// the latest usage even when the turn continues before `record_turn`.
-    fn record_input_tokens(&mut self, _input_tokens: Option<u64>) {}
 
     /// Record the assistant turn (text, reasoning, tool calls) into history.
     /// The findings ledger is already fed by a prior `record_prose` call, so
@@ -63,8 +116,13 @@ pub(crate) trait Conversation: Send + Sync {
     /// Build the outgoing request for the current turn.
     ///
     /// May trigger compaction before building the turn script when
-    /// token thresholds are exceeded.
-    async fn render_turn(&mut self, nested: bool, system_prompt: Option<String>) -> TurnScript;
+    /// token thresholds are exceeded. Returns an error when the assembled
+    /// messages exceed the configured prompt-size ceiling.
+    async fn render_turn(
+        &mut self,
+        nested: bool,
+        system_prompt: Option<String>,
+    ) -> Result<TurnScript, TurnScriptError>;
 
     /// Build the final transcript for a finished run.
     ///
@@ -115,15 +173,6 @@ pub(crate) trait Conversation: Send + Sync {
     /// conversations built from raw messages (chat continuation) inherit the
     /// run's actual preserve-reasoning setting rather than a hardcoded `false`.
     fn set_preserve_reasoning(&mut self, _preserve: bool) {}
-
-    /// True when a server-issued signed compaction block is active.
-    /// The agent loop attaches the `compact-2026-09-04` beta header
-    /// unconditionally at client construction; this method is available
-    /// for future conditional attachment or diagnostic use.
-    #[allow(dead_code)]
-    fn has_signed_compaction_block(&self) -> bool {
-        false
-    }
 
     /// Compact digest of the Read/Grep evidence still present in the durable
     /// transcript. Fan-out tools fold this into the parent's tool result so a
@@ -346,12 +395,28 @@ impl Conversation for ConversationStub {
         self.prompt_committed = false;
     }
 
-    async fn render_turn(&mut self, _nested: bool, system_prompt: Option<String>) -> TurnScript {
-        TurnScript {
+    async fn render_turn(
+        &mut self,
+        _nested: bool,
+        system_prompt: Option<String>,
+    ) -> Result<TurnScript, TurnScriptError> {
+        let limit = crate::config::max_prompt_bytes();
+        let sys_bytes = system_prompt.as_ref().map(|s| s.len() as u64).unwrap_or(0);
+        let actual: u64 = sys_bytes
+            + self
+                .history
+                .iter()
+                .chain(std::iter::once(&self.next_prompt))
+                .map(message_text_byte_len)
+                .sum::<u64>();
+        if actual > limit {
+            return Err(TurnScriptError::TooLarge { limit, actual });
+        }
+        Ok(TurnScript {
             messages: self.history.clone(),
             system_prompt,
             next_user_prompt: self.next_prompt.clone(),
-        }
+        })
     }
 
     fn finalize(
@@ -480,9 +545,5 @@ impl Conversation for ConversationStub {
 
     fn set_preserve_reasoning(&mut self, preserve: bool) {
         self.preserve_reasoning = preserve;
-    }
-
-    fn has_signed_compaction_block(&self) -> bool {
-        false
     }
 }

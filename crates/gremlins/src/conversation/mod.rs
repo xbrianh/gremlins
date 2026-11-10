@@ -19,9 +19,13 @@ pub(crate) fn new_blank_conversation(
         preserve_reasoning,
         prepopulated_messages,
         None,
-        None,
-        None,
-        None,
-        None,
     ))
+}
+
+/// Production blank conversation for callers that must build a
+/// [`RunParams`] before a real backend has prepared one. The returned
+/// conversation is intentionally inert — callers are expected to overwrite
+/// it immediately.
+pub(crate) fn new_blank_for_run_params() -> Box<dyn crate::clients::conversation::Conversation> {
+    Box::new(standard::StandardConversation::new("", false, None, None))
 }

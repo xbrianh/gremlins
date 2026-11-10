@@ -5,16 +5,14 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
 use crate::artifacts::resolve::ResolveError;
 use crate::artifacts::uri::Uri;
-use crate::clients::backend::{Backend, ClientError, RunParams};
+use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::{Client, ModelURI};
 use crate::config;
-use crate::conversation::compaction::CompactionState;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent, AgentError};
 use crate::executor::bootstrap::run_definition_bootstrap;
@@ -51,92 +49,6 @@ fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<PathBuf, RunEr
         .open(&blob_name, state::BlobMode::Append)
         .map_err(|e| RunError::Message(format!("agent raw stream: {e}")))?;
     Ok(fs.root_dir().join(&blob_name))
-}
-
-/// Default number of most-recent turns to keep verbatim during compaction.
-const DEFAULT_COMPACTION_KEEP_RECENT: usize = 10;
-
-/// Tuple returned by [`build_compaction_parts`]: backend, state, model,
-/// instructions, and optional local model.
-pub(crate) type CompactionParts = (
-    Arc<dyn Backend>,
-    CompactionState,
-    String,
-    Option<String>,
-    Option<crate::clients::model::GremlinsModel>,
-);
-
-/// Build the compaction parts needed by [`StandardConversation::new`].
-/// Returns `None` when compaction is disabled (threshold == 0 and not in chat
-/// mode — chat always returns parts so `/compact` can fire on demand).
-pub(crate) fn build_compaction_parts(
-    client: &Client,
-    model: String,
-    is_chat: bool,
-) -> Option<CompactionParts> {
-    let backend = match client.get_or_build_backend() {
-        Ok(b) => b,
-        Err(e) => {
-            log::warn!("compaction: failed to build backend: {e}");
-            return None;
-        }
-    };
-
-    let threshold = if is_chat {
-        // Chat always returns parts so /compact can fire on demand;
-        // threshold is irrelevant for the on-demand path.
-        0
-    } else {
-        crate::config::compaction_threshold_tokens()
-    };
-
-    // Zero threshold means compaction is disabled (non-chat only).
-    if !is_chat && threshold == 0 {
-        return None;
-    }
-
-    // Build a local model when possible — used when the backend doesn't
-    // support server-side compaction.
-    let qualified = format!("{}/{}", client.provider(), model);
-    let local_model = backend.make_model(&qualified);
-    if local_model.is_none() {
-        log::warn!(
-            "compaction: make_model failed for '{}'; local compaction will not be available",
-            qualified
-        );
-    }
-
-    Some((
-        backend,
-        CompactionState::new(threshold, DEFAULT_COMPACTION_KEEP_RECENT),
-        model,
-        None,
-        local_model,
-    ))
-}
-
-/// Build a [`StandardConversation`] with compaction wired in. A shared
-/// helper used by both [`run_agent`] and [`handle_compact`].
-pub(crate) fn build_compaction_conversation(
-    client: &Client,
-    model: String,
-    is_chat: bool,
-    verbatim_history: Option<Vec<Message>>,
-) -> crate::conversation::standard::StandardConversation {
-    let (backend, state, cm, ci, lm) = build_compaction_parts(client, model, is_chat)
-        .map_or((None, None, None, None, None), |(b, s, m, i, l)| {
-            (Some(b), Some(s), Some(m), i, l)
-        });
-    crate::conversation::standard::StandardConversation::new(
-        "",
-        false,
-        verbatim_history,
-        backend,
-        state,
-        cm,
-        ci,
-        lm,
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -576,14 +488,18 @@ async fn run_agent(
         None
     };
 
-    let conv = build_compaction_conversation(
-        &client,
-        prepared
-            .model
-            .clone()
-            .unwrap_or_else(|| client.model().to_string()),
-        is_chat,
+    let backend = match client.get_or_build_backend() {
+        Ok(b) => Some(b),
+        Err(e) => {
+            log::warn!("run_agent: failed to build backend: {e}");
+            None
+        }
+    };
+    let conv = crate::conversation::standard::StandardConversation::new(
+        "",
+        false,
         verbatim_history,
+        backend,
     );
 
     // ── Live usage tracker for failure persistence ─────

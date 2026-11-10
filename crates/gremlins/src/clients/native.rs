@@ -1,19 +1,21 @@
 //! Shared run-state scaffolding for native provider backends.
 //!
 //! [`NativeRunState`] holds the per-backend state common to every provider
-//! that drives the agent loop through a [`GremlinsModel`]. Each backend plugs
+//! that drives the agent loop through a [`DynModel<Completion>`]. Each backend plugs
 //! its own client construction into [`NativeRunState::single_attempt`] by
 //! passing the future that builds the per-attempt model.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
+
 use crate::clients::agent_loop::{run_agent_loop, LoopOpts, RunContext};
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::cancel::{default_classify, CancelToken, ErrorClassifier};
 use crate::clients::cancels::CancelsMap;
 use crate::clients::interactive::InteractiveSession;
-use crate::clients::model::GremlinsModel;
 use crate::clients::params::ResolvedParams;
 use crate::clients::protocol::CompletedRun;
 
@@ -97,7 +99,7 @@ impl<C> NativeRunState<C> {
     /// Execute a single agent-loop attempt, registering and cleaning up a
     /// cancel token for the given `gremlin_id`.
     ///
-    /// `make_model` is awaited to obtain the [`GremlinsModel`] for this
+    /// `make_model` is awaited to obtain the [`DynModel<Completion>`] for this
     /// attempt; the caller is responsible for building it, including resolving
     /// the effective model name. Once the model is available the agent loop
     /// runs once with the backend's error classifier and request options.
@@ -108,7 +110,7 @@ impl<C> NativeRunState<C> {
         cancel: Arc<CancelToken>,
         interactive: Option<InteractiveSession>,
         preserve_reasoning: PreserveReasoning,
-        make_model: impl std::future::Future<Output = Result<GremlinsModel, ClientError>>,
+        make_model: impl std::future::Future<Output = Result<DynModel<Completion>, ClientError>>,
     ) -> Result<CompletedRun, ClientError> {
         let gremlin_id = ctx.params.gremlin_id.clone().unwrap_or_default();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -124,10 +126,13 @@ impl<C> NativeRunState<C> {
                 LoopOpts {
                     extra: self.extra_params(),
                     tool_filter: self.tool_filter.as_deref(),
+                    tool_mode: crate::conversation::tool_specs::ToolMode::Full,
                     classify_error: Some(default_classify as ErrorClassifier),
                     temperature: self.resolved.temperature,
                     max_tokens: self.resolved.max_tokens,
                     preserve_reasoning_in_history: preserve_reasoning.as_bool(),
+                    preamble: None,
+                    single_turn: false,
                 },
                 interactive,
             )

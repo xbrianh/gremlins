@@ -5,13 +5,14 @@ use std::sync::Arc;
 use super::cancel::CancelToken;
 use super::conversation::Conversation;
 use super::interactive::{InteractiveSession, StreamEventSender};
-use super::model::GremlinsModel;
 use super::params::ResolvedParams;
 pub(crate) use super::plug::LoopHooks;
 use super::protocol::{CompactionResult, CompletedRun};
 use super::task_models::TaskModelSelector;
 use async_trait::async_trait;
 use indexmap::IndexMap;
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
 
 pub struct RunParams {
     pub prompt: String,
@@ -75,6 +76,48 @@ pub struct RunParams {
     pub hooks: Option<LoopHooks>,
 }
 
+impl RunParams {
+    /// The minimum viable [`RunParams`] for a no-backend, single-turn
+    /// completion (used by [`super::client::run_naked`]). Everything else
+    /// is a sensible default: no sandboxing, no telemetry, no task models.
+    ///
+    /// The caller must overwrite [`prepopulated_conversation`](Self::prepopulated_conversation)
+    /// with the actual conversation before running; the blank value here only
+    /// satisfies the struct invariant so every field can start from a real
+    /// default.
+    pub(crate) fn empty() -> Self {
+        Self {
+            prompt: String::new(),
+            label: String::new(),
+            model: None,
+            raw_path: None,
+            capture_events: false,
+            on_timeout_prompt: None,
+            max_retries: 0,
+            cwd: None,
+            artifact_dir: None,
+            idle_timeout: None,
+            extra_env: None,
+            expected_artifact_paths: Vec::new(),
+            system_prompt: None,
+            gremlin_id: None,
+            log_tx: None,
+            base_env: None,
+            allow_all: false,
+            task_models: None,
+            cancel_token: None,
+            stream_events: None,
+            prepopulated_conversation: crate::conversation::new_blank_for_run_params(),
+            skills_available: false,
+            discovered_skills: None,
+            active_skills: None,
+            token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
+            extra_sandbox_roots: Vec::new(),
+            hooks: None,
+        }
+    }
+}
+
 impl Clone for RunParams {
     fn clone(&self) -> Self {
         Self {
@@ -128,19 +171,15 @@ pub trait Backend: Send + Sync {
         interactive: Option<InteractiveSession>,
     ) -> Result<CompletedRun, ClientError>;
 
-    /// Build a [`GremlinsModel`] from a `provider/model` spec, or `None` when
-    /// the spec names a different provider or the model cannot be built.
-    fn model_for(&self, _model: &str, _resolved: Option<&ResolvedParams>) -> Option<GremlinsModel> {
-        None
-    }
+    /// The model this backend instance was built for.
+    ///
+    /// The [`CmdBackend`](super::backends::cmd::CmdBackend) returns the
+    /// empty string — it has no single model; the command *is* the model
+    /// and varies per run.
+    fn model(&self) -> &str;
 
     fn name(&self) -> &'static str {
         "unknown"
-    }
-
-    /// List all models this backend can serve (unfiltered).
-    fn models(&self) -> IndexMap<String, GremlinsModel> {
-        IndexMap::new()
     }
 
     /// Return the last `RunParams` that were used, for resume support.
@@ -159,7 +198,7 @@ pub trait Backend: Send + Sync {
     fn reap_all(&self, _gremlin_id: &str) {}
 
     /// Build a model from a provider-raw spec string.
-    fn make_model(&self, _spec: &str) -> Option<GremlinsModel> {
+    fn make_model(&self, _spec: &str) -> Option<DynModel<Completion>> {
         None
     }
 
@@ -195,7 +234,6 @@ pub trait Backend: Send + Sync {
         _messages: &[rig_core::completion::Message],
         _system_prompt: Option<&str>,
         _instructions: Option<&str>,
-        _model: &str,
     ) -> Result<Option<CompactionResult>, ClientError> {
         Ok(None)
     }
