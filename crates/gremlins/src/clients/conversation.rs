@@ -285,8 +285,8 @@ impl std::fmt::Debug for dyn Conversation {
 
 /// A minimal [`Conversation`] implementation for use in `clients/` tests.
 ///
-/// Tracks flat message history (no findings ledger) so that agent-loop and
-/// tool-registry tests can run without depending on `crate::conversation`
+/// Tracks flat message history so that agent-loop and tool-registry tests can
+/// run without depending on `crate::conversation`
 /// (which lives in a different package boundary). `record_turn`,
 /// `done_rejected`, `pop_last_assistant_turn`, and `fork` all mirror
 /// `StandardConversation` — including the prompt-commit invariant — so the
