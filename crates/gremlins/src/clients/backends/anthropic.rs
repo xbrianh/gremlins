@@ -13,12 +13,14 @@ use crate::clients::cancels::CancelsMap;
 use crate::clients::config::ProviderAuth;
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::lazy_auth_http::{BearerStrategy, LazyAuthHttpClient};
-use crate::clients::model::GremlinsModel;
+
 use crate::clients::native::NativeRunState;
 use crate::clients::openai_protocol;
 use crate::clients::params::{self, ResolvedParams};
 use crate::clients::protocol::{CompactionBlock, CompactionResult, CompletedRun};
 use crate::clients::token_provider::{self, TokenProvider};
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
 use rig_reqwest::ReqwestClient;
 
 /// Default `max_tokens` for Anthropic requests.
@@ -187,15 +189,12 @@ impl AnthropicBackend {
 
 #[async_trait]
 impl Backend for AnthropicBackend {
-    fn make_model(&self, spec: &str) -> Option<GremlinsModel> {
+    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
         let (provider, model) = openai_protocol::provider_and_model(spec)?;
         if provider == "anthropic" {
             match &self.state.client_state {
                 AnthropicClientState::Static(client) => {
-                    Some(GremlinsModel::new(
-                        client.completion(&model).erase(),
-                        crate::config::max_prompt_bytes(),
-                    ))
+                    Some(client.completion(&model).erase())
                 }
                 AnthropicClientState::Dynamic {
                     ref base_url,
@@ -215,10 +214,7 @@ impl Backend for AnthropicBackend {
                         .with_beta("compact-2026-09-04")
                         .with_base_url(base_url)
                         .connect(wrapped);
-                    Some(GremlinsModel::new(
-                        client.completion(&model).erase(),
-                        crate::config::max_prompt_bytes(),
-                    ))
+                    Some(client.completion(&model).erase())
                 }
             }
         } else {
@@ -238,10 +234,7 @@ impl Backend for AnthropicBackend {
         let make_model = async {
             match &self.state.client_state {
                 AnthropicClientState::Static(client) => {
-                    Ok(GremlinsModel::new(
-                        client.completion(&model_name).erase(),
-                        crate::config::max_prompt_bytes(),
-                    ))
+                    Ok(client.completion(&model_name).erase())
                 }
                 AnthropicClientState::Dynamic {
                     token_provider,
@@ -265,10 +258,7 @@ impl Backend for AnthropicBackend {
                         .with_beta("compact-2026-09-04")
                         .with_base_url(base_url)
                         .connect(wrapped);
-                    Ok(GremlinsModel::new(
-                        client.completion(&model_name).erase(),
-                        crate::config::max_prompt_bytes(),
-                    ))
+                    Ok(client.completion(&model_name).erase())
                 }
             }
         };

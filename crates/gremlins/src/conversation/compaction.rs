@@ -13,10 +13,30 @@ use std::fmt;
 
 use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::completion::{CompletionRequest, CompletionResponse, Message};
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
 use serde::Serialize;
 
-use crate::clients::model::GremlinsModel;
 use crate::clients::protocol::CompactionBlock;
+
+use std::io::{self, Write};
+
+/// An [`io::Write`] sink that counts serialized bytes without buffering them.
+#[derive(Default)]
+struct ByteCounter {
+    count: u64,
+}
+
+impl Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.count += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 /// Compute a cut index so `to_compact = &history[..cut]` and
 /// `kept = &history[cut..]`. The cut lands on a completed-turn boundary:
@@ -322,7 +342,7 @@ impl fmt::Display for CompactError {
 /// enrichment. This is the inner function wrapped by
 /// [`compact_local_with_retry`].
 pub(crate) async fn compact_local_raw(
-    model: &GremlinsModel,
+    model: &DynModel<Completion>,
     to_compact: &[Message],
     instructions: Option<&str>,
     system_prompt: Option<&str>,
@@ -352,6 +372,26 @@ pub(crate) async fn compact_local_raw(
         .preamble(preamble)
         .messages(truncated)
         .max_tokens(LOCAL_COMPACTION_MAX_TOKENS);
+
+    // Defense-in-depth: measure the full serialized request against the
+    // configured prompt-size ceiling so a pathological to_compact that
+    // slips past the truncation floor is caught before reaching the
+    // provider.
+    let actual = {
+        let mut counter = ByteCounter::default();
+        serde_json::to_writer(&mut counter, &request).map_err(|e| {
+            CompactError::Transient(format!(
+                "failed to serialize compaction request for prompt-size check: {e}"
+            ))
+        })?;
+        counter.count
+    };
+    let limit = crate::config::max_prompt_bytes();
+    if actual > limit {
+        return Err(CompactError::Fatal(format!(
+            "compaction request {actual} bytes exceeds configured limit of {limit} bytes"
+        )));
+    }
 
     // Unary call — the summary is at most a few paragraphs.
     let response = match model.call(request).await {
@@ -427,7 +467,7 @@ pub(crate) async fn compact_local_raw(
 /// the returned message is an ordinary `Message::Assistant` whose text
 /// content is the summary.
 pub(crate) async fn compact_local_with_retry(
-    model: &GremlinsModel,
+    model: &DynModel<Completion>,
     to_compact: &[Message],
     instructions: Option<&str>,
     system_prompt: Option<&str>,

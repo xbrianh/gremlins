@@ -8,6 +8,7 @@ use rig_core::completion::message::{
     AssistantContent, CallId, Reasoning, Sealed, ToolCall, ToolName,
 };
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
+use rig_core::driver::DynModel;
 use rig_core::error::ProviderError;
 use rig_core::operation::Completion;
 use rig_core::streaming::{Item, StreamEvent, Streamed};
@@ -19,13 +20,12 @@ use super::interactive::{
 };
 
 use super::cancel::{default_classify, is_retryable, CancelToken, ErrorClassifier};
-use super::conversation::Conversation;
+use super::conversation::{Conversation, TurnScriptError};
 use super::error::ClientError;
 use super::format::{
     apply_chunk, assistant_tool_message, enrich_log_line, format_tool_call, format_tool_call_parts,
     trunc,
 };
-use super::model::{GremlinsModel, GremlinsModelError};
 use super::plug::LoopHooks;
 use super::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
 use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
@@ -380,7 +380,7 @@ impl LoopState {
     #[allow(clippy::too_many_arguments)]
     async fn stream_turn(
         &mut self,
-        model: &GremlinsModel,
+        model: &DynModel<Completion>,
         tool_ctx: &AgentLoopRuntime,
         tool_defs: &[ToolDefinition],
         cancel: &CancelToken,
@@ -399,7 +399,7 @@ impl LoopState {
             _ = cancel.cancelled() => {
                 return Err(cancelled_error("cancelled during request preparation", &self.conv.messages()));
             }
-            b = self.prepare_stream_request(tool_defs, opts, nested) => b,
+            b = self.prepare_stream_request(tool_defs, opts, nested) => b?,
         };
 
         // Dump the full prompt to the state directory when
@@ -410,17 +410,7 @@ impl LoopState {
         // retry inline (each path returns early).
         let response = match model.stream(builder) {
             Ok(s) => s,
-            Err(GremlinsModelError::TooLarge { limit, actual }) => {
-                self.hook_log(&format!(
-                    "agent_loop: prompt too large on turn {}: {} bytes exceeds configured limit of {} bytes", self.turn_num, actual, limit
-                ));
-                self.hook_log(&format!(
-                    "{prefix}error: prompt size {actual} bytes exceeds configured limit of {limit} bytes"
-                ));
-                return Err(ClientError::PromptTooLarge { limit, actual });
-            }
-            Err(GremlinsModelError::Provider(e)) => {
-                let e = *e;
+            Err(e) => {
                 // Retryable (429/5xx) error before streaming began — back off
                 // and re-execute this same turn with history intact.
                 if self.turn_retries < turn_retry_backoff.len()
@@ -483,11 +473,16 @@ impl LoopState {
         tool_defs: &[ToolDefinition],
         opts: &LoopOpts<'_>,
         nested: bool,
-    ) -> CompletionRequest {
+    ) -> Result<CompletionRequest, ClientError> {
         let script = self
             .conv
             .render_turn(nested, self.system_prompt.clone())
-            .await;
+            .await
+            .map_err(|e| match e {
+                TurnScriptError::TooLarge { limit, actual } => {
+                    ClientError::PromptTooLarge { limit, actual }
+                }
+            })?;
 
         let mut builder = CompletionRequest::new(script.next_user_prompt)
             .messages(script.messages)
@@ -504,7 +499,7 @@ impl LoopState {
         if let Some(mt) = opts.max_tokens {
             builder = builder.max_tokens(mt);
         }
-        builder
+        Ok(builder)
     }
 
     /// Drive the model stream to completion: forward live deltas, accumulate
@@ -514,7 +509,7 @@ impl LoopState {
     async fn consume_stream_events(
         &mut self,
         mut response: Streamed<Completion>,
-        model: &GremlinsModel,
+        model: &DynModel<Completion>,
         tool_ctx: &AgentLoopRuntime,
         cancel: &CancelToken,
         opts: &LoopOpts<'_>,
@@ -840,7 +835,7 @@ impl LoopState {
         &mut self,
         tool_calls: &[ToolCall],
         tool_ctx: &AgentLoopRuntime,
-        model: &GremlinsModel,
+        model: &DynModel<Completion>,
         prefix: &str,
         cancel: &CancelToken,
         raw: &mut Option<std::fs::File>,
@@ -935,7 +930,7 @@ impl LoopState {
         &mut self,
         jobs: &[ToolJob],
         tool_ctx: &AgentLoopRuntime,
-        model: &GremlinsModel,
+        model: &DynModel<Completion>,
         prefix: &str,
         cancel: &CancelToken,
     ) -> Result<ToolDispatchOutcome, ClientError> {
@@ -1163,7 +1158,7 @@ impl LoopState {
     /// pause token) or an active session re-entered after RunOneTurn.
     async fn await_interactive_turn(
         &mut self,
-        model: &GremlinsModel,
+        model: &DynModel<Completion>,
         prefix: &str,
     ) -> Result<InteractiveBoundary, ClientError> {
         if self.cmd_rx.is_some() && self.evt_tx.is_some() && self.pause.is_some() {
@@ -1661,7 +1656,7 @@ impl LoopState {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_agent_loop(
-    model: GremlinsModel,
+    model: DynModel<Completion>,
     prompt: &str,
     ctx: RunContext,
     cancel: Arc<CancelToken>,
@@ -1833,7 +1828,7 @@ pub(crate) async fn run_agent_loop(
 /// Used by the Task tool.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_agent_loop_nested(
-    model: GremlinsModel,
+    model: DynModel<Completion>,
     prompt: &str,
     system_prompt: Option<String>,
     tool_ctx: &AgentLoopRuntime,
@@ -1952,7 +1947,7 @@ async fn maybe_pause(pause: &Option<Arc<PauseToken>>) {
 /// one turn and then re-enters this function.
 #[allow(clippy::too_many_arguments)]
 async fn interactive_loop(
-    _model: &GremlinsModel,
+    _model: &DynModel<Completion>,
     conv: &mut dyn Conversation,
     session: &mut InteractiveSession,
     turn: usize,
@@ -2101,7 +2096,7 @@ fn artifact_reminder(missing: &[&PathBuf]) -> String {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_agent_loop_core(
-    model: &GremlinsModel,
+    model: &DynModel<Completion>,
     prompt: &str,
     system_prompt: Option<String>,
     tool_ctx: &AgentLoopRuntime,
@@ -2589,13 +2584,6 @@ pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str, hooks: &LoopH
 }
 
 // ── lifted test helpers (used by conversation/standard.rs tests) ────────
-
-#[cfg(test)]
-pub(crate) fn gm(
-    model: rig_core::driver::DynModel<rig_core::operation::Completion>,
-) -> GremlinsModel {
-    GremlinsModel::new(model, crate::config::DEFAULT_MAX_PROMPT_BYTES)
-}
 
 #[cfg(test)]
 pub(crate) struct LogSink {
@@ -3272,10 +3260,13 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_prompt_fails_hard_before_any_request() {
+        let _env = crate::test_support::EnvGuard::lock();
+        std::env::set_var("GREMLINS_MAX_PROMPT_BYTES", "16");
+        crate::config::clear_global();
         let inner = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
             rig_core::test_utils::MockStreamEvent::text("should not run"),
         ]]);
-        let model = GremlinsModel::new(inner.clone().erase(), 16);
+        let model = inner.clone().erase();
         let prompt = "x".repeat(10_000);
 
         let result = run_agent_loop(
@@ -3328,7 +3319,7 @@ mod tests {
         )
         .erase();
         let handle = tokio::spawn(run_agent_loop(
-            gm(model.clone()),
+            model.clone(),
             "hi",
             ctx.clone(),
             cancel,
@@ -3379,7 +3370,7 @@ mod tests {
         let cancel = CancelToken::new();
 
         let handle = tokio::spawn(run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "go",
             ctx,
             cancel.clone(),
@@ -3490,7 +3481,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "write",
             ctx.clone(),
             cancel,
@@ -3652,7 +3643,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "read then finish",
             ctx,
             cancel,
@@ -3747,7 +3738,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "read then finish",
             ctx,
             cancel,
@@ -3839,7 +3830,7 @@ mod tests {
         let cancel = CancelToken::new();
 
         let handle = tokio::spawn(run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "read then finish",
             ctx.clone(),
             cancel,
@@ -3982,7 +3973,7 @@ mod tests {
         let cancel = CancelToken::new();
 
         let handle = tokio::spawn(run_agent_loop(
-            gm(model.clone()),
+            model.clone(),
             "finish",
             ctx.clone(),
             cancel,
@@ -4038,7 +4029,7 @@ mod tests {
         let cancel = CancelToken::new();
 
         let handle = tokio::spawn(run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "boom",
             ctx.clone(),
             cancel.clone(),
@@ -4085,7 +4076,7 @@ mod tests {
         let cancel = CancelToken::new();
 
         let handle = tokio::spawn(run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "boom",
             ctx.clone(),
             cancel,
@@ -4151,7 +4142,7 @@ mod tests {
         let cancel = CancelToken::new();
 
         let handle = tokio::spawn(run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "read then finish",
             ctx.clone(),
             cancel,
@@ -4199,7 +4190,7 @@ mod tests {
         let cancel = CancelToken::new();
 
         let handle = tokio::spawn(run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "boom",
             ctx.clone(),
             cancel.clone(),
@@ -4251,7 +4242,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "hi",
             ctx.clone(),
             cancel,
@@ -4297,7 +4288,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "hi",
             ctx.clone(),
             cancel,
@@ -4351,7 +4342,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "where am i",
             ctx.clone(),
             cancel,
@@ -4419,7 +4410,7 @@ mod tests {
         let cancel = CancelToken::new();
         let filter = vec!["Read".to_string()];
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "write",
             ctx.clone(),
             cancel,
@@ -4488,7 +4479,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "write",
             ctx.clone(),
             cancel,
@@ -4550,7 +4541,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "read both",
             ctx.clone(),
             cancel,
@@ -4636,7 +4627,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "mix",
             ctx.clone(),
             cancel,
@@ -4715,7 +4706,7 @@ mod tests {
         ctx.params.system_prompt = Some("you are a harness".into());
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "hi",
             ctx.clone(),
             cancel,
@@ -4763,7 +4754,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "hi",
             ctx.clone(),
             cancel,
@@ -4841,7 +4832,7 @@ mod tests {
         ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "write",
             ctx.clone(),
             cancel,
@@ -4891,7 +4882,7 @@ mod tests {
         ctx.completion_nudge_budget = 0;
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "write",
             ctx.clone(),
             cancel,
@@ -4942,7 +4933,7 @@ mod tests {
         ctx.completion_nudge_budget = 1;
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "do it",
             ctx.clone(),
             cancel,
@@ -4971,6 +4962,7 @@ mod tests {
 
     #[tokio::test]
     async fn mixed_done_with_other_tools_is_rejected() {
+        let _env = crate::test_support::EnvGuard::lock();
         // Done mixed with other tool calls in the same turn must be
         // rejected with an error; no tools from that turn may execute.
         let dir = std::env::temp_dir().join(format!(
@@ -5030,7 +5022,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "write",
             ctx.clone(),
             cancel,
@@ -5092,7 +5084,7 @@ mod tests {
         ctx.reminder_budget = 0;
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "hi",
             ctx.clone(),
             cancel,
@@ -5151,7 +5143,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "fan out",
             ctx.clone(),
             cancel,
@@ -5235,7 +5227,7 @@ mod tests {
         let factory: super::super::task::TaskModelFactory = Arc::new(move |spec: &str| {
             assert_eq!(spec, "openai/mini", "factory receives the matched spec");
             Ok(super::super::task::TaskModel {
-                model: gm(child_handle.clone().erase()),
+                model: child_handle.clone().erase(),
                 temperature: None,
                 max_tokens: None,
                 extra: None,
@@ -5254,7 +5246,7 @@ mod tests {
         ctx.params.task_models = Some(selector);
 
         run_agent_loop(
-            gm(parent.clone().erase()),
+            parent.clone().erase(),
             "go",
             ctx.clone(),
             CancelToken::new(),
@@ -5343,7 +5335,7 @@ mod tests {
         let cancel = CancelToken::new();
         let mut opts = loop_opts(None);
         opts.max_tokens = Some(8192);
-        run_agent_loop(gm(model.clone().erase()), "go", ctx, cancel, opts, None)
+        run_agent_loop(model.clone().erase(), "go", ctx, cancel, opts, None)
             .await
             .unwrap();
 
@@ -5384,7 +5376,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let opts = loop_opts(None); // max_tokens: None
-        run_agent_loop(gm(model.clone().erase()), "go", ctx, cancel, opts, None)
+        run_agent_loop(model.clone().erase(), "go", ctx, cancel, opts, None)
             .await
             .unwrap();
 
@@ -5434,7 +5426,7 @@ mod tests {
         let child_handle = child.clone();
         let factory: super::super::task::TaskModelFactory = Arc::new(move |_spec: &str| {
             Ok(super::super::task::TaskModel {
-                model: gm(child_handle.clone().erase()),
+                model: child_handle.clone().erase(),
                 temperature: None,
                 max_tokens: Some(8192),
                 extra: None,
@@ -5455,7 +5447,7 @@ mod tests {
         opts.max_tokens = Some(8192);
 
         run_agent_loop(
-            gm(parent.clone().erase()),
+            parent.clone().erase(),
             "go",
             ctx,
             CancelToken::new(),
@@ -5492,6 +5484,7 @@ mod tests {
     /// child result can't collide on the parent TUI's per-ID live slots.
     #[tokio::test]
     async fn nested_task_shares_stream_and_prefixes_ids() {
+        let _env = crate::test_support::EnvGuard::lock();
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
         let mut ctx = test_ctx(None, None);
@@ -5549,7 +5542,7 @@ mod tests {
         let run = tokio::time::timeout(
             Duration::from_secs(15),
             run_agent_loop(
-                gm(model.erase()),
+                model.erase(),
                 "go",
                 ctx,
                 CancelToken::new(),
@@ -5650,7 +5643,7 @@ mod tests {
         let child_handle = child.clone();
         let factory: super::super::task::TaskModelFactory = Arc::new(move |_spec: &str| {
             Ok(super::super::task::TaskModel {
-                model: gm(child_handle.clone().erase()),
+                model: child_handle.clone().erase(),
                 temperature: None,
                 max_tokens: None,
                 extra: None,
@@ -5669,7 +5662,7 @@ mod tests {
         ctx.params.task_models = Some(selector);
 
         run_agent_loop(
-            gm(parent.clone().erase()),
+            parent.clone().erase(),
             "go",
             ctx,
             CancelToken::new(),
@@ -5789,7 +5782,7 @@ mod tests {
             ),
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
-        let dyn_model = gm(model.erase());
+        let dyn_model = model.erase();
         let evt_tx_clone = handle.evt_tx.clone();
         tool_ctx.telemetry = AgentLoopTelemetry {
             stream_events: Some(StreamEventSender::Broadcast(evt_tx_clone.clone())),
@@ -5900,7 +5893,7 @@ mod tests {
                 rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
             ],
         ]);
-        let dyn_model = gm(model.erase());
+        let dyn_model = model.erase();
         let evt_tx_clone = handle.evt_tx.clone();
         tool_ctx.telemetry = AgentLoopTelemetry {
             stream_events: Some(StreamEventSender::Broadcast(evt_tx_clone.clone())),
@@ -5998,7 +5991,7 @@ mod tests {
             ),
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
-        let dyn_model = gm(model.erase());
+        let dyn_model = model.erase();
         let evt_tx_clone = handle.evt_tx.clone();
         tool_ctx.telemetry = AgentLoopTelemetry {
             stream_events: Some(StreamEventSender::Broadcast(evt_tx_clone.clone())),
@@ -6085,7 +6078,7 @@ mod tests {
             ),
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
-        let dyn_model = gm(model.erase());
+        let dyn_model = model.erase();
         let evt_tx_clone = handle.evt_tx.clone();
         tool_ctx.telemetry = AgentLoopTelemetry {
             stream_events: Some(StreamEventSender::Broadcast(evt_tx_clone.clone())),
@@ -6184,7 +6177,7 @@ mod tests {
 
         let agent = tokio::spawn(async move {
             run_agent_loop(
-                gm(model.erase()),
+                model.erase(),
                 "hi",
                 ctx,
                 cancel,
@@ -6230,18 +6223,16 @@ mod tests {
     /// in the returned history. Both are asserted here at the loop level.
     #[tokio::test]
     async fn loop_done_emits_log_and_ledger() {
-        let model = gm(
-            rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
-                rig_core::test_utils::MockStreamEvent::text("all finished"),
-                rig_core::test_utils::MockStreamEvent::tool_call(
-                    "done1",
-                    "Done",
-                    serde_json::json!({"summary": "implemented the fix"}),
-                ),
-                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-            ]])
-            .erase(),
-        );
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
+            rig_core::test_utils::MockStreamEvent::text("all finished"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "implemented the fix"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]])
+        .erase();
 
         let tool_ctx = test_tool_ctx();
         let tool_defs = tools::tool_definitions(None, false);
@@ -6318,18 +6309,16 @@ mod tests {
     /// user message.
     #[tokio::test]
     async fn loop_done_persisted_history_has_no_consecutive_user_messages() {
-        let model = gm(
-            rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
-                rig_core::test_utils::MockStreamEvent::text("all finished"),
-                rig_core::test_utils::MockStreamEvent::tool_call(
-                    "done1",
-                    "Done",
-                    serde_json::json!({"summary": "implemented the fix"}),
-                ),
-                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-            ]])
-            .erase(),
-        );
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
+            rig_core::test_utils::MockStreamEvent::text("all finished"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "implemented the fix"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]])
+        .erase();
 
         let tool_ctx = test_tool_ctx();
         let tool_defs = tools::tool_definitions(None, false);
@@ -6494,7 +6483,7 @@ mod tests {
             crate::conversation::new_blank_conversation("hi", false, None);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "write",
             ctx.clone(),
             cancel,

@@ -17,7 +17,6 @@ pub(crate) mod format;
 pub mod github_auth;
 pub(crate) mod interactive;
 pub(crate) mod lazy_auth_http;
-pub mod model;
 pub(crate) mod native;
 pub mod openai_protocol;
 pub mod params;

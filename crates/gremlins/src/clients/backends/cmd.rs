@@ -10,9 +10,11 @@ use regex::Regex;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
+
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::interactive::InteractiveSession;
-use crate::clients::model::GremlinsModel;
 use crate::clients::params::ResolvedParams;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::stream_json::{self, StreamState};
@@ -634,7 +636,7 @@ impl Backend for CmdBackend {
         ""
     }
 
-    fn make_model(&self, _spec: &str) -> Option<GremlinsModel> {
+    fn make_model(&self, _spec: &str) -> Option<DynModel<Completion>> {
         None
     }
 

@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use crate::clients::backend::Backend;
 use crate::clients::compaction::compaction_block_as_message;
-use crate::clients::conversation::{Conversation, RunArtifact, TurnScript};
+use crate::clients::conversation::{Conversation, RunArtifact, TurnScript, TurnScriptError};
 use crate::clients::done_helpers::done_user_message;
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
@@ -266,7 +266,11 @@ impl Conversation for StandardConversation {
         self.prompt_committed = false;
     }
 
-    async fn render_turn(&mut self, nested: bool, system_prompt: Option<String>) -> TurnScript {
+    async fn render_turn(
+        &mut self,
+        nested: bool,
+        system_prompt: Option<String>,
+    ) -> Result<TurnScript, TurnScriptError> {
         let combined_system = system_prompt;
 
         let next_user_prompt = if nested {
@@ -318,15 +322,34 @@ impl Conversation for StandardConversation {
             }
         };
 
+        // Coarse prompt-size gate: sum text byte lengths of all messages
+        // (including system prompt) and reject oversized turns before the
+        // model ever sees them.
+        let limit = crate::config::max_prompt_bytes();
+        let sys_bytes = combined_system
+            .as_ref()
+            .map(|s| s.len() as u64)
+            .unwrap_or(0);
+        let actual: u64 = sys_bytes
+            + self
+                .history
+                .iter()
+                .chain(std::iter::once(&next_user_prompt))
+                .map(crate::clients::conversation::message_text_byte_len)
+                .sum::<u64>();
+        if actual > limit {
+            return Err(TurnScriptError::TooLarge { limit, actual });
+        }
+
         // Stash the rendered prompt so record_turn/done_rejected/finalize
         // can commit the exact message the model saw.
         self.rendered_prompt = Some(next_user_prompt.clone());
 
-        TurnScript {
+        Ok(TurnScript {
             messages: self.history.clone(),
             system_prompt: combined_system,
             next_user_prompt,
-        }
+        })
     }
 
     fn finalize(
@@ -598,7 +621,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
 
         run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "parent go",
             ctx,
             CancelToken::new(),
@@ -706,7 +729,7 @@ mod tests {
         let child_handle = child.clone();
         let factory: crate::clients::task::TaskModelFactory = Arc::new(move |_spec: &str| {
             Ok(crate::clients::task::TaskModel {
-                model: gm(child_handle.clone().erase()),
+                model: child_handle.clone().erase(),
                 temperature: None,
                 max_tokens: None,
                 extra: None,
@@ -725,7 +748,7 @@ mod tests {
         ctx.params.task_models = Some(selector);
 
         run_agent_loop(
-            gm(parent.clone().erase()),
+            parent.clone().erase(),
             "go",
             ctx,
             CancelToken::new(),
@@ -809,7 +832,7 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let result = run_agent_loop(
-            gm(model.clone().erase()),
+            model.clone().erase(),
             "think then finish",
             ctx,
             cancel,

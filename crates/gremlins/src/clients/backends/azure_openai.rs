@@ -13,13 +13,15 @@ use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::cancels::CancelsMap;
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::lazy_auth_http::{ApiKeyStrategy, LazyAuthHttpClient};
-use crate::clients::model::GremlinsModel;
+
 use crate::clients::native::NativeRunState;
 use crate::clients::openai_protocol;
 use crate::clients::params::ResolvedParams;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::token_provider::TokenProvider;
 use crate::clients::config::ProviderAuth;
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
 use rig_reqwest::ReqwestClient;
 
 // ── AzureOpenAiClientState ───────────────────────────────────────────────
@@ -200,10 +202,7 @@ impl Backend for AzureOpenAiBackend {
 
         let make_model = async {
             match &self.state.client_state {
-                AzureOpenAiClientState::Static(client) => Ok(GremlinsModel::new(
-                    client.completion(&model_name).erase(),
-                    crate::config::max_prompt_bytes(),
-                )),
+                AzureOpenAiClientState::Static(client) => Ok(client.completion(&model_name).erase()),
                 AzureOpenAiClientState::Dynamic {
                     token_provider,
                     endpoint,
@@ -228,10 +227,7 @@ impl Backend for AzureOpenAiBackend {
                             endpoint,
                             api_version,
                         ));
-                    Ok(GremlinsModel::new(
-                        client.completion(&model_name).erase(),
-                        crate::config::max_prompt_bytes(),
-                    ))
+                    Ok(client.completion(&model_name).erase())
                 }
             }
         };
@@ -257,15 +253,12 @@ impl Backend for AzureOpenAiBackend {
         &self.state.model
     }
 
-    fn make_model(&self, spec: &str) -> Option<GremlinsModel> {
+    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
         let (provider, model) = openai_protocol::provider_and_model(spec)?;
         if provider == "azure-openai" {
             match &self.state.client_state {
                 AzureOpenAiClientState::Static(client) => {
-                    Some(GremlinsModel::new(
-                        client.completion(&model).erase(),
-                        crate::config::max_prompt_bytes(),
-                    ))
+                    Some(client.completion(&model).erase())
                 }
                 AzureOpenAiClientState::Dynamic {
                     ref endpoint,
@@ -289,10 +282,7 @@ impl Backend for AzureOpenAiBackend {
                         .with_api_version(api_version)
                         .with_base_url(endpoint)
                         .connect(wrapped);
-                    Some(GremlinsModel::new(
-                        client.completion(&model).erase(),
-                        crate::config::max_prompt_bytes(),
-                    ))
+                    Some(client.completion(&model).erase())
                 }
             }
         } else {

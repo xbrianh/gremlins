@@ -5,13 +5,14 @@ use std::sync::Arc;
 use super::cancel::CancelToken;
 use super::conversation::Conversation;
 use super::interactive::{InteractiveSession, StreamEventSender};
-use super::model::GremlinsModel;
 use super::params::ResolvedParams;
 pub(crate) use super::plug::LoopHooks;
 use super::protocol::{CompactionResult, CompletedRun};
 use super::task_models::TaskModelSelector;
 use async_trait::async_trait;
 use indexmap::IndexMap;
+use rig_core::driver::DynModel;
+use rig_core::operation::Completion;
 
 pub struct RunParams {
     pub prompt: String,
@@ -140,7 +141,7 @@ pub trait Backend: Send + Sync {
     }
 
     /// List all models this backend can serve (unfiltered).
-    fn models(&self) -> IndexMap<String, GremlinsModel> {
+    fn models(&self) -> IndexMap<String, DynModel<Completion>> {
         IndexMap::new()
     }
 
@@ -160,7 +161,7 @@ pub trait Backend: Send + Sync {
     fn reap_all(&self, _gremlin_id: &str) {}
 
     /// Build a model from a provider-raw spec string.
-    fn make_model(&self, _spec: &str) -> Option<GremlinsModel> {
+    fn make_model(&self, _spec: &str) -> Option<DynModel<Completion>> {
         None
     }
 
