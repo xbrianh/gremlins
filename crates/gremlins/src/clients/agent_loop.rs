@@ -486,10 +486,7 @@ impl LoopState {
     ) -> CompletionRequest {
         let script = self
             .conv
-            .render_turn(
-                nested,
-                self.system_prompt.clone(),
-            )
+            .render_turn(nested, self.system_prompt.clone())
             .await;
 
         let mut builder = CompletionRequest::new(script.next_user_prompt)

@@ -321,11 +321,7 @@ impl Conversation for StandardConversation {
         self.prompt_committed = false;
     }
 
-    async fn render_turn(
-        &mut self,
-        nested: bool,
-        system_prompt: Option<String>,
-    ) -> TurnScript {
+    async fn render_turn(&mut self, nested: bool, system_prompt: Option<String>) -> TurnScript {
         // Phase 0: auto-compaction (main loop only; not in nested/fork contexts)
         if !nested && self.should_compact_auto() {
             if let Some(report) = self.compact(system_prompt.as_deref()).await {
