@@ -6,6 +6,9 @@ Multiple Task calls issued in the same message execute concurrently
 (up to 8). Use this to fan out independent subtasks and collect
 results in a single round-trip.
 
+Parallel Tasks launched in the same message share one working directory.
+Each worker can see the other workers' in-progress changes.
+
 Three `kind` variants:
 
 - `Scout` — read-only exploration. Use for gathering information,
