@@ -860,6 +860,13 @@ fn load_cache(path: &Path) -> Result<HashMap<String, CacheEntry>, String> {
                         existing.estimates = existing.raw_estimates.len();
                     }
                     std::collections::hash_map::Entry::Vacant(e) => {
+                        // Normalize `estimates` to the actual raw count
+                        // so a partial entry from an interrupted run
+                        // (e.g. estimates=3 but only 1 raw_estimate
+                        // written before crash) is treated as a cache
+                        // miss rather than accepted with incomplete data.
+                        let mut entry = entry;
+                        entry.estimates = entry.raw_estimates.len();
                         e.insert(entry);
                     }
                 }

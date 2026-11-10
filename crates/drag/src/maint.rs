@@ -713,6 +713,15 @@ fn load_maint_cache(path: &Path) -> Result<HashMap<String, MaintCacheEntry>, Str
                 match map.entry(entry.key.clone()) {
                     std::collections::hash_map::Entry::Occupied(mut slot) => {
                         let existing: &mut MaintCacheEntry = slot.get_mut();
+                        // The cache key excludes the model, so a model
+                        // change means the existing entries belong to a
+                        // different scoring run.  Replace entirely
+                        // rather than merging estimates from different
+                        // models.
+                        if existing.model != entry.model {
+                            slot.insert(entry);
+                            continue;
+                        }
                         let needed = entry.estimates.saturating_sub(existing.raw_estimates.len());
                         existing
                             .raw_estimates
@@ -720,6 +729,13 @@ fn load_maint_cache(path: &Path) -> Result<HashMap<String, MaintCacheEntry>, Str
                         existing.estimates = existing.raw_estimates.len();
                     }
                     std::collections::hash_map::Entry::Vacant(slot) => {
+                        // Normalize `estimates` to the actual raw count
+                        // so a partial entry from an interrupted run
+                        // (e.g. estimates=3 but only 1 raw_estimate
+                        // written before crash) is treated as a cache
+                        // miss rather than accepted with incomplete data.
+                        let mut entry = entry;
+                        entry.estimates = entry.raw_estimates.len();
                         slot.insert(entry);
                     }
                 }
