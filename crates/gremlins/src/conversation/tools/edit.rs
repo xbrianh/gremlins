@@ -427,17 +427,34 @@ fn normalize_for_fuzzy_match(s: &str) -> String {
     out
 }
 
+/// Collect all byte-positions where `needle` occurs in `haystack`,
+/// offset by `window_offset` so results are absolute positions in the
+/// original buffer. Advances by the first character's UTF-8 length so
+/// the next search never starts inside a multi-byte character, while
+/// still detecting overlapping occurrences.
+fn find_all_matches(haystack: &str, needle: &str, window_offset: usize) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut search_from = 0;
+    let advance_by = needle.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+    while let Some(pos) = haystack[search_from..].find(needle) {
+        positions.push(search_from + pos + window_offset);
+        search_from += pos + advance_by;
+    }
+    positions
+}
+
 fn apply_edits(
     content: &str,
     edits: &[EditOp],
     file_path: &str,
-) -> Result<(String, Vec<(usize, usize)>), String> {
+) -> Result<(String, Vec<(usize, usize)>, bool), String> {
     let mut buffer = content.to_string();
     // Record each applied edit's replacement byte span at application time.
     // Line ranges are computed afterwards against the final buffer, so a later
     // edit that inserts or deletes lines before an earlier edit's position
     // still reports the earlier edit at its true final location.
     let mut applied: Vec<AppliedEdit> = Vec::with_capacity(edits.len());
+    let mut any_unescape = false;
 
     // Validate and apply edits sequentially. Each edit sees the accumulated
     // state of all prior edits in the same batch, enabling chained edits
@@ -477,54 +494,54 @@ fn apply_edits(
         };
         let window_offset = scope.map_or(0, |(s, _)| s);
 
-        // Collect ALL match positions using find + offset advancement.
-        // Advance by the first character's UTF-8 length (not 1 byte) so the
-        // next search never starts inside a multi-byte character, while
-        // still detecting overlapping occurrences (e.g. "aa" in "aaa").
-        let mut match_positions: Vec<usize> = Vec::new();
-        let mut search_from = 0;
-        let advance_by = old_str.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-        while let Some(pos) = search_window[search_from..].find(old_str) {
-            let abs_pos = search_from + pos + window_offset;
-            match_positions.push(abs_pos);
-            search_from += pos + advance_by;
-        }
+        // Collect all match positions with find + advance-by-char.
+        let mut match_positions = find_all_matches(search_window, old_str, window_offset);
 
         if match_positions.is_empty() {
-            // \n unescape retry: the LLM may have seen literal \n in Read
-            // output and interpreted it as a JSON escape, producing a real
-            // newline byte in old_string. Convert those newlines back to
-            // the literal two-byte sequence `\n` and retry.
-            let unescaped_old = old_str.replace('\n', "\\n");
-            if unescaped_old != *old_str {
-                let mut search_from = 0;
-                let advance_by = unescaped_old
-                    .chars()
-                    .next()
-                    .map(|c| c.len_utf8())
-                    .unwrap_or(1);
-                while let Some(pos) = search_window[search_from..].find(&unescaped_old) {
-                    let abs_pos = search_from + pos + window_offset;
-                    match_positions.push(abs_pos);
-                    search_from += pos + advance_by;
+            // Control-character unescape retry: the LLM may have seen
+            // literal \n, \t, or \r in Read output and interpreted them
+            // as JSON escapes, producing real control bytes in old_string.
+            // Convert those back to their literal two-byte sequences and
+            // retry so the needle matches what the file actually contains.
+            let mut unescaped = String::with_capacity(old_str.len());
+            let mut had_escape = false;
+            for ch in old_str.chars() {
+                match ch {
+                    '\n' => {
+                        unescaped.push_str("\\n");
+                        had_escape = true;
+                    }
+                    '\t' => {
+                        unescaped.push_str("\\t");
+                        had_escape = true;
+                    }
+                    '\r' => {
+                        unescaped.push_str("\\r");
+                        had_escape = true;
+                    }
+                    _ => unescaped.push(ch),
                 }
+            }
+            if had_escape {
+                match_positions = find_all_matches(search_window, &unescaped, window_offset);
 
                 if !match_positions.is_empty() {
                     if match_positions.len() > 1 {
                         return Err(format!(
-                            "Error: old_string is not unique in {file_path} (edit {}) — {} matches found after newline unescaping. Try scoping with start_line/end_line.",
+                            "Error: old_string is not unique in {file_path} (edit {}) — {} matches found after control-character unescaping. Try scoping with start_line/end_line.",
                             i + 1,
                             match_positions.len()
                         ));
                     }
                     let start = match_positions[0];
-                    let old_len = unescaped_old.len();
+                    let old_len = unescaped.len();
                     buffer.replace_range(start..start + old_len, &edit.new_str);
                     applied.push(AppliedEdit {
                         start,
                         old_len,
                         new_len: edit.new_str.len(),
                     });
+                    any_unescape = true;
                     continue;
                 }
             }
@@ -751,7 +768,7 @@ fn apply_edits(
         ranges.push((start_line, end_line));
     }
 
-    Ok((buffer, ranges))
+    Ok((buffer, ranges, any_unescape))
 }
 
 const SUCCESS_SNIPPET_RADIUS: usize = 3;
@@ -794,6 +811,7 @@ fn render_success(
     original_lines: usize,
     final_lines: usize,
     diff: Option<&str>,
+    unescape_used: bool,
 ) -> String {
     let offsets = compute_line_offsets(content);
     let last_line = offsets.len();
@@ -866,6 +884,10 @@ fn render_success(
         delta_sign,
         delta
     );
+
+    if unescape_used {
+        out.push_str("(note: one or more edits matched via control-character unescaping — the LLM may have misinterpreted literal \\n, \\t, or \\r in Read output as JSON escapes)\n");
+    }
 
     if expanded < windows.len() {
         let remaining = windows.len() - expanded;
@@ -1096,7 +1118,7 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
         edit.new_str = edit.new_str.replace("\r\n", "\n");
     }
 
-    let (mut updated, ranges) = match apply_edits(&content, &edits, file_path) {
+    let (mut updated, ranges, any_unescape) = match apply_edits(&content, &edits, file_path) {
         Ok(u) => u,
         Err(e) => return e,
     };
@@ -1116,6 +1138,7 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
         original_lines,
         final_lines,
         diff.as_deref(),
+        any_unescape,
     );
 
     // Restore BOM after diff/render so it doesn't leak into context snippets.
@@ -1261,7 +1284,7 @@ mod tests {
             scope_start: None,
             scope_end: None,
         }];
-        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "foo baz");
     }
 
@@ -1279,8 +1302,9 @@ mod tests {
             scope_start: None,
             scope_end: None,
         }];
-        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _, unescape_used) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "'Replaced'\n");
+        assert!(unescape_used, "should report unescape was used");
     }
 
     #[test]
@@ -1296,9 +1320,70 @@ mod tests {
         }];
         let err = apply_edits(content, &edits, "f.txt").unwrap_err();
         assert!(
-            err.contains("not unique") && err.contains("after newline unescaping"),
+            err.contains("not unique") && err.contains("after control-character unescaping"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn apply_match_unescapes_json_tab_in_old_string() {
+        // Real tab byte → literal \t, same mechanism as \n.
+        let content = "'col1\\tcol2'\n";
+        let edits = vec![EditOp {
+            old_str: "'col1\tcol2'".into(),
+            new_str: "'replaced'".into(),
+            scope_start: None,
+            scope_end: None,
+        }];
+        let (out, _, unescape_used) = apply_edits(content, &edits, "f.txt").unwrap();
+        assert_eq!(out, "'replaced'\n");
+        assert!(unescape_used);
+    }
+
+    #[test]
+    fn apply_match_unescapes_json_carriage_return_in_old_string() {
+        let content = "'before\\rafter'\n";
+        let edits = vec![EditOp {
+            old_str: "'before\rafter'".into(),
+            new_str: "'replaced'".into(),
+            scope_start: None,
+            scope_end: None,
+        }];
+        let (out, _, unescape_used) = apply_edits(content, &edits, "f.txt").unwrap();
+        assert_eq!(out, "'replaced'\n");
+        assert!(unescape_used);
+    }
+
+    #[test]
+    fn apply_match_unescape_retry_falls_through_to_fuzzy() {
+        // unescape retry must fail (no literal \n in file) so fuzzy must
+        // kick in and match via confusable normalization.
+        // Use a smart-quote character that the fuzzy path normalizes.
+        let content = "\u{201C}hello\u{201D}\n";
+        let edits = vec![EditOp {
+            old_str: "\"hello\"".into(),
+            new_str: "'replaced'".into(),
+            scope_start: None,
+            scope_end: None,
+        }];
+        let (out, _, unescape_used) = apply_edits(content, &edits, "f.txt").unwrap();
+        assert_eq!(out, "'replaced'\n");
+        assert!(!unescape_used);
+    }
+
+    #[test]
+    fn apply_match_unescape_retry_respects_line_scope() {
+        // Two lines with literal \n, scoped to line 2 only.
+        let content = "'a\\nb'\n'a\\nb'\n";
+        let edits = vec![EditOp {
+            old_str: "'a\nb'".into(),
+            new_str: "'replaced'".into(),
+            scope_start: Some(2),
+            scope_end: Some(2),
+        }];
+        let (out, _, unescape_used) = apply_edits(content, &edits, "f.txt").unwrap();
+        assert_eq!(out, "'a\\nb'\n'replaced'\n");
+        assert!(unescape_used);
     }
 
     #[test]
@@ -1448,7 +1533,7 @@ mod tests {
             scope_start: Some(2),
             scope_end: Some(4),
         }];
-        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "line1\nline2\nTARGET\nline4\nline5\n");
     }
 
@@ -1477,7 +1562,7 @@ mod tests {
             scope_start: Some(3),
             scope_end: None,
         }];
-        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "line1\nline2\nTARGET\nline4\n");
     }
 
@@ -1490,7 +1575,7 @@ mod tests {
             scope_start: Some(2),
             scope_end: Some(100),
         }];
-        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "line1\nline2\nTARGET\nline4\n");
     }
 
@@ -1504,7 +1589,7 @@ mod tests {
             scope_start: Some(2),
             scope_end: Some(2),
         }];
-        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "x\nBAR\nfoo\n");
     }
 
@@ -1520,7 +1605,7 @@ mod tests {
             scope_start: Some(2),
             scope_end: Some(3),
         }];
-        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "foo\nBAR\nBAZ\n");
     }
 
@@ -1557,7 +1642,7 @@ mod tests {
                 scope_end: None,
             },
         ];
-        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "fn baz() {}\nfn main() { baz(); }\n");
     }
 
@@ -1618,7 +1703,7 @@ mod tests {
                 scope_end: None,
             },
         ];
-        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "let a = \"hi\";\nlet b = \"bye\";\n");
     }
 
@@ -1663,7 +1748,7 @@ mod tests {
                 scope_end: None,
             },
         ];
-        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "aONEbTWOc");
     }
 
@@ -1934,7 +2019,7 @@ mod tests {
             scope_start: None,
             scope_end: None,
         }];
-        let (out, ranges) = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, ranges, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "one\ntwo\nTHREE\nfour\nfive\n");
         assert_eq!(ranges, vec![(3, 3)]);
     }
@@ -1942,7 +2027,7 @@ mod tests {
     #[test]
     fn render_success_includes_context_around_single_edit() {
         let content = "one\ntwo\nTHREE\nfour\nfive\n";
-        let report = render_success(content, &[(3, 3)], "f.txt", 5, 5, None);
+        let report = render_success(content, &[(3, 3)], "f.txt", 5, 5, None, false);
         assert!(
             report.starts_with("Applied 1 edit to f.txt. (5 lines, +0 vs original)\n"),
             "got: {report}"
@@ -1971,7 +2056,7 @@ mod tests {
                 scope_end: None,
             },
         ];
-        let (out, ranges) = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, ranges, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "a\nB\nC\nC2\nD\n");
         assert_eq!(ranges, vec![(2, 4), (5, 5)]);
     }
@@ -1979,7 +2064,7 @@ mod tests {
     #[test]
     fn render_success_coalesces_adjacent_windows() {
         let content = "a\nB\nC\nd\n";
-        let report = render_success(content, &[(2, 2), (3, 3)], "f.txt", 4, 4, None);
+        let report = render_success(content, &[(2, 2), (3, 3)], "f.txt", 4, 4, None, false);
         assert!(
             report.starts_with("Applied 2 edits to f.txt. (4 lines, +0 vs original)\n"),
             "got: {report}"
@@ -1995,7 +2080,7 @@ mod tests {
     #[test]
     fn render_success_coalesces_out_of_order_windows() {
         let content = "one\ntwo\nthree\nfour\nfive\n";
-        let report = render_success(content, &[(5, 5), (1, 1)], "f.txt", 5, 5, None);
+        let report = render_success(content, &[(5, 5), (1, 1)], "f.txt", 5, 5, None, false);
         assert!(
             report.starts_with("Applied 2 edits to f.txt. (5 lines, +0 vs original)\n"),
             "got: {report}"
@@ -2008,7 +2093,7 @@ mod tests {
     #[test]
     fn render_success_preserves_trailing_empty_line() {
         let content = "one\ntwo\n";
-        let report = render_success(content, &[(2, 2)], "f.txt", 2, 2, None);
+        let report = render_success(content, &[(2, 2)], "f.txt", 2, 2, None, false);
         assert!(report.contains("  3: "), "got: {report}");
     }
 
@@ -2032,7 +2117,7 @@ mod tests {
                 scope_end: None,
             },
         ];
-        let (out, ranges) = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, ranges, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "A\nA2\nb\nC\n");
         assert_eq!(ranges, vec![(4, 4), (1, 2)]);
     }
@@ -2043,7 +2128,7 @@ mod tests {
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let report = render_success(&content, &[(1, 40)], "f.txt", 40, 40, None);
+        let report = render_success(&content, &[(1, 40)], "f.txt", 40, 40, None, false);
         assert!(
             report.starts_with("Applied 1 edit to f.txt. (40 lines, +0 vs original)\n"),
             "got: {report}"
@@ -2072,7 +2157,7 @@ mod tests {
             (60, 60),
             (70, 70),
         ];
-        let report = render_success(&content, &ranges, "f.txt", 70, 70, None);
+        let report = render_success(&content, &ranges, "f.txt", 70, 70, None, false);
         assert!(
             report.starts_with("Applied 8 edits to f.txt. (70 lines, +0 vs original)\n"),
             "got: {report}"
@@ -2106,6 +2191,7 @@ mod tests {
             30,
             30,
             None,
+            false,
         );
         assert!(report.contains("  10: line10"), "got: {report}");
         assert!(report.contains("  17: line17"), "got: {report}");
