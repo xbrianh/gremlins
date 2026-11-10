@@ -158,9 +158,8 @@ impl InputBuffer {
     /// existing substitution overlapping `span` is replaced.
     pub fn add_substitution(&mut self, span: Range<usize>, absolute: String) {
         // Remove any existing substitution that overlaps this span.
-        self.substitutions.retain(|(s, _)| {
-            s.end <= span.start || s.start >= span.end
-        });
+        self.substitutions
+            .retain(|(s, _)| s.end <= span.start || s.start >= span.end);
         // Insert, maintaining sorted order.
         let pos = self
             .substitutions
@@ -178,9 +177,8 @@ impl InputBuffer {
     /// Used by [`super::app::App::replace_input_span`] to clear stale
     /// substitutions before a new completion candidate replaces the span.
     pub fn clear_substitutions_in(&mut self, span: Range<usize>) {
-        self.substitutions.retain(|(s, _)| {
-            s.end <= span.start || s.start >= span.end
-        });
+        self.substitutions
+            .retain(|(s, _)| s.end <= span.start || s.start >= span.end);
     }
 
     // ── Resolution (called once, on Enter) ──
@@ -196,10 +194,7 @@ impl InputBuffer {
         for (span, absolute) in self.substitutions.iter().rev() {
             let start = span.start.min(result.len());
             let end = span.end.min(result.len());
-            if start <= end
-                && result.is_char_boundary(start)
-                && result.is_char_boundary(end)
-            {
+            if start <= end && result.is_char_boundary(start) && result.is_char_boundary(end) {
                 result.replace_range(start..end, absolute);
             }
         }

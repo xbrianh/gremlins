@@ -748,7 +748,7 @@ impl App {
         let Some(_search) = &self.history_search else {
             return;
         };
-        if self.input.len() > 0 {
+        if !self.input.is_empty() {
             let end = self.input.len();
             let mut start = end - 1;
             while start > 0 && !self.input.is_char_boundary(start) {

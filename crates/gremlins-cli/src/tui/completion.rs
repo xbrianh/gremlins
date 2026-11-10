@@ -358,11 +358,7 @@ mod tests {
     fn advance_and_rewind_wrap() {
         let mut state = CompletionState {
             candidates: vec!["a".to_string(), "b".to_string(), "c".to_string()],
-            absolutes: vec![
-                "/a".to_string(),
-                "/b".to_string(),
-                "/c".to_string(),
-            ],
+            absolutes: vec!["/a".to_string(), "/b".to_string(), "/c".to_string()],
             index: 2,
             span: 0..1,
         };
