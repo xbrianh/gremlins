@@ -211,7 +211,7 @@ fn edit_not_found_diagnostic(
         && (window_start > 0 || window_end < content.len());
     let scoped_hint = if let Some(rel) = content[window_start..window_end].find(needle) {
         let pos = window_start + rel;
-        let line_no = content[..pos].lines().count() + 1;
+        let line_no = line_number_at(&line_offsets, pos);
         let context_start = content[..pos].rfind('\n').map_or(0, |n| n + 1);
         let context_end = content[pos..].find('\n').map_or(content.len(), |n| pos + n);
         let cap_byte = content[context_start..]
@@ -239,12 +239,21 @@ fn edit_not_found_diagnostic(
         scoped
     } else if scope_is_proper_subset {
         if let Some(rel) = content.find(needle) {
-            let line_no = content[..rel].lines().count() + 1;
-            format!(
-                " — first occurrence at line {line_no} (outside the requested scope; \
-                 prior edits may have shifted line numbers — try without \
-                 start_line/end_line or re-read the file)"
-            )
+            // The trimmed needle matched, but verify the complete old_str
+            // also matches here before declaring this as an out-of-scope
+            // occurrence. A partial first-line match (e.g. "alpha" from
+            // "alpha\ngamma" matching "alpha\nbeta") is a genuine
+            // content mismatch, not a stale scope.
+            if content[rel..].starts_with(old_str) {
+                let line_no = line_number_at(&line_offsets, rel);
+                format!(
+                    " — first occurrence at line {line_no} (outside the requested scope; \
+                     prior edits may have shifted line numbers — try without \
+                     start_line/end_line or re-read the file)"
+                )
+            } else {
+                String::new()
+            }
         } else {
             String::new()
         }
@@ -1384,6 +1393,38 @@ mod tests {
         assert!(!msg.contains("between lines"), "got: {msg}");
         assert!(!msg.contains("outside the requested scope"), "got: {msg}");
         assert!(msg.contains("did you mean"), "got: {msg}");
+    }
+
+    #[test]
+    fn diagnostic_scoped_miss_needle_match_but_full_old_str_diverges() {
+        // Regression: the trimmed first-line needle "alpha" matches at
+        // line 2, but the complete old_str "alpha\ngamma" does NOT match
+        // at that position (the content has "alpha\nbeta"). The scope-stale
+        // hint must NOT fire because retrying without the scope would still
+        // fail — this is a genuine content mismatch, not a stale scope.
+        let content = "header\nalpha\nbeta\n";
+        let old_str = "alpha\ngamma";
+        let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, Some(1), Some(1));
+        assert!(msg.contains("between lines 1-1"), "got: {msg}");
+        assert!(!msg.contains("outside the requested scope"), "got: {msg}");
+        assert!(!msg.contains("first occurrence"), "got: {msg}");
+    }
+
+    #[test]
+    fn diagnostic_scoped_miss_mid_line_match_reports_containing_line() {
+        // Regression: when the trimmed needle ("target") starts mid-line,
+        // the full-file fallback must report the containing line via
+        // line_number_at, not the naive .lines().count() + 1 which counts
+        // a partial prefix as a full line.
+        // Content: "alpha\n  target\nzeta\n"
+        // "target" at byte 8 starts on line 2. The old bug counted
+        // content[..8].lines() = ["alpha", "  "] → 2, then +1 = 3 (wrong).
+        let content = "alpha\n  target\nzeta\n";
+        let old_str = "target";
+        let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, Some(1), Some(1));
+        assert!(msg.contains("between lines 1-1"), "got: {msg}");
+        assert!(msg.contains("first occurrence at line 2"), "got: {msg}");
+        assert!(msg.contains("outside the requested scope"), "got: {msg}");
     }
 
     // --- Batch-order diagnostic tests ---
