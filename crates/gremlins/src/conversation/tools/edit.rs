@@ -225,7 +225,9 @@ fn edit_not_found_diagnostic(
         // stepping back across the scope boundary.
         let content_start = pos.saturating_sub(leading_ws).max(window_start);
         let divergence = divergence_report(content, content_start, window_end, old_str);
-        Some(format!(" — did you mean to match near line {line_no}? Found:\n{context}\n{divergence}"))
+        Some(format!(
+            " — did you mean to match near line {line_no}? Found:\n{context}\n{divergence}"
+        ))
     } else {
         None
     };
@@ -1392,7 +1394,10 @@ mod tests {
     fn render_success_coalesces_adjacent_windows() {
         let content = "a\nB\nC\nd\n";
         let report = render_success(content, &[(2, 2), (3, 3)], "f.txt", 4, 4);
-        assert!(report.starts_with("Applied 2 edits to f.txt. (4 lines, +0 vs original)\n"), "got: {report}");
+        assert!(
+            report.starts_with("Applied 2 edits to f.txt. (4 lines, +0 vs original)\n"),
+            "got: {report}"
+        );
         assert_eq!(report.matches("  2: B").count(), 1, "got: {report}");
         assert_eq!(report.matches("  3: C").count(), 1, "got: {report}");
         assert!(
@@ -1405,7 +1410,10 @@ mod tests {
     fn render_success_coalesces_out_of_order_windows() {
         let content = "one\ntwo\nthree\nfour\nfive\n";
         let report = render_success(content, &[(5, 5), (1, 1)], "f.txt", 5, 5);
-        assert!(report.starts_with("Applied 2 edits to f.txt. (5 lines, +0 vs original)\n"), "got: {report}");
+        assert!(
+            report.starts_with("Applied 2 edits to f.txt. (5 lines, +0 vs original)\n"),
+            "got: {report}"
+        );
         assert_eq!(report.matches("  1: one").count(), 1, "got: {report}");
         assert_eq!(report.matches("  5: five").count(), 1, "got: {report}");
         assert!(!report.contains("--"), "got: {report}");
@@ -1450,7 +1458,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let report = render_success(&content, &[(1, 40)], "f.txt", 40, 40);
-        assert!(report.starts_with("Applied 1 edit to f.txt. (40 lines, +0 vs original)\n"), "got: {report}");
+        assert!(
+            report.starts_with("Applied 1 edit to f.txt. (40 lines, +0 vs original)\n"),
+            "got: {report}"
+        );
         assert!(report.contains("  1: line1"), "got: {report}");
         assert!(report.contains("  6: line6"), "got: {report}");
         assert!(!report.contains("  7: line7"), "got: {report}");
@@ -1476,7 +1487,10 @@ mod tests {
             (70, 70),
         ];
         let report = render_success(&content, &ranges, "f.txt", 70, 70);
-        assert!(report.starts_with("Applied 8 edits to f.txt. (70 lines, +0 vs original)\n"), "got: {report}");
+        assert!(
+            report.starts_with("Applied 8 edits to f.txt. (70 lines, +0 vs original)\n"),
+            "got: {report}"
+        );
         assert!(
             report.contains("(2 more context blocks not shown)"),
             "got: {report}"
