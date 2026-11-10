@@ -443,11 +443,11 @@ fn find_all_matches(haystack: &str, needle: &str, window_offset: usize) -> Vec<u
     positions
 }
 
-fn apply_edits(
-    content: &str,
-    edits: &[EditOp],
-    file_path: &str,
-) -> Result<(String, Vec<(usize, usize)>, bool), String> {
+/// Returned by [`apply_edits`]: the final buffer, applied-edit line ranges, and
+/// whether any `\n` / `\t` unescape was performed.
+type ApplyEditsResult = Result<(String, Vec<(usize, usize)>, bool), String>;
+
+fn apply_edits(content: &str, edits: &[EditOp], file_path: &str) -> ApplyEditsResult {
     let mut buffer = content.to_string();
     // Record each applied edit's replacement byte span at application time.
     // Line ranges are computed afterwards against the final buffer, so a later
