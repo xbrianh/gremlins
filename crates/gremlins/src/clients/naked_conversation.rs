@@ -7,8 +7,8 @@
 
 use async_trait::async_trait;
 
-use super::conversation::{Conversation, RunArtifact, TurnScript, TurnScriptError};
 use super::conversation::message_text_byte_len;
+use super::conversation::{Conversation, RunArtifact, TurnScript, TurnScriptError};
 
 /// A minimal [`Conversation`] implementation for shell-backed models.
 ///
@@ -26,20 +26,7 @@ pub(crate) struct NakedConversation {
 }
 
 impl NakedConversation {
-    pub(crate) fn new(prompt: &str) -> Self {
-        Self {
-            history: Vec::new(),
-            next_prompt: rig_core::completion::Message::user(prompt.to_string()),
-            preserve_reasoning: false,
-            last_text: String::new(),
-            finalized_messages: None,
-        }
-    }
-
-    pub(crate) fn with_history(
-        prompt: &str,
-        history: Vec<rig_core::completion::Message>,
-    ) -> Self {
+    pub(crate) fn with_history(prompt: &str, history: Vec<rig_core::completion::Message>) -> Self {
         Self {
             history,
             next_prompt: rig_core::completion::Message::user(prompt.to_string()),
