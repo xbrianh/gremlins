@@ -417,6 +417,11 @@ async fn run() -> Result<(), String> {
         });
     }
 
+    // Shared semaphore to bound concurrent ephemeral gremlin runs.
+    // Created once and passed to both scoring phases so the permit count
+    // is enforced globally regardless of how the phases are composed.
+    let scoring_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_SCORING_RUNS));
+
     // 7. Comprehensibility
     if config.estimates_per_survey < 1 {
         return Err("estimates_per_survey must be >= 1".to_string());
@@ -434,6 +439,7 @@ async fn run() -> Result<(), String> {
         module_cache,
         &config.comprehensibility,
         &comp_config_hash,
+        Arc::clone(&scoring_sem),
     )
     .await?;
 
@@ -493,6 +499,7 @@ async fn run() -> Result<(), String> {
                 cache_state.clone(),
                 &config.maintainability,
                 &maint_config_hash,
+                Arc::clone(&scoring_sem),
             )
             .await?;
             (maint_scores, skipped_dirs)
@@ -919,6 +926,7 @@ async fn score_comprehensibility(
     module_cache: HashMap<String, CacheEntry>,
     comprehensibility_config: &ComprehensibilityConfig,
     config_hash: &str,
+    scoring_sem: Arc<Semaphore>,
 ) -> Result<(), String> {
     // Validate dimensions before spawning any LLM tasks.
     if comprehensibility_config.dimensions.is_empty() {
@@ -950,9 +958,6 @@ async fn score_comprehensibility(
     }
 
     eprintln!("Scoring comprehensibility for {} modules...", modules.len());
-
-    // Shared semaphore to bound concurrent ephemeral gremlin runs.
-    let scoring_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_SCORING_RUNS));
 
     // Single pass: for each module, check the pre-computed module_cache.
     // Cache hits produce `estimates` copies of the cached score directly.
@@ -1025,7 +1030,10 @@ async fn score_comprehensibility(
                     // stay bounded.  The permit is dropped at the end of
                     // each attempt so a sleeping/backoff task does not
                     // hold a scoring slot.
-                    let _permit = sem.acquire().await;
+                    let _permit = sem
+                        .acquire()
+                        .await
+                        .expect("scoring semaphore closed — cannot proceed without a permit");
                     match run_comp_agent(
                         &module,
                         &source,

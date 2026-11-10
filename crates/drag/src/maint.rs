@@ -22,9 +22,7 @@ use gremlins::executor::gremlin::{Gremlin, GremlinConfig};
 use gremlins::model_uri::ModelURI;
 
 use crate::config::MaintainabilityConfig;
-use crate::util::{
-    extract_json, mean_with_ci, truncate, CacheState, CompAgentError, MAX_CONCURRENT_SCORING_RUNS,
-};
+use crate::util::{extract_json, mean_with_ci, truncate, CacheState, CompAgentError};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -135,6 +133,7 @@ pub(crate) async fn score_directory_maintainability(
     cache_state: CacheState,
     maint_config: &MaintainabilityConfig,
     config_hash: &str,
+    scoring_sem: Arc<Semaphore>,
 ) -> Result<(HashMap<String, DirMaintResult>, HashSet<String>), String> {
     if scoring_dirs.is_empty() {
         return Ok((HashMap::new(), HashSet::new()));
@@ -158,9 +157,6 @@ pub(crate) async fn score_directory_maintainability(
         "Scoring maintainability for {} directories...",
         scoring_dirs.len()
     );
-
-    // Shared semaphore to bound concurrent ephemeral gremlin runs.
-    let scoring_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_SCORING_RUNS));
 
     let mut handles: Vec<MaintEstimateTask> = Vec::new();
     let mut estimates_map: HashMap<String, Vec<HashMap<String, u8>>> = HashMap::new();
@@ -223,7 +219,8 @@ pub(crate) async fn score_directory_maintainability(
                     // stay bounded.  The permit is dropped at the end of
                     // each attempt so a sleeping/backoff task does not
                     // hold a scoring slot.
-                    let _permit = sem.acquire().await;
+                    let _permit = sem.acquire().await
+                        .expect("scoring semaphore closed — cannot proceed without a permit");
                     match run_maint_agent(
                         &dir_name,
                         &prompt,
