@@ -882,8 +882,10 @@ strand stays display-only and never enters the FIFO or scrollback; cancel
 entirely — the transcript and input bar are occluded, not overlaid. The table
 lists every tracked gremlin with its status glyph (`▲` running, `◆` done, `✖`
 failed, `■` stopped), running runs first and each group sorted by id. `Up`/
-`Down` move the selection; `Ctrl+O` opens a tail-anchored inline log pane for
-the selected run; `Esc` closes the pane and then returns to chat.
+`Down` move the selection; `Ctrl+O` or `Ctrl+W` opens a tail-anchored inline log pane for
+the selected run; `Esc` closes the pane and then returns to chat. `Ctrl+W`
+also enters the Runs screen from chat and exits back to chat when no pane
+is open.
 
 ```
 ╔══════════════════════════════════════════════════════════════╗

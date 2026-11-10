@@ -68,6 +68,7 @@ this section — do not try to run them yourself.
 - `Ctrl+D` on an empty input — exit the TUI.
 - `Ctrl+L` — redraw the screen.
 - `Esc` — in `/watch`, the first press closes an open live log and the next returns to chat; otherwise return a full-screen view to chat, or clear the input bar and cancel an in-flight chat turn.
+- `Ctrl+W` — enter/exit the watch screen; inside `/watch` the first press closes the inline pane and the next returns to chat.
 - `Ctrl+O` — in `/watch`: open or close the selected gremlin's live log.
 - `j` / `k` / `Up` / `Down` — in `/watch`: move the gremlin selection.
 - `Ctrl+G` — open the external editor to compose multi-line input.

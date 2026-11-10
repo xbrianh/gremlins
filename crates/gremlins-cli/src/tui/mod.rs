@@ -1507,6 +1507,39 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 );
                             }
                         }
+                        KeyCode::Char('w')
+                            if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                        {
+                            // Ctrl+W enters/exits the watch (Runs) screen.
+                            if app.history_search.is_some() {
+                                continue;
+                            }
+                            // Inert on Debug (prompt owns input).
+                            if app.screen.has_prompt() {
+                                continue;
+                            }
+                            match &app.screen {
+                                Screen::Chat => {
+                                    close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
+                                    app.show_runs();
+                                    live_area.show_runs();
+                                    status_generation = status_generation.wrapping_add(1);
+                                    fetch_run_statuses(&client, &status_tx, status_generation);
+                                }
+                                Screen::Runs => {
+                                    if app.watch_following.is_some() {
+                                        // Close the open inline pane.
+                                        close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
+                                    } else {
+                                        // No pane open — exit back to chat.
+                                        close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
+                                        app.exit_screen();
+                                        live_area.exit_screen_view();
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                         KeyCode::Char('g')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
