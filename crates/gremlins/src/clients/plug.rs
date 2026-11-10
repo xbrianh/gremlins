@@ -13,9 +13,6 @@ pub struct LoopHooks {
     /// channel.
     #[allow(clippy::type_complexity)]
     pub(crate) log_fn: Arc<dyn Fn(&str) + Send + Sync>,
-    /// Scratchpad reader: returns `Some(content)` when a scratchpad file
-    /// exists and is readable, `None` otherwise.
-    pub(crate) read_scratchpad_fn: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     /// Prompt debug dumper: called with every serialized
     /// [`CompletionRequest`]; the closure checks `log_level_threshold`
     /// and writes to the state store.
@@ -30,7 +27,6 @@ impl LoopHooks {
     pub(crate) fn new() -> Self {
         Self {
             log_fn: Arc::new(|_| {}),
-            read_scratchpad_fn: Arc::new(|| None),
             dump_prompt_debug_fn: Arc::new(|_| {}),
             emit_token_usage_fn: Arc::new(|_, _, _| {}),
         }
@@ -40,12 +36,6 @@ impl LoopHooks {
     /// already carries the stage/model/task prefix.
     pub(crate) fn log(&self, msg: &str) {
         (self.log_fn)(msg);
-    }
-
-    /// Read the persistent scratchpad, returning `Some(content)` when one is
-    /// configured and readable, `None` otherwise.
-    pub(crate) fn read_scratchpad(&self) -> Option<String> {
-        (self.read_scratchpad_fn)()
     }
 
     /// Dump a serialized request via the registered debug dumper.
@@ -71,14 +61,6 @@ impl LoopHooks {
         self.log_fn = Arc::new(f);
     }
 
-    /// Register a scratchpad reader.
-    pub(crate) fn register_scratchpad_reader<F>(&mut self, f: F)
-    where
-        F: Fn() -> Option<String> + Send + Sync + 'static,
-    {
-        self.read_scratchpad_fn = Arc::new(f);
-    }
-
     /// Register a prompt debug dumper.
     pub(crate) fn register_prompt_debug<F>(&mut self, f: F)
     where
@@ -100,7 +82,6 @@ impl Clone for LoopHooks {
     fn clone(&self) -> Self {
         Self {
             log_fn: self.log_fn.clone(),
-            read_scratchpad_fn: self.read_scratchpad_fn.clone(),
             dump_prompt_debug_fn: self.dump_prompt_debug_fn.clone(),
             emit_token_usage_fn: self.emit_token_usage_fn.clone(),
         }

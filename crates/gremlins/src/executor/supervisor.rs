@@ -1143,8 +1143,7 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
     if let Some(id) = request.get("id").and_then(|v| v.as_str()) {
         // Snapshot the state store handle and the project root from the
         // run-map before touching the session so we can persist the
-        // accumulated scratchpad artifacts.
-        let (store, project_root) = {
+        let (_store, _project_root) = {
             let map = get_run_map().lock().unwrap();
             match map.get(id) {
                 Some(handle) => {
@@ -1162,7 +1161,7 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
         let _gremlin = s.chat_gremlins.remove(id);
         s.chat_ids.remove(id);
         // Clone done before releasing the lock, then await turn completion
-        // so the model finishes flushing its live scratchpad before we
+        // so the model finishes flushing before we
         // accumulate — matching what stop_session_chat_gremlin does.
         let done = if let Some(cur) = &s.current_turn {
             if cur.id == id {
@@ -1176,18 +1175,9 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
             None
         };
         drop(s);
-        // Wait for in-flight turn to finish so its scratchpad is committed.
+        // Wait for in-flight turn to finish before proceeding.
         if let Some(mut done_rx) = done {
             let _ = done_rx.wait_for(|v| *v).await;
-        }
-        // Persist accumulated scratchpad artifacts to the XDG project
-        // scratchpad before calling handle_stop so working memory from
-        // committed turns survives. When a turn was in-flight, its error
-        // path already flushed the live scratchpad into the store.
-        if let (Some(store), Some(ref pr)) = (&store, &project_root) {
-            let accumulated =
-                crate::executor::agent_runner::accumulate_scratchpads(store.as_ref(), &[]).await;
-            persist_project_scratchpad(&accumulated, pr);
         }
     }
     handle_stop(request, &watch::channel(false).0).await
@@ -1197,8 +1187,8 @@ async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value 
 async fn stop_session_chat_gremlin(id: &str) {
     // Snapshot the state store handle, project root, and liveness from the
     // run-map before touching the session, so the persist step reads the
-    // final accumulated scratchpad artifacts.
-    let (live, store, project_root) = {
+    // final accumulated artifacts.
+    let (live, _store, _project_root) = {
         let map = get_run_map().lock().unwrap();
         match map.get(id) {
             Some(handle) => {
@@ -1213,7 +1203,7 @@ async fn stop_session_chat_gremlin(id: &str) {
     };
 
     // Cancel the in-flight turn and wait for it to finish so the model
-    // doesn't race with our accumulation of committed scratchpad artifacts.
+    // doesn't race with our accumulation of committed artifacts.
     // Keep the removed Gremlin alive until after the persist so its state
     // store is not dropped before we read.
     let sessions: Vec<SessionHandle> = session_map().lock().unwrap().values().cloned().collect();
@@ -1239,12 +1229,6 @@ async fn stop_session_chat_gremlin(id: &str) {
                 if let Some(mut done) = done {
                     let _ = done.wait_for(|v| *v).await;
                 }
-            }
-            if let (Some(store), Some(ref pr)) = (&store, &project_root) {
-                let accumulated =
-                    crate::executor::agent_runner::accumulate_scratchpads(store.as_ref(), &[])
-                        .await;
-                persist_project_scratchpad(&accumulated, pr);
             }
             return;
         }
@@ -1669,14 +1653,6 @@ async fn handle_resume(
             Err(e) => return error_response(&format!("gremlin {id}: {e}")),
         };
         let produced_all = definition.artifact_keys_produced();
-        // Stage names at or after the target — used below to also clean up
-        // synthetic scratchpad artifacts from discarded stages.
-        let stages_after_target: HashSet<String> = definition
-            .stages
-            .iter()
-            .skip_while(|s| s.name() != target)
-            .map(|s| s.name().to_string())
-            .collect();
         // Parallel groups register runtime-only keys — completion markers and
         // child-prefixed merged bindings — that `produced_all` cannot contain.
         // Any group at or after the target re-runs, so its bookkeeping must
@@ -1694,20 +1670,6 @@ async fn handle_resume(
             // are not skipped and its fresh merges are not blocked.
             if parallel_keys.is_rerun(&key) {
                 continue;
-            }
-            // Drop synthetic scratchpad artifacts from stages at or after
-            // the target. Scratchpad keys are formatted as
-            // `artifact://_scratchpad/{name}.md` or
-            // `artifact://_scratchpad/{name}-{loop_iter}.md`.
-            if let Some(rest) = key
-                .strip_prefix("artifact://_scratchpad/")
-                .or_else(|| key.strip_prefix("_scratchpad/"))
-            {
-                let rest = rest.strip_suffix(".md").unwrap_or(rest);
-                let name_part = rest.split('-').next().unwrap_or(rest);
-                if stages_after_target.contains(name_part) {
-                    continue;
-                }
             }
             preserve.insert(key);
         }
@@ -2906,15 +2868,6 @@ async fn handle_chat(
         }
     };
     gremlin.client = client;
-    // Re-inject scratchpads persisted by prior turns of this persistent chat
-    // gremlin so working memory carries across turns. Each turn commits its
-    // scratchpad under `artifact://_scratchpad/{stage}.md`; the accumulated
-    // content is read back here.
-    let scratchpad_accumulated = crate::executor::agent_runner::accumulate_scratchpads(
-        gremlin.state.store_ref(),
-        &[], // chat stages sort correctly lexically
-    )
-    .await;
     // Inject the dynamic preamble (repo context + skills) on every turn so
     // newly activated skills and refreshed repository snapshots reach the model.
     // The preamble is part of the user turn, not the system prompt, so the
@@ -2924,26 +2877,6 @@ async fn handle_chat(
         crate::clients::system_prompts::build_chat_preamble(context, &trusted_section);
     if !dynamic_preamble.is_empty() {
         text = format!("{dynamic_preamble}\n---\n{text}");
-    }
-    // Inject XDG project-level scratchpad on the first turn when there are
-    // no accumulated scratchpads from prior turns. On subsequent turns the
-    // accumulated content subsumes the persistent memory.
-    if scratchpad_accumulated.is_empty() {
-        let project_sp = crate::config::project_scratchpad_path(&project_root);
-        if let Ok(content) = crate::executor::agent_runner::read_scratchpad_contained(
-            &project_sp,
-            &crate::config::state_root(),
-        ) {
-            if !content.trim().is_empty() {
-                let injection =
-                    crate::executor::agent_runner::format_scratchpad_injection(&content);
-                text = format!("{injection}\n\n---\n\n{text}");
-            }
-        }
-    } else {
-        let injection =
-            crate::executor::agent_runner::format_scratchpad_injection(&scratchpad_accumulated);
-        text = format!("{injection}\n\n---\n\n{text}");
     }
     // Queue this turn's prompt onto the ChatDefinition so that
     // next_stage() builds the agent stage on demand.
@@ -3697,31 +3630,6 @@ async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &Se
         .await;
 }
 
-/// Persist accumulated scratchpad content to the XDG project scratchpad.
-///
-/// Best-effort: failures are silently ignored. Empty content is skipped.
-fn persist_project_scratchpad(content: &str, project_root: &Path) {
-    if content.trim().is_empty() {
-        return;
-    }
-    let path = config::project_scratchpad_path(project_root);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    // Atomic write to avoid truncation-corruption on crash: write to a
-    // temporary sibling then rename over the destination. Use a unique
-    // suffix so concurrent flushes from different chat sessions for the
-    // same project don't collide on the same .tmp file.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let tmp = path.with_extension(format!("tmp.{nanos}"));
-    if std::fs::write(&tmp, content).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
-}
-
 /// Shut down a chat gremlin: remove run-map entry, write terminal state,
 /// reap client, emit RunStopped.
 async fn cleanup_chat_gremlin(id: &str) {
@@ -3731,8 +3639,8 @@ async fn cleanup_chat_gremlin(id: &str) {
 
     // Snapshot the state store handle and project root before cancelling the
     // turn and removing from the run-map, so the persist step reads the final
-    // accumulated scratchpad artifacts.
-    let (store, project_root, cancel) = {
+    // accumulated artifacts.
+    let (_store, _project_root, cancel) = {
         let map = get_run_map().lock().unwrap();
         match map.get(id) {
             Some(handle) => {
@@ -3749,14 +3657,6 @@ async fn cleanup_chat_gremlin(id: &str) {
     // Cancel the in-flight turn so the model stops writing before we persist.
     if let Some(cancel) = cancel {
         cancel.cancel();
-    }
-
-    // Persist the project-level scratchpad so working memory survives across
-    // chat sessions, reading the committed scratchpad artifacts from the store.
-    if let (Some(store), Some(ref pr)) = (&store, &project_root) {
-        let accumulated =
-            crate::executor::agent_runner::accumulate_scratchpads(store.as_ref(), &[]).await;
-        persist_project_scratchpad(&accumulated, pr);
     }
 
     // Remove from RUN_MAP. If the id wasn't there (already stopped by

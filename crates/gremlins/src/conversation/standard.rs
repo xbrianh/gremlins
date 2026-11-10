@@ -3,7 +3,7 @@
 //! `StandardConversation` owns the durable message history and the pending user
 //! prompt. On each turn the pending prompt is committed into history before the
 //! assistant message, so `history + next_prompt` is always the complete
-//! transcript. Findings and scratchpad content are prepended to the ephemeral
+//! transcript. Findings content is prepended to the ephemeral
 //! turn prompt so the system preamble stays cache-stable across turns.
 //!
 //! `render_turn` stashes the rendered user message (with prefixes) so
@@ -53,7 +53,7 @@ pub(crate) struct StandardConversation {
     /// and [`set_next_prompt`].
     next_prompt: Message,
     /// The user message `render_turn` hands to the model. May carry
-    /// scratchpad/findings prefixes that `next_prompt` lacks. Used by
+    /// findings prefixes that `next_prompt` lacks. Used by
     /// `record_turn`, `done_rejected`, and `finalize` so the committed
     /// transcript matches what the model saw.
     rendered_prompt: Option<Message>,
@@ -285,7 +285,7 @@ impl Conversation for StandardConversation {
             self.last_input_tokens = input_tokens;
         }
 
-        // Commit the exact rendered user prompt (with scratchpad/findings
+        // Commit the exact rendered user prompt (with findings
         // prefixes) so the transcript matches what the model saw.
         let prompt = self
             .rendered_prompt
@@ -324,7 +324,6 @@ impl Conversation for StandardConversation {
     async fn render_turn(
         &mut self,
         nested: bool,
-        scratchpad: Option<String>,
         system_prompt: Option<String>,
     ) -> TurnScript {
         // Phase 0: auto-compaction (main loop only; not in nested/fork contexts)
@@ -353,20 +352,10 @@ impl Conversation for StandardConversation {
         let next_user_prompt = if nested {
             self.next_prompt.clone()
         } else {
-            // Prepend per-turn mutable content (scratchpad, findings) to the
+            // Prepend per-turn mutable content (findings) to the
             // ephemeral user prompt so the system preamble stays cache-stable
             // across turns.
             let mut prefix = Vec::new();
-
-            if let Some(content) = scratchpad {
-                let trimmed = content.trim();
-                if !trimmed.is_empty() {
-                    prefix.push(format!(
-                        "## Scratchpad\n\nThe following is your persistent scratchpad \
-                         content:\n\n{trimmed}"
-                    ));
-                }
-            }
 
             let findings = self.findings_ledger.format();
             if !findings.is_empty() {
@@ -429,8 +418,8 @@ impl Conversation for StandardConversation {
     ) -> RunArtifact {
         let mut messages = self.history.clone();
         // The pending prompt for this Done turn was never committed by
-        // record_turn, so append the rendered prompt (with scratchpad/
-        // findings prefixes) if available, otherwise `next_prompt`.
+        // record_turn, so append the rendered prompt (with findings
+        // prefixes) if available, otherwise `next_prompt`.
         let prompt = self
             .rendered_prompt
             .take()

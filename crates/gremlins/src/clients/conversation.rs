@@ -67,7 +67,6 @@ pub(crate) trait Conversation: Send + Sync {
     async fn render_turn(
         &mut self,
         nested: bool,
-        scratchpad: Option<String>,
         system_prompt: Option<String>,
     ) -> TurnScript;
 
@@ -354,7 +353,6 @@ impl Conversation for ConversationStub {
     async fn render_turn(
         &mut self,
         _nested: bool,
-        _scratchpad: Option<String>,
         system_prompt: Option<String>,
     ) -> TurnScript {
         TurnScript {

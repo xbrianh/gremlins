@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::Path;
 
 use thiserror::Error;
@@ -7,7 +6,6 @@ use thiserror::Error;
 use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::definition::Agent;
-use crate::executor::implicit::{accumulate_implicit, ImplicitArtifact};
 use crate::executor::state::StateStore;
 use crate::executor::vars;
 
@@ -38,15 +36,6 @@ pub struct AgentPrepared {
     /// A stage-supplied system prompt override. When present, this replaces
     /// the harness default in [`AgentPrepared::system_prompt`].
     pub system_prompt: Option<String>,
-    /// Harness-managed implicit artifacts (currently just the scratchpad).
-    /// The model writes each artifact's `model_path`; on commit
-    /// [`commit_agent`] persists it under the artifact URI. Best-effort — the
-    /// stage may never write any of them.
-    pub(crate) implicit_artifacts: Vec<ImplicitArtifact>,
-    /// Absolute filesystem path of the scratchpad, derived from the first
-    /// implicit artifact. Emitted in the workspace preamble so the model
-    /// knows where to write.
-    pub(crate) scratchpad_path: String,
 } // AgentError
   // ---------------------------------------------------------------------------
 
@@ -83,7 +72,7 @@ pub async fn prepare_agent(
     local_state: &dyn StateStore,
     loop_iter: &str,
     framework_subs: &HashMap<String, String>,
-    artifact_dir: &Path,
+    _artifact_dir: &Path,
 ) -> Result<AgentPrepared, AgentError> {
     let name = &agent.name;
     let str_opts = vars::string_options(&agent.options);
@@ -106,10 +95,6 @@ pub async fn prepare_agent(
             name: name.clone(),
             source: e,
         })?;
-
-    // Capture filepath-interpolated values for collision validation before
-    // the merge (which consumes `filepath_interpolated`).
-    let filepath_values: Vec<String> = filepath_interpolated.values().cloned().collect();
 
     // Merge: filepath shadows content on key collision.
     let mut interpolation_map: HashMap<String, String> = content_interpolated;
@@ -167,43 +152,9 @@ pub async fn prepare_agent(
 
     let expected_artifact_paths: Vec<String> = output_paths.values().cloned().collect();
 
-    // Synthetic scratchpad binding via ImplicitArtifact. The model writes to
-    // {artifact_dir}/.gremlins/implicit/scratchpad.md (not the worktree), and
-    // the harness commits it under artifact://_scratchpad/{stage}.md. The bind
-    // is optional and excluded from expected_artifact_paths so it never
-    // triggers a missing-artifact reminder.
-    let scratchpad =
-        ImplicitArtifact::for_kind("scratchpad", name, loop_iter, artifact_dir, local_state)
-            .await
-            .map_err(|e| AgentError::Generic {
-                name: name.clone(),
-                detail: e.to_string(),
-            })?;
-
-    // Validate that the implicit scratchpad does not collide with any
-    // user-declared artifact — URI collisions could silently overwrite
-    // checked-out outputs, and path collisions could corrupt the live file.
-    let user_uris: Vec<String> = output_uris.iter().map(|(_, u, _)| u.clone()).collect();
-    let user_paths: Vec<String> = output_paths
-        .values()
-        .chain(filepath_values.iter())
-        .cloned()
-        .collect();
-    scratchpad
-        .validate_no_collisions(&user_uris, &user_paths)
-        .map_err(|e| AgentError::Generic {
-            name: name.clone(),
-            detail: e.to_string(),
-        })?;
-
-    output_paths.insert(scratchpad.bind_key.clone(), scratchpad.persist_path.clone());
-    output_uris.push((
-        scratchpad.bind_key.clone(),
-        scratchpad.uri.clone(),
-        scratchpad.optional,
-    )); // gremlin's kind is "chat" (set programmatically by the chat builder,
-        // never by user YAML), so containment cannot be disabled by arbitrary
-        // user-defined stages.
+    // The gremlin's kind is "chat" (set programmatically by the chat builder,
+    // never by user YAML), so containment cannot be disabled by arbitrary
+    // user-defined stages.
     let allow_all = framework_subs.get("kind").map(|s| s.as_str()) == Some("chat")
         && agent
             .options
@@ -231,8 +182,6 @@ pub async fn prepare_agent(
         artifact_dir: String::new(),
         allow_all,
         system_prompt,
-        scratchpad_path: scratchpad.placeholder_path(),
-        implicit_artifacts: vec![scratchpad],
     })
 }
 
@@ -247,17 +196,6 @@ pub async fn commit_agent(
     prepared: &AgentPrepared,
     local_state: &dyn StateStore,
 ) -> Result<(), AgentError> {
-    // Commit implicit artifacts (e.g. scratchpad). Each artifact reads its
-    // model-writable file (containment-checked) and copies it to the persist
-    // path if non-empty. Registration in the artifact store is handled by the
-    // bind loop below — the persist step only does file I/O.
-    // Failures are logged but never abort the stage; a scratchpad I/O problem
-    // must not prevent real outputs from being committed.
-    for artifact in &prepared.implicit_artifacts {
-        if let Err(e) = artifact.persist().await {
-            log::warn!("implicit artifact '{}' persist failed: {e}", artifact.kind);
-        }
-    }
     for (key, uri_str, optional) in &prepared.output_uris {
         let path = &prepared.output_paths[key];
         let produced = tokio::fs::metadata(path).await.is_ok();
@@ -280,166 +218,13 @@ pub async fn commit_agent(
 }
 
 // ---------------------------------------------------------------------------
-// Scratchpad accumulation
-// ---------------------------------------------------------------------------
-
-/// Concatenate every persisted stage scratchpad from `store`, in the order
-/// given by `stage_order`. Keys whose stage name does not appear in
-/// `stage_order` are appended after the ordered entries in lexical order.
-/// Empty scratchpads are skipped.
-pub(crate) async fn accumulate_scratchpads(
-    store: &(dyn StateStore + Send + Sync),
-    stage_order: &[String],
-) -> String {
-    accumulate_implicit("scratchpad", store, stage_order).await
-}
-
-/// Format accumulated scratchpad content for injection into a user prompt.
-pub(crate) fn format_scratchpad_injection(content: &str) -> String {
-    format!(
-        "## Scratchpad\n\
-         \n\
-         The following is accumulated working memory from prior stages:\n\
-         \n\
-         {content}"
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Scratchpad I/O helpers
-// ---------------------------------------------------------------------------
-
-#[cfg(unix)]
-fn open_scratchpad_read(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-}
-
-#[cfg(not(unix))]
-fn open_scratchpad_read(path: &Path) -> std::io::Result<std::fs::File> {
-    reject_symlink(path)?;
-    std::fs::File::open(path)
-}
-
-#[cfg(unix)]
-fn create_scratchpad_reset(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-}
-
-#[cfg(not(unix))]
-fn create_scratchpad_reset(path: &Path) -> std::io::Result<std::fs::File> {
-    reject_symlink(path)?;
-    // Remove any existing symlink before creating a regular file.
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            let _ = std::fs::remove_file(path);
-        }
-        _ => {}
-    }
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)
-}
-
-/// Reject a symlink at `path` so callers never inadvertently follow one.
-fn reject_symlink(path: &Path) -> std::io::Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("scratchpad path is a symlink: {}", path.display()),
-        )),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Ok(_) => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-/// Read the scratchpad file at `path` with no-follow semantics (symlinks are
-/// rejected) and a root-containment check so a file that escapes the worktree
-/// via directory symlinks is also rejected.
-pub(crate) fn read_scratchpad_contained(path: &Path, root: &Path) -> std::io::Result<String> {
-    reject_symlink(path)?;
-    // Canonicalize both paths to resolve any parent-directory symlinks.
-    let canonical_path = path.canonicalize().map_err(|e| {
-        std::io::Error::new(
-            e.kind(),
-            format!("cannot resolve scratchpad path {}: {e}", path.display()),
-        )
-    })?;
-    let canonical_root = root.canonicalize().map_err(|e| {
-        std::io::Error::new(
-            e.kind(),
-            format!("cannot resolve scratchpad root {}: {e}", root.display()),
-        )
-    })?;
-    if !canonical_path.starts_with(&canonical_root) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!(
-                "scratchpad path escapes allowed root: {} not under {}",
-                canonical_path.display(),
-                canonical_root.display()
-            ),
-        ));
-    }
-    let mut file = open_scratchpad_read(path)?;
-    let mut content = String::new();
-    file.read_to_string(&mut content)?;
-    Ok(content)
-}
-
-/// Reset (truncate) the scratchpad file at `path` without following symlinks.
-/// If a stale symlink is present it is removed first so the no-follow open
-/// can succeed on a fresh regular file.
-pub(crate) fn reset_scratchpad(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        // On unix the O_NOFOLLOW open is the real defense; remove a stale
-        // symlink first so create+truncate succeeds.
-        match std::fs::symlink_metadata(path) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                std::fs::remove_file(path)?;
-            }
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-        drop(create_scratchpad_reset(path)?);
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        // On non-unix we rely on the reject_symlink + remove-if-symlink dance
-        // inside `create_scratchpad_reset`.
-        drop(create_scratchpad_reset(path)?);
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Workspace preamble assembly
 // ---------------------------------------------------------------------------
 
-pub(crate) fn build_workspace_preamble(cwd: &str, scratchpad_path: &str) -> String {
+pub(crate) fn build_workspace_preamble(cwd: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     if !cwd.is_empty() {
         parts.push(format!("Your working directory is: {cwd}"));
-    }
-    if !scratchpad_path.is_empty() {
-        parts.push(format!("Scratchpad path: {scratchpad_path}"));
     }
     parts.push("Relevant environment variable: $GREMLIN_WORKDIR".to_string());
     parts.join("\n")
@@ -458,7 +243,7 @@ impl AgentPrepared {
 
     /// Workspace preamble + stage prompt (no harness system content).
     pub fn user_prompt(&self) -> String {
-        let preamble = build_workspace_preamble(&self.cwd, &self.scratchpad_path);
+        let preamble = build_workspace_preamble(&self.cwd);
         format!("{preamble}\n\n{}", self.prompt)
     }
 }
@@ -714,30 +499,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prepare_user_prompt_includes_scratchpad_path() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad.clone());
-        let agent = Agent {
-            name: "test".to_string(),
-            prompts: vec!["hi".to_string()],
-            options: HashMap::new(),
-            interpolation_map: HashMap::new(),
-            outputs_map: HashMap::new(),
-            landscape: true,
-        };
-        let fw = HashMap::new();
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
-            .await
-            .unwrap();
-        let up = prepared.user_prompt();
-        assert!(
-            up.contains("Scratchpad path:"),
-            "user_prompt must include the scratchpad path; got: {up}"
-        );
-    }
-
-    #[tokio::test]
     async fn test_prepare_workspace_preamble_absent() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ad = ensure_artifact_dir(&tmp);
@@ -755,8 +516,7 @@ mod tests {
             .await
             .unwrap();
         prepared.cwd = String::new();
-        prepared.scratchpad_path = String::new();
-        let preamble = build_workspace_preamble(&prepared.cwd, &prepared.scratchpad_path);
+        let preamble = build_workspace_preamble(&prepared.cwd);
         assert_eq!(preamble, "Relevant environment variable: $GREMLIN_WORKDIR");
         let full = format!("{preamble}\n\n{}", prepared.prompt);
         assert!(!full.contains("Your working directory is"));
@@ -780,7 +540,7 @@ mod tests {
             .await
             .unwrap();
         prepared.cwd = "/work".to_string();
-        let preamble = build_workspace_preamble(&prepared.cwd, &prepared.scratchpad_path);
+        let preamble = build_workspace_preamble(&prepared.cwd);
         let full = format!("{preamble}\n\n{}", prepared.prompt);
         assert!(full.contains("Your working directory is: /work"));
         assert!(!full.contains("Project worktree:"));
@@ -906,174 +666,9 @@ mod tests {
         let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
             .await
             .unwrap();
-        // The three real binds plus the synthetic `_stage_scratchpad` bind.
-        assert_eq!(prepared.output_uris.len(), 4);
-        // The synthetic scratchpad bind is optional and excluded from the
-        // expected-artifact set, so it is not counted here.
+        // The three real binds.
+        assert_eq!(prepared.output_uris.len(), 3);
         assert_eq!(prepared.expected_artifact_paths.len(), 3);
-        assert!(
-            prepared
-                .output_uris
-                .iter()
-                .any(|(k, uri, opt)| k == "__gml_scratchpad"
-                    && uri == "artifact://_scratchpad/test.md"
-                    && *opt),
-            "a synthetic optional scratchpad bind must be present"
-        );
-        // The scratchpad is exposed as exactly one implicit artifact.
-        assert_eq!(prepared.implicit_artifacts.len(), 1);
-        assert_eq!(prepared.implicit_artifacts[0].kind, "scratchpad");
-        assert_eq!(
-            prepared.implicit_artifacts[0].uri,
-            "artifact://_scratchpad/test.md"
-        );
-        assert_eq!(prepared.implicit_artifacts[0].bind_key, "__gml_scratchpad");
-        assert!(prepared.implicit_artifacts[0].optional);
-    }
-
-    #[tokio::test]
-    async fn test_prepare_synthetic_scratchpad_binding() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad.clone());
-        let agent = Agent {
-            name: "stage-a".to_string(),
-            prompts: vec!["hi".to_string()],
-            options: HashMap::new(),
-            interpolation_map: HashMap::new(),
-            outputs_map: HashMap::new(),
-            landscape: true,
-        };
-        let fw = HashMap::from([("cwd".to_string(), tmp.path().to_string_lossy().into_owned())]);
-        let prepared = prepare_agent(&agent, &store, &store, "", &fw, &ad)
-            .await
-            .unwrap();
-
-        assert_eq!(prepared.output_uris.len(), 1);
-        let (key, uri, optional) = &prepared.output_uris[0];
-        assert_eq!(key, "__gml_scratchpad");
-        assert_eq!(uri, "artifact://_scratchpad/stage-a.md");
-        assert!(*optional);
-        // The checkout path and the model-writable path are recorded on the
-        // single implicit artifact.
-        assert_eq!(prepared.implicit_artifacts.len(), 1);
-        assert!(prepared.implicit_artifacts[0]
-            .persist_path
-            .contains("stage-a.md"));
-        assert_eq!(
-            prepared.output_paths["__gml_scratchpad"],
-            prepared.implicit_artifacts[0].persist_path
-        );
-        assert!(prepared.implicit_artifacts[0]
-            .model_path
-            .ends_with("_scratchpad.md"));
-        assert!(
-            prepared.implicit_artifacts[0].model_path.starts_with(&ad),
-            "model_path must be under artifact_dir"
-        );
-        // No real outputs means no expected artifacts.
-        assert!(prepared.expected_artifact_paths.is_empty());
-    }
-    #[tokio::test]
-    async fn test_commit_agent_persists_scratchpad_content() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad.clone());
-        let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
-            .await
-            .unwrap();
-        std::fs::write(&prepared.output_paths["out"], "body").unwrap();
-        // Write the scratchpad directly to its model-writable path (under the
-        // artifact dir, not the worktree root). The containment-checked reader
-        // in `persist()` verifies the file lives under the artifact dir.
-        assert!(
-            prepared.implicit_artifacts[0].model_path.starts_with(&ad),
-            "model_path must be under artifact_dir"
-        );
-        std::fs::write(
-            &prepared.implicit_artifacts[0].model_path,
-            "remember: the answer is 42",
-        )
-        .unwrap();
-
-        commit_agent(&prepared, &store).await.unwrap();
-
-        assert!(store.is_registered("artifact://out.md").await);
-        assert!(store.is_registered("artifact://_scratchpad/test.md").await);
-        let committed = store
-            .content("artifact://_scratchpad/test.md", None)
-            .await
-            .unwrap();
-        assert_eq!(committed, "remember: the answer is 42");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_commit_agent_skips_symlinked_scratchpad() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad.clone());
-        let agent = agent_with_bind("out", "artifact://out.md");
-        let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
-            .await
-            .unwrap();
-        std::fs::write(&prepared.output_paths["out"], "body").unwrap();
-        // Replace the model-writable scratchpad with a symlink pointing
-        // outside the artifact dir. The containment-checked reader must
-        // refuse to follow it, so no scratchpad artifact is persisted.
-        std::fs::write(&prepared.implicit_artifacts[0].model_path, "original").unwrap();
-        let target = tmp.path().join("secret");
-        std::fs::write(&target, "escaped-content").unwrap();
-        std::fs::remove_file(&prepared.implicit_artifacts[0].model_path).unwrap();
-        std::os::unix::fs::symlink(&target, &prepared.implicit_artifacts[0].model_path).unwrap();
-
-        commit_agent(&prepared, &store).await.unwrap();
-
-        assert!(store.is_registered("artifact://out.md").await);
-        assert!(!store.is_registered("artifact://_scratchpad/test.md").await);
-    }
-
-    #[tokio::test]
-    async fn test_commit_agent_skips_absent_scratchpad() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad.clone());
-        let agent = agent_with_bind("out", "artifact://out.md");
-        let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new(), &ad)
-            .await
-            .unwrap();
-        std::fs::write(&prepared.output_paths["out"], "body").unwrap();
-        // Point the scratchpad at a path that does not exist.
-        prepared.implicit_artifacts[0].model_path = ad.join("missing").join("_scratchpad.md");
-
-        commit_agent(&prepared, &store).await.unwrap();
-
-        assert!(store.is_registered("artifact://out.md").await);
-        assert!(!store.is_registered("artifact://_scratchpad/test.md").await);
-    }
-    #[tokio::test]
-    async fn test_accumulate_scratchpads_ordered_and_skips_empty() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad.clone());
-        // Stages in execution order: a, b, c
-        let stage_order: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
-        let uri_b = Uri::parse("artifact://_scratchpad/b.md").unwrap();
-        let uri_a = Uri::parse("artifact://_scratchpad/a.md").unwrap();
-        let uri_empty = Uri::parse("artifact://_scratchpad/c.md").unwrap();
-        let other = Uri::parse("artifact://unrelated.md").unwrap();
-        store.write_into_registry(&uri_b, "second").await.unwrap();
-        store.write_into_registry(&uri_a, "first").await.unwrap();
-        store.write_into_registry(&uri_empty, "   ").await.unwrap();
-        store
-            .write_into_registry(&other, "not-a-scratchpad")
-            .await
-            .unwrap();
-
-        let accumulated = accumulate_scratchpads(&store, &stage_order).await;
-
-        assert_eq!(accumulated, "first\n\nsecond");
     }
 
     #[tokio::test]
@@ -1098,14 +693,12 @@ mod tests {
 
     #[test]
     fn test_build_workspace_preamble_both_present() {
-        let p = build_workspace_preamble("/work/dir", "/tmp/scratchpad.md");
+        let p = build_workspace_preamble("/work/dir");
         assert!(p.contains("Your working directory is: /work/dir"));
-        assert!(p.contains("Scratchpad path: /tmp/scratchpad.md"));
         assert!(!p.contains("Project worktree:"));
 
-        let p2 = build_workspace_preamble("/tmp/run", "");
+        let p2 = build_workspace_preamble("/tmp/run");
         assert!(p2.contains("Your working directory is: /tmp/run"));
-        assert!(!p2.contains("Scratchpad path:"));
         assert!(!p2.contains("Project worktree:"));
     }
 
@@ -1272,30 +865,5 @@ mod tests {
         prepared.cwd = "/work".to_string();
         let expected = crate::clients::system_prompts::agent_system_prompt(Path::new("/work"));
         assert_eq!(prepared.system_prompt(), expected);
-    }
-
-    #[tokio::test]
-    async fn test_prepare_rejects_stage_name_with_path_traversal() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let ad = ensure_artifact_dir(&tmp);
-        let store = make_state_store(ad.clone());
-        for bad_name in &["../escape", "sub/dir", "back\\slash"] {
-            let agent = Agent {
-                name: (*bad_name).to_string(),
-                prompts: vec!["hi".to_string()],
-                options: HashMap::new(),
-                interpolation_map: HashMap::new(),
-                outputs_map: HashMap::new(),
-                landscape: true,
-            };
-            let fw = HashMap::new();
-            let err = prepare_agent(&agent, &store, &store, "", &fw, &ad)
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(err, AgentError::Generic { .. }),
-                "stage name {bad_name:?} must be rejected; got {err:?}"
-            );
-        }
     }
 }

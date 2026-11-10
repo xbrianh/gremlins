@@ -110,7 +110,7 @@ reasons:
 
 1. **Resumability.** A definition with named stages and a `state.json` cursor
    can be resumed from any stage by an operator or a rescue script. A
-   single agent loop has no equivalent — its "stage" is whatever its scratchpad
+   single agent loop has no equivalent — its "stage" is whatever its context
    says it is.
 2. **Observability.** Stage transitions are logged events that downstream
    tools (`gremlins` status, `fleet/`, the session-summary hook) consume.
@@ -209,7 +209,7 @@ information it needs and nothing else. We push hard on this.
 ### 3.1 Stages do not share an in-memory context
 
 Every agentic stage starts a **fresh agent loop** with a **fresh model
-context** via the backend trait. There is no shared scratchpad, no in-memory
+context** via the backend trait. There is no shared context store, no in-memory
 history threaded between stages, no rolling summary. When `address-code` runs
 after `review-code`, it does not inherit anything from the review process —
 it gets the same starting context any cold invocation would, plus the
