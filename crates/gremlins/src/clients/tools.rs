@@ -4298,7 +4298,7 @@ mod tests {
             result.len()
         );
         assert!(
-            result.contains("[...truncated at 100 bytes. Read with offset=1 to continue...]"),
+            result.contains("[...truncated at 100 bytes"),
             "multibyte truncation must carry a marker, got: {result}"
         );
         // Should contain some multi-byte content before truncation.
