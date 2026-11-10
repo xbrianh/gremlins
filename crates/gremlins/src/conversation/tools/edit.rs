@@ -207,8 +207,8 @@ fn edit_not_found_diagnostic(
     // back to a full-file search before giving up. If the needle exists
     // elsewhere in the file the scope is stale (prior edits shifted line
     // numbers); if it's nowhere, the content is genuinely wrong.
-    let scope_is_proper_subset =
-        scope_start.is_some() && (window_start > 0 || window_end < content.len());
+    let scope_is_proper_subset = (scope_start.is_some() || scope_end.is_some())
+        && (window_start > 0 || window_end < content.len());
     let scoped_hint = if let Some(rel) = content[window_start..window_end].find(needle) {
         let pos = window_start + rel;
         let line_no = content[..pos].lines().count() + 1;
@@ -241,7 +241,7 @@ fn edit_not_found_diagnostic(
         if let Some(rel) = content.find(needle) {
             let line_no = content[..rel].lines().count() + 1;
             format!(
-                " — exists at line {line_no} (outside the requested scope; \
+                " — first occurrence at line {line_no} (outside the requested scope; \
                  prior edits may have shifted line numbers — try without \
                  start_line/end_line or re-read the file)"
             )
@@ -445,13 +445,19 @@ fn apply_edits(
             // exists in the *original* file content. If so, the problem
             // is a batch-order issue: prior edits modified the region
             // and this edit should run first or in a separate call.
-            if i > 0 && content.contains(old_str) {
+            // Only fire the batch-order message when the old_string is
+            // genuinely absent from the accumulated buffer. If it still
+            // exists in the buffer (just outside a stale scope window),
+            // let edit_not_found_diagnostic produce the more precise
+            // scope-stale diagnostic from Change 2.
+            if i > 0 && !buffer.contains(old_str) && content.contains(old_str) {
                 return Err(format!(
                     "Error: old_string not found in file after prior edits modified \
                      lines surrounding the target (edit {}). The old_string \
                      matches the original file content — try splitting this \
-                     into a separate Edit call, or reorder edits so this one \
-                     runs first.",
+                     into a separate Edit call, reorder edits so this one \
+                     runs first, or verify your edits don't target overlapping \
+                     regions.",
                     i + 1
                 ));
             }
@@ -1335,6 +1341,153 @@ mod tests {
         assert!(msg.contains("diverges at byte offset 12"), "got: {msg}");
         assert!(msg.contains(r#"expected: "line2\nline3""#), "got: {msg}");
         assert!(msg.contains(r#"actual:   "line2\n""#), "got: {msg}");
+    }
+
+    // --- Scope-stale diagnostic tests ---
+
+    #[test]
+    fn diagnostic_scoped_miss_needle_exists_outside_scope() {
+        // Needle "target" is at line 5. Scope is lines 1-3. The scoped
+        // window search finds nothing, but the full-file fallback should
+        // locate it and report a scope-stale hint.
+        let content = "alpha\nbeta\ngamma\ndelta\ntarget\nzeta\n";
+        let old_str = "target";
+        let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, Some(1), Some(3));
+        assert!(msg.contains("between lines 1-3"), "got: {msg}");
+        assert!(msg.contains("first occurrence at line 5"), "got: {msg}");
+        assert!(msg.contains("outside the requested scope"), "got: {msg}");
+    }
+
+    #[test]
+    fn diagnostic_scoped_miss_needle_nowhere_in_file() {
+        // Needle is genuinely absent from the whole file. Neither the
+        // scoped window nor the full-file fallback finds it. No
+        // divergence report fires (that only triggers when the needle
+        // matches but the full old_str diverges). Result is a clean
+        // "not found" error with the scope label but no extra hints.
+        let content = "alpha\nbeta\ngamma\n";
+        let old_str = "nowhere";
+        let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, Some(1), Some(3));
+        assert!(msg.contains("between lines 1-3"), "got: {msg}");
+        assert!(!msg.contains("outside the requested scope"), "got: {msg}");
+        assert!(!msg.contains("first occurrence"), "got: {msg}");
+        assert!(!msg.contains("did you mean"), "got: {msg}");
+    }
+
+    #[test]
+    fn diagnostic_unscoped_still_works() {
+        // No scope at all — the scoped search and full-file fallback are
+        // both skipped, and the existing "did you mean" hint fires.
+        let content = "alpha\nbeta\ngamma\n";
+        let old_str = "beta";
+        let msg = edit_not_found_diagnostic(content, "f.txt", old_str, 1, None, None);
+        assert!(!msg.contains("between lines"), "got: {msg}");
+        assert!(!msg.contains("outside the requested scope"), "got: {msg}");
+        assert!(msg.contains("did you mean"), "got: {msg}");
+    }
+
+    // --- Batch-order diagnostic tests ---
+
+    #[test]
+    fn apply_edits_batch_order_error_when_prior_edit_destroys_text() {
+        // Edit 1 replaces "234" with "x". Edit 2 looks for "456" which
+        // no longer exists in the accumulated buffer but does exist in
+        // the *original* content — this is a batch-order problem.
+        let content = "0123456789";
+        let edits = vec![
+            EditOp {
+                old_str: "234".into(),
+                new_str: "x".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+            EditOp {
+                old_str: "456".into(),
+                new_str: "y".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+        ];
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
+        assert!(
+            err.contains("old_string not found in file after prior edits"),
+            "got: {err}"
+        );
+        assert!(
+            err.contains("matches the original file content"),
+            "got: {err}"
+        );
+        assert!(
+            err.contains("try splitting this into a separate Edit call"),
+            "got: {err}"
+        );
+        assert!(
+            err.contains("verify your edits don't target overlapping regions"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_edits_batch_edit_not_found_in_either_buffer() {
+        // Edit 1 succeeds. Edit 2's old_str is absent from both the
+        // accumulated buffer AND the original — a genuine wrong-text
+        // error, not a batch-order problem.
+        let content = "hello world\nfoo bar\n";
+        let edits = vec![
+            EditOp {
+                old_str: "hello".into(),
+                new_str: "hi".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+            EditOp {
+                old_str: "nonexistent".into(),
+                new_str: "replacement".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+        ];
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
+        assert!(err.contains("old_string not found"), "got: {err}");
+        assert!(
+            !err.contains("matches the original file content"),
+            "batch-order message should not fire when old_str is absent from original too; got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_edits_scoped_batch_needle_in_buffer_outside_scope() {
+        // Edit 1 adds a line above, shifting content down. Edit 2 has a
+        // scope that was correct for the *original* file but is now stale
+        // because edit 1 shifted lines. The needle still exists in the
+        // buffer — just outside the stale scope window. The batch-order
+        // message must NOT fire; instead the scope-stale diagnostic from
+        // edit_not_found_diagnostic should produce the "outside the
+        // requested scope" hint.
+        let content = "line1\nline2\ntarget\nline4\n";
+        let edits = vec![
+            EditOp {
+                old_str: "line1".into(),
+                new_str: "line0\nline1".into(),
+                scope_start: None,
+                scope_end: None,
+            },
+            EditOp {
+                old_str: "target".into(),
+                new_str: "TARGET".into(),
+                scope_start: Some(3),
+                scope_end: Some(3),
+            },
+        ];
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
+        assert!(
+            !err.contains("matches the original file content"),
+            "batch-order message should NOT fire when needle is still in buffer; got: {err}"
+        );
+        assert!(
+            err.contains("outside the requested scope"),
+            "scope-stale diagnostic should fire; got: {err}"
+        );
     }
 
     // --- Success-report tests ---
