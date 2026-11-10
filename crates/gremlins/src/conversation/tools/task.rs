@@ -73,8 +73,6 @@ impl ToolHandler for TaskTool {
             o_len = final_output.len(),
             o_preview = preview_str(&final_output, 300),
         );
-        ToolOutcome {
-            output: final_output,
-        }
+        ToolOutcome::text(final_output)
     }
 }

@@ -28,7 +28,7 @@ use super::format::{
 };
 use super::plug::LoopHooks;
 use super::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
-use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry};
+use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry, ToolOutcome};
 use crate::clients::done_helpers::done_user_message;
 use crate::conversation::tool_specs::ToolMode;
 
@@ -215,8 +215,8 @@ struct ToolJob {
 /// Outcome of one concurrent tool batch dispatched by
 /// [`LoopState::dispatch_tool_jobs`].
 enum ToolDispatchOutcome {
-    /// Every tool finished; outputs are aligned with the job list order.
-    Completed(Vec<String>),
+    /// Every tool finished; outcomes are aligned with the job list order.
+    Completed(Vec<ToolOutcome>),
     /// The operator entered debug mid-batch: the batch was abandoned, the
     /// turn's history was unwound, and the caller should re-execute the turn.
     ReexecuteTurn,
@@ -865,18 +865,18 @@ impl LoopState {
         let jobs = self.collect_tool_jobs(tool_calls, prefix, nested, raw, captured);
 
         // Phase 2: concurrent execution (cancel/pause aware).
-        let results = match self
+        let outcomes = match self
             .dispatch_tool_jobs(&jobs, tool_ctx, model, prefix, cancel)
             .await?
         {
-            ToolDispatchOutcome::Completed(results) => results,
+            ToolDispatchOutcome::Completed(outcomes) => outcomes,
             // Operator entered debug mid-batch; the turn is re-executed.
             ToolDispatchOutcome::ReexecuteTurn => return Ok(()),
         };
 
         // Phase 3: emit results, extend history, roll the prompt forward.
         self.emit_tool_results(
-            jobs, results, tool_ctx, prefix, nested, raw, captured, cancel,
+            jobs, outcomes, tool_ctx, prefix, nested, raw, captured, cancel,
         )
         .await?;
 
@@ -1001,18 +1001,16 @@ impl LoopState {
             let sem = sem.clone();
             async move {
                 if let Some(msg) = &j.over_cap {
-                    msg.clone()
+                    ToolOutcome::text(msg.clone())
                 } else {
                     let _permit = sem.acquire_owned().await;
-                    tools::invoke_with_conversation(&j.id, &j.name, ctx, &j.args, conv)
-                        .await
-                        .output
+                    tools::invoke_with_conversation(&j.id, &j.name, ctx, &j.args, conv).await
                 }
             }
         }));
 
-        let results = tokio::select! {
-            results = exec_fut => results,
+        let outcomes = tokio::select! {
+            outcomes = exec_fut => outcomes,
             _ = forward_live_output => unreachable!("live-output forwarder parks forever"),
             _ = cancel.cancelled() => {
                 // Esc / cancel_chat during a tool batch: drop the join_all
@@ -1088,7 +1086,7 @@ impl LoopState {
             }
         };
 
-        Ok(ToolDispatchOutcome::Completed(results))
+        Ok(ToolDispatchOutcome::Completed(outcomes))
     }
 
     /// Emit tool results in request order: drain trailing live output,
@@ -1097,7 +1095,7 @@ impl LoopState {
     async fn emit_tool_results(
         &mut self,
         jobs: Vec<ToolJob>,
-        results: Vec<String>,
+        outcomes: Vec<ToolOutcome>,
         tool_ctx: &AgentLoopRuntime,
         prefix: &str,
         nested: bool,
@@ -1130,11 +1128,13 @@ impl LoopState {
         // for `tool_calls.len()` when bumping the turn counter below.
         let job_count = jobs.len();
         let mut result_msgs = Vec::new();
-        for (job, output) in jobs.into_iter().zip(results) {
+        for (job, outcome) in jobs.into_iter().zip(outcomes) {
+            let output = outcome.output;
+            let exit_code = outcome.exit_code;
             let result_msg = format!("result: {}", trunc(&output, 200));
             self.hook_log(&format!("{prefix}{result_msg}"));
             if !nested {
-                let result_evt = tool_result_event(&job.id, &output);
+                let result_evt = tool_result_event(&job.id, &output, exit_code);
                 write_raw(raw, &result_evt);
                 if let Some(evts) = captured.as_mut() {
                     evts.push(result_evt);
@@ -2427,8 +2427,12 @@ pub(crate) fn tool_use_event(id: &str, name: &str, input: &serde_json::Value) ->
     })
 }
 
-pub(crate) fn tool_result_event(id: &str, content: &str) -> serde_json::Value {
-    serde_json::json!({
+pub(crate) fn tool_result_event(
+    id: &str,
+    content: &str,
+    exit_code: Option<i32>,
+) -> serde_json::Value {
+    let mut msg = serde_json::json!({
         "type": "user",
         "message": {
             "content": [{
@@ -2437,7 +2441,11 @@ pub(crate) fn tool_result_event(id: &str, content: &str) -> serde_json::Value {
                 "content": content
             }]
         }
-    })
+    });
+    if let Some(code) = exit_code {
+        msg["message"]["content"][0]["exit_code"] = serde_json::json!(code);
+    }
+    msg
 }
 
 pub(crate) fn write_raw(raw: &mut Option<std::fs::File>, evt: &serde_json::Value) {
@@ -2891,7 +2899,7 @@ mod tests {
         assert_eq!(tool["message"]["content"][0]["name"], "Bash");
         assert_eq!(tool["message"]["content"][0]["id"], "id42");
 
-        let result = tool_result_event("id42", "ok");
+        let result = tool_result_event("id42", "ok", None);
         assert_eq!(result["type"], "user");
         assert_eq!(result["message"]["content"][0]["tool_use_id"], "id42");
         assert_eq!(result["message"]["content"][0]["content"], "ok");

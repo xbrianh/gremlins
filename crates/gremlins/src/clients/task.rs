@@ -130,9 +130,9 @@ fn make_task_runner_at_depth(
 
             Box::pin(async move {
                 if depth >= MAX_DEPTH {
-                    return tools::ToolOutcome {
-                        output: format!("Error: task max depth ({MAX_DEPTH}) exceeded"),
-                    };
+                    return tools::ToolOutcome::text(format!(
+                        "Error: task max depth ({MAX_DEPTH}) exceeded"
+                    ));
                 }
 
                 // A selector, when configured, may swap in a different model
@@ -165,9 +165,7 @@ fn make_task_runner_at_depth(
                 let (selected, _selected_spec) = match selection {
                     Ok(selection) => selection,
                     Err(reason) => {
-                        return tools::ToolOutcome {
-                            output: format!("Task error: {reason}"),
-                        };
+                        return tools::ToolOutcome::text(format!("Task error: {reason}"));
                     }
                 };
                 let selected_model = selected.model.clone();
@@ -276,11 +274,9 @@ fn make_task_runner_at_depth(
                                 format!("{out}\n\n{evidence}")
                             }
                         };
-                        tools::ToolOutcome { output }
+                        tools::ToolOutcome::text(output)
                     }
-                    Err(e) => tools::ToolOutcome {
-                        output: format!("Task error: {e}"),
-                    },
+                    Err(e) => tools::ToolOutcome::text(format!("Task error: {e}")),
                 }
             })
         },

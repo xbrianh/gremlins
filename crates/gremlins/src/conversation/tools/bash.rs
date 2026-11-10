@@ -48,7 +48,12 @@ impl ToolHandler for BashTool {
         _conv: &dyn crate::clients::conversation::Conversation,
         args_json: &str,
     ) -> ToolOutcome {
-        ToolOutcome::text(bash_invoke(ctx, args_json, id).await)
+        let (text, exit_code) = bash_invoke(ctx, args_json, id).await;
+        let mut outcome = ToolOutcome::text(text);
+        if let Some(code) = exit_code {
+            outcome = outcome.with_exit_code(code);
+        }
+        outcome
     }
 }
 
@@ -262,14 +267,18 @@ pub(super) fn apply_env_to_command(cmd: &mut Command, ctx: &AgentLoopRuntime) {
     }
 }
 
-pub(crate) async fn bash_invoke(ctx: &AgentLoopRuntime, args_json: &str, id: &str) -> String {
+pub(crate) async fn bash_invoke(
+    ctx: &AgentLoopRuntime,
+    args_json: &str,
+    id: &str,
+) -> (String, Option<i32>) {
     let args = match parse_args(args_json) {
         Ok(v) => v,
-        Err(e) => return e,
+        Err(e) => return (e, None),
     };
     let command = match req_str(&args, "command") {
         Ok(s) => s,
-        Err(e) => return e,
+        Err(e) => return (e, None),
     };
     let call = format_tool_call_parts("Bash", &args);
     let timeout_secs = args
@@ -299,7 +308,7 @@ pub(crate) async fn bash_invoke(ctx: &AgentLoopRuntime, args_json: &str, id: &st
     apply_env_to_command(&mut cmd, ctx);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return format!("Error: {e}"),
+        Err(e) => return (format!("Error: {e}"), None),
     };
     // Own the process group for the tool call. When the surrounding
     // `join_all` future is dropped on Esc, this guard is dropped too and
@@ -325,12 +334,12 @@ pub(crate) async fn bash_invoke(ctx: &AgentLoopRuntime, args_json: &str, id: &st
             // `process_group_guard` fires as this function returns; the
             // direct child is also covered by `kill_on_drop` when the
             // timed-out future was dropped.
-            "[timeout]".into()
+            ("[timeout]".into(), None)
         }
         Ok(Err(e)) => {
             #[cfg(unix)]
             process_group_guard.disarm();
-            format!("Error: {e}")
+            (format!("Error: {e}"), None)
         }
         Ok(Ok(status)) => {
             #[cfg(unix)]
@@ -338,9 +347,10 @@ pub(crate) async fn bash_invoke(ctx: &AgentLoopRuntime, args_json: &str, id: &st
             let mut text = String::from_utf8_lossy(&out).into_owned();
             text.push_str(&String::from_utf8_lossy(&err));
             if status.success() {
-                text
+                (text, Some(0))
             } else {
-                format!("[exit {}]\n{text}", status.code().unwrap_or(1))
+                let code = status.code().unwrap_or(1);
+                (format!("[exit {}]\n{text}", code), Some(code))
             }
         }
     }
