@@ -444,7 +444,7 @@ fn find_all_matches(haystack: &str, needle: &str, window_offset: usize) -> Vec<u
 }
 
 /// Returned by [`apply_edits`]: the final buffer, applied-edit line ranges, and
-/// whether any `\n` / `\t` unescape was performed.
+/// whether any `\n` unescape was performed.
 type ApplyEditsResult = Result<(String, Vec<(usize, usize)>, bool), String>;
 
 fn apply_edits(content: &str, edits: &[EditOp], file_path: &str) -> ApplyEditsResult {
@@ -498,43 +498,39 @@ fn apply_edits(content: &str, edits: &[EditOp], file_path: &str) -> ApplyEditsRe
         let mut match_positions = find_all_matches(search_window, old_str, window_offset);
 
         if match_positions.is_empty() {
-            // Control-character unescape retry: the LLM may have seen
-            // literal \n, \t, or \r in Read output and interpreted them
-            // as JSON escapes, producing real control bytes in old_string.
-            // Convert those back to their literal two-byte sequences and
-            // retry so the needle matches what the file actually contains.
-            let mut unescaped = String::with_capacity(old_str.len());
+            // Newline unescape retry: the LLM may have seen a literal `\n`
+            // in Read output and interpreted it as a JSON escape, producing
+            // a real newline byte in old_string. Convert real newlines back
+            // to the literal two-byte sequence and retry so the needle
+            // matches what the file actually contains. Only `\n` is
+            // converted: tabs and carriage returns in old_string may be
+            // genuine indentation or line endings, not misinterpreted
+            // escapes, so rewriting them could break otherwise-valid input.
+            let mut newline_unescaped = String::with_capacity(old_str.len());
             let mut had_escape = false;
             for ch in old_str.chars() {
                 match ch {
                     '\n' => {
-                        unescaped.push_str("\\n");
+                        newline_unescaped.push_str("\\n");
                         had_escape = true;
                     }
-                    '\t' => {
-                        unescaped.push_str("\\t");
-                        had_escape = true;
-                    }
-                    '\r' => {
-                        unescaped.push_str("\\r");
-                        had_escape = true;
-                    }
-                    _ => unescaped.push(ch),
+                    _ => newline_unescaped.push(ch),
                 }
             }
             if had_escape {
-                match_positions = find_all_matches(search_window, &unescaped, window_offset);
+                match_positions =
+                    find_all_matches(search_window, &newline_unescaped, window_offset);
 
                 if !match_positions.is_empty() {
                     if match_positions.len() > 1 {
                         return Err(format!(
-                            "Error: old_string is not unique in {file_path} (edit {}) — {} matches found after control-character unescaping. Try scoping with start_line/end_line.",
+                            "Error: old_string is not unique in {file_path} (edit {}) — {} matches found after newline unescaping. Try scoping with start_line/end_line.",
                             i + 1,
                             match_positions.len()
                         ));
                     }
                     let start = match_positions[0];
-                    let old_len = unescaped.len();
+                    let old_len = newline_unescaped.len();
                     buffer.replace_range(start..start + old_len, &edit.new_str);
                     applied.push(AppliedEdit {
                         start,
@@ -886,7 +882,7 @@ fn render_success(
     );
 
     if unescape_used {
-        out.push_str("(note: one or more edits matched via control-character unescaping — the LLM may have misinterpreted literal \\n, \\t, or \\r in Read output as JSON escapes)\n");
+        out.push_str("(note: one or more edits matched via newline unescaping — the LLM may have misinterpreted a literal \\n in Read output as a JSON escape)\n");
     }
 
     if expanded < windows.len() {
@@ -1320,38 +1316,54 @@ mod tests {
         }];
         let err = apply_edits(content, &edits, "f.txt").unwrap_err();
         assert!(
-            err.contains("not unique") && err.contains("after control-character unescaping"),
+            err.contains("not unique") && err.contains("after newline unescaping"),
             "got: {err}"
         );
     }
 
     #[test]
-    fn apply_match_unescapes_json_tab_in_old_string() {
-        // Real tab byte → literal \t, same mechanism as \n.
-        let content = "'col1\\tcol2'\n";
+    fn apply_match_keeps_genuine_tab_indentation_with_newline_unescape() {
+        // old_string preserves a real tab for indentation while an embedded
+        // literal `\n` in the file was misread as a newline. The newline-only
+        // retry must leave the indentation alone so the whole needle matches.
+        let content = "\t'Line one\\nLine two'\n";
         let edits = vec![EditOp {
-            old_str: "'col1\tcol2'".into(),
-            new_str: "'replaced'".into(),
+            old_str: "\t'Line one\nLine two'".into(),
+            new_str: "\t'Replaced'".into(),
             scope_start: None,
             scope_end: None,
         }];
         let (out, _, unescape_used) = apply_edits(content, &edits, "f.txt").unwrap();
-        assert_eq!(out, "'replaced'\n");
+        assert_eq!(out, "\t'Replaced'\n");
         assert!(unescape_used);
     }
 
     #[test]
-    fn apply_match_unescapes_json_carriage_return_in_old_string() {
-        let content = "'before\\rafter'\n";
-        let edits = vec![EditOp {
+    fn apply_match_does_not_unescape_tabs_or_carriage_returns() {
+        // Tab and CR bytes in old_string are preserved as-is: they may be
+        // genuine whitespace or line endings, not misinterpreted escapes.
+        // The literal-match path (not the retry) finds these needles.
+        let tab_content = "\tfoo\n";
+        let tab_edits = vec![EditOp {
+            old_str: "\tfoo".into(),
+            new_str: "bar".into(),
+            scope_start: None,
+            scope_end: None,
+        }];
+        let (out, _, unescape_used) = apply_edits(tab_content, &tab_edits, "f.txt").unwrap();
+        assert_eq!(out, "bar\n");
+        assert!(!unescape_used);
+
+        let cr_content = "'before\rafter'\n";
+        let cr_edits = vec![EditOp {
             old_str: "'before\rafter'".into(),
             new_str: "'replaced'".into(),
             scope_start: None,
             scope_end: None,
         }];
-        let (out, _, unescape_used) = apply_edits(content, &edits, "f.txt").unwrap();
+        let (out, _, unescape_used) = apply_edits(cr_content, &cr_edits, "f.txt").unwrap();
         assert_eq!(out, "'replaced'\n");
-        assert!(unescape_used);
+        assert!(!unescape_used);
     }
 
     #[test]
