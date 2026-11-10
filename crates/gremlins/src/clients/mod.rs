@@ -7,6 +7,7 @@ pub mod backends;
 pub(crate) mod cancel;
 pub(crate) mod cancels;
 pub mod client;
+pub(crate) use client::run_naked;
 pub(crate) mod compaction;
 pub mod config;
 pub mod conversation;

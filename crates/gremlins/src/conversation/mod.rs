@@ -21,3 +21,29 @@ pub(crate) fn new_blank_conversation(
         None,
     ))
 }
+
+/// Production blank conversation for callers that must build a
+/// [`RunParams`] before a real backend has prepared one. The returned
+/// conversation is intentionally inert — callers are expected to overwrite
+/// it immediately.
+pub(crate) fn new_blank_for_run_params() -> Box<dyn crate::clients::conversation::Conversation> {
+    Box::new(standard::StandardConversation::new("", false, None, None))
+}
+
+/// Build a conversation with a pre-populated message history and a pending
+/// user prompt, for single-turn completion runners that have no backend.
+/// This lives in the conversation layer because [`StandardConversation`]
+/// owns the history/prompt invariant; the I/O layer depends only on the
+/// [`crate::clients::conversation::Conversation`] trait.
+pub(crate) fn new_prepopulated(
+    prompt: &str,
+    preserve_reasoning: bool,
+    prepopulated_messages: Option<Vec<rig_core::completion::Message>>,
+) -> Box<dyn crate::clients::conversation::Conversation> {
+    Box::new(standard::StandardConversation::new(
+        prompt,
+        preserve_reasoning,
+        prepopulated_messages,
+        None,
+    ))
+}

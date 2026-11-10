@@ -130,6 +130,7 @@ impl<C> NativeRunState<C> {
                     temperature: self.resolved.temperature,
                     max_tokens: self.resolved.max_tokens,
                     preserve_reasoning_in_history: preserve_reasoning.as_bool(),
+                    preamble: None,
                 },
                 interactive,
             )

@@ -677,6 +677,7 @@ mod tests {
     /// child provider.
     #[tokio::test]
     async fn task_override_uses_target_resolved_options() {
+        let _env = crate::test_support::EnvGuard::lock();
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
         let ctx = depth_test_ctx();

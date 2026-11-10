@@ -32,7 +32,9 @@ use crate::clients::conversation::{Conversation, RunArtifact, TurnScript, TurnSc
 use crate::clients::done_helpers::done_user_message;
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
-use crate::conversation::compaction::{compaction_cut_index, CompactionReport, CompactionStrategy};
+use crate::conversation::compaction::{
+    compaction_cut_index, run_local_compaction, CompactionReport, CompactionStrategy,
+};
 
 /// Default number of most-recent turns to keep verbatim during compaction.
 const KEEP_RECENT: usize = 10;
@@ -166,34 +168,22 @@ impl StandardConversation {
         }
 
         // ── Local compaction ──
-        let qualified = format!("{}/{}", backend.name(), backend.model());
-        if let Some(local) = backend.make_model(&qualified) {
-            match crate::conversation::compaction::compact_local_with_retry(
-                &local,
-                &to_compact,
-                instructions,
-                system_prompt,
-            )
-            .await
-            {
-                Some((summary_msg, input_tokens, output_tokens)) => {
-                    let mut new_history = Vec::with_capacity(1 + kept.len());
-                    new_history.push(summary_msg);
-                    new_history.extend_from_slice(&kept);
-                    self.history = new_history;
-                    return Some(CompactionReport {
-                        strategy: CompactionStrategy::Local,
-                        messages_compacted: to_compact.len(),
-                        messages_kept: kept.len(),
-                        compaction_input_tokens: input_tokens,
-                        compaction_output_tokens: output_tokens,
-                        compaction_block: None,
-                    });
-                }
-                None => { /* fall through */ }
-            }
-        } else {
-            log::error!("Local compaction unavailable: make_model failed");
+        let spec = format!("{}/{}", backend.name(), backend.model());
+        if let Some((summary_msg, input_tokens, output_tokens)) =
+            run_local_compaction(&spec, &to_compact, instructions, system_prompt).await
+        {
+            let mut new_history = Vec::with_capacity(1 + kept.len());
+            new_history.push(summary_msg);
+            new_history.extend_from_slice(&kept);
+            self.history = new_history;
+            return Some(CompactionReport {
+                strategy: CompactionStrategy::Local,
+                messages_compacted: to_compact.len(),
+                messages_kept: kept.len(),
+                compaction_input_tokens: input_tokens,
+                compaction_output_tokens: output_tokens,
+                compaction_block: None,
+            });
         }
 
         None

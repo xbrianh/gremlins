@@ -76,6 +76,48 @@ pub struct RunParams {
     pub hooks: Option<LoopHooks>,
 }
 
+impl RunParams {
+    /// The minimum viable [`RunParams`] for a no-backend, single-turn
+    /// completion (used by [`super::client::run_naked`]). Everything else
+    /// is a sensible default: no sandboxing, no telemetry, no task models.
+    ///
+    /// The caller must overwrite [`prepopulated_conversation`](Self::prepopulated_conversation)
+    /// with the actual conversation before running; the blank value here only
+    /// satisfies the struct invariant so every field can start from a real
+    /// default.
+    pub(crate) fn empty() -> Self {
+        Self {
+            prompt: String::new(),
+            label: String::new(),
+            model: None,
+            raw_path: None,
+            capture_events: false,
+            on_timeout_prompt: None,
+            max_retries: 0,
+            cwd: None,
+            artifact_dir: None,
+            idle_timeout: None,
+            extra_env: None,
+            expected_artifact_paths: Vec::new(),
+            system_prompt: None,
+            gremlin_id: None,
+            log_tx: None,
+            base_env: None,
+            allow_all: false,
+            task_models: None,
+            cancel_token: None,
+            stream_events: None,
+            prepopulated_conversation: crate::conversation::new_blank_for_run_params(),
+            skills_available: false,
+            discovered_skills: None,
+            active_skills: None,
+            token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
+            extra_sandbox_roots: Vec::new(),
+            hooks: None,
+        }
+    }
+}
+
 impl Clone for RunParams {
     fn clone(&self) -> Self {
         Self {

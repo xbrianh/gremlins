@@ -21,6 +21,11 @@ use crate::clients::backends;
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::protocol::CompletedRun;
 
+use super::agent_loop::{run_agent_loop, LoopOpts, RunContext};
+use super::cancel::CancelToken;
+use super::conversation::Conversation;
+use super::plug::LoopHooks;
+
 /// The seven tools every native agent may call.
 ///
 /// The allowlist is deliberately fixed per-client rather than configurable:
@@ -317,6 +322,70 @@ pub(crate) fn resolve_model(spec: &str) -> Result<super::task::TaskModel, String
         extra: resolved.additional_value(),
         preserve_reasoning: Some(preserve_reasoning),
     })
+}
+
+/// A single-turn completion run with no tools, no system prompt, and no
+/// interactive session.
+///
+/// The caller supplies the full message history, the assistant text trigger
+/// (the next user message that requests the completion), the preamble that
+/// carries the system instructions, and an optional output-token ceiling.
+/// The agent loop contributes its normal retry, backoff, timeout, and
+/// cancellation behavior.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_naked(
+    spec: &str,
+    messages: Vec<rig_core::completion::Message>,
+    prompt: &str,
+    preamble: String,
+    max_tokens: Option<u64>,
+) -> Result<String, ClientError> {
+    let task_model = resolve_model(spec).map_err(|e| ClientError::Runtime { message: e })?;
+
+    let cancel = CancelToken::new(); // inert — single turn, no interactive
+
+    let mut params = RunParams::empty();
+    params.model = Some(spec.to_string());
+
+    let conv: Box<dyn Conversation> = crate::conversation::new_prepopulated(
+        prompt,
+        task_model.preserve_reasoning.unwrap_or(false),
+        Some(messages),
+    );
+
+    let ctx = RunContext {
+        params,
+        prefix: String::new(),
+        idle_timeout: crate::config::stream_idle_timeout(),
+        expected_artifact_paths: vec![],
+        reminder_budget: 0,
+        completion_nudge_budget: 0,
+        stream_events: None,
+        prepopulated_conversation: conv,
+        hooks: LoopHooks::new(),
+    };
+
+    let opts = LoopOpts {
+        extra: task_model.extra,
+        tool_filter: Some(&[]), // no tools
+        classify_error: None,
+        temperature: task_model.temperature,
+        max_tokens,
+        preserve_reasoning_in_history: task_model.preserve_reasoning.unwrap_or(false),
+        preamble: Some(preamble),
+    };
+
+    let completed = run_agent_loop(
+        task_model.model,
+        prompt,
+        ctx,
+        cancel,
+        opts,
+        None, // no interactive
+    )
+    .await?;
+
+    Ok(completed.text_result.unwrap_or_default())
 }
 
 #[cfg(test)]

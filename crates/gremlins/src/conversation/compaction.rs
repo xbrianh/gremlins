@@ -1,42 +1,19 @@
-//! Cut-point helpers, compaction orchestration state, local-compaction
-//! helpers, and the on-demand `CompactionReport` return type.
+//! Cut-point helpers, compaction orchestration state, and the on-demand
+//! `CompactionReport` return type.
 //!
 //! Cut-point functions operate purely on [`Message`] slices — they have no
 //! dependency on [`Backend`] or any Anthropic-specific type.
 //!
-//! Local-compaction helpers (`compact_local_raw`, `compact_local_with_retry`,
-//! and their truncation/validation support) live here so that
-//! [`crate::conversation::standard::StandardConversation`] can call them
-//! when the backend does not support server-side compaction.
-
-use std::fmt;
+//! Local compaction is a pure message transform here: it truncates tool
+//! results, extracts file operations, builds a preamble, and delegates the
+//! actual completion to [`crate::clients::run_naked`]. No I/O driver types
+//! cross into this module.
 
 use rig_core::completion::message::{AssistantContent, UserContent};
-use rig_core::completion::{CompletionRequest, CompletionResponse, Message};
-use rig_core::driver::DynModel;
-use rig_core::operation::Completion;
+use rig_core::completion::Message;
 use serde::Serialize;
 
 use crate::clients::protocol::CompactionBlock;
-
-use std::io::{self, Write};
-
-/// An [`io::Write`] sink that counts serialized bytes without buffering them.
-#[derive(Default)]
-struct ByteCounter {
-    count: u64,
-}
-
-impl Write for ByteCounter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.count += buf.len() as u64;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
 
 /// Compute a cut index so `to_compact = &history[..cut]` and
 /// `kept = &history[cut..]`. The cut lands on a completed-turn boundary:
@@ -136,18 +113,18 @@ Summarize the conversation above. Preserve:
 Write a single concise paragraph. Do not call any tools.";
 
 /// Output token budget for the local compaction completion.
-const LOCAL_COMPACTION_MAX_TOKENS: u64 = 2048;
+pub(crate) const LOCAL_COMPACTION_MAX_TOKENS: u64 = 2048;
+
+/// The user-turn trigger that asks the model to produce the summary. The
+/// conversation history is supplied separately, so this is deliberately a
+/// short, fixed instruction rather than the full summarization prompt (which
+/// rides in the preamble).
+const LOCAL_COMPACTION_PROMPT: &str = "Summarize the conversation above.";
 
 /// Maximum characters for a single tool-result text block in the
 /// summarization request. Beyond this, the content is truncated with a
 /// marker.
 const TOOL_RESULT_MAX_CHARS: usize = 2000;
-
-/// Maximum number of summarization attempts per compaction trigger.
-const MAX_COMPACTION_ATTEMPTS: usize = 2;
-
-/// Retry delay between compaction attempts.
-const COMPACTION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 // ── File path extraction for summaries ───────────────────────────────
 
@@ -270,22 +247,99 @@ fn truncate_tool_result_content(
         .collect()
 }
 
-// ── Defensive failure checks ─────────────────────────────────────────
+// ── Local compaction ─────────────────────────────────────────────────
 
-/// Validate that a summarization response is safe to use as a compaction
-/// summary. Returns `Some(reason)` if the response should be discarded.
-fn validate_summarization_response(response: &CompletionResponse) -> Option<&'static str> {
-    // Reject tool-use responses — summarization must be prose-only.
-    let has_tool_use = response
-        .choice
-        .iter()
-        .any(|c| matches!(c, AssistantContent::ToolCall(_)));
-    if has_tool_use {
-        return Some("summarization response contained tool calls");
+/// Build the local-compaction request and hand it to
+/// [`crate::clients::run_naked`]. Returns the summary text with token
+/// counts, or `None` on failure.
+///
+/// `system_prompt` is the conversation's active system prompt — it is
+/// prepended to the summarization instructions in the preamble so the
+/// model has context about its role and constraints.
+///
+/// Token counts are `None` for now: `run_naked` returns only the assistant
+/// text. A follow-up can return a richer struct if callers want the
+/// compaction call's own usage.
+pub(crate) async fn run_local_compaction(
+    spec: &str,
+    to_compact: &[Message],
+    instructions: Option<&str>,
+    system_prompt: Option<&str>,
+) -> Option<(Message, Option<u64>, Option<u64>)> {
+    let summarization_instructions = instructions.unwrap_or(DEFAULT_LOCAL_COMPACTION_PROMPT);
+
+    let preamble = match system_prompt {
+        Some(sys) if !sys.is_empty() => {
+            format!("{sys}\n\n{summarization_instructions}")
+        }
+        _ => summarization_instructions.to_string(),
+    };
+
+    let truncated = truncate_for_summarization(to_compact);
+
+    // Defense-in-depth: the coarse prompt-size ceiling is re-checked here so
+    // a pathological `to_compact` that slips past the truncation floor cannot
+    // reach the provider. `render_turn` enforces the same bound inside the
+    // agent loop, but by then the request is already being assembled.
+    let actual = preamble.len() as u64
+        + truncated
+            .iter()
+            .map(crate::clients::conversation::message_text_byte_len)
+            .sum::<u64>();
+    let limit = crate::config::max_prompt_bytes();
+    if actual > limit {
+        log::warn!(
+            "Local compaction request {actual} bytes exceeds configured limit of {limit} bytes"
+        );
+        return None;
     }
 
-    None
+    let summary_text = match crate::clients::run_naked(
+        spec,
+        truncated,
+        LOCAL_COMPACTION_PROMPT,
+        preamble,
+        Some(LOCAL_COMPACTION_MAX_TOKENS),
+    )
+    .await
+    {
+        Ok(text) => text,
+        Err(e) => {
+            log::warn!("Local compaction failed: {e}");
+            return None;
+        }
+    };
+
+    if summary_text.is_empty() {
+        return None;
+    }
+
+    // The agent loop's done-decision guarantees a completed stream, but a
+    // completion can still end at the token cap mid-word. Reject those rather
+    // than injecting a truncated summary into the durable history.
+    if summary_looks_truncated(&summary_text) {
+        log::warn!("Local compaction produced a truncated summary; discarding");
+        return None;
+    }
+
+    let (read_files, modified_files) = extract_file_ops(to_compact);
+    let file_annotations = format_file_ops(&read_files, &modified_files);
+    let enriched = format!("{summary_text}{file_annotations}");
+
+    let msg = Message::Assistant {
+        id: None,
+        content: vec![AssistantContent::Text(
+            rig_core::completion::message::Text {
+                text: enriched,
+                additional_params: None,
+            },
+        )],
+    };
+
+    Some((msg, None, None))
 }
+
+// ── Defensive failure checks ─────────────────────────────────────────
 
 /// Check whether the summary text looks truncated (terminated mid-word
 /// or at an unnatural boundary). Only flags explicit truncation markers
@@ -315,185 +369,6 @@ fn summary_looks_truncated(text: &str) -> bool {
         && !trimmed.ends_with(']')
         && !trimmed.ends_with('}')
         && !trimmed.ends_with('\'')
-}
-
-// ── Local compaction ─────────────────────────────────────────────────
-
-/// Why a local compaction attempt failed.
-#[derive(Debug)]
-pub(crate) enum CompactError {
-    /// The model call itself failed (network, timeout, 5xx). Worth
-    /// retrying.
-    Transient(String),
-    /// The response was rejected by validation (tool calls, empty
-    /// summary, truncated). Retrying won't help.
-    Fatal(String),
-}
-
-impl fmt::Display for CompactError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CompactError::Transient(msg) | CompactError::Fatal(msg) => msg.fmt(f),
-        }
-    }
-}
-
-/// Core single-turn summarization — raw call, no retry, no file-path
-/// enrichment. This is the inner function wrapped by
-/// [`compact_local_with_retry`].
-pub(crate) async fn compact_local_raw(
-    model: &DynModel<Completion>,
-    to_compact: &[Message],
-    instructions: Option<&str>,
-    system_prompt: Option<&str>,
-) -> Result<(Message, Option<u64>, Option<u64>), CompactError> {
-    let summarization_instructions = instructions.unwrap_or(DEFAULT_LOCAL_COMPACTION_PROMPT);
-
-    // Build a system preamble: the conversation's system prompt first
-    // (so the model has role/constraint context), then the summarization
-    // instructions.
-    let preamble = match system_prompt {
-        Some(sys) if !sys.is_empty() => {
-            format!("{sys}\n\n{summarization_instructions}")
-        }
-        _ => summarization_instructions.to_string(),
-    };
-
-    // Truncate large tool-result content blocks before passing to the
-    // model — the model needs the gist, not the verbatim content.
-    let truncated = truncate_for_summarization(to_compact);
-
-    // Build a CompletionRequest with the preamble carrying both the
-    // conversation system context and the summarization instructions.
-    // `to_compact` is set as the message history and a short user
-    // message triggers the summarization turn. Order: preamble →
-    // history → trigger.
-    let request = CompletionRequest::new(Message::user("Summarize the conversation above."))
-        .preamble(preamble)
-        .messages(truncated)
-        .max_tokens(LOCAL_COMPACTION_MAX_TOKENS);
-
-    // Defense-in-depth: measure the full serialized request against the
-    // configured prompt-size ceiling so a pathological to_compact that
-    // slips past the truncation floor is caught before reaching the
-    // provider.
-    let actual = {
-        let mut counter = ByteCounter::default();
-        serde_json::to_writer(&mut counter, &request).map_err(|e| {
-            CompactError::Transient(format!(
-                "failed to serialize compaction request for prompt-size check: {e}"
-            ))
-        })?;
-        counter.count
-    };
-    let limit = crate::config::max_prompt_bytes();
-    if actual > limit {
-        return Err(CompactError::Fatal(format!(
-            "compaction request {actual} bytes exceeds configured limit of {limit} bytes"
-        )));
-    }
-
-    // Unary call — the summary is at most a few paragraphs.
-    let response = match model.call(request).await {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(CompactError::Transient(format!(
-                "Local compaction call failed: {e}"
-            )));
-        }
-    };
-
-    // Defensive: reject responses with tool calls.
-    if let Some(reason) = validate_summarization_response(&response) {
-        return Err(CompactError::Fatal(format!(
-            "Local compaction rejected: {reason}"
-        )));
-    }
-
-    // Extract the assistant text and token usage.
-    let summary: String = response
-        .choice
-        .iter()
-        .filter_map(|c| match c {
-            AssistantContent::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("");
-
-    if summary.is_empty() {
-        return Err(CompactError::Fatal(
-            "Local compaction produced empty summary".into(),
-        ));
-    }
-
-    // Defensive: reject summaries that look truncated.
-    if summary_looks_truncated(&summary) {
-        return Err(CompactError::Fatal(
-            "Local compaction produced a truncated summary; discarding".into(),
-        ));
-    }
-
-    // Enrich the summary with file-path annotations.
-    let (read_files, modified_files) = extract_file_ops(to_compact);
-    let file_annotations = format_file_ops(&read_files, &modified_files);
-    let enriched = format!("{summary}{file_annotations}");
-
-    let input_tokens = response.usage.input_tokens;
-    let output_tokens = response.usage.output_tokens;
-
-    let msg = Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::Text(
-            rig_core::completion::message::Text {
-                text: enriched,
-                additional_params: None,
-            },
-        )],
-    };
-
-    Ok((msg, input_tokens, output_tokens))
-}
-
-/// Run a single-turn summarization completion on `to_compact` with a
-/// single retry on transient failure.
-///
-/// `system_prompt` is the conversation's active system prompt — it is
-/// prepended to the summarization instructions in the system preamble
-/// so the model has context about its role and constraints.
-///
-/// Returns a plain assistant text message with token counts, or `None`
-/// if all attempts failed. Does not produce a signed `CompactionBlock` —
-/// the returned message is an ordinary `Message::Assistant` whose text
-/// content is the summary.
-pub(crate) async fn compact_local_with_retry(
-    model: &DynModel<Completion>,
-    to_compact: &[Message],
-    instructions: Option<&str>,
-    system_prompt: Option<&str>,
-) -> Option<(Message, Option<u64>, Option<u64>)> {
-    for attempt in 0..MAX_COMPACTION_ATTEMPTS {
-        match compact_local_raw(model, to_compact, instructions, system_prompt).await {
-            Ok(v) => return Some(v),
-            Err(CompactError::Transient(msg)) if attempt < MAX_COMPACTION_ATTEMPTS - 1 => {
-                log::warn!(
-                    "Local compaction attempt {} failed (transient): {msg}; retrying in {:?}",
-                    attempt + 1,
-                    COMPACTION_RETRY_DELAY,
-                );
-                tokio::time::sleep(COMPACTION_RETRY_DELAY).await;
-            }
-            Err(e) => {
-                log::warn!(
-                    "Local compaction failed after {} attempt{}: {e}; entering cooldown",
-                    attempt + 1,
-                    if attempt > 0 { "s" } else { "" },
-                );
-                return None;
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]

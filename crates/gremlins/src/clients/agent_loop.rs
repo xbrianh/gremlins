@@ -190,6 +190,10 @@ pub(crate) struct LoopOpts<'a> {
     pub(crate) temperature: Option<f64>,
     pub(crate) max_tokens: Option<u64>,
     pub(crate) preserve_reasoning_in_history: bool,
+    /// Fallback system preamble for naked runs that have no conversation
+    /// system prompt (e.g. local compaction). Ignored when the rendered turn
+    /// already carries a system prompt.
+    pub(crate) preamble: Option<String>,
 }
 
 /// A single tool invocation queued for concurrent execution within a turn.
@@ -489,6 +493,8 @@ impl LoopState {
             .tools(tool_defs.to_vec());
         if let Some(ref sys) = script.system_prompt {
             builder = builder.preamble(sys.clone());
+        } else if let Some(preamble) = opts.preamble.clone() {
+            builder = builder.preamble(preamble);
         }
         if let Some(params) = opts.extra.clone() {
             builder = builder.additional_params(params);
@@ -1852,6 +1858,7 @@ pub(crate) async fn run_agent_loop_nested(
         temperature,
         max_tokens,
         preserve_reasoning_in_history,
+        preamble: None,
     };
     // Nested loops never expose LoadSkill even when the parent has skills.
     let is_chat = false;
@@ -2675,6 +2682,7 @@ pub(crate) fn loop_opts(filter: Option<&[String]>) -> LoopOpts<'_> {
         temperature: None,
         max_tokens: None,
         preserve_reasoning_in_history: false,
+        preamble: None,
     }
 }
 
@@ -2687,6 +2695,7 @@ pub(crate) fn loop_opts_preserve_reasoning(filter: Option<&[String]>) -> LoopOpt
         temperature: None,
         max_tokens: None,
         preserve_reasoning_in_history: true,
+        preamble: None,
     }
 }
 
