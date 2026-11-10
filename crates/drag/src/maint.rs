@@ -125,6 +125,7 @@ pub(crate) struct MaintCacheEntry {
 /// subdirectories).  Callers should treat skipped directories as
 /// containers with no maintainability penalty rather than as scoring
 /// failures.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn score_directory_maintainability(
     model_spec: &str,
     verbose: bool,
