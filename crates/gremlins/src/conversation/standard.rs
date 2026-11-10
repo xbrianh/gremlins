@@ -3,13 +3,12 @@
 //! `StandardConversation` owns the durable message history and the pending user
 //! prompt. On each turn the pending prompt is committed into history before the
 //! assistant message, so `history + next_prompt` is always the complete
-//! transcript. Findings content is prepended to the ephemeral
-//! turn prompt so the system preamble stays cache-stable across turns.
+//! transcript.
 //!
-//! `render_turn` stashes the rendered user message (with prefixes) so
-//! `record_turn`, `done_rejected`, and `finalize` can commit the exact
-//! message the model saw rather than the raw `next_prompt`. A
-//! `prompt_committed` flag prevents `messages()` from appending a
+//! `render_turn` returns the raw `next_prompt` with no prefix assembly — the
+//! rendered prompt is always identical to the pending prompt.
+//! `record_turn`, `done_rejected`, and `finalize` commit `next_prompt` directly.
+//! A `prompt_committed` flag prevents `messages()` from appending a
 //! duplicate when `record_turn` has already committed the prompt.
 //!
 //! ## Compaction
@@ -30,7 +29,6 @@ use crate::clients::backend::Backend;
 use crate::clients::compaction::compaction_block_as_message;
 use crate::clients::conversation::{Conversation, RunArtifact, TurnScript, TurnScriptError};
 use crate::clients::done_helpers::done_user_message;
-use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
 use crate::conversation::compaction::{
     compaction_cut_index, run_local_compaction, CompactionReport, CompactionStrategy,
@@ -49,18 +47,10 @@ pub(crate) struct StandardConversation {
     /// [`record_turn`] and [`done_rejected`], replaced by [`record_tool_results`]
     /// and [`set_next_prompt`].
     next_prompt: Message,
-    /// The user message `render_turn` hands to the model. May carry
-    /// findings prefixes that `next_prompt` lacks. Used by
-    /// `record_turn`, `done_rejected`, and `finalize` so the committed
-    /// transcript matches what the model saw.
-    rendered_prompt: Option<Message>,
     /// When `true`, `record_turn` has already committed the prompt into
     /// `history` so `messages()` must not append a duplicate. Reset by
     /// `pop_last_assistant_turn` and `begin_next_turn`.
     prompt_committed: bool,
-    /// Declarative findings extracted from assistant prose and surfaced in the
-    /// per-turn prompt so the model does not re-derive facts it already stated.
-    findings_ledger: FindingsLedger,
     preserve_reasoning_in_history: bool,
     last_text: String,
     /// Snapshot produced by the most recent [`Conversation::finalize`] call.
@@ -82,9 +72,7 @@ impl StandardConversation {
         Self {
             history,
             next_prompt: Message::user(prompt.to_string()),
-            rendered_prompt: None,
             prompt_committed: false,
-            findings_ledger: FindingsLedger::new(),
             preserve_reasoning_in_history: preserve_reasoning,
             last_text: String::new(),
             finalized_messages: None,
@@ -95,15 +83,7 @@ impl StandardConversation {
     /// Roll prompt-forward bookkeeping after a tool batch.
     fn begin_next_turn(&mut self) {
         self.next_prompt = Message::user("Continue.".to_string());
-        self.rendered_prompt = None;
         self.prompt_committed = false;
-    }
-
-    fn feed_text(&mut self, text: &str) {
-        if !text.is_empty() {
-            self.last_text = text.to_string();
-        }
-        self.findings_ledger.feed(text);
     }
 
     /// The committed durable transcript only — excludes the unsubmitted
@@ -196,9 +176,7 @@ impl Conversation for StandardConversation {
         Box::new(Self {
             history: self.history.clone(),
             next_prompt: self.next_prompt.clone(),
-            rendered_prompt: self.rendered_prompt.clone(),
             prompt_committed: self.prompt_committed,
-            findings_ledger: self.findings_ledger.clone(),
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: self.last_text.clone(),
             finalized_messages: self.finalized_messages.clone(),
@@ -207,7 +185,9 @@ impl Conversation for StandardConversation {
     }
 
     fn record_prose(&mut self, text: &str) {
-        self.feed_text(text);
+        if !text.is_empty() {
+            self.last_text = text.to_string();
+        }
     }
 
     fn record_turn(
@@ -217,15 +197,8 @@ impl Conversation for StandardConversation {
         tool_calls: &[ToolCall],
         _input_tokens: Option<u64>,
     ) {
-        // record_prose already fed the findings ledger and updated last_text;
-        // do NOT call feed_text here to avoid double-counting findings.
-
-        // Commit the exact rendered user prompt (with findings
-        // prefixes) so the transcript matches what the model saw.
-        let prompt = self
-            .rendered_prompt
-            .take()
-            .unwrap_or_else(|| self.next_prompt.clone());
+        // Commit the pending user prompt before the assistant message.
+        let prompt = self.next_prompt.clone();
         self.history.push(prompt);
         self.prompt_committed = true;
         self.history.push(assistant_tool_message(
@@ -252,65 +225,16 @@ impl Conversation for StandardConversation {
             let prompt = self.history.pop().unwrap();
             self.next_prompt = prompt;
         }
-        self.rendered_prompt = None;
         self.prompt_committed = false;
     }
 
     async fn render_turn(
         &mut self,
-        nested: bool,
+        _nested: bool,
         system_prompt: Option<String>,
     ) -> Result<TurnScript, TurnScriptError> {
         let combined_system = system_prompt;
-
-        let next_user_prompt = if nested {
-            self.next_prompt.clone()
-        } else {
-            // Prepend per-turn mutable content (findings) to the
-            // ephemeral user prompt so the system preamble stays cache-stable
-            // across turns.
-            let mut prefix = Vec::new();
-
-            let findings = self.findings_ledger.format();
-            if !findings.is_empty() {
-                prefix.push(findings);
-            }
-
-            if prefix.is_empty() {
-                self.next_prompt.clone()
-            } else {
-                // Prefixes ride as text blocks ahead of the real content.
-                let mut content = Vec::new();
-                let separator = "\n\n---\n\n";
-                for p in prefix {
-                    content.push(rig_core::completion::message::UserContent::Text(
-                        rig_core::completion::message::Text {
-                            text: p,
-                            additional_params: None,
-                        },
-                    ));
-                }
-                content.push(rig_core::completion::message::UserContent::Text(
-                    rig_core::completion::message::Text {
-                        text: separator.to_string(),
-                        additional_params: None,
-                    },
-                ));
-                match self.next_prompt.clone() {
-                    Message::User {
-                        content: mut existing,
-                    } => {
-                        content.append(&mut existing);
-                        Message::User { content }
-                    }
-                    other => {
-                        // Non-user next_prompt: the content blocks won't merge
-                        // correctly, so return the prompt as-is.
-                        other
-                    }
-                }
-            }
-        };
+        let next_user_prompt = self.next_prompt.clone();
 
         // Coarse prompt-size gate: sum text byte lengths of all messages
         // (including system prompt) and reject oversized turns before the
@@ -331,10 +255,6 @@ impl Conversation for StandardConversation {
             return Err(TurnScriptError::TooLarge { limit, actual });
         }
 
-        // Stash the rendered prompt so record_turn/done_rejected/finalize
-        // can commit the exact message the model saw.
-        self.rendered_prompt = Some(next_user_prompt.clone());
-
         Ok(TurnScript {
             messages: self.history.clone(),
             system_prompt: combined_system,
@@ -350,14 +270,7 @@ impl Conversation for StandardConversation {
         done: Option<&ToolCall>,
     ) -> RunArtifact {
         let mut messages = self.history.clone();
-        // The pending prompt for this Done turn was never committed by
-        // record_turn, so append the rendered prompt (with findings
-        // prefixes) if available, otherwise `next_prompt`.
-        let prompt = self
-            .rendered_prompt
-            .take()
-            .unwrap_or_else(|| self.next_prompt.clone());
-        messages.push(prompt);
+        messages.push(self.next_prompt.clone());
         let final_text = if text.trim().is_empty() {
             done.and_then(|tc| {
                 tc.function
@@ -415,12 +328,10 @@ impl Conversation for StandardConversation {
         Box::new(Self {
             history,
             next_prompt: Message::user(String::new()),
-            rendered_prompt: None,
             prompt_committed: false,
-            // Fork children start with a clean FindingsLedger and empty
-            // last_text — matching the old prepopulated_messages semantics
-            // where only raw messages were carried forward.
-            findings_ledger: FindingsLedger::new(),
+            // Fork children start with empty last_text — matching the old
+            // prepopulated_messages semantics where only raw messages were
+            // carried forward.
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: String::new(),
             finalized_messages: None,
@@ -439,7 +350,6 @@ impl Conversation for StandardConversation {
 
     fn set_next_prompt(&mut self, prompt: &str) {
         self.next_prompt = Message::user(prompt.to_string());
-        self.rendered_prompt = None;
         self.prompt_committed = false;
     }
 
@@ -473,12 +383,10 @@ impl Conversation for StandardConversation {
                     .push(Message::user(format!("[operator]: {text}")));
                 self.next_prompt = Message::User { content: merged };
             }
-            self.rendered_prompt = None;
         } else {
             self.history
                 .push(Message::user(format!("[operator]: {text}")));
             self.next_prompt = Message::user(text);
-            self.rendered_prompt = None;
         }
     }
 
@@ -490,16 +398,9 @@ impl Conversation for StandardConversation {
         results: Vec<Message>,
         next_prompt: Message,
     ) {
-        // record_prose already fed the findings ledger and updated last_text;
-        // do NOT call feed_text here to avoid double-counting findings.
-
-        // Commit the rendered prompt (with prefixes) before the assistant
-        // message, matching the record_turn invariant.
-        let prompt = self
-            .rendered_prompt
-            .take()
-            .unwrap_or_else(|| self.next_prompt.clone());
-        self.next_prompt = next_prompt;
+        // Commit the pending prompt before the assistant message, matching
+        // the record_turn invariant.
+        let prompt = std::mem::replace(&mut self.next_prompt, next_prompt);
         self.history.push(prompt);
         self.prompt_committed = true;
         self.history.push(assistant_tool_message(

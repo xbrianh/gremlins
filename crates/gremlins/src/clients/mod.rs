@@ -13,7 +13,6 @@ pub mod config;
 pub mod conversation;
 pub(crate) mod done_helpers;
 pub(crate) mod error;
-pub(crate) mod findings;
 pub(crate) mod format;
 pub mod github_auth;
 pub(crate) mod interactive;

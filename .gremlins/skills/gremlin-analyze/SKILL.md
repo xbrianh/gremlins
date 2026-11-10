@@ -82,8 +82,9 @@ working correctly instead.
 - **Task tool usage**: `Task` delegates work to sub-agents. If the log shows a single agent doing
   all the work without delegating, suggest breaking the prompt into parallel `Task` calls.
 - **Redundant reads**: If the same file is read across multiple consecutive turns, the model may
-  not be retaining context. Suggest prompt guidance to cache findings — the findings ledger is
-  surfaced in the per-turn prompt for exactly this reason.
+  not be retaining context. Suggest prompt guidance to help the model track its own findings across
+  turns — for example, instructing it to note observations explicitly in its prose so they survive
+  in the conversation history.
 
 #### D. Cache efficiency
 

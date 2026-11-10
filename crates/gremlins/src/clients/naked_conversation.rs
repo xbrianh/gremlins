@@ -1,9 +1,9 @@
 //! A concrete, production [`Conversation`] implementation for shell-backed
 //! models.
 //!
-//! [`NakedConversation`] tracks flat message history without a findings
-//! ledger. It is purpose-built for single-turn use via [`run_naked`] — no
-//! tool layer, no multi-turn loops, no fork/spawn.
+//! [`NakedConversation`] tracks flat message history. It is purpose-built for
+//! single-turn use via [`run_naked`] — no tool layer, no multi-turn loops, no
+//! fork/spawn.
 
 use async_trait::async_trait;
 

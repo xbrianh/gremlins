@@ -89,13 +89,14 @@ pub(crate) trait Conversation: Send + Sync {
     fn clone_box(&self) -> Box<dyn Conversation>;
 
     /// Note assistant prose without committing an assistant turn to history
-    /// (used to update the findings ledger and `last_text` before completion
-    /// classification decides whether to record or reject the turn).
+    /// (used to update `last_text` before completion classification decides
+    /// whether to record or reject the turn).
     fn record_prose(&mut self, text: &str);
 
     /// Record the assistant turn (text, reasoning, tool calls) into history.
-    /// The findings ledger is already fed by a prior `record_prose` call, so
-    /// this method should NOT re-feed the ledger — it only commits the message.
+    /// Implementations commit the pending user prompt before the assistant
+    /// message so the transcript maintains the invariant that every assistant
+    /// message is preceded by a user message.
     fn record_turn(
         &mut self,
         text: &str,
@@ -284,8 +285,8 @@ impl std::fmt::Debug for dyn Conversation {
 
 /// A minimal [`Conversation`] implementation for use in `clients/` tests.
 ///
-/// Tracks flat message history (no findings ledger) so that agent-loop and
-/// tool-registry tests can run without depending on `crate::conversation`
+/// Tracks flat message history so that agent-loop and tool-registry tests can
+/// run without depending on `crate::conversation`
 /// (which lives in a different package boundary). `record_turn`,
 /// `done_rejected`, `pop_last_assistant_turn`, and `fork` all mirror
 /// `StandardConversation` — including the prompt-commit invariant — so the
