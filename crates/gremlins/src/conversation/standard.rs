@@ -32,9 +32,7 @@ use crate::clients::conversation::{Conversation, RunArtifact, TurnScript};
 use crate::clients::done_helpers::done_user_message;
 use crate::clients::findings::FindingsLedger;
 use crate::clients::format::assistant_tool_message;
-use crate::conversation::compaction::{
-    compaction_cut_index, CompactionReport, CompactionStrategy,
-};
+use crate::conversation::compaction::{compaction_cut_index, CompactionReport, CompactionStrategy};
 
 /// Default number of most-recent turns to keep verbatim during compaction.
 const KEEP_RECENT: usize = 10;
@@ -117,8 +115,17 @@ impl StandardConversation {
     /// Run compaction on the current history. Called by the `/compact` TUI
     /// command handler.
     ///
+    /// `model` is the model name (e.g. `"claude-sonnet-4-20250514"`) used for
+    /// server-side compaction. The qualified form `"{provider}/{model}"` is
+    /// derived from the backend name for local `make_model`.
+    ///
     /// Returns `None` when there is nothing to compact or every path fails.
-    pub(crate) async fn compact(&mut self) -> Option<CompactionReport> {
+    pub(crate) async fn compact(
+        &mut self,
+        model: &str,
+        system_prompt: Option<&str>,
+        instructions: Option<&str>,
+    ) -> Option<CompactionReport> {
         let backend = match &self.backend {
             Some(b) => b,
             None => {
@@ -133,15 +140,12 @@ impl StandardConversation {
         let kept = self.history[cut..].to_vec();
         let to_compact = self.history[..cut].to_vec();
 
-        let instructions: Option<&str> = None;
-        let system_prompt = crate::clients::system_prompts::chat_system_prompt();
-
         // ── Server-side compaction ──
         if backend.supports_compaction() {
-            let result = backend
-                .compact(&to_compact, Some(system_prompt), instructions, "")
-                .await;
-            match result {
+            match backend
+                .compact(&to_compact, system_prompt, instructions, model)
+                .await
+            {
                 Ok(Some(r)) if r.block.is_some() => {
                     let signed = r.block.unwrap();
                     let mut new_history = Vec::with_capacity(1 + kept.len());
@@ -158,23 +162,22 @@ impl StandardConversation {
                     });
                 }
                 Ok(_) => {
-                    log::error!("Server compaction returned no block; compaction failed");
-                    return None;
+                    log::warn!("Server compaction returned no block; falling back to local");
                 }
                 Err(e) => {
-                    log::error!("Server compaction failed: {e}");
-                    return None;
+                    log::warn!("Server compaction failed: {e}; falling back to local");
                 }
             }
         }
 
         // ── Local compaction ──
-        if let Some(local) = backend.make_model("") {
+        let qualified = format!("{}/{}", backend.name(), model);
+        if let Some(local) = backend.make_model(&qualified) {
             match crate::conversation::compaction::compact_local_with_retry(
                 &local,
                 &to_compact,
                 instructions,
-                Some(system_prompt),
+                system_prompt,
             )
             .await
             {

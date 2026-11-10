@@ -482,6 +482,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cut_empty_returns_zero() {
+        assert_eq!(compaction_cut_index(&[], 10), 0);
+    }
+
+    #[test]
+    fn cut_keep_recent_zero_returns_full_length() {
+        // keep_recent=0 means keep nothing — compact everything
+        let h = paired_history(5);
+        assert_eq!(compaction_cut_index(&h, 0), h.len());
+    }
+
+    #[test]
+    fn cut_fewer_than_keep_recent_returns_zero() {
+        let h = paired_history(3);
+        assert_eq!(compaction_cut_index(&h, 10), 0);
+    }
+
+    #[test]
+    fn cut_more_than_keep_recent() {
+        let h = paired_history(20);
+        let cut = compaction_cut_index(&h, 10);
+        assert!(cut > 0, "cut should be > 0 for 20 pairs with keep 10");
+        assert!(cut < h.len(), "cut should be inside the history");
+    }
+
     /// Build a history with `pairs` user→assistant exchanges.
     fn paired_history(pairs: usize) -> Vec<Message> {
         let mut h = Vec::with_capacity(pairs * 2);

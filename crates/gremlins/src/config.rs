@@ -1177,7 +1177,6 @@ pub(crate) fn max_tool_output_bytes() -> u64 {
         .unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_BYTES)
 }
 
-
 /// Effective turn-level retry schedule from the global config, falling back
 /// to the in-code default when the global config is uninitialized.
 pub(crate) fn turn_retry_backoff() -> Vec<f64> {

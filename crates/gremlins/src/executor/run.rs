@@ -488,7 +488,13 @@ async fn run_agent(
         None
     };
 
-    let backend = client.get_or_build_backend().ok();
+    let backend = match client.get_or_build_backend() {
+        Ok(b) => Some(b),
+        Err(e) => {
+            log::warn!("run_agent: failed to build backend: {e}");
+            None
+        }
+    };
     let conv = crate::conversation::standard::StandardConversation::new(
         "",
         false,
