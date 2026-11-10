@@ -141,7 +141,7 @@ static TOOL_SPECS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "Task",
-        description: "Delegate a self-contained task to a worker. Non-Fork kinds start with a clean conversation context; the Fork kind inherits the parent conversation history. Multiple Task calls in the same message run concurrently, up to {TASK_MAX_PER_TURN} per message (the harness supports up to {MAX_CONCURRENT_TOOLS} total concurrent tool calls). Returns the worker's final text output.",
+        description: "Delegate a self-contained task to a worker. Non-Fork kinds start with a clean conversation context; the Fork kind inherits the parent conversation history. Multiple Task calls in the same message run concurrently, up to {TASK_MAX_PER_TURN} per message (the harness supports up to {MAX_CONCURRENT_TOOLS} total concurrent tool calls). Parallel Tasks launched in the same message share one working directory — each worker can see the other workers' in-progress changes. Give each parallel Task disjoint files or read-only work to avoid edit conflicts. Returns the worker's final text output.",
         fields: &[
             FieldSpec { name: "kind", description: "The kind of task to delegate.", ty: "string", required: true, validated: true },
             FieldSpec { name: "prompt", description: "Full task briefing for the worker. Non-Fork kinds start with a clean conversation context and see nothing from your conversation — include all relevant file contents, diffs, plans, and instructions the worker needs directly in this field. The Fork kind inherits the parent conversation history before this prompt.", ty: "string", required: true, validated: true },
