@@ -64,12 +64,7 @@ pub(crate) trait Conversation: Send + Sync {
     ///
     /// May trigger compaction before building the turn script when
     /// token thresholds are exceeded.
-    async fn render_turn(
-        &mut self,
-        nested: bool,
-        scratchpad: Option<String>,
-        system_prompt: Option<String>,
-    ) -> TurnScript;
+    async fn render_turn(&mut self, nested: bool, system_prompt: Option<String>) -> TurnScript;
 
     /// Build the final transcript for a finished run.
     ///
@@ -351,12 +346,7 @@ impl Conversation for ConversationStub {
         self.prompt_committed = false;
     }
 
-    async fn render_turn(
-        &mut self,
-        _nested: bool,
-        _scratchpad: Option<String>,
-        system_prompt: Option<String>,
-    ) -> TurnScript {
+    async fn render_turn(&mut self, _nested: bool, system_prompt: Option<String>) -> TurnScript {
         TurnScript {
             messages: self.history.clone(),
             system_prompt,

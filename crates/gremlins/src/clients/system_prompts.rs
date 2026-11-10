@@ -36,15 +36,6 @@ ALWAYS use Landscape first when exploring unknown code — it maps structure wit
 <directories>\n\
 Work root:     {work}\n\
 </directories>\n\
-<scratchpad>\n\
-You have a persistent scratchpad file. Use the Write tool to update it with findings, decisions, and\n\
-context you want to preserve across turns — file paths, discovered\n\
-patterns, TODO items, architectural notes. Keep it concise.\n\
-\n\
-The harness injects the scratchpad into your prompt at the start of\n\
-every turn, so you never need to Read it. To update it, write the full\n\
-revised content with the Write tool.\n\
-</scratchpad>\
 ",
         batching = BATCHING_GUIDANCE,
         work = work_root.display(),
@@ -263,45 +254,6 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_system_prompt_includes_scratchpad() {
-        let prompt = agent_system_prompt(Path::new("/work"));
-        assert!(
-            prompt.contains("<scratchpad>"),
-            "agent prompt must describe the scratchpad; got: {prompt}"
-        );
-        assert!(
-            !prompt.contains("{scratchpad_path}"),
-            "agent prompt must not contain the scratchpad placeholder; got: {prompt}"
-        );
-    }
-
-    #[test]
-    fn test_task_system_prompt_excludes_scratchpad() {
-        let prompt = task_system_prompt(Path::new("/work"));
-        assert!(
-            !prompt.contains("<scratchpad>"),
-            "task prompt must not mention scratchpad; nested workers are stateless; got: {prompt}"
-        );
-        assert!(
-            !prompt.contains("{scratchpad_path}"),
-            "task prompt must not name the scratchpad placeholder; got: {prompt}"
-        );
-    }
-
-    #[test]
-    fn test_fork_system_prompt_excludes_scratchpad() {
-        let prompt = fork_system_prompt(Path::new("/work"));
-        assert!(
-            !prompt.contains("<scratchpad>"),
-            "fork prompt must not mention scratchpad; nested workers are stateless; got: {prompt}"
-        );
-        assert!(
-            !prompt.contains("{scratchpad_path}"),
-            "fork prompt must not name the scratchpad placeholder; got: {prompt}"
-        );
-    }
-
-    #[test]
     fn test_all_prompts_share_batching_guidance() {
         let expected = r#"Before every turn, scan the tools you're about to call. When two or more calls are independent (neither depends on the other's result), batch them in a single message. Good: Read foo.rs + Grep "pattern" + Bash "cargo check" — three independent operations in one turn. Bad: those same three calls spread across three serial turns. After writing files, batch all spot-checks (Reads and Greps) into one turn rather than one check per turn; if the build passes and spot-checks look correct, call Done."#;
         assert_eq!(
@@ -390,26 +342,6 @@ mod tests {
     fn chat_preamble_without_context_is_empty() {
         assert_eq!(build_chat_preamble("", ""), "");
         assert_eq!(build_chat_preamble("   \n", ""), "");
-    }
-
-    #[test]
-    fn chat_system_prompt_documents_scratchpad() {
-        let prompt = CHAT_SYSTEM_PROMPT;
-        assert!(
-            prompt.contains("## Scratchpad"),
-            "the chat prompt must describe the persistent scratchpad"
-        );
-        assert!(
-            !prompt.contains("{scratchpad_path}"),
-            "the chat prompt must not contain the scratchpad placeholder"
-        );
-        // The scratchpad guidance must precede the trailing Guidelines section.
-        let scratchpad = prompt.find("## Scratchpad").unwrap();
-        let guidelines = prompt.find("## Guidelines").unwrap();
-        assert!(
-            scratchpad < guidelines,
-            "the scratchpad section must sit before `## Guidelines`"
-        );
     }
 
     /// The chat system prompt must teach the agent about the TUI surface it

@@ -36,7 +36,7 @@ use crate::clients::done_helpers::done_user_message;
 //
 //   LoopState::run_agent_loop_core           // main while-loop
 //     ├─ LoopState::stream_turn              // one model completion turn
-//     │   ├─ prepare_stream_request           // build messages, inject scratchpad
+//     │   ├─ prepare_stream_request           // build messages
 //     │   ├─ launch_model_stream              // error-handling + retry
 //     │   ├─ consume_stream_events            // the async event loop
 //     │   └─ finish_stream_turn               // post-stream classification
@@ -391,7 +391,7 @@ impl LoopState {
         turn_retry_backoff: &[f64],
         timeout_retry_backoff: &[f64],
     ) -> Result<StreamTurnOutcome, ClientError> {
-        // Phase 1: assemble the request (messages, scratchpad, gen params).
+        // Phase 1: assemble the request (messages, gen params).
         // Race against cancellation so an unresponsive compaction endpoint
         // cannot block shutdown.
         let builder = tokio::select! {
@@ -476,7 +476,7 @@ impl LoopState {
     }
 
     /// Build the [`CompletionRequest`] for one model turn: assemble the request
-    /// messages, re-inject the scratchpad when a prior injection is missing,
+    /// messages,
     /// and apply the caller's generation parameters.
     async fn prepare_stream_request(
         &mut self,
@@ -486,11 +486,7 @@ impl LoopState {
     ) -> CompletionRequest {
         let script = self
             .conv
-            .render_turn(
-                nested,
-                self.hooks.read_scratchpad(),
-                self.system_prompt.clone(),
-            )
+            .render_turn(nested, self.system_prompt.clone())
             .await;
 
         let mut builder = CompletionRequest::new(script.next_user_prompt)
@@ -2747,7 +2743,6 @@ pub(crate) fn test_ctx(
             discovered_skills: None,
             active_skills: None,
             token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
-            scratchpad_path: None,
             extra_sandbox_roots: Vec::new(),
             hooks: None,
         },

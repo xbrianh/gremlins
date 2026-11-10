@@ -478,7 +478,7 @@ async fn run_agent(
     let _attempt = gremlin.state.read_str("attempt");
     let loop_iter = gremlin.loop_iter.clone();
 
-    let mut checkout_keys = collect_checkout_keys(
+    let checkout_keys = collect_checkout_keys(
         gremlin.state.store_ref(),
         &agent.interpolation_map,
         &agent.outputs_map,
@@ -488,21 +488,6 @@ async fn run_agent(
         &agent.name,
     )
     .await?;
-
-    // The synthetic scratchpad bind writes into the checkout so
-    // `local_state.commit()` can persist it. This does NOT restore
-    // `_scratchpad.md` in the worktree root — the stage always starts with
-    // a clean slate (reset below). The checkout just reserves space for the
-    // commit path.
-    //
-    // `loop_iter` is included so repeating-sequence iterations produce
-    // distinct, ordered snapshots.
-    let scratchpad_uri = if loop_iter.is_empty() {
-        format!("artifact://_scratchpad/{}.md", agent.name)
-    } else {
-        format!("artifact://_scratchpad/{}-{loop_iter}.md", agent.name)
-    };
-    checkout_keys.push(scratchpad_uri);
 
     let Checkout {
         store: local_registry,
@@ -519,7 +504,6 @@ async fn run_agent(
         local_registry.as_ref(),
         &loop_iter,
         &framework_subs,
-        &artifact_dir,
     )
     .await
     .map_err(|e| agent_prepare_err(e, &agent.name))?;
@@ -529,21 +513,9 @@ async fn run_agent(
 
     let is_chat = gremlin.state.read_str("kind") == "chat";
 
-    // The checkout artifact directory must exist before the reset step — the
-    // implicit artifacts write directly into it.
+    // Ensure the checkout artifact directory exists so the agent's
+    // local state store can create files under it.
     std::fs::create_dir_all(&artifact_dir)?;
-
-    // Reset implicit artifact files at stage start so the model always begins
-    // with a clean slate. Prior-stage working memory is injected below
-    // (headless) or by the chat supervisor (chat gremlins).
-    for artifact in &prepared.implicit_artifacts {
-        if let Err(e) = crate::executor::agent_runner::reset_scratchpad(&artifact.model_path) {
-            log::warn!("{} reset failed: {e}", artifact.kind);
-        }
-    }
-
-    // Scratchpad path is populated by prepare_agent — ready for the workspace
-    // preamble that user_prompt() emits.
 
     let system_prompt = prepared.system_prompt();
 
@@ -555,24 +527,6 @@ async fn run_agent(
     );
 
     let chat_turn: Option<usize> = chat_turn_from_stage_name(&agent.name);
-
-    // Re-inject scratchpads persisted by prior stages so working memory (file
-    // paths, discovered patterns, decisions) carries across stages.
-    // Chat gremlins receive this injection in the supervisor so it rides on
-    // the operator prompt — skip it here to avoid doubling up.
-    if !is_chat {
-        let stage_order: Vec<String> = gremlin.definition.stage_names().to_vec();
-        let scratchpad_accumulated = crate::executor::agent_runner::accumulate_scratchpads(
-            gremlin.state.store_ref(),
-            &stage_order,
-        )
-        .await;
-        if !scratchpad_accumulated.is_empty() {
-            let scratchpad_section =
-                crate::executor::agent_runner::format_scratchpad_injection(&scratchpad_accumulated);
-            prepared.prompt = format!("{scratchpad_section}\n\n{}", prepared.prompt);
-        }
-    }
 
     // Messages from turns before the current one — the canonical baseline
     // used for diff computation on rollback.
@@ -646,7 +600,7 @@ async fn run_agent(
     ));
 
     // ── Build inversion-of-control hooks ─────
-    // Wires cross-package dependencies (log, scratchpad, prompt-debug,
+    // Wires cross-package dependencies (log, prompt-debug,
     // token-usage) into the agent loop without the loop importing
     // `crate::executor` or `crate::landscape`.
     let mut hooks = crate::clients::plug::LoopHooks::new();
@@ -658,19 +612,6 @@ async fn run_agent(
                     let _ = tx.send(msg.to_string());
                 }
             }
-        });
-    }
-    if let Some(sp) = prepared
-        .implicit_artifacts
-        .first()
-        .map(|a| a.model_path.clone())
-    {
-        let root = sp
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| gremlin.cwd());
-        hooks.register_scratchpad_reader(move || {
-            crate::executor::agent_runner::read_scratchpad_contained(&sp, &root).ok()
         });
     }
     {
@@ -760,7 +701,6 @@ async fn run_agent(
         discovered_skills: gremlin.discovered_skills.clone(),
         active_skills: gremlin.active_skills.clone(),
         token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
-        scratchpad_path: None,
         extra_sandbox_roots: gremlin.extra_sandbox_roots.clone(),
         hooks: Some(hooks),
     };
@@ -830,16 +770,6 @@ async fn run_agent(
                 );
                 gremlin.state.accumulate_token_usage(&delta);
                 state::emit_stage_token_usage(gremlin.state.store_ref(), &stage_path, &delta);
-            }
-            // Flush the live scratchpad into the main state store so a
-            // cancelled/failed chat turn does not drop in-flight working
-            // memory. The checkout is dropped without ever being joined on
-            // this path.
-            if is_chat {
-                for artifact in &prepared.implicit_artifacts {
-                    crate::executor::implicit::flush_live(artifact, gremlin.state.store_ref())
-                        .await;
-                }
             }
             return Err(client_run_err(error, &prepared.name));
         }

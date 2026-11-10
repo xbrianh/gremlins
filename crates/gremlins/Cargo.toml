@@ -31,7 +31,6 @@ thiserror = "2"
 log = { version = "0.4", features = ["std"] }
 dirs = "6"
 tempfile = "3"
-sha2 = "0.10"
 gremlins-landscape = { path = "../gremlins-landscape" }
 
 [dev-dependencies]

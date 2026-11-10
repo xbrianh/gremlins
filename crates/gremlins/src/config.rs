@@ -1377,26 +1377,6 @@ pub(crate) fn stage_definition_dirs() -> Vec<PathBuf> {
     vec![overlay.join("stages")]
 }
 
-/// Path to the project-level persistent scratchpad file that survives chat
-/// sessions. Lives at `{state_root()}/scratchpads/{hash}.md` where hash is a
-/// SHA-256 digest of the canonical project root path, avoiding path
-/// leakage and collisions.
-pub(crate) fn project_scratchpad_path(project_root: &Path) -> PathBuf {
-    use sha2::Digest;
-    // Normalize deterministically: canonicalize to resolve symlinks and
-    // `..` so the same project always hashes to the same key, falling back
-    // to absolute (which resolves `..` but not symlinks) on failure.
-    let normalized = project_root
-        .canonicalize()
-        .or_else(|_| std::path::absolute(project_root))
-        .unwrap_or_else(|_| project_root.to_path_buf());
-    let key = normalized.to_string_lossy();
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(key.as_bytes());
-    let hash = format!("{:x}", hasher.finalize());
-    state_root().join("scratchpads").join(format!("{hash}.md"))
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

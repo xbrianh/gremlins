@@ -181,12 +181,6 @@ impl StageSpec {
                 out.push(format!("artifact://{resolved_key}"));
             }
         }
-        // Every agent stage also produces a synthetic scratchpad artifact
-        // so that rewind bookkeeping can clean up memory from discarded
-        // stages.
-        if matches!(self, StageSpec::Agent { .. }) {
-            out.push(format!("artifact://_scratchpad/{name}.md"));
-        }
     }
 
     /// The stage's children — empty for leaves.

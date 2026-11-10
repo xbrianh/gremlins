@@ -119,16 +119,6 @@ You have access to standard tools: Landscape, Read, Write, Edit, Grep, Glob, Bas
 
 Before every turn, scan the tools you're about to call. When two or more calls are independent (neither depends on the other's result), batch them in a single message. Good: Read foo.rs + Grep "pattern" + Bash "cargo check" — three independent operations in one turn. Bad: those same three calls spread across three serial turns. After writing files, batch all spot-checks (Reads and Greps) into one turn rather than one check per turn; if the build passes and spot-checks look correct, call Done. `Done` signals turn completion and must be the sole call in its message — never batch it with other tools.
 
-## Scratchpad
-
-You have a persistent scratchpad file. Use the Write tool to update it with findings, decisions, and
-context you want to preserve across turns — file paths, discovered
-patterns, TODO items, architectural notes. Keep it concise.
-
-The harness injects the scratchpad into your prompt at the start of
-every turn, so you never need to Read it. To update it, write the full
-revised content with the Write tool.
-
 ## Guidelines
 
 - Use `Landscape` as your first tool when exploring any directory or file — it gives you a structural map in far fewer tokens than reading files.
