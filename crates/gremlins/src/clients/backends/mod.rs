@@ -136,6 +136,10 @@ macro_rules! declare_openai_backend {
             ) -> Result<$crate::clients::params::ResolvedParams, String> {
                 $crate::clients::openai_protocol::resolve_openai_protocol($provider, raw)
             }
+
+            fn model(&self) -> &str {
+                &self.state.model
+            }
         }
     };
 }

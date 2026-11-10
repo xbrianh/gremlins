@@ -291,18 +291,21 @@ impl Backend for AnthropicBackend {
         true
     }
 
+    fn model(&self) -> &str {
+        &self.state.model
+    }
+
     async fn compact(
         &self,
         messages: &[rig_core::completion::Message],
         system_prompt: Option<&str>,
         instructions: Option<&str>,
-        model: &str,
     ) -> Result<Option<CompactionResult>, ClientError> {
         use http::{Request, StatusCode};
         use rig_core::http_client::HttpClientExt;
 
         let mut body = serde_json::Map::new();
-        body.insert("model".into(), model.into());
+        body.insert("model".into(), self.model().into());
         body.insert("max_tokens".into(), 4096.into());
         body.insert("messages".into(), serde_json::to_value(messages).map_err(|e| {
             ClientError::Runtime {

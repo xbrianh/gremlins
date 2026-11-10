@@ -128,11 +128,12 @@ pub trait Backend: Send + Sync {
         interactive: Option<InteractiveSession>,
     ) -> Result<CompletedRun, ClientError>;
 
-    /// Build a [`GremlinsModel`] from a `provider/model` spec, or `None` when
-    /// the spec names a different provider or the model cannot be built.
-    fn model_for(&self, _model: &str, _resolved: Option<&ResolvedParams>) -> Option<GremlinsModel> {
-        None
-    }
+    /// The model this backend instance was built for.
+    ///
+    /// The [`CmdBackend`](super::backends::cmd::CmdBackend) returns the
+    /// empty string — it has no single model; the command *is* the model
+    /// and varies per run.
+    fn model(&self) -> &str;
 
     fn name(&self) -> &'static str {
         "unknown"
@@ -195,7 +196,6 @@ pub trait Backend: Send + Sync {
         _messages: &[rig_core::completion::Message],
         _system_prompt: Option<&str>,
         _instructions: Option<&str>,
-        _model: &str,
     ) -> Result<Option<CompactionResult>, ClientError> {
         Ok(None)
     }

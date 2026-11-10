@@ -253,6 +253,10 @@ impl Backend for AzureOpenAiBackend {
 
     super::delegate_native_run_state!(state);
 
+    fn model(&self) -> &str {
+        &self.state.model
+    }
+
     fn make_model(&self, spec: &str) -> Option<GremlinsModel> {
         let (provider, model) = openai_protocol::provider_and_model(spec)?;
         if provider == "azure-openai" {

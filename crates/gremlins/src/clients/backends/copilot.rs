@@ -640,6 +640,10 @@ impl Backend for CopilotBackend {
 
     super::delegate_native_run_state!(state.native);
 
+    fn model(&self) -> &str {
+        &self.state.native.model
+    }
+
     fn resolve_params(raw: &indexmap::IndexMap<String, String>) -> Result<ResolvedParams, String> {
         // Validate the typed flags strictly (so a malformed value errors at
         // build time), then resolve temperature/max_tokens and passthrough.

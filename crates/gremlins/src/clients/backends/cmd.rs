@@ -626,6 +626,14 @@ impl Backend for CmdBackend {
         }
     }
 
+    /// Returns the empty string — the [`CmdBackend`] has no single model;
+    /// the shell command itself varies per run. See also
+    /// [`make_model`](Backend::make_model), which returns `None` for every
+    /// spec, ensuring local compaction never reaches this backend.
+    fn model(&self) -> &str {
+        ""
+    }
+
     fn make_model(&self, _spec: &str) -> Option<GremlinsModel> {
         None
     }

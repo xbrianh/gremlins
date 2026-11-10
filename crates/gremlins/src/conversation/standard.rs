@@ -115,14 +115,9 @@ impl StandardConversation {
     /// Run compaction on the current history. Called by the `/compact` TUI
     /// command handler.
     ///
-    /// `model` is the model name (e.g. `"claude-sonnet-4-20250514"`) used for
-    /// server-side compaction. The qualified form `"{provider}/{model}"` is
-    /// derived from the backend name for local `make_model`.
-    ///
     /// Returns `None` when there is nothing to compact or every path fails.
     pub(crate) async fn compact(
         &mut self,
-        model: &str,
         system_prompt: Option<&str>,
         instructions: Option<&str>,
     ) -> Option<CompactionReport> {
@@ -143,7 +138,7 @@ impl StandardConversation {
         // ── Server-side compaction ──
         if backend.supports_compaction() {
             match backend
-                .compact(&to_compact, system_prompt, instructions, model)
+                .compact(&to_compact, system_prompt, instructions)
                 .await
             {
                 Ok(Some(r)) if r.block.is_some() => {
@@ -171,7 +166,7 @@ impl StandardConversation {
         }
 
         // ── Local compaction ──
-        let qualified = format!("{}/{}", backend.name(), model);
+        let qualified = format!("{}/{}", backend.name(), backend.model());
         if let Some(local) = backend.make_model(&qualified) {
             match crate::conversation::compaction::compact_local_with_retry(
                 &local,
