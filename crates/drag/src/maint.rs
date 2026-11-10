@@ -22,7 +22,9 @@ use gremlins::executor::gremlin::{Gremlin, GremlinConfig};
 use gremlins::model_uri::ModelURI;
 
 use crate::config::MaintainabilityConfig;
-use crate::util::{extract_json, mean_with_ci, truncate, CacheState, CompAgentError, MAX_CONCURRENT_SCORING_RUNS};
+use crate::util::{
+    extract_json, mean_with_ci, truncate, CacheState, CompAgentError, MAX_CONCURRENT_SCORING_RUNS,
+};
 
 // ---------------------------------------------------------------------------
 // Data types

@@ -6,7 +6,9 @@ mod util;
 
 use config::{ComprehensibilityConfig, ComprehensibilityDimensionDef, DragConfig, OutputFormat};
 use scoring::{build_drag_tree, compute_drag, compute_footprint, DragNode};
-use util::{extract_json, mean_with_ci, truncate, CacheState, CompAgentError, MAX_CONCURRENT_SCORING_RUNS};
+use util::{
+    extract_json, mean_with_ci, truncate, CacheState, CompAgentError, MAX_CONCURRENT_SCORING_RUNS,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
