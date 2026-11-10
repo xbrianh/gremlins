@@ -491,6 +491,46 @@ fn apply_edits(
         }
 
         if match_positions.is_empty() {
+            // \n unescape retry: the LLM may have seen literal \n in Read
+            // output and interpreted it as a JSON escape, producing a real
+            // newline byte in old_string. Convert those newlines back to
+            // the literal two-byte sequence `\n` and retry.
+            let unescaped_old = old_str.replace('\n', "\\n");
+            if unescaped_old != *old_str {
+                let mut search_from = 0;
+                let advance_by = unescaped_old
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(1);
+                while let Some(pos) = search_window[search_from..].find(&unescaped_old) {
+                    let abs_pos = search_from + pos + window_offset;
+                    match_positions.push(abs_pos);
+                    search_from += pos + advance_by;
+                }
+
+                if !match_positions.is_empty() {
+                    if match_positions.len() > 1 {
+                        return Err(format!(
+                            "Error: old_string is not unique in {file_path} (edit {}) — {} matches found after newline unescaping. Try scoping with start_line/end_line.",
+                            i + 1,
+                            match_positions.len()
+                        ));
+                    }
+                    let start = match_positions[0];
+                    let old_len = unescaped_old.len();
+                    buffer.replace_range(start..start + old_len, &edit.new_str);
+                    applied.push(AppliedEdit {
+                        start,
+                        old_len,
+                        new_len: edit.new_str.len(),
+                    });
+                    continue;
+                }
+            }
+        }
+
+        if match_positions.is_empty() {
             // Fuzzy fallback: normalize Unicode confusables and retry.
             // Always attempt when exact match fails — both the query may
             // contain confusables and the buffer may contain confusables.
@@ -1223,6 +1263,42 @@ mod tests {
         }];
         let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
         assert_eq!(out, "foo baz");
+    }
+
+    #[test]
+    fn apply_match_unescapes_json_newline_in_old_string() {
+        // Read shows raw file bytes, so a JSON5 string like
+        // `'Line one\nLine two'` is displayed with a literal backslash-n.
+        // A JSON parser turns the LLM's `\n` into a real newline byte,
+        // which would not match the file. The unescape retry must convert
+        // real newlines back to the literal two-byte sequence before matching.
+        let content = "'Line one\\nLine two'\n";
+        let edits = vec![EditOp {
+            old_str: "'Line one\nLine two'".into(),
+            new_str: "'Replaced'".into(),
+            scope_start: None,
+            scope_end: None,
+        }];
+        let (out, _) = apply_edits(content, &edits, "f.txt").unwrap();
+        assert_eq!(out, "'Replaced'\n");
+    }
+
+    #[test]
+    fn apply_match_unescape_retry_still_reports_not_unique() {
+        // The unescape retry must preserve the uniqueness check so a
+        // converted needle matching two literal `\n` strings fails loudly.
+        let content = "'a\\nb'\n'a\\nb'\n";
+        let edits = vec![EditOp {
+            old_str: "'a\nb'".into(),
+            new_str: "'x'".into(),
+            scope_start: None,
+            scope_end: None,
+        }];
+        let err = apply_edits(content, &edits, "f.txt").unwrap_err();
+        assert!(
+            err.contains("not unique") && err.contains("after newline unescaping"),
+            "got: {err}"
+        );
     }
 
     #[test]
