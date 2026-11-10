@@ -1546,6 +1546,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                             // Enter. Reset history navigation so the
                                             // fresh text isn't treated as a history
                                             // position.
+                                            // Editor round-trip resets path
+                                            // substitutions: the editor edits the
+                                            // display form, so completed paths
+                                            // revert to their as-typed form.
                                             app.input.replace_all(&text);
                                             app.reset_cursor_to_end();
                                             app.clear_completion();
@@ -1672,28 +1676,26 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
 
-                            if let Some(state) = app.completion.as_ref() {
-                                let span = state.span.clone();
+                            let active = app.completion.as_ref().map(|state| {
+                                (state.span.clone(), state.contains_current(app.input.text()))
+                            });
+                            if let Some((span, advance)) = active {
                                 // The initial Tab only inserted the common
                                 // prefix, so it must not cycle yet. On
                                 // subsequent presses, advance to the next
                                 // candidate before committing so the input
                                 // always matches the state's current index.
-                                if state.contains_current(app.input.text()) {
+                                if advance {
                                     app.completion_advance();
                                 }
-                                let next_absolute = app
-                                    .completion
-                                    .as_ref()
-                                    .expect("completion is active")
-                                    .current_absolute()
-                                    .to_string();
-                                let next = app
-                                    .completion
-                                    .as_ref()
-                                    .expect("completion is active")
-                                    .current()
-                                    .to_string();
+                                let (next_absolute, next) = {
+                                    let state =
+                                        app.completion.as_ref().expect("completion is active");
+                                    (
+                                        state.current_absolute().to_string(),
+                                        state.current().to_string(),
+                                    )
+                                };
                                 app.replace_input_span(span.clone(), next.clone());
                                 let new_span = span.start..span.start + next.len();
                                 app.update_completion_span(new_span.clone());
@@ -1712,10 +1714,16 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     app.input.add_substitution(new_span, absolute);
                                 } else {
                                     let prefix = completion::common_prefix(&state.candidates);
+                                    let absolute_prefix =
+                                        completion::common_prefix(&state.absolutes);
+                                    let new_span = span.start..span.start + prefix.len();
                                     state.index = 0;
-                                    state.span = span.start..span.start + prefix.len();
+                                    state.span = new_span.clone();
                                     app.set_completion(state);
                                     app.replace_input_span(span, prefix);
+                                    if !new_span.is_empty() {
+                                        app.input.add_substitution(new_span, absolute_prefix);
+                                    }
                                 }
                             }
                             live_area.ensure_input_cursor_visible(
@@ -1728,26 +1736,19 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             if app.history_search.is_some() || app.screen.has_prompt() || !app.screen.is_chat() {
                                 continue;
                             }
-                            let Some(state) = app.completion.as_ref() else {
+                            let Some(span) =
+                                app.completion.as_ref().map(|state| state.span.clone())
+                            else {
                                 continue;
                             };
-                            let span = state.span.clone();
                             // Rewind first, then commit the previous candidate
                             // so the input always matches the state's current
                             // index.
                             app.completion_rewind();
-                            let candidate = app
-                                .completion
-                                .as_ref()
-                                .expect("completion is active")
-                                .current()
-                                .to_string();
-                            let absolute = app
-                                .completion
-                                .as_ref()
-                                .expect("completion is active")
-                                .current_absolute()
-                                .to_string();
+                            let (candidate, absolute) = {
+                                let state = app.completion.as_ref().expect("completion is active");
+                                (state.current().to_string(), state.current_absolute().to_string())
+                            };
                             app.replace_input_span(span.clone(), candidate.clone());
                             let new_span = span.start..span.start + candidate.len();
                             app.update_completion_span(new_span.clone());
@@ -2029,7 +2030,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
                             app.cursor_left();
-                            app.clear_completion();
+                            app.dismiss_completion();
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
                                 app.input.text(),
@@ -2041,7 +2042,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
                             app.cursor_right();
-                            app.clear_completion();
+                            app.dismiss_completion();
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
                                 app.input.text(),
@@ -2053,7 +2054,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
                             app.cursor_home();
-                            app.clear_completion();
+                            app.dismiss_completion();
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
                                 app.input.text(),
@@ -2065,7 +2066,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
                             app.cursor_end();
-                            app.clear_completion();
+                            app.dismiss_completion();
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
                                 app.input.text(),
@@ -2084,7 +2085,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 prompt.pop();
                             } else if app.screen.is_chat() {
                                 app.delete_before_cursor();
-                                app.clear_completion();
+                                app.dismiss_completion();
                                 live_area.ensure_input_cursor_visible(
                                     app.input_cursor,
                                     app.input.text(),
@@ -2101,7 +2102,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
                             app.delete_at_cursor();
-                            app.clear_completion();
+                            app.dismiss_completion();
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
                                 app.input.text(),
@@ -2132,7 +2133,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 prompt.push(ch);
                             } else if app.screen.is_chat() {
                                 app.insert_char(ch);
-                                app.clear_completion();
+                                app.dismiss_completion();
                                 // Typing a fresh character resets history navigation.
                                 app.history_cursor = None;
                                 live_area.ensure_input_cursor_visible(
@@ -2152,7 +2153,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 if let Some(entry) = app.history_up().map(|s| s.to_string()) {
                                     app.input.replace_all(&entry);
                                     app.reset_cursor_to_end();
-                                    app.clear_completion();
+                                    app.dismiss_completion();
                                     live_area.ensure_input_cursor_visible(
                                         app.input_cursor,
                                         app.input.text(),
@@ -2171,7 +2172,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 let entry = app.history_down().unwrap_or("").to_string();
                                 app.input.replace_all(&entry);
                                 app.reset_cursor_to_end();
-                                app.clear_completion();
+                                app.dismiss_completion();
                                 live_area.ensure_input_cursor_visible(
                                     app.input_cursor,
                                     app.input.text(),

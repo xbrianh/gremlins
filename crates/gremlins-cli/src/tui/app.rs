@@ -547,7 +547,20 @@ impl App {
         }
     }
 
+    /// Drop the active completion preview while preserving path
+    /// substitutions.
+    ///
+    /// Used by ordinary edit/cursor keys. The editing operations in
+    /// [`InputBuffer`] already invalidate any substitution they cross, so
+    /// dismissing the preview must not wipe unrelated resolved paths.
+    pub fn dismiss_completion(&mut self) {
+        self.completion = None;
+    }
+
     /// Drop any active completion state and all path substitutions.
+    ///
+    /// Used on input-bar resets (hard cancel, Esc, `/clear`, search entry,
+    /// submission) where the buffer is being replaced wholesale.
     pub fn clear_completion(&mut self) {
         self.completion = None;
         self.input.clear_substitutions();
@@ -651,15 +664,14 @@ impl App {
 
     /// Replace the completion span with `replacement` and move the cursor to
     /// the end of the replacement. The span must lie on `char` boundaries.
-    /// Any existing substitution overlapping the span is cleared, since the
-    /// replacement breaks the old display→absolute mapping.
+    ///
+    /// [`InputBuffer::replace_range`] drops any substitution overlapping the
+    /// span and shifts later substitutions, so the caller only has to record
+    /// the fresh substitution for `replacement` afterwards.
     pub fn replace_input_span(&mut self, span: std::ops::Range<usize>, replacement: String) {
         debug_assert!(self.input.is_char_boundary(span.start));
         debug_assert!(self.input.is_char_boundary(span.end));
-        let end = span.end.min(self.input.len());
-        // Clear any stale substitution that overlaps the span being replaced.
-        self.input.clear_substitutions_in(span.start..end);
-        self.input.replace_range(span.start..end, &replacement);
+        self.input.replace_range(span.clone(), &replacement);
         self.input_cursor = span.start + replacement.len();
     }
 

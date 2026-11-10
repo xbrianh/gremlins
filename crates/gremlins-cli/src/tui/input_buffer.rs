@@ -115,16 +115,23 @@ impl InputBuffer {
         self.text.drain(start..end);
     }
 
-    /// Replace the byte range `range` with `replacement`. Unlike
-    /// [`insert_char`] and [`delete_range`], this does *not* invalidate
-    /// substitutions — it is used for completion-driven replacements where
-    /// the caller will immediately record a fresh substitution via
-    /// [`add_substitution`].
+    /// Replace the byte range `range` with `replacement`.
+    ///
+    /// Substitutions whose interior overlaps the replaced region are dropped
+    /// (the replacement rewrites those bytes, so their display→absolute
+    /// mapping is no longer valid). Substitutions that start at or after the
+    /// replaced region are shifted by the length delta. Completion callers
+    /// immediately record a fresh substitution via [`add_substitution`]
+    /// afterwards.
     pub fn replace_range(&mut self, range: Range<usize>, replacement: &str) {
         let end = range.end.min(self.text.len());
         let start = range.start.min(end);
         let old_len = end - start;
         let new_len = replacement.len();
+
+        // Drop substitutions whose interior overlaps the replaced region.
+        self.substitutions
+            .retain(|(s, _)| end <= s.start || start >= s.end);
 
         // Shift substitutions that start at or after the replaced region.
         for (s, _) in &mut self.substitutions {
@@ -162,17 +169,13 @@ impl InputBuffer {
         self.substitutions.insert(pos, (span, absolute));
     }
 
-    /// Remove all substitutions (e.g. when the operator types a character).
+    /// Remove all substitutions.
+    ///
+    /// Used when the input bar is being reset wholesale. Ordinary edits
+    /// preserve non-overlapping substitutions; see [`insert_char`] and
+    /// [`delete_range`].
     pub fn clear_substitutions(&mut self) {
         self.substitutions.clear();
-    }
-
-    /// Remove substitutions that overlap the given span.
-    /// Used by [`super::app::App::replace_input_span`] to clear stale
-    /// substitutions before a new completion candidate replaces the span.
-    pub fn clear_substitutions_in(&mut self, span: Range<usize>) {
-        self.substitutions
-            .retain(|(s, _)| s.end <= span.start || s.start >= span.end);
     }
 
     // ── Resolution (called once, on Enter) ──
@@ -180,17 +183,16 @@ impl InputBuffer {
     /// Produce the text to send to the model.
     ///
     /// Substitutions are applied from right to left so earlier spans stay
-    /// valid during replacement. Spans whose absolute path no longer
-    /// corresponds to a valid substitution are left as-is (stale guard).
+    /// valid during replacement. Spans that are out of bounds or no longer
+    /// sit on `char` boundaries are skipped (stale guard).
     pub fn resolve(self) -> String {
         let mut result = self.text;
         // Apply substitutions from right to left.
         for (span, absolute) in self.substitutions.iter().rev() {
-            let start = span.start.min(result.len());
-            let end = span.end.min(result.len());
-            if start <= end && result.is_char_boundary(start) && result.is_char_boundary(end) {
-                result.replace_range(start..end, absolute);
+            if result.get(span.clone()).is_none() {
+                continue;
             }
+            result.replace_range(span.clone(), absolute);
         }
         result
     }
@@ -274,18 +276,25 @@ mod tests {
     }
 
     #[test]
-    fn replace_range_does_not_invalidate() {
+    fn replace_range_invalidates_overlapping_substitution() {
         let mut buf = InputBuffer::new();
         buf.text = "hello world".to_string();
         buf.substitutions = vec![(6..11, "/abs/path".to_string())];
 
         buf.replace_range(6..11, "there");
         assert_eq!(buf.text(), "hello there");
-        // Substitution still exists but is now stale — caller must
-        // add_substitution to replace it.
-        assert_eq!(buf.substitutions.len(), 1);
-        // The old substitution shifted with the text.
-        assert_eq!(buf.substitutions[0].0, 6..11);
+        assert!(buf.substitutions.is_empty());
+    }
+
+    #[test]
+    fn replace_range_shifts_later_substitutions() {
+        let mut buf = InputBuffer::new();
+        buf.text = "hello brave world".to_string();
+        buf.substitutions = vec![(12..17, "/abs/path".to_string())];
+
+        buf.replace_range(6..12, "");
+        assert_eq!(buf.text(), "hello world");
+        assert_eq!(buf.substitutions, vec![(6..11, "/abs/path".to_string())]);
     }
 
     #[test]
@@ -329,11 +338,46 @@ mod tests {
         let mut buf = InputBuffer::new();
         buf.text = "short".to_string();
 
-        // Stale span extends past the text.
+        // Stale span extends past the text; it must be skipped, not clipped.
         buf.add_substitution(0..20, "/very/long/path".to_string());
 
         let resolved = buf.resolve();
-        assert_eq!(resolved, "/very/long/path");
+        assert_eq!(resolved, "short");
+    }
+
+    #[test]
+    fn resolve_skips_span_entirely_past_text() {
+        let mut buf = InputBuffer::new();
+        buf.text = "abc".to_string();
+        buf.add_substitution(5..8, "/very/long/path".to_string());
+
+        assert_eq!(buf.resolve(), "abc");
+    }
+
+    #[test]
+    fn resolve_applies_multiple_substitutions() {
+        let mut buf = InputBuffer::new();
+        buf.text = "read crates/gr and src/ma".to_string();
+        buf.add_substitution(5..14, "/abs/crates/gr".to_string());
+        buf.add_substitution(19..25, "/abs/src/ma".to_string());
+
+        assert_eq!(buf.resolve(), "read /abs/crates/gr and /abs/src/ma");
+    }
+
+    #[test]
+    fn edit_between_substitutions_preserves_both() {
+        let mut buf = InputBuffer::new();
+        buf.text = "a b".to_string();
+        buf.add_substitution(0..1, "/A".to_string());
+        buf.add_substitution(2..3, "/B".to_string());
+
+        buf.insert_char(1, '>');
+        assert_eq!(buf.text(), "a> b");
+        assert_eq!(
+            buf.substitutions,
+            vec![(0..1, "/A".to_string()), (3..4, "/B".to_string())]
+        );
+        assert_eq!(buf.resolve(), "/A> /B");
     }
 
     #[test]
