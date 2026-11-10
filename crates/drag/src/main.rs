@@ -1072,10 +1072,7 @@ async fn score_comprehensibility(
                                     "  [{module}] WARNING: failed to append cache entry: {e}"
                                 );
                             }
-                            return Ok(CompEstimate {
-                                module,
-                                dim_scores,
-                            });
+                            return Ok(CompEstimate { module, dim_scores });
                         }
                         Err(e) => {
                             // Drop the permit before sleeping.
