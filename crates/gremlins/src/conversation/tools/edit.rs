@@ -203,7 +203,13 @@ fn edit_not_found_diagnostic(
         None => (0, content.len()),
     };
 
-    let hint = if let Some(rel) = content[window_start..window_end].find(needle) {
+    // When a scope is set and the scope-window search finds nothing, fall
+    // back to a full-file search before giving up. If the needle exists
+    // elsewhere in the file the scope is stale (prior edits shifted line
+    // numbers); if it's nowhere, the content is genuinely wrong.
+    let scope_is_proper_subset =
+        scope_start.is_some() && (window_start > 0 || window_end < content.len());
+    let scoped_hint = if let Some(rel) = content[window_start..window_end].find(needle) {
         let pos = window_start + rel;
         let line_no = content[..pos].lines().count() + 1;
         let context_start = content[..pos].rfind('\n').map_or(0, |n| n + 1);
@@ -219,7 +225,27 @@ fn edit_not_found_diagnostic(
         // stepping back across the scope boundary.
         let content_start = pos.saturating_sub(leading_ws).max(window_start);
         let divergence = divergence_report(content, content_start, window_end, old_str);
-        format!(" — did you mean to match near line {line_no}? Found:\n{context}\n{divergence}")
+        Some(format!(" — did you mean to match near line {line_no}? Found:\n{context}\n{divergence}"))
+    } else {
+        None
+    };
+
+    // Full-file fallback: only when a scope was set and the scoped search
+    // came up empty. If the needle exists anywhere in the full file, the
+    // scope is stale rather than the content being wrong.
+    let hint = if let Some(scoped) = scoped_hint {
+        scoped
+    } else if scope_is_proper_subset {
+        if let Some(rel) = content.find(needle) {
+            let line_no = content[..rel].lines().count() + 1;
+            format!(
+                " — exists at line {line_no} (outside the requested scope; \
+                 prior edits may have shifted line numbers — try without \
+                 start_line/end_line or re-read the file)"
+            )
+        } else {
+            String::new()
+        }
     } else {
         String::new()
     };
@@ -412,6 +438,21 @@ fn apply_edits(
         }
 
         if match_positions.is_empty() {
+            // When a batched edit (not the first) fails to find its
+            // old_string in the accumulated buffer, check whether it
+            // exists in the *original* file content. If so, the problem
+            // is a batch-order issue: prior edits modified the region
+            // and this edit should run first or in a separate call.
+            if i > 0 && content.contains(old_str) {
+                return Err(format!(
+                    "Error: old_string not found in file after prior edits modified \
+                     lines surrounding the target (edit {}). The old_string \
+                     matches the original file content — try splitting this \
+                     into a separate Edit call, or reorder edits so this one \
+                     runs first.",
+                    i + 1
+                ));
+            }
             return Err(edit_not_found_diagnostic(
                 &buffer,
                 file_path,
@@ -553,7 +594,13 @@ struct SuccessPiece {
 /// `SUCCESS_EXPANDED_EDIT_CAP` edits are expanded (the remainder are summarized
 /// by a trailing count), and every snippet is capped at
 /// `SUCCESS_WINDOW_LINE_CAP` lines.
-fn render_success(content: &str, ranges: &[(usize, usize)], file_path: &str) -> String {
+fn render_success(
+    content: &str,
+    ranges: &[(usize, usize)],
+    file_path: &str,
+    original_lines: usize,
+    final_lines: usize,
+) -> String {
     let offsets = compute_line_offsets(content);
     let last_line = offsets.len();
 
@@ -615,10 +662,15 @@ fn render_success(content: &str, ranges: &[(usize, usize)], file_path: &str) -> 
         }
     }
 
+    let delta = final_lines as isize - original_lines as isize;
+    let delta_sign = if delta >= 0 { "+" } else { "" };
     let mut out = format!(
-        "Applied {} edit{} to {file_path}.\n",
+        "Applied {} edit{} to {file_path}. ({} lines, {}{} vs original)\n",
         ranges.len(),
-        if ranges.len() == 1 { "" } else { "s" }
+        if ranges.len() == 1 { "" } else { "s" },
+        final_lines,
+        delta_sign,
+        delta
     );
 
     if expanded < windows.len() {
@@ -685,6 +737,7 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
         Ok(c) => c,
         Err(e) => return format!("Error: {e}"),
     };
+    let original_lines = content.lines().count();
 
     let edits = match parse_edits(edits_arr, file_path) {
         Ok(e) => e,
@@ -695,11 +748,12 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
         Ok(u) => u,
         Err(e) => return e,
     };
+    let final_lines = updated.lines().count();
 
     if let Err(e) = std::fs::write(&path, &updated) {
         return format!("Error: {e}");
     }
-    render_success(&updated, &ranges, file_path)
+    render_success(&updated, &ranges, file_path, original_lines, final_lines)
 }
 
 #[cfg(test)]
@@ -1300,9 +1354,9 @@ mod tests {
     #[test]
     fn render_success_includes_context_around_single_edit() {
         let content = "one\ntwo\nTHREE\nfour\nfive\n";
-        let report = render_success(content, &[(3, 3)], "f.txt");
+        let report = render_success(content, &[(3, 3)], "f.txt", 5, 5);
         assert!(
-            report.starts_with("Applied 1 edit to f.txt.\n"),
+            report.starts_with("Applied 1 edit to f.txt. (5 lines, +0 vs original)\n"),
             "got: {report}"
         );
         assert!(report.contains("  1: one"), "got: {report}");
@@ -1337,8 +1391,8 @@ mod tests {
     #[test]
     fn render_success_coalesces_adjacent_windows() {
         let content = "a\nB\nC\nd\n";
-        let report = render_success(content, &[(2, 2), (3, 3)], "f.txt");
-        assert!(report.starts_with("Applied 2 edits"), "got: {report}");
+        let report = render_success(content, &[(2, 2), (3, 3)], "f.txt", 4, 4);
+        assert!(report.starts_with("Applied 2 edits to f.txt. (4 lines, +0 vs original)\n"), "got: {report}");
         assert_eq!(report.matches("  2: B").count(), 1, "got: {report}");
         assert_eq!(report.matches("  3: C").count(), 1, "got: {report}");
         assert!(
@@ -1350,8 +1404,8 @@ mod tests {
     #[test]
     fn render_success_coalesces_out_of_order_windows() {
         let content = "one\ntwo\nthree\nfour\nfive\n";
-        let report = render_success(content, &[(5, 5), (1, 1)], "f.txt");
-        assert!(report.starts_with("Applied 2 edits"), "got: {report}");
+        let report = render_success(content, &[(5, 5), (1, 1)], "f.txt", 5, 5);
+        assert!(report.starts_with("Applied 2 edits to f.txt. (5 lines, +0 vs original)\n"), "got: {report}");
         assert_eq!(report.matches("  1: one").count(), 1, "got: {report}");
         assert_eq!(report.matches("  5: five").count(), 1, "got: {report}");
         assert!(!report.contains("--"), "got: {report}");
@@ -1360,7 +1414,7 @@ mod tests {
     #[test]
     fn render_success_preserves_trailing_empty_line() {
         let content = "one\ntwo\n";
-        let report = render_success(content, &[(2, 2)], "f.txt");
+        let report = render_success(content, &[(2, 2)], "f.txt", 2, 2);
         assert!(report.contains("  3: "), "got: {report}");
     }
 
@@ -1395,8 +1449,8 @@ mod tests {
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let report = render_success(&content, &[(1, 40)], "f.txt");
-        assert!(report.starts_with("Applied 1 edit"), "got: {report}");
+        let report = render_success(&content, &[(1, 40)], "f.txt", 40, 40);
+        assert!(report.starts_with("Applied 1 edit to f.txt. (40 lines, +0 vs original)\n"), "got: {report}");
         assert!(report.contains("  1: line1"), "got: {report}");
         assert!(report.contains("  6: line6"), "got: {report}");
         assert!(!report.contains("  7: line7"), "got: {report}");
@@ -1421,8 +1475,8 @@ mod tests {
             (60, 60),
             (70, 70),
         ];
-        let report = render_success(&content, &ranges, "f.txt");
-        assert!(report.starts_with("Applied 8 edits"), "got: {report}");
+        let report = render_success(&content, &ranges, "f.txt", 70, 70);
+        assert!(report.starts_with("Applied 8 edits to f.txt. (70 lines, +0 vs original)\n"), "got: {report}");
         assert!(
             report.contains("(2 more context blocks not shown)"),
             "got: {report}"
@@ -1445,7 +1499,7 @@ mod tests {
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let report = render_success(&content, &[(10, 10), (17, 17), (24, 24)], "f.txt");
+        let report = render_success(&content, &[(10, 10), (17, 17), (24, 24)], "f.txt", 30, 30);
         assert!(report.contains("  10: line10"), "got: {report}");
         assert!(report.contains("  17: line17"), "got: {report}");
         assert!(report.contains("  24: line24"), "got: {report}");
