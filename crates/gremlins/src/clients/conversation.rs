@@ -94,9 +94,9 @@ pub(crate) trait Conversation: Send + Sync {
     fn record_prose(&mut self, text: &str);
 
     /// Record the assistant turn (text, reasoning, tool calls) into history.
-    /// Commits the pending user prompt before the assistant message so the
-    /// transcript maintains the invariant that every assistant message is
-    /// preceded by a user message.
+    /// Implementations commit the pending user prompt before the assistant
+    /// message so the transcript maintains the invariant that every assistant
+    /// message is preceded by a user message.
     fn record_turn(
         &mut self,
         text: &str,
