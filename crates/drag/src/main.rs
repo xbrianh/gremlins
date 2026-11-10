@@ -1583,7 +1583,11 @@ fn print_node(node: &DragNode, depth: usize, has_comp: bool, has_maint: bool) {
                 let w = (55usize).saturating_sub(depth * 2);
                 let maint = maint_score.map(|s| {
                     if let (Some(lo), Some(hi)) = (maint_ci_lower, maint_ci_upper) {
-                        format!("{s:.2} ({lo:.2}–{hi:.2})")
+                        format!(
+                            "{s:.2} ({:.2}–{:.2})",
+                            lo.clamp(0.0, 1.0),
+                            hi.clamp(0.0, 1.0)
+                        )
                     } else {
                         format!("{s:.2}")
                     }

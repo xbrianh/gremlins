@@ -54,6 +54,37 @@ fn compute_maint_score_from_map(dims: &HashMap<&str, f64>) -> f64 {
     (sum / max).clamp(0.0, 1.0)
 }
 
+/// Compute the 95% CI on the aggregate maintainability score from
+/// per-estimate scores, using the same `compute_maint_score_from_map`
+/// formula so the CI is always centred on the point estimate.
+///
+/// Missing dimensions in an estimate default to the neutral 2.0.
+/// Returns (ci_lower, ci_upper), clamped to [0, 1].
+fn compute_maint_ci(
+    estimate_batch: &[DirMaintainability],
+    dim_means: &HashMap<&str, f64>,
+    maint_config: &MaintainabilityConfig,
+) -> (f64, f64) {
+    let mut per_estimate_scores: Vec<f64> = Vec::with_capacity(estimate_batch.len());
+    for est in estimate_batch {
+        let dims: HashMap<&str, f64> = maint_config
+            .dimensions
+            .iter()
+            .map(|dim| {
+                let val = est.get(&dim.key).copied().unwrap_or(2) as f64;
+                (dim.key.as_str(), val)
+            })
+            .collect();
+        per_estimate_scores.push(compute_maint_score_from_map(&dims));
+    }
+    let point = compute_maint_score_from_map(dim_means);
+    if per_estimate_scores.is_empty() {
+        return (point, point);
+    }
+    let (_, lo, hi) = mean_with_ci(&per_estimate_scores);
+    (lo.clamp(0.0, 1.0), hi.clamp(0.0, 1.0))
+}
+
 const MAX_MAINT_RETRIES: u32 = 3;
 const MAINT_BACKOFF: [f64; 2] = [1.0, 2.0];
 
@@ -315,24 +346,8 @@ pub(crate) async fn score_directory_maintainability(
         }
 
         let maint_score = compute_maint_score_from_map(&dim_means);
-
-        // Aggregate 95% CI from per-estimate total scores.
-        let n_dims = maint_config.dimensions.len() as f64;
-        let mut per_estimate_scores: Vec<f64> = Vec::with_capacity(estimate_batch.len());
-        for est in estimate_batch {
-            let sum: f64 = maint_config
-                .dimensions
-                .iter()
-                .filter_map(|dim| est.get(&dim.key).copied().map(|s| s as f64))
-                .sum();
-            let score = if n_dims > 0.0 {
-                (sum / (n_dims * 4.0)).clamp(0.0, 1.0)
-            } else {
-                0.5
-            };
-            per_estimate_scores.push(score);
-        }
-        let (_, maint_ci_lower, maint_ci_upper) = mean_with_ci(&per_estimate_scores);
+        let (maint_ci_lower, maint_ci_upper) =
+            compute_maint_ci(estimate_batch, &dim_means, maint_config);
 
         eprintln!(
             "  [{dir_name}] maint: {maint_score:.3} (95% CI: {maint_ci_lower:.3}–{maint_ci_upper:.3})"
@@ -770,6 +785,122 @@ mod tests {
         let score = compute_maint_score_from_map(&dims);
         // sum=5, max=8 → 0.625
         assert!((score - 0.625).abs() < 1e-10);
+    }
+
+    // ── compute_maint_ci ──
+
+    #[test]
+    fn maint_ci_all_estimates_identical() {
+        // When all estimates agree, CI is a point interval containing the score.
+        let cfg = make_config(&["naming", "cohesion"]);
+        let est0: DirMaintainability = [("naming", 3), ("cohesion", 2)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let est1: DirMaintainability = [("naming", 3), ("cohesion", 2)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let batch = vec![est0, est1];
+
+        let mut dim_means: HashMap<&str, f64> = HashMap::new();
+        dim_means.insert("naming", 3.0);
+        dim_means.insert("cohesion", 2.0);
+
+        let (lo, hi) = compute_maint_ci(&batch, &dim_means, &cfg);
+        // sum=5, max=8 → 0.625.  All estimates identical → CI degenerate.
+        let expected = 0.625;
+        assert!((lo - expected).abs() < 1e-10, "lo={lo} expected={expected}");
+        assert!((hi - expected).abs() < 1e-10, "hi={hi} expected={expected}");
+
+        // Point estimate must be inside the CI.
+        let point = compute_maint_score_from_map(&dim_means);
+        assert!(
+            lo <= point && point <= hi,
+            "CI [{lo}, {hi}] doesn't contain point {point}"
+        );
+    }
+
+    #[test]
+    fn maint_ci_missing_dimension_defaults_to_neutral() {
+        // An estimate that omits a dimension should use the neutral 2.0
+        // so the per-estimate score matches its row in dim_means.
+        let cfg = make_config(&["naming", "cohesion"]);
+        let est0: DirMaintainability = [("naming", 3), ("cohesion", 2)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        // est1 is missing "cohesion" — defaults to 2.
+        let est1: DirMaintainability = [("naming", 3)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let batch = vec![est0, est1];
+
+        // dim_means: naming=(3+3)/2=3, cohesion=(2+2)/2=2 (default 2 for est1).
+        let mut dim_means: HashMap<&str, f64> = HashMap::new();
+        dim_means.insert("naming", 3.0);
+        dim_means.insert("cohesion", 2.0);
+
+        let (lo, hi) = compute_maint_ci(&batch, &dim_means, &cfg);
+        let point = compute_maint_score_from_map(&dim_means);
+        assert!(
+            lo <= point && point <= hi,
+            "CI [{lo}, {hi}] doesn't contain point {point}"
+        );
+    }
+
+    #[test]
+    fn maint_ci_single_estimate() {
+        // Single estimate → degenerate CI (mean_with_ci returns (mean, mean, mean)).
+        let cfg = make_config(&["naming"]);
+        let est: DirMaintainability = [("naming", 3)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let batch = vec![est];
+        let mut dim_means: HashMap<&str, f64> = HashMap::new();
+        dim_means.insert("naming", 3.0);
+
+        let (lo, hi) = compute_maint_ci(&batch, &dim_means, &cfg);
+        assert!((lo - 0.75).abs() < 1e-10);
+        assert!((hi - 0.75).abs() < 1e-10);
+    }
+
+    #[test]
+    fn maint_ci_empty_estimate_batch() {
+        // Empty batch → CI equals the point estimate.
+        let cfg = make_config(&["naming"]);
+        let batch: Vec<DirMaintainability> = vec![];
+        let mut dim_means: HashMap<&str, f64> = HashMap::new();
+        dim_means.insert("naming", 3.0);
+
+        let (lo, hi) = compute_maint_ci(&batch, &dim_means, &cfg);
+        assert!((lo - 0.75).abs() < 1e-10);
+        assert!((hi - 0.75).abs() < 1e-10);
+    }
+
+    #[test]
+    fn maint_ci_bounds_clamped_to_0_1() {
+        // Wide variance should not push bounds outside [0, 1].
+        let cfg = make_config(&["naming"]);
+        let est0: DirMaintainability = [("naming", 0)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let est1: DirMaintainability = [("naming", 4)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let batch = vec![est0, est1];
+        let mut dim_means: HashMap<&str, f64> = HashMap::new();
+        dim_means.insert("naming", 2.0);
+
+        let (lo, hi) = compute_maint_ci(&batch, &dim_means, &cfg);
+        assert!(lo >= 0.0, "lower bound below 0: {lo}");
+        assert!(hi <= 1.0, "upper bound above 1: {hi}");
+        let point = compute_maint_score_from_map(&dim_means);
+        assert!(lo <= point && point <= hi);
     }
 
     // ── build_dir_manifest ──
