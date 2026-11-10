@@ -23,6 +23,7 @@ pub mod openai_protocol;
 pub mod params;
 pub(crate) mod plug;
 pub mod protocol;
+pub(crate) mod naked_conversation;
 pub(crate) mod shell_parse;
 pub(crate) mod stream_json;
 pub(crate) mod system_prompts;

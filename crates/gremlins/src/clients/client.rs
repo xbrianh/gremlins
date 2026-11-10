@@ -347,11 +347,12 @@ pub(crate) async fn run_naked(
     let mut params = RunParams::empty();
     params.model = Some(spec.to_string());
 
-    let conv: Box<dyn Conversation> = crate::conversation::new_prepopulated(
-        prompt,
-        task_model.preserve_reasoning.unwrap_or(false),
-        Some(messages),
-    );
+    let mut conv: Box<dyn Conversation> =
+        Box::new(super::naked_conversation::NakedConversation::with_history(
+            prompt,
+            messages,
+        ));
+    conv.set_preserve_reasoning(task_model.preserve_reasoning.unwrap_or(false));
 
     let ctx = RunContext {
         params,
