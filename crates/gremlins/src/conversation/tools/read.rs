@@ -43,11 +43,10 @@ impl ToolHandler for ReadTool {
     }
 
     fn output_cap(&self) -> bool {
-        true
-    }
-
-    fn output_marker(&self, cap: u64) -> String {
-        format!("\n[...truncated at {cap} bytes, use offset/limit to paginate...]")
+        // `read_sync` handles its own truncation so it can emit an
+        // offset-aware continuation hint (`Read with offset=N`). Returning
+        // `false` keeps `cap_output` from truncating with a generic marker.
+        false
     }
 
     async fn invoke(
@@ -108,5 +107,52 @@ fn read_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
         // offset + window index + 1 — never the window-relative index.
         numbered.push_str(&format!("{}|{line}", offset + idx + 1));
     }
-    numbered
+
+    // Apply the global output cap here (rather than via `cap_output`) so the
+    // truncation marker can carry an offset-aware continuation hint. When the
+    // numbered output exceeds the budget, keep a byte-safe prefix and append a
+    // marker telling the model the exact `offset` that resumes where this
+    // window was cut. `lines.len()` counts the window we just emitted, so
+    // `offset + lines.len()` is the 0-indexed line to read next.
+    let cap = crate::config::max_tool_output_bytes();
+    if cap == 0 || numbered.len() as u64 <= cap {
+        return numbered;
+    }
+    let next_offset = offset + lines.len();
+    let marker =
+        format!("\n[...truncated at {cap} bytes. Read with offset={next_offset} to continue...]");
+    let marker_len = marker.len() as u64;
+    let keep = cap.saturating_sub(marker_len) as usize;
+    if keep == 0 {
+        // Cap is smaller than the marker itself — emit a byte-safe slice of the
+        // marker so the whole result still fits the budget.
+        return truncate_to_bytes(&marker, cap as usize);
+    }
+    let mut trunc = String::with_capacity(cap as usize);
+    let mut used = 0usize;
+    for c in numbered.chars() {
+        let cl = c.len_utf8();
+        if used + cl > keep {
+            break;
+        }
+        trunc.push(c);
+        used += cl;
+    }
+    trunc.push_str(&marker);
+    trunc
+}
+
+/// Truncate `s` to at most `max_bytes`, never splitting a UTF-8 codepoint.
+fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
+    let mut out = String::with_capacity(max_bytes);
+    let mut used = 0usize;
+    for c in s.chars() {
+        let cl = c.len_utf8();
+        if used + cl > max_bytes {
+            break;
+        }
+        out.push(c);
+        used += cl;
+    }
+    out
 }

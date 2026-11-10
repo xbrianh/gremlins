@@ -46,14 +46,26 @@ type ToolFuture = Pin<Box<dyn std::future::Future<Output = ToolOutcome> + Send>>
 pub(crate) struct ToolOutcome {
     /// The prose output (text result) from the tool.
     pub output: String,
+    /// Structured process exit code, when the tool ran a process.
+    ///
+    /// Additive only: tools that do not run a process leave this `None`, and
+    /// Bash keeps the `[exit N]\n` text prefix for backward compatibility.
+    pub exit_code: Option<i32>,
 }
 
 impl ToolOutcome {
-    /// Build an outcome with prose output and no child conversation.
+    /// Build an outcome with prose output and no exit code.
     pub(crate) fn text(output: impl Into<String>) -> Self {
         Self {
             output: output.into(),
+            exit_code: None,
         }
+    }
+
+    /// Attach a structured exit code to this outcome.
+    pub(crate) fn with_exit_code(mut self, code: i32) -> Self {
+        self.exit_code = Some(code);
+        self
     }
 }
 
@@ -687,9 +699,7 @@ pub(crate) async fn invoke_with_conversation(
     // when allowed_tools is None (no filter) or explicitly lists them.
     let chat = ctx.skills_available;
     if !chat && (name == "Mischief" || name == "WebSearch") {
-        return ToolOutcome {
-            output: format!("Error: unknown tool {name}"),
-        };
+        return ToolOutcome::text(format!("Error: unknown tool {name}"));
     }
     if let Some(allowed) = &ctx.allowed_tools {
         // Pass through the gate only when the tool is always-available,
@@ -700,9 +710,7 @@ pub(crate) async fn invoke_with_conversation(
             && !chat_only_always_available(name, chat)
             && !allowed.iter().any(|n| n == name)
         {
-            return ToolOutcome {
-                output: format!("Error: unknown tool {name}"),
-            };
+            return ToolOutcome::text(format!("Error: unknown tool {name}"));
         }
     }
     let ka = audit_key_arg(args_json);
@@ -716,9 +724,7 @@ pub(crate) async fn invoke_with_conversation(
                 &ka,
                 "error",
             );
-            return ToolOutcome {
-                output: "Error: invalid arguments".into(),
-            };
+            return ToolOutcome::text("Error: invalid arguments");
         }
     };
     // Validate args against the tool's expected schema before dispatching.
@@ -732,7 +738,7 @@ pub(crate) async fn invoke_with_conversation(
             &ka,
             "error",
         );
-        return ToolOutcome { output: err };
+        return ToolOutcome::text(err);
     }
     if let Some(err) = check_tool(name, ctx, &args) {
         audit(
@@ -742,7 +748,7 @@ pub(crate) async fn invoke_with_conversation(
             &ka,
             "denied",
         );
-        return ToolOutcome { output: err };
+        return ToolOutcome::text(err);
     }
 
     // Dispatch through the registry. Every tool — including Task, Done, and
@@ -3778,11 +3784,7 @@ mod tests {
         let called2 = called.clone();
         let task_fn: TaskFn = Arc::new(move |kind, prompt, _history| {
             *called2.lock().unwrap() = true;
-            Box::pin(async move {
-                ToolOutcome {
-                    output: format!("task result: {kind} / {prompt}"),
-                }
-            })
+            Box::pin(async move { ToolOutcome::text(format!("task result: {kind} / {prompt}")) })
         });
         let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
@@ -3814,11 +3816,7 @@ mod tests {
     async fn task_empty_prompt_returns_error() {
         let dir = tmp();
         let task_fn: TaskFn = Arc::new(|_kind, _prompt, _history| {
-            Box::pin(async move {
-                ToolOutcome {
-                    output: "should not be called".to_string(),
-                }
-            })
+            Box::pin(async move { ToolOutcome::text("should not be called") })
         });
         let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
@@ -3857,11 +3855,7 @@ mod tests {
         let called2 = called.clone();
         let task_fn: TaskFn = Arc::new(move |_kind, _prompt, _history| {
             *called2.lock().unwrap() = true;
-            Box::pin(async move {
-                ToolOutcome {
-                    output: "should not be called".to_string(),
-                }
-            })
+            Box::pin(async move { ToolOutcome::text("should not be called") })
         });
         let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
@@ -3895,13 +3889,8 @@ mod tests {
     #[tokio::test]
     async fn task_result_is_headered_with_kind() {
         let dir = tmp();
-        let task_fn: TaskFn = Arc::new(|_k, _p, _history| {
-            Box::pin(async move {
-                ToolOutcome {
-                    output: "body".to_string(),
-                }
-            })
-        });
+        let task_fn: TaskFn =
+            Arc::new(|_k, _p, _history| Box::pin(async move { ToolOutcome::text("body") }));
         let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),
             extra_env: None,
@@ -4214,7 +4203,7 @@ mod tests {
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "200");
         let result = invoke("tool-test-id", "Read", &c, &args).await;
         assert!(
-            result.contains("[...truncated at 200 bytes, use offset/limit to paginate...]"),
+            result.contains("[...truncated at 200 bytes. Read with offset=1 to continue...]"),
             "oversized Read must carry a truncation marker, got: {result}"
         );
         assert!(
@@ -4289,7 +4278,7 @@ mod tests {
             result.len()
         );
         assert!(
-            result.contains("[...truncated at 100 bytes, use offset/limit to paginate...]"),
+            result.contains("[...truncated at 100 bytes. Read with offset=1 to continue...]"),
             "multibyte truncation must carry a marker, got: {result}"
         );
         // Should contain some multi-byte content before truncation.
@@ -4347,11 +4336,7 @@ mod tests {
         let _env = crate::test_support::EnvGuard::lock();
         let dir = tmp();
         let task_fn: TaskFn = Arc::new(|_k, _p, _history| {
-            Box::pin(async move {
-                ToolOutcome {
-                    output: "x".repeat(500),
-                }
-            })
+            Box::pin(async move { ToolOutcome::text("x".repeat(500)) })
         });
         let c = AgentLoopRuntime {
             cwd: Some(dir.clone()),

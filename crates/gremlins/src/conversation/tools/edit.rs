@@ -387,6 +387,46 @@ fn map_position_forward(applied: &[AppliedEdit], from_edit: usize, mut position:
     position
 }
 
+/// Normalize common Unicode confusables to ASCII equivalents for fuzzy matching.
+/// Only the match location is found via normalized text; the replacement still
+/// operates on the original bytes so no data is lost.
+fn normalize_for_fuzzy_match(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            // Smart quotes → straight quotes
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => out.push('"'),
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => out.push('\''),
+            // Unicode dashes → ASCII hyphen
+            '\u{2013}' | '\u{2014}' | '\u{2015}' => out.push('-'),
+            // Special spaces → regular space
+            '\u{00A0}' | '\u{2009}' | '\u{200A}' | '\u{202F}' => out.push(' '),
+            // Fullwidth Latin uppercase A-Z
+            c if ('\u{FF21}'..='\u{FF3A}').contains(&c) => {
+                let ascii = (c as u32 - 0xFF21 + 'A' as u32) as u8 as char;
+                out.push(ascii);
+            }
+            // Fullwidth Latin lowercase a-z
+            c if ('\u{FF41}'..='\u{FF5A}').contains(&c) => {
+                let ascii = (c as u32 - 0xFF41 + 'a' as u32) as u8 as char;
+                out.push(ascii);
+            }
+            // Fullwidth digits 0-9
+            c if ('\u{FF10}'..='\u{FF19}').contains(&c) => {
+                let ascii = (c as u32 - 0xFF10 + '0' as u32) as u8 as char;
+                out.push(ascii);
+            }
+            // Ellipsis → three dots
+            '\u{2026}' => out.push_str("..."),
+            // Bullet → asterisk
+            '\u{2022}' => out.push('*'),
+            // Keep everything else as-is
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn apply_edits(
     content: &str,
     edits: &[EditOp],
@@ -449,35 +489,67 @@ fn apply_edits(
         }
 
         if match_positions.is_empty() {
-            // When a batched edit (not the first) fails to find its
-            // old_string in the accumulated buffer, check whether it
-            // exists in the *original* file content. If so, the problem
-            // is a batch-order issue: prior edits modified the region
-            // and this edit should run first or in a separate call.
-            // Only fire the batch-order message when the old_string is
-            // genuinely absent from the accumulated buffer. If it still
-            // exists in the buffer (just outside a stale scope window),
-            // let edit_not_found_diagnostic produce the more precise
-            // scope-stale diagnostic from Change 2.
-            if i > 0 && !buffer.contains(old_str) && content.contains(old_str) {
-                return Err(format!(
-                    "Error: old_string not found in file after prior edits modified \
+            // Fuzzy fallback: normalize Unicode confusables and retry.
+            let normalized_old = normalize_for_fuzzy_match(old_str);
+            if normalized_old != *old_str {
+                let normalized_window = normalize_for_fuzzy_match(search_window);
+                if let Some(fuzzy_pos) = normalized_window.find(normalized_old.as_str()) {
+                    // Map the normalized position back to the original buffer.
+                    // Walk characters in parallel: advance `orig_pos` for each
+                    // char in the original until we've consumed `fuzzy_pos` chars
+                    // in the normalized view.
+                    let mut orig_pos = 0usize;
+                    let mut norm_consumed = 0usize;
+                    let orig_chars: Vec<char> = search_window.chars().collect();
+                    for &oc in &orig_chars {
+                        if norm_consumed >= fuzzy_pos {
+                            break;
+                        }
+                        let norm_char = normalize_for_fuzzy_match(&oc.to_string());
+                        norm_consumed += norm_char.chars().count();
+                        orig_pos += oc.len_utf8();
+                    }
+                    let abs_pos = orig_pos + window_offset;
+                    // Verify the original `old_str` at this position has the
+                    // same length — we already know the normalized forms match.
+                    let old_len = old_str.len();
+                    if abs_pos + old_len <= buffer.len() {
+                        match_positions.push(abs_pos);
+                    }
+                }
+            }
+
+            if match_positions.is_empty() {
+                // When a batched edit (not the first) fails to find its
+                // old_string in the accumulated buffer, check whether it
+                // exists in the *original* file content. If so, the problem
+                // is a batch-order issue: prior edits modified the region
+                // and this edit should run first or in a separate call.
+                // Only fire the batch-order message when the old_string is
+                // genuinely absent from the accumulated buffer. If it still
+                // exists in the buffer (just outside a stale scope window),
+                // let edit_not_found_diagnostic produce the more precise
+                // scope-stale diagnostic from Change 2.
+                if i > 0 && !buffer.contains(old_str) && content.contains(old_str) {
+                    return Err(format!(
+                        "Error: old_string not found in file after prior edits modified \
                      lines surrounding the target (edit {}). The old_string \
                      matches the original file content — try splitting this \
                      into a separate Edit call, reorder edits so this one \
                      runs first, or verify your edits don't target overlapping \
                      regions.",
-                    i + 1
+                        i + 1
+                    ));
+                }
+                return Err(edit_not_found_diagnostic(
+                    &buffer,
+                    file_path,
+                    old_str,
+                    i + 1,
+                    edit.scope_start,
+                    edit.scope_end,
                 ));
             }
-            return Err(edit_not_found_diagnostic(
-                &buffer,
-                file_path,
-                old_str,
-                i + 1,
-                edit.scope_start,
-                edit.scope_end,
-            ));
         }
 
         if match_positions.len() > 1 {
@@ -727,11 +799,127 @@ fn render_success(
     out
 }
 
+/// Silently repair three common JSON malformations before schema validation.
+/// This is a pre-validation pass — if repair fails, existing schema validation
+/// still catches it.
+fn repair_edit_args(args: serde_json::Value) -> serde_json::Value {
+    let mut args = args;
+
+    // Repair 1: `edits` is a JSON-encoded string → parse it
+    if let Some(edits_val) = args.get("edits") {
+        if let Some(s) = edits_val.as_str() {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
+                if let Some(obj) = args.as_object_mut() {
+                    obj.insert("edits".to_string(), parsed);
+                }
+            }
+        }
+    }
+
+    // Repair 2: `edits` is an object with `old_string` key (not an array) → wrap in array
+    if let Some(edits_val) = args.get("edits") {
+        if edits_val.is_object() && edits_val.get("old_string").is_some() {
+            if let Some(obj) = args.as_object_mut() {
+                let single = obj.remove("edits").unwrap();
+                obj.insert("edits".to_string(), serde_json::json!([single]));
+            }
+        }
+    }
+
+    // Repair 3: Top-level `old_string` + `new_string` keys exist without `edits` → merge
+    if !args.get("edits").is_some()
+        && args.get("old_string").is_some()
+        && args.get("new_string").is_some()
+    {
+        if let Some(obj) = args.as_object_mut() {
+            let old = obj.remove("old_string").unwrap();
+            let new = obj.remove("new_string").unwrap();
+            let mut edit_obj = serde_json::json!({
+                "old_string": old,
+                "new_string": new,
+            });
+            // Carry over optional scope keys
+            for key in &["start_line", "end_line"] {
+                if let Some(v) = obj.remove(*key) {
+                    edit_obj[key] = v;
+                }
+            }
+            obj.insert("edits".to_string(), serde_json::json!([edit_obj]));
+        }
+    }
+
+    args
+}
+
+/// Compute a simple line-based unified diff between `original` and `updated`.
+/// Walk forward for a common prefix, backward for a common suffix, and emit
+/// the changed lines between them.
+fn compute_diff(original: &str, updated: &str) -> String {
+    let orig_lines: Vec<&str> = original.lines().collect();
+    let upd_lines: Vec<&str> = updated.lines().collect();
+
+    // Common prefix
+    let prefix = orig_lines
+        .iter()
+        .zip(upd_lines.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    // Common suffix (from the end, but not overlapping prefix)
+    let suffix = orig_lines[prefix..]
+        .iter()
+        .rev()
+        .zip(upd_lines[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let orig_start = prefix;
+    let orig_end = orig_lines.len().saturating_sub(suffix);
+    let upd_start = prefix;
+    let upd_end = upd_lines.len().saturating_sub(suffix);
+
+    // If nothing changed, return empty
+    if orig_start >= orig_end && upd_start >= upd_end {
+        return String::new();
+    }
+
+    let mut diff = String::from("```diff\n");
+    for line in &orig_lines[orig_start..orig_end] {
+        diff.push_str(&format!("-{}\n", line));
+    }
+    for line in &upd_lines[upd_start..upd_end] {
+        diff.push_str(&format!("+{}\n", line));
+    }
+    diff.push_str("```\n");
+    diff
+}
+
+/// Detect the line ending style from the first 1KB of content.
+/// Returns `"\r\n"` if CRLF is found, `None` for LF (the default).
+fn detect_line_ending(content: &str) -> Option<&'static str> {
+    let scan = if content.len() > 1024 {
+        &content[..1024]
+    } else {
+        content
+    };
+    if scan.contains("\r\n") {
+        Some("\r\n")
+    } else {
+        None
+    }
+}
+
+/// Strip the UTF-8 BOM if present.
+fn strip_bom(content: &str) -> &str {
+    content.strip_prefix('\u{FEFF}').unwrap_or(content)
+}
+
 pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
     let args = match parse_args(args_json) {
         Ok(v) => v,
         Err(e) => return e,
     };
+    let args = repair_edit_args(args);
     let file_path = match req_str(&args, "file_path") {
         Ok(s) => s,
         Err(e) => return e,
@@ -754,6 +942,9 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
         Ok(c) => c,
         Err(e) => return format!("Error: {e}"),
     };
+    let had_bom = content.starts_with('\u{FEFF}');
+    let line_ending = detect_line_ending(&content);
+    let content = strip_bom(&content).to_string();
     let original_lines = content.lines().count();
 
     let edits = match parse_edits(edits_arr, file_path) {
@@ -761,16 +952,30 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
         Err(e) => return e,
     };
 
-    let (updated, ranges) = match apply_edits(&content, &edits, file_path) {
+    let (mut updated, ranges) = match apply_edits(&content, &edits, file_path) {
         Ok(u) => u,
         Err(e) => return e,
     };
+    // Restore line endings
+    if line_ending == Some("\r\n") {
+        updated = updated.replace('\n', "\r\n");
+    }
+    // Restore BOM
+    if had_bom {
+        updated.insert(0, '\u{FEFF}');
+    }
     let final_lines = updated.lines().count();
 
     if let Err(e) = std::fs::write(&path, &updated) {
         return format!("Error: {e}");
     }
-    render_success(&updated, &ranges, file_path, original_lines, final_lines)
+    let mut result = render_success(&updated, &ranges, file_path, original_lines, final_lines);
+    let diff = compute_diff(&content, &updated);
+    if !diff.is_empty() {
+        result.push('\n');
+        result.push_str(&diff);
+    }
+    result
 }
 
 #[cfg(test)]

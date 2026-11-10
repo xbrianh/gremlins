@@ -48,7 +48,20 @@ impl ToolHandler for BashTool {
         _conv: &dyn crate::clients::conversation::Conversation,
         args_json: &str,
     ) -> ToolOutcome {
-        ToolOutcome::text(bash_invoke(ctx, args_json, id).await)
+        let text = bash_invoke(ctx, args_json, id).await;
+        // `bash_invoke` reports the exit code only in the `[exit N]\n` text
+        // prefix, which stays for backward compatibility. Recover it
+        // structurally so consumers do not have to parse prose. `[timeout]`
+        // and `Error:` mean no process status was observed.
+        let exit_code = if let Some(rest) = text.strip_prefix("[exit ") {
+            rest.split_once(']')
+                .and_then(|(n, _)| n.parse::<i32>().ok())
+        } else if text.starts_with("[timeout]") || text.starts_with("Error:") {
+            None
+        } else {
+            Some(0)
+        };
+        ToolOutcome::text(text).with_exit_code(exit_code.unwrap_or(1))
     }
 }
 
