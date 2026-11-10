@@ -14,9 +14,12 @@ use std::path::{Path, PathBuf};
 /// filesystem again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionState {
-    /// All matching entries, returned as full path words (directory and file
-    /// entries alike).
+    /// All matching entries as display-relative path words (directory and file
+    /// entries alike), mirroring the prefix the user typed.
     pub candidates: Vec<String>,
+    /// Absolute path word for each entry, parallel to `candidates`:
+    /// `absolutes[i]` is the absolute path corresponding to `candidates[i]`.
+    pub absolutes: Vec<String>,
     /// Index of the currently selected candidate.
     pub index: usize,
     /// Byte range in the pre-completion input that the selected candidate
@@ -29,6 +32,11 @@ impl CompletionState {
     /// The candidate currently selected.
     pub fn current(&self) -> &str {
         &self.candidates[self.index]
+    }
+
+    /// The absolute path word for the currently selected candidate.
+    pub fn current_absolute(&self) -> &str {
+        &self.absolutes[self.index]
     }
 
     /// Advance to the next candidate, wrapping around at the end.
@@ -173,6 +181,29 @@ fn split_prefix(word: &str, expanded: PathBuf) -> Option<(PathBuf, String)> {
     Some((absolutize(dir)?, partial))
 }
 
+/// Build the display-relative path word for a directory entry.
+///
+/// The directory prefix is everything in `word` up to and including the last
+/// `/`, so the result mirrors what the user typed rather than exposing the
+/// absolute listing directory. Directory entries receive a trailing `/`.
+fn display_path_word(word: &str, name: &str, is_dir: bool) -> String {
+    // Bare `~` has no `/` for rfind but we must preserve `~/` so the
+    // display candidate mirrors what the operator typed.
+    let prefix = if word == "~" {
+        "~/"
+    } else {
+        match word.rfind('/') {
+            Some(i) => &word[..=i],
+            None => "",
+        }
+    };
+    let mut out = format!("{prefix}{name}");
+    if is_dir && !out.ends_with('/') {
+        out.push('/');
+    }
+    out
+}
+
 /// Build the full path word for a directory entry.
 fn entry_path_word(dir: &Path, name: &str, is_dir: bool) -> String {
     let mut out = dir.join(name).to_string_lossy().into_owned();
@@ -210,7 +241,7 @@ pub fn complete(input: &str, cursor: usize) -> Option<CompletionState> {
         Err(_) => return None,
     };
 
-    let mut candidates: Vec<String> = Vec::new();
+    let mut pairs: Vec<(String, String)> = Vec::new();
     for entry in entries {
         let Ok(entry) = entry else {
             continue;
@@ -225,18 +256,25 @@ pub fn complete(input: &str, cursor: usize) -> Option<CompletionState> {
         let is_dir = std::fs::metadata(entry.path())
             .map(|m| m.is_dir())
             .unwrap_or(false);
-        candidates.push(entry_path_word(&dir, &name, is_dir));
+        pairs.push((
+            display_path_word(word, &name, is_dir),
+            entry_path_word(&dir, &name, is_dir),
+        ));
     }
 
-    if candidates.is_empty() {
+    if pairs.is_empty() {
         return None;
     }
 
-    candidates.sort();
-    candidates.dedup();
+    // Sort and dedup by the display form (what Tab cycling previews), keeping
+    // the parallel absolute paths aligned with their display candidates.
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    pairs.dedup_by(|a, b| a.0 == b.0);
+    let (candidates, absolutes): (Vec<String>, Vec<String>) = pairs.into_iter().unzip();
 
     Some(CompletionState {
         candidates,
+        absolutes,
         index: 0,
         span: word_start(input, cursor)..cursor,
     })
@@ -326,12 +364,15 @@ mod tests {
     fn advance_and_rewind_wrap() {
         let mut state = CompletionState {
             candidates: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            absolutes: vec!["/a".to_string(), "/b".to_string(), "/c".to_string()],
             index: 2,
             span: 0..1,
         };
         assert_eq!(state.current(), "c");
+        assert_eq!(state.current_absolute(), "/c");
         state.advance();
         assert_eq!(state.current(), "a");
+        assert_eq!(state.current_absolute(), "/a");
         state.rewind();
         assert_eq!(state.current(), "c");
         state.rewind();
@@ -474,18 +515,22 @@ mod tests {
         std::fs::write(tmp.path().join("Cargo.toml"), "x").unwrap();
         let _cwd = CwdGuard::enter(tmp.path());
 
-        // A relative prefix lists from an absolute directory.
+        // A relative prefix lists from an absolute directory while keeping
+        // display candidates relative to the typed prefix.
         let input = "crates/gr";
         let state = complete(input, input.len()).unwrap();
         assert!(!state.candidates.is_empty());
-        assert!(state.candidates.iter().all(|c| Path::new(c).is_absolute()));
-        assert!(state.candidates.iter().all(|c| !c.contains("/./")));
+        assert_eq!(state.candidates, vec!["crates/gremlins-cli".to_string()]);
+        assert!(state.absolutes.iter().all(|c| Path::new(c).is_absolute()));
+        assert!(state.absolutes.iter().all(|c| !c.contains("/./")));
 
-        // A bare filename resolves against the working directory.
+        // A bare filename resolves against the working directory; the display
+        // candidate stays bare while the absolute path is fully qualified.
         let input = "Cargo";
         let state = complete(input, input.len()).unwrap();
+        assert_eq!(state.candidates, vec!["Cargo.toml".to_string()]);
         assert_eq!(
-            state.candidates,
+            state.absolutes,
             vec![format!(
                 "{}/Cargo.toml",
                 std::fs::canonicalize(tmp.path()).unwrap().display()
@@ -515,8 +560,9 @@ mod tests {
         let input = "link/../needle";
         let state = complete(input, input.len()).unwrap();
 
+        assert_eq!(state.candidates, vec!["link/../needle".to_string()]);
         assert_eq!(
-            state.candidates,
+            state.absolutes,
             vec![format!(
                 "{}/needle",
                 std::fs::canonicalize(&target).unwrap().display()

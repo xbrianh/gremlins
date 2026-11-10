@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::tui::completion::CompletionState;
+use crate::tui::input_buffer::InputBuffer;
 
 /// Application state for the TUI.
 ///
@@ -11,7 +12,7 @@ use crate::tui::completion::CompletionState;
 /// those widgets consume via their render context.
 pub struct App {
     /// Current text in the input bar.
-    pub input: String,
+    pub input: InputBuffer,
     /// Cursor byte index into `input` (always on a `char` boundary).
     pub input_cursor: usize,
     /// Live gremlin state: id → run details.
@@ -113,8 +114,9 @@ pub struct HistorySearch {
     matches: Vec<usize>,
     /// Current position within `matches` (0 = first / newest match).
     position: usize,
-    /// The input text snapshotted before search started, restored on cancel.
-    saved_input: String,
+    /// Saved input buffer (text + substitutions) before search started,
+    /// restored on cancel.
+    saved_input: InputBuffer,
     /// Cursor position snapshotted before search started.
     saved_cursor: usize,
 }
@@ -162,7 +164,7 @@ impl App {
             .unwrap_or_else(|| "?".to_string());
 
         Self {
-            input: String::new(),
+            input: InputBuffer::new(),
             input_cursor: 0,
             active_runs: HashMap::new(),
             project_name,
@@ -546,9 +548,23 @@ impl App {
         }
     }
 
-    /// Drop any active completion state.
+    /// Drop the active completion preview while preserving path
+    /// substitutions.
+    ///
+    /// Used by ordinary edit/cursor keys. The editing operations in
+    /// [`InputBuffer`] already invalidate any substitution they cross, so
+    /// dismissing the preview must not wipe unrelated resolved paths.
+    pub fn dismiss_completion(&mut self) {
+        self.completion = None;
+    }
+
+    /// Drop any active completion state and all path substitutions.
+    ///
+    /// Used on input-bar resets (hard cancel, Esc, `/clear`, search entry,
+    /// submission) where the buffer is being replaced wholesale.
     pub fn clear_completion(&mut self) {
         self.completion = None;
+        self.input.clear_substitutions();
     }
 
     /// Update the active completion's replaced span to the given range.
@@ -616,7 +632,7 @@ impl App {
     /// Insert `ch` at the cursor, keeping the cursor on a `char` boundary.
     pub fn insert_char(&mut self, ch: char) {
         let idx = self.input_cursor.min(self.input.len());
-        self.input.insert(idx, ch);
+        self.input.insert_char(idx, ch);
         self.input_cursor = idx + ch.len_utf8();
     }
 
@@ -630,7 +646,7 @@ impl App {
         while start > 0 && !self.input.is_char_boundary(start) {
             start -= 1;
         }
-        self.input.drain(start..self.input_cursor);
+        self.input.delete_range(start..self.input_cursor);
         self.input_cursor = start;
     }
 
@@ -644,16 +660,19 @@ impl App {
         while end < self.input.len() && !self.input.is_char_boundary(end) {
             end += 1;
         }
-        self.input.drain(self.input_cursor..end);
+        self.input.delete_range(self.input_cursor..end);
     }
 
     /// Replace the completion span with `replacement` and move the cursor to
     /// the end of the replacement. The span must lie on `char` boundaries.
+    ///
+    /// [`InputBuffer::replace_range`] drops any substitution overlapping the
+    /// span and shifts later substitutions, so the caller only has to record
+    /// the fresh substitution for `replacement` afterwards.
     pub fn replace_input_span(&mut self, span: std::ops::Range<usize>, replacement: String) {
         debug_assert!(self.input.is_char_boundary(span.start));
         debug_assert!(self.input.is_char_boundary(span.end));
-        let end = span.end.min(self.input.len());
-        self.input.replace_range(span.start..end, &replacement);
+        self.input.replace_range(span.clone(), &replacement);
         self.input_cursor = span.start + replacement.len();
     }
 
@@ -715,6 +734,7 @@ impl App {
     pub fn enter_search(&mut self) {
         self.clear_completion();
         let saved_input = std::mem::take(&mut self.input);
+        self.input.clear();
         let saved_cursor = self.input_cursor;
         self.input_cursor = 0;
         let matches: Vec<usize> = (0..self.input_history.len()).rev().collect();
@@ -731,7 +751,7 @@ impl App {
         let Some(_search) = &self.history_search else {
             return;
         };
-        self.input.push(ch);
+        self.input.insert_char(self.input.len(), ch);
         self.input_cursor = self.input.len();
         self.rebuild_search_matches();
     }
@@ -741,7 +761,14 @@ impl App {
         let Some(_search) = &self.history_search else {
             return;
         };
-        self.input.pop();
+        if !self.input.is_empty() {
+            let end = self.input.len();
+            let mut start = end - 1;
+            while start > 0 && !self.input.is_char_boundary(start) {
+                start -= 1;
+            }
+            self.input.delete_range(start..end);
+        }
         self.input_cursor = self.input.len();
         self.rebuild_search_matches();
     }
@@ -773,7 +800,7 @@ impl App {
         };
         if let Some(&idx) = search.matches.get(search.position) {
             if let Some(entry) = self.input_history.get(idx) {
-                self.input = entry.clone();
+                self.input.replace_all(entry);
                 self.input_cursor = self.input.len();
                 return;
             }
@@ -795,7 +822,7 @@ impl App {
         let Some(search) = &mut self.history_search else {
             return;
         };
-        let query_lower = self.input.to_lowercase();
+        let query_lower = self.input.text().to_lowercase();
         search.matches = self
             .input_history
             .iter()
@@ -831,7 +858,7 @@ mod tests {
     #[test]
     fn cursor_moves_left_right_on_char_boundaries() {
         let mut app = App::new();
-        app.input = "aé😀b".to_string();
+        app.input.replace_all("aé😀b");
         app.input_cursor = app.input.len();
 
         app.cursor_left(); // before 'b'
@@ -860,11 +887,11 @@ mod tests {
     #[test]
     fn insert_at_cursor_keeps_utf8_boundary() {
         let mut app = App::new();
-        app.input = "ab".to_string();
+        app.input.replace_all("ab");
         app.input_cursor = 1;
 
         app.insert_char('😀');
-        assert_eq!(app.input, "a😀b");
+        assert_eq!(app.input.text(), "a😀b");
         assert_eq!(app.input_cursor, "a😀".len());
         assert!(app.input.is_char_boundary(app.input_cursor));
     }
@@ -872,57 +899,57 @@ mod tests {
     #[test]
     fn backspace_deletes_char_before_cursor() {
         let mut app = App::new();
-        app.input = "aé😀b".to_string();
+        app.input.replace_all("aé😀b");
         app.input_cursor = app.input.len();
 
         app.delete_before_cursor(); // delete 'b'
-        assert_eq!(app.input, "aé😀");
+        assert_eq!(app.input.text(), "aé😀");
         assert_eq!(app.input_cursor, "aé😀".len());
 
         app.delete_before_cursor(); // delete 😀
-        assert_eq!(app.input, "aé");
+        assert_eq!(app.input.text(), "aé");
         assert_eq!(app.input_cursor, "aé".len());
 
         app.delete_before_cursor(); // delete é
-        assert_eq!(app.input, "a");
+        assert_eq!(app.input.text(), "a");
         assert_eq!(app.input_cursor, "a".len());
 
         app.delete_before_cursor(); // delete 'a'
-        assert_eq!(app.input, "");
+        assert_eq!(app.input.text(), "");
         assert_eq!(app.input_cursor, 0);
 
         app.delete_before_cursor(); // no-op at start
-        assert_eq!(app.input, "");
+        assert_eq!(app.input.text(), "");
         assert_eq!(app.input_cursor, 0);
     }
 
     #[test]
     fn delete_removes_char_at_cursor() {
         let mut app = App::new();
-        app.input = "aé😀b".to_string();
+        app.input.replace_all("aé😀b");
         app.input_cursor = "a".len();
 
         app.delete_at_cursor(); // delete é
-        assert_eq!(app.input, "a😀b");
+        assert_eq!(app.input.text(), "a😀b");
         assert_eq!(app.input_cursor, "a".len());
 
         app.delete_at_cursor(); // delete 😀
-        assert_eq!(app.input, "ab");
+        assert_eq!(app.input.text(), "ab");
         assert_eq!(app.input_cursor, "a".len());
 
         app.delete_at_cursor(); // delete 'b'
-        assert_eq!(app.input, "a");
+        assert_eq!(app.input.text(), "a");
         assert_eq!(app.input_cursor, "a".len());
 
         app.delete_at_cursor(); // no-op at end
-        assert_eq!(app.input, "a");
+        assert_eq!(app.input.text(), "a");
         assert_eq!(app.input_cursor, "a".len());
     }
 
     #[test]
     fn home_end_jump_to_ends() {
         let mut app = App::new();
-        app.input = "hello".to_string();
+        app.input.replace_all("hello");
         app.input_cursor = 2;
 
         app.cursor_home();
