@@ -94,28 +94,48 @@ fn read_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
         .get("limit")
         .and_then(|v| v.as_u64())
         .map(|n| n as usize);
-    let mut lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let all_lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let total_lines = all_lines.len();
+    let mut lines: Vec<&str> = all_lines;
     if offset > 0 {
         lines = lines.into_iter().skip(offset).collect();
     }
-    if let Some(limit) = limit {
-        lines.truncate(limit);
-    }
+    let line_limited = if let Some(limit) = limit {
+        if lines.len() > limit {
+            lines.truncate(limit);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
     let mut numbered = String::new();
     for (idx, line) in lines.iter().enumerate() {
         // `offset` is a 0-indexed skip count, so the file line number is
         // offset + window index + 1 — never the window-relative index.
         numbered.push_str(&format!("{}|{line}", offset + idx + 1));
     }
+    let emitted_line_count = lines.len();
 
     // Apply the global output cap here (rather than via `cap_output`) so the
     // truncation marker can carry an offset-aware continuation hint. When the
     // numbered output exceeds the budget, keep a byte-safe prefix and append a
     // marker telling the model the exact `offset` that resumes where this
-    // window was cut. Count newlines in the kept prefix to derive the actual
-    // number of emitted lines, so the hint never skips truncated-away lines.
+    // window was cut. Count complete lines in the kept prefix to derive the
+    // actual number of emitted lines, so the hint never skips truncated-away
+    // lines.
     let cap = crate::config::max_tool_output_bytes();
     if cap == 0 || numbered.len() as u64 <= cap {
+        // Byte budget not exceeded — but if lines were omitted due to a
+        // `limit` parameter (not EOF), emit a continuation hint.
+        let more_after_line_cap = line_limited && offset + emitted_line_count < total_lines;
+        if more_after_line_cap {
+            let next_offset = offset + emitted_line_count;
+            numbered.push_str(&format!(
+                "\n[Read with offset={next_offset} to continue...]"
+            ));
+        }
         return numbered;
     }
     // Reserve ~75 bytes for the marker (longest reasonable offset + framing).
@@ -127,6 +147,7 @@ fn read_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
     }
     let mut trunc = String::with_capacity(cap as usize);
     let mut used = 0usize;
+    let mut complete_lines = 0usize;
     for c in numbered.chars() {
         let cl = c.len_utf8();
         if used + cl > keep {
@@ -134,19 +155,27 @@ fn read_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
         }
         trunc.push(c);
         used += cl;
+        if c == '\n' {
+            complete_lines += 1;
+        }
     }
-    // Each emitted line starts with "N|" — count '|' characters to determine
-    // how many lines made it into the truncated output (more reliable than
-    // counting newlines, since the last line may not end with \n).
-    let emitted_lines = trunc.bytes().filter(|&b| b == b'|').count();
-    let next_offset = offset + emitted_lines;
-    let marker =
-        format!("\n[...truncated at {cap} bytes. Read with offset={next_offset} to continue...]");
+    // If the last character pushed was not a newline, the current line was
+    // only partially emitted — do not count it.
+    let next_offset = offset + complete_lines;
+    // When no complete line fits within the budget (a single line exceeds
+    // the cap), next_offset == offset and "continue" would be misleading.
+    // Report the oversized line explicitly instead.
+    let marker = if complete_lines == 0 {
+        format!("\n[...truncated at {cap} bytes — line too long for offset hint...]")
+    } else {
+        format!("\n[...truncated at {cap} bytes. Read with offset={next_offset} to continue...]")
+    };
     // If the real marker is larger than our estimate, re-truncate.
     if trunc.len() + marker.len() > cap as usize {
         let actual_keep = cap.saturating_sub(marker.len() as u64) as usize;
         trunc.clear();
         let mut used2 = 0usize;
+        let mut complete_lines2 = 0usize;
         for c in numbered.chars() {
             let cl = c.len_utf8();
             if used2 + cl > actual_keep {
@@ -154,12 +183,18 @@ fn read_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> 
             }
             trunc.push(c);
             used2 += cl;
+            if c == '\n' {
+                complete_lines2 += 1;
+            }
         }
-        let emitted_lines2 = trunc.bytes().filter(|&b| b == b'|').count();
-        let next_offset2 = offset + emitted_lines2;
-        let marker2 = format!(
-            "\n[...truncated at {cap} bytes. Read with offset={next_offset2} to continue...]"
-        );
+        let next_offset2 = offset + complete_lines2;
+        let marker2 = if complete_lines2 == 0 {
+            format!("\n[...truncated at {cap} bytes — line too long for offset hint...]")
+        } else {
+            format!(
+                "\n[...truncated at {cap} bytes. Read with offset={next_offset2} to continue...]"
+            )
+        };
         trunc.push_str(&marker2);
         return trunc;
     }

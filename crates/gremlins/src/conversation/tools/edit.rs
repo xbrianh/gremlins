@@ -477,15 +477,17 @@ fn apply_edits(
         };
         let window_offset = scope.map_or(0, |(s, _)| s);
 
-        // Collect ALL match positions using find + offset-1 advancement
-        // so overlapping occurrences (e.g. `old_str: "foo\nfoo"` in
-        // `"foo\nfoo\nfoo\n"`) are detected.
+        // Collect ALL match positions using find + offset advancement.
+        // Advance by the first character's UTF-8 length (not 1 byte) so the
+        // next search never starts inside a multi-byte character, while
+        // still detecting overlapping occurrences (e.g. "aa" in "aaa").
         let mut match_positions: Vec<usize> = Vec::new();
         let mut search_from = 0;
+        let advance_by = old_str.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
         while let Some(pos) = search_window[search_from..].find(old_str) {
             let abs_pos = search_from + pos + window_offset;
             match_positions.push(abs_pos);
-            search_from += pos + 1; // advance by 1 to detect overlapping matches
+            search_from += pos + advance_by;
         }
 
         if match_positions.is_empty() {
@@ -495,14 +497,21 @@ fn apply_edits(
             let normalized_old = normalize_for_fuzzy_match(old_str);
             let normalized_window = normalize_for_fuzzy_match(search_window);
             let mut fuzzy_search_from = 0;
+            let fuzzy_advance_by = normalized_old
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(1);
             while let Some(fuzzy_pos) =
                 normalized_window[fuzzy_search_from..].find(normalized_old.as_str())
             {
                 let norm_match_start = fuzzy_search_from + fuzzy_pos;
-                fuzzy_search_from = norm_match_start + 1; // advance by 1 for overlapping
+                fuzzy_search_from = norm_match_start + fuzzy_advance_by;
 
                 // Map the normalized byte position back to the original buffer.
-                // Walk original chars, accumulate normalized *byte* lengths.
+                // Walk original chars, accumulating normalized *byte* lengths.
+                // After the loop, orig_pos points just past the consumed chars
+                // (i.e. the start of the next character).
                 let mut orig_pos = 0usize;
                 let mut norm_bytes_consumed = 0usize;
                 for (byte_idx, oc) in search_window.char_indices() {
@@ -511,11 +520,11 @@ fn apply_edits(
                     }
                     let norm_char = normalize_for_fuzzy_match(&oc.to_string());
                     norm_bytes_consumed += norm_char.len();
-                    orig_pos = byte_idx;
+                    orig_pos = byte_idx + oc.len_utf8();
                 }
-                // If we haven't consumed enough, advance past the last char
-                if norm_bytes_consumed < norm_match_start {
-                    // Match starts beyond the last full char; skip.
+                // Require exact normalized boundary — reject matches that
+                // start mid-character.
+                if norm_bytes_consumed != norm_match_start {
                     continue;
                 }
                 let abs_pos = orig_pos + window_offset;
@@ -864,7 +873,7 @@ fn render_success(
 /// Silently repair three common JSON malformations before schema validation.
 /// This is a pre-validation pass — if repair fails, existing schema validation
 /// still catches it.
-fn repair_edit_args(args: serde_json::Value) -> serde_json::Value {
+pub(crate) fn repair_edit_args(args: serde_json::Value) -> serde_json::Value {
     let mut args = args;
 
     // Repair 1: `edits` is a JSON-encoded string → parse it
@@ -913,10 +922,13 @@ fn repair_edit_args(args: serde_json::Value) -> serde_json::Value {
     args
 }
 
+const DIFF_LINE_CAP: usize = 60;
+
 /// Compute a simple line-based unified diff between `original` and `updated`.
 /// Walk forward for a common prefix, backward for a common suffix, and emit
 /// the changed lines between them. Falls back to a note when `lines()` obscures
-/// changes (e.g. a trailing newline was added/removed).
+/// changes (e.g. a trailing newline was added/removed). Output is bounded to
+/// `DIFF_LINE_CAP` lines to avoid blowing up model history on large files.
 fn compute_diff(original: &str, updated: &str) -> Option<String> {
     if original == updated {
         return None;
@@ -949,27 +961,44 @@ fn compute_diff(original: &str, updated: &str) -> Option<String> {
         return Some("```diff\n(whitespace-only change)\n```\n".to_string());
     }
 
+    let orig_count = orig_end.saturating_sub(orig_start);
+    let upd_count = upd_end.saturating_sub(upd_start);
+    let total_diff_lines = orig_count + upd_count;
+    let omitted = total_diff_lines.saturating_sub(DIFF_LINE_CAP);
+
+    let half = DIFF_LINE_CAP / 2;
     let mut diff = String::from("```diff\n");
-    if orig_start < orig_end {
-        for line in &orig_lines[orig_start..orig_end] {
+    if omitted > 0 {
+        let orig_take = orig_count.min(half);
+        let upd_take = upd_count.min(half);
+        for line in orig_lines[orig_start..][..orig_take].iter() {
             diff.push_str(&format!("-{}\n", line));
         }
-    }
-    if upd_start < upd_end {
-        for line in &upd_lines[upd_start..upd_end] {
+        for line in upd_lines[upd_start..][..upd_take].iter() {
             diff.push_str(&format!("+{}\n", line));
+        }
+        diff.push_str(&format!("... {} diff lines omitted ...\n", omitted));
+    } else {
+        if orig_start < orig_end {
+            for line in &orig_lines[orig_start..orig_end] {
+                diff.push_str(&format!("-{}\n", line));
+            }
+        }
+        if upd_start < upd_end {
+            for line in &upd_lines[upd_start..upd_end] {
+                diff.push_str(&format!("+{}\n", line));
+            }
         }
     }
     diff.push_str("```\n");
     Some(diff)
 }
 
-/// Detect the line ending style from the first 1KB of content.
+/// Detect the line ending style from the file content.
 /// Returns `"\r\n"` if CRLF is found, `None` for LF (the default).
 fn detect_line_ending(content: &str) -> Option<&'static str> {
     let bytes = content.as_bytes();
-    let scan = &bytes[..bytes.len().min(1024)];
-    if scan.windows(2).any(|w| w == b"\r\n") {
+    if bytes.windows(2).any(|w| w == b"\r\n") {
         Some("\r\n")
     } else {
         None
@@ -1015,10 +1044,17 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
     let content = strip_bom(&content).replace("\r\n", "\n");
     let original_lines = content.lines().count();
 
-    let edits = match parse_edits(edits_arr, file_path) {
+    let mut edits = match parse_edits(edits_arr, file_path) {
         Ok(e) => e,
         Err(e) => return e,
     };
+    // Normalize edit strings to LF so CRLF needles/new_strings work
+    // against the LF-normalized content and restoration produces correct
+    // line endings (CRLF→LF normalization, then LF→CRLF restoration).
+    for edit in &mut edits {
+        edit.old_str = edit.old_str.replace("\r\n", "\n");
+        edit.new_str = edit.new_str.replace("\r\n", "\n");
+    }
 
     let (mut updated, ranges) = match apply_edits(&content, &edits, file_path) {
         Ok(u) => u,

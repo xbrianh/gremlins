@@ -714,7 +714,7 @@ pub(crate) async fn invoke_with_conversation(
         }
     }
     let ka = audit_key_arg(args_json);
-    let args = match parse_args(args_json) {
+    let mut args = match parse_args(args_json) {
         Ok(v) => v,
         Err(_) => {
             audit(
@@ -727,6 +727,19 @@ pub(crate) async fn invoke_with_conversation(
             return ToolOutcome::text("Error: invalid arguments");
         }
     };
+    // Apply Edit argument auto-repair *before* schema validation so the
+    // three common malformations (edits-as-string, edits-as-object,
+    // top-level old_string/new_string without edits wrapper) are silently
+    // repaired rather than rejected.
+    let mut repaired_args_json = args_json.to_string();
+    if name == "Edit" {
+        let repaired = crate::conversation::tools::edit::repair_edit_args(args.clone());
+        if repaired != args {
+            repaired_args_json =
+                serde_json::to_string(&repaired).unwrap_or_else(|_| args_json.to_string());
+            args = repaired;
+        }
+    }
     // Validate args against the tool's expected schema before dispatching.
     // Produces a rich, schema-specific error message so the model can
     // self-correct in a single retry.
@@ -756,7 +769,7 @@ pub(crate) async fn invoke_with_conversation(
     // name-based execution branch here.
     let registry = global_registry();
     let mut outcome = match registry.handlers.get(name) {
-        Some(handler) => handler.invoke(id, ctx, conv, args_json).await,
+        Some(handler) => handler.invoke(id, ctx, conv, &repaired_args_json).await,
         None => {
             return ToolOutcome::text(format!("Error: unknown tool {name}"));
         }
@@ -986,7 +999,10 @@ mod tests {
         std::fs::write(dir.join("nums.txt"), "a\nb\nc\nd\n").unwrap();
         let args =
             serde_json::json!({"file_path": "nums.txt", "offset": 1, "limit": 2}).to_string();
-        assert_eq!(read_invoke(&c, &args).await, "2|b\n3|c\n");
+        assert_eq!(
+            read_invoke(&c, &args).await,
+            "2|b\n3|c\n\n[Read with offset=3 to continue...]"
+        );
 
         // No trailing newline and empty files stay well-formed.
         std::fs::write(dir.join("no-newline.txt"), "x\ny").unwrap();
@@ -1027,19 +1043,23 @@ mod tests {
         let dir = tmp();
         let mut c = ctx(&dir);
         let args = serde_json::json!({"command": "echo hi"}).to_string();
-        assert_eq!(bash_invoke(&c, &args, "tool-test-id").await.trim(), "hi");
+        assert_eq!(bash_invoke(&c, &args, "tool-test-id").await.0.trim(), "hi");
         c.extra_env = Some(HashMap::from([("GREMLIN_TEST_TOKEN".into(), "abc".into())]));
         let env_args =
             serde_json::json!({"command": "printf %s \"$GREMLIN_TEST_TOKEN\""}).to_string();
-        assert_eq!(bash_invoke(&c, &env_args, "tool-test-id").await, "abc");
+        assert_eq!(bash_invoke(&c, &env_args, "tool-test-id").await.0, "abc");
         let fail = serde_json::json!({"command": "exit 7"}).to_string();
         assert!(bash_invoke(&c, &fail, "tool-test-id")
             .await
+            .0
             .starts_with("[exit 7]"));
         // Process substitution is bash-only; `sh` would fail here, proving
         // the interpreter is `bash` rather than a POSIX shell.
         let bash_only = serde_json::json!({"command": "diff <(echo a) <(echo a)"}).to_string();
-        assert_eq!(bash_invoke(&c, &bash_only, "tool-test-id").await.trim(), "");
+        assert_eq!(
+            bash_invoke(&c, &bash_only, "tool-test-id").await.0.trim(),
+            ""
+        );
     }
 
     #[tokio::test]
@@ -1052,7 +1072,7 @@ mod tests {
         // No trailing newline: the final flush must emit the trailing partial
         // with an appended `\n`.
         let args = serde_json::json!({ "command": "printf 'a\\nbb\\nccc'" }).to_string();
-        let out = bash_invoke(&c, &args, "tool-test-id").await;
+        let out = bash_invoke(&c, &args, "tool-test-id").await.0;
         assert_eq!(out, "a\nbb\nccc");
 
         let mut chunks = Vec::new();
@@ -1078,7 +1098,7 @@ mod tests {
             { "command": "printf out1; printf err1 >&2; printf out2; printf err2 >&2" }
         )
         .to_string();
-        let out = bash_invoke(&c, &args, "tool-test-id").await;
+        let out = bash_invoke(&c, &args, "tool-test-id").await.0;
         assert_eq!(out, "out1out2err1err2");
     }
 
@@ -1087,7 +1107,7 @@ mod tests {
         let dir = tmp();
         let c = ctx(&dir);
         let args = serde_json::json!({"command": "echo ok", "timeout": 5}).to_string();
-        let out = bash_invoke(&c, &args, "tool-test-id").await;
+        let out = bash_invoke(&c, &args, "tool-test-id").await.0;
         assert_eq!(out.trim(), "ok");
         assert!(!out.contains("[timeout]"));
     }
@@ -1097,7 +1117,7 @@ mod tests {
         let dir = tmp();
         let c = ctx(&dir);
         let args = serde_json::json!({"command": "sleep 10", "timeout": 1}).to_string();
-        let out = bash_invoke(&c, &args, "tool-test-id").await;
+        let out = bash_invoke(&c, &args, "tool-test-id").await.0;
         assert_eq!(out, "[timeout]");
     }
 
@@ -1117,7 +1137,7 @@ mod tests {
             child = child_pid.display(),
         );
         let args = serde_json::json!({ "command": command, "timeout": 1 }).to_string();
-        let out = bash_invoke(&c, &args, "tool-test-id").await;
+        let out = bash_invoke(&c, &args, "tool-test-id").await.0;
         assert_eq!(out, "[timeout]");
 
         let read_pid = |path: &std::path::Path| -> u32 {
@@ -1150,7 +1170,7 @@ mod tests {
         let dir = tmp();
         let c = ctx(&dir);
         let args = serde_json::json!({"command": "echo ok"}).to_string();
-        let out = bash_invoke(&c, &args, "tool-test-id").await;
+        let out = bash_invoke(&c, &args, "tool-test-id").await.0;
         assert_eq!(out.trim(), "ok");
         assert!(!out.contains("[timeout]"));
     }
@@ -1160,7 +1180,7 @@ mod tests {
         let dir = tmp();
         let c = ctx(&dir);
         let args = serde_json::json!({"command": "echo ok", "timeout": 0}).to_string();
-        let out = bash_invoke(&c, &args, "tool-test-id").await;
+        let out = bash_invoke(&c, &args, "tool-test-id").await.0;
         assert_eq!(out.trim(), "ok");
         assert!(!out.contains("[timeout]"));
     }
@@ -1192,7 +1212,7 @@ mod tests {
             log_tx: None,
         };
         let args = serde_json::json!({"command": "pwd; ls"}).to_string();
-        let output = bash_invoke(&c, &args, "tool-test-id").await;
+        let output = bash_invoke(&c, &args, "tool-test-id").await.0;
         assert!(
             output.contains(dir.to_str().unwrap()),
             "bash_invoke pwd must contain cwd={}, got: {output}",
@@ -1234,7 +1254,7 @@ mod tests {
         };
         let expected = canonicalize_or_ancestor(&dir);
         let args = serde_json::json!({"command": "pwd"}).to_string();
-        let output = bash_invoke(&c, &args, "tool-test-id").await;
+        let output = bash_invoke(&c, &args, "tool-test-id").await.0;
         assert!(
             output.trim().contains(expected.to_str().unwrap()),
             "bash_invoke with cwd=None should use project_root={}, got: {output}",
@@ -1275,7 +1295,7 @@ mod tests {
         // Ensure the daemon cwd is genuinely different from project root.
         assert_ne!(canonicalize_or_ancestor(&daemon), expected);
         let args = serde_json::json!({"command": "pwd"}).to_string();
-        let output = bash_invoke(&c, &args, "tool-test-id").await;
+        let output = bash_invoke(&c, &args, "tool-test-id").await.0;
         assert!(
             output.trim().contains(expected.to_str().unwrap()),
             "bash_invoke with cwd=None must use project_root={}, not process cwd={}, got: {output}",
@@ -4203,7 +4223,7 @@ mod tests {
         std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "200");
         let result = invoke("tool-test-id", "Read", &c, &args).await;
         assert!(
-            result.contains("[...truncated at 200 bytes. Read with offset=1 to continue...]"),
+            result.contains("[...truncated at 200 bytes — line too long for offset hint...]"),
             "oversized Read must carry a truncation marker, got: {result}"
         );
         assert!(
