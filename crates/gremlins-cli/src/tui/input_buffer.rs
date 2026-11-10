@@ -72,12 +72,6 @@ impl InputBuffer {
         self.text.is_char_boundary(idx)
     }
 
-    /// The number of active substitutions.
-    #[cfg(test)]
-    pub fn substitution_count(&self) -> usize {
-        self.substitutions.len()
-    }
-
     // ── Editing operations (work on display text, maintain substitutions) ──
 
     /// Insert `ch` at byte index `idx`. Invalidates any substitution whose
