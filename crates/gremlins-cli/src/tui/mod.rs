@@ -7,6 +7,7 @@ pub mod client;
 pub mod commands;
 pub mod completion;
 pub mod editor;
+pub mod input_buffer;
 pub mod markdown;
 pub mod motif;
 pub mod screen;
@@ -41,6 +42,7 @@ use chat::ChatEvent;
 use commands::{dispatch, CommandResult};
 use editor::{open_editor, ReaderChannels, SuspendHandle};
 use gremlins::executor::socket;
+use input_buffer::InputBuffer;
 use screen::LiveArea;
 
 /// A daemon `chat_model` lookup result tagged with the session generation it
@@ -1364,7 +1366,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
-                                &app.input,
+                                app.input.text(),
                                 app.width,
                             );
                         }
@@ -1378,7 +1380,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.cancel_search();
                                 live_area.ensure_input_cursor_visible(
                                     app.input_cursor,
-                                    &app.input,
+                                    app.input.text(),
                                     app.width,
                                 );
                                 continue;
@@ -1525,7 +1527,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
 
-                            match open_editor(&app.input, &suspend_handle).await {
+                            match open_editor(app.input.text(), &suspend_handle).await {
                                 Ok(outcome) => {
                                     // `open_editor` returns the reader-resume
                                     // guard so we can drain the event channel
@@ -1544,13 +1546,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                             // Enter. Reset history navigation so the
                                             // fresh text isn't treated as a history
                                             // position.
-                                            app.input = text;
+                                            app.input.replace_all(&text);
                                             app.reset_cursor_to_end();
                                             app.clear_completion();
                                             app.history_cursor = None;
                                             live_area.ensure_input_cursor_visible(
                                                 app.input_cursor,
-                                                &app.input,
+                                                app.input.text(),
                                                 app.width,
                                             );
                                         }
@@ -1591,7 +1593,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.cancel_search();
                                 live_area.ensure_input_cursor_visible(
                                     app.input_cursor,
-                                    &app.input,
+                                    app.input.text(),
                                     app.width,
                                 );
                                 continue;
@@ -1677,9 +1679,15 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 // subsequent presses, advance to the next
                                 // candidate before committing so the input
                                 // always matches the state's current index.
-                                if state.contains_current(&app.input) {
+                                if state.contains_current(app.input.text()) {
                                     app.completion_advance();
                                 }
+                                let next_absolute = app
+                                    .completion
+                                    .as_ref()
+                                    .expect("completion is active")
+                                    .current_absolute()
+                                    .to_string();
                                 let next = app
                                     .completion
                                     .as_ref()
@@ -1687,18 +1695,21 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     .current()
                                     .to_string();
                                 app.replace_input_span(span.clone(), next.clone());
-                                app.update_completion_span(
-                                    span.start..span.start + next.len(),
-                                );
+                                let new_span = span.start..span.start + next.len();
+                                app.update_completion_span(new_span.clone());
+                                app.input.add_substitution(new_span, next_absolute);
                             } else {
                                 let cursor = app.input_cursor.min(app.input.len());
-                                let Some(mut state) = completion::complete(&app.input, cursor) else {
+                                let Some(mut state) = completion::complete(app.input.text(), cursor) else {
                                     continue;
                                 };
                                 let span = state.span.clone();
                                 if state.candidates.len() == 1 {
                                     let candidate = state.candidates[0].clone();
-                                    app.replace_input_span(span, candidate);
+                                    let absolute = state.absolutes[0].clone();
+                                    app.replace_input_span(span.clone(), candidate.clone());
+                                    let new_span = span.start..span.start + candidate.len();
+                                    app.input.add_substitution(new_span, absolute);
                                 } else {
                                     let prefix = completion::common_prefix(&state.candidates);
                                     state.index = 0;
@@ -1709,7 +1720,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
-                                &app.input,
+                                app.input.text(),
                                 app.width,
                             );
                         }
@@ -1731,11 +1742,19 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 .expect("completion is active")
                                 .current()
                                 .to_string();
+                            let absolute = app
+                                .completion
+                                .as_ref()
+                                .expect("completion is active")
+                                .current_absolute()
+                                .to_string();
                             app.replace_input_span(span.clone(), candidate.clone());
-                            app.update_completion_span(span.start..span.start + candidate.len());
+                            let new_span = span.start..span.start + candidate.len();
+                            app.update_completion_span(new_span.clone());
+                            app.input.add_substitution(new_span, absolute);
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
-                                &app.input,
+                                app.input.text(),
                                 app.width,
                             );
                         }
@@ -1746,7 +1765,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.accept_search();
                                 live_area.ensure_input_cursor_visible(
                                     app.input_cursor,
-                                    &app.input,
+                                    app.input.text(),
                                     app.width,
                                 );
                                 continue;
@@ -1773,7 +1792,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
 
-                            let input = std::mem::take(&mut app.input);
+                            let input_buf: InputBuffer = std::mem::take(&mut app.input);
+                            let display_input = input_buf.text().to_string();
+                            let input = input_buf.resolve();
                             app.input_cursor = 0;
                             app.clear_completion();
                             live_area.reset_input_scroll();
@@ -1781,8 +1802,11 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
 
-                            // Record the submission for Up/Down history.
-                            if app.push_history(input.clone()) {
+                            // Record the submission for Up/Down history. The
+                            // display form is stored so recall reproduces what
+                            // the operator typed (relative paths, not resolved
+                            // absolute paths).
+                            if app.push_history(display_input) {
                                 save_history(&app.input_history);
                             }
 
@@ -2008,7 +2032,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             app.clear_completion();
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
-                                &app.input,
+                                app.input.text(),
                                 app.width,
                             );
                         }
@@ -2020,7 +2044,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             app.clear_completion();
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
-                                &app.input,
+                                app.input.text(),
                                 app.width,
                             );
                         }
@@ -2032,7 +2056,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             app.clear_completion();
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
-                                &app.input,
+                                app.input.text(),
                                 app.width,
                             );
                         }
@@ -2044,7 +2068,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             app.clear_completion();
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
-                                &app.input,
+                                app.input.text(),
                                 app.width,
                             );
                         }
@@ -2053,7 +2077,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.search_backspace();
                                 live_area.ensure_input_cursor_visible(
                                     app.input_cursor,
-                                    &app.input,
+                                    app.input.text(),
                                     app.width,
                                 );
                             } else if let Some(prompt) = live_area.debug_prompt_mut() {
@@ -2063,7 +2087,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.clear_completion();
                                 live_area.ensure_input_cursor_visible(
                                     app.input_cursor,
-                                    &app.input,
+                                    app.input.text(),
                                     app.width,
                                 );
                             }
@@ -2080,7 +2104,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             app.clear_completion();
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
-                                &app.input,
+                                app.input.text(),
                                 app.width,
                             );
                         }
@@ -2101,7 +2125,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.search_push_char(ch);
                                 live_area.ensure_input_cursor_visible(
                                     app.input_cursor,
-                                    &app.input,
+                                    app.input.text(),
                                     app.width,
                                 );
                             } else if let Some(prompt) = live_area.debug_prompt_mut() {
@@ -2113,7 +2137,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.history_cursor = None;
                                 live_area.ensure_input_cursor_visible(
                                     app.input_cursor,
-                                    &app.input,
+                                    app.input.text(),
                                     app.width,
                                 );
                             }
@@ -2126,12 +2150,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.watch_move(-1);
                             } else if app.screen.is_chat() {
                                 if let Some(entry) = app.history_up().map(|s| s.to_string()) {
-                                    app.input = entry;
+                                    app.input.replace_all(&entry);
                                     app.reset_cursor_to_end();
                                     app.clear_completion();
                                     live_area.ensure_input_cursor_visible(
                                         app.input_cursor,
-                                        &app.input,
+                                        app.input.text(),
                                         app.width,
                                     );
                                 }
@@ -2144,12 +2168,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             if app.screen == Screen::Runs {
                                 app.watch_move(1);
                             } else if app.screen.is_chat() && app.history_cursor.is_some() {
-                                app.input = app.history_down().unwrap_or("").to_string();
+                                let entry = app.history_down().unwrap_or("").to_string();
+                                app.input.replace_all(&entry);
                                 app.reset_cursor_to_end();
                                 app.clear_completion();
                                 live_area.ensure_input_cursor_visible(
                                     app.input_cursor,
-                                    &app.input,
+                                    app.input.text(),
                                     app.width,
                                 );
                             }

@@ -332,7 +332,7 @@ impl<B: Backend> LiveArea<B> {
 
     fn render_context<'a>(&self, app: &'a App, gremlin_count: &'a str) -> RenderContext<'a> {
         RenderContext {
-            input: &app.input,
+            input: app.input.text(),
             cursor: app.input_cursor,
             following_log: app.following_log.as_deref(),
             gremlin_count,
@@ -2101,7 +2101,7 @@ mod tests {
         app.project_name = "gremlins".to_string();
         // A non-empty input keeps the empty-state hint out of the input bar
         // so this test exercises transcript tail anchoring in isolation.
-        app.input = "x".to_string();
+        app.input.replace_all("x");
         app.input_cursor = 1;
 
         // Two long raw lines, each longer than the 10-col width so each wraps
