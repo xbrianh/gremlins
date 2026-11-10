@@ -187,9 +187,15 @@ fn split_prefix(word: &str, expanded: PathBuf) -> Option<(PathBuf, String)> {
 /// `/`, so the result mirrors what the user typed rather than exposing the
 /// absolute listing directory. Directory entries receive a trailing `/`.
 fn display_path_word(word: &str, name: &str, is_dir: bool) -> String {
-    let prefix = match word.rfind('/') {
-        Some(i) => &word[..=i],
-        None => "",
+    // Bare `~` has no `/` for rfind but we must preserve `~/` so the
+    // display candidate mirrors what the operator typed.
+    let prefix = if word == "~" {
+        "~/"
+    } else {
+        match word.rfind('/') {
+            Some(i) => &word[..=i],
+            None => "",
+        }
     };
     let mut out = format!("{prefix}{name}");
     if is_dir && !out.ends_with('/') {

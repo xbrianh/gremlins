@@ -114,8 +114,9 @@ pub struct HistorySearch {
     matches: Vec<usize>,
     /// Current position within `matches` (0 = first / newest match).
     position: usize,
-    /// The input text snapshotted before search started, restored on cancel.
-    saved_input: String,
+    /// Saved input buffer (text + substitutions) before search started,
+    /// restored on cancel.
+    saved_input: InputBuffer,
     /// Cursor position snapshotted before search started.
     saved_cursor: usize,
 }
@@ -732,7 +733,7 @@ impl App {
     /// the query string and `input_cursor` sits at its end.
     pub fn enter_search(&mut self) {
         self.clear_completion();
-        let saved_input = self.input.text().to_string();
+        let saved_input = std::mem::take(&mut self.input);
         self.input.clear();
         let saved_cursor = self.input_cursor;
         self.input_cursor = 0;
@@ -787,7 +788,7 @@ impl App {
         let Some(search) = self.history_search.take() else {
             return;
         };
-        self.input.replace_all(&search.saved_input);
+        self.input = search.saved_input;
         self.input_cursor = search.saved_cursor;
     }
 
@@ -805,7 +806,7 @@ impl App {
             }
         }
         // No match selected — restore saved input.
-        self.input.replace_all(&search.saved_input);
+        self.input = search.saved_input;
         self.input_cursor = search.saved_cursor;
     }
 

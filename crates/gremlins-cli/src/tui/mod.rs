@@ -1807,7 +1807,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             // display form is stored so recall reproduces what
                             // the operator typed (relative paths, not resolved
                             // absolute paths).
-                            if app.push_history(display_input) {
+                            if app.push_history(display_input.clone()) {
                                 save_history(&app.input_history);
                             }
 
@@ -1817,7 +1817,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.following_log = None;
                             }
 
-                            if let Some(result) = dispatch(&input) {
+                            if let Some(result) = dispatch(&display_input) {
                                 match result {
                                     CommandResult::ShowRuns => {
                                         close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
@@ -1846,7 +1846,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     }
                                     CommandResult::Lines(lines) => {
                                         let mut block = Vec::with_capacity(lines.len() + 1);
-                                        block.push(format!("> {input}"));
+                                        block.push(format!("> {display_input}"));
                                         block.extend(lines.iter().cloned());
                                         live_area.push_transcript_block(block);
                                     }
