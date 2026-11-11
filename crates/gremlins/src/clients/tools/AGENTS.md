@@ -80,13 +80,15 @@ Two layers, both in `sandbox.rs`:
   heredoc bodies and subshell placeholder regions, and validates every
   path-looking token against canonical containment roots using
   `within_worktree_lexical` (leaf-symlink-tolerant). `cd` after `||` is not
-  tracked (conservative). This is a heuristic — the real enforcement is
-  `io_enforce` at the OS level.
+  tracked (conservative). This is a heuristic — Bash subprocess I/O is not
+  constrained by `io_enforce`, which only covers the file-tool handlers.
 
-- **`io_enforce`** — OS-level file I/O containment in the sandbox layer
-  (called from `Gremlin::init_runtime`). Every file opened by Read/Write/
-  Edit/Glob/Grep/Landscape is canonicalized and checked against containment
-  roots. `AllowAll` mode short-circuits all checks.
+- **`io_enforce`** — application-level path containment function in
+  `core/paths.rs`. Each file-tool handler (Read, Write, Edit, Glob, Grep,
+  Landscape) calls it during `invoke()` to canonicalize the target path and
+  check it against containment roots. `AllowAll` mode (no roots) causes each
+  handler to skip the check. Not an OS sandbox, and not called from
+  `Gremlin::init_runtime`.
 
 ### ToolSpec as single source of truth
 
