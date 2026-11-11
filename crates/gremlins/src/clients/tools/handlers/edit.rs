@@ -1145,11 +1145,10 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
             edit.new_str = edit.new_str.replace("\r\n", "\n");
         }
 
-        let (mut updated, ranges, any_unescape) =
-            match apply_edits(&content, &edits, file_path) {
-                Ok(u) => u,
-                Err(e) => return e,
-            };
+        let (mut updated, ranges, any_unescape) = match apply_edits(&content, &edits, file_path) {
+            Ok(u) => u,
+            Err(e) => return e,
+        };
         // Restore line endings (safe now: the buffer is pure LF so no double-convert).
         if line_ending == Some("\r\n") {
             updated = updated.replace('\n', "\r\n");
