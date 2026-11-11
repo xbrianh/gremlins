@@ -100,7 +100,7 @@ impl BootstrapBuilder {
     ) -> Result<Self, SchemaError> {
         let name = name.into();
         let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
-        let src = InputSource::new(name.clone(), types, optional)?;
+        let src = InputSource::new(name.clone(), types, optional, None)?;
         self.source.insert(name, src);
         Ok(self)
     }

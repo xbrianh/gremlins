@@ -353,12 +353,28 @@ pub async fn run_definition_bootstrap(
         // Every declared source key gets a value, even an absent one, so an
         // optional `{plan}` substitutes to an empty string instead of leaking
         // the literal placeholder into a shell command.
+        // When a source has a `default`, that default is used instead of an
+        // empty string — CLI overrides take priority via `stage_inputs`.
         let mut values: HashMap<String, String> = gremlin.stage_inputs.clone();
         if let Some(source) = &bootstrap.source {
             for key in source.all_sources() {
-                values.entry(key).or_default();
+                // Compute the default (if any) before the entry call so that
+                // `key` can be moved directly without cloning.
+                // CLI-provided `stage_inputs` take priority — the default is
+                // only used when no value was supplied at all.
+                let default = source
+                    .get(&key)
+                    .and_then(|s| s.default.clone())
+                    .unwrap_or_default();
+                values.entry(key).or_insert(default);
             }
         }
+
+        // Push the merged effective values back into stage_inputs so that
+        // DSL handlers (bind_artifact) see the same defaults as shell-command
+        // substitution. CLI-provided values still take priority because
+        // `values` started as a clone of `stage_inputs`.
+        gremlin.stage_inputs = values.clone();
 
         let mut shell_cmds: Vec<String> = Vec::new();
         for command in &bootstrap.launch_cmds {
@@ -456,7 +472,7 @@ mod tests {
     use crate::definition::StaticDefinition;
     use crate::executor::gremlin::{validate_gremlin_id, WorkDir};
     use crate::executor::state::{self, StateData};
-    use crate::schemas::bootstrap::Bootstrap;
+    use crate::schemas::bootstrap::{Bootstrap, InputSource, InputSources};
     use crate::test_support::Sandbox;
 
     fn model(spec: &str) -> ModelURI {
@@ -868,6 +884,75 @@ mod tests {
             error,
             RunError::BootstrapFailed { exit_code: 3, .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn launch_dsl_sees_default_when_input_is_absent() {
+        let mut sources = HashMap::new();
+        sources.insert(
+            "note".to_string(),
+            InputSource::new(
+                "note".to_string(),
+                vec!["string".to_string()],
+                true,
+                Some("default value".to_string()),
+            )
+            .unwrap(),
+        );
+        let input_sources = InputSources::new(sources);
+        let bootstrap = Bootstrap {
+            source: Some(input_sources),
+            launch_cmds: vec![r#"gremlins:bind_artifact("artifact://note.txt", note)"#.to_string()],
+            ..Default::default()
+        };
+        // No stage_input for "note" — the default should be used.
+        let (_sandbox, mut gremlin) = test_gremlin(bootstrap, HashMap::new());
+
+        run_definition_bootstrap(&mut gremlin, false).await.unwrap();
+
+        assert!(gremlin.state.is_registered("artifact://note.txt").await);
+        assert_eq!(
+            gremlin
+                .state
+                .content("artifact://note.txt", None)
+                .await
+                .unwrap(),
+            "default value"
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_input_overrides_default_for_dsl() {
+        let mut sources = HashMap::new();
+        sources.insert(
+            "note".to_string(),
+            InputSource::new(
+                "note".to_string(),
+                vec!["string".to_string()],
+                true,
+                Some("default value".to_string()),
+            )
+            .unwrap(),
+        );
+        let input_sources = InputSources::new(sources);
+        let bootstrap = Bootstrap {
+            source: Some(input_sources),
+            launch_cmds: vec![r#"gremlins:bind_artifact("artifact://note.txt", note)"#.to_string()],
+            ..Default::default()
+        };
+        let inputs = HashMap::from([("note".to_string(), "cli override".to_string())]);
+        let (_sandbox, mut gremlin) = test_gremlin(bootstrap, inputs);
+
+        run_definition_bootstrap(&mut gremlin, false).await.unwrap();
+
+        assert_eq!(
+            gremlin
+                .state
+                .content("artifact://note.txt", None)
+                .await
+                .unwrap(),
+            "cli override"
+        );
     }
 
     #[tokio::test]
