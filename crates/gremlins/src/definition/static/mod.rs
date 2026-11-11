@@ -501,6 +501,9 @@ fn bootstrap_to_json(bootstrap: &Bootstrap) -> Value {
             if input_src.optional {
                 entry.insert("optional".to_string(), Value::Bool(true));
             }
+            if let Some(ref default) = input_src.default {
+                entry.insert("default".to_string(), Value::String(default.clone()));
+            }
             src_map.insert(name.clone(), Value::Object(entry));
         }
         if !source.require_one_of.is_empty() {
@@ -1273,6 +1276,70 @@ mod tests {
     fn definition_error_registry_variant() {
         let err = DefinitionError::Registry("boom".into());
         assert_eq!(err.to_string(), "boom");
+    }
+
+    #[test]
+    fn bootstrap_to_json_preserves_default_field() {
+        let mut sources = std::collections::HashMap::new();
+        sources.insert(
+            "plan".to_string(),
+            InputSource::new(
+                "plan".to_string(),
+                vec!["filepath".to_string()],
+                true,
+                Some("./default-plan.md".to_string()),
+            )
+            .unwrap(),
+        );
+        let input_sources = InputSources::new(sources);
+
+        let bootstrap = Bootstrap {
+            source: Some(input_sources),
+            ..Bootstrap::default()
+        };
+
+        let json = bootstrap_to_json(&bootstrap);
+        let object = json
+            .as_object()
+            .expect("bootstrap_to_json returns an object");
+        let source = object.get("source").expect("source key present");
+        let src_object = source.as_object().expect("source is an object");
+        let plan = src_object.get("plan").expect("plan key present");
+        let plan_obj = plan.as_object().expect("plan is an object");
+        let default = plan_obj
+            .get("default")
+            .expect("default field present")
+            .as_str()
+            .unwrap();
+        assert_eq!(default, "./default-plan.md");
+    }
+
+    #[test]
+    fn bootstrap_to_json_omits_default_when_none() {
+        let mut sources = std::collections::HashMap::new();
+        sources.insert(
+            "plan".to_string(),
+            InputSource::new("plan".to_string(), vec!["filepath".to_string()], true, None).unwrap(),
+        );
+        let input_sources = InputSources::new(sources);
+
+        let bootstrap = Bootstrap {
+            source: Some(input_sources),
+            ..Bootstrap::default()
+        };
+
+        let json = bootstrap_to_json(&bootstrap);
+        let object = json
+            .as_object()
+            .expect("bootstrap_to_json returns an object");
+        let source = object.get("source").expect("source key present");
+        let src_object = source.as_object().expect("source is an object");
+        let plan = src_object.get("plan").expect("plan key present");
+        let plan_obj = plan.as_object().expect("plan is an object");
+        assert!(
+            plan_obj.get("default").is_none(),
+            "default field must be absent when default is None"
+        );
     }
 
     #[test]
