@@ -79,6 +79,27 @@ enum Cmds {
         #[arg(long)]
         stage: Option<String>,
     },
+    /// Re-snapshot a gremlin's definition from its source .json5 file.
+    Snapshot {
+        /// Gremlin id whose definition snapshot to refresh.
+        id: String,
+    },
+    /// Read or write a gremlin's artifacts.
+    Artifact {
+        /// Gremlin id to inspect or mutate.
+        id: String,
+        /// Artifact URI (e.g. artifact://drag/target.txt).
+        artifact: Option<String>,
+        /// Write content into the artifact registry.
+        #[arg(long)]
+        put: Option<String>,
+        /// List all registered artifact keys.
+        #[arg(long)]
+        list: bool,
+        /// Extract a JSON path from artifact content when reading.
+        #[arg(long)]
+        json_path: Option<String>,
+    },
     /// Follow a gremlin's log file with `less +F`.
     Log {
         /// Gremlin id whose log to follow.
@@ -195,6 +216,23 @@ async fn main() {
         Some(Cmds::Info { id }) => info(&id).await,
         Some(Cmds::Stop { id }) => stop(&id).await,
         Some(Cmds::Resume { id, stage }) => resume(&id, stage.as_deref()).await,
+        Some(Cmds::Snapshot { id }) => snapshot(&id).await,
+        Some(Cmds::Artifact {
+            id,
+            artifact,
+            put,
+            list,
+            json_path,
+        }) => {
+            artifact_cmd(
+                &id,
+                artifact.as_deref(),
+                put.as_deref(),
+                list,
+                json_path.as_deref(),
+            )
+            .await
+        }
         Some(Cmds::Log { id }) => log_gremlin(&id).await,
         Some(Cmds::Debug { id }) => debug_gremlin(&id).await,
         Some(Cmds::Clean { id, keep }) => clean(&id, keep).await,
@@ -922,6 +960,102 @@ async fn resume(id: &str, stage: Option<&str>) -> Result<(), String> {
     check_error(&response)?;
 
     println!("{id}");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// snapshot
+// ---------------------------------------------------------------------------
+
+/// Re-snapshot a gremlin's definition from its source `.json5` file.
+///
+/// Useful after editing a pipeline definition: `resume` loads the hermetic
+/// `definition.json` snapshot, so a stale snapshot would replay the old
+/// (buggy) definition. This op re-serializes the current source file back
+/// into the state directory before resume.
+async fn snapshot(id: &str) -> Result<(), String> {
+    config::init_global().map_err(|e| e.to_string())?;
+
+    validate_gremlin_id(id).map_err(|_| {
+        format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
+    })?;
+
+    let response = executor_request(serde_json::json!({ "op": "snapshot", "id": id })).await?;
+    check_error(&response)?;
+
+    let path = response
+        .get("definition_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let bytes = response.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+    println!("gremlin {id}: snapshot refreshed from {path} ({bytes} bytes)");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// artifact (read/write)
+// ---------------------------------------------------------------------------
+
+/// Read or write a gremlin's artifacts through the daemon.
+async fn artifact_cmd(
+    id: &str,
+    artifact_uri: Option<&str>,
+    put: Option<&str>,
+    list: bool,
+    json_path: Option<&str>,
+) -> Result<(), String> {
+    config::init_global().map_err(|e| e.to_string())?;
+
+    validate_gremlin_id(id).map_err(|_| {
+        format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
+    })?;
+
+    if list {
+        let response =
+            executor_request(serde_json::json!({ "op": "artifact", "id": id, "list": true }))
+                .await?;
+        check_error(&response)?;
+        let keys = response
+            .get("keys")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        for key in keys {
+            println!("{key}");
+        }
+        return Ok(());
+    }
+
+    let Some(uri) = artifact_uri else {
+        return Err("artifact requires an <artifact> URI, --list, or --put".to_string());
+    };
+
+    let mut request = serde_json::json!({ "op": "artifact", "id": id, "artifact": uri });
+    if let Some(content) = put {
+        request
+            .as_object_mut()
+            .unwrap()
+            .insert("put".to_string(), Value::String(content.to_string()));
+    } else if let Some(jp) = json_path {
+        request
+            .as_object_mut()
+            .unwrap()
+            .insert("json_path".to_string(), Value::String(jp.to_string()));
+    }
+
+    let response = executor_request(request).await?;
+    check_error(&response)?;
+
+    if put.is_some() {
+        let path = response.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        println!("gremlin {id}: wrote {uri} -> {path}");
+    } else {
+        let content = response
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        print!("{content}");
+    }
     Ok(())
 }
 

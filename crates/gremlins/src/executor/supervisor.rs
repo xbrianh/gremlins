@@ -23,7 +23,7 @@ use crate::clients::interactive::{
 };
 use crate::clients::protocol::{add_opt, UsageStats};
 use crate::config;
-use crate::definition::{ChatDefinition, StageSpec, StaticDefinition};
+use crate::definition::{ChatDefinition, GremlinDefinition, StageSpec, StaticDefinition};
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin, GremlinConfig};
 use crate::executor::socket::{self, GremlinsDaemonLock};
 use crate::executor::state::{self, FileSystemStateStore};
@@ -1055,6 +1055,7 @@ async fn dispatch_op(
         "status" => handle_status(request, state_root).await,
         "info" => handle_info(request, state_root).await,
         "artifact" => handle_artifact(request).await,
+        "snapshot" => handle_snapshot(request, state_root).await,
         "model" => handle_model(request).await,
         _ => error_response(&format!("unknown op: {op:?}")),
     };
@@ -1974,11 +1975,124 @@ async fn handle_artifact(request: &Value) -> Value {
         return error_response("missing 'artifact' field");
     }
 
+    // `put` writes content into the registry (creating parent dirs and
+    // committing the binding). This is the operator-facing escape hatch for
+    // a bailed stage whose required artifact was never produced: create the
+    // artifact by hand, then `resume` skips or retries the stage.
+    if let Some(content) = request.get("put").and_then(|v| v.as_str()) {
+        let uri = match crate::artifacts::uri::Uri::parse(artifact) {
+            Ok(uri) => uri,
+            Err(e) => return error_response(&format!("invalid artifact URI {artifact:?}: {e}")),
+        };
+        match store.write_into_registry(&uri, content).await {
+            Ok(path) => {
+                return ok_response(
+                    serde_json::json!({ "id": id, "artifact": artifact, "path": path }),
+                )
+            }
+            Err(e) => {
+                return error_response(&format!("failed to write artifact {artifact:?}: {e}"))
+            }
+        }
+    }
+
     let json_path = request.get("json_path").and_then(|v| v.as_str());
     match store.content(artifact, json_path).await {
         Ok(content) => ok_response(serde_json::json!({ "id": id, "content": content })),
         Err(e) => error_response(&format!("artifact {artifact:?}: {e}")),
     }
+}
+
+// ---------------------------------------------------------------------------
+// snapshot
+// ---------------------------------------------------------------------------
+
+/// Re-serialize the run's source definition into the hermetic
+/// `definition.json` snapshot.
+///
+/// This is the recovery path for a stale snapshot: after editing the
+/// `.gremlins/*.json5` pipeline, run `snapshot` so a subsequent `resume`
+/// loads the fixed definition instead of the one captured at launch.
+///
+/// The snapshot is built in memory from the source definition path recorded
+/// in state.json (not the stale blob), then written back through the state
+/// store so the flock and name validation are respected.
+async fn handle_snapshot(request: &Value, _state_root: &Path) -> Value {
+    let id = match valid_id(request) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    if let Err(e) = config::init_global() {
+        return error_response(&format!("config init: {e}"));
+    }
+
+    let gremlin = match Gremlin::from(id) {
+        Ok(g) => g,
+        Err(e) => return error_response(&format!("gremlin {id}: {e}")),
+    };
+
+    if gremlin.state.read_str("status") == "running" {
+        return error_response(&format!("gremlin {id} is running — use stop first"));
+    }
+
+    let definition_path = match gremlin.definition_path.clone() {
+        Some(p) => p,
+        None => {
+            return error_response(&format!(
+                "gremlin {id}: no definition path recorded in state"
+            ))
+        }
+    };
+
+    let default_model = config::global_config()
+        .ok()
+        .and_then(|c| c.default_model().map(String::from));
+
+    // Load the source definition from disk, not the stale snapshot. A
+    // model override must be replayed so profile/task-model resolution
+    // matches the original launch (if any override was recorded).
+    let definition = match StaticDefinition::from_json5_file(
+        &definition_path,
+        gremlin.model_override.as_deref(),
+        default_model.as_deref(),
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            return error_response(&format!(
+                "gremlin {id}: failed to load definition from {}: {e}",
+                definition_path.display()
+            ))
+        }
+    };
+
+    let bytes = match definition.serialize() {
+        Ok(b) => b,
+        Err(e) => {
+            return error_response(&format!(
+                "gremlin {id}: failed to serialize definition: {e}"
+            ))
+        }
+    };
+
+    let mut blob = match gremlin
+        .state
+        .open_blob("definition.json", state::BlobMode::Write)
+    {
+        Ok(b) => b,
+        Err(e) => return error_response(&format!("gremlin {id}: failed to open snapshot: {e}")),
+    };
+
+    use std::io::Write;
+    if let Err(e) = blob.write_all(&bytes) {
+        return error_response(&format!("gremlin {id}: failed to write snapshot: {e}"));
+    }
+
+    ok_response(serde_json::json!({
+        "id": id,
+        "definition_path": definition_path.display().to_string(),
+        "bytes": bytes.len(),
+    }))
 }
 
 // ---------------------------------------------------------------------------
