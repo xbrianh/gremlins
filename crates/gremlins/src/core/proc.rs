@@ -737,6 +737,10 @@ pub async fn run_shell_async(
 #[derive(Debug)]
 pub struct ShellResult {
     pub output: String,
+    /// Stderr text, trimmed: the stream where real failure reasons land,
+    /// kept separate so callers can prefer it over the instrumented
+    /// stdout noise in `output`.
+    pub stderr: String,
     pub rc: i32,
 }
 
@@ -761,6 +765,7 @@ pub async fn run_logged_commands(
     if cmds.is_empty() {
         return Ok(ShellResult {
             output: String::new(),
+            stderr: String::new(),
             rc: 0,
         });
     }
@@ -819,8 +824,10 @@ pub async fn run_logged_commands(
                 let mut g = m.lock().unwrap();
                 write_log_footer(&mut *g, r.returncode, elapsed, log_tx);
             }
+            let stderr = String::from_utf8_lossy(&r.stderr).trim().to_string();
             Ok(ShellResult {
                 output: combined_output.trim().to_string(),
+                stderr,
                 rc: r.returncode,
             })
         }

@@ -1453,12 +1453,27 @@ pub(crate) fn strip_unpaired_tool_messages(messages: &mut Vec<Message>) {
     }
 }
 
-/// Clamp `text` to at most `max` bytes, cutting on a char boundary.
+/// Clamp `text` to at most `max` bytes, cutting on a char boundary
+/// at the **start** of the string.
 pub(crate) fn truncate(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }
     text[..text.floor_char_boundary(max)].to_string()
+}
+
+/// Clamp `text` to the **last** at most `max` bytes, cutting on a char
+/// boundary at the start of the retained window.
+///
+/// When a long combined stdout/scrip trace is the fallback for an
+/// empty stderr, the interesting text is at the tail — the failing
+/// command — not at the head ("Preparing worktree…" from cmd 1/7).
+pub(crate) fn truncate_tail(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let start = text.ceil_char_boundary(text.len() - max);
+    text[start..].to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1601,6 +1616,16 @@ mod tests {
         assert_eq!(truncate("abcdef", 3), "abc");
         // "é" is two bytes, so a naive slice at 3 would split it.
         assert_eq!(truncate("aé", 2), "a");
+    }
+
+    #[test]
+    fn truncate_tail_keeps_the_end() {
+        assert_eq!(truncate_tail("short", 200), "short");
+        assert_eq!(truncate_tail("abcdef", 3), "def");
+        // "é" is two bytes, so a naive tail slice could split it.
+        assert_eq!(truncate_tail("éa", 2), "a");
+        // The last char is the one most likely to survive.
+        assert_eq!(truncate_tail("0123456789", 3), "789");
     }
 
     /// `messages_from_conversation` must round-trip all `Message` variants.

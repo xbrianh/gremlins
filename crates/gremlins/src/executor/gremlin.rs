@@ -1163,10 +1163,15 @@ impl Gremlin {
                 match result {
                     Ok(r) if r.rc == 0 => {}
                     Ok(r) => {
+                        let detail = if !r.stderr.is_empty() {
+                            &r.stderr
+                        } else {
+                            &r.output
+                        };
                         return Err(RunError::Message(format!(
                             "fork command(s) failed with exit code {}: {}",
                             r.rc,
-                            crate::executor::run::truncate(&r.output, 500),
+                            crate::executor::run::truncate_tail(detail, 500),
                         )));
                     }
                     Err(e) => {
@@ -1331,10 +1336,15 @@ impl Gremlin {
                 log::info!("clean: commands completed successfully");
             }
             Ok(r) => {
+                let detail = if !r.stderr.is_empty() {
+                    &r.stderr
+                } else {
+                    &r.output
+                };
                 log::warn!(
                     "clean: commands exited with {} (continuing teardown): {}",
                     r.rc,
-                    crate::executor::run::truncate(&r.output, 500),
+                    crate::executor::run::truncate_tail(detail, 500),
                 );
             }
             Err(e) => {
