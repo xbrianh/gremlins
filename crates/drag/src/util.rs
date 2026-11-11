@@ -332,3 +332,138 @@ fn remove_trailing_commas(json: &str) -> String {
 
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_is_char_boundary_safe() {
+        // "é" is two bytes; cutting at byte 1 would be a non-boundary.
+        assert_eq!(truncate("éx", 1), "");
+        assert_eq!(truncate("abc", 2), "ab");
+    }
+
+    // ── JSON extraction tests ──
+
+    #[test]
+    fn extract_plain_json() {
+        let raw = r#"{"naming": 3, "control_flow": 2, "data_flow": 2, "abstractions": 3}"#;
+        let extracted = extract_json(raw).unwrap();
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
+        assert_eq!(scores["control_flow"], 2);
+    }
+
+    #[test]
+    fn extract_json_fenced() {
+        let raw = "```json\n{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3}\n```";
+        let extracted = extract_json(raw).unwrap();
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
+    }
+
+    #[test]
+    fn extract_json_fenced_no_lang() {
+        let raw =
+            "```\n{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3}\n```";
+        let extracted = extract_json(raw).unwrap();
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
+    }
+
+    #[test]
+    fn extract_json_with_text_before() {
+        let raw = "Here is my assessment of the file:\n\n{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3}\n\nHope that helps.";
+        let extracted = extract_json(raw).unwrap();
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
+    }
+
+    #[test]
+    fn extract_json_with_trailing_comma() {
+        let raw = "{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3,}";
+        let extracted = extract_json(raw).unwrap();
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
+    }
+
+    #[test]
+    fn extract_json_with_line_comment() {
+        let raw = "{\n// scoring notes\n\"naming\": 3,\n\"control_flow\": 2,\n\"data_flow\": 2,\n\"abstractions\": 3\n}";
+        let extracted = extract_json(raw).unwrap();
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
+    }
+
+    #[test]
+    fn extract_json_with_block_comment() {
+        let raw = "{\n/* scoring notes */\n\"naming\": 3,\n\"control_flow\": 2,\n\"data_flow\": 2,\n\"abstractions\": 3\n}";
+        let extracted = extract_json(raw).unwrap();
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
+    }
+
+    #[test]
+    fn extract_json_fenced_with_text_and_trailing_comma() {
+        // The most common failure mode: markdown fence, trailing comma, extra text.
+        let raw = "Here's the score:\n\n```json\n{\n  \"naming\": 3,\n  \"control_flow\": 2,\n  \"data_flow\": 2,\n  \"abstractions\": 3,\n}\n```\n\nLet me know if you need anything else.";
+        let extracted = extract_json(raw).unwrap();
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
+    }
+
+    #[test]
+    fn extract_json_missing_closing_fence() {
+        let raw =
+            "```json\n{\"naming\": 3, \"control_flow\": 2, \"data_flow\": 2, \"abstractions\": 3}";
+        let extracted = extract_json(raw).unwrap();
+        let scores: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(scores["naming"], 3);
+    }
+
+    #[test]
+    fn extract_json_nested_braces_in_string() {
+        // Braces inside a JSON string should not confuse the matcher.
+        let raw = r#"{"naming": 3, "note": "use {braces} here", "control_flow": 2, "data_flow": 2, "abstractions": 3}"#;
+        let extracted = extract_json(raw).unwrap();
+        // This test just needs valid JSON out — extra field is fine for serde.
+        let _: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+    }
+
+    #[test]
+    fn extract_json_no_braces_returns_none() {
+        assert!(extract_json("just some text, no json here").is_none());
+    }
+
+    // ── mean_with_ci tests ──
+
+    #[test]
+    fn mean_three_values() {
+        let vals = [1.0, 2.0, 3.0];
+        let (m, lo, hi) = mean_with_ci(&vals);
+        assert!((m - 2.0).abs() < 1e-12);
+        // n=3, df=2, t_crit ≈ 4.3027, sd=1.0, se=1/√3≈0.577, margin≈2.484
+        assert!((lo - (2.0 - 2.484_05)).abs() < 1e-4);
+        assert!((hi - (2.0 + 2.484_05)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn mean_single_value_ci_degenerate() {
+        let vals = [7.0];
+        let (m, lo, hi) = mean_with_ci(&vals);
+        assert!((m - 7.0).abs() < 1e-12);
+        assert!((lo - 7.0).abs() < 1e-12);
+        assert!((hi - 7.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn mean_identical_values_ci_zero() {
+        let vals = [0.5, 0.5, 0.5];
+        let (m, lo, hi) = mean_with_ci(&vals);
+        assert!((m - 0.5).abs() < 1e-12);
+        // All identical → variance = 0 → no margin.
+        assert!((lo - 0.5).abs() < 1e-12);
+        assert!((hi - 0.5).abs() < 1e-12);
+    }
+}
