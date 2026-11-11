@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use super::tools::{self, AgentLoopRuntime};
+use crate::clients::tools::{self, AgentLoopRuntime};
 use crate::task_kind::TaskKind;
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
@@ -62,7 +62,7 @@ pub(crate) fn make_task_runner(
     model: DynModel<Completion>,
     task_model_selector: Option<TaskModelSelector>,
     tool_filter: Option<Vec<String>>,
-    cancel: Arc<super::cancel::CancelToken>,
+    cancel: Arc<crate::clients::cancel::CancelToken>,
     ctx: AgentLoopRuntime,
     prefix: String,
     parent_model_name: String,
@@ -99,7 +99,7 @@ fn make_task_runner_at_depth(
     model: DynModel<Completion>,
     task_model_selector: Option<TaskModelSelector>,
     tool_filter: Option<Vec<String>>,
-    cancel: Arc<super::cancel::CancelToken>,
+    cancel: Arc<crate::clients::cancel::CancelToken>,
     ctx: AgentLoopRuntime,
     prefix: String,
     _parent_model_name: String,
@@ -116,7 +116,7 @@ fn make_task_runner_at_depth(
     Arc::new(
         move |kind: TaskKind,
               task: String,
-              parent_conversation: Box<dyn super::conversation::Conversation>| {
+              parent_conversation: Box<dyn crate::clients::conversation::Conversation>| {
             let model = model.clone();
             let task_model_selector = task_model_selector.clone();
             let tool_filter = tool_filter.clone();
@@ -213,18 +213,14 @@ fn make_task_runner_at_depth(
 
                 let work_root = crate::core::paths::worktree_root(task_cwd.as_deref());
                 let system_prompt = if kind == TaskKind::Fork {
-                    Some(crate::clients::system_prompts::fork_system_prompt(
-                        &work_root,
-                    ))
+                    Some(super::system_prompts::fork_system_prompt(&work_root))
                 } else {
-                    Some(crate::clients::system_prompts::task_system_prompt(
-                        &work_root,
-                    ))
+                    Some(super::system_prompts::task_system_prompt(&work_root))
                 };
 
                 let prepopulated_conversation = parent_conversation;
 
-                let result = crate::clients::agent_loop::run_agent_loop_nested(
+                let result = super::agent_loop::run_agent_loop_nested(
                     selected_model.clone(),
                     &task,
                     system_prompt.clone(),

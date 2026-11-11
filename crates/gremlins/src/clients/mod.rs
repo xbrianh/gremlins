@@ -1,4 +1,4 @@
-pub(crate) mod agent_loop;
+pub(crate) mod agent;
 
 pub(crate) mod anthropic_bearer_http;
 pub(crate) mod azure_openai_responses_http;
@@ -11,7 +11,6 @@ pub(crate) use client::run_naked;
 pub(crate) mod compaction;
 pub mod config;
 pub mod conversation;
-pub(crate) mod done_helpers;
 pub(crate) mod error;
 pub(crate) mod format;
 pub mod github_auth;
@@ -21,13 +20,9 @@ pub(crate) mod naked_conversation;
 pub(crate) mod native;
 pub mod openai_protocol;
 pub mod params;
-pub(crate) mod plug;
 pub mod protocol;
 pub(crate) mod shell_parse;
 pub(crate) mod stream_json;
-pub(crate) mod system_prompts;
-pub(crate) mod task;
-pub(crate) mod task_models;
 pub(crate) mod token_provider;
 pub(crate) mod token_usage;
 pub(crate) mod tools;

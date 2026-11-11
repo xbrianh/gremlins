@@ -9,7 +9,7 @@ use rig_core::operation::Completion;
 use rig_core::providers::openai::wire::Dialect;
 use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 
-use super::agent_loop::{run_agent_loop, LoopOpts, RunContext};
+use super::agent::agent_loop::{run_agent_loop, LoopOpts, RunContext};
 use super::backend::{ClientError, RunParams};
 use super::cancel::{CancelToken, ErrorClassifier};
 use super::cancels::CancelsMap;

@@ -237,7 +237,7 @@ impl AgentPrepared {
             return override_prompt.clone();
         }
         let cwd = Path::new(&self.cwd);
-        crate::clients::system_prompts::agent_system_prompt(cwd)
+        crate::clients::agent::system_prompts::agent_system_prompt(cwd)
     }
 
     /// Workspace preamble + stage prompt (no harness system content).
@@ -862,7 +862,8 @@ mod tests {
             .await
             .unwrap();
         prepared.cwd = "/work".to_string();
-        let expected = crate::clients::system_prompts::agent_system_prompt(Path::new("/work"));
+        let expected =
+            crate::clients::agent::system_prompts::agent_system_prompt(Path::new("/work"));
         assert_eq!(prepared.system_prompt(), expected);
     }
 }

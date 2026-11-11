@@ -4,32 +4,27 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
-use rig_core::completion::message::{
-    AssistantContent, CallId, Reasoning, Sealed, ToolCall, ToolName,
-};
+use rig_core::completion::message::{CallId, Reasoning, Sealed, ToolCall, ToolName};
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
 use rig_core::driver::DynModel;
 use rig_core::error::ProviderError;
 use rig_core::operation::Completion;
-use rig_core::streaming::{Item, StreamEvent, Streamed};
+use rig_core::streaming::Streamed;
 use tokio::sync::{mpsc, Semaphore};
 
-use super::backend::RunParams;
-use super::interactive::{
+use crate::clients::backend::RunParams;
+use crate::clients::interactive::{
     InteractiveCommand, InteractiveEvent, InteractiveSession, PauseToken, StreamEventSender,
 };
 
-use super::cancel::{default_classify, is_retryable, CancelToken, ErrorClassifier};
-use super::conversation::{Conversation, TurnScriptError};
-use super::error::ClientError;
-use super::format::{
-    apply_chunk, assistant_tool_message, enrich_log_line, format_tool_call, format_tool_call_parts,
-    trunc,
-};
+use super::interactive::{interactive_loop, maybe_pause, InteractiveLoopResult};
 use super::plug::LoopHooks;
-use super::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
-use super::tools::{self, AgentLoopRuntime, AgentLoopTelemetry, ToolOutcome};
-use crate::clients::done_helpers::done_user_message;
+use crate::clients::cancel::{default_classify, is_retryable, CancelToken, ErrorClassifier};
+use crate::clients::conversation::{Conversation, TurnScriptError};
+use crate::clients::error::ClientError;
+use crate::clients::format::{enrich_log_line, format_tool_call_parts, trunc};
+use crate::clients::protocol::{CompletedRun, TurnStats, UsageStats};
+use crate::clients::tools::{self, AgentLoopRuntime, AgentLoopTelemetry, ToolOutcome};
 use crate::conversation::tool_specs::ToolMode;
 
 // ── Architecture ────────────────────────────────────────────────────────────
@@ -49,7 +44,7 @@ use crate::conversation::tool_specs::ToolMode;
 // Supporting types: ToolJob, StreamAccumulator, StreamTurnOutcome,
 // LoopOpts, InteractiveSession, TurnFlow, etc.
 // ────────────────────────────────────────────────────────────────────────────
-fn cancelled_error(message: impl Into<String>, history: &[Message]) -> ClientError {
+pub(super) fn cancelled_error(message: impl Into<String>, history: &[Message]) -> ClientError {
     ClientError::Cancelled {
         message: message.into(),
         messages: Some(history.to_vec()),
@@ -99,7 +94,7 @@ impl AgentLoopTelemetry {
     /// No-ops (returns `Ok(())`) when there is no channel or the broadcast
     /// subscriber has disconnected. Races against `cancel` so the caller can
     /// propagate cancellation with `?`.
-    async fn send_stream_event(
+    pub(super) async fn send_stream_event(
         &self,
         event: InteractiveEvent,
         cancel: &CancelToken,
@@ -119,7 +114,7 @@ impl AgentLoopTelemetry {
     /// listening — the `send_stream_event` method already no-ops, but
     /// skipping the clone / format / truncate work saves allocation and
     /// CPU on non-interactive runs.
-    fn wants_stream_events(&self) -> bool {
+    pub(super) fn wants_stream_events(&self) -> bool {
         self.stream_events
             .as_ref()
             .is_some_and(|se| se.wants_events())
@@ -138,7 +133,7 @@ fn discard_tool_output(rx: &mut Option<mpsc::Receiver<tools::ToolOutputLine>>) {
 /// Sleep for the turn-level backoff, aborting early when the cancel token is
 /// set. Returns `true` if cancellation was observed (the caller must abandon
 /// the retry and unwind), `false` if the full backoff elapsed.
-async fn retry_backoff(cancel: &CancelToken, wait: f64) -> bool {
+pub(super) async fn retry_backoff(cancel: &CancelToken, wait: f64) -> bool {
     tokio::select! {
         _ = tokio::time::sleep(Duration::from_secs_f64(wait)) => false,
         _ = cancel.cancelled() => true,
@@ -204,17 +199,17 @@ pub(crate) struct LoopOpts<'a> {
 }
 
 /// A single tool invocation queued for concurrent execution within a turn.
-struct ToolJob {
-    id: String,
-    name: String,
-    args: String,
-    call: String,
-    over_cap: Option<String>,
+pub(super) struct ToolJob {
+    pub(super) id: String,
+    pub(super) name: String,
+    pub(super) args: String,
+    pub(super) call: String,
+    pub(super) over_cap: Option<String>,
 }
 
 /// Outcome of one concurrent tool batch dispatched by
 /// [`LoopState::dispatch_tool_jobs`].
-enum ToolDispatchOutcome {
+pub(super) enum ToolDispatchOutcome {
     /// Every tool finished; outcomes are aligned with the job list order.
     Completed(Vec<ToolOutcome>),
     /// The operator entered debug mid-batch: the batch was abandoned, the
@@ -223,69 +218,66 @@ enum ToolDispatchOutcome {
 }
 
 /// Mutable state threaded through one agent-loop run.
-struct LoopState {
-    system_prompt: Option<String>,
-    original_system_prompt: Option<String>,
-    live_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
-    conv: Box<dyn Conversation>,
-    turns: usize,
-    turn_num: usize,
-    turn_retries: usize,
-    timeout_retries: usize,
-    timed_out: bool,
-    exhausted_turn_retries: bool,
-    exhausted_timeout_retries: bool,
-    stream_error: Option<ProviderError>,
-    total_prompt_tokens: Option<u64>,
-    total_completion_tokens: Option<u64>,
-    total_cached_tokens: Option<u64>,
-    total_cache_creation_tokens: Option<u64>,
-    total_reasoning_tokens: Option<u64>,
-    interactive_active: bool,
-    pending_run_one_turn: bool,
-    cmd_rx: Option<mpsc::Receiver<InteractiveCommand>>,
-    evt_tx: Option<tokio::sync::broadcast::Sender<InteractiveEvent>>,
-    pause: Option<Arc<PauseToken>>,
-    remaining_turns: usize,
-    reminder_budget: usize,
-    completion_nudge_budget: usize,
-    /// When true, skip reasoning-only continuation and nudging — used
-    /// for single-turn naked completions (local compaction).
-    single_turn: bool,
-    /// Inversion-of-control hooks carrying prompt-debug/token-usage callbacks.
-    hooks: LoopHooks,
+pub(super) struct LoopState {
+    pub(super) system_prompt: Option<String>,
+    pub(super) original_system_prompt: Option<String>,
+    pub(super) live_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
+    pub(super) conv: Box<dyn Conversation>,
+    pub(super) turns: usize,
+    pub(super) turn_num: usize,
+    pub(super) turn_retries: usize,
+    pub(super) timeout_retries: usize,
+    pub(super) timed_out: bool,
+    pub(super) exhausted_turn_retries: bool,
+    pub(super) exhausted_timeout_retries: bool,
+    pub(super) stream_error: Option<ProviderError>,
+    pub(super) total_prompt_tokens: Option<u64>,
+    pub(super) total_completion_tokens: Option<u64>,
+    pub(super) total_cached_tokens: Option<u64>,
+    pub(super) total_cache_creation_tokens: Option<u64>,
+    pub(super) total_reasoning_tokens: Option<u64>,
+    pub(super) interactive_active: bool,
+    pub(super) pending_run_one_turn: bool,
+    pub(super) cmd_rx: Option<mpsc::Receiver<InteractiveCommand>>,
+    pub(super) evt_tx: Option<tokio::sync::broadcast::Sender<InteractiveEvent>>,
+    pub(super) pause: Option<Arc<PauseToken>>,
+    pub(super) remaining_turns: usize,
+    pub(super) reminder_budget: usize,
+    pub(super) completion_nudge_budget: usize,
+    pub(super) single_turn: bool,
+    pub(super) hooks: LoopHooks,
 }
 
 /// Accumulated state from one model completion stream.
-struct StreamAccumulator {
-    text: String,
-    reasoning: String,
-    reasoning_items: Vec<Sealed<Reasoning>>,
-    tool_calls: Vec<ToolCall>,
-    ended: bool,
-    turn_usage: Option<Usage>,
-    paused_mid_stream: bool,
-    retry_turn: bool,
-    retry_timeout_turn: bool,
-    first_token: Option<Instant>,
-    last_token: Option<Instant>,
+pub(super) struct StreamAccumulator {
+    pub(super) text: String,
+    pub(super) reasoning: String,
+    pub(super) reasoning_items: Vec<Sealed<Reasoning>>,
+    pub(super) tool_calls: Vec<ToolCall>,
+    pub(super) ended: bool,
+    pub(super) turn_usage: Option<Usage>,
+    pub(super) paused_mid_stream: bool,
+    pub(super) retry_turn: bool,
+    pub(super) retry_timeout_turn: bool,
+    pub(super) first_token: Option<Instant>,
+    pub(super) last_token: Option<Instant>,
 }
 
 /// Result of streaming one turn's request: the accumulated assistant content
 /// plus the timestamps needed for metric emission by the caller.
-struct StreamTurnOutput {
-    text: String,
-    reasoning: String,
-    reasoning_items: Vec<Sealed<Reasoning>>,
-    tool_calls: Vec<ToolCall>,
-    turn_usage: Option<Usage>,
-    first_token: Option<Instant>,
-    last_token: Option<Instant>,
-    ended: bool,
+pub(super) struct StreamTurnOutput {
+    pub(super) text: String,
+    pub(super) reasoning: String,
+    pub(super) reasoning_items: Vec<Sealed<Reasoning>>,
+    pub(super) tool_calls: Vec<ToolCall>,
+    pub(super) turn_usage: Option<Usage>,
+    pub(super) first_token: Option<Instant>,
+    pub(super) last_token: Option<Instant>,
+    pub(super) ended: bool,
 }
 
 /// Control-flow signal returned by [`LoopState::stream_turn`].
-enum StreamTurnOutcome {
+pub(super) enum StreamTurnOutcome {
     /// A turn's stream completed — caller processes the accumulated output.
     Output(Box<StreamTurnOutput>),
     /// Caller should re-execute the turn (retry / pause / idle timeout).
@@ -296,13 +288,13 @@ enum StreamTurnOutcome {
 
 /// Decision from the interactive turn-boundary gate: either re-enter the
 /// interactive loop, or proceed to execute a normal turn.
-enum InteractiveBoundary {
+pub(super) enum InteractiveBoundary {
     ContinueLoop,
     RunTurn,
 }
 
 /// Result of inspecting the assistant's tool calls for a Done signal.
-enum DoneDecision {
+pub(super) enum DoneDecision {
     /// No Done call present — proceed to execute the remaining tools.
     NotDone,
     /// Done was rejected (mixed or missing artifacts) — re-run the turn.
@@ -312,14 +304,14 @@ enum DoneDecision {
 }
 
 /// Result of handling a turn that produced no tool calls.
-enum EmptyTurnAction {
+pub(super) enum EmptyTurnAction {
     ContinueLoop,
     ReturnRun(Box<CompletedRun>),
 }
 
 impl LoopState {
     #[allow(clippy::too_many_arguments)]
-    fn new(
+    pub(super) fn new(
         system_prompt: Option<String>,
         prompt: &str,
         prepopulated_conversation: Box<dyn Conversation>,
@@ -388,13 +380,13 @@ impl LoopState {
     /// and the per-gremlin log channel wired by the executor. Daemon-mode
     /// runs — where env_logger may not be installed — still write to the
     /// gremlin log blob via this path.
-    fn hook_log(&self, msg: &str) {
+    pub(super) fn hook_log(&self, msg: &str) {
         log::info!("{msg}");
         self.hooks.log(msg);
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn stream_turn(
+    pub(super) async fn stream_turn(
         &mut self,
         model: &DynModel<Completion>,
         tool_ctx: &AgentLoopRuntime,
@@ -484,7 +476,7 @@ impl LoopState {
     /// Build the [`CompletionRequest`] for one model turn: assemble the request
     /// messages,
     /// and apply the caller's generation parameters.
-    async fn prepare_stream_request(
+    pub(super) async fn prepare_stream_request(
         &mut self,
         tool_defs: &[ToolDefinition],
         opts: &LoopOpts<'_>,
@@ -527,7 +519,7 @@ impl LoopState {
     #[allow(clippy::too_many_arguments)]
     async fn consume_stream_events(
         &mut self,
-        mut response: Streamed<Completion>,
+        response: Streamed<Completion>,
         model: &DynModel<Completion>,
         tool_ctx: &AgentLoopRuntime,
         cancel: &CancelToken,
@@ -538,319 +530,36 @@ impl LoopState {
         timeout_retry_backoff: &[f64],
         turn_retry_backoff: &[f64],
     ) -> Result<StreamAccumulator, ClientError> {
-        let mut first_token: Option<Instant> = None;
-        let mut last_token: Option<Instant> = None;
-
-        let mut text = String::new();
-        let mut reasoning = String::new();
-        let mut reasoning_items: Vec<Sealed<Reasoning>> = Vec::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-        let mut ended = false;
-        let mut turn_usage: Option<Usage> = None;
-        let mut paused_mid_stream = false;
-        let mut retry_turn = false;
-        let mut retry_timeout_turn = false;
-
-        // Build a cancellation snapshot that includes the pending
-        // `next_prompt` and (as streaming progresses) accumulated
-        // assistant content.  Plain `history` omits both because they
-        // are only committed after a successful turn.
-        let mut stream_snapshot: Vec<Message> = self.conv.messages();
-
-        loop {
-            let item = tokio::select! {
-                _ = cancel.cancelled() => {
-                    self.hook_log(&format!("agent_loop: cancelled mid-stream (label={})", prefix));
-                    self.hook_log(&format!("{prefix}exit: cancelled mid-stream"));
-                    drop(response);
-                    return Err(cancelled_error("cancelled", &stream_snapshot));
-                }
-                _ = maybe_pause(&self.pause) => {
-                    // Operator triggered debug — cancel the stream and enter
-                    // interactive mode. The turn will be re-executed after
-                    // the debug session ends.
-                    self.hook_log(&format!("agent_loop: paused mid-stream (label={})", prefix));
-                    self.hook_log(&format!("{prefix}pause: entering interactive mode (mid-stream)"));
-                    drop(response);
-                    paused_mid_stream = true;
-                    if let Some(ref p) = self.pause {
-                        p.reset();
-                    }
-                    log::debug!("agent_loop: entering interactive mode mid-stream (label={})", prefix);
-
-                    // Amend system prompt with operator note (same as turn-boundary path).
-                    let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
-                    let amended_system = match &self.system_prompt {
-                        Some(sp) => format!("{sp}{debug_note}"),
-                        None => debug_note.trim_start().to_string(),
-                    };
-                    self.system_prompt = Some(amended_system);
-
-                    // Enter interactive mode inline.
-                    if self.cmd_rx.is_some() && self.evt_tx.is_some() && self.pause.is_some() {
-                        let mut session = InteractiveSession {
-                            cmd_rx: self.cmd_rx.take().unwrap(),
-                            evt_tx: self.evt_tx.take().unwrap(),
-                            pause: self.pause.clone().unwrap(),
-                        };
-                        match interactive_loop(
-                            model,
-                            &mut *self.conv,
-                            &mut session,
-                            self.turn_num,
-                        )
-                        .await
-                        {
-                            Ok(InteractiveLoopResult::Resumed) => {
-                                self.system_prompt = self.original_system_prompt.clone();
-                                self.cmd_rx = Some(session.cmd_rx);
-                                self.evt_tx = Some(session.evt_tx);
-                                self.interactive_active = false;
-                                // Re-build the request from the original next_prompt
-                                // (still available — the builder clones it).
-                                break; // exit the stream loop, re-enter the turn loop
-                            }
-                            Ok(InteractiveLoopResult::RunOneTurn) => {
-                                self.cmd_rx = Some(session.cmd_rx);
-                                self.evt_tx = Some(session.evt_tx);
-                                self.pending_run_one_turn = true;
-                                break; // exit the stream loop, execute one turn
-                            }
-                            Err(e) => {
-                                self.hook_log(&format!("agent_loop: exit (operator bailed, label={})", prefix));
-                                self.hook_log(&format!("{prefix}exit: operator bailed"));
-                                return Err(e);
-                            }
-                        }
-                    }
-                    // No interactive session — shouldn't happen, but continue.
-                    break;
-                }
-                timed = tokio::time::timeout(
-                    Duration::from_secs_f64(idle_timeout),
-                    futures::StreamExt::next(&mut response),
-                ) => timed,
-            };
-            match item {
-                Err(_) => {
-                    if self.timeout_retries < timeout_retry_backoff.len() {
-                        let wait = timeout_retry_backoff[self.timeout_retries];
-                        self.timeout_retries += 1;
-                        self.hook_log(&format!(
-                            "agent_loop: idle timeout on turn {} (attempt {}), backing off {wait}s",
-                            self.turn_num, self.timeout_retries
-                        ));
-                        self.hook_log(&format!("{prefix}retry: idle timeout, backing off {wait}s"));
-                        drop(response);
-                        retry_timeout_turn = true;
-                        if retry_backoff(cancel, wait).await {
-                            self.hook_log(&format!(
-                                "agent_loop: cancelled during timeout backoff (label={})",
-                                prefix
-                            ));
-                            self.hook_log(&format!(
-                                "{prefix}exit: cancelled during timeout backoff"
-                            ));
-                            return Err(cancelled_error("cancelled", &self.conv.messages()));
-                        }
-                        break;
-                    }
-                    self.exhausted_timeout_retries = true;
-                    self.timed_out = true;
-                    drop(response);
-                    break;
-                }
-                Ok(None) => {
-                    ended = true;
-                    turn_usage = Some(response.partial().usage);
-                    break;
-                }
-                Ok(Some(Err(e))) => {
-                    // Retryable (429/5xx) error delivered mid-stream — back off
-                    // and re-execute this same turn with history intact.
-                    if self.turn_retries < turn_retry_backoff.len()
-                        && is_retryable(&e, opts.classify_error)
-                    {
-                        let wait = turn_retry_backoff[self.turn_retries];
-                        self.turn_retries += 1;
-                        self.hook_log(&format!(
-                            "agent_loop: retryable mid-stream error on turn {} (attempt {}), backing off {wait}s: {e}", self.turn_num, self.turn_retries
-                        ));
-                        self.hook_log(&format!(
-                            "{prefix}retry: transient error, backing off {wait}s"
-                        ));
-                        drop(response);
-                        retry_turn = true;
-                        if retry_backoff(cancel, wait).await {
-                            self.hook_log(&format!(
-                                "agent_loop: cancelled during retry backoff (label={})",
-                                prefix
-                            ));
-                            self.hook_log(&format!("{prefix}exit: cancelled during retry backoff"));
-                            return Err(cancelled_error("cancelled", &self.conv.messages()));
-                        }
-                        break;
-                    }
-                    let retryable = is_retryable(&e, opts.classify_error);
-                    if retryable {
-                        self.exhausted_turn_retries = true;
-                    }
-                    self.stream_error = Some(e);
-                    break;
-                }
-                Ok(Some(Ok(chunk))) => {
-                    let now = Instant::now();
-                    if first_token.is_none() {
-                        first_token = Some(now);
-                    }
-                    last_token = Some(now);
-                    // Emit stream deltas via tool_ctx.telemetry.stream_events channel.
-                    // Nested loops must not emit text/reasoning deltas on the
-                    // parent's stream — their output arrives as tool results.
-                    if !nested && tool_ctx.telemetry.wants_stream_events() {
-                        match &chunk {
-                            Item::Event(StreamEvent::Text { ref text, .. }) => {
-                                tool_ctx
-                                    .telemetry
-                                    .send_stream_event(
-                                        InteractiveEvent::StreamChunk { text: text.clone() },
-                                        cancel,
-                                        &stream_snapshot,
-                                    )
-                                    .await?;
-                            }
-                            Item::Event(StreamEvent::Reasoning { ref text, .. }) => {
-                                tool_ctx
-                                    .telemetry
-                                    .send_stream_event(
-                                        InteractiveEvent::ReasoningChunk { text: text.clone() },
-                                        cancel,
-                                        &stream_snapshot,
-                                    )
-                                    .await?;
-                            }
-                            Item::Event(StreamEvent::End {
-                                content: AssistantContent::ToolCall(tc),
-                                ..
-                            }) => {
-                                // Emit tool calls as reasoning so they
-                                // appear in the live thought stream.
-                                tool_ctx
-                                    .telemetry
-                                    .send_stream_event(
-                                        InteractiveEvent::ReasoningChunk {
-                                            text: format_tool_call(tc),
-                                        },
-                                        cancel,
-                                        &stream_snapshot,
-                                    )
-                                    .await?;
-                            }
-                            _ => {}
-                        }
-                    }
-                    apply_chunk(
-                        chunk,
-                        &mut text,
-                        &mut reasoning,
-                        &mut reasoning_items,
-                        &mut tool_calls,
-                    );
-                    // Keep the cancellation snapshot current with whatever
-                    // the model has produced so far so the supervisor can
-                    // reconstruct the full partial turn.
-                    while stream_snapshot
-                        .last()
-                        .is_some_and(|m| matches!(m, Message::Assistant { .. }))
-                    {
-                        stream_snapshot.pop();
-                    }
-                    if !text.is_empty() || !reasoning_items.is_empty() || !tool_calls.is_empty() {
-                        stream_snapshot.push(assistant_tool_message(
-                            &text,
-                            &reasoning_items,
-                            &tool_calls,
-                            true,
-                        ));
-                    }
-                }
-            }
-        }
-
-        Ok(StreamAccumulator {
-            text,
-            reasoning,
-            reasoning_items,
-            tool_calls,
-            ended,
-            turn_usage,
-            paused_mid_stream,
-            retry_turn,
-            retry_timeout_turn,
-            first_token,
-            last_token,
-        })
+        super::stream_consume::consume_stream_events(
+            self,
+            response,
+            model,
+            tool_ctx,
+            cancel,
+            opts,
+            prefix,
+            idle_timeout,
+            nested,
+            timeout_retry_backoff,
+            turn_retry_backoff,
+        )
+        .await
     }
 
     /// Classify a completed stream into a [`StreamTurnOutcome`], applying the
     /// pause/retry continuations and otherwise packaging the turn output.
-    async fn finish_stream_turn(
+    pub(super) async fn finish_stream_turn(
         &mut self,
         acc: StreamAccumulator,
         tool_ctx: &AgentLoopRuntime,
         cancel: &CancelToken,
         nested: bool,
     ) -> Result<StreamTurnOutcome, ClientError> {
-        if acc.paused_mid_stream {
-            // Stream was interrupted by pause — skip post-stream processing.
-            // The turn loop will re-enter at the top and either continue
-            // (if Resumed) or execute one turn (if RunOneTurn).
-            return Ok(StreamTurnOutcome::Continue);
-        }
-
-        if acc.retry_turn {
-            // Stream was interrupted by a retryable error — re-execute this
-            // same turn. History and next_prompt are untouched (the builder
-            // cloned both), so the retry picks up exactly where it left off.
-            // Preserve the pending one-turn state only when already
-            // interactive — otherwise an unconditional set would force
-            // RunOneTurn after normal resumption.
-            if self.interactive_active {
-                self.pending_run_one_turn = true;
-            }
-
-            // Send StreamReset so consumers discard partial text /
-            // reasoning from the failed attempt. Nested loops skip this —
-            // only the parent stream should be reset.
-            if !nested {
-                tool_ctx
-                    .telemetry
-                    .send_stream_event(InteractiveEvent::StreamReset, cancel, &self.conv.messages())
-                    .await?;
-            }
-            return Ok(StreamTurnOutcome::Continue);
-        }
-
-        if acc.retry_timeout_turn {
-            // Stream was interrupted by an idle timeout — re-execute this
-            // same turn with history intact.
-            return Ok(StreamTurnOutcome::Continue);
-        }
-
-        Ok(StreamTurnOutcome::Output(Box::new(StreamTurnOutput {
-            text: acc.text,
-            reasoning: acc.reasoning,
-            reasoning_items: acc.reasoning_items,
-            tool_calls: acc.tool_calls,
-            turn_usage: acc.turn_usage,
-            first_token: acc.first_token,
-            last_token: acc.last_token,
-            ended: acc.ended,
-        })))
+        super::stream_consume::finish_stream_turn(self, acc, tool_ctx, cancel, nested).await
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn execute_tools(
+    pub(super) async fn execute_tools(
         &mut self,
         tool_calls: &[ToolCall],
         tool_ctx: &AgentLoopRuntime,
@@ -886,7 +595,7 @@ impl LoopState {
     /// Validate the turn's tool calls and build the owned [`ToolJob`] list.
     /// Emits per-call tool-start events (unless nested) and enforces the
     /// per-message Task cap by marking over-cap jobs for rejection.
-    fn collect_tool_jobs(
+    pub(super) fn collect_tool_jobs(
         &mut self,
         tool_calls: &[ToolCall],
         prefix: &str,
@@ -945,7 +654,7 @@ impl LoopState {
     /// applied in [`Self::collect_tool_jobs`] via each tool's
     /// `max_per_message()` policy, because a capped tool spawns a child loop.
     #[allow(clippy::too_many_arguments)]
-    async fn dispatch_tool_jobs(
+    pub(super) async fn dispatch_tool_jobs(
         &mut self,
         jobs: &[ToolJob],
         tool_ctx: &AgentLoopRuntime,
@@ -1092,7 +801,7 @@ impl LoopState {
     /// Emit tool results in request order: drain trailing live output,
     /// publish ToolResult events, extend history, and roll the prompt forward.
     #[allow(clippy::too_many_arguments)]
-    async fn emit_tool_results(
+    pub(super) async fn emit_tool_results(
         &mut self,
         jobs: Vec<ToolJob>,
         outcomes: Vec<ToolOutcome>,
@@ -1180,117 +889,14 @@ impl LoopState {
         model: &DynModel<Completion>,
         prefix: &str,
     ) -> Result<InteractiveBoundary, ClientError> {
-        if self.cmd_rx.is_some() && self.evt_tx.is_some() && self.pause.is_some() {
-            if self.pending_run_one_turn {
-                // Came back from a mid-stream or mid-tool pause with
-                // RunOneTurn. Execute one turn, then re-enter interactive.
-                self.pending_run_one_turn = false;
-                self.interactive_active = true;
-                // Fall through to execute one turn.
-            } else if self.interactive_active {
-                // Re-enter interactive_loop after a RunOneTurn/Inject.
-                let mut session = InteractiveSession {
-                    cmd_rx: self.cmd_rx.take().unwrap(),
-                    evt_tx: self.evt_tx.take().unwrap(),
-                    pause: self.pause.clone().unwrap(),
-                };
-                match interactive_loop(model, &mut *self.conv, &mut session, self.turn_num).await {
-                    Ok(InteractiveLoopResult::Resumed) => {
-                        self.interactive_active = false;
-                        self.system_prompt = self.original_system_prompt.clone();
-                        self.cmd_rx = Some(session.cmd_rx);
-                        self.evt_tx = Some(session.evt_tx);
-                        return Ok(InteractiveBoundary::ContinueLoop);
-                    }
-                    Ok(InteractiveLoopResult::RunOneTurn) => {
-                        self.cmd_rx = Some(session.cmd_rx);
-                        self.evt_tx = Some(session.evt_tx);
-                        // Fall through to execute one turn.
-                    }
-                    Err(e) => {
-                        self.hook_log(&format!(
-                            "agent_loop: exit (operator bailed, label={})",
-                            prefix
-                        ));
-                        self.hook_log(&format!("{prefix}exit: operator bailed"));
-                        return Err(e);
-                    }
-                }
-            } else if self.pause.as_ref().is_some_and(|p| p.is_paused()) {
-                // Pause token was triggered — enter interactive mode.
-                self.hook_log(&format!(
-                    "agent_loop: pause token detected at turn boundary (label={})",
-                    prefix
-                ));
-                self.hook_log(&format!(
-                    "{prefix}pause: entering interactive mode (turn boundary)"
-                ));
-                if let Some(ref p) = self.pause {
-                    p.reset();
-                }
-
-                // Amend system prompt with operator note.
-                let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
-                let amended_system = match &self.system_prompt {
-                    Some(sp) => format!("{sp}{debug_note}"),
-                    None => debug_note.trim_start().to_string(),
-                };
-                self.system_prompt = Some(amended_system);
-
-                let mut session = InteractiveSession {
-                    cmd_rx: self.cmd_rx.take().unwrap(),
-                    evt_tx: self.evt_tx.take().unwrap(),
-                    pause: self.pause.clone().unwrap(),
-                };
-                match interactive_loop(model, &mut *self.conv, &mut session, self.turn_num).await {
-                    Ok(InteractiveLoopResult::Resumed) => {
-                        self.system_prompt = self.original_system_prompt.clone();
-                        self.cmd_rx = Some(session.cmd_rx);
-                        self.evt_tx = Some(session.evt_tx);
-                        return Ok(InteractiveBoundary::ContinueLoop);
-                    }
-                    Ok(InteractiveLoopResult::RunOneTurn) => {
-                        self.interactive_active = true;
-                        self.cmd_rx = Some(session.cmd_rx);
-                        self.evt_tx = Some(session.evt_tx);
-                        // Fall through to execute one turn.
-                    }
-                    Err(e) => {
-                        self.hook_log(&format!(
-                            "agent_loop: exit (operator bailed, label={})",
-                            prefix
-                        ));
-                        self.hook_log(&format!("{prefix}exit: operator bailed"));
-                        return Err(e);
-                    }
-                }
-            }
-        }
-        Ok(InteractiveBoundary::RunTurn)
+        super::interactive::await_interactive_turn(self, model, prefix).await
     }
 
     /// Fold this turn's provider usage into the running totals and return the
     /// cumulative [`UsageStats`]. Absent fields stay `None`; a reported zero
     /// is preserved as `Some(0)`.
     fn fold_turn_usage(&mut self, turn_usage: Option<&Usage>) -> UsageStats {
-        if let Some(u) = turn_usage {
-            self.total_prompt_tokens = add_opt(self.total_prompt_tokens, u.input_tokens);
-            self.total_completion_tokens = add_opt(self.total_completion_tokens, u.output_tokens);
-            self.total_cached_tokens = add_opt(self.total_cached_tokens, u.cached_input_tokens);
-            self.total_cache_creation_tokens = add_opt(
-                self.total_cache_creation_tokens,
-                u.cache_creation_input_tokens,
-            );
-            self.total_reasoning_tokens = add_opt(self.total_reasoning_tokens, u.reasoning_tokens);
-        }
-        usage_stats(
-            self.turn_num + 1,
-            self.total_prompt_tokens,
-            self.total_completion_tokens,
-            self.total_cached_tokens,
-            self.total_cache_creation_tokens,
-            self.total_reasoning_tokens,
-        )
+        super::turn_flow::fold_turn_usage(self, turn_usage)
     }
 
     /// Emit TurnComplete plus the raw/captured transcript entries and turn
@@ -1314,60 +920,25 @@ impl LoopState {
         captured: &mut Option<Vec<serde_json::Value>>,
         prefix: &str,
     ) -> Result<(), ClientError> {
-        // Emit TurnComplete via tool_ctx.telemetry.stream_events, before
-        // text/tool_calls are consumed by the rest of the turn processing.
-        // Nested loops skip this — their child turn numbers restart at 0 and
-        // can collide with the parent's.
-        if !nested && tool_ctx.telemetry.wants_stream_events() {
-            log::debug!(
-                "agent_loop: broadcasting TurnComplete (turn={})",
-                self.turn_num
-            );
-            tool_ctx
-                .telemetry
-                .send_stream_event(
-                    InteractiveEvent::TurnComplete {
-                        turn: self.turn_num,
-                        text: text.to_string(),
-                        tool_calls: tool_calls.iter().map(format_tool_call).collect(),
-                        stats: turn_stats.clone(),
-                        totals: Some(totals.clone()),
-                    },
-                    cancel,
-                    &self.conv.messages(),
-                )
-                .await?;
-        }
-
-        if !reasoning.is_empty() {
-            let msg = format!("think: {}", trunc(reasoning, 200));
-            self.hook_log(&format!("{prefix}{msg}"));
-        }
-        if !text.is_empty() {
-            let msg = format!("text: {}", trunc(text, 200));
-            self.hook_log(&format!("{prefix}{msg}"));
-        }
-        if !nested && !text.is_empty() {
-            write_raw(raw, &assistant_text_event(text));
-            if let Some(evts) = captured.as_mut() {
-                evts.push(assistant_text_event(text));
-            }
-        }
-        self.conv.record_prose(text);
-
-        emit_turn_metrics(
-            prefix,
-            self.turn_num,
+        super::turn_flow::emit_turn_artifacts(
+            self,
+            tool_ctx,
+            cancel,
+            nested,
+            text,
+            reasoning,
+            tool_calls,
+            turn_stats,
+            totals,
             first_token,
             last_token,
             turn_start,
-            reasoning,
-            text,
-            tool_calls,
             turn_usage,
-            &self.hooks,
-        );
-        Ok(())
+            raw,
+            captured,
+            prefix,
+        )
+        .await
     }
 
     /// Inspect the assistant's tool calls for a Done signal and act on it.
@@ -1385,153 +956,20 @@ impl LoopState {
         loop_start: Instant,
         prefix: &str,
     ) -> Result<DoneDecision, ClientError> {
-        // Solo Done is the only valid completion signal. Mixed Done + other
-        // tool calls is incoherent and rejected wholesale so the model retries
-        // cleanly. Which tool completes the loop is the handler's
-        // `completion()` policy, not a name comparison here.
-        let has_non_done = tool_calls
-            .iter()
-            .any(|tc| !tools::is_completion(tc.function.name.as_str()));
-        let done_call = tool_calls
-            .iter()
-            .find(|tc| tools::is_completion(tc.function.name.as_str()));
-
-        match (done_call, has_non_done) {
-            (Some(_done_tc), true) => {
-                // Mixed — produce a tool_result for every call so providers
-                // see a valid round of history.
-                let mut results = Vec::with_capacity(tool_calls.len());
-                for tc in tool_calls {
-                    let body = if tools::is_completion(tc.function.name.as_str()) {
-                        "Error: Done must be called alone — do not combine Done with \
-                         other tool calls in the same message. Re-issue your tool \
-                         calls without Done, then call Done by itself when finished."
-                    } else {
-                        "Skipped: this call was rejected because Done was combined \
-                         with other tool calls in the same message. Re-issue without \
-                         Done."
-                    };
-                    results.push(Message::tool_result(
-                        tc.id.clone(),
-                        tc.function.name.clone(),
-                        body,
-                    ));
-                }
-                self.conv.done_rejected(
-                    text,
-                    reasoning_items,
-                    tool_calls,
-                    results,
-                    Message::user(
-                        "Done was rejected because it was combined with other tool calls. \
-                         Try again — this time either use tools, or call Done. Never both.",
-                    ),
-                );
-                return Ok(DoneDecision::RetryNeeded);
-            }
-            (Some(done_tc), false) => {
-                // Solo Done — validate expected artifacts before accepting.
-                let done_summary = done_tc
-                    .function
-                    .arguments
-                    .get("summary")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                self.hook_log(&format!("{prefix}tool: Done {}", trunc(&done_summary, 200)));
-                if !nested && !expected_artifact_paths.is_empty() {
-                    let missing = missing_artifacts(expected_artifact_paths);
-                    if !missing.is_empty() && self.reminder_budget > 0 {
-                        self.reminder_budget -= 1;
-                        let reminder = format!(
-                            "Done rejected: {}\nWrite each file using the Write \
-                             tool, then call Done.",
-                            artifact_reminder(&missing),
-                        );
-                        self.conv.done_rejected(
-                            text,
-                            reasoning_items,
-                            std::slice::from_ref(done_tc),
-                            vec![],
-                            {
-                                let rejected_ledger = format!(
-                                    "[turn {}]: Done {} (rejected)\n\n{}",
-                                    self.turn_num, done_summary, reminder
-                                );
-                                done_user_message(
-                                    &rejected_ledger,
-                                    done_tc.id.clone(),
-                                    done_tc.function.name.clone(),
-                                    &reminder,
-                                )
-                            },
-                        );
-                        return Ok(DoneDecision::RetryNeeded);
-                    }
-                }
-
-                // Accept completion.
-                let result_text = if text.trim().is_empty() && !done_summary.is_empty() {
-                    done_summary.clone()
-                } else {
-                    text.to_string()
-                };
-                let usage = usage_stats(
-                    self.turn_num,
-                    self.total_prompt_tokens,
-                    self.total_completion_tokens,
-                    self.total_cached_tokens,
-                    self.total_cache_creation_tokens,
-                    self.total_reasoning_tokens,
-                );
-                if !nested {
-                    emit_final(prefix, self.turns, "", &self.hooks);
-                    emit_summary(
-                        prefix,
-                        self.turn_num,
-                        loop_start,
-                        self.total_prompt_tokens,
-                        self.total_completion_tokens,
-                        self.total_cached_tokens,
-                        self.total_cache_creation_tokens,
-                        self.total_reasoning_tokens,
-                        &self.hooks,
-                    );
-                }
-                // Emit Done via stream_events. Nested loops skip this — only
-                // the parent's Done signals completion.
-                if !nested && tool_ctx.telemetry.wants_stream_events() {
-                    log::debug!("agent_loop: broadcasting Done (turn={})", self.turn_num);
-                    tool_ctx
-                        .telemetry
-                        .send_stream_event(
-                            InteractiveEvent::Done {
-                                text: result_text.clone(),
-                                summary: done_summary.clone(),
-                                usage: Some(usage.clone()),
-                            },
-                            cancel,
-                            &self.conv.messages(),
-                        )
-                        .await?;
-                }
-                // Capture the full message history (prior turns + this final
-                // user prompt + assistant message) so the chat gremlin can
-                // persist complete model context between stages.
-                let artifact =
-                    self.conv
-                        .finalize(self.turn_num, text, reasoning_items, Some(done_tc));
-                return Ok(DoneDecision::Accepted(Box::new(completed_run(
-                    Some(artifact.final_text),
-                    Some(done_summary),
-                    captured,
-                    usage,
-                    Some(self.conv.clone_box()),
-                ))));
-            }
-            _ => {}
-        }
-        Ok(DoneDecision::NotDone)
+        super::turn_flow::handle_done_decision(
+            self,
+            tool_ctx,
+            cancel,
+            nested,
+            text,
+            reasoning_items,
+            tool_calls,
+            expected_artifact_paths,
+            captured,
+            loop_start,
+            prefix,
+        )
+        .await
     }
 
     /// Handle a turn that produced no tool calls: continue (interactive / or
@@ -1549,118 +987,18 @@ impl LoopState {
         captured: &mut Option<Vec<serde_json::Value>>,
         prefix: &str,
     ) -> EmptyTurnAction {
-        // In interactive mode, empty turns are expected — the operator is
-        // driving the conversation. Don't nudge or remind.
-        if self.interactive_active {
-            return EmptyTurnAction::ContinueLoop;
-        }
-
-        // Reasoning-only turn — the model is thinking. Just loop, preserving
-        // the structured reasoning items for the next request.
-        // In single-turn mode (naked completions, local compaction) the
-        // conversation panics on record_turn; don't loop, let it exhaust.
-        if text.is_empty() && !reasoning.is_empty() && !self.single_turn {
-            log::debug!("reasoning-only turn: turn={} — continuing", self.turn_num);
-            self.conv.record_turn("", reasoning_items, &[], None);
-            self.conv.set_next_prompt("Continue.");
-            return EmptyTurnAction::ContinueLoop;
-        }
-        // Single-turn: fall through to exhaustion.
-
-        log::warn!(
-            "empty turn: turn={} text_empty={} reasoning_empty={} budget={}",
-            self.turn_num,
-            text.is_empty(),
-            reasoning.is_empty(),
-            self.completion_nudge_budget,
-        );
-
-        // Missing-artifact reminder (only when the model produced text).
-        if !nested && self.reminder_budget > 0 && !text.is_empty() {
-            let missing = missing_artifacts(expected_artifact_paths);
-            if !missing.is_empty() {
-                self.reminder_budget -= 1;
-                self.hook_log(&format!(
-                    "reminder: {} missing artifact(s) — nudging agent (remaining_budget={})",
-                    missing.len(),
-                    self.reminder_budget,
-                ));
-                self.conv.record_turn(text, reasoning_items, &[], None);
-                let reminder = artifact_reminder(&missing);
-                write_raw(
-                    raw,
-                    &serde_json::json!({"type": "reminder", "message": reminder}),
-                );
-                if let Some(evts) = captured.as_mut() {
-                    evts.push(serde_json::json!({"type": "reminder", "message": reminder}));
-                }
-                self.conv.set_next_prompt(&reminder);
-                return EmptyTurnAction::ContinueLoop;
-            }
-        }
-
-        // Completion nudge — prompt the model to call Done.
-        if !text.is_empty() && self.completion_nudge_budget > 0 {
-            self.completion_nudge_budget -= 1;
-            self.hook_log(&format!(
-                "empty turn — nudging agent (remaining_budget={})",
-                self.completion_nudge_budget,
-            ));
-            let nudge_msg = "You produced text but no tool calls. If your work is complete, \
-                 call the Done tool. If you still need to make changes, use the \
-                 appropriate tool now.";
-            write_raw(
-                raw,
-                &serde_json::json!({"type": "reminder", "message": nudge_msg}),
-            );
-            if let Some(evts) = captured.as_mut() {
-                evts.push(serde_json::json!({"type": "reminder", "message": nudge_msg}));
-            }
-            self.conv.record_turn(text, reasoning_items, &[], None);
-            self.conv.set_next_prompt(nudge_msg);
-            return EmptyTurnAction::ContinueLoop;
-        }
-
-        // Exhausted — give up.
-        log::warn!(
-            "empty-turn exhausted: turn={} text_empty={} reasoning_empty={} budget={}",
-            self.turn_num,
-            text.is_empty(),
-            reasoning.is_empty(),
-            self.completion_nudge_budget,
-        );
-        let usage = usage_stats(
-            self.turn_num,
-            self.total_prompt_tokens,
-            self.total_completion_tokens,
-            self.total_cached_tokens,
-            self.total_cache_creation_tokens,
-            self.total_reasoning_tokens,
-        );
-        if !nested {
-            emit_final(prefix, self.turns, " (exhausted)", &self.hooks);
-            emit_summary(
-                prefix,
-                self.turn_num,
-                loop_start,
-                self.total_prompt_tokens,
-                self.total_completion_tokens,
-                self.total_cached_tokens,
-                self.total_cache_creation_tokens,
-                self.total_reasoning_tokens,
-                &self.hooks,
-            );
-        }
-        let artifact = self
-            .conv
-            .finalize(self.turn_num, text, reasoning_items, None);
-        EmptyTurnAction::ReturnRun(Box::new(completed_run(
-            Some(artifact.final_text),
-            None,
+        super::turn_flow::handle_empty_turn(
+            self,
+            nested,
+            text,
+            reasoning,
+            reasoning_items,
+            expected_artifact_paths,
+            loop_start,
+            raw,
             captured,
-            usage,
-            Some(self.conv.clone_box()),
-        )))
+            prefix,
+        )
     }
 
     /// Append the current assistant turn to the conversation history.
@@ -1671,8 +1009,13 @@ impl LoopState {
         tool_calls: &[ToolCall],
         input_tokens: Option<u64>,
     ) {
-        self.conv
-            .record_turn(text, reasoning_items, tool_calls, input_tokens);
+        super::turn_flow::commit_turn_to_history(
+            self,
+            text,
+            reasoning_items,
+            tool_calls,
+            input_tokens,
+        )
     }
 }
 
@@ -1950,113 +1293,7 @@ pub(crate) async fn run_agent_loop_nested(
     result
 }
 
-/// Future that resolves when a [`PauseToken`] fires, or never if there is no token.
-async fn maybe_pause(pause: &Option<Arc<PauseToken>>) {
-    if let Some(ref p) = pause {
-        log::debug!("maybe_pause: waiting on pause token");
-        p.paused().await;
-        log::debug!("maybe_pause: pause token resolved");
-    } else {
-        // No interactive session — pause is impossible. This future never
-        // resolves, which is intentional: without a session there is no
-        // channel for the agent to receive a pause signal.
-        log::trace!("maybe_pause: no interactive session, pending forever");
-        std::future::pending::<()>().await;
-    }
-}
-
-// ── interactive loop ─────────────────────────────────────────────────────
-
-/// Interactive state machine. Called when the operator triggers pause
-/// (via [`PauseToken`]) or when re-entering after a `RunTurn`/`Inject`.
-///
-/// On entry, broadcasts `Ready { turn }`. Then blocks reading
-/// `InteractiveCommand`s from the session's `cmd_rx`.
-/// `Inject` and `RunTurn` return so the outer turn loop executes exactly
-/// one turn and then re-enters this function.
-#[allow(clippy::too_many_arguments)]
-async fn interactive_loop(
-    _model: &DynModel<Completion>,
-    conv: &mut dyn Conversation,
-    session: &mut InteractiveSession,
-    turn: usize,
-) -> Result<InteractiveLoopResult, ClientError> {
-    log::debug!("interactive_loop: broadcasting Ready (turn={turn})");
-    let _ = session.evt_tx.send(InteractiveEvent::Ready { turn });
-
-    log::debug!("interactive_loop: waiting for command (turn={turn})");
-    let cmd = match session.cmd_rx.recv().await {
-        Some(cmd) => {
-            log::debug!("interactive_loop: received command {cmd:?} (turn={turn})");
-            cmd
-        }
-        None => {
-            log::debug!("interactive_loop: cmd_rx closed, ending session (turn={turn})");
-            let _ = session.evt_tx.send(InteractiveEvent::Ended {
-                reason: "disconnect".to_string(),
-            });
-            return Ok(InteractiveLoopResult::Resumed);
-        }
-    };
-
-    match cmd {
-        InteractiveCommand::Inject(text) => {
-            log::debug!(
-                "interactive_loop: Inject command (len={}, turn={turn})",
-                text.len()
-            );
-            conv.inject_operator(&text);
-            Ok(InteractiveLoopResult::RunOneTurn)
-        }
-        InteractiveCommand::RunTurn => {
-            log::debug!("interactive_loop: RunTurn command (turn={turn})");
-            Ok(InteractiveLoopResult::RunOneTurn)
-        }
-        InteractiveCommand::Bail(reason) => {
-            log::debug!("interactive_loop: Bail command (reason={reason:?}, turn={turn})");
-            let _ = session.evt_tx.send(InteractiveEvent::Ended {
-                reason: "bailed".to_string(),
-            });
-            Err(ClientError::Bail {
-                reason: format!("operator bailed: {reason}"),
-            })
-        }
-        InteractiveCommand::Quit => {
-            log::debug!("interactive_loop: Quit command (turn={turn})");
-            let _ = session.evt_tx.send(InteractiveEvent::Ended {
-                reason: "resumed".to_string(),
-            });
-            Ok(InteractiveLoopResult::Resumed)
-        }
-    }
-}
-
-enum InteractiveLoopResult {
-    /// Quit — interactive session ended, resume normal operation.
-    Resumed,
-    /// Run one turn, then re-enter interactive_loop.
-    RunOneTurn,
-}
-
 // ── helpers for completion-decision bookkeeping ───────────────────────────
-
-fn usage_stats(
-    turns: usize,
-    prompt: Option<u64>,
-    completion: Option<u64>,
-    cached: Option<u64>,
-    cache_creation: Option<u64>,
-    reasoning: Option<u64>,
-) -> UsageStats {
-    UsageStats {
-        prompt_tokens: prompt,
-        completion_tokens: completion,
-        cached_input_tokens: cached,
-        cache_creation_input_tokens: cache_creation,
-        reasoning_tokens: reasoning,
-        turns,
-    }
-}
 
 fn turn_stats(turn: usize, usage: Option<&Usage>) -> Option<TurnStats> {
     let u = usage?;
@@ -2081,44 +1318,6 @@ fn turn_stats(turn: usize, usage: Option<&Usage>) -> Option<TurnStats> {
         cache_creation_input_tokens: u.cache_creation_input_tokens,
         reasoning_tokens: u.reasoning_tokens,
     })
-}
-
-fn completed_run(
-    text: Option<String>,
-    summary: Option<String>,
-    events: &Option<Vec<serde_json::Value>>,
-    usage: UsageStats,
-    conversation: Option<Box<dyn Conversation>>,
-) -> CompletedRun {
-    CompletedRun {
-        exit_code: 0,
-        text_result: text,
-        summary,
-        events: events.clone(),
-        cost_usd: None,
-        token_usage: Some(usage),
-        conversation,
-    }
-}
-
-fn missing_artifacts(expected: &[PathBuf]) -> Vec<&PathBuf> {
-    expected
-        .iter()
-        .filter(|p| !p.exists() || p.metadata().map(|m| m.len()).unwrap_or(0) == 0)
-        .collect()
-}
-
-fn artifact_reminder(missing: &[&PathBuf]) -> String {
-    let paths: Vec<String> = missing
-        .iter()
-        .map(|p| format!("  - {}", p.display()))
-        .collect();
-    format!(
-        "The following expected output file(s) were not written:\n{}\n\
-         Please write each file using the Write tool now. Do not explain \
-         \u{2014} just write the files.",
-        paths.join("\n")
-    )
 }
 
 // ── agent loop ────────────────────────────────────────────────────────────
@@ -2406,6 +1605,7 @@ pub(crate) async fn run_agent_loop_core(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn assistant_text_event(text: &str) -> serde_json::Value {
     serde_json::json!({
         "type": "assistant",
@@ -2448,7 +1648,7 @@ pub(crate) fn tool_result_event(
     msg
 }
 
-pub(crate) fn write_raw(raw: &mut Option<std::fs::File>, evt: &serde_json::Value) {
+fn write_raw(raw: &mut Option<std::fs::File>, evt: &serde_json::Value) {
     if let Some(f) = raw {
         if let Ok(line) = serde_json::to_string(evt) {
             let _ = writeln!(f, "{line}");
@@ -2460,7 +1660,7 @@ pub(crate) fn write_raw(raw: &mut Option<std::fs::File>, evt: &serde_json::Value
 /// Emit a structured per-turn token/cache log line for every completed turn.
 ///
 /// This is always logged regardless of the telemetry gate; timing and output
-/// byte-ratio extras live behind the separate [`emit_turn_metrics`] path.
+/// byte-ratio extras live in the [`emit_turn_metrics`] path in `turn_flow.rs`.
 fn emit_turn_stats(
     prefix: &str,
     turn: usize,
@@ -2479,81 +1679,9 @@ fn emit_turn_stats(
     hooks.log(&msg);
 }
 
-/// Emit per-turn telemetry: timing, token counts, cache hit ratio, reasoning ratio.
-#[allow(clippy::too_many_arguments)]
-fn emit_turn_metrics(
-    prefix: &str,
-    turn: usize,
-    first_token: Option<Instant>,
-    last_token: Option<Instant>,
-    turn_start: Instant,
-    reasoning: &str,
-    text: &str,
-    tool_calls: &[ToolCall],
-    usage: Option<&Usage>,
-    hooks: &LoopHooks,
-) {
-    if !crate::config::telemetry_enabled() {
-        return;
-    }
-
-    let ttft = first_token
-        .map(|ft| ft.duration_since(turn_start))
-        .map(|d| format!("{:.1}s", d.as_secs_f64()))
-        .unwrap_or_else(|| "-".into());
-
-    let gen_time = match (first_token, last_token) {
-        (Some(ft), Some(lt)) => {
-            let d = lt.duration_since(ft);
-            format!("{:.1}s", d.as_secs_f64())
-        }
-        _ => "-".into(),
-    };
-
-    let prompt = usage.and_then(|u| u.input_tokens).unwrap_or(0);
-    let completion = usage.and_then(|u| u.output_tokens).unwrap_or(0);
-    let cached = usage.and_then(|u| u.cached_input_tokens).unwrap_or(0);
-    let reasoning_tok = usage.and_then(|u| u.reasoning_tokens).unwrap_or(0);
-
-    let cache_pct = if prompt > 0 {
-        format!("{:.0}%", (cached as f64 / (prompt as f64).max(1.0)) * 100.0)
-    } else {
-        "-".into()
-    };
-
-    // Byte lengths (not char counts) — a cheap proxy for output volume.
-    let reasoning_bytes = reasoning.len();
-    let text_bytes = text.len();
-    let total_bytes = reasoning_bytes + text_bytes;
-    let reasoning_byte_ratio = if total_bytes > 0 {
-        format!(
-            "{:.0}%",
-            (reasoning_bytes as f64 / total_bytes as f64) * 100.0
-        )
-    } else {
-        "-".into()
-    };
-
-    let msg = format!(
-        "metrics: turn={} ttft={} gen={} tools={} prompt={} completion={} cached={}({}) reasoning_tok={} reasoning_byte_ratio={}",
-        turn,
-        ttft,
-        gen_time,
-        tool_calls.len(),
-        prompt,
-        completion,
-        cached,
-        cache_pct,
-        reasoning_tok,
-        reasoning_byte_ratio,
-    );
-    log::info!("{prefix}{msg}");
-    hooks.log(&format!("{prefix}{msg}"));
-}
-
 /// Emit stage-end telemetry summary (always emitted, not gated by GREMLINS_TELEMETRY).
 #[allow(clippy::too_many_arguments)]
-fn emit_summary(
+pub(super) fn emit_summary(
     prefix: &str,
     turns: usize,
     loop_start: Instant,
@@ -2614,7 +1742,7 @@ fn emit_summary(
     hooks.log(&full);
 }
 
-pub(crate) fn emit_final(prefix: &str, turns: usize, suffix: &str, hooks: &LoopHooks) {
+pub(super) fn emit_final(prefix: &str, turns: usize, suffix: &str, hooks: &LoopHooks) {
     let msg = format!("final: turns={turns} cost=not-reported{suffix}");
     let full = format!("{prefix}{msg}");
     log::info!("{full}");
@@ -2739,10 +1867,10 @@ pub(crate) fn test_ctx(
     cwd: Option<std::path::PathBuf>,
     raw_path: Option<std::path::PathBuf>,
 ) -> RunContext {
-    let conv: Box<dyn super::conversation::Conversation> =
-        Box::new(super::conversation::ConversationStub::new("hi"));
+    let conv: Box<dyn crate::clients::conversation::Conversation> =
+        Box::new(crate::clients::conversation::ConversationStub::new("hi"));
     RunContext {
-        params: super::backend::RunParams {
+        params: crate::clients::backend::RunParams {
             prompt: "hi".into(),
             label: "t".into(),
             model: Some("mock".into()),
@@ -2778,23 +1906,23 @@ pub(crate) fn test_ctx(
         completion_nudge_budget: 0,
         stream_events: None,
         prepopulated_conversation: conv,
-        hooks: super::plug::LoopHooks::new(),
+        hooks: crate::clients::agent::plug::LoopHooks::new(),
     }
 }
 
 #[cfg(test)]
-pub(crate) fn test_tool_ctx() -> super::tools::AgentLoopRuntime {
-    super::tools::AgentLoopRuntime {
+pub(crate) fn test_tool_ctx() -> crate::clients::tools::AgentLoopRuntime {
+    crate::clients::tools::AgentLoopRuntime {
         cwd: None,
         extra_env: None,
         base_env: None,
-        sandbox: super::tools::SandboxMode::Roots(vec![]),
+        sandbox: crate::clients::tools::SandboxMode::Roots(vec![]),
         audit_log: None,
         allowed_tools: None,
         task_fn: None,
         audit_lock: Some(std::sync::Arc::new(std::sync::Mutex::new(()))),
         id_prefix: String::new(),
-        telemetry: super::tools::AgentLoopTelemetry {
+        telemetry: crate::clients::tools::AgentLoopTelemetry {
             stream_events: None,
             tool_output: None,
         },
@@ -2809,9 +1937,10 @@ pub(crate) fn test_tool_ctx() -> super::tools::AgentLoopRuntime {
 mod tests {
     use super::*;
     use crate::clients::conversation::ConversationStub;
-    use crate::clients::format::key_arg;
+    use crate::clients::format::{assistant_tool_message, key_arg};
     use crate::clients::interactive::InteractiveChannels;
     use http::StatusCode;
+    use rig_core::completion::message::AssistantContent;
     use rig_core::message::{Issuer, Reasoning, ReasoningContent, ToolFunction, UserContent};
     use rig_core::operation::Completion;
     use std::collections::HashMap;

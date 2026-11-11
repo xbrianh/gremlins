@@ -462,7 +462,7 @@ impl Conversation for ConversationStub {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
             );
-            messages.push(super::done_helpers::done_user_message(
+            messages.push(super::agent::done_helpers::done_user_message(
                 &done_ledger,
                 done_tc.id.clone(),
                 done_tc.function.name.clone(),

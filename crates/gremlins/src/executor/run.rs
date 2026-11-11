@@ -433,7 +433,7 @@ async fn run_agent(
 
     let stage_env = gremlin.env.clone();
 
-    let task_models = crate::clients::task::build_task_selector(
+    let task_models = crate::clients::agent::task::build_task_selector(
         std::sync::Arc::new(crate::clients::client::resolve_model),
         &task_models_by_kind,
     );
@@ -519,7 +519,7 @@ async fn run_agent(
     // Wires cross-package dependencies (log, prompt-debug,
     // token-usage) into the agent loop without the loop importing
     // `crate::executor` or `crate::landscape`.
-    let mut hooks = crate::clients::plug::LoopHooks::new();
+    let mut hooks = crate::clients::agent::plug::LoopHooks::new();
     {
         let log_tx = gremlin.runtime_config.log_tx.clone();
         hooks.register_logger(move |msg| {

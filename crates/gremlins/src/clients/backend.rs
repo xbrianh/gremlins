@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub(crate) use super::agent::plug::LoopHooks;
+use super::agent::task_models::TaskModelSelector;
 use super::cancel::CancelToken;
 use super::conversation::Conversation;
 use super::interactive::{InteractiveSession, StreamEventSender};
 use super::params::ResolvedParams;
-pub(crate) use super::plug::LoopHooks;
 use super::protocol::{CompactionResult, CompletedRun};
-use super::task_models::TaskModelSelector;
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use rig_core::driver::DynModel;
