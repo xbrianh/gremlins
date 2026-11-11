@@ -1,6 +1,3 @@
-use crate::task_kind::TaskKind;
-use rig_core::completion::ToolDefinition;
-
 /// Whether tools are available to the model. NoTools mode produces zero
 /// tool definitions, so the model cannot call any tool — including Task and
 /// Done. Used by single-turn naked completions (local compaction, etc.).
@@ -28,13 +25,6 @@ pub(crate) fn always_available(name: &str) -> bool {
     ALWAYS_AVAILABLE.contains(&name)
 }
 
-/// Mischief and WebSearch are chat-only tools that bypass tool filters in chat
-/// sessions. Headless gremlins must get them from their native block (which
-/// never lists them), so this helper keeps them out of headless loops.
-pub(crate) fn chat_only_always_available(name: &str, chat: bool) -> bool {
-    chat && (name == "Mischief" || name == "WebSearch")
-}
-
 /// One tool parameter: the name and description shown in the JSON schema,
 /// the JSON-schema `ty`, whether the model must supply it, and whether
 /// `validate_tool_args` type-checks it. A handful of fields are advertised in
@@ -42,12 +32,12 @@ pub(crate) fn chat_only_always_available(name: &str, chat: bool) -> bool {
 /// `limit`/`offset`, Bash's `timeout`, Grep's `path`/`glob`/`max_matches`,
 /// Glob's `path`); those carry `validated: false` so argument checking stays
 /// byte-for-byte identical to the old hand-written `tool_param_schema`.
-struct FieldSpec {
-    name: &'static str,
-    description: &'static str,
-    ty: &'static str,
-    required: bool,
-    validated: bool,
+pub(super) struct FieldSpec {
+    pub(super) name: &'static str,
+    pub(super) description: &'static str,
+    pub(super) ty: &'static str,
+    pub(super) required: bool,
+    pub(super) validated: bool,
 }
 
 /// One tool: the single source of truth shared by `tool_param_schema`
@@ -55,15 +45,19 @@ struct FieldSpec {
 /// `description` may contain the `{TASK_MAX_PER_TURN}` /
 /// `{MAX_CONCURRENT_TOOLS}` placeholders, substituted when the definition is
 /// emitted.
-struct ToolSpec {
-    name: &'static str,
-    description: &'static str,
-    fields: &'static [FieldSpec],
+pub(super) struct ToolSpec {
+    pub(super) name: &'static str,
+    pub(super) description: &'static str,
+    pub(super) fields: &'static [FieldSpec],
+    /// Chat-only tools are omitted from tool definitions in headless mode
+    /// and bypass the tool filter in chat mode. Only LoadSkill and
+    /// WebSearch set this to `true`.
+    pub(super) chat_only: bool,
 }
 
 /// Every tool's contract. The order is the order `tool_definitions`
 /// advertises them; `LoadSkill` is emitted only for chat sessions.
-static TOOL_SPECS: &[ToolSpec] = &[
+pub(super) static TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec {
         name: "Read",
         description: "Read the contents of a file. Paths outside the sandbox are rejected. Use offset/limit to paginate large files — continue reading with offset until you have the whole file. Each returned line is prefixed with its true 1-based line number in the source file followed by a `|` separator (e.g. `12|content`); `offset` is a 0-indexed line skip count, so line numbers stay aligned with `Grep` results even when paging.",
@@ -72,6 +66,7 @@ static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "limit", description: "Maximum number of lines to read", ty: "integer", required: false, validated: false },
             FieldSpec { name: "offset", description: "Number of lines to skip from the start of the file (0-indexed, default 0)", ty: "integer", required: false, validated: false },
         ],
+        chat_only: false,
     },
     ToolSpec {
         name: "Landscape",
@@ -81,16 +76,16 @@ static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "depth", description: "For directories, how many nested directory levels to descend (default: all levels)", ty: "integer", required: false, validated: true },
             FieldSpec { name: "token_budget", description: "Optional token budget for directory outlines. When set, the tree is trimmed with skeletonization and depth back-off to fit the budget.", ty: "integer", required: false, validated: true },
         ],
+        chat_only: false,
     },
     ToolSpec {
         name: "Edit",
         description: "Make one or more replacements in a file. Edits apply sequentially, so later edits see the results of earlier edits in the same call — useful for chained renames. Each edit replaces old_string with new_string (requires unique match). Use start_line/end_line to scope the search to a line range when old_string appears multiple times (line-number scopes refer to the file state after all prior edits in the same call). After a failed edit due to non-uniqueness, re-read only the failing region (with offset/limit), not the whole file. All edits in the array target the same file, specified by the top-level `file_path` parameter — do not nest `file_path` inside individual edit objects.",
         fields: &[
             FieldSpec { name: "file_path", description: "Path to the file to edit (relative or absolute)", ty: "string", required: true, validated: true },
-            // `edits` has no top-level description; its nested item schema is
-            // built specially in `tool_parameters`.
             FieldSpec { name: "edits", description: "", ty: "array", required: true, validated: true },
         ],
+        chat_only: false,
     },
     ToolSpec {
         name: "Bash",
@@ -99,6 +94,7 @@ static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "command", description: "Shell command to execute (run via bash -c)", ty: "string", required: true, validated: true },
             FieldSpec { name: "timeout", description: "Timeout in seconds (optional, default 120)", ty: "integer", required: false, validated: false },
         ],
+        chat_only: false,
     },
     ToolSpec {
         name: "Write",
@@ -107,6 +103,7 @@ static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "file_path", description: "Path to the file to write (relative or absolute)", ty: "string", required: true, validated: true },
             FieldSpec { name: "content", description: "Content to write to the file", ty: "string", required: true, validated: true },
         ],
+        chat_only: false,
     },
     ToolSpec {
         name: "Grep",
@@ -119,6 +116,7 @@ static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "context_before", description: "Number of context lines to include before each match (optional, default 0)", ty: "integer", required: false, validated: true },
             FieldSpec { name: "context_after", description: "Number of context lines to include after each match (optional, default 0)", ty: "integer", required: false, validated: true },
         ],
+        chat_only: false,
     },
     ToolSpec {
         name: "Glob",
@@ -127,6 +125,7 @@ static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "pattern", description: "Glob pattern (e.g. `**/*.rs`, `src/**/mod.rs`)", ty: "string", required: true, validated: true },
             FieldSpec { name: "path", description: "Base directory to search in (default: current directory)", ty: "string", required: false, validated: false },
         ],
+        chat_only: false,
     },
     ToolSpec {
         name: "WebSearch",
@@ -135,11 +134,13 @@ static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "url", description: "The URL to fetch (e.g. https://example.com/page)", ty: "string", required: true, validated: true },
             FieldSpec { name: "timeout", description: "Timeout in seconds (optional, default 30)", ty: "integer", required: false, validated: true },
         ],
+        chat_only: true,
     },
     ToolSpec {
         name: "Mischief",
         description: "Return the gremlins YAML DSL reference. Call with no arguments to get a complete reference for definition files, stage types, artifact URIs, interpolation, bootstrap, land, and stage definitions.",
         fields: &[],
+        chat_only: true,
     },
     ToolSpec {
         name: "Done",
@@ -147,6 +148,7 @@ static TOOL_SPECS: &[ToolSpec] = &[
         fields: &[
             FieldSpec { name: "summary", description: "Brief summary of what was accomplished", ty: "string", required: true, validated: true },
         ],
+        chat_only: false,
     },
     ToolSpec {
         name: "Task",
@@ -155,6 +157,7 @@ static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "kind", description: "The kind of task to delegate.", ty: "string", required: true, validated: true },
             FieldSpec { name: "prompt", description: "Full task briefing for the worker. Non-Fork kinds start with a clean conversation context and see nothing from your conversation — include all relevant file contents, diffs, plans, and instructions the worker needs directly in this field. The Fork kind inherits the parent conversation history before this prompt.", ty: "string", required: true, validated: true },
         ],
+        chat_only: false,
     },
     ToolSpec {
         name: "LoadSkill",
@@ -162,6 +165,7 @@ static TOOL_SPECS: &[ToolSpec] = &[
         fields: &[
             FieldSpec { name: "name", description: "Name of the skill to load", ty: "string", required: true, validated: true },
         ],
+        chat_only: true,
     },
 ];
 
@@ -170,7 +174,7 @@ static TOOL_SPECS: &[ToolSpec] = &[
 /// the parameter is required; optional parameters are type-checked only when
 /// present. Fields are drawn from [`TOOL_SPECS`], keeping the advertised and
 /// validated contracts in lockstep.
-fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool)>> {
+pub(super) fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool)>> {
     let spec = TOOL_SPECS.iter().find(|s| s.name == name)?;
     Some(
         spec.fields
@@ -179,287 +183,4 @@ fn tool_param_schema(name: &str) -> Option<Vec<(&'static str, &'static str, bool
             .map(|f| (f.name, f.ty, f.required))
             .collect(),
     )
-}
-
-/// Build a short summary of the fields present in a mixed-mode edit object,
-/// so the error message shows what the model actually sent.
-fn describe_edit_provided_fields(obj: &serde_json::Map<String, serde_json::Value>) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    for key in &["start_line", "end_line", "old_string", "new_string"] {
-        if let Some(v) = obj.get(*key) {
-            let display = match v {
-                serde_json::Value::String(s) => {
-                    if s.len() > 40 {
-                        format!("{}<{} chars>", key, s.len())
-                    } else {
-                        format!("{key}={s:?}")
-                    }
-                }
-                other => format!("{key}={other}"),
-            };
-            parts.push(display);
-        }
-    }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!(" (provided: {})", parts.join(", "))
-    }
-}
-
-/// Check that all required tool arguments are present and have the correct types.
-/// Returns an error message string on failure, or `None` if valid.
-pub(crate) fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
-    let schema = tool_param_schema(name)?;
-    for (field, expected_type, required) in &schema {
-        match args.get(field) {
-            None if *required => {
-                let expected: Vec<String> = schema
-                    .iter()
-                    .map(|(f, t, required)| {
-                        if *required {
-                            format!("{f}: {t}")
-                        } else {
-                            format!("{f}: {t} (optional)")
-                        }
-                    })
-                    .collect();
-                let found: Vec<String> = args
-                    .as_object()
-                    .map(|o| o.keys().map(|k| format!("{k}: …")).collect())
-                    .unwrap_or_default();
-                let found_str = if found.is_empty() {
-                    "<not an object>".into()
-                } else {
-                    format!("{{{}}}", found.join(", "))
-                };
-                let mut msg = format!(
-                    "Error: missing '{field}' for {name} tool. \
-                     Expected: {{{}}}. Got: {found_str}",
-                    expected.join(", ")
-                );
-                // If file_path is missing for Edit and any edit item has a
-                // file_path key, the model likely nested it — give a targeted hint.
-                if name == "Edit" && *field == "file_path" {
-                    if let Some(edits) = args.get("edits").and_then(|v| v.as_array()) {
-                        let misplaced = edits.iter().any(|e| {
-                            e.as_object()
-                                .map(|o| o.contains_key("file_path"))
-                                .unwrap_or(false)
-                        });
-                        if misplaced {
-                            msg.push_str(
-                                " (Note: file_path belongs at the top level, not inside individual edits — all edits target the same file)",
-                            );
-                        }
-                    }
-                }
-                return Some(msg);
-            }
-            None => continue,
-            Some(val) => {
-                let ok = match *expected_type {
-                    "string" => val.is_string(),
-                    "array" => val.is_array(),
-                    "integer" => val.is_number(),
-                    "object" => val.is_object(),
-                    _ => true,
-                };
-                if !ok {
-                    let actual = if val.is_string() {
-                        "string"
-                    } else if val.is_array() {
-                        "array"
-                    } else if val.is_number() {
-                        "number"
-                    } else if val.is_object() {
-                        "object"
-                    } else if val.is_null() {
-                        "null"
-                    } else if val.is_boolean() {
-                        "bool"
-                    } else {
-                        "?"
-                    };
-                    return Some(format!(
-                        "Error: '{field}' for {name} must be {expected_type}, got {actual}"
-                    ));
-                }
-            }
-        }
-    }
-    // Nested constraints for tools with structured array items.
-    if name == "Edit" {
-        if let Some(edits) = args.get("edits").and_then(|v| v.as_array()) {
-            if edits.is_empty() {
-                return Some("Error: 'edits' array must not be empty for Edit tool".into());
-            }
-            for (i, edit) in edits.iter().enumerate() {
-                let obj = match edit.as_object() {
-                    Some(o) => o,
-                    None => {
-                        return Some(format!(
-                            "Error: edit {} in 'edits' must be an object for Edit tool",
-                            i + 1
-                        ));
-                    }
-                };
-                // 'replacement' (the old range-mode field) is removed — reject it
-                // explicitly even when old_string/new_string are also present,
-                // so legacy mixed-mode requests don't silently apply new_string.
-                if obj.contains_key("replacement") {
-                    let provided = describe_edit_provided_fields(obj);
-                    return Some(format!(
-                        "Error: edit {} has 'replacement' which is no longer supported — use 'new_string' instead{}",
-                        i + 1,
-                        provided
-                    ));
-                }
-                // 'old_string' is always required.
-                if !obj.contains_key("old_string") {
-                    return Some(format!(
-                        "Error: edit {} missing 'old_string' for Edit tool",
-                        i + 1
-                    ));
-                }
-                // With 'old_string' present, 'new_string' is also required.
-                if !obj.contains_key("new_string") {
-                    return Some(format!(
-                        "Error: edit {} missing 'new_string' for Edit tool",
-                        i + 1
-                    ));
-                } // 'start_line'/'end_line' are optional scope fields;
-                  // both accept any integer (zero clamps to 1 in the executor),
-                  // end_line may appear without start_line (scope defaults to
-                  // line 1), and start_line > end_line is accepted (the executor
-                  // clamps the byte window).
-                let has_start = obj.contains_key("start_line");
-                let has_end = obj.contains_key("end_line");
-                if has_start {
-                    match obj.get("start_line").and_then(|v| v.as_u64()) {
-                        Some(_) => {}
-                        None => {
-                            return Some(format!(
-                                "Error: edit {} 'start_line' must be an integer for Edit tool",
-                                i + 1
-                            ));
-                        }
-                    }
-                }
-                if has_end {
-                    match obj.get("end_line").and_then(|v| v.as_u64()) {
-                        Some(_) => {}
-                        None => {
-                            return Some(format!(
-                                "Error: edit {} 'end_line' must be an integer for Edit tool",
-                                i + 1
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Build the JSON-schema `parameters` object for a tool from its [`ToolSpec`].
-/// Field names, descriptions and the `required` set all come from the table;
-/// only Edit's nested `edits` item schema and Task's `kind` enum are bespoke.
-fn tool_parameters(spec: &ToolSpec) -> serde_json::Value {
-    let mut properties = serde_json::Map::new();
-    for field in spec.fields {
-        let value = match (spec.name, field.name) {
-            ("Edit", "edits") => serde_json::json!({
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "old_string": {
-                            "type": "string",
-                            "description": "Exact text to replace — must be unique in the file (or unique within start_line/end_line scope)"
-                        },
-                        "new_string": {
-                            "type": "string",
-                            "description": "Replacement text"
-                        },
-                        "start_line": {
-                            "type": "integer",
-                            "description": "When old_string appears multiple times, scope the search to start at this 1-based line (inclusive; clamps to EOF if beyond last line)"
-                        },
-                        "end_line": {
-                            "type": "integer",
-                            "description": "When old_string appears multiple times, scope the search to end at this 1-based line (inclusive; clamps to EOF if beyond last line)"
-                        }
-                    },
-                    "additionalProperties": false,
-                    "required": ["old_string", "new_string"]
-                }            }),
-            ("Task", "kind") => serde_json::json!({
-                "type": "string",
-                "enum": TaskKind::ALL
-                    .iter()
-                    .map(|kind| serde_json::Value::String(kind.as_str().to_string()))
-                    .collect::<Vec<_>>(),
-                "description": field.description
-            }),
-            _ => serde_json::json!({
-                "type": field.ty,
-                "description": field.description
-            }),
-        };
-        properties.insert(field.name.to_string(), value);
-    }
-    let required: Vec<&str> = spec
-        .fields
-        .iter()
-        .filter(|f| f.required)
-        .map(|f| f.name)
-        .collect();
-    serde_json::json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false
-    })
-}
-
-pub(crate) fn tool_definitions(
-    filter: Option<&[String]>,
-    is_chat: bool,
-    mode: ToolMode,
-) -> Vec<ToolDefinition> {
-    if mode == ToolMode::NoTools {
-        return Vec::new();
-    }
-    let mut all: Vec<ToolDefinition> = Vec::new();
-    for spec in TOOL_SPECS {
-        // LoadSkill and WebSearch are chat-only; every other tool is always
-        // constructed so the filter below can still admit it via `always_available`.
-        if (spec.name == "LoadSkill" || spec.name == "WebSearch") && !is_chat {
-            continue;
-        }
-        let description = spec
-            .description
-            .replace("{TASK_MAX_PER_TURN}", &TASK_MAX_PER_TURN.to_string())
-            .replace("{MAX_CONCURRENT_TOOLS}", &MAX_CONCURRENT_TOOLS.to_string());
-        all.push(ToolDefinition {
-            name: spec.name.into(),
-            description,
-            parameters: tool_parameters(spec),
-        });
-    }
-    match filter {
-        Some(names) => all
-            .into_iter()
-            .filter(|t| {
-                always_available(&t.name)
-                    || (is_chat && t.name == "LoadSkill")
-                    || chat_only_always_available(&t.name, is_chat)
-                    || names.iter().any(|n| n == &t.name)
-            })
-            .collect(),
-        None => all,
-    }
 }

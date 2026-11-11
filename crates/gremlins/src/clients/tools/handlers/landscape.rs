@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 
 use crate::clients::conversation::Conversation;
-use crate::clients::tools::{
-    blocking_string, parse_args, req_str, AgentLoopRuntime, ToolHandler, ToolOutcome,
-};
+use crate::clients::tools::registry::ToolHandler;
+use crate::clients::tools::runtime::{AgentLoopRuntime, ToolOutcome};
+use crate::clients::tools::util::{blocking_string, parse_args, req_str};
 use crate::core::paths::{enforce, io_enforce, resolve};
 use crate::landscape::{format_landscape_block_tool, format_outline_items, LandscapeExplorer};
 

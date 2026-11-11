@@ -1,0 +1,3663 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use crate::clients::tools::definitions::tool_definitions;
+use crate::clients::tools::dispatch::invoke;
+use crate::clients::tools::handlers::{
+    bash::bash_invoke,
+    edit::{edit_invoke, edit_sync},
+    glob::glob_invoke,
+    grep::grep_invoke,
+    read::read_invoke,
+    skills::load_skill_invoke,
+    websearch::{websearch_invoke, websearch_invoke_with_cap},
+    write::write_invoke,
+};
+use crate::clients::tools::sandbox::{audit, audit_log_path, bash_check, check_tool};
+use crate::clients::tools::schema::validate_tool_args;
+use crate::clients::tools::tool_specs::ToolMode;
+use crate::core::paths::*;
+use crate::test_support::EnvGuard;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use super::*;
+
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Returns true if a process with the given pid exists on this host.
+///
+/// `kill -0` reports success for zombies too, because a zombie still
+/// occupies a process-table entry until its parent (or init) reaps it.
+/// A killed descendant is precisely what the process-group timeout test
+/// asserts, so on Linux treat zombies as dead by reading `/proc`.
+fn process_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // `/proc/<pid>/stat` is `pid (comm) state ...`. `comm` may
+            // itself contain spaces and parentheses, so split after the
+            // last `)` and read the next field.
+            if let Some(state) = stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+            {
+                if matches!(state, "Z" | "X" | "x") {
+                    return false;
+                }
+            }
+        }
+    }
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn tmp() -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let p = std::env::temp_dir().join(format!(
+        "gremlins-tools-{}-{}-{n}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+fn ctx(cwd: &Path) -> AgentLoopRuntime {
+    AgentLoopRuntime {
+        cwd: Some(cwd.to_path_buf()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![cwd.to_path_buf()]),
+        audit_log: None,
+        allowed_tools: None,
+        task_fn: None,
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    }
+}
+
+#[tokio::test]
+async fn emit_output_prefixes_the_tool_call_id() {
+    let dir = tmp();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ToolOutputLine>(4);
+    let mut c = ctx(&dir);
+    c.id_prefix = "a3f1.".to_string();
+    c.telemetry.tool_output = Some(tx);
+
+    c.emit_output("call_0", "Bash", "Bash echo hi", "hi\n")
+        .await;
+    let line = rx.recv().await.expect("a line was emitted");
+    assert_eq!(
+        line.id, "a3f1.call_0",
+        "id must carry the task-chain prefix"
+    );
+    assert_eq!(line.name, "Bash");
+    assert_eq!(line.text, "hi\n");
+}
+
+#[tokio::test]
+async fn emit_output_without_prefix_keeps_the_raw_id() {
+    let dir = tmp();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ToolOutputLine>(4);
+    let mut c = ctx(&dir);
+    c.telemetry.tool_output = Some(tx);
+
+    c.emit_output("call_0", "Bash", "call", "x").await;
+    let line = rx.recv().await.expect("a line was emitted");
+    assert_eq!(line.id, "call_0", "top-level ids must stay unprefixed");
+}
+
+#[tokio::test]
+async fn read_write_roundtrip() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let path = dir.join("a.txt");
+    let args =
+        serde_json::json!({"file_path": path.to_str().unwrap(), "content": "hello\nworld\n"})
+            .to_string();
+    assert_eq!(write_invoke(&c, &args).await, "OK");
+    let read_args = serde_json::json!({"file_path": "a.txt"}).to_string();
+    assert_eq!(read_invoke(&c, &read_args).await, "1|hello\n2|world\n");
+    let limited = serde_json::json!({"file_path": "a.txt", "offset": 1, "limit": 1}).to_string();
+    assert_eq!(read_invoke(&c, &limited).await, "2|world\n");
+}
+
+#[tokio::test]
+async fn read_numbers_lines_with_true_file_line_numbers() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    std::fs::write(dir.join("nums.txt"), "a\nb\nc\nd\n").unwrap();
+    let args = serde_json::json!({"file_path": "nums.txt", "offset": 1, "limit": 2}).to_string();
+    assert_eq!(
+        read_invoke(&c, &args).await,
+        "2|b\n3|c\n\n[Read with offset=3 to continue...]"
+    );
+
+    // No trailing newline and empty files stay well-formed.
+    std::fs::write(dir.join("no-newline.txt"), "x\ny").unwrap();
+    let args = serde_json::json!({"file_path": "no-newline.txt"}).to_string();
+    assert_eq!(read_invoke(&c, &args).await, "1|x\n2|y");
+
+    std::fs::write(dir.join("empty.txt"), "").unwrap();
+    let args = serde_json::json!({"file_path": "empty.txt"}).to_string();
+    assert_eq!(read_invoke(&c, &args).await, "");
+}
+
+#[tokio::test]
+async fn edit_replaces_unique() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    std::fs::write(dir.join("b.txt"), "foo bar foo").unwrap();
+    let dup = serde_json::json!({
+        "file_path": "b.txt",
+        "edits": [{"old_string": "foo", "new_string": "baz"}]
+    })
+    .to_string();
+    assert!(edit_invoke(&c, &dup).await.contains("not unique"));
+    std::fs::write(dir.join("b.txt"), "foo bar").unwrap();
+    let ok = serde_json::json!({
+        "file_path": "b.txt",
+        "edits": [{"old_string": "foo", "new_string": "baz"}]
+    })
+    .to_string();
+    assert!(edit_invoke(&c, &ok).await.contains("Applied 1 edit"));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("b.txt")).unwrap(),
+        "baz bar"
+    );
+}
+
+#[tokio::test]
+async fn bash_echo_and_env() {
+    let dir = tmp();
+    let mut c = ctx(&dir);
+    let args = serde_json::json!({"command": "echo hi"}).to_string();
+    assert_eq!(bash_invoke(&c, &args, "tool-test-id").await.0.trim(), "hi");
+    c.extra_env = Some(HashMap::from([("GREMLIN_TEST_TOKEN".into(), "abc".into())]));
+    let env_args = serde_json::json!({"command": "printf %s \"$GREMLIN_TEST_TOKEN\""}).to_string();
+    assert_eq!(bash_invoke(&c, &env_args, "tool-test-id").await.0, "abc");
+    let fail = serde_json::json!({"command": "exit 7"}).to_string();
+    assert!(bash_invoke(&c, &fail, "tool-test-id")
+        .await
+        .0
+        .starts_with("[exit 7]"));
+    // Process substitution is bash-only; `sh` would fail here, proving
+    // the interpreter is `bash` rather than a POSIX shell.
+    let bash_only = serde_json::json!({"command": "diff <(echo a) <(echo a)"}).to_string();
+    assert_eq!(
+        bash_invoke(&c, &bash_only, "tool-test-id").await.0.trim(),
+        ""
+    );
+}
+
+#[tokio::test]
+async fn bash_streaming_emits_completed_lines_and_final_flush() {
+    let dir = tmp();
+    let mut c = ctx(&dir);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ToolOutputLine>(8);
+    c.telemetry.tool_output = Some(tx);
+
+    // No trailing newline: the final flush must emit the trailing partial
+    // with an appended `\n`.
+    let args = serde_json::json!({ "command": "printf 'a\\nbb\\nccc'" }).to_string();
+    let out = bash_invoke(&c, &args, "tool-test-id").await.0;
+    assert_eq!(out, "a\nbb\nccc");
+
+    let mut chunks = Vec::new();
+    while let Ok(line) = rx.try_recv() {
+        assert_eq!(line.id, "tool-test-id");
+        assert_eq!(line.name, "Bash");
+        chunks.push(line.text);
+    }
+    let joined: String = chunks.concat();
+    assert_eq!(
+        joined, "a\nbb\nccc\n",
+        "live chunks must preserve line boundaries and flush the trailing partial"
+    );
+}
+
+#[tokio::test]
+async fn bash_interleaved_stdout_stderr_preserves_stdout_then_stderr() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    // Interleave stdout/stderr writes so completion order is not trivially
+    // the emission order; the result string must still be stdout-then-stderr.
+    let args = serde_json::json!(
+        { "command": "printf out1; printf err1 >&2; printf out2; printf err2 >&2" }
+    )
+    .to_string();
+    let out = bash_invoke(&c, &args, "tool-test-id").await.0;
+    assert_eq!(out, "out1out2err1err2");
+}
+
+#[tokio::test]
+async fn bash_timeout_from_args() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let args = serde_json::json!({"command": "echo ok", "timeout": 5}).to_string();
+    let out = bash_invoke(&c, &args, "tool-test-id").await.0;
+    assert_eq!(out.trim(), "ok");
+    assert!(!out.contains("[timeout]"));
+}
+
+#[tokio::test]
+async fn bash_timeout_kills_slow_command() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let args = serde_json::json!({"command": "sleep 10", "timeout": 1}).to_string();
+    let out = bash_invoke(&c, &args, "tool-test-id").await.0;
+    assert_eq!(out, "[timeout]");
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn bash_timeout_kills_descendant_process_group() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let child_pid = dir.join("child.pid");
+    let parent_pid = dir.join("parent.pid");
+    // `sh` records its own pid (group leader) and starts a descendant,
+    // then waits. On timeout both must be killed, proving the process
+    // group is terminated rather than just the direct `sh` child.
+    let command = format!(
+        "echo $$ > {parent}; sh -c 'echo $$ > {child}; sleep 10' & wait",
+        parent = parent_pid.display(),
+        child = child_pid.display(),
+    );
+    let args = serde_json::json!({ "command": command, "timeout": 1 }).to_string();
+    let out = bash_invoke(&c, &args, "tool-test-id").await.0;
+    assert_eq!(out, "[timeout]");
+
+    let read_pid = |path: &std::path::Path| -> u32 {
+        std::fs::read_to_string(path)
+            .expect("pid file should exist")
+            .trim()
+            .parse()
+            .expect("pid file should hold a valid pid")
+    };
+    let _parent = read_pid(&parent_pid);
+    let child = read_pid(&child_pid);
+
+    // Poll briefly: the timeout path must reap the group promptly. The
+    // group leader can linger as a zombie while the shell that spawned
+    // it waits, so only check the descendant is gone.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !process_alive(child) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("descendant should be killed by the process-group timeout");
+}
+
+#[tokio::test]
+async fn bash_timeout_defaults_to_120() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let args = serde_json::json!({"command": "echo ok"}).to_string();
+    let out = bash_invoke(&c, &args, "tool-test-id").await.0;
+    assert_eq!(out.trim(), "ok");
+    assert!(!out.contains("[timeout]"));
+}
+
+#[tokio::test]
+async fn bash_timeout_zero_is_clamped() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let args = serde_json::json!({"command": "echo ok", "timeout": 0}).to_string();
+    let out = bash_invoke(&c, &args, "tool-test-id").await.0;
+    assert_eq!(out.trim(), "ok");
+    assert!(!out.contains("[timeout]"));
+}
+
+#[tokio::test]
+async fn bash_invoke_respects_cwd() {
+    // Reproduction: pwd must report cwd, not the process working directory.
+    let dir = tmp();
+    let marker = "gremlins-cwd-test-marker";
+    std::fs::write(dir.join(marker), "ok").unwrap();
+    let c = AgentLoopRuntime {
+        cwd: Some(dir.clone()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![dir.clone()]),
+        audit_log: None,
+        allowed_tools: None,
+        task_fn: None,
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    };
+    let args = serde_json::json!({"command": "pwd; ls"}).to_string();
+    let output = bash_invoke(&c, &args, "tool-test-id").await.0;
+    assert!(
+        output.contains(dir.to_str().unwrap()),
+        "bash_invoke pwd must contain cwd={}, got: {output}",
+        dir.display()
+    );
+    assert!(
+        output.contains(marker),
+        "bash_invoke ls must see marker file '{marker}', got: {output}"
+    );
+}
+
+#[tokio::test]
+async fn bash_invoke_cwd_none_uses_project_root() {
+    // When cwd is None, bash must use project_root() — the same
+    // fallback that bash_check uses for path resolution. This keeps
+    // validation and execution bases aligned.
+    let _env = EnvGuard::lock();
+    let dir = tmp();
+    std::env::set_var("GREMLINS_PROJECT_ROOT", dir.to_str().unwrap());
+    let c = AgentLoopRuntime {
+        cwd: None,
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![dir.clone()]),
+        audit_log: None,
+        allowed_tools: None,
+        task_fn: None,
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    };
+    let expected = canonicalize_or_ancestor(&dir);
+    let args = serde_json::json!({"command": "pwd"}).to_string();
+    let output = bash_invoke(&c, &args, "tool-test-id").await.0;
+    assert!(
+        output.trim().contains(expected.to_str().unwrap()),
+        "bash_invoke with cwd=None should use project_root={}, got: {output}",
+        expected.display()
+    );
+}
+
+#[tokio::test]
+async fn bash_invoke_cwd_none_diverges_from_process_cwd() {
+    // Regression: when GREMLINS_PROJECT_ROOT differs from the daemon's
+    // working directory, bash execution must still use project_root so
+    // validation and execution agree on what `./file.txt` refers to.
+    let _env = EnvGuard::lock();
+    let project = tmp();
+    let daemon = tmp();
+    std::env::set_var("GREMLINS_PROJECT_ROOT", project.to_str().unwrap());
+    let c = AgentLoopRuntime {
+        cwd: None,
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![project.clone()]),
+        audit_log: None,
+        allowed_tools: None,
+        task_fn: None,
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    };
+    let expected = canonicalize_or_ancestor(&project);
+    // Ensure the daemon cwd is genuinely different from project root.
+    assert_ne!(canonicalize_or_ancestor(&daemon), expected);
+    let args = serde_json::json!({"command": "pwd"}).to_string();
+    let output = bash_invoke(&c, &args, "tool-test-id").await.0;
+    assert!(
+        output.trim().contains(expected.to_str().unwrap()),
+        "bash_invoke with cwd=None must use project_root={}, not process cwd={}, got: {output}",
+        expected.display(),
+        canonicalize_or_ancestor(&daemon).display()
+    );
+}
+
+#[tokio::test]
+async fn grep_and_glob() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    std::fs::write(dir.join("one.rs"), "fn alpha() {}\nfn beta() {}\n").unwrap();
+    std::fs::write(dir.join("two.py"), "def alpha():\n    pass\n").unwrap();
+    std::fs::create_dir(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("sub/three.rs"), "fn alpha() {}\n").unwrap();
+    let grep_args = serde_json::json!({"pattern": "alpha", "glob": "*.rs"}).to_string();
+    let out = grep_invoke(&c, &grep_args).await;
+    assert!(out.contains("one.rs:1:fn alpha() {}"));
+    assert!(out.contains("three.rs:1:fn alpha() {}"));
+    assert!(!out.contains("two.py"));
+    let glob_args = serde_json::json!({"pattern": "**/*.rs"}).to_string();
+    let found = glob_invoke(&c, &glob_args).await;
+    assert!(found.contains("one.rs"));
+    assert!(found.contains("three.rs"));
+    assert!(!found.contains("two.py"));
+}
+
+#[tokio::test]
+async fn grep_context_expands_with_line_numbers_and_clips() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let path = dir.join("ctx.txt");
+    std::fs::write(&path, "lead\nzero\nalpha\nbeta\ngamma\n").unwrap();
+    let args = serde_json::json!({
+        "pattern": "alpha",
+        "path": path.to_str().unwrap(),
+        "context_before": 5,
+        "context_after": 1
+    })
+    .to_string();
+    let out = grep_invoke(&c, &args).await;
+    let p = path.display();
+    assert_eq!(
+        out,
+        format!("{p}-1-lead\n{p}-2-zero\n{p}:3:alpha\n{p}-4-beta")
+    );
+}
+
+#[tokio::test]
+async fn grep_context_separates_non_contiguous_blocks() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let path = dir.join("blocks.txt");
+    std::fs::write(&path, "a\nb\nc\nd\ne\nf\ng\n").unwrap();
+    let args = serde_json::json!({
+        "pattern": "b|f",
+        "path": path.to_str().unwrap(),
+        "context_before": 1,
+        "context_after": 1
+    })
+    .to_string();
+    let out = grep_invoke(&c, &args).await;
+    let p = path.display();
+    assert_eq!(
+        out,
+        format!("{p}-1-a\n{p}:2:b\n{p}-3-c\n--\n{p}-5-e\n{p}:6:f\n{p}-7-g")
+    );
+}
+
+#[tokio::test]
+async fn grep_context_merges_touching_windows() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let path = dir.join("merge.txt");
+    std::fs::write(&path, "a\nb\nc\nd\ne\n").unwrap();
+    let args = serde_json::json!({
+        "pattern": "b|d",
+        "path": path.to_str().unwrap(),
+        "context_before": 1,
+        "context_after": 1
+    })
+    .to_string();
+    let out = grep_invoke(&c, &args).await;
+    let p = path.display();
+    assert_eq!(out, format!("{p}-1-a\n{p}:2:b\n{p}-3-c\n{p}:4:d\n{p}-5-e"));
+}
+
+#[tokio::test]
+async fn grep_context_max_matches_counts_matches_not_lines() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let path = dir.join("hits.txt");
+    let body: String = (1..=10).map(|i| format!("hit {i}\n")).collect();
+    std::fs::write(&path, body).unwrap();
+    let args = serde_json::json!({
+        "pattern": "hit",
+        "path": path.to_str().unwrap(),
+        "max_matches": 3,
+        "context_before": 1,
+        "context_after": 1
+    })
+    .to_string();
+    let out = grep_invoke(&c, &args).await;
+    let p = path.display();
+    // All ten lines match, but only three are admitted; the fourth match
+    // must be excluded entirely rather than emitted as `-` context.
+    assert_eq!(
+        out,
+        format!("{p}:1:hit 1\n{p}:2:hit 2\n{p}:3:hit 3\n[truncated at 3 matches]"),
+    );
+}
+
+#[tokio::test]
+async fn grep_without_context_is_byte_identical_to_legacy_format() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let path = dir.join("plain.txt");
+    std::fs::write(&path, "a\nb\nc\n").unwrap();
+    let args = serde_json::json!({
+        "pattern": "b",
+        "path": path.to_str().unwrap(),
+        "context_before": 0,
+        "context_after": 0
+    })
+    .to_string();
+    let out = grep_invoke(&c, &args).await;
+    assert_eq!(out, format!("{}:2:b", path.display()));
+}
+
+#[tokio::test]
+async fn grep_context_directory_walk_uses_same_matcher() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    std::fs::write(dir.join("a.txt"), "1\n2 alpha\n3\n").unwrap();
+    std::fs::write(dir.join("b.txt"), "x\ny alpha\nz\n").unwrap();
+    let args = serde_json::json!({
+        "pattern": "alpha",
+        "context_before": 1,
+        "context_after": 1
+    })
+    .to_string();
+    let out = grep_invoke(&c, &args).await;
+    let root = canonicalize_or_ancestor(&dir);
+    let a = root.join(".").join("a.txt");
+    let b = root.join(".").join("b.txt");
+    assert_eq!(
+        out,
+        format!(
+            "{}-1-1\n{}:2:2 alpha\n{}-3-3\n--\n{}-1-x\n{}:2:y alpha\n{}-3-z",
+            a.display(),
+            a.display(),
+            a.display(),
+            b.display(),
+            b.display(),
+            b.display()
+        )
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn grep_and_glob_skip_symlink_escape() {
+    let root = tmp();
+    let worktree = root.join("worktree");
+    std::fs::create_dir(&worktree).unwrap();
+    let outside = root.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("secret.rs"), "fn alpha() {}\n").unwrap();
+    // Symlinked file and directory inside the worktree pointing out.
+    std::os::unix::fs::symlink(outside.join("secret.rs"), worktree.join("leak.rs")).unwrap();
+    std::os::unix::fs::symlink(&outside, worktree.join("outdir")).unwrap();
+    // A legitimate in-worktree file that should still be found.
+    std::fs::write(worktree.join("ok.rs"), "fn alpha() {}\n").unwrap();
+
+    let c = ctx(&worktree);
+    let grep_args = serde_json::json!({"pattern": "alpha"}).to_string();
+    let out = grep_invoke(&c, &grep_args).await;
+    assert!(
+        out.contains("ok.rs"),
+        "in-worktree file should match: {out}"
+    );
+    assert!(
+        !out.contains("leak.rs"),
+        "symlinked file must be skipped: {out}"
+    );
+    assert!(
+        !out.contains("secret.rs"),
+        "escaped dir must be skipped: {out}"
+    );
+
+    let glob_args = serde_json::json!({"pattern": "**/*.rs"}).to_string();
+    let found = glob_invoke(&c, &glob_args).await;
+    assert!(
+        found.contains("ok.rs"),
+        "in-worktree file should glob: {found}"
+    );
+    assert!(
+        !found.contains("leak.rs"),
+        "symlinked file must be filtered: {found}"
+    );
+    assert!(
+        !found.contains("secret.rs"),
+        "escaped dir must be filtered: {found}"
+    );
+}
+
+#[tokio::test]
+async fn grep_no_matches_and_bad_regex() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    std::fs::write(dir.join("z.txt"), "nothing").unwrap();
+    let none = serde_json::json!({"pattern": "zzz"}).to_string();
+    assert_eq!(grep_invoke(&c, &none).await, "(no matches)");
+    let bad = serde_json::json!({"pattern": "["}).to_string();
+    assert!(grep_invoke(&c, &bad)
+        .await
+        .starts_with("Error: invalid regex"));
+}
+
+#[tokio::test]
+async fn grep_max_matches_from_args() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let body: String = (0..50).map(|i| format!("hit {i}\n")).collect();
+    std::fs::write(dir.join("hits.txt"), body).unwrap();
+    let args = serde_json::json!({"pattern": "hit", "max_matches": 10}).to_string();
+    let out = grep_invoke(&c, &args).await;
+    let lines: Vec<_> = out.lines().collect();
+    assert_eq!(lines.len(), 11, "got: {out}");
+    assert!(out.ends_with("[truncated at 10 matches]"));
+}
+
+#[tokio::test]
+async fn grep_exact_max_matches_is_not_truncated() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let body: String = (0..10).map(|i| format!("hit {i}\n")).collect();
+    std::fs::write(dir.join("hits.txt"), body).unwrap();
+    let args = serde_json::json!({"pattern": "hit", "max_matches": 10}).to_string();
+    let out = grep_invoke(&c, &args).await;
+    let lines: Vec<_> = out.lines().collect();
+    assert_eq!(lines.len(), 10, "got: {out}");
+    assert!(!out.contains("[truncated"));
+}
+
+#[tokio::test]
+async fn grep_exact_max_matches_file_path_is_not_truncated() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let body: String = (0..10).map(|i| format!("hit {i}\n")).collect();
+    std::fs::write(dir.join("hits.txt"), body).unwrap();
+    let args = serde_json::json!({
+        "pattern": "hit",
+        "path": "hits.txt",
+        "max_matches": 10
+    })
+    .to_string();
+    let out = grep_invoke(&c, &args).await;
+    let lines: Vec<_> = out.lines().collect();
+    assert_eq!(lines.len(), 10, "got: {out}");
+    assert!(!out.contains("[truncated"));
+}
+
+#[tokio::test]
+async fn grep_max_matches_defaults_to_2000() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let body: String = (0..2100).map(|i| format!("hit {i}\n")).collect();
+    std::fs::write(dir.join("hits.txt"), body).unwrap();
+    let args = serde_json::json!({"pattern": "hit"}).to_string();
+    let out = grep_invoke(&c, &args).await;
+    let lines: Vec<_> = out.lines().collect();
+    assert_eq!(lines.len(), 2001, "got {} lines", lines.len());
+    assert!(out.ends_with("[truncated at 2000 matches]"));
+}
+
+#[tokio::test]
+async fn grep_max_matches_larger_than_default() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let body: String = (0..3000).map(|i| format!("hit {i}\n")).collect();
+    std::fs::write(dir.join("hits.txt"), body).unwrap();
+    let args = serde_json::json!({"pattern": "hit", "max_matches": 5000}).to_string();
+    let out = grep_invoke(&c, &args).await;
+    let lines: Vec<_> = out.lines().collect();
+    assert_eq!(lines.len(), 3000, "got {} lines", lines.len());
+    assert!(!out.contains("[truncated"));
+}
+
+fn spawn_http_server(
+    body: String,
+    include_content_length: bool,
+) -> (String, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut request = [0u8; 4096];
+        let _ = stream.read(&mut request);
+        let headers = if include_content_length {
+            format!("Content-Length: {}\r\n", body.len())
+        } else {
+            String::new()
+        };
+        let response = format!("HTTP/1.1 200 OK\r\n{headers}Connection: close\r\n\r\n{body}");
+        let _ = stream.write_all(response.as_bytes());
+    });
+    (url, handle)
+}
+
+fn unused_local_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+#[tokio::test]
+async fn websearch_fetches_url() {
+    let _env = EnvGuard::lock();
+    let dir = tmp();
+    let c = ctx(&dir);
+    let (url, server) = spawn_http_server("hello from local server\n".into(), true);
+    let args = serde_json::json!({ "url": url }).to_string();
+    let out = websearch_invoke(&c, &args, "tool-test-id").await;
+    server.join().unwrap();
+    assert_eq!(out, "hello from local server");
+}
+
+#[tokio::test]
+async fn websearch_omitted_timeout_uses_default() {
+    let _env = EnvGuard::lock();
+    let dir = tmp();
+    let c = ctx(&dir);
+    let (url, server) = spawn_http_server("ok\n".into(), true);
+    // `timeout` is optional; an args object with only `url` must dispatch.
+    let args = serde_json::json!({ "url": url }).to_string();
+    let out = websearch_invoke(&c, &args, "tool-test-id").await;
+    server.join().unwrap();
+    assert_eq!(out, "ok");
+    assert!(!out.contains("[timeout]"));
+}
+
+#[tokio::test]
+async fn websearch_preserves_curl_diagnostics() {
+    let _env = EnvGuard::lock();
+    let dir = tmp();
+    let c = ctx(&dir);
+    // Bind and immediately release a port so the connection is refused.
+    let url = format!("http://127.0.0.1:{}/", unused_local_port());
+    let args = serde_json::json!({ "url": url, "timeout": 5 }).to_string();
+    let out = websearch_invoke(&c, &args, "tool-test-id").await;
+    assert!(out.starts_with("[exit"), "got: {out:?}");
+    assert!(out.contains("curl:"), "got: {out:?}");
+    assert!(out.contains("Failed to connect"), "got: {out:?}");
+}
+
+#[tokio::test]
+async fn websearch_oversized_response_kept_within_cap() {
+    let _env = EnvGuard::lock();
+    let dir = tmp();
+    let c = ctx(&dir);
+    let body = "0123456789".repeat(30);
+    // Omit Content-Length so curl streams the response and our read-side
+    // cap (rather than curl's `--max-filesize` check) truncates it.
+    let (url, server) = spawn_http_server(body, false);
+    let cap = 64;
+    let args = serde_json::json!({ "url": url, "timeout": 5 }).to_string();
+    let out = websearch_invoke_with_cap(&c, &args, cap, "tool-test-id").await;
+    server.join().unwrap();
+    assert!(out.starts_with("[truncated at 64 bytes]\n"), "got: {out:?}");
+    assert!(out.contains("0123456789"), "got: {out:?}");
+    assert!(out.len() as u64 <= cap, "got len {}: {out:?}", out.len());
+    assert!(!out.contains("Tool output exceeded"), "got: {out:?}");
+}
+
+#[test]
+fn tool_definitions_filter() {
+    let all = tool_definitions(None, false, ToolMode::Full);
+    // Read, Landscape, Edit, Bash, Write, Grep, Glob, Done, Task = 9
+    // (chat-only: WebSearch, Mischief, LoadSkill are excluded in headless)
+    assert_eq!(all.len(), 9);
+    let all_names: Vec<_> = all.iter().map(|t| t.name.as_str()).collect();
+    assert!(all_names.contains(&"Landscape"), "got: {all_names:?}");
+    let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), false, ToolMode::Full);
+    let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
+    // Task and Done are always available regardless of the filter.
+    // Mischief and WebSearch are chat-only, absent from headless filters.
+    assert_eq!(names, ["Read", "Bash", "Done", "Task"]);
+    assert!(!names.contains(&"WebSearch"), "got: {names:?}");
+    assert!(!names.contains(&"Mischief"), "got: {names:?}");
+}
+
+#[test]
+fn task_and_done_always_available() {
+    let filtered = tool_definitions(Some(&["Read".to_string()]), false, ToolMode::Full);
+    let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"Task"), "got: {names:?}");
+    assert!(names.contains(&"Done"), "got: {names:?}");
+    assert!(names.contains(&"Read"), "got: {names:?}");
+    assert!(!names.contains(&"Mischief"), "got: {names:?}");
+}
+
+#[test]
+fn mischief_passes_filter_when_chat_mode() {
+    // Mischief and WebSearch are always available to chat sessions even
+    // when the default native_block filter does not list them.
+    let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), true, ToolMode::Full);
+    let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"Mischief"), "got: {names:?}");
+    assert!(names.contains(&"WebSearch"), "got: {names:?}");
+    assert!(names.contains(&"Read"), "got: {names:?}");
+    assert!(names.contains(&"Bash"), "got: {names:?}");
+}
+
+#[tokio::test]
+async fn mischief_invoke_blocked_in_headless() {
+    // Mischief is chat-only. Headless gremlins with an allowlist that
+    // omits Mischief must get "unknown tool".
+    let dir = tmp();
+    let c = AgentLoopRuntime {
+        cwd: Some(dir.clone()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![dir.clone()]),
+        audit_log: None,
+        allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
+        task_fn: None,
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    };
+    let out = invoke("tool-test-id", "Mischief", &c, "{}").await;
+    assert!(
+        out.contains("unknown tool"),
+        "headless Mischief must be rejected, got: {out}"
+    );
+}
+
+#[tokio::test]
+async fn websearch_invoke_blocked_in_headless() {
+    // WebSearch is chat-only. Headless gremlins with an allowlist that
+    // omits WebSearch must get "unknown tool".
+    let dir = tmp();
+    let c = AgentLoopRuntime {
+        cwd: Some(dir.clone()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![dir.clone()]),
+        audit_log: None,
+        allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
+        task_fn: None,
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    };
+    let out = invoke(
+        "tool-test-id",
+        "WebSearch",
+        &c,
+        r#"{"url":"https://example.com"}"#,
+    )
+    .await;
+    assert!(
+        out.contains("unknown tool"),
+        "headless WebSearch must be rejected, got: {out}"
+    );
+}
+
+#[tokio::test]
+async fn websearch_invoke_blocked_in_headless_no_filter() {
+    // WebSearch is chat-only. Without any allowlist the gate must still
+    // reject it — the None branch must not open a bypass.
+    let dir = tmp();
+    let c = AgentLoopRuntime {
+        cwd: Some(dir.clone()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![dir.clone()]),
+        audit_log: None,
+        allowed_tools: None,
+        task_fn: None,
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    };
+    let out = invoke(
+        "tool-test-id",
+        "WebSearch",
+        &c,
+        r#"{"url":"https://example.com"}"#,
+    )
+    .await;
+    assert!(
+        out.contains("unknown tool"),
+        "headless WebSearch (no filter) must be rejected, got: {out}"
+    );
+}
+
+#[tokio::test]
+async fn websearch_invoke_blocked_in_headless_explicit_allowlist() {
+    // WebSearch is chat-only. Even when a headless allowlist explicitly
+    // includes it the gate must reject the call.
+    let dir = tmp();
+    let c = AgentLoopRuntime {
+        cwd: Some(dir.clone()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![dir.clone()]),
+        audit_log: None,
+        allowed_tools: Some(vec!["Read".into(), "WebSearch".into()]),
+        task_fn: None,
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    };
+    let out = invoke(
+        "tool-test-id",
+        "WebSearch",
+        &c,
+        r#"{"url":"https://example.com"}"#,
+    )
+    .await;
+    assert!(
+        out.contains("unknown tool"),
+        "headless WebSearch (explicit allowlist) must be rejected, got: {out}"
+    );
+}
+
+#[tokio::test]
+async fn mischief_invoke_allowed_in_chat() {
+    // Mischief is chat-only but always available in chat sessions even
+    // when the allowlist omits it.
+    let dir = tmp();
+    let c = AgentLoopRuntime {
+        cwd: Some(dir.clone()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![dir.clone()]),
+        audit_log: None,
+        allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
+        task_fn: None,
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: Some(Arc::new(std::sync::Mutex::new(vec![]))),
+        skills_available: true,
+        discovered_skills: None,
+        log_tx: None,
+    };
+    let out = invoke("tool-test-id", "Mischief", &c, "{}").await;
+    assert!(
+        out.starts_with("# Gremlins JSON5 DSL Reference"),
+        "chat Mischief must succeed, got: {out}"
+    );
+}
+
+#[test]
+fn load_skill_in_tool_definitions_when_chat_mode() {
+    let defs = tool_definitions(None, true, ToolMode::Full);
+    assert_eq!(defs.len(), 12);
+    let names: Vec<_> = defs.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"LoadSkill"), "got: {names:?}");
+}
+
+#[test]
+fn load_skill_not_in_tool_definitions_when_not_chat_mode() {
+    let defs = tool_definitions(None, false, ToolMode::Full);
+    let names: Vec<_> = defs.iter().map(|t| t.name.as_str()).collect();
+    assert!(!names.contains(&"LoadSkill"), "got: {names:?}");
+}
+
+#[test]
+fn load_skill_passes_filter_when_chat_mode() {
+    // With is_chat=true, LoadSkill must appear even when a
+    // restrictive filter is active — the default native_block filter
+    // does not include LoadSkill, and chat sessions must always expose it.
+    let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), true, ToolMode::Full);
+    let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"LoadSkill"), "got: {names:?}");
+    assert!(names.contains(&"Read"), "got: {names:?}");
+    assert!(names.contains(&"Bash"), "got: {names:?}");
+}
+
+#[test]
+fn validate_tool_args_load_skill() {
+    // Valid: has name.
+    assert!(validate_tool_args("LoadSkill", &serde_json::json!({"name": "pdf"})).is_none());
+    // Missing required name.
+    let err = validate_tool_args("LoadSkill", &serde_json::json!({})).unwrap();
+    assert!(err.contains("missing 'name'"), "got: {err}");
+    assert!(err.contains("LoadSkill"), "got: {err}");
+}
+
+#[tokio::test]
+async fn load_skill_invoke_missing_name() {
+    let c = ctx(&tmp());
+    let result = load_skill_invoke(&c, &serde_json::json!({}));
+    assert!(result.starts_with("Error: missing 'name'"), "got: {result}");
+}
+
+#[test]
+fn load_skill_invoke_no_skills_configured() {
+    let c = ctx(&tmp());
+    let result = load_skill_invoke(&c, &serde_json::json!({"name": "pdf"}));
+    assert!(
+        result.starts_with("Error: LoadSkill is only available in chat sessions"),
+        "got: {result}"
+    );
+}
+
+#[test]
+fn load_skill_unknown_name() {
+    let _lock = EnvGuard::lock();
+    let mut c = ctx(&tmp());
+    c.discovered_skills = Some(Arc::new(vec![]));
+    c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
+    c.skills_available = true;
+    let result = load_skill_invoke(&c, &serde_json::json!({"name": "nonexistent"}));
+    assert!(
+        result.starts_with("Error: skill \"nonexistent\" not found"),
+        "got: {result}"
+    );
+}
+
+#[test]
+fn load_skill_rejects_disable_model_invocation() {
+    let _lock = EnvGuard::lock();
+    let mut c = ctx(&tmp());
+    c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
+    let skill = crate::skills::Skill {
+        name: "secret-ops".into(),
+        description: "operator-only skill".into(),
+        disable_model_invocation: true,
+        user_invocable: true,
+        body: "secret body".into(),
+        dir: PathBuf::from("/tmp"),
+        ..Default::default()
+    };
+    let loaded = crate::skills::LoadedSkill {
+        skill,
+        files: vec![],
+    };
+    c.discovered_skills = Some(Arc::new(vec![loaded]));
+    c.skills_available = true;
+    let result = load_skill_invoke(&c, &serde_json::json!({"name": "secret-ops"}));
+    assert!(
+        result.starts_with("Error: skill \"secret-ops\" is not available for model invocation"),
+        "got: {result}"
+    );
+}
+
+#[test]
+fn load_skill_success_body_free() {
+    // A successful LoadSkill must return a body-free acknowledgement.
+    // The skill body is injected as a trusted system-prompt amendment at
+    // the next turn boundary, not written into the transcript.
+    let _lock = EnvGuard::lock();
+    let mut c = ctx(&tmp());
+    c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
+    let skill = crate::skills::Skill {
+        name: "pdf".into(),
+        description: "PDF skill".into(),
+        body: "SECRET SKILL BODY".into(),
+        dir: PathBuf::from("/tmp/pdf-skill"),
+        ..Default::default()
+    };
+    let loaded = crate::skills::LoadedSkill {
+        skill,
+        files: vec![],
+    };
+    c.discovered_skills = Some(Arc::new(vec![loaded]));
+    c.skills_available = true;
+    let result = load_skill_invoke(&c, &serde_json::json!({"name": "pdf"}));
+    assert!(
+        result.starts_with("Skill \"pdf\" loaded successfully."),
+        "got: {result}"
+    );
+    assert!(
+        !result.contains("SECRET SKILL BODY"),
+        "skill body must not leak into tool result: {result}"
+    );
+}
+
+#[test]
+fn validate_tool_args_missing_required() {
+    let err = validate_tool_args("Edit", &serde_json::json!({"file_path": "foo.py"})).unwrap();
+    assert!(err.contains("missing 'edits'"));
+    assert!(err.contains("Edit"));
+    assert!(err.contains("file_path: string"));
+}
+
+#[test]
+fn validate_tool_args_optional_field_absent_passes() {
+    assert!(validate_tool_args(
+        "WebSearch",
+        &serde_json::json!({"url": "https://example.com"})
+    )
+    .is_none());
+}
+
+#[test]
+fn validate_tool_args_optional_field_wrong_type() {
+    let err = validate_tool_args(
+        "WebSearch",
+        &serde_json::json!({"url": "https://example.com", "timeout": "30"}),
+    )
+    .unwrap();
+    assert!(err.contains("'timeout'"));
+    assert!(err.contains("must be integer"));
+}
+
+#[test]
+fn validate_tool_args_wrong_type() {
+    let err = validate_tool_args(
+        "Edit",
+        &serde_json::json!({"file_path": "foo.py", "edits": "not-an-array"}),
+    )
+    .unwrap();
+    assert!(err.contains("'edits'"));
+    assert!(err.contains("must be array"));
+}
+
+#[test]
+fn validate_tool_args_valid_passes() {
+    assert!(validate_tool_args(
+        "Edit",
+        &serde_json::json!({"file_path": "foo.py", "edits": [{"old_string": "a", "new_string": "b"}]})
+    )
+    .is_none());
+    assert!(validate_tool_args("Read", &serde_json::json!({"file_path": "foo.py"})).is_none());
+    assert!(validate_tool_args("Bash", &serde_json::json!({"command": "ls"})).is_none());
+    assert!(validate_tool_args(
+        "Write",
+        &serde_json::json!({"file_path": "f", "content": "x"})
+    )
+    .is_none());
+    assert!(validate_tool_args("Grep", &serde_json::json!({"pattern": "fn"})).is_none());
+    assert!(validate_tool_args("Glob", &serde_json::json!({"pattern": "*.rs"})).is_none());
+    assert!(validate_tool_args(
+        "Task",
+        &serde_json::json!({"kind": "Scout", "prompt": "do it"})
+    )
+    .is_none());
+}
+
+#[test]
+fn validate_tool_args_not_an_object() {
+    let err = validate_tool_args("Read", &serde_json::json!("not an object")).unwrap();
+    assert!(err.contains("missing 'file_path'"));
+    assert!(err.contains("<not an object>"));
+}
+
+#[test]
+fn validate_tool_args_edit_missing_file_path_no_hint() {
+    // file_path missing, but no edit item has file_path either — no hint.
+    let err = validate_tool_args(
+        "Edit",
+        &serde_json::json!({"edits": [{"old_string": "a", "new_string": "b"}]}),
+    )
+    .unwrap();
+    assert!(err.contains("missing 'file_path'"));
+    assert!(!err.contains("Note:"));
+}
+
+#[test]
+fn validate_tool_args_edit_file_path_nested_hint() {
+    // file_path missing at top level but present inside an edit item — hint fires.
+    let err = validate_tool_args(
+        "Edit",
+        &serde_json::json!({"edits": [{"file_path": "x.py", "old_string": "a", "new_string": "b"}]}),
+    )
+    .unwrap();
+    assert!(err.contains("missing 'file_path'"));
+    assert!(err.contains("Note: file_path belongs at the top level"));
+}
+
+#[test]
+fn validate_tool_args_edit_empty_array() {
+    let err =
+        validate_tool_args("Edit", &serde_json::json!({"file_path": "x", "edits": []})).unwrap();
+    assert!(err.contains("must not be empty"));
+}
+
+#[test]
+fn validate_tool_args_edit_missing_nested_fields() {
+    let err = validate_tool_args(
+        "Edit",
+        &serde_json::json!({"file_path": "x", "edits": [{}]}),
+    )
+    .unwrap();
+    assert!(err.contains("missing 'old_string'"), "got: {err}");
+    assert!(err.contains("edit 1"), "got: {err}");
+}
+
+#[test]
+fn validate_tool_args_edit_missing_new_string() {
+    // old_string is always required, and new_string accompanies it.
+    let err = validate_tool_args(
+        "Edit",
+        &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a"}]}),
+    )
+    .unwrap();
+    assert!(err.contains("missing 'new_string'"), "got: {err}");
+}
+
+#[test]
+fn validate_tool_args_edit_scoped_ok() {
+    // A complete scope (start_line + end_line) is valid alongside the
+    // always-required old_string/new_string.
+    assert!(validate_tool_args(
+        "Edit",
+        &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "new_string": "b", "start_line": 1, "end_line": 2}]}),
+    )
+    .is_none());
+}
+
+#[test]
+fn validate_tool_args_edit_start_line_only_ok() {
+    // start_line without end_line is a valid open-ended scope.
+    assert!(validate_tool_args(
+        "Edit",
+        &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "new_string": "b", "start_line": 1}]}),
+    )
+    .is_none());
+}
+
+#[test]
+fn validate_tool_args_edit_end_line_without_start_accepted() {
+    // end_line without start_line is accepted; the executor defaults
+    // scope_start to 1.
+    assert!(validate_tool_args(
+        "Edit",
+        &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "new_string": "b", "end_line": 2}]}),
+    )
+    .is_none());
+}
+
+#[test]
+fn validate_tool_args_edit_scope_without_old_string_error() {
+    // The old line-range form is gone: the `replacement` field is
+    // rejected outright even when old_string is missing.
+    let err = validate_tool_args(
+        "Edit",
+        &serde_json::json!({"file_path": "x", "edits": [{"start_line": 1, "end_line": 2, "replacement": "b"}]}),
+    )
+    .unwrap();
+    assert!(
+        err.contains("'replacement' which is no longer supported"),
+        "got: {err}"
+    );
+}
+#[test]
+fn validate_tool_args_edit_replacement_field_rejected() {
+    // The old `replacement` field is removed.  Even when
+    // old_string/new_string are also present, the legacy field must
+    // be explicitly rejected so mixed-mode requests don't silently
+    // apply new_string.
+    let err = validate_tool_args(
+        "Edit",
+        &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "new_string": "b", "replacement": "c"}]}),
+    )
+    .unwrap();
+    assert!(
+        err.contains("'replacement' which is no longer supported"),
+        "got: {err}"
+    );
+}
+#[test]
+fn validate_tool_args_edit_start_after_end_accepted() {
+    // start_line > end_line is accepted; the executor's scope_byte_range
+    // clamps the window.
+    assert!(validate_tool_args(
+        "Edit",
+        &serde_json::json!({"file_path": "x", "edits": [{"old_string": "a", "new_string": "b", "start_line": 3, "end_line": 2}]}),
+    )
+    .is_none());
+}
+
+#[test]
+fn validate_tool_args_edit_item_not_object() {
+    let err = validate_tool_args(
+        "Edit",
+        &serde_json::json!({"file_path": "x", "edits": ["not-an-object"]}),
+    )
+    .unwrap();
+    assert!(err.contains("must be an object"));
+}
+
+#[test]
+fn validate_tool_args_task_missing_prompt() {
+    let err = validate_tool_args("Task", &serde_json::json!({"kind": "Scout"})).unwrap();
+    assert!(err.contains("missing 'prompt'"));
+    assert!(err.contains("Task"));
+}
+
+#[test]
+fn resolve_relative_against_cwd() {
+    let cwd = tmp();
+    assert_eq!(
+        resolve("a.txt", Some(&cwd)),
+        canonicalize_or_ancestor(&cwd).join("a.txt")
+    );
+    assert_eq!(resolve("/abs", Some(&cwd)), PathBuf::from("/abs"));
+}
+
+#[test]
+fn resolve_relative_with_cwd_is_absolute() {
+    let cwd = tmp();
+    let resolved = resolve("sub/file.txt", Some(&cwd));
+    assert!(resolved.is_absolute(), "got: {resolved:?}");
+    assert_eq!(
+        resolved,
+        canonicalize_or_ancestor(&cwd).join("sub/file.txt")
+    );
+}
+
+#[test]
+fn resolve_relative_without_cwd_uses_project_root() {
+    let mut env = EnvGuard::lock();
+    let root = tmp();
+    env.set("GREMLINS_PROJECT_ROOT", root.to_str().unwrap());
+    let resolved = resolve("sub/file.txt", None);
+    assert!(resolved.is_absolute(), "got: {resolved:?}");
+    assert_eq!(
+        resolved,
+        canonicalize_or_ancestor(&root).join("sub/file.txt")
+    );
+}
+
+#[test]
+fn within_worktree_relative_path_with_cwd() {
+    let dir = tmp();
+    std::fs::create_dir(dir.join("sub")).unwrap();
+    assert!(within_worktree(
+        Path::new("sub/file.txt"),
+        std::slice::from_ref(&dir),
+        Some(&dir)
+    ));
+}
+
+#[test]
+fn within_worktree_relative_path_without_cwd_uses_project_root() {
+    let mut env = EnvGuard::lock();
+    let dir = tmp();
+    std::fs::create_dir(dir.join("sub")).unwrap();
+    env.set("GREMLINS_PROJECT_ROOT", dir.to_str().unwrap());
+    assert!(within_worktree(
+        Path::new("sub/file.txt"),
+        std::slice::from_ref(&dir),
+        None
+    ));
+}
+
+#[test]
+fn glob_check_tool_resolves_relative_base_against_cwd() {
+    let dir = tmp();
+    std::fs::create_dir(dir.join("src")).unwrap();
+    let c = ctx(&dir);
+    let args = serde_json::json!({"path": "./src", "pattern": "**/*.rs"});
+    assert!(check_tool("Glob", &c, &args).is_none());
+}
+
+#[test]
+fn glob_check_tool_rejects_relative_escape() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let args = serde_json::json!({"path": "../outside", "pattern": "*.txt"});
+    let err = check_tool("Glob", &c, &args).unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+fn within_worktree_same_dir() {
+    let dir = tmp();
+    assert!(within_worktree(&dir, std::slice::from_ref(&dir), None));
+}
+
+#[test]
+fn within_worktree_child() {
+    let dir = tmp();
+    assert!(within_worktree(
+        &dir.join("sub").join("file.txt"),
+        std::slice::from_ref(&dir),
+        None
+    ));
+}
+
+#[test]
+fn within_worktree_outside() {
+    let dir = tmp();
+    assert!(!within_worktree(&dir, &[dir.join("sub")], None));
+}
+
+#[test]
+fn within_worktree_second_root() {
+    let dir1 = tmp();
+    let dir2 = tmp();
+    assert!(within_worktree(&dir2.join("file.txt"), &[dir1, dir2], None));
+}
+
+#[test]
+fn within_worktree_sibling() {
+    let dir = tmp();
+    let sibling = dir.parent().unwrap().join("other");
+    assert!(!within_worktree(&sibling, std::slice::from_ref(&dir), None));
+}
+
+#[test]
+#[cfg(unix)]
+fn within_worktree_symlink_traversal() {
+    let dir = tmp();
+    let worktree = dir.join("worktree");
+    std::fs::create_dir(&worktree).unwrap();
+    let outside = dir.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let link = worktree.join("link");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    // Canonical containment: symlink resolves outside the worktree.
+    assert!(!within_worktree(
+        &link,
+        std::slice::from_ref(&worktree),
+        None
+    ));
+}
+
+#[test]
+fn enforce_inside_worktree() {
+    let dir = tmp();
+    let inside = dir.join("file.txt");
+    assert!(enforce(std::slice::from_ref(&dir), inside.to_str().unwrap(), None).is_none());
+}
+
+#[test]
+fn enforce_outside_worktree() {
+    let dir = tmp();
+    let outside = dir.parent().unwrap().join("secret.txt");
+    let err = enforce(std::slice::from_ref(&dir), outside.to_str().unwrap(), None).unwrap();
+    assert!(err.contains("outside sandbox"));
+}
+
+#[test]
+fn enforce_relative_path_with_cwd() {
+    let dir = tmp();
+    assert!(enforce(std::slice::from_ref(&dir), "file.txt", Some(&dir)).is_none());
+}
+
+#[test]
+fn enforce_relative_path_escapes_via_cwd() {
+    let dir = tmp();
+    let err = enforce(
+        std::slice::from_ref(&dir),
+        "../../../etc/passwd",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"));
+}
+
+#[test]
+fn bash_check_safe_command() {
+    let dir = tmp();
+    assert!(bash_check(std::slice::from_ref(&dir), "ls -la", Some(&dir)).is_none());
+}
+
+#[test]
+fn bash_check_absolute_outside() {
+    let dir = tmp();
+    let err = bash_check(std::slice::from_ref(&dir), "cat /etc/passwd", Some(&dir)).unwrap();
+    assert!(err.contains("outside sandbox"));
+}
+
+#[test]
+fn bash_check_absolute_inside() {
+    let dir = tmp();
+    let inside = dir.join("file.txt");
+    let cmd = format!("cat {}", inside.display());
+    assert!(bash_check(std::slice::from_ref(&dir), &cmd, Some(&dir)).is_none());
+}
+
+#[test]
+fn bash_check_tilde_expansion_outside() {
+    let dir = tmp();
+    let prev = std::env::var("HOME").ok();
+    unsafe { std::env::set_var("HOME", "/nonexistent-home") };
+    let err = bash_check(std::slice::from_ref(&dir), "cat ~/.ssh/id_rsa", Some(&dir)).unwrap();
+    assert!(err.contains("outside sandbox"));
+    match prev {
+        Some(h) => unsafe { std::env::set_var("HOME", h) },
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+}
+
+#[test]
+fn bash_check_dotdot_escapes() {
+    let dir = tmp();
+    let err = bash_check(std::slice::from_ref(&dir), "cat ../secret", Some(&dir)).unwrap();
+    assert!(err.contains("outside sandbox"));
+}
+
+#[test]
+fn bash_check_intermediate_traversal() {
+    let dir = tmp();
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "cat subdir/../../etc/passwd",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"));
+}
+
+#[test]
+fn bash_check_empty_command() {
+    let dir = tmp();
+    assert!(bash_check(std::slice::from_ref(&dir), "", Some(&dir)).is_none());
+    assert!(bash_check(std::slice::from_ref(&dir), "   ", Some(&dir)).is_none());
+}
+
+#[test]
+fn bash_check_subshell_dollar_paren_ignored() {
+    let dir = tmp();
+    // Paths inside $(...) are runtime-expanded, not literal — skip them.
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "for f in $(grep -rl pattern /); do echo $f; done",
+        Some(&dir),
+    )
+    .is_none());
+    // Nested $(...) works too.
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "echo $(cat $(find /tmp -name '*.rs'))",
+        Some(&dir),
+    )
+    .is_none());
+}
+
+#[test]
+fn bash_check_subshell_backtick_ignored() {
+    let dir = tmp();
+    // Paths inside backticks are runtime-expanded — skip them.
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "for f in `grep -rl pattern /`; do echo $f; done",
+        Some(&dir),
+    )
+    .is_none());
+}
+
+#[test]
+fn bash_check_heredoc_body_ignored() {
+    let dir = tmp();
+    // Path-looking tokens in a heredoc body are file content, not
+    // path arguments. None of these may trigger the per-token check.
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "cat <<'EOF'\n//\n///\n//comment\n//example.com/path\n/\n~\n..\nEOF\n",
+        Some(&dir),
+    )
+    .is_none());
+    // Unquoted delimiter and `<<-` (leading tabs stripped from the
+    // terminator) work too.
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "cat <<-EOF\n\t//\n\tEOF\n",
+        Some(&dir),
+    )
+    .is_none());
+    // Quoted double-quote delimiter.
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "cat <<\"EOF\"\n//\nEOF\n",
+        Some(&dir),
+    )
+    .is_none());
+    // Backslash-quoted delimiter.
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "cat <<\\EOF\n//\nEOF\n",
+        Some(&dir),
+    )
+    .is_none());
+}
+
+#[test]
+fn bash_check_heredoc_first_line_redirect_still_checked() {
+    let dir = tmp();
+    // The remainder of the heredoc's first line is shell, not body.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "cat <<EOF > /etc/passwd\nhello\nEOF\n",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"));
+}
+
+#[test]
+fn bash_check_quoted_heredoc_operator_not_treated_as_heredoc() {
+    let dir = tmp();
+    // A quoted `<<` must not swallow the rest of the command, or real
+    // path tokens would escape checking.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "echo \"a << b\" /etc/passwd",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"));
+}
+
+#[test]
+fn bash_check_command_after_heredoc_terminator_checked() {
+    let dir = tmp();
+    // A path command after a closed heredoc must still be denied.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "cat <<EOF\nhello\nEOF\ncat /etc/passwd",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"));
+}
+
+#[test]
+fn bash_check_multiple_heredocs_all_bodies_ignored() {
+    let dir = tmp();
+    // Two heredocs on one command line: both bodies are stripped, and a
+    // path command after both terminators is still checked.
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "cat <<A <<B\n//bodyA\nA\n//bodyB\nB\n",
+        Some(&dir),
+    )
+    .is_none());
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "cat <<A <<B\n//bodyA\nA\n//bodyB\nB\ncat /etc/passwd",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"));
+}
+
+#[test]
+fn bash_check_here_string_not_treated_as_heredoc() {
+    let dir = tmp();
+    // `<<<` is a here-string; a path after it must still be checked.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "cat <<< /etc/passwd",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"));
+}
+
+#[test]
+fn bash_check_shift_operator_not_treated_as_heredoc() {
+    let dir = tmp();
+    // `<<` inside arithmetic and parameter expansions is a bitwise shift,
+    // not a heredoc; a following path command must still be checked.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "echo $((1<<2))\ncat /etc/passwd",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"));
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "echo ${arr[1<<2]}\ncat /etc/passwd",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"));
+}
+
+#[test]
+fn bash_check_escaped_and_comment_heredoc_operator_not_heredoc() {
+    let dir = tmp();
+    // A backslash-escaped `<<` and a word-initial `# <<` comment must not
+    // swallow the rest of the command.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "echo \\<<EOF\ncat /etc/passwd",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"));
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "echo hi # <<EOF\ncat /etc/passwd",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"));
+}
+
+#[test]
+fn bash_check_ansi_c_quoted_delimiter() {
+    let dir = tmp();
+    // `$'EOF'` and mixed-quote delimiters resolve to the real terminator.
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "cat <<$'EOF'\n//\nEOF\n",
+        Some(&dir),
+    )
+    .is_none());
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "cat <<EOF'x'\n//\nEOFx\n",
+        Some(&dir),
+    )
+    .is_none());
+}
+
+#[test]
+fn bash_check_literal_path_still_checked() {
+    let dir = tmp();
+    // A literal /etc/passwd outside a subshell is still denied.
+    let err = bash_check(std::slice::from_ref(&dir), "cat /etc/passwd", Some(&dir)).unwrap();
+    assert!(err.contains("outside sandbox"));
+    // Path outside subshell with $() still caught.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "cat /etc/passwd $(echo foo)",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"));
+}
+
+#[test]
+fn bash_check_quoted_paren_in_subshell() {
+    let dir = tmp();
+    // Quoted parentheses inside $() must not affect the depth counter.
+    // The literal /etc/passwd after the subshell is still checked.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "cat $(printf '(') /etc/passwd",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(
+        err.contains("outside sandbox"),
+        "literal /etc/passwd after subshell must be caught: {err}"
+    );
+}
+
+#[test]
+fn strip_heredocs_copied_dollar_param_region_skips_escaped_close() {
+    // A backslash-escaped close delimiter must not terminate the
+    // ${...} copy. Previously `${unset:-\} << x}` returned at the
+    // escaped `}`, classified the inner `<<` as a heredoc, and swallowed
+    // the following path-bearing command.
+    let dir = tmp();
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "echo ${unset:-\\} << x}\ncat /etc/passwd",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(
+        err.contains("outside sandbox"),
+        "trailing /etc/passwd after escaped-close parameter expansion must be caught: {err}"
+    );
+}
+
+#[test]
+fn audit_writes_jsonl() {
+    let dir = tmp();
+    let log = dir.join("audit.jsonl");
+    audit(Some(&log), None, "Read", "/some/file", "ok");
+    let lines: Vec<_> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(lines.len(), 1);
+    let entry: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+    assert_eq!(entry["tool"], "Read");
+    assert_eq!(entry["key_arg"], "/some/file");
+    assert_eq!(entry["status"], "ok");
+    assert!(entry.get("ts").is_some());
+}
+
+#[test]
+fn audit_appends_multiple() {
+    let dir = tmp();
+    let log = dir.join("audit.jsonl");
+    audit(Some(&log), None, "Read", "a", "ok");
+    audit(Some(&log), None, "Bash", "b", "denied");
+    let text = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<_> = text.lines().collect();
+    assert_eq!(lines.len(), 2);
+    let entry: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(entry["status"], "denied");
+}
+
+#[test]
+fn audit_none_log_is_noop() {
+    audit(None, None, "Read", "/file", "ok");
+}
+
+#[test]
+fn audit_truncates_key_arg() {
+    let dir = tmp();
+    let log = dir.join("audit.jsonl");
+    let long_arg = "x".repeat(300);
+    audit(Some(&log), None, "Read", &long_arg, "ok");
+    let entry: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
+    assert_eq!(entry["key_arg"].as_str().unwrap().len(), 200);
+}
+
+#[tokio::test]
+async fn invoke_denied_writes_audit() {
+    let dir = tmp();
+    let log = dir.join("audit.jsonl");
+    let mut c = ctx(&dir);
+    c.audit_log = Some(log.clone());
+    let outside = dir.parent().unwrap().join("secret.txt");
+    let args = serde_json::json!({"file_path": outside.to_str().unwrap()}).to_string();
+    let result = invoke("tool-test-id", "Read", &c, &args).await;
+    assert!(result.contains("outside sandbox"));
+    let entry: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
+    assert_eq!(entry["status"], "denied");
+    assert_eq!(entry["tool"], "Read");
+}
+
+#[tokio::test]
+async fn invoke_ok_writes_audit() {
+    let dir = tmp();
+    let log = dir.join("audit.jsonl");
+    let target = dir.join("hello.txt");
+    std::fs::write(&target, "hi").unwrap();
+    let mut c = ctx(&dir);
+    c.audit_log = Some(log.clone());
+    let args = serde_json::json!({"file_path": target.to_str().unwrap()}).to_string();
+    let result = invoke("tool-test-id", "Read", &c, &args).await;
+    assert_eq!(result, "1|hi");
+    let entry: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
+    assert_eq!(entry["status"], "ok");
+}
+
+#[tokio::test]
+async fn invoke_invalid_json_writes_error() {
+    let dir = tmp();
+    let log = dir.join("audit.jsonl");
+    let mut c = ctx(&dir);
+    c.audit_log = Some(log.clone());
+    let result = invoke("tool-test-id", "Read", &c, "not-json{{{").await;
+    assert!(result.contains("Error"));
+    let entry: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
+    assert_eq!(entry["status"], "error");
+}
+
+#[tokio::test]
+async fn invoke_bash_denied_writes_audit() {
+    let dir = tmp();
+    let log = dir.join("audit.jsonl");
+    let mut c = ctx(&dir);
+    c.audit_log = Some(log.clone());
+    let args = serde_json::json!({"command": "cat /etc/passwd"}).to_string();
+    let result = invoke("tool-test-id", "Bash", &c, &args).await;
+    assert!(result.contains("outside sandbox"));
+    let entry: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
+    assert_eq!(entry["status"], "denied");
+    assert_eq!(entry["tool"], "Bash");
+}
+
+#[tokio::test]
+async fn filtered_tool_does_not_mutate_or_spawn() {
+    let dir = tmp();
+    let target = dir.join("must-not-exist.txt");
+    let c = AgentLoopRuntime {
+        cwd: Some(dir.clone()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![dir.clone()]),
+        audit_log: None,
+        allowed_tools: Some(vec!["Read".into()]),
+        task_fn: None,
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    };
+    let write_args =
+        serde_json::json!({"file_path": target.to_str().unwrap(), "content": "nope"}).to_string();
+    let write_out = invoke("tool-test-id", "Write", &c, &write_args).await;
+    assert!(write_out.contains("unknown tool"));
+    assert!(!target.exists());
+
+    let marker = dir.join("bash-ran");
+    let bash_args = serde_json::json!({
+        "command": format!("touch {}", marker.display())
+    })
+    .to_string();
+    let bash_out = invoke("tool-test-id", "Bash", &c, &bash_args).await;
+    assert!(bash_out.contains("unknown tool"));
+    assert!(!marker.exists());
+}
+
+#[test]
+fn audit_log_path_sibling() {
+    let raw = PathBuf::from("/tmp/run.jsonl");
+    assert_eq!(audit_log_path(&raw), PathBuf::from("/tmp/run.audit.jsonl"));
+}
+
+// --- Part 1: Lexical containment tests ---
+
+#[test]
+fn bash_check_blocks_ln_s_flag() {
+    let dir = tmp();
+    let err = bash_check(std::slice::from_ref(&dir), "ln -s /tmp/foo bar", Some(&dir)).unwrap();
+    assert!(err.contains("symlinks is not allowed"));
+}
+
+#[test]
+fn bash_check_blocks_ln_sf_flag() {
+    let dir = tmp();
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "ln -sf /tmp/foo bar",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("symlinks is not allowed"));
+}
+
+#[test]
+fn bash_check_blocks_ln_symbolic_flag() {
+    let dir = tmp();
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "ln --symbolic foo bar",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("symlinks is not allowed"));
+}
+
+#[test]
+fn bash_check_blocks_bin_ln_s() {
+    let dir = tmp();
+    let err = bash_check(std::slice::from_ref(&dir), "/bin/ln -s foo bar", Some(&dir)).unwrap();
+    assert!(err.contains("symlinks is not allowed"));
+}
+
+#[test]
+fn bash_check_allows_column_s() {
+    let dir = tmp();
+    // "column -s , file.csv" is not an ln invocation.
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "column -s , file.csv",
+        Some(&dir)
+    )
+    .is_none());
+}
+
+#[test]
+fn bash_check_allows_echo_ln_s() {
+    let dir = tmp();
+    // echo "ln -s" is an echo, not ln.
+    assert!(bash_check(std::slice::from_ref(&dir), "echo \"ln -s\"", Some(&dir)).is_none());
+}
+
+#[test]
+#[cfg(unix)]
+fn bash_check_blocks_cd_through_symlink_directory() {
+    let dir = tmp();
+    let worktree = dir.join("worktree");
+    std::fs::create_dir(&worktree).unwrap();
+    let outside = dir.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let link = worktree.join("link");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    // cd link — bare name, no /, caught by cd check in bash_check.
+    let err = bash_check(
+        std::slice::from_ref(&worktree),
+        "cd link; cat secret",
+        Some(&worktree),
+    )
+    .unwrap();
+    assert!(err.contains("cd target outside sandbox"), "got: {err}");
+}
+
+// ANTI-REGRESSION: agent self-verify needs to execute the bootstrap venv,
+// whose `bin/python` is a symlink to a base interpreter outside the
+// worktree. bash_check must allow a final-component symlink whose node is
+// in-worktree. This was silently broken by #1197 (which deleted the old
+// `enforce_allows_venv_symlink_in_cwd` test); do not "harden" bash_check to
+// canonicalize the leaf, or you re-break self-verify for zero real safety
+// (execution isn't gated here — see within_worktree_lexical).
+#[test]
+#[cfg(unix)]
+fn bash_check_allows_venv_symlink_leaf() {
+    let dir = tmp();
+    let worktree = dir.join("worktree");
+    std::fs::create_dir_all(worktree.join(".venv/bin")).unwrap();
+    let brew = dir.join("brew/bin");
+    std::fs::create_dir_all(&brew).unwrap();
+    let real_python = brew.join("python3.14");
+    std::fs::write(&real_python, "#!/bin/sh").unwrap();
+    // .venv/bin/python -> <outside>/brew/bin/python3.14, exactly like uv/venv.
+    let venv_python = worktree.join(".venv/bin/python");
+    std::os::unix::fs::symlink(&real_python, &venv_python).unwrap();
+    assert!(
+        bash_check(
+            std::slice::from_ref(&worktree),
+            ".venv/bin/python -c 'print(1)'",
+            Some(&worktree),
+        )
+        .is_none(),
+        "bash_check must allow executing the in-worktree venv python symlink"
+    );
+}
+
+// The data boundary stays strict: reading/writing THROUGH the same leaf
+// symlink via the file tools is still blocked by io_enforce.
+#[test]
+#[cfg(unix)]
+fn io_enforce_still_blocks_venv_symlink_leaf() {
+    let dir = tmp();
+    let worktree = dir.join("worktree");
+    std::fs::create_dir_all(worktree.join(".venv/bin")).unwrap();
+    let outside = dir.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let secret = outside.join("secret");
+    std::fs::write(&secret, "x").unwrap();
+    let link = worktree.join(".venv/bin/python");
+    std::os::unix::fs::symlink(&secret, &link).unwrap();
+    let err = io_enforce(&link, std::slice::from_ref(&worktree)).unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+#[cfg(unix)]
+fn bash_check_blocks_cd_through_dangling_symlink() {
+    let dir = tmp();
+    let worktree = dir.join("worktree");
+    std::fs::create_dir(&worktree).unwrap();
+    let outside = dir.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    // Dangling symlink to outside/new — target doesn't exist yet.
+    let link = worktree.join("link");
+    std::os::unix::fs::symlink(outside.join("new"), &link).unwrap();
+    let err = bash_check(
+        std::slice::from_ref(&worktree),
+        "cd link; cat secret",
+        Some(&worktree),
+    )
+    .unwrap();
+    assert!(err.contains("cd target outside sandbox"), "got: {err}");
+}
+
+#[test]
+fn bash_check_cd_no_arg_passes() {
+    let dir = tmp();
+    // cd with no argument (goes HOME) — can't statically check, skip.
+    assert!(bash_check(std::slice::from_ref(&dir), "cd", Some(&dir)).is_none());
+}
+
+#[test]
+fn bash_check_cd_dash_passes() {
+    let dir = tmp();
+    // cd - (previous dir) — can't statically check, skip.
+    assert!(bash_check(std::slice::from_ref(&dir), "cd -", Some(&dir)).is_none());
+}
+
+#[test]
+fn bash_check_cd_inside_worktree_passes() {
+    let dir = tmp();
+    std::fs::create_dir(dir.join("sub")).unwrap();
+    assert!(bash_check(std::slice::from_ref(&dir), "cd sub; ls", Some(&dir)).is_none());
+}
+
+#[test]
+fn bash_check_cd_tracks_cwd_for_relative_paths() {
+    let dir = tmp();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("file.txt"), "ok").unwrap();
+    // cd into subdir, then reference ../file.txt — resolves inside
+    // worktree only from the new cwd.
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "cd sub && cat ../file.txt",
+        Some(&dir),
+    )
+    .is_none());
+}
+
+#[test]
+fn bash_check_cd_then_escape_still_denied() {
+    let dir = tmp();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    // cd sub && cat ../../../etc/passwd — escapes even from new cwd.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "cd sub && cat ../../../etc/passwd",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+fn bash_check_multiple_cd_chained() {
+    let dir = tmp();
+    std::fs::create_dir_all(dir.join("a").join("b")).unwrap();
+    std::fs::write(dir.join("file.txt"), "ok").unwrap();
+    // cd a && cd b && cat ../../file.txt — resolves inside worktree.
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "cd a && cd b && cat ../../file.txt",
+        Some(&dir),
+    )
+    .is_none());
+}
+
+#[test]
+fn bash_check_cd_dash_does_not_update_cwd() {
+    let dir = tmp();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    // cd - doesn't update sim_cwd, so ../secret resolves from original
+    // cwd and should be denied.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "cd - && cat ../secret",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+fn bash_check_bare_cd_does_not_update_cwd() {
+    let dir = tmp();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    // bare cd doesn't update sim_cwd, so ../secret resolves from
+    // original cwd and should be denied.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "cd && cat ../secret",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+fn bash_check_cd_dotdot_inside_worktree_passes() {
+    let dir = tmp();
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(dir.join("file.txt"), "ok").unwrap();
+    // cd .. from a direct child of the sandbox root stays inside; the
+    // `..` operand must resolve from the pre-cd cwd (sub), not the
+    // post-cd cwd (dir).
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "cd .. && cat file.txt",
+        Some(&sub),
+    )
+    .is_none());
+}
+
+#[test]
+fn bash_check_cd_dotdot_dotdot_passes() {
+    let dir = tmp();
+    let b = dir.join("a").join("b");
+    std::fs::create_dir_all(&b).unwrap();
+    std::fs::write(dir.join("file.txt"), "ok").unwrap();
+    // cd ../.. from two levels down resolves to the root; still inside.
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "cd ../.. && cat file.txt",
+        Some(&b),
+    )
+    .is_none());
+}
+
+#[test]
+fn bash_check_path_inside_before_cd_but_outside_after_denied() {
+    let dir = tmp();
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    // From the original cwd (sub), ../secret resolves to dir/secret —
+    // inside. After `cd ..` (now at dir), ../secret escapes; cd tracking
+    // must still deny it.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "cd .. && cat ../secret",
+        Some(&sub),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+// ── Regression: cd after || must not be tracked ──────────────
+
+#[test]
+fn bash_check_cd_after_oror_not_tracked_true_or_cd_dotdot() {
+    let dir = tmp();
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(dir.join("file.txt"), "ok").unwrap();
+    // `true || cd ..` — cd .. is after || and won't execute because
+    // true succeeds. Without the || guard, sim_cwd would move to the
+    // parent and falsely deny the valid `cat ../file.txt`.
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "true || cd ..; cat ../file.txt",
+        Some(&sub),
+    )
+    .is_none());
+}
+
+#[test]
+fn bash_check_cd_after_oror_not_tracked_cd_dot_or_cd_dotdot() {
+    let dir = tmp();
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(dir.join("file.txt"), "ok").unwrap();
+    // `cd . || cd ..` — the second cd is after || and won't execute.
+    // Without the || guard, sim_cwd would move to the parent.
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "cd . || cd ..; cat ../file.txt",
+        Some(&sub),
+    )
+    .is_none());
+}
+
+#[test]
+fn bash_check_escape_after_oror_still_denied() {
+    let dir = tmp();
+    // `true || cd ..` is not tracked, so `cat ../secret` resolves from
+    // the original cwd (the sandbox root) and must be denied.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "true || cd ..; cat ../secret",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+// ── Regression: cd options must not be tracked as directories ─
+
+#[test]
+fn bash_check_cd_dashdash_treated_as_option_not_dir() {
+    let dir = tmp();
+    // `cd -- .` — `--` is an option, not a directory operand.
+    // Without the guard, sim_cwd would become <root>/-- and
+    // `cat ../secret` would falsely pass.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "cd -- . && cat ../secret",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+fn bash_check_cd_dash_p_treated_as_option_not_dir() {
+    let dir = tmp();
+    // `cd -P .` — `-P` is an option, not a directory operand.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "cd -P . && cat ../secret",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+fn bash_check_cd_dash_l_treated_as_option_not_dir() {
+    let dir = tmp();
+    // `cd -L .` — `-L` is an option, not a directory operand.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "cd -L . && cat ../secret",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+// ── Regression: subshell placeholders must not be tracked ────
+
+#[test]
+fn bash_check_cd_dollar_paren_subshell_not_tracked() {
+    let dir = tmp();
+    // `cd "$(pwd)"` — the subshell is replaced with a sentinel; cd
+    // tracking must leave sim_cwd untouched.  Without the guard the
+    // old `_` placeholder was treated as a valid directory name.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "cd \"$(pwd)\" && cat ../secret",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+fn bash_check_cd_backtick_subshell_not_tracked() {
+    let dir = tmp();
+    // `cd \`pwd\`` — backtick subshell replaced with sentinel.
+    let err = bash_check(
+        std::slice::from_ref(&dir),
+        "cd `pwd` && cat ../secret",
+        Some(&dir),
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+fn bash_check_cd_literal_underscore_still_trackable() {
+    let dir = tmp();
+    let underscore_dir = dir.join("_");
+    std::fs::create_dir_all(&underscore_dir).unwrap();
+    std::fs::write(underscore_dir.join("file.txt"), "ok").unwrap();
+    // A literal directory named `_` must still be tracked (the
+    // subshell sentinel is `\x01`, not `_`, so there is no collision).
+    assert!(bash_check(
+        std::slice::from_ref(&dir),
+        "cd _ && cat file.txt",
+        Some(&dir),
+    )
+    .is_none());
+}
+
+#[test]
+#[cfg(unix)]
+fn enforce_rejects_symlink_escape() {
+    let dir = tmp();
+    let worktree = dir.join("worktree");
+    std::fs::create_dir(&worktree).unwrap();
+    let outside = dir.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let link = worktree.join("link");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    // Canonical containment: symlink resolves outside the worktree.
+    let err = enforce(
+        std::slice::from_ref(&worktree),
+        link.to_str().unwrap(),
+        None,
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"));
+}
+
+#[test]
+#[cfg(unix)]
+fn enforce_rejects_dangling_symlink_escape() {
+    let dir = tmp();
+    let worktree = dir.join("worktree");
+    std::fs::create_dir(&worktree).unwrap();
+    let outside = dir.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    // Dangling symlink: target doesn't exist, so canonicalize() walks
+    // past it. The containment check must still read_link() and reject.
+    let link = worktree.join("link");
+    std::os::unix::fs::symlink(outside.join("new.txt"), &link).unwrap();
+    let err = enforce(
+        std::slice::from_ref(&worktree),
+        link.to_str().unwrap(),
+        None,
+    )
+    .unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+fn within_worktree_lexical_child() {
+    let dir = tmp();
+    let child = dir.join("sub").join("file.txt");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(&child, "x").unwrap();
+    assert!(within_worktree(&child, std::slice::from_ref(&dir), None));
+}
+
+// --- Part 2: Edit diagnostics tests ---
+
+#[test]
+fn edit_not_found_shows_first_line() {
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "hello\nworld\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "fn alpha() {}", "new_string": ""}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("Error: old_string not found"));
+    assert!(result.contains("fn alpha() {}"));
+}
+
+#[test]
+fn edit_not_found_shows_line_hint() {
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "hello world\nfn alpha() {}\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "fn alpha() {\n  x = 1\n}", "new_string": ""}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("did you mean to match"));
+    assert!(result.contains("fn alpha"));
+}
+
+#[test]
+fn edit_empty_old_string() {
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "hello\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "", "new_string": ""}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("old_string is empty"));
+}
+
+#[test]
+fn edit_not_found_whitespace_only_first_line() {
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "hello\n").unwrap();
+    // old_string starts with a blank line, so first_line trims to empty.
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "\n  fn alpha() {}", "new_string": ""}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("first line is empty"));
+}
+
+#[test]
+fn edit_not_found_multibyte_truncation() {
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "hello\n").unwrap();
+    // First line > 80 chars with multibyte content — must not panic.
+    let long_line = "é".repeat(100);
+    let old = format!("{long_line}\nbody");
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": old, "new_string": ""}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("old_string not found"));
+    // The needle should be truncated to 80 chars, not 80 bytes.
+    // 100 é's is 200 bytes, so untruncated needle would be 200 bytes.
+    assert!(!result.contains(&long_line));
+}
+
+#[test]
+fn edit_not_found_multibyte_context() {
+    let dir = tmp();
+    // File content with multibyte characters near the match.
+    let content = "é".repeat(300) + "\nfn alpha() {}\nbar";
+    std::fs::write(dir.join("f.txt"), &content).unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "fn alpha() {\n  x = 1\n}", "new_string": ""}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("did you mean to match"));
+    // Must not panic on byte-slice boundary.
+}
+
+#[test]
+fn edit_batch_three_non_overlapping() {
+    let dir = tmp();
+    std::fs::write(dir.join("x.txt"), "alpha\nbeta\ngamma\ndelta\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "x.txt",
+        "edits": [
+            {"old_string": "alpha", "new_string": "A"},
+            {"old_string": "gamma", "new_string": "C"},
+            {"old_string": "delta", "new_string": "D"}
+        ]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.starts_with("Applied 3 edits"), "got: {result}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("x.txt")).unwrap(),
+        "A\nbeta\nC\nD\n"
+    );
+}
+
+#[test]
+fn edit_batch_overlap_second_not_found() {
+    // Edits apply sequentially: the first replaces "hello", so the
+    // second edit's "hello world" no longer exists in the accumulated
+    // buffer.
+    let dir = tmp();
+    std::fs::write(dir.join("x.txt"), "hello world\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "x.txt",
+        "edits": [
+            {"old_string": "hello", "new_string": "hi"},
+            {"old_string": "hello world", "new_string": "hi earth"}
+        ]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("old_string not found"), "got: {result}");
+}
+
+#[test]
+fn edit_batch_empty_rejected() {
+    let dir = tmp();
+    std::fs::write(dir.join("x.txt"), "x\n").unwrap();
+    let args = serde_json::json!({"file_path": "x.txt", "edits": []}).to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("no edits provided"));
+}
+
+#[test]
+fn edit_batch_missing_edits_key() {
+    let dir = tmp();
+    std::fs::write(dir.join("x.txt"), "x\n").unwrap();
+    let args = serde_json::json!({"file_path": "x.txt"}).to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("missing 'edits'"));
+}
+
+// --- Scoped edit tests ---
+
+#[test]
+fn edit_scoped_match_replaces_within_scope() {
+    // "alpha" appears on lines 1 and 3; the scope selects line 3 only.
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "alpha\nbeta\nalpha\ngamma\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "alpha", "new_string": "ALPHA", "start_line": 3, "end_line": 3}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.starts_with("Applied 1 edit"), "got: {result}");
+    assert!(result.contains("ALPHA"), "got: {result}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+        "alpha\nbeta\nALPHA\ngamma\n"
+    );
+}
+
+#[test]
+fn edit_scope_end_beyond_eof_clamps() {
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "line1\ntarget\nline3\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "target", "new_string": "TARGET", "start_line": 2, "end_line": 100}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.starts_with("Applied 1 edit"), "got: {result}");
+    assert!(result.contains("TARGET"), "got: {result}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+        "line1\nTARGET\nline3\n"
+    );
+}
+
+#[test]
+fn edit_both_scoped_and_unscoped() {
+    // One unscoped edit and one scoped edit in the same batch.
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "alpha\nbeta\ngamma\ndelta\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [
+            {"old_string": "alpha", "new_string": "A"},
+            {"old_string": "gamma", "new_string": "G", "start_line": 3, "end_line": 3}
+        ]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.starts_with("Applied 2 edits"), "got: {result}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+        "A\nbeta\nG\ndelta\n"
+    );
+}
+
+#[test]
+fn edit_mixed_overlap_second_not_found() {
+    // Edits apply sequentially: the first replaces "234", so the second
+    // edit's "456" (scoped to line 1) no longer exists in the
+    // accumulated buffer.
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "0123456789\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [
+            {"old_string": "234", "new_string": "x"},
+            {"old_string": "456", "new_string": "y", "start_line": 1, "end_line": 1}
+        ]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("old_string not found"), "got: {result}");
+}
+
+#[test]
+fn edit_range_start_gt_end_clamped() {
+    // start_line > end_line is accepted; scope_byte_range clamps
+    // the window, producing a not-found diagnostic when the match
+    // falls outside the clamped range.
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "line1", "new_string": "x", "start_line": 3, "end_line": 2}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("old_string not found"), "got: {result}");
+    assert!(result.contains("between lines 3-2"), "got: {result}");
+}
+
+#[test]
+fn edit_neither_old_string_nor_start_line_error() {
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"new_string": "x"}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("missing 'old_string'"));
+}
+
+#[test]
+fn edit_end_line_without_start_line_accepted() {
+    // end_line without start_line defaults scope_start to 1.
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "line1", "new_string": "x", "end_line": 2}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.starts_with("Applied 1 edit"), "got: {result}");
+    assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "x\n");
+}
+
+#[test]
+fn edit_scope_start_gt_end_clamped() {
+    // start_line > end_line within a scope is accepted; scope_byte_range
+    // clamps, producing a not-found diagnostic when the match falls
+    // outside the clamped range.
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "line1", "new_string": "x", "start_line": 2, "end_line": 1}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("old_string not found"), "got: {result}");
+    assert!(result.contains("between lines 2-1"), "got: {result}");
+}
+
+#[test]
+fn edit_scope_start_beyond_eof_clamped() {
+    // A scope starting past the last line is clamped to EOF by
+    // scope_byte_range, producing a not-found diagnostic.
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "line1", "new_string": "x", "start_line": 3, "end_line": 3}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("old_string not found"), "got: {result}");
+}
+
+#[test]
+fn edit_scope_start_line_zero_clamped() {
+    // Zero start_line is clamped to 1 by the executor.
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "line1", "new_string": "x", "start_line": 0, "end_line": 1}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.starts_with("Applied 1 edit"), "got: {result}");
+    assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "x\n");
+}
+
+#[test]
+fn edit_scoped_match_missing_outside_scope() {
+    // "target" exists on line 2, but the scope is line 3 — scope-aware error.
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "line1\ntarget\nline3\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "target", "new_string": "TARGET", "start_line": 3, "end_line": 3}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("old_string not found"), "got: {result}");
+    assert!(result.contains("between lines 3-3"), "got: {result}");
+}
+
+#[test]
+fn edit_scoped_match_start_line_only() {
+    // start_line without end_line scopes from that line to end of file.
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "target\nline2\ntarget\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "target", "new_string": "TARGET", "start_line": 3}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.starts_with("Applied 1 edit"), "got: {result}");
+    assert!(result.contains("TARGET"), "got: {result}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+        "target\nline2\nTARGET\n"
+    );
+}
+
+#[test]
+fn edit_scoped_match_disambiguates() {
+    // "dup" appears twice; the scope narrows to the line-1 occurrence.
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "dup\nother\ndup\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "dup", "new_string": "DUP", "start_line": 1, "end_line": 1}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.starts_with("Applied 1 edit"), "got: {result}");
+    assert!(result.contains("DUP"), "got: {result}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+        "DUP\nother\ndup\n"
+    );
+}
+
+#[test]
+fn edit_scoped_match_still_non_unique() {
+    // Both occurrences fall inside the scope, so it is still non-unique.
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "dup\nother\ndup\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "dup", "new_string": "DUP", "start_line": 1, "end_line": 3}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("not unique"), "got: {result}");
+}
+
+#[test]
+fn edit_scope_rejects_non_integer_start_line() {
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "line1", "new_string": "x", "start_line": "2", "end_line": 2}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("must be an integer"), "got: {result}");
+    assert!(result.contains("start_line"), "got: {result}");
+}
+
+#[test]
+fn edit_scope_rejects_non_integer_end_line() {
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "line1", "new_string": "x", "start_line": 1, "end_line": "2"}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.contains("must be an integer"), "got: {result}");
+    assert!(result.contains("end_line"), "got: {result}");
+}
+
+#[test]
+fn edit_scope_end_line_without_start_accepted() {
+    // end_line without start_line defaults scope_start to 1.
+    let dir = tmp();
+    std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
+    let args = serde_json::json!({
+        "file_path": "f.txt",
+        "edits": [{"old_string": "line1", "new_string": "x", "end_line": 2}]
+    })
+    .to_string();
+    let result = edit_sync(Some(&dir), Some(std::slice::from_ref(&dir)), &args);
+    assert!(result.starts_with("Applied 1 edit"), "got: {result}");
+    assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "x\n");
+}
+
+#[tokio::test]
+async fn task_no_callback_returns_error() {
+    let dir = tmp();
+    let c = AgentLoopRuntime {
+        cwd: Some(dir.clone()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![dir.clone()]),
+        audit_log: None,
+        allowed_tools: None,
+        task_fn: None,
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    };
+    let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
+    let result = invoke("tool-test-id", "Task", &c, &args).await;
+    assert!(result.contains("Task not available"));
+}
+
+#[tokio::test]
+async fn task_callback_called_when_set() {
+    let dir = tmp();
+    let called = Arc::new(std::sync::Mutex::new(false));
+    let called2 = called.clone();
+    let task_fn: TaskFn = Arc::new(move |kind, prompt, _history| {
+        *called2.lock().unwrap() = true;
+        Box::pin(async move { ToolOutcome::text(format!("task result: {kind} / {prompt}")) })
+    });
+    let c = AgentLoopRuntime {
+        cwd: Some(dir.clone()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![dir.clone()]),
+        audit_log: None,
+        allowed_tools: None,
+        task_fn: Some(task_fn),
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    };
+    let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
+    let result = invoke("tool-test-id", "Task", &c, &args).await;
+    assert!(*called.lock().unwrap());
+    assert!(result.contains("task result: Scout / do something"));
+}
+
+#[tokio::test]
+async fn task_empty_prompt_returns_error() {
+    let dir = tmp();
+    let task_fn: TaskFn = Arc::new(|_kind, _prompt, _history| {
+        Box::pin(async move { ToolOutcome::text("should not be called") })
+    });
+    let c = AgentLoopRuntime {
+        cwd: Some(dir.clone()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![dir.clone()]),
+        audit_log: None,
+        allowed_tools: None,
+        task_fn: Some(task_fn),
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    };
+    let args = serde_json::json!({"kind": "Scout", "prompt": ""}).to_string();
+    let result = invoke("tool-test-id", "Task", &c, &args).await;
+    assert!(result.contains("Task prompt is required"));
+
+    // Missing prompt key entirely — caught by schema validation.
+    let args2 = serde_json::json!({"kind": "Scout"}).to_string();
+    let result2 = invoke("tool-test-id", "Task", &c, &args2).await;
+    assert!(result2.contains("missing 'prompt'"), "got: {result2}");
+}
+
+#[tokio::test]
+async fn task_unknown_kind_rejected_before_callback() {
+    let dir = tmp();
+    let called = Arc::new(std::sync::Mutex::new(false));
+    let called2 = called.clone();
+    let task_fn: TaskFn = Arc::new(move |_kind, _prompt, _history| {
+        *called2.lock().unwrap() = true;
+        Box::pin(async move { ToolOutcome::text("should not be called") })
+    });
+    let c = AgentLoopRuntime {
+        cwd: Some(dir.clone()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![dir.clone()]),
+        audit_log: None,
+        allowed_tools: None,
+        task_fn: Some(task_fn),
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    };
+    let args = serde_json::json!({"kind": "Bogus", "prompt": "go"}).to_string();
+    let result = invoke("tool-test-id", "Task", &c, &args).await;
+    assert!(result.contains("unknown Task kind"), "got: {result}");
+    assert!(
+        !*called.lock().unwrap(),
+        "callback must not run for unknown kind"
+    );
+}
+
+#[tokio::test]
+async fn task_result_is_headered_with_kind() {
+    let dir = tmp();
+    let task_fn: TaskFn =
+        Arc::new(|_k, _p, _history| Box::pin(async move { ToolOutcome::text("body") }));
+    let c = AgentLoopRuntime {
+        cwd: Some(dir.clone()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![dir.clone()]),
+        audit_log: None,
+        allowed_tools: None,
+        task_fn: Some(task_fn),
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    };
+    let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
+    assert_eq!(
+        invoke("tool-test-id", "Task", &c, &args).await,
+        "# Scout\n\nbody"
+    );
+}
+
+#[tokio::test]
+async fn done_invoke_returns_summary() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let args = serde_json::json!({"summary": "wrote three files and fixed tests"}).to_string();
+    let result = invoke("tool-test-id", "Done", &c, &args).await;
+    assert_eq!(result, "Done. wrote three files and fixed tests");
+}
+
+#[tokio::test]
+async fn done_invoke_empty_summary() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let args = serde_json::json!({"summary": ""}).to_string();
+    let result = invoke("tool-test-id", "Done", &c, &args).await;
+    assert_eq!(result, "Done. ");
+}
+
+// --- Part 4: IO containment tests (symlink-aware) ---
+
+#[test]
+fn io_enforce_passes_for_lexical_child() {
+    let dir = tmp();
+    let f = dir.join("a.txt");
+    std::fs::write(&f, "hi").unwrap();
+    assert!(io_enforce(&f, std::slice::from_ref(&dir)).is_none());
+}
+
+#[test]
+fn io_enforce_passes_for_new_file() {
+    let dir = tmp();
+    let f = dir.join("new.txt");
+    // Non-existent file passes — can't be a bad symlink if it doesn't exist.
+    assert!(io_enforce(&f, std::slice::from_ref(&dir)).is_none());
+}
+
+#[test]
+fn io_enforce_passes_for_non_existent_root() {
+    let dir = tmp();
+    let root = dir.join("does-not-exist-yet");
+    let target = root.join("new.txt");
+    // A root that doesn't exist yet (e.g. a not-yet-created worktree dir)
+    // must not be dropped from containment; its partial-canonical path is still used.
+    assert!(io_enforce(&target, std::slice::from_ref(&root)).is_none());
+    // A target that escapes the non-existent root via `..` must be rejected.
+    let escape = root.join("..").join("outside.txt");
+    let err = io_enforce(&escape, std::slice::from_ref(&root)).unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+fn io_enforce_rejects_dotdot_escape_through_non_existent_root() {
+    let dir = tmp();
+    let root = dir.join("gap");
+    // Lexically under the (missing) root, but `..` resolves outside.
+    let escape = root.join("..").join("other").join("file.txt");
+    let err = io_enforce(&escape, std::slice::from_ref(&root)).unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+fn io_enforce_passes_for_lexical_sibling() {
+    let dir = tmp();
+    let sibling = dir.parent().unwrap().join(format!(
+        "gremlins-io-sibling-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&sibling).unwrap();
+    let target = sibling.join("out.txt");
+    std::fs::write(&target, "x").unwrap();
+    // target is outside the worktree (sibling, not child).
+    let err = io_enforce(&target, std::slice::from_ref(&dir)).unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+#[cfg(unix)]
+fn io_enforce_blocks_symlink_escape() {
+    let dir = tmp();
+    let worktree = dir.join("worktree");
+    std::fs::create_dir(&worktree).unwrap();
+    let outside = dir.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), "sensitive").unwrap();
+    let link = worktree.join("link.txt");
+    std::os::unix::fs::symlink(outside.join("secret.txt"), &link).unwrap();
+    // Lexically inside the worktree, but symlink resolves outside.
+    let err = io_enforce(&link, std::slice::from_ref(&worktree)).unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+#[cfg(unix)]
+fn io_enforce_blocks_write_through_symlinked_parent() {
+    let dir = tmp();
+    let worktree = dir.join("worktree");
+    std::fs::create_dir(&worktree).unwrap();
+    let outside = dir.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    // A pre-existing symlinked directory inside the worktree pointing out.
+    let link_dir = worktree.join("venv-link");
+    std::os::unix::fs::symlink(&outside, &link_dir).unwrap();
+    // The leaf doesn't exist yet, but its parent resolves outside.
+    let target = link_dir.join("newfile.txt");
+    let err = io_enforce(&target, std::slice::from_ref(&worktree)).unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+#[cfg(unix)]
+fn io_enforce_allows_new_file_under_in_worktree_symlink() {
+    let dir = tmp();
+    let worktree = dir.join("worktree");
+    std::fs::create_dir(&worktree).unwrap();
+    let real = worktree.join("real");
+    std::fs::create_dir(&real).unwrap();
+    // A symlink that stays inside the worktree is fine.
+    let link_dir = worktree.join("link");
+    std::os::unix::fs::symlink(&real, &link_dir).unwrap();
+    let target = link_dir.join("newfile.txt");
+    assert!(io_enforce(&target, std::slice::from_ref(&worktree)).is_none());
+}
+
+#[test]
+#[cfg(unix)]
+fn io_enforce_blocks_dangling_symlink_escape() {
+    let dir = tmp();
+    let worktree = dir.join("worktree");
+    std::fs::create_dir(&worktree).unwrap();
+    let outside = dir.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    // Dangling symlink: target doesn't exist yet, so canonicalize()
+    // fails on the symlink itself. We must still resolve the symlink
+    // target for containment.
+    let link = worktree.join("link");
+    std::os::unix::fs::symlink(outside.join("new.txt"), &link).unwrap();
+    let err = io_enforce(&link, std::slice::from_ref(&worktree)).unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+fn within_worktree_relative_root_with_different_agent_cwd() {
+    // Regression: when a sandbox root was assembled relative to the
+    // daemon's cwd but the agent has a different cwd, within_worktree
+    // must still correctly resolve the root. The fix canonicalizes
+    // roots at assembly time, so they arrive here as absolute paths.
+    // This test simulates that: the root is pre-canonicalized (as the
+    // assembly step now does), and the agent cwd is unrelated.
+    let daemon_like = tmp();
+    let worktree = daemon_like.join("worktree");
+    std::fs::create_dir(&worktree).unwrap();
+    let worktree_file = worktree.join("data.txt");
+    std::fs::write(&worktree_file, "ok").unwrap();
+
+    let agent_cwd = tmp();
+    // The root is pre-canonicalized (absolute), as the assembly step
+    // now guarantees.
+    let roots = [canonicalize_or_ancestor(&worktree)];
+
+    // within_worktree must allow the worktree file even when agent cwd
+    // is somewhere entirely different.
+    assert!(within_worktree(&worktree_file, &roots, Some(&agent_cwd)));
+    // io_enforce must agree.
+    assert!(io_enforce(&worktree_file, &roots).is_none());
+
+    // A file outside the root is still denied by both.
+    let outside = agent_cwd.join("outside.txt");
+    std::fs::write(&outside, "x").unwrap();
+    assert!(!within_worktree(&outside, &roots, Some(&agent_cwd)));
+    assert!(io_enforce(&outside, &roots).is_some());
+}
+
+// Independent of `normalize_path`: for existing dirs it must agree with
+// plain canonicalization, so tests comparing against it are not tautological.
+fn canon(p: &Path) -> String {
+    std::fs::canonicalize(p).unwrap().display().to_string()
+}
+
+fn sorted_canon(roots: &[PathBuf]) -> String {
+    let mut v: Vec<String> = roots.iter().map(|r| canon(r)).collect();
+    v.sort();
+    v.join(", ")
+}
+
+#[test]
+fn roots_suffix_sorted_and_empty() {
+    // Creation order is deliberately `b`, `a`; the names make `a` sort
+    // first, so this fails if the sort is dropped.
+    let parent = tmp();
+    let (a, b) = (parent.join("aaa"), parent.join("bbb"));
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    assert_eq!(
+        roots_suffix(&[b.clone(), a.clone()], None),
+        format!("\n→ sandbox roots: {}, {}", canon(&a), canon(&b))
+    );
+    assert_eq!(roots_suffix(&[], None), "");
+}
+
+#[test]
+#[cfg(unix)]
+fn roots_suffix_dedups_symlink_alias() {
+    let dir = tmp();
+    let link = tmp().join("alias");
+    std::os::unix::fs::symlink(&dir, &link).unwrap();
+    assert_eq!(
+        roots_suffix(&[dir.clone(), link], None),
+        format!("\n→ sandbox roots: {}", canon(&dir))
+    );
+}
+
+#[test]
+fn enforce_denial_appends_sorted_roots() {
+    let worktree = tmp();
+    let artifact_dir = tmp();
+    let outside = tmp().join("bad.txt");
+    let err = enforce(
+        &[worktree.clone(), artifact_dir.clone()],
+        outside.to_str().unwrap(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        err,
+        format!(
+            "Error: path outside sandbox: {}\n→ sandbox roots: {}",
+            outside.display(),
+            sorted_canon(&[worktree, artifact_dir])
+        )
+    );
+}
+
+#[test]
+fn bash_check_denial_appends_sorted_roots() {
+    let worktree = tmp();
+    let err = bash_check(std::slice::from_ref(&worktree), "cat /etc/passwd", None).unwrap();
+    assert_eq!(
+        err,
+        format!(
+            "Error: path outside sandbox (from /etc/passwd): /etc/passwd\n→ sandbox roots: {}",
+            canon(&worktree)
+        )
+    );
+}
+
+// --- Part 5: Output size cap tests ---
+
+#[tokio::test]
+async fn invoke_caps_oversized_bash_result() {
+    let _env = crate::test_support::EnvGuard::lock();
+    let dir = tmp();
+    let c = ctx(&dir);
+    // Generate ~500 bytes of output — well over a 200-byte cap.
+    let args =
+        serde_json::json!({"command": "i=0; while [ $i -lt 500 ]; do printf x; i=$((i+1)); done"})
+            .to_string();
+    std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "200");
+    let result = invoke("tool-test-id", "Bash", &c, &args).await;
+    assert!(
+        result.contains("[...truncated at 200 bytes...]"),
+        "oversized Bash must carry a truncation marker, got: {result}"
+    );
+    assert!(
+        (result.len() as u64) <= 200,
+        "truncated result must fit within cap, got len {}: {result}",
+        result.len()
+    );
+    assert!(
+        !result.contains("Tool output exceeded the limit"),
+        "oversized Bash must be truncated, not discarded, got: {result}"
+    );
+}
+#[tokio::test]
+async fn invoke_caps_oversized_read_result() {
+    let _env = crate::test_support::EnvGuard::lock();
+    let dir = tmp();
+    let c = ctx(&dir);
+    let big = "x".repeat(500);
+    std::fs::write(dir.join("big.txt"), &big).unwrap();
+    let args = serde_json::json!({"file_path": "big.txt"}).to_string();
+    std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "200");
+    let result = invoke("tool-test-id", "Read", &c, &args).await;
+    assert!(
+        result.contains("[...truncated at 200 bytes — line too long for offset hint...]"),
+        "oversized Read must carry a truncation marker, got: {result}"
+    );
+    assert!(
+        (result.len() as u64) <= 200,
+        "truncated result must fit within cap, got len {}: {result}",
+        result.len()
+    );
+    assert!(
+        !result.contains("Tool output exceeded the limit"),
+        "oversized Read must be truncated, not discarded, got: {result}"
+    );
+}
+#[tokio::test]
+async fn invoke_truncation_preserves_content_prefix() {
+    let _env = crate::test_support::EnvGuard::lock();
+    let dir = tmp();
+    let c = ctx(&dir);
+    // 200 bytes of output with a 64-byte cap: the leading bytes must
+    // survive and the whole result (content + marker) must fit the cap.
+    let args =
+        serde_json::json!({"command": "i=0; while [ $i -lt 200 ]; do printf x; i=$((i+1)); done"})
+            .to_string();
+    std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "64");
+    let result = invoke("tool-test-id", "Bash", &c, &args).await;
+    assert!(
+        result.contains("[...truncated at 64 bytes...]"),
+        "truncated Bash must carry a marker, got: {result}"
+    );
+    assert!(
+        result.contains("xxxxxxxxxx"),
+        "truncated Bash must preserve a content prefix, got: {result}"
+    );
+    assert!(
+        (result.len() as u64) <= 64,
+        "truncated result must fit within the cap, got len {}: {result}",
+        result.len()
+    );
+}
+
+#[tokio::test]
+async fn invoke_zero_cap_disables_limit() {
+    let _env = crate::test_support::EnvGuard::lock();
+    let dir = tmp();
+    let c = ctx(&dir);
+    let args =
+        serde_json::json!({"command": "i=0; while [ $i -lt 200 ]; do printf x; i=$((i+1)); done"})
+            .to_string();
+    std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "0");
+    let result = invoke("tool-test-id", "Bash", &c, &args).await;
+    assert!(
+        result.contains('x'),
+        "cap=0 must return actual output, got: {result}"
+    );
+    assert!(
+        !result.contains("[...truncated at"),
+        "cap=0 must not truncate output, got: {result}"
+    );
+}
+
+#[tokio::test]
+async fn invoke_truncation_respects_byte_boundary_with_multibyte_utf8() {
+    let _env = crate::test_support::EnvGuard::lock();
+    let dir = tmp();
+    let c = ctx(&dir);
+    // 200 '§' chars at 2 bytes each = 400 bytes. Cap at 100 bytes.
+    // Read marker is ~62 bytes, so keep ≈ 38 bytes = 19 '§' chars.
+    // Must not split a multi-byte char mid-codepoint.
+    let content = "§".repeat(200);
+    std::fs::write(dir.join("utf8.txt"), &content).unwrap();
+    std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "100");
+    let args = serde_json::json!({"file_path": "utf8.txt"}).to_string();
+    let result = invoke("tool-test-id", "Read", &c, &args).await;
+    assert!(
+        (result.len() as u64) <= 100,
+        "truncated result must fit within the cap, got len {}: {result}",
+        result.len()
+    );
+    assert!(
+        result.contains("[...truncated at 100 bytes"),
+        "multibyte truncation must carry a marker, got: {result}"
+    );
+    // Should contain some multi-byte content before truncation.
+    assert!(
+        result.contains('§'),
+        "truncated result must preserve multibyte prefix, got: {result}"
+    );
+    // Verify the result is valid UTF-8 by round-tripping.
+    let _valid = String::from_utf8(result.as_bytes().to_vec())
+        .expect("truncated output must be valid UTF-8");
+}
+
+#[tokio::test]
+async fn invoke_cap_smaller_than_marker_stays_within_limit() {
+    let _env = crate::test_support::EnvGuard::lock();
+    let dir = tmp();
+    let c = ctx(&dir);
+    let big = "x".repeat(500);
+    std::fs::write(dir.join("big.txt"), &big).unwrap();
+    let args = serde_json::json!({"file_path": "big.txt"}).to_string();
+    // Cap is 5 bytes — every marker is longer than that.
+    std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "5");
+    let result = invoke("tool-test-id", "Read", &c, &args).await;
+    assert!(
+        (result.len() as u64) <= 5,
+        "result must fit within cap when marker exceeds cap, got len {}: {result}",
+        result.len()
+    );
+    // Result should be valid UTF-8.
+    let _valid = String::from_utf8(result.as_bytes().to_vec())
+        .expect("marker-only output must be valid UTF-8");
+}
+
+#[tokio::test]
+async fn invoke_does_not_cap_done() {
+    let _env = crate::test_support::EnvGuard::lock();
+    let dir = tmp();
+    let c = ctx(&dir);
+    let long_summary = "x".repeat(500);
+    let args = serde_json::json!({"summary": &long_summary}).to_string();
+    std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
+    let result = invoke("tool-test-id", "Done", &c, &args).await;
+    assert!(
+        result.starts_with("Done. "),
+        "Done must not be capped, got: {result}"
+    );
+    assert!(
+        result.contains(&long_summary),
+        "Done summary must be preserved"
+    );
+}
+
+#[tokio::test]
+async fn invoke_does_not_cap_task() {
+    let _env = crate::test_support::EnvGuard::lock();
+    let dir = tmp();
+    let task_fn: TaskFn =
+        Arc::new(|_k, _p, _history| Box::pin(async move { ToolOutcome::text("x".repeat(500)) }));
+    let c = AgentLoopRuntime {
+        cwd: Some(dir.clone()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![dir.clone()]),
+        audit_log: None,
+        allowed_tools: None,
+        task_fn: Some(task_fn),
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    };
+    let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
+    std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
+    let result = invoke("tool-test-id", "Task", &c, &args).await;
+    assert!(
+        result.contains('x'),
+        "Task must not be capped, got: {result}"
+    );
+    assert!(
+        !result.contains("[...truncated at"),
+        "Task must not truncate output, got: {result}"
+    );
+}
+
+// --- Part 6: SandboxMode (AllowAll) tests ---
+
+fn allow_all_ctx(cwd: &Path) -> AgentLoopRuntime {
+    AgentLoopRuntime {
+        cwd: Some(cwd.to_path_buf()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::AllowAll,
+        audit_log: None,
+        allowed_tools: None,
+        task_fn: None,
+        audit_lock: None,
+
+        id_prefix: String::new(),
+        telemetry: AgentLoopTelemetry {
+            stream_events: None,
+            tool_output: None,
+        },
+        active_skills: None,
+        skills_available: false,
+        discovered_skills: None,
+        log_tx: None,
+    }
+}
+
+#[tokio::test]
+async fn allow_all_permits_out_of_roots_read() {
+    let dir = tmp();
+    let outside = dir.parent().unwrap().join(format!(
+        "gremlins-allowall-read-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&outside).unwrap();
+    let secret = outside.join("secret.txt");
+    std::fs::write(&secret, "top secret").unwrap();
+
+    let c = allow_all_ctx(&dir);
+    let args = serde_json::json!({"file_path": secret.to_str().unwrap()}).to_string();
+    let result = invoke("tool-test-id", "Read", &c, &args).await;
+    assert_eq!(
+        result, "1|top secret",
+        "AllowAll must permit out-of-roots read"
+    );
+}
+
+#[tokio::test]
+async fn allow_all_permits_out_of_roots_write() {
+    let dir = tmp();
+    let outside = dir.parent().unwrap().join(format!(
+        "gremlins-allowall-write-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&outside).unwrap();
+    let target = outside.join("new.txt");
+
+    let c = allow_all_ctx(&dir);
+    let args =
+        serde_json::json!({"file_path": target.to_str().unwrap(), "content": "hi"}).to_string();
+    let result = invoke("tool-test-id", "Write", &c, &args).await;
+    assert_eq!(result, "OK", "AllowAll must permit out-of-roots write");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "hi");
+}
+
+#[tokio::test]
+async fn allow_all_permits_out_of_roots_bash() {
+    let dir = tmp();
+    let c = allow_all_ctx(&dir);
+    // /etc/passwd is outside every root; bash_check must not deny it.
+    let args = serde_json::json!({"command": "cat /etc/passwd"}).to_string();
+    let result = invoke("tool-test-id", "Bash", &c, &args).await;
+    assert!(
+        !result.contains("outside sandbox"),
+        "AllowAll must bypass bash_check, got: {result}"
+    );
+    // The command must actually run and succeed, not merely fail in some
+    // other way (e.g. "invalid sandbox root" from empty roots).
+    assert!(
+        result.contains("root:"),
+        "AllowAll bash must read /etc/passwd, got: {result}"
+    );
+    assert!(
+        !result.starts_with("[exit"),
+        "AllowAll bash must exit 0, got: {result}"
+    );
+}
+
+#[test]
+fn empty_roots_still_deny_io_enforce() {
+    let dir = tmp();
+    let f = dir.join("a.txt");
+    std::fs::write(&f, "x").unwrap();
+    // Empty roots must continue to mean "deny all", not "allow all".
+    let err = io_enforce(&f, &[]).unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+fn empty_roots_still_deny_enforce() {
+    let dir = tmp();
+    let err = enforce(&[], dir.join("a.txt").to_str().unwrap(), None).unwrap();
+    assert!(err.contains("outside sandbox"), "got: {err}");
+}
+
+#[test]
+fn empty_roots_still_deny_bash_check() {
+    let dir = tmp();
+    // Empty roots fail closed in bash_check ("invalid sandbox root"),
+    // never "allow all".
+    let err = bash_check(&[], "cat /etc/passwd", Some(&dir)).unwrap();
+    assert!(err.contains("invalid sandbox root"), "got: {err}");
+}

@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
-use crate::clients::tools::{
-    blocking_string, parse_args, req_str, str_detail, AgentLoopRuntime, ToolHandler, ToolOutcome,
-};
+use crate::clients::tools::registry::{str_detail, ToolHandler};
+use crate::clients::tools::runtime::{AgentLoopRuntime, ToolOutcome};
+use crate::clients::tools::util::{blocking_string, parse_args, req_str};
 use crate::core::paths::{enforce, io_enforce, resolve};
 
 pub(crate) struct EditTool;
@@ -24,6 +24,11 @@ impl ToolHandler for EditTool {
                 .unwrap_or("."),
             ctx.cwd.as_deref(),
         )
+    }
+
+    fn repair_args(&self, args: serde_json::Value) -> Option<serde_json::Value> {
+        let repaired = repair_edit_args(args);
+        Some(repaired)
     }
 
     async fn invoke(

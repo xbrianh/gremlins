@@ -1,10 +1,10 @@
+use crate::task_kind::TaskKind;
 use async_trait::async_trait;
 
 use crate::clients::conversation::Conversation;
-use crate::clients::tools::{
-    parse_args, preview_str, str_detail, AgentLoopRuntime, ToolHandler, ToolOutcome,
-};
-use crate::task_kind::TaskKind;
+use crate::clients::tools::registry::{str_detail, ToolHandler};
+use crate::clients::tools::runtime::{AgentLoopRuntime, ToolOutcome};
+use crate::clients::tools::util::{parse_args, preview_str};
 
 /// The Task tool. Fans out to a child agent loop and returns the child's
 /// prose output for the parent loop. Seeding happens here: `Fork` gets a copy
@@ -18,7 +18,7 @@ impl ToolHandler for TaskTool {
     }
 
     fn max_per_message(&self) -> Option<usize> {
-        Some(crate::conversation::tool_specs::TASK_MAX_PER_TURN)
+        Some(crate::clients::tools::tool_specs::TASK_MAX_PER_TURN)
     }
 
     async fn invoke(

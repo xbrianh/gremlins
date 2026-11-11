@@ -1,12 +1,18 @@
 use async_trait::async_trait;
 
 use crate::clients::conversation::Conversation;
-use crate::clients::tools::{parse_args, AgentLoopRuntime, ToolHandler, ToolOutcome};
+use crate::clients::tools::registry::ToolHandler;
+use crate::clients::tools::runtime::{AgentLoopRuntime, ToolOutcome};
+use crate::clients::tools::util::parse_args;
 
 pub(crate) struct LoadSkillTool;
 
 #[async_trait]
 impl ToolHandler for LoadSkillTool {
+    fn bypass_filter(&self) -> bool {
+        true
+    }
+
     async fn invoke(
         &self,
         _id: &str,
