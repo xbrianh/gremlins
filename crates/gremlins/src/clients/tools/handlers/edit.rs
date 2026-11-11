@@ -1,11 +1,32 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use async_trait::async_trait;
 
 use crate::clients::tools::registry::{str_detail, ToolHandler};
 use crate::clients::tools::runtime::{AgentLoopRuntime, ToolOutcome};
 use crate::clients::tools::util::{blocking_string, parse_args, req_str};
-use crate::core::paths::{enforce, io_enforce, resolve};
+use crate::core::paths::{canonicalize_or_ancestor, enforce, io_enforce, resolve};
+
+/// Per-file mutex map: serializes `edit_sync` calls targeting the same
+/// canonical path so concurrent `Edit` tool invocations never race on
+/// read-edit-write. Each file gets an `Arc<Mutex<()>>`; entries are
+/// created on first access and never evicted (the map is tiny in practice).
+static EDIT_FILE_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Acquire the per-file lock for `path` and run `f` under it.
+fn with_edit_file_lock(path: &Path, f: impl FnOnce() -> String) -> String {
+    let lock = {
+        let mut map = EDIT_FILE_LOCKS.lock().unwrap();
+        map.entry(canonicalize_or_ancestor(path))
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    let _guard = lock.lock().unwrap();
+    f()
+}
 
 pub(crate) struct EditTool;
 
@@ -1097,60 +1118,67 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
             return err;
         }
     }
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) => return format!("Error: {e}"),
-    };
-    let had_bom = content.starts_with('\u{FEFF}');
-    let line_ending = detect_line_ending(&content);
-    // Normalize to LF before editing so CRLF files don't double-convert.
-    let content = strip_bom(&content).replace("\r\n", "\n");
-    let original_lines = content.lines().count();
 
-    let mut edits = match parse_edits(edits_arr, file_path) {
-        Ok(e) => e,
-        Err(e) => return e,
-    };
-    // Normalize edit strings to LF so CRLF needles/new_strings work
-    // against the LF-normalized content and restoration produces correct
-    // line endings (CRLF→LF normalization, then LF→CRLF restoration).
-    for edit in &mut edits {
-        edit.old_str = edit.old_str.replace("\r\n", "\n");
-        edit.new_str = edit.new_str.replace("\r\n", "\n");
-    }
+    // Serialize read-edit-write per file: two concurrent `Edit` calls
+    // targeting the same path would otherwise race — both read the
+    // original content, and the later write silently discards the first.
+    with_edit_file_lock(&path, || {
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let had_bom = content.starts_with('\u{FEFF}');
+        let line_ending = detect_line_ending(&content);
+        // Normalize to LF before editing so CRLF files don't double-convert.
+        let content = strip_bom(&content).replace("\r\n", "\n");
+        let original_lines = content.lines().count();
 
-    let (mut updated, ranges, any_unescape) = match apply_edits(&content, &edits, file_path) {
-        Ok(u) => u,
-        Err(e) => return e,
-    };
-    // Restore line endings (safe now: the buffer is pure LF so no double-convert).
-    if line_ending == Some("\r\n") {
-        updated = updated.replace('\n', "\r\n");
-    }
-    let final_lines = updated.lines().count();
+        let mut edits = match parse_edits(edits_arr, file_path) {
+            Ok(e) => e,
+            Err(e) => return e,
+        };
+        // Normalize edit strings to LF so CRLF needles/new_strings work
+        // against the LF-normalized content and restoration produces correct
+        // line endings (CRLF→LF normalization, then LF→CRLF restoration).
+        for edit in &mut edits {
+            edit.old_str = edit.old_str.replace("\r\n", "\n");
+            edit.new_str = edit.new_str.replace("\r\n", "\n");
+        }
 
-    // Build result and diff against the BOM-stripped, LF-normalized content
-    // before the BOM is re-prepended, so the diff reflects real changes.
-    let diff = compute_diff(&content, &updated);
-    let result = render_success(
-        &updated,
-        &ranges,
-        file_path,
-        original_lines,
-        final_lines,
-        diff.as_deref(),
-        any_unescape,
-    );
+        let (mut updated, ranges, any_unescape) =
+            match apply_edits(&content, &edits, file_path) {
+                Ok(u) => u,
+                Err(e) => return e,
+            };
+        // Restore line endings (safe now: the buffer is pure LF so no double-convert).
+        if line_ending == Some("\r\n") {
+            updated = updated.replace('\n', "\r\n");
+        }
+        let final_lines = updated.lines().count();
 
-    // Restore BOM after diff/render so it doesn't leak into context snippets.
-    if had_bom {
-        updated.insert(0, '\u{FEFF}');
-    }
+        // Build result and diff against the BOM-stripped, LF-normalized content
+        // before the BOM is re-prepended, so the diff reflects real changes.
+        let diff = compute_diff(&content, &updated);
+        let result = render_success(
+            &updated,
+            &ranges,
+            file_path,
+            original_lines,
+            final_lines,
+            diff.as_deref(),
+            any_unescape,
+        );
 
-    if let Err(e) = std::fs::write(&path, &updated) {
-        return format!("Error: {e}");
-    }
-    result
+        // Restore BOM after diff/render so it doesn't leak into context snippets.
+        if had_bom {
+            updated.insert(0, '\u{FEFF}');
+        }
+
+        if let Err(e) = std::fs::write(&path, &updated) {
+            return format!("Error: {e}");
+        }
+        result
+    })
 }
 
 #[cfg(test)]
