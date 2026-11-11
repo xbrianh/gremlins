@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 
 use crate::clients::conversation::Conversation;
-use crate::clients::tools::{parse_args, AgentLoopRuntime, ToolHandler, ToolOutcome};
+use crate::clients::tools::registry::ToolHandler;
+use crate::clients::tools::runtime::{AgentLoopRuntime, ToolOutcome};
+use crate::clients::tools::util::parse_args;
 
 /// The Done tool — the completion signal. Behavior is trivial (echo the
 /// summary); the agent loop treats Done as the completion protocol (solo-only

@@ -24,8 +24,8 @@ use crate::clients::conversation::{Conversation, TurnScriptError};
 use crate::clients::error::ClientError;
 use crate::clients::format::{enrich_log_line, format_tool_call_parts, trunc};
 use crate::clients::protocol::{CompletedRun, TurnStats, UsageStats};
+use crate::clients::tools::tool_specs::ToolMode;
 use crate::clients::tools::{self, AgentLoopRuntime, AgentLoopTelemetry, ToolOutcome};
-use crate::conversation::tool_specs::ToolMode;
 
 // ── Architecture ────────────────────────────────────────────────────────────
 // agent_loop.rs orchestrates a single agent turn-sequence:
@@ -182,7 +182,7 @@ impl RunContext {
 pub(crate) struct LoopOpts<'a> {
     pub(crate) extra: Option<serde_json::Value>,
     pub(crate) tool_filter: Option<&'a [String]>,
-    pub(crate) tool_mode: crate::conversation::tool_specs::ToolMode,
+    pub(crate) tool_mode: crate::clients::tools::tool_specs::ToolMode,
     pub(crate) classify_error: Option<ErrorClassifier>,
     pub(crate) temperature: Option<f64>,
     pub(crate) max_tokens: Option<u64>,
@@ -1217,7 +1217,7 @@ pub(crate) async fn run_agent_loop_nested(
     let opts = LoopOpts {
         extra,
         tool_filter,
-        tool_mode: crate::conversation::tool_specs::ToolMode::Full,
+        tool_mode: crate::clients::tools::tool_specs::ToolMode::Full,
         classify_error: None,
         temperature,
         max_tokens,

@@ -126,7 +126,7 @@ impl<C> NativeRunState<C> {
                 LoopOpts {
                     extra: self.extra_params(),
                     tool_filter: self.tool_filter.as_deref(),
-                    tool_mode: crate::conversation::tool_specs::ToolMode::Full,
+                    tool_mode: crate::clients::tools::tool_specs::ToolMode::Full,
                     classify_error: Some(default_classify as ErrorClassifier),
                     temperature: self.resolved.temperature,
                     max_tokens: self.resolved.max_tokens,

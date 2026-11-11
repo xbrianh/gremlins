@@ -1,7 +1,5 @@
 pub(crate) mod compaction;
 pub(crate) mod standard;
-pub(crate) mod tool_specs;
-pub(crate) mod tools;
 
 #[cfg(test)]
 use rig_core::completion::Message;

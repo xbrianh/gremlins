@@ -297,7 +297,7 @@ pub(crate) async fn run_with_agent_loop(
         LoopOpts {
             extra,
             tool_filter,
-            tool_mode: crate::conversation::tool_specs::ToolMode::Full,
+            tool_mode: crate::clients::tools::tool_specs::ToolMode::Full,
             classify_error,
             temperature,
             max_tokens,

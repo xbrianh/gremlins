@@ -19,7 +19,7 @@ pub(crate) mod websearch;
 pub(crate) mod write;
 use std::sync::Arc;
 
-use crate::clients::tools::ToolRegistry;
+use crate::clients::tools::registry::ToolRegistry;
 
 pub(crate) fn default_registry() -> ToolRegistry {
     ToolRegistry::new(vec![

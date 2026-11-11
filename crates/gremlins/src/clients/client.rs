@@ -367,7 +367,7 @@ pub(crate) async fn run_naked(
     let opts = LoopOpts {
         extra: task_model.extra,
         tool_filter: Some(&[]),
-        tool_mode: crate::conversation::tool_specs::ToolMode::NoTools,
+        tool_mode: crate::clients::tools::tool_specs::ToolMode::NoTools,
         classify_error: None,
         temperature: task_model.temperature,
         max_tokens,
