@@ -1011,6 +1011,13 @@ async fn artifact_cmd(
     })?;
 
     if list {
+        // Reject conflicting flags early so user intent is not silently ignored.
+        if put.is_some() {
+            return Err("--list and --put are mutually exclusive".to_string());
+        }
+        if artifact_uri.is_some() {
+            return Err("--list takes no <artifact> URI".to_string());
+        }
         let response =
             executor_request(serde_json::json!({ "op": "artifact", "id": id, "list": true }))
                 .await?;
@@ -1019,16 +1026,25 @@ async fn artifact_cmd(
             .get("keys")
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
-            .unwrap_or_default();
-        for key in keys {
+            .ok_or_else(|| {
+                "daemon response missing 'keys' field (protocol mismatch?)".to_string()
+            })?;
+        for key in &keys {
             println!("{key}");
         }
         return Ok(());
     }
 
     let Some(uri) = artifact_uri else {
-        return Err("artifact requires an <artifact> URI, --list, or --put".to_string());
+        return Err(
+            "<artifact> URI is required (use --list to enumerate registered keys)".to_string(),
+        );
     };
+
+    // Reject conflicting read/write flags.
+    if put.is_some() && json_path.is_some() {
+        return Err("--put and --json-path are mutually exclusive".to_string());
+    }
 
     let mut request = serde_json::json!({ "op": "artifact", "id": id, "artifact": uri });
     if let Some(content) = put {
@@ -1047,14 +1063,21 @@ async fn artifact_cmd(
     check_error(&response)?;
 
     if put.is_some() {
-        let path = response.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let path = response
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                "daemon response missing 'path' field (protocol mismatch?)".to_string()
+            })?;
         println!("gremlin {id}: wrote {uri} -> {path}");
     } else {
         let content = response
             .get("content")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
-        print!("{content}");
+            .ok_or_else(|| {
+                "daemon response missing 'content' field (protocol mismatch?)".to_string()
+            })?;
+        println!("{content}");
     }
     Ok(())
 }

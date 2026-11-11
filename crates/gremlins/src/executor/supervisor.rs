@@ -2032,8 +2032,14 @@ async fn handle_snapshot(request: &Value, _state_root: &Path) -> Value {
         Err(e) => return error_response(&format!("gremlin {id}: {e}")),
     };
 
-    if gremlin.state.read_str("status") == "running" {
-        return error_response(&format!("gremlin {id} is running — use stop first"));
+    // Only allow snapshot on terminal gremlins (done / stopped).
+    // Re-check after opening the blob in case a race brought the gremlin
+    // back to life between the first read and the write.
+    let status = gremlin.state.read_str("status");
+    if status != "done" && status != "stopped" {
+        return error_response(&format!(
+            "gremlin {id}: status is {status:?} — snapshot requires done or stopped"
+        ));
     }
 
     let definition_path = match gremlin.definition_path.clone() {
@@ -2087,6 +2093,11 @@ async fn handle_snapshot(request: &Value, _state_root: &Path) -> Value {
     if let Err(e) = blob.write_all(&bytes) {
         return error_response(&format!("gremlin {id}: failed to write snapshot: {e}"));
     }
+    // flush + drop to force any buffered writes before returning.
+    if let Err(e) = blob.flush() {
+        return error_response(&format!("gremlin {id}: failed to flush snapshot: {e}"));
+    }
+    drop(blob);
 
     ok_response(serde_json::json!({
         "id": id,
