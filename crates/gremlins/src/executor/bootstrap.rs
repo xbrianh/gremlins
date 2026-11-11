@@ -353,10 +353,17 @@ pub async fn run_definition_bootstrap(
         // Every declared source key gets a value, even an absent one, so an
         // optional `{plan}` substitutes to an empty string instead of leaking
         // the literal placeholder into a shell command.
+        // When a source has a `default`, that default is used instead of an
+        // empty string — CLI overrides take priority via `stage_inputs`.
         let mut values: HashMap<String, String> = gremlin.stage_inputs.clone();
         if let Some(source) = &bootstrap.source {
             for key in source.all_sources() {
-                values.entry(key).or_default();
+                values.entry(key.clone()).or_insert_with(|| {
+                    source
+                        .get(&key)
+                        .and_then(|s| s.default.clone())
+                        .unwrap_or_default()
+                });
             }
         }
 

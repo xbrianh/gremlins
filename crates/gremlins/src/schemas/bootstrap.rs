@@ -11,6 +11,7 @@ pub struct InputSource {
     pub name: String,
     pub types: Vec<String>,
     pub optional: bool,
+    pub default: Option<String>,
 }
 
 impl InputSource {
@@ -34,6 +35,7 @@ impl InputSource {
             name,
             types,
             optional,
+            default: None,
         })
     }
 }
@@ -126,10 +128,18 @@ impl InputSources {
                 None => false,
             };
 
-            sources.insert(
-                key.to_string(),
-                InputSource::new(key.to_string(), types, optional)?,
-            );
+            let default = match entry_map.get("default") {
+                Some(v) => match v.as_str() {
+                    Some(s) if !s.is_empty() => Some(s.to_string()),
+                    _ => None,
+                },
+                None => None,
+            };
+
+            let mut src = InputSource::new(key.to_string(), types, optional)?;
+            src.default = default;
+
+            sources.insert(key.to_string(), src);
         }
 
         // Validate require_one_of groups against the parsed sources.
