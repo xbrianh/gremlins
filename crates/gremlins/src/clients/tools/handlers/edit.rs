@@ -1,11 +1,37 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use async_trait::async_trait;
 
 use crate::clients::tools::registry::{str_detail, ToolHandler};
 use crate::clients::tools::runtime::{AgentLoopRuntime, ToolOutcome};
 use crate::clients::tools::util::{blocking_string, parse_args, req_str};
-use crate::core::paths::{enforce, io_enforce, resolve};
+use crate::core::paths::{canonicalize_or_ancestor, enforce, io_enforce, resolve};
+
+/// Per-file mutex map: serializes `edit_sync` calls targeting the same
+/// canonical path so concurrent `Edit` tool invocations never race on
+/// read-edit-write. Each file gets an `Arc<Mutex<()>>`; entries are
+/// created on first access and never evicted (the map is tiny in practice).
+static EDIT_FILE_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Acquire the per-file lock for `path` and run `f` under it.
+fn with_edit_file_lock(path: &Path, f: impl FnOnce() -> String) -> String {
+    // Resolve the canonical key *outside* the map lock so filesystem I/O
+    // from canonicalization doesn't serialize all concurrent edits.
+    let canonical = canonicalize_or_ancestor(path);
+    let lock = {
+        let mut map = EDIT_FILE_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(canonical)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    // Recover from a poisoned mutex so a panic inside one edit closure
+    // doesn't permanently break the Edit tool for that file.
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
 
 pub(crate) struct EditTool;
 
@@ -1097,60 +1123,66 @@ pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json
             return err;
         }
     }
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) => return format!("Error: {e}"),
-    };
-    let had_bom = content.starts_with('\u{FEFF}');
-    let line_ending = detect_line_ending(&content);
-    // Normalize to LF before editing so CRLF files don't double-convert.
-    let content = strip_bom(&content).replace("\r\n", "\n");
-    let original_lines = content.lines().count();
 
-    let mut edits = match parse_edits(edits_arr, file_path) {
-        Ok(e) => e,
-        Err(e) => return e,
-    };
-    // Normalize edit strings to LF so CRLF needles/new_strings work
-    // against the LF-normalized content and restoration produces correct
-    // line endings (CRLF→LF normalization, then LF→CRLF restoration).
-    for edit in &mut edits {
-        edit.old_str = edit.old_str.replace("\r\n", "\n");
-        edit.new_str = edit.new_str.replace("\r\n", "\n");
-    }
+    // Serialize read-edit-write per file: two concurrent `Edit` calls
+    // targeting the same path would otherwise race — both read the
+    // original content, and the later write silently discards the first.
+    with_edit_file_lock(&path, || {
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let had_bom = content.starts_with('\u{FEFF}');
+        let line_ending = detect_line_ending(&content);
+        // Normalize to LF before editing so CRLF files don't double-convert.
+        let content = strip_bom(&content).replace("\r\n", "\n");
+        let original_lines = content.lines().count();
 
-    let (mut updated, ranges, any_unescape) = match apply_edits(&content, &edits, file_path) {
-        Ok(u) => u,
-        Err(e) => return e,
-    };
-    // Restore line endings (safe now: the buffer is pure LF so no double-convert).
-    if line_ending == Some("\r\n") {
-        updated = updated.replace('\n', "\r\n");
-    }
-    let final_lines = updated.lines().count();
+        let mut edits = match parse_edits(edits_arr, file_path) {
+            Ok(e) => e,
+            Err(e) => return e,
+        };
+        // Normalize edit strings to LF so CRLF needles/new_strings work
+        // against the LF-normalized content and restoration produces correct
+        // line endings (CRLF→LF normalization, then LF→CRLF restoration).
+        for edit in &mut edits {
+            edit.old_str = edit.old_str.replace("\r\n", "\n");
+            edit.new_str = edit.new_str.replace("\r\n", "\n");
+        }
 
-    // Build result and diff against the BOM-stripped, LF-normalized content
-    // before the BOM is re-prepended, so the diff reflects real changes.
-    let diff = compute_diff(&content, &updated);
-    let result = render_success(
-        &updated,
-        &ranges,
-        file_path,
-        original_lines,
-        final_lines,
-        diff.as_deref(),
-        any_unescape,
-    );
+        let (mut updated, ranges, any_unescape) = match apply_edits(&content, &edits, file_path) {
+            Ok(u) => u,
+            Err(e) => return e,
+        };
+        // Restore line endings (safe now: the buffer is pure LF so no double-convert).
+        if line_ending == Some("\r\n") {
+            updated = updated.replace('\n', "\r\n");
+        }
+        let final_lines = updated.lines().count();
 
-    // Restore BOM after diff/render so it doesn't leak into context snippets.
-    if had_bom {
-        updated.insert(0, '\u{FEFF}');
-    }
+        // Build result and diff against the BOM-stripped, LF-normalized content
+        // before the BOM is re-prepended, so the diff reflects real changes.
+        let diff = compute_diff(&content, &updated);
+        let result = render_success(
+            &updated,
+            &ranges,
+            file_path,
+            original_lines,
+            final_lines,
+            diff.as_deref(),
+            any_unescape,
+        );
 
-    if let Err(e) = std::fs::write(&path, &updated) {
-        return format!("Error: {e}");
-    }
-    result
+        // Restore BOM after diff/render so it doesn't leak into context snippets.
+        if had_bom {
+            updated.insert(0, '\u{FEFF}');
+        }
+
+        if let Err(e) = std::fs::write(&path, &updated) {
+            return format!("Error: {e}");
+        }
+        result
+    })
 }
 
 #[cfg(test)]
@@ -2214,5 +2246,90 @@ mod tests {
         assert!(report.contains("  17: line17"), "got: {report}");
         assert!(report.contains("  24: line24"), "got: {report}");
         assert!(!report.contains("... skipped"), "got: {report}");
+    }
+
+    // ── Concurrency tests ──
+
+    #[test]
+    fn concurrent_edits_all_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("shared.txt");
+        // Four unique placeholders — each thread replaces one.
+        std::fs::write(&file_path, "A_\nB_\nC_\nD_\n").unwrap();
+
+        let tasks: Vec<_> = ['A', 'B', 'C', 'D']
+            .into_iter()
+            .map(|ch| {
+                let cwd = cwd.clone();
+                let args = serde_json::json!({
+                    "file_path": "shared.txt",
+                    "edits": [{"old_string": format!("{ch}_"), "new_string": format!("X{ch}")}]
+                })
+                .to_string();
+                std::thread::spawn(move || edit_sync(Some(&cwd), None::<&[PathBuf]>, &args))
+            })
+            .collect();
+
+        let results: Vec<_> = tasks.into_iter().map(|j| j.join().unwrap()).collect();
+        for r in &results {
+            assert!(r.starts_with("Applied 1 edit"), "unexpected result: {r}");
+        }
+
+        let final_content = std::fs::read_to_string(&file_path).unwrap();
+        // All four edits must be present — no silent drops.
+        assert!(
+            final_content.contains("XA"),
+            "missing edit for A: {final_content:?}"
+        );
+        assert!(
+            final_content.contains("XB"),
+            "missing edit for B: {final_content:?}"
+        );
+        assert!(
+            final_content.contains("XC"),
+            "missing edit for C: {final_content:?}"
+        );
+        assert!(
+            final_content.contains("XD"),
+            "missing edit for D: {final_content:?}"
+        );
+    }
+
+    #[test]
+    fn concurrent_edits_same_file_different_path_spellings() {
+        // Two threads target the same file spelled differently (relative
+        // vs explicit `./` prefix). Both must land.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("spell.txt");
+        std::fs::write(&file_path, "hello\nworld\n").unwrap();
+
+        let args1 = serde_json::json!({
+            "file_path": "spell.txt",
+            "edits": [{"old_string": "hello", "new_string": "HELLO"}]
+        })
+        .to_string();
+        let args2 = serde_json::json!({
+            "file_path": "./spell.txt",
+            "edits": [{"old_string": "world", "new_string": "WORLD"}]
+        })
+        .to_string();
+
+        let c1 = cwd.clone();
+        let c2 = cwd.clone();
+        let t1 = std::thread::spawn(move || edit_sync(Some(&c1), None::<&[PathBuf]>, &args1));
+        let t2 = std::thread::spawn(move || edit_sync(Some(&c2), None::<&[PathBuf]>, &args2));
+
+        let r1 = t1.join().unwrap();
+        let r2 = t2.join().unwrap();
+        assert!(r1.starts_with("Applied 1 edit"), "{r1}");
+        assert!(r2.starts_with("Applied 1 edit"), "{r2}");
+
+        let final_content = std::fs::read_to_string(&file_path).unwrap();
+        assert!(
+            final_content.contains("HELLO") && final_content.contains("WORLD"),
+            "both edits must land; got: {final_content:?}"
+        );
     }
 }
