@@ -1951,8 +1951,61 @@ async fn handle_artifact(request: &Value) -> Value {
         Err(resp) => return resp,
     };
 
-    // Resolve the store: run map first for live gremlins (including ephemeral
-    // ones whose state lives in a TempDir), otherwise the persisted state.
+    // `put` requires locking: verify the gremlin is terminal and not in the
+    // run map before allowing mutation.
+    if request.get("put").and_then(|v| v.as_str()).is_some() {
+        let id_lock = get_id_lock(id);
+        let _guard = id_lock.lock().await;
+
+        // Reject if gremlin is in the run map.
+        {
+            let map = get_run_map().lock().unwrap();
+            if map.contains_key(id) {
+                return error_response(&format!(
+                    "gremlin {id} is running — cannot write artifacts to an active gremlin"
+                ));
+            }
+        }
+
+        // Resolve persisted store (not live run-map store).
+        let store = match state::StateData::open(id).map(|sd| sd.store_handle()) {
+            Ok(s) => s,
+            Err(e) => return error_response(&format!("gremlin {id}: {e}")),
+        };
+
+        let status = store.read_str("status");
+        if status != "done" && status != "stopped" {
+            return error_response(&format!(
+                "gremlin {id}: status is {status:?} — artifact writes require done or stopped"
+            ));
+        }
+
+        let artifact = request
+            .get("artifact")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if artifact.is_empty() {
+            return error_response("missing 'artifact' field");
+        }
+        let content = request.get("put").and_then(|v| v.as_str()).unwrap();
+        let uri = match crate::artifacts::uri::Uri::parse(artifact) {
+            Ok(uri) => uri,
+            Err(e) => return error_response(&format!("invalid artifact URI {artifact:?}: {e}")),
+        };
+        match store.write_into_registry(&uri, content).await {
+            Ok(path) => {
+                return ok_response(
+                    serde_json::json!({ "id": id, "artifact": artifact, "path": path }),
+                )
+            }
+            Err(e) => {
+                return error_response(&format!("failed to write artifact {artifact:?}: {e}"))
+            }
+        }
+    }
+
+    // Reads and listing — resolve the store (run map first for live
+    // gremlins, otherwise persisted).
     let store = match resolve_store_for_id(id) {
         Ok(store) => store,
         Err(resp) => return resp,
@@ -1973,27 +2026,6 @@ async fn handle_artifact(request: &Value) -> Value {
         .unwrap_or("");
     if artifact.is_empty() {
         return error_response("missing 'artifact' field");
-    }
-
-    // `put` writes content into the registry (creating parent dirs and
-    // committing the binding). This is the operator-facing escape hatch for
-    // a bailed stage whose required artifact was never produced: create the
-    // artifact by hand, then `resume` skips or retries the stage.
-    if let Some(content) = request.get("put").and_then(|v| v.as_str()) {
-        let uri = match crate::artifacts::uri::Uri::parse(artifact) {
-            Ok(uri) => uri,
-            Err(e) => return error_response(&format!("invalid artifact URI {artifact:?}: {e}")),
-        };
-        match store.write_into_registry(&uri, content).await {
-            Ok(path) => {
-                return ok_response(
-                    serde_json::json!({ "id": id, "artifact": artifact, "path": path }),
-                )
-            }
-            Err(e) => {
-                return error_response(&format!("failed to write artifact {artifact:?}: {e}"))
-            }
-        }
     }
 
     let json_path = request.get("json_path").and_then(|v| v.as_str());
@@ -2023,6 +2055,11 @@ async fn handle_snapshot(request: &Value, _state_root: &Path) -> Value {
         Err(resp) => return resp,
     };
 
+    // Serialise with concurrent resume/rm so that a resume cannot register
+    // the gremlin in RUN_MAP after our status check.
+    let id_lock = get_id_lock(id);
+    let _guard = id_lock.lock().await;
+
     if let Err(e) = config::init_global() {
         return error_response(&format!("config init: {e}"));
     }
@@ -2033,8 +2070,6 @@ async fn handle_snapshot(request: &Value, _state_root: &Path) -> Value {
     };
 
     // Only allow snapshot on terminal gremlins (done / stopped).
-    // Re-check after opening the blob in case a race brought the gremlin
-    // back to life between the first read and the write.
     let status = gremlin.state.read_str("status");
     if status != "done" && status != "stopped" {
         return error_response(&format!(
@@ -2081,23 +2116,18 @@ async fn handle_snapshot(request: &Value, _state_root: &Path) -> Value {
         }
     };
 
-    let mut blob = match gremlin
-        .state
-        .open_blob("definition.json", state::BlobMode::Write)
-    {
-        Ok(b) => b,
-        Err(e) => return error_response(&format!("gremlin {id}: failed to open snapshot: {e}")),
-    };
-
-    use std::io::Write;
-    if let Err(e) = blob.write_all(&bytes) {
+    // Atomic write: write to a temp file then rename, so a partial write
+    // (disk full, etc.) never leaves definition.json truncated.
+    let state_dir = gremlin.state.state_dir();
+    let dst = state_dir.join("definition.json");
+    let tmp = state_dir.join(format!("definition.json.tmp.{}", state::token_hex(4)));
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
         return error_response(&format!("gremlin {id}: failed to write snapshot: {e}"));
     }
-    // flush + drop to force any buffered writes before returning.
-    if let Err(e) = blob.flush() {
-        return error_response(&format!("gremlin {id}: failed to flush snapshot: {e}"));
+    if let Err(e) = std::fs::rename(&tmp, &dst) {
+        let _ = std::fs::remove_file(&tmp);
+        return error_response(&format!("gremlin {id}: failed to commit snapshot: {e}"));
     }
-    drop(blob);
 
     ok_response(serde_json::json!({
         "id": id,
