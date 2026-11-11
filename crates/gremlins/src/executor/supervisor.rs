@@ -4993,11 +4993,18 @@ mod tests {
         let source = InputSources::new(HashMap::from([
             (
                 "plan".to_string(),
-                InputSource::new("plan".to_string(), vec!["filepath".to_string()], true).unwrap(),
+                InputSource::new("plan".to_string(), vec!["filepath".to_string()], true, None)
+                    .unwrap(),
             ),
             (
                 "message".to_string(),
-                InputSource::new("message".to_string(), vec!["string".to_string()], true).unwrap(),
+                InputSource::new(
+                    "message".to_string(),
+                    vec!["string".to_string()],
+                    true,
+                    None,
+                )
+                .unwrap(),
             ),
         ]));
         let inputs = HashMap::from([
@@ -5024,7 +5031,7 @@ mod tests {
 
         let source = InputSources::new(HashMap::from([(
             "plan".to_string(),
-            InputSource::new("plan".to_string(), vec!["filepath".to_string()], true).unwrap(),
+            InputSource::new("plan".to_string(), vec!["filepath".to_string()], true, None).unwrap(),
         )]));
 
         let with_absolute =
@@ -5048,6 +5055,7 @@ mod tests {
                 "plan".to_string(),
                 vec!["filepath".to_string(), "string".to_string()],
                 true,
+                None,
             )
             .unwrap(),
         )]));
@@ -5070,7 +5078,7 @@ mod tests {
 
         let source = InputSources::new(HashMap::from([(
             "plan".to_string(),
-            InputSource::new("plan".to_string(), vec!["filepath".to_string()], true).unwrap(),
+            InputSource::new("plan".to_string(), vec!["filepath".to_string()], true, None).unwrap(),
         )]));
 
         let with_missing = HashMap::from([("plan".to_string(), "missing.md".to_string())]);

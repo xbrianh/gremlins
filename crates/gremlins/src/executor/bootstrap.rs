@@ -358,12 +358,15 @@ pub async fn run_definition_bootstrap(
         let mut values: HashMap<String, String> = gremlin.stage_inputs.clone();
         if let Some(source) = &bootstrap.source {
             for key in source.all_sources() {
-                values.entry(key.clone()).or_insert_with(|| {
-                    source
-                        .get(&key)
-                        .and_then(|s| s.default.clone())
-                        .unwrap_or_default()
-                });
+                // Compute the default (if any) before the entry call so that
+                // `key` can be moved directly without cloning.
+                // CLI-provided `stage_inputs` take priority — the default is
+                // only used when no value was supplied at all.
+                let default = source
+                    .get(&key)
+                    .and_then(|s| s.default.clone())
+                    .unwrap_or_default();
+                values.entry(key).or_insert(default);
             }
         }
 

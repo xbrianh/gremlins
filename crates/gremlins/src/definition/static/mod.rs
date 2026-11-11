@@ -1232,11 +1232,17 @@ mod tests {
         let mut sources = std::collections::HashMap::new();
         sources.insert(
             "instructions".to_string(),
-            InputSource::new("instructions".to_string(), vec!["string".to_string()], true).unwrap(),
+            InputSource::new(
+                "instructions".to_string(),
+                vec!["string".to_string()],
+                true,
+                None,
+            )
+            .unwrap(),
         );
         sources.insert(
             "plan".to_string(),
-            InputSource::new("plan".to_string(), vec!["filepath".to_string()], true).unwrap(),
+            InputSource::new("plan".to_string(), vec!["filepath".to_string()], true, None).unwrap(),
         );
         let mut input_sources = InputSources::new(sources);
         input_sources.require_one_of = vec![vec!["instructions".to_string(), "plan".to_string()]];

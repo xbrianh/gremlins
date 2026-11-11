@@ -2455,13 +2455,19 @@ mod tests {
                     "plan".to_string(),
                     plan_types.iter().map(|t| (*t).to_string()).collect(),
                     true,
+                    None,
                 )
                 .unwrap(),
             ),
             (
                 "instructions".to_string(),
-                InputSource::new("instructions".to_string(), vec!["string".to_string()], true)
-                    .unwrap(),
+                InputSource::new(
+                    "instructions".to_string(),
+                    vec!["string".to_string()],
+                    true,
+                    None,
+                )
+                .unwrap(),
             ),
         ]
         .into_iter()

@@ -15,7 +15,12 @@ pub struct InputSource {
 }
 
 impl InputSource {
-    pub fn new(name: String, types: Vec<String>, optional: bool) -> Result<Self, SchemaError> {
+    pub fn new(
+        name: String,
+        types: Vec<String>,
+        optional: bool,
+        default: Option<String>,
+    ) -> Result<Self, SchemaError> {
         if types.is_empty() {
             return Err(SchemaError::InputSource {
                 name,
@@ -35,7 +40,7 @@ impl InputSource {
             name,
             types,
             optional,
-            default: None,
+            default,
         })
     }
 }
@@ -130,14 +135,31 @@ impl InputSources {
 
             let default = match entry_map.get("default") {
                 Some(v) => match v.as_str() {
-                    Some(s) if !s.is_empty() => Some(s.to_string()),
-                    _ => None,
+                    Some(s) => Some(s.to_string()),
+                    None => {
+                        return Err(SchemaError::InputSource {
+                            name: key.to_string(),
+                            msg: format!(
+                                "'default' must be a string, got {}",
+                                if v.is_number() {
+                                    "a number"
+                                } else if v.is_boolean() {
+                                    "a boolean"
+                                } else if v.is_array() {
+                                    "an array"
+                                } else if v.is_object() {
+                                    "an object"
+                                } else {
+                                    "null"
+                                }
+                            ),
+                        });
+                    }
                 },
                 None => None,
             };
 
-            let mut src = InputSource::new(key.to_string(), types, optional)?;
-            src.default = default;
+            let src = InputSource::new(key.to_string(), types, optional, default)?;
 
             sources.insert(key.to_string(), src);
         }
@@ -423,19 +445,19 @@ mod tests {
 
     #[test]
     fn test_input_source_empty_types() {
-        let result = InputSource::new("test".to_string(), vec![], false);
+        let result = InputSource::new("test".to_string(), vec![], false, None);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_input_source_unknown_type() {
-        let result = InputSource::new("test".to_string(), vec!["bad".to_string()], false);
+        let result = InputSource::new("test".to_string(), vec!["bad".to_string()], false, None);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_input_source_valid() {
-        let result = InputSource::new("test".to_string(), vec!["filepath".to_string()], true);
+        let result = InputSource::new("test".to_string(), vec!["filepath".to_string()], true, None);
         assert!(result.is_ok());
         let src = result.unwrap();
         assert_eq!(src.name, "test");
@@ -476,7 +498,8 @@ mod tests {
         let src = InputSources::new(
             vec![(
                 "key".to_string(),
-                InputSource::new("key".to_string(), vec!["string".to_string()], false).unwrap(),
+                InputSource::new("key".to_string(), vec!["string".to_string()], false, None)
+                    .unwrap(),
             )]
             .into_iter()
             .collect(),
@@ -501,7 +524,8 @@ mod tests {
         let src = InputSources::new(
             vec![(
                 "plan".to_string(),
-                InputSource::new("plan".to_string(), vec!["filepath".to_string()], true).unwrap(),
+                InputSource::new("plan".to_string(), vec!["filepath".to_string()], true, None)
+                    .unwrap(),
             )]
             .into_iter()
             .collect(),
@@ -598,12 +622,17 @@ mod tests {
             [
                 (
                     "instructions".to_string(),
-                    InputSource::new("instructions".to_string(), vec!["string".to_string()], true)
-                        .unwrap(),
+                    InputSource::new(
+                        "instructions".to_string(),
+                        vec!["string".to_string()],
+                        true,
+                        None,
+                    )
+                    .unwrap(),
                 ),
                 (
                     "plan".to_string(),
-                    InputSource::new("plan".to_string(), vec!["filepath".to_string()], true)
+                    InputSource::new("plan".to_string(), vec!["filepath".to_string()], true, None)
                         .unwrap(),
                 ),
             ]
@@ -623,12 +652,17 @@ mod tests {
             [
                 (
                     "instructions".to_string(),
-                    InputSource::new("instructions".to_string(), vec!["string".to_string()], true)
-                        .unwrap(),
+                    InputSource::new(
+                        "instructions".to_string(),
+                        vec!["string".to_string()],
+                        true,
+                        None,
+                    )
+                    .unwrap(),
                 ),
                 (
                     "plan".to_string(),
-                    InputSource::new("plan".to_string(), vec!["filepath".to_string()], true)
+                    InputSource::new("plan".to_string(), vec!["filepath".to_string()], true, None)
                         .unwrap(),
                 ),
             ]
@@ -649,12 +683,17 @@ mod tests {
             [
                 (
                     "instructions".to_string(),
-                    InputSource::new("instructions".to_string(), vec!["string".to_string()], true)
-                        .unwrap(),
+                    InputSource::new(
+                        "instructions".to_string(),
+                        vec!["string".to_string()],
+                        true,
+                        None,
+                    )
+                    .unwrap(),
                 ),
                 (
                     "plan".to_string(),
-                    InputSource::new("plan".to_string(), vec!["filepath".to_string()], true)
+                    InputSource::new("plan".to_string(), vec!["filepath".to_string()], true, None)
                         .unwrap(),
                 ),
             ]
@@ -675,12 +714,17 @@ mod tests {
             [
                 (
                     "instructions".to_string(),
-                    InputSource::new("instructions".to_string(), vec!["string".to_string()], true)
-                        .unwrap(),
+                    InputSource::new(
+                        "instructions".to_string(),
+                        vec!["string".to_string()],
+                        true,
+                        None,
+                    )
+                    .unwrap(),
                 ),
                 (
                     "plan".to_string(),
-                    InputSource::new("plan".to_string(), vec!["filepath".to_string()], true)
+                    InputSource::new("plan".to_string(), vec!["filepath".to_string()], true, None)
                         .unwrap(),
                 ),
             ]
