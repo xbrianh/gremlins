@@ -21,10 +21,10 @@ use crate::clients::backends;
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::protocol::CompletedRun;
 
-use super::agent_loop::{run_agent_loop, LoopOpts, RunContext};
+use super::agent::agent_loop::{run_agent_loop, LoopOpts, RunContext};
+use super::agent::plug::LoopHooks;
 use super::cancel::CancelToken;
 use super::conversation::Conversation;
-use super::plug::LoopHooks;
 
 /// The seven tools every native agent may call.
 ///
@@ -294,7 +294,7 @@ pub(crate) fn validate_task_model_spec(spec: &str) -> Result<ModelURI, String> {
 /// the parent model's `temperature`/`max_tokens`/`extra`. Every failure —
 /// malformed spec, unknown provider, `cmd`, and backend-build failure — is
 /// returned as an `Err` with a reason instead of a silent fallback.
-pub(crate) fn resolve_model(spec: &str) -> Result<super::task::TaskModel, String> {
+pub(crate) fn resolve_model(spec: &str) -> Result<super::agent::task::TaskModel, String> {
     let uri = validate_task_model_spec(spec)?;
     let client = Client::from_uri(uri)?;
     let backend = client.get_or_build_backend()?;
@@ -315,7 +315,7 @@ pub(crate) fn resolve_model(spec: &str) -> Result<super::task::TaskModel, String
     // preference on the selected TaskModel so a cross-provider task override
     // does not inherit the parent's opposite setting.
     let preserve_reasoning = matches!(client.provider(), "azure-openai" | "anthropic");
-    Ok(super::task::TaskModel {
+    Ok(super::agent::task::TaskModel {
         model,
         temperature: resolved.temperature,
         max_tokens: resolved.max_tokens,

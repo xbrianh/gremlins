@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 
-use crate::clients::agent_loop::{run_agent_loop, LoopOpts, RunContext};
+use crate::clients::agent::agent_loop::{run_agent_loop, LoopOpts, RunContext};
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::cancel::{default_classify, CancelToken, ErrorClassifier};
 use crate::clients::cancels::CancelsMap;

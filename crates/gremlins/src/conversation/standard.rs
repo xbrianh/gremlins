@@ -25,10 +25,10 @@ use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
 use rig_core::completion::Message;
 use std::sync::Arc;
 
+use crate::clients::agent::done_helpers::done_user_message;
 use crate::clients::backend::Backend;
 use crate::clients::compaction::compaction_block_as_message;
 use crate::clients::conversation::{Conversation, RunArtifact, TurnScript, TurnScriptError};
-use crate::clients::done_helpers::done_user_message;
 use crate::clients::format::assistant_tool_message;
 use crate::conversation::compaction::{
     compaction_cut_index, run_local_compaction, CompactionReport, CompactionStrategy,
@@ -429,7 +429,7 @@ mod tests {
     use rig_core::completion::Message;
     use rig_core::message::{AssistantContent, Issuer, UserContent};
 
-    use crate::clients::agent_loop::*;
+    use crate::clients::agent::agent_loop::*;
     use crate::clients::cancel::CancelToken;
     use crate::conversation::new_blank_conversation;
 
@@ -452,8 +452,8 @@ mod tests {
     fn test_ctx(
         cwd: Option<std::path::PathBuf>,
         raw_path: Option<std::path::PathBuf>,
-    ) -> crate::clients::agent_loop::RunContext {
-        let mut ctx = crate::clients::agent_loop::test_ctx(cwd, raw_path);
+    ) -> crate::clients::agent::agent_loop::RunContext {
+        let mut ctx = crate::clients::agent::agent_loop::test_ctx(cwd, raw_path);
         ctx.prepopulated_conversation = new_blank_conversation("hi", false, None);
         ctx
     }
@@ -618,16 +618,17 @@ mod tests {
         ]);
 
         let child_handle = child.clone();
-        let factory: crate::clients::task::TaskModelFactory = Arc::new(move |_spec: &str| {
-            Ok(crate::clients::task::TaskModel {
-                model: child_handle.clone().erase(),
-                temperature: None,
-                max_tokens: None,
-                extra: None,
-                preserve_reasoning: None,
-            })
-        });
-        let selector = crate::clients::task::TaskModelSelector::new(
+        let factory: crate::clients::agent::task::TaskModelFactory =
+            Arc::new(move |_spec: &str| {
+                Ok(crate::clients::agent::task::TaskModel {
+                    model: child_handle.clone().erase(),
+                    temperature: None,
+                    max_tokens: None,
+                    extra: None,
+                    preserve_reasoning: None,
+                })
+            });
+        let selector = crate::clients::agent::task::TaskModelSelector::new(
             HashMap::from([(crate::task_kind::TaskKind::Scout, "openai/mini".to_string())]),
             factory,
         )

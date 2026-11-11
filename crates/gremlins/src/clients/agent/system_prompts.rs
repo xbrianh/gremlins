@@ -105,7 +105,7 @@ Work root:     {work}\n\
 // ---------------------------------------------------------------------------
 
 /// Chat system prompt, loaded from `prompts/chat_system.md`.
-const CHAT_SYSTEM_PROMPT: &str = include_str!("../../prompts/chat_system.md");
+const CHAT_SYSTEM_PROMPT: &str = include_str!("../../../prompts/chat_system.md");
 
 const REPOSITORY_CONTEXT_END_MARKER: &str = "<!-- END REPOSITORY CONTEXT BLOCK -->";
 const REPOSITORY_CONTEXT_END_MARKER_ESCAPED: &str =
@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn test_chat_system_prompt_matches_batching_guidance() {
-        let chat_md = include_str!("../../prompts/chat_system.md");
+        let chat_md = include_str!("../../../prompts/chat_system.md");
         assert!(
             chat_md.contains(BATCHING_GUIDANCE),
             "chat_system.md must include the same batching guidance as BATCHING_GUIDANCE; \

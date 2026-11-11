@@ -2292,7 +2292,7 @@ async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
         Some(backend.clone()),
     );
 
-    let system_prompt = crate::clients::system_prompts::chat_system_prompt();
+    let system_prompt = crate::clients::agent::system_prompts::chat_system_prompt();
 
     match conv.compact(Some(system_prompt), None).await {
         Some(report) => {
@@ -2919,7 +2919,7 @@ async fn handle_chat(
     };
     let (trusted_section, unresolved_skills) =
         crate::skills::build_system_prompt_section(&all_skills, &active_skills);
-    let system_prompt = crate::clients::system_prompts::chat_system_prompt().to_string();
+    let system_prompt = crate::clients::agent::system_prompts::chat_system_prompt().to_string();
 
     // 5. Get or create the session's chat gremlin (id was resolved in step 3
     //    after waiting for the in-flight turn).
@@ -3001,7 +3001,7 @@ async fn handle_chat(
     // static system prompt stays cache-stable.
     let mut text = text.to_string();
     let dynamic_preamble =
-        crate::clients::system_prompts::build_chat_preamble(context, &trusted_section);
+        crate::clients::agent::system_prompts::build_chat_preamble(context, &trusted_section);
     if !dynamic_preamble.is_empty() {
         text = format!("{dynamic_preamble}\n---\n{text}");
     }

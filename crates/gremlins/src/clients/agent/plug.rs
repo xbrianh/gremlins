@@ -1,4 +1,4 @@
-use super::protocol::UsageStats;
+use crate::clients::protocol::UsageStats;
 use rig_core::completion::CompletionRequest;
 use std::sync::Arc;
 
