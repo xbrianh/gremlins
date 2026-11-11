@@ -18,13 +18,18 @@ static EDIT_FILE_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
 
 /// Acquire the per-file lock for `path` and run `f` under it.
 fn with_edit_file_lock(path: &Path, f: impl FnOnce() -> String) -> String {
+    // Resolve the canonical key *outside* the map lock so filesystem I/O
+    // from canonicalization doesn't serialize all concurrent edits.
+    let canonical = canonicalize_or_ancestor(path);
     let lock = {
-        let mut map = EDIT_FILE_LOCKS.lock().unwrap();
-        map.entry(canonicalize_or_ancestor(path))
+        let mut map = EDIT_FILE_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(canonical)
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     };
-    let _guard = lock.lock().unwrap();
+    // Recover from a poisoned mutex so a panic inside one edit closure
+    // doesn't permanently break the Edit tool for that file.
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     f()
 }
 
@@ -2241,5 +2246,90 @@ mod tests {
         assert!(report.contains("  17: line17"), "got: {report}");
         assert!(report.contains("  24: line24"), "got: {report}");
         assert!(!report.contains("... skipped"), "got: {report}");
+    }
+
+    // ── Concurrency tests ──
+
+    #[test]
+    fn concurrent_edits_all_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("shared.txt");
+        // Four unique placeholders — each thread replaces one.
+        std::fs::write(&file_path, "A_\nB_\nC_\nD_\n").unwrap();
+
+        let tasks: Vec<_> = ['A', 'B', 'C', 'D']
+            .into_iter()
+            .map(|ch| {
+                let cwd = cwd.clone();
+                let args = serde_json::json!({
+                    "file_path": "shared.txt",
+                    "edits": [{"old_string": format!("{ch}_"), "new_string": format!("X{ch}")}]
+                })
+                .to_string();
+                std::thread::spawn(move || edit_sync(Some(&cwd), None::<&[PathBuf]>, &args))
+            })
+            .collect();
+
+        let results: Vec<_> = tasks.into_iter().map(|j| j.join().unwrap()).collect();
+        for r in &results {
+            assert!(r.starts_with("Applied 1 edit"), "unexpected result: {r}");
+        }
+
+        let final_content = std::fs::read_to_string(&file_path).unwrap();
+        // All four edits must be present — no silent drops.
+        assert!(
+            final_content.contains("XA"),
+            "missing edit for A: {final_content:?}"
+        );
+        assert!(
+            final_content.contains("XB"),
+            "missing edit for B: {final_content:?}"
+        );
+        assert!(
+            final_content.contains("XC"),
+            "missing edit for C: {final_content:?}"
+        );
+        assert!(
+            final_content.contains("XD"),
+            "missing edit for D: {final_content:?}"
+        );
+    }
+
+    #[test]
+    fn concurrent_edits_same_file_different_path_spellings() {
+        // Two threads target the same file spelled differently (relative
+        // vs explicit `./` prefix). Both must land.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let file_path = cwd.join("spell.txt");
+        std::fs::write(&file_path, "hello\nworld\n").unwrap();
+
+        let args1 = serde_json::json!({
+            "file_path": "spell.txt",
+            "edits": [{"old_string": "hello", "new_string": "HELLO"}]
+        })
+        .to_string();
+        let args2 = serde_json::json!({
+            "file_path": "./spell.txt",
+            "edits": [{"old_string": "world", "new_string": "WORLD"}]
+        })
+        .to_string();
+
+        let c1 = cwd.clone();
+        let c2 = cwd.clone();
+        let t1 = std::thread::spawn(move || edit_sync(Some(&c1), None::<&[PathBuf]>, &args1));
+        let t2 = std::thread::spawn(move || edit_sync(Some(&c2), None::<&[PathBuf]>, &args2));
+
+        let r1 = t1.join().unwrap();
+        let r2 = t2.join().unwrap();
+        assert!(r1.starts_with("Applied 1 edit"), "{r1}");
+        assert!(r2.starts_with("Applied 1 edit"), "{r2}");
+
+        let final_content = std::fs::read_to_string(&file_path).unwrap();
+        assert!(
+            final_content.contains("HELLO") && final_content.contains("WORLD"),
+            "both edits must land; got: {final_content:?}"
+        );
     }
 }
