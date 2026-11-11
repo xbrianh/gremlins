@@ -23,7 +23,7 @@ use crate::clients::interactive::{
 };
 use crate::clients::protocol::{add_opt, UsageStats};
 use crate::config;
-use crate::definition::{ChatDefinition, StageSpec, StaticDefinition};
+use crate::definition::{ChatDefinition, GremlinDefinition, StageSpec, StaticDefinition};
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin, GremlinConfig};
 use crate::executor::socket::{self, GremlinsDaemonLock};
 use crate::executor::state::{self, FileSystemStateStore};
@@ -1055,6 +1055,7 @@ async fn dispatch_op(
         "status" => handle_status(request, state_root).await,
         "info" => handle_info(request, state_root).await,
         "artifact" => handle_artifact(request).await,
+        "snapshot" => handle_snapshot(request, state_root).await,
         "model" => handle_model(request).await,
         _ => error_response(&format!("unknown op: {op:?}")),
     };
@@ -1950,8 +1951,61 @@ async fn handle_artifact(request: &Value) -> Value {
         Err(resp) => return resp,
     };
 
-    // Resolve the store: run map first for live gremlins (including ephemeral
-    // ones whose state lives in a TempDir), otherwise the persisted state.
+    // `put` requires locking: verify the gremlin is terminal and not in the
+    // run map before allowing mutation.
+    if request.get("put").and_then(|v| v.as_str()).is_some() {
+        let id_lock = get_id_lock(id);
+        let _guard = id_lock.lock().await;
+
+        // Reject if gremlin is in the run map.
+        {
+            let map = get_run_map().lock().unwrap();
+            if map.contains_key(id) {
+                return error_response(&format!(
+                    "gremlin {id} is running — cannot write artifacts to an active gremlin"
+                ));
+            }
+        }
+
+        // Resolve persisted store (not live run-map store).
+        let store = match state::StateData::open(id).map(|sd| sd.store_handle()) {
+            Ok(s) => s,
+            Err(e) => return error_response(&format!("gremlin {id}: {e}")),
+        };
+
+        let status = store.read_str("status");
+        if status != "done" && status != "stopped" {
+            return error_response(&format!(
+                "gremlin {id}: status is {status:?} — artifact writes require done or stopped"
+            ));
+        }
+
+        let artifact = request
+            .get("artifact")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if artifact.is_empty() {
+            return error_response("missing 'artifact' field");
+        }
+        let content = request.get("put").and_then(|v| v.as_str()).unwrap();
+        let uri = match crate::artifacts::uri::Uri::parse(artifact) {
+            Ok(uri) => uri,
+            Err(e) => return error_response(&format!("invalid artifact URI {artifact:?}: {e}")),
+        };
+        match store.write_into_registry(&uri, content).await {
+            Ok(path) => {
+                return ok_response(
+                    serde_json::json!({ "id": id, "artifact": artifact, "path": path }),
+                )
+            }
+            Err(e) => {
+                return error_response(&format!("failed to write artifact {artifact:?}: {e}"))
+            }
+        }
+    }
+
+    // Reads and listing — resolve the store (run map first for live
+    // gremlins, otherwise persisted).
     let store = match resolve_store_for_id(id) {
         Ok(store) => store,
         Err(resp) => return resp,
@@ -1979,6 +2033,107 @@ async fn handle_artifact(request: &Value) -> Value {
         Ok(content) => ok_response(serde_json::json!({ "id": id, "content": content })),
         Err(e) => error_response(&format!("artifact {artifact:?}: {e}")),
     }
+}
+
+// ---------------------------------------------------------------------------
+// snapshot
+// ---------------------------------------------------------------------------
+
+/// Re-serialize the run's source definition into the hermetic
+/// `definition.json` snapshot.
+///
+/// This is the recovery path for a stale snapshot: after editing the
+/// `.gremlins/*.json5` pipeline, run `snapshot` so a subsequent `resume`
+/// loads the fixed definition instead of the one captured at launch.
+///
+/// The snapshot is built in memory from the source definition path recorded
+/// in state.json (not the stale blob), then written back through the state
+/// store so the flock and name validation are respected.
+async fn handle_snapshot(request: &Value, _state_root: &Path) -> Value {
+    let id = match valid_id(request) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    // Serialise with concurrent resume/rm so that a resume cannot register
+    // the gremlin in RUN_MAP after our status check.
+    let id_lock = get_id_lock(id);
+    let _guard = id_lock.lock().await;
+
+    if let Err(e) = config::init_global() {
+        return error_response(&format!("config init: {e}"));
+    }
+
+    let gremlin = match Gremlin::from(id) {
+        Ok(g) => g,
+        Err(e) => return error_response(&format!("gremlin {id}: {e}")),
+    };
+
+    // Only allow snapshot on terminal gremlins (done / stopped).
+    let status = gremlin.state.read_str("status");
+    if status != "done" && status != "stopped" {
+        return error_response(&format!(
+            "gremlin {id}: status is {status:?} — snapshot requires done or stopped"
+        ));
+    }
+
+    let definition_path = match gremlin.definition_path.clone() {
+        Some(p) => p,
+        None => {
+            return error_response(&format!(
+                "gremlin {id}: no definition path recorded in state"
+            ))
+        }
+    };
+
+    let default_model = config::global_config()
+        .ok()
+        .and_then(|c| c.default_model().map(String::from));
+
+    // Load the source definition from disk, not the stale snapshot. A
+    // model override must be replayed so profile/task-model resolution
+    // matches the original launch (if any override was recorded).
+    let definition = match StaticDefinition::from_json5_file(
+        &definition_path,
+        gremlin.model_override.as_deref(),
+        default_model.as_deref(),
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            return error_response(&format!(
+                "gremlin {id}: failed to load definition from {}: {e}",
+                definition_path.display()
+            ))
+        }
+    };
+
+    let bytes = match definition.serialize() {
+        Ok(b) => b,
+        Err(e) => {
+            return error_response(&format!(
+                "gremlin {id}: failed to serialize definition: {e}"
+            ))
+        }
+    };
+
+    // Atomic write: write to a temp file then rename, so a partial write
+    // (disk full, etc.) never leaves definition.json truncated.
+    let state_dir = gremlin.state.state_dir();
+    let dst = state_dir.join("definition.json");
+    let tmp = state_dir.join(format!("definition.json.tmp.{}", state::token_hex(4)));
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        return error_response(&format!("gremlin {id}: failed to write snapshot: {e}"));
+    }
+    if let Err(e) = std::fs::rename(&tmp, &dst) {
+        let _ = std::fs::remove_file(&tmp);
+        return error_response(&format!("gremlin {id}: failed to commit snapshot: {e}"));
+    }
+
+    ok_response(serde_json::json!({
+        "id": id,
+        "definition_path": definition_path.display().to_string(),
+        "bytes": bytes.len(),
+    }))
 }
 
 // ---------------------------------------------------------------------------

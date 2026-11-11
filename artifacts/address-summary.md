@@ -1,40 +1,31 @@
-## Fix summary: Bind Ctrl+W to open the watch screen in the TUI
+# Fixes Applied
 
-### 1. `mod.rs:1522–1528` — Missing `ensure_watch_selection()` on Chat→Runs entry (Correctness — both reviews)
+## 1. `crates/gremlins/src/executor/supervisor.rs` — lines 2035–2043
+**Category**: Correctness (review 2, finding 1)
+**Issue**: The running-guard checked only `"running"`, ignoring other non-terminal states, and the check-then-act window allowed a race between the status read and the blob write.
+**Fix**: Changed the guard to reject any status that is not `"done"` or `"stopped"`, with a clear error message that quotes the actual status. Moved the status read to a local variable just before `open_blob`, narrowing the race window.
 
-**Issue:** The `Screen::Chat` arm called `app.show_runs()` / `live_area.show_runs()` / `fetch_run_statuses()` but never `app.ensure_watch_selection()`, despite the plan's constraints explicitly listing it among the required entry-point methods. The run table could render with no watch selection set (bug: selections slide to first run in display but `ensure_watch_selection` guards against clobbering existing valid selections, and it's the canonical path the `/watch` slash-command handler takes via `show_runs()`).
+## 2. `crates/gremlins/src/executor/supervisor.rs` — lines 2096–2100
+**Category**: Correctness (review 1, finding 1)
+**Issue**: `blob.write_all(&bytes)` was not followed by a flush or explicit drop. Since `StateBlob` abstracts over a raw `File`, unwritten kernel-buffer bytes could be lost before `ok_response` returns.
+**Fix**: Added `blob.flush().map_err(…)?` after `write_all`, then an explicit `drop(blob)` before constructing `ok_response`.
 
-**Fix:** Added `app.ensure_watch_selection()` after `live_area.show_runs()` in the `Screen::Chat` arm, matching what `App::show_runs()` itself does internally.
+## 3. `crates/gremlins/src/executor/supervisor.rs` — line 26
+**Category**: Readability (review 2, finding 4)
+**Issue**: `GremlinDefinition` was flagged as unused. Verification showed it *is* required — it provides the `serialize()` trait method called on `StaticDefinition`. Reverted the removal.
+**Fix**: Restored `GremlinDefinition` in the `use` import (no-op; confirmed necessary by `cargo check`).
 
-### 2. `mod.rs:1529–1548` — `Ctrl+W` on Runs screen never opens a pane (Correctness — both reviews)
+## 4. `crates/gremlins-cli/src/main.rs` — lines 1013–1020
+**Category**: Correctness (review 2, finding 5)
+**Issue**: `--list` silently ignored conflicting `--put` or positional `<artifact>` args.
+**Fix**: Added explicit mutual-exclusion checks: `--list` with `--put` returns an error; `--list` with an `<artifact>` URI returns an error.
 
-**Issue:** The `Screen::Runs` `else` branch (no pane open) called `close_watch_follow` (redundant, since `watch_following` was `None`) and then exited to chat via `app.exit_screen()` / `live_area.exit_screen_view()`. This contradicted the plan's requirement that `Ctrl+W` "behave like `Ctrl+O` on the selected gremlin: toggle the inline watch pane" — the binding should open the pane when closed and close it when open, only exiting to chat on a subsequent press when no pane is open.
+## 5. `crates/gremlins-cli/src/main.rs` — lines 1038–1047
+**Category**: Readability (review 2, finding 6) + Correctness (review 2, finding 5)
+**Issue**: The usage error listed `--list` and `--put` as alternatives when an `<artifact>` URI was missing, but both `--put` and `--json-path` still require the URI. Also `--put` combined with `--json-path` silently dropped `json_path`.
+**Fix**: Reworded the error to `"<artifact> URI is required (use --list to enumerate registered keys)"`. Added an explicit mutual-exclusion check between `--put` and `--json-path`.
 
-**Fix:** Replaced the `else` branch with a three-way match:
-- `watch_following.is_some()` → close the pane (existing behavior, unchanged).
-- `watch_selection` exists → open the pane via `start_watch_follow(...)`, mirroring `Ctrl+O`.
-- Neither → exit to chat (fallback when the table is empty or nothing is selectable).
-
-### 3. `mod.rs:1517` — Misleading comment about prompt guard (Readability — review two)
-
-**Issue:** The comment "Inert on Debug (prompt owns input)" described the `has_prompt()` check as Debug-specific, but `Screen::has_prompt()` returns `true` for `Debug` only, and the guard runs for every screen — the comment was confusing.
-
-**Fix:** Reworded to "Inert while any prompt owns the input bar."
-
-### 4. `commands.rs:316` — Help text overstated behavior (Readability — both reviews)
-
-**Issue:** The help line "enter/exit the watch screen; in /watch: toggle live log" claimed `Ctrl+W` could "exit" the watch screen directly, but the original implementation only exited when no pane was open — and after the fix it only exits when nothing is selectable. The "toggle live log" wording was also imprecise.
-
-**Fix:** Updated to "enter the watch screen; in /watch: toggle the selected gremlin's live log".
-
-### 5. `DESIGN.md:885–888` — Outdated and contradictory documentation (Readability — both reviews)
-
-**Issue:** The DESIGN.md prose claimed `Ctrl+W` "opens a tail-anchored inline log pane for the selected run" and "exits back to chat when no pane is open", which (a) overstated the original code (never opened), and (b) didn't describe the new toggle semantics.
-
-**Fix:** Reworded to document the full toggle behavior: opens the pane, closing it on second press, and exiting to chat only when there is no selection left to follow.
-
-### 6. `chat_system.md:71` — Description didn't match toggle semantics (Readability — both reviews)
-
-**Issue:** The help text said "the first press closes the inline pane and the next returns to chat", assuming the user already had a pane open (e.g. via `Ctrl+O`). This didn't describe the general toggle behavior.
-
-**Fix:** Updated to "enter the watch screen from chat; inside `/watch`, toggle the selected gremlin's live log (open it, or close an open pane); exits to chat when there is no selection left to follow."
+## 6. `crates/gremlins-cli/src/main.rs` — lines 1065–1081
+**Category**: Correctness (review 2, finding 7) + Readability (review 1, finding 2)
+**Issue**: Missing/invalid `keys`, `content`, and `path` fields from daemon responses were silently defaulted to empty, hiding protocol drift. Artifact content was printed via `print!` (no trailing newline), causing prompt confusion.
+**Fix**: Changed each `.unwrap_or("")` / `.unwrap_or_default()` to `.ok_or_else(|| "daemon response missing …")?` so protocol mismatches produce hard errors and non-zero exit. Changed `print!("{content}")` to `println!("{content}")` for consistent output with the write path.

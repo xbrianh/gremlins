@@ -434,6 +434,10 @@ impl Gremlin {
         }
         initial.insert("model".to_string(), Value::String(String::new()));
         initial.insert(
+            "model_override".to_string(),
+            Value::String(model_override.unwrap_or("").to_string()),
+        );
+        initial.insert(
             "definition_path".to_string(),
             Value::String(definition_path_str.clone()),
         );
@@ -611,13 +615,23 @@ impl Gremlin {
         }
         let definition: Box<dyn GremlinDefinition> = Box::new(stub);
 
+        // Restore the CLI model override if one was recorded at launch.
+        let model_override = {
+            let mo = str_field(&raw, "model_override");
+            if mo.is_empty() {
+                None
+            } else {
+                Some(mo.to_string())
+            }
+        };
+
         // Snapshot the runtime config before gremlin_id is moved.
-        let runtime_config = RuntimeConfig::snapshot(None);
+        let runtime_config = RuntimeConfig::snapshot(model_override.as_deref());
 
         Ok(Gremlin {
             id: gremlin_id,
             definition_path,
-            model_override: None,
+            model_override,
             definition,
             workdir,
             project_root,
