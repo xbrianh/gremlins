@@ -1130,6 +1130,7 @@ pub(crate) async fn run_agent_loop(
         allowed_tools: opts.tool_filter.map(|s| s.to_vec()),
         task_fn: None,
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
+        log_line_fn: Some(ctx.hooks.log_line_fn.clone()),
         id_prefix: String::new(),
         telemetry,
         active_skills: ctx.params.active_skills.clone(),
@@ -1247,7 +1248,14 @@ pub(crate) async fn run_agent_loop_nested(
     };
     // Nested-loop log lines go through the process logger; callers observe
     // task begin/end events via the process-wide logger.
-    let hooks = LoopHooks::new();
+    let hooks = LoopHooks {
+        log_line_fn: tool_ctx
+            .log_line_fn
+            .clone()
+            .unwrap_or_else(|| Arc::new(|_| {})),
+        ..LoopHooks::new()
+    };
+    hooks.log_line(&format!("{prefix}task: begin (max_turns={max_turns})"));
     log::info!("{prefix}task: begin (max_turns={max_turns})");
     let result = run_agent_loop_core(
         &model,
@@ -1273,6 +1281,7 @@ pub(crate) async fn run_agent_loop_nested(
     )
     .await;
     log::info!("{prefix}task: end");
+    hooks.log_line(&format!("{prefix}task: end"));
     result
 }
 
@@ -1894,6 +1903,7 @@ pub(crate) fn test_tool_ctx() -> crate::clients::tools::AgentLoopRuntime {
         allowed_tools: None,
         task_fn: None,
         audit_lock: Some(std::sync::Arc::new(std::sync::Mutex::new(()))),
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: crate::clients::tools::AgentLoopTelemetry {
             stream_events: None,

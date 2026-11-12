@@ -45,8 +45,22 @@ pub(crate) struct StreamState {
 }
 
 /// Emit a stream-json event to stderr (via `log`).
-pub(crate) fn emit_event(prefix: &str, evt: &Value) {
+/// When `on_log` is provided, it is also called with each formatted log line.
+pub(crate) fn emit_event(prefix: &str, evt: &Value, on_log: Option<&(dyn Fn(String) + Send + Sync)>) {
     use super::format::trunc;
+
+    let log_info = |msg: String| {
+        log::info!("{msg}");
+        if let Some(ref cb) = on_log {
+            cb(msg);
+        }
+    };
+    let log_warn = |msg: String| {
+        log::warn!("{msg}");
+        if let Some(ref cb) = on_log {
+            cb(msg);
+        }
+    };
 
     let evt_type = evt.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -59,7 +73,7 @@ pub(crate) fn emit_event(prefix: &str, evt: &Value) {
                     "{}using client model={} cwd={} reasoning_effort={}",
                     prefix, model, cwd, "default"
                 );
-                log::info!("{msg}");
+                log_info(msg);
             }
         }
         "assistant" => {
@@ -73,18 +87,18 @@ pub(crate) fn emit_event(prefix: &str, evt: &Value) {
                         Some("text") => {
                             let text = c.get("text").and_then(|v| v.as_str()).unwrap_or("");
                             let msg = format!("{}text: {}", prefix, trunc(text, 200));
-                            log::info!("{msg}");
+                            log_info(msg);
                         }
                         Some("thinking") => {
                             let thinking = c.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
                             let msg = format!("{}think: {}", prefix, trunc(thinking, 200));
-                            log::info!("{msg}");
+                            log_info(msg);
                         }
                         Some("tool_use") => {
                             let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("?");
                             let arg = tool_arg(c);
                             let msg = format!("{}tool: {} {}", prefix, name, trunc(&arg, 200));
-                            log::info!("{msg}");
+                            log_info(msg);
                         }
                         _ => {}
                     }
@@ -103,10 +117,10 @@ pub(crate) fn emit_event(prefix: &str, evt: &Value) {
                         let body = tool_result_body(c.get("content").unwrap_or(&Value::Null));
                         if is_error {
                             let msg = format!("{}result ERROR: {}", prefix, trunc(&body, 200));
-                            log::warn!("{msg}");
+                            log_warn(msg);
                         } else {
                             let msg = format!("{}result: {}", prefix, trunc(&body, 200));
-                            log::info!("{msg}");
+                            log_info(msg);
                         }
                     }
                 }
@@ -124,7 +138,7 @@ pub(crate) fn emit_event(prefix: &str, evt: &Value) {
                 .and_then(|v| v.as_i64())
                 .map_or("?".to_string(), |t| t.to_string());
             let msg = format!("{prefix}final: subtype={subtype} turns={turns} cost={cost_str}");
-            log::info!("{msg}");
+            log_info(msg);
         }
         _ => {}
     }

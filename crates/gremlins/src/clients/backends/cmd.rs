@@ -18,6 +18,8 @@ use crate::clients::interactive::InteractiveSession;
 use crate::clients::params::ResolvedParams;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::stream_json::{self, StreamState};
+use crate::executor::supervisor::emit_event;
+use crate::executor::EventKind;
 
 fn footer_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -196,6 +198,7 @@ impl CmdBackend {
         raw_path: Option<&PathBuf>,
         capture_events: bool,
         idle_timeout: f64,
+        on_log: Option<&(dyn Fn(String) + Send + Sync)>,
     ) -> Result<
         (
             StreamState,
@@ -279,7 +282,7 @@ impl CmdBackend {
                 if let Some(ref mut evts) = events {
                     evts.push(evt.clone());
                 }
-                stream_json::emit_event(prefix, &evt);
+                stream_json::emit_event(prefix, &evt, on_log);
             }
         }
 
@@ -389,12 +392,20 @@ impl CmdBackend {
         }
 
         let result = if self.stream_json {
+            let gid = gremlin_id.to_string();
+            let on_log: &(dyn Fn(String) + Send + Sync) = &move |msg: String| {
+                emit_event(EventKind::LogLine {
+                    id: gid.clone(),
+                    line: msg,
+                });
+            };
             let (state, events, timed_out, sid) = Self::read_stream_json(
                 &mut child,
                 &prefix,
                 raw_path.as_ref(),
                 capture_events,
                 idle_timeout,
+                Some(on_log),
             )
             .await?;
 

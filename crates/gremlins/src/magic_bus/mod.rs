@@ -63,6 +63,19 @@ impl<P: Clone + Send + 'static> Bus<P> {
         Ok((subscriber, receiver))
     }
 
+    /// Remove a subscriber by its handle. Idempotent (no-op if already gone).
+    ///
+    /// After unsubscription the subscriber's receiver will eventually observe
+    /// `Closed` once in-flight deliveries drain; the subscriber task can then
+    /// close its log blob or connection and exit cleanly.
+    pub fn unsubscribe(&self, subscriber: &Subscriber<P>) {
+        let prefix = subscriber.prefix();
+        self.subscribers
+            .write()
+            .expect("subscriber registry poisoned")
+            .retain(|(p, _)| p != prefix);
+    }
+
     /// Fan out synchronously. Never blocks; backpressured subscribers drop
     /// events when full. This is the path for log-shaped records.
     pub fn emit(&self, event: DispatchEvent<P>) {

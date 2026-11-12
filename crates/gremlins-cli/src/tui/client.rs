@@ -518,18 +518,18 @@ async fn read_loop(
             continue;
         }
 
-        // Classify as a EventKind next — unsolicited events can arrive
-        // at any time, even when a request is pending.
-        if let Ok(event) = serde_json::from_value::<EventKind>(value.clone()) {
-            let _ = out.event_tx.send(event);
+        // Classify chat events next — they pattern-match on `type` string
+        // values and would otherwise be deserialized as EventKind, causing
+        // chat output to be sent to event_tx and lost from chat_tx.
+        if let Some(event) = parse_chat_event(&value) {
+            let _ = out.chat_tx.send(event);
             continue;
         }
 
-        // Classify chat events before FIFO response delivery. Chat turns
-        // stream as unsolicited JSON lines and must not be misrouted to a
-        // pending request waiter (which would corrupt FIFO alignment).
-        if let Some(event) = parse_chat_event(&value) {
-            let _ = out.chat_tx.send(event);
+        // Classify as an EventKind next — unsolicited events can arrive
+        // at any time, even when a request is pending.
+        if let Ok(event) = serde_json::from_value::<EventKind>(value.clone()) {
+            let _ = out.event_tx.send(event);
             continue;
         }
 

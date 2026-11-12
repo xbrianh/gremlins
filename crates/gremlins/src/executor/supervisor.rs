@@ -248,11 +248,26 @@ pub(crate) fn subscribe_all() -> (Subscriber<EventKind>, ReceiverHalf<EventKind>
 }
 
 pub(crate) fn emit_event(event: EventKind) {
-    // Log lines carry a run-scoped correlation id so the per-gremlin log
-    // writer (subscribed with a `r:<id>` prefix) receives only its own lines;
-    // every other event keeps an empty id and reaches all subscribers.
+    // Run-bearing events carry a run-scoped correlation id so per-gremlin
+    // subscribers (subscribed with a `r:<id>` prefix) receive only their own
+    // run's events; everything else keeps an empty id and reaches all
+    // subscribers.
     let corr_id = match &event {
-        EventKind::LogLine { id, .. } => CorrId::new().with_run(id.as_str()),
+        EventKind::RunStarted { id, .. }
+        | EventKind::RunCompleted { id, .. }
+        | EventKind::RunFailed { id, .. }
+        | EventKind::RunStopped { id }
+        | EventKind::RunRemoved { id }
+        | EventKind::TokenUsage { id, .. }
+        | EventKind::StageTransition { id, .. }
+        | EventKind::Bail { id, .. }
+        | EventKind::LogLine { id, .. } => {
+            if id.is_empty() {
+                CorrId::new()
+            } else {
+                CorrId::new().with_run(id.as_str())
+            }
+        }
         _ => CorrId::new(),
     };
     if let Some(bus) = BUS.get() {

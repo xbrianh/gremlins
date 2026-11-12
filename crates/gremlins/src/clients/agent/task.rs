@@ -477,6 +477,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
+            log_line_fn: None,
 
             id_prefix: String::new(),
             telemetry: tools::AgentLoopTelemetry {

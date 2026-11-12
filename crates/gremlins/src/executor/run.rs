@@ -83,11 +83,14 @@ async fn run_stage_scoped(
     let enc_tm = enclosing_task_models.or(tm.as_ref());
     let m = gremlin.enclosing_model.clone();
     let enc_model = enclosing_model.or(m.as_ref());
-    log::info!(
-        "stage '{}': entering (type={})",
-        stage.name(),
-        stage.stage_type()
-    );
+    emit_event(EventKind::LogLine {
+        id: gremlin.id.to_string(),
+        line: format!(
+            "stage '{}': entering (type={})",
+            stage.name(),
+            stage.stage_type()
+        ),
+    });
 
     // Scoped (sequence/parallel child) stages are not announced by the
     // top-level run loop. Publish their active leaf identity so a stage-stream
@@ -375,7 +378,10 @@ async fn run_sequence(
             )
             .await
         {
-            log::info!("sequence '{}': skipped (artifact exists)", seq.name);
+            emit_event(EventKind::LogLine {
+                id: gremlin.id.to_string(),
+                line: format!("sequence '{}': skipped (artifact exists)", seq.name),
+            });
             return Ok(());
         }
         for child in &seq.stages {
@@ -418,15 +424,18 @@ async fn run_sequence(
             )
             .await
         {
-            log::info!(
-                "sequence '{}': {}",
-                seq.name,
-                if iteration == 1 {
-                    "skipped (artifact exists)"
-                } else {
-                    "stopped (artifact exists)"
-                }
-            );
+            emit_event(EventKind::LogLine {
+                id: gremlin.id.to_string(),
+                line: format!(
+                    "sequence '{}': {}",
+                    seq.name,
+                    if iteration == 1 {
+                        "skipped (artifact exists)"
+                    } else {
+                        "stopped (artifact exists)"
+                    }
+                ),
+            });
             if iteration == 1 {
                 gremlin.loop_iter = saved_loop_iter;
                 return Ok(());
@@ -435,10 +444,13 @@ async fn run_sequence(
             break;
         }
 
-        log::info!(
-            "sequence '{}': iteration {iteration}/{max_iterations} starting",
-            seq.name
-        );
+        emit_event(EventKind::LogLine {
+            id: gremlin.id.to_string(),
+            line: format!(
+                "sequence '{}': iteration {iteration}/{max_iterations} starting",
+                seq.name
+            ),
+        });
 
         for child in &seq.stages {
             if let Err(error) = Box::pin(run_stage_scoped(
@@ -550,7 +562,10 @@ impl Gremlin {
 
             if let Some(ref ct) = self.cancel_token {
                 if ct.is_cancelled() {
-                    log::info!("cancelled");
+                    emit_event(EventKind::LogLine {
+                        id: self.id.to_string(),
+                        line: "cancelled".to_string(),
+                    });
                     self.finish(-1);
                     return Ok(-1);
                 }
@@ -578,11 +593,14 @@ impl Gremlin {
                 self.loop_iter = format!("{}~{}", saved_loop_iter, attempt);
             }
 
-            log::info!(
-                "stage '{}': starting (type={})",
-                stage.name(),
-                stage.stage_type()
-            );
+            emit_event(EventKind::LogLine {
+                id: self.id.to_string(),
+                line: format!(
+                    "stage '{}': starting (type={})",
+                    stage.name(),
+                    stage.stage_type()
+                ),
+            });
             send_stage_boundary(
                 &self.runtime_config.stage_stream_tx,
                 stage.name(),

@@ -99,6 +99,10 @@ pub(crate) struct AgentLoopRuntime {
     pub(crate) allowed_tools: Option<Vec<String>>,
     pub(crate) task_fn: Option<TaskFn>,
     pub(crate) audit_lock: Option<Arc<std::sync::Mutex<()>>>,
+    /// Per-gremlin log-line emitter inherited from the parent loop. Nested
+    /// Task loops read this to route their begin/end and turn-level records to
+    /// the same bus-backed log writer as the parent run.
+    pub(crate) log_line_fn: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     /// Prefix prepended to tool call IDs emitted on the shared event stream.
     ///
     /// Nested Task conversations run on the parent's stream but reuse raw
