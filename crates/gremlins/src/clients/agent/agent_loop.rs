@@ -5409,7 +5409,13 @@ mod tests {
             &[],
             0,
             0,
-            &LoopHooks::new(),
+            &{
+                let mut hooks = LoopHooks::new();
+                hooks.register_log_line(|msg: &str| {
+                    log::info!("{msg}");
+                });
+                hooks
+            },
             None,
             None,
             Box::new(ConversationStub::new("hi")),
