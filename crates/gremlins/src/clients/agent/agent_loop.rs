@@ -376,12 +376,10 @@ impl LoopState {
         }
     }
 
-    /// Emit a log line through both the process-wide logger (env_logger)
-    /// and the per-gremlin log channel wired by the executor. Daemon-mode
-    /// runs — where env_logger may not be installed — still write to the
-    /// gremlin log blob via this path.
+    /// Emit a log line through the per-gremlin log channel wired by the
+    /// executor. The bus routes each `LogLine` event through `log::info!()`
+    /// itself, so this must not also call `log::info!` directly.
     pub(super) fn hook_log(&self, msg: &str) {
-        log::info!("{msg}");
         self.hooks.log_line(msg);
     }
 

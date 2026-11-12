@@ -510,25 +510,32 @@ fn boundary_stage(boundary: &Value) -> String {
         .to_string()
 }
 
-/// Send a stage_boundary sentinel into the stage-stream broadcast when a
-/// stage transition occurs. An empty `stage_name` denotes the inactive
-/// operational-log fallback (bootstrap, between stages, or terminal).
+/// Build the legacy stage_boundary JSON sentinel string for the stage-stream
+/// broadcast. Shared between the bus forwarder and any remaining direct-path
+/// callers so the wire format stays in one place.
+pub(crate) fn stage_boundary_json(stage: &str, stage_type: &str, active: bool) -> String {
+    serde_json::json!({
+        "kind": "stage_boundary",
+        "stage": stage,
+        "stage_type": stage_type,
+        "active": active,
+    })
+    .to_string()
+}
+
+/// Emit a StageBoundary event on the bus. The bus subscriber in
+/// `setup_gremlin_channels` forwards it to the legacy stage-stream broadcast
+/// so the TUI keeps working unchanged.
+///
+/// The `_tx` parameter is retained for Phase 2 — it will be removed alongside
+/// `stage_stream_tx` from `RuntimeConfig` once the legacy broadcast is fully
+/// retired.
 pub(crate) fn send_stage_boundary(
-    tx: &Option<broadcast::Sender<String>>,
+    _tx: &Option<broadcast::Sender<String>>,
     gremlin_id: &str,
     stage_name: &str,
     stage_type: &str,
 ) {
-    if let Some(ref tx) = tx {
-        let payload = serde_json::json!({
-            "kind": "stage_boundary",
-            "stage": stage_name,
-            "stage_type": stage_type,
-            "active": !stage_name.is_empty(),
-        })
-        .to_string();
-        let _ = tx.send(payload);
-    }
     crate::executor::supervisor::emit_event(crate::executor::EventKind::StageBoundary {
         id: gremlin_id.to_string(),
         stage: stage_name.to_string(),

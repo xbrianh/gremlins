@@ -4150,31 +4150,37 @@ fn setup_gremlin_channels(
 
     // Subscribe to StageBoundary events with a run-scoped prefix and forward
     // them to the legacy stage_stream_broadcast so the TUI keeps working.
+    // Lossless delivery ensures the forwarder never misses a boundary —
+    // boundaries are rare but state-critical (missing one would leave the
+    // TUI's stage display stuck on the wrong stage).
     let (_stage_sub, mut stage_rx) = init_bus()
-        .subscribe(SubscriberRegistration::lag_tolerant(
+        .subscribe(SubscriberRegistration::lossless(
             CorrId::new().with_run(&run_id),
-            256,
         ))
         .expect("stage boundary subscription cannot fail");
     {
         let sbc = stage_stream_broadcast.clone();
         tokio::spawn(async move {
-            while let crate::magic_bus::Recv::Event(dispatch) = stage_rx.recv().await {
-                if let EventKind::StageBoundary {
-                    stage,
-                    stage_type,
-                    active,
-                    ..
-                } = dispatch.kind()
-                {
-                    let payload = serde_json::json!({
-                        "kind": "stage_boundary",
-                        "stage": stage,
-                        "stage_type": stage_type,
-                        "active": active,
-                    })
-                    .to_string();
-                    let _ = sbc.send(payload);
+            loop {
+                match stage_rx.recv().await {
+                    crate::magic_bus::Recv::Event(dispatch) => {
+                        if let EventKind::StageBoundary {
+                            stage,
+                            stage_type,
+                            active,
+                            ..
+                        } = dispatch.kind()
+                        {
+                            let payload = crate::executor::stage_stream::stage_boundary_json(
+                                stage, stage_type, *active,
+                            );
+                            let _ = sbc.send(payload);
+                        }
+                    }
+                    crate::magic_bus::Recv::Closed => break,
+                    // Lossless doesn't produce Lagged, but handle it
+                    // gracefully so a future policy change is safe.
+                    crate::magic_bus::Recv::Lagged(_) => {}
                 }
             }
         });
