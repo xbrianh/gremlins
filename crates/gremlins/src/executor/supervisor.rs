@@ -4162,7 +4162,13 @@ fn setup_gremlin_channels(
             loop {
                 match stage_rx.recv().await {
                     crate::magic_bus::Recv::Event(dispatch) => {
-                        if let EventKind::StageBoundary { stage, stage_type, active, .. } = dispatch.kind() {
+                        if let EventKind::StageBoundary {
+                            stage,
+                            stage_type,
+                            active,
+                            ..
+                        } = dispatch.kind()
+                        {
                             let payload = serde_json::json!({
                                 "kind": "stage_boundary",
                                 "stage": stage,
