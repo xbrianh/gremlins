@@ -138,16 +138,17 @@ pub fn file_to_module(file: &Path, packages: &[PackageInfo]) -> Option<(String, 
 /// When a workspace contains a library crate and a binary crate that share
 /// the same target name (e.g. `gremlins` lib + `gremlins-cli` bin named
 /// `gremlins`), both map to the same module identifier.  This function keeps
-/// the library target over the binary and warns about each dropped file.
+/// the library target over the binary.  Two same-kind collisions (lib–lib or
+/// bin–bin) are an error rather than an arbitrary silent drop.
 pub(crate) fn dedup_target_modules(
     target_modules: &mut Vec<(String, PathBuf, String)>,
     packages: &[PackageInfo],
-) {
+) -> Result<(), String> {
     // Map module name → index of the best entry seen so far.
     let mut best: HashMap<String, usize> = HashMap::new();
     let mut drop_indices: Vec<usize> = Vec::new();
 
-    for (i, (module, _file, pkg_key)) in target_modules.iter().enumerate() {
+    for (i, (module, file, pkg_key)) in target_modules.iter().enumerate() {
         if let Some(&prev) = best.get(module) {
             let prev_is_bin = is_bin(&target_modules[prev].2, packages);
             let this_is_bin = is_bin(pkg_key, packages);
@@ -155,8 +156,14 @@ pub(crate) fn dedup_target_modules(
                 // Replace: keep this library entry, drop the previous binary.
                 drop_indices.push(prev);
                 best.insert(module.clone(), i);
+            } else if prev_is_bin == this_is_bin {
+                return Err(format!(
+                    "duplicate module {module:?} from both {} and {}",
+                    target_modules[prev].1.display(),
+                    file.display()
+                ));
             } else {
-                // Keep the previous entry, drop this one.
+                // Keep the previous library entry, drop this binary.
                 drop_indices.push(i);
             }
         } else {
@@ -169,10 +176,11 @@ pub(crate) fn dedup_target_modules(
     for idx in drop_indices {
         let (_module, file, _pkg_key) = target_modules.remove(idx);
         eprintln!(
-            "warning: skipping duplicate module from {} (already covered by another crate)",
+            "warning: skipping binary module from {} (library target takes precedence)",
             file.display()
         );
     }
+    Ok(())
 }
 
 /// Does `pkg_key` refer to a Rust binary target?
@@ -301,7 +309,7 @@ mod tests {
             ("bar".into(), PathBuf::from("b/bar.rs"), "rust:b".into()),
         ];
         let packages = vec![rust_pkg("a", "a", false), rust_pkg("b", "b", false)];
-        dedup_target_modules(&mut modules, &packages);
+        dedup_target_modules(&mut modules, &packages).unwrap();
         assert_eq!(modules.len(), 2);
     }
 
@@ -323,22 +331,19 @@ mod tests {
             rust_pkg("mybin", "mylib", true),
             rust_pkg("mylib", "mylib", false),
         ];
-        dedup_target_modules(&mut modules, &packages);
+        dedup_target_modules(&mut modules, &packages).unwrap();
         assert_eq!(modules.len(), 1);
         // The library entry should survive.
         assert!(modules[0].1.to_string_lossy().contains("lib.rs"));
     }
 
     #[test]
-    fn dedup_first_wins_when_both_same_kind() {
+    fn dedup_same_kind_collision_is_an_error() {
         let mut modules = vec![
             ("dup".into(), PathBuf::from("first.rs"), "rust:a".into()),
             ("dup".into(), PathBuf::from("second.rs"), "rust:b".into()),
         ];
         let packages = vec![rust_pkg("a", "a", false), rust_pkg("b", "b", false)];
-        dedup_target_modules(&mut modules, &packages);
-        assert_eq!(modules.len(), 1);
-        // First occurrence should survive when both are libraries.
-        assert!(modules[0].1.to_string_lossy().contains("first.rs"));
+        assert!(dedup_target_modules(&mut modules, &packages).is_err());
     }
 }

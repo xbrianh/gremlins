@@ -27,6 +27,10 @@ pub(crate) const MAX_CONCURRENT_SCORING_RUNS: usize = 16;
 // Cache state type
 // ---------------------------------------------------------------------------
 
+/// Dimension key → score (0–4). Keys are defined by the comprehensibility
+/// config; a missing key means the model omitted that dimension.
+pub(crate) type ComprehensibilityScores = std::collections::HashMap<String, u8>;
+
 /// Shared comprehensibility/maintainability cache: the JSONL file path.
 pub(crate) type CacheState = PathBuf;
 

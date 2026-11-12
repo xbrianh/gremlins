@@ -57,12 +57,7 @@ impl fmt::Display for ExecError {
             ExecError::Generic { name, detail } => write!(f, "exec {name}: {detail}"),
             ExecError::NonZeroExit { name, rc, output } => {
                 if let Some(out) = output.as_ref().filter(|s| !s.trim().is_empty()) {
-                    const MAX: usize = 500;
-                    let tail = if out.len() <= MAX {
-                        out.as_str()
-                    } else {
-                        &out[out.ceil_char_boundary(out.len() - MAX)..]
-                    };
+                    let tail = crate::executor::run::truncate_tail(out, 500);
                     write!(f, "exec {name}: exited {rc}: {tail}")
                 } else {
                     write!(f, "exec {name}: exited {rc}")

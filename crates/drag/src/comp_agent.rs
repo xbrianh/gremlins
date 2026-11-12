@@ -11,8 +11,10 @@ use gremlins::model_uri::ModelURI;
 
 use crate::cache::{append_cache_entry, compute_cache_key, CacheEntry};
 use crate::config::ComprehensibilityConfig;
-use crate::scoring::{ComprehensibilityScores, ModuleDrag};
-use crate::util::{extract_json, mean_with_ci, truncate, CacheState, CompAgentError};
+use crate::scoring::ModuleDrag;
+use crate::util::{
+    extract_json, mean_with_ci, truncate, CacheState, CompAgentError, ComprehensibilityScores,
+};
 
 const MAX_COMP_RETRIES: u32 = 3;
 const COMP_BACKOFF: [f64; 2] = [1.0, 2.0];
@@ -143,6 +145,8 @@ pub(crate) async fn score_comprehensibility(
 
         let token_count = module_tokens.get(module.as_str()).copied().unwrap_or(0);
 
+        let cache_key = compute_cache_key(&source, model_spec, estimates, config_hash);
+
         for _ in 0..estimates {
             let module = module.clone();
             let source = source.clone();
@@ -150,13 +154,11 @@ pub(crate) async fn score_comprehensibility(
             let prompt = prompt.clone();
             let model_spec = model_spec.to_string();
             let comp_config = comprehensibility_config.clone();
-            let config_hash = config_hash.to_string();
             let sem = Arc::clone(&scoring_sem);
             let cache_path = cache_state.clone();
+            let cache_key = cache_key.clone();
 
             handles.push(tokio::spawn(async move {
-                let cache_key = compute_cache_key(&source, &model_spec, estimates, &config_hash);
-
                 for attempt in 0..MAX_COMP_RETRIES {
                     // Acquire a semaphore permit before creating the
                     // ephemeral gremlin so total open file descriptors

@@ -1,6 +1,87 @@
+use serde::Serialize;
+
 use crate::config::{ComprehensibilityDimensionDef, DragConfig};
 use crate::scoring::DragNode;
 use crate::util::truncate;
+
+/// Serializable mirror of [`DragNode`] for JSON output.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub(crate) enum DragNodeOutput {
+    Module {
+        name: String,
+        file: String,
+        token_count: usize,
+        footprint: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        comprehensibility: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ci_lower: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ci_upper: Option<f64>,
+        drag: f64,
+    },
+    Container {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        maint_score: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        maint_ci_lower: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        maint_ci_upper: Option<f64>,
+        drag: f64,
+        children: Vec<DragNodeOutput>,
+    },
+}
+
+impl From<&DragNode> for DragNodeOutput {
+    fn from(node: &DragNode) -> Self {
+        match node {
+            DragNode::Module {
+                name,
+                file,
+                token_count,
+                footprint,
+                comprehensibility,
+                ci_lower,
+                ci_upper,
+                drag,
+            } => DragNodeOutput::Module {
+                name: name.clone(),
+                file: file.clone(),
+                token_count: *token_count,
+                footprint: *footprint,
+                comprehensibility: *comprehensibility,
+                ci_lower: *ci_lower,
+                ci_upper: *ci_upper,
+                drag: *drag,
+            },
+            DragNode::Container {
+                name,
+                maint_score,
+                maint_ci_lower,
+                maint_ci_upper,
+                drag,
+                children,
+            } => DragNodeOutput::Container {
+                name: name.clone(),
+                maint_score: *maint_score,
+                maint_ci_lower: *maint_ci_lower,
+                maint_ci_upper: *maint_ci_upper,
+                drag: *drag,
+                children: children.iter().map(DragNodeOutput::from).collect(),
+            },
+        }
+    }
+}
+
+/// Weighting constants reported alongside the tree in JSON output.
+#[derive(Serialize)]
+pub(crate) struct ReportConfig {
+    pub w2: f64,
+    pub m: f64,
+    pub p: f64,
+}
 
 /// Print a self-contained explanation of the drag calculation: the formula,
 /// the comprehensibility and maintainability surveys, and how each factor
@@ -324,5 +405,92 @@ fn print_node(node: &DragNode, depth: usize, has_comp: bool, has_maint: bool) {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ci_fields_round_trip_through_json() {
+        // ModuleDrag is not directly serialized, but DragNodeOutput is.
+        // Build a DragNode::Module with CI fields and round-trip through
+        // DragNodeOutput → serde_json.
+        let node = DragNode::Module {
+            name: "test_mod".into(),
+            file: "src/test.rs".into(),
+            token_count: 42,
+            footprint: 100,
+            comprehensibility: Some(0.75),
+            ci_lower: Some(0.70),
+            ci_upper: Some(0.80),
+            drag: 1.5,
+        };
+        let output = DragNodeOutput::from(&node);
+        let json = serde_json::to_string(&output).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "module");
+        assert_eq!(v["name"], "test_mod");
+        assert!((v["comprehensibility"].as_f64().unwrap() - 0.75).abs() < 1e-12);
+        assert!((v["ci_lower"].as_f64().unwrap() - 0.70).abs() < 1e-12);
+        assert!((v["ci_upper"].as_f64().unwrap() - 0.80).abs() < 1e-12);
+
+        // None CI fields are omitted entirely by skip_serializing_if.
+        let node_no_ci = DragNode::Module {
+            name: "no_ci".into(),
+            file: "src/no_ci.rs".into(),
+            token_count: 1,
+            footprint: 1,
+            comprehensibility: None,
+            ci_lower: None,
+            ci_upper: None,
+            drag: 0.0,
+        };
+        let output_no_ci = DragNodeOutput::from(&node_no_ci);
+        let json_no_ci = serde_json::to_string(&output_no_ci).unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&json_no_ci).unwrap();
+        let obj = v2.as_object().unwrap();
+        assert!(!obj.contains_key("comprehensibility"));
+        assert!(!obj.contains_key("ci_lower"));
+        assert!(!obj.contains_key("ci_upper"));
+    }
+
+    #[test]
+    fn container_ci_fields_round_trip_through_json() {
+        // Container CI fields round-trip through DragNodeOutput → JSON.
+        let node = DragNode::Container {
+            name: "my_pkg".into(),
+            maint_score: Some(0.72),
+            maint_ci_lower: Some(0.61),
+            maint_ci_upper: Some(0.83),
+            drag: 42.0,
+            children: vec![],
+        };
+        let output = DragNodeOutput::from(&node);
+        let json = serde_json::to_string(&output).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "container");
+        assert_eq!(v["name"], "my_pkg");
+        assert!((v["maint_score"].as_f64().unwrap() - 0.72).abs() < 1e-12);
+        assert!((v["maint_ci_lower"].as_f64().unwrap() - 0.61).abs() < 1e-12);
+        assert!((v["maint_ci_upper"].as_f64().unwrap() - 0.83).abs() < 1e-12);
+
+        // None CI fields are omitted.
+        let node_no_ci = DragNode::Container {
+            name: "orphan".into(),
+            maint_score: None,
+            maint_ci_lower: None,
+            maint_ci_upper: None,
+            drag: 1.0,
+            children: vec![],
+        };
+        let output_no_ci = DragNodeOutput::from(&node_no_ci);
+        let json_no_ci = serde_json::to_string(&output_no_ci).unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&json_no_ci).unwrap();
+        let obj = v2.as_object().unwrap();
+        assert!(!obj.contains_key("maint_score"));
+        assert!(!obj.contains_key("maint_ci_lower"));
+        assert!(!obj.contains_key("maint_ci_upper"));
     }
 }

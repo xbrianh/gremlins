@@ -112,7 +112,10 @@ pub async fn run_bootstrap(
             // message).  Grab the tail of combined output — the failing
             // command is at the end, not the beginning.
             let (detail, tail) = if !r.stderr.is_empty() {
-                (truncate(&r.stderr, 2000), truncate(&r.stderr, 500))
+                (
+                    truncate_tail(&r.stderr, 2000),
+                    truncate_tail(&r.stderr, 500),
+                )
             } else {
                 (
                     truncate_tail(&r.output, 2000),

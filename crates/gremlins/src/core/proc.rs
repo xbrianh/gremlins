@@ -736,8 +736,10 @@ pub async fn run_shell_async(
 /// Return type for `run_logged_commands`.
 #[derive(Debug)]
 pub struct ShellResult {
+    /// The combined, trimmed stdout+stderr stream (instrumented output).
+    /// Useful for display, but not the first choice for failure reasons.
     pub output: String,
-    /// Stderr text, trimmed: the stream where real failure reasons land,
+    /// Raw stderr text, trimmed: the stream where real failure reasons land,
     /// kept separate so callers can prefer it over the instrumented
     /// stdout noise in `output`.
     pub stderr: String,

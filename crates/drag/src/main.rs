@@ -8,7 +8,8 @@ mod scoring;
 mod util;
 
 use config::{DragConfig, OutputFormat};
-use scoring::{build_drag_tree, compute_drag, compute_footprint, DragNodeOutput};
+use output::DragNodeOutput;
+use scoring::{build_drag_tree, compute_drag, compute_footprint};
 use util::{CacheState, MAX_CONCURRENT_SCORING_RUNS};
 
 use std::collections::{HashMap, HashSet};
@@ -66,7 +67,7 @@ struct Cli {
 #[derive(Serialize)]
 struct DragReport {
     #[serde(flatten)]
-    config: scoring::ReportConfig,
+    config: output::ReportConfig,
     #[serde(flatten)]
     tree: DragNodeOutput,
 }
@@ -144,7 +145,7 @@ async fn run() -> Result<(), String> {
             eprintln!("warning: could not map to module: {}", file.display());
         }
     }
-    lang::dedup_target_modules(&mut target_modules, &packages);
+    lang::dedup_target_modules(&mut target_modules, &packages)?;
 
     if target_modules.is_empty() {
         let exts = lang::extensions()
@@ -453,7 +454,7 @@ async fn run() -> Result<(), String> {
     // 9. Output
     if matches!(config.format, OutputFormat::Json) {
         let report = DragReport {
-            config: scoring::ReportConfig {
+            config: output::ReportConfig {
                 w2: config.weights.w2,
                 m: config.weights.m,
                 p: config.weights.p,

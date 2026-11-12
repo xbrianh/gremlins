@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::scoring::ComprehensibilityScores;
+use crate::util::ComprehensibilityScores;
 
 /// One line in the JSONL cache file.
 ///
