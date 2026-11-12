@@ -544,10 +544,15 @@ pub(crate) async fn run_parallel(
             match result {
                 Ok(r) if r.rc == 0 => {}
                 Ok(r) => {
+                    let detail = if !r.stderr.is_empty() {
+                        &r.stderr
+                    } else {
+                        &r.output
+                    };
                     log::warn!(
                         "parallel group {group_name}: join command(s) for child {child_name} exited {}: {}",
                         r.rc,
-                        crate::executor::run::truncate(&r.output, 500),
+                        crate::executor::run::truncate_tail(detail, 500),
                     );
                 }
                 Err(e) => {

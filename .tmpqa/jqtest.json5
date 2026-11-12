@@ -1,0 +1,7 @@
+{
+  // whole line
+  "model": "x", // trailing
+  /* block
+     comment */
+  "p": 2.5
+}

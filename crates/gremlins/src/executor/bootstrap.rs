@@ -28,7 +28,7 @@ use regex::Regex;
 use crate::artifacts::uri::Uri;
 use crate::core::proc::{run_logged_commands, ProcError};
 use crate::executor::gremlin::Gremlin;
-use crate::executor::run::truncate;
+use crate::executor::run::{truncate, truncate_tail};
 use crate::executor::send_log;
 use crate::executor::state::BlobMode;
 use crate::executor::RunError;
@@ -105,16 +105,29 @@ pub async fn run_bootstrap(
             Ok(())
         }
         Ok(r) => {
-            let msg = format!(
-                "bootstrap failed (exit {}): {}",
-                r.rc,
-                truncate(&r.output, 2000)
-            );
+            // Prefer stderr: the instrumented script prints `printf` headers
+            // to stdout, and the real failure reason lands on stderr.  When
+            // stderr is blank, fall back to the combined output so silent
+            // failures still surface *something* (e.g. `exit 1` with no
+            // message).  Grab the tail of combined output — the failing
+            // command is at the end, not the beginning.
+            let (detail, tail) = if !r.stderr.is_empty() {
+                (
+                    truncate_tail(&r.stderr, 2000),
+                    truncate_tail(&r.stderr, 500),
+                )
+            } else {
+                (
+                    truncate_tail(&r.output, 2000),
+                    truncate_tail(&r.output, 500),
+                )
+            };
+            let msg = format!("bootstrap failed (exit {}): {}", r.rc, detail);
             send_log(log_tx, log::Level::Error, &msg);
             log::error!("{msg}");
             Err(RunError::BootstrapFailed {
                 exit_code: r.rc,
-                stderr: truncate(&r.output, 500),
+                stderr: tail,
             })
         }
         Err(ProcError::CalledProcessError(rc, stdout, stderr)) => {

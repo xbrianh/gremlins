@@ -1,7 +1,7 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
 
-use thiserror::Error;
 use tokio::sync::broadcast;
 
 use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
@@ -13,26 +13,26 @@ use crate::executor::state::{BlobMode, StateData};
 use crate::executor::vars;
 use tokio::sync::mpsc;
 
-#[derive(Error, Debug)]
+#[derive(Debug)]
 pub enum ExecError {
-    #[error("exec {name}: {source}")]
     Resolve {
         name: String,
-        #[source]
         source: ResolveError,
     },
-    #[error("exec {name}: {detail}")]
-    Generic { name: String, detail: String },
-    #[error("exec {name}: exited {rc}")]
+    Generic {
+        name: String,
+        detail: String,
+    },
     NonZeroExit {
         name: String,
         rc: i32,
         output: Option<String>,
     },
-    #[error("exec {name}: artifact {uri} was not produced")]
-    MissingArtifact { name: String, uri: String },
-    #[error(transparent)]
-    Proc(#[from] ProcError),
+    MissingArtifact {
+        name: String,
+        uri: String,
+    },
+    Proc(ProcError),
 }
 
 impl From<ResolveError> for ExecError {
@@ -40,6 +40,43 @@ impl From<ResolveError> for ExecError {
         ExecError::Resolve {
             name: String::new(),
             source,
+        }
+    }
+}
+
+impl From<ProcError> for ExecError {
+    fn from(err: ProcError) -> Self {
+        ExecError::Proc(err)
+    }
+}
+
+impl fmt::Display for ExecError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExecError::Resolve { name, source } => write!(f, "exec {name}: {source}"),
+            ExecError::Generic { name, detail } => write!(f, "exec {name}: {detail}"),
+            ExecError::NonZeroExit { name, rc, output } => {
+                if let Some(out) = output.as_ref().filter(|s| !s.trim().is_empty()) {
+                    let tail = crate::executor::run::truncate_tail(out, 500);
+                    write!(f, "exec {name}: exited {rc}: {tail}")
+                } else {
+                    write!(f, "exec {name}: exited {rc}")
+                }
+            }
+            ExecError::MissingArtifact { name, uri } => {
+                write!(f, "exec {name}: artifact {uri} was not produced")
+            }
+            ExecError::Proc(source) => write!(f, "{source}"),
+        }
+    }
+}
+
+impl std::error::Error for ExecError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ExecError::Resolve { source, .. } => Some(source),
+            ExecError::Proc(source) => Some(source),
+            _ => None,
         }
     }
 }
@@ -217,6 +254,7 @@ pub async fn run_shell(
     if prepared.cmds.is_empty() {
         return Ok(ShellResult {
             output: String::new(),
+            stderr: String::new(),
             rc: 0,
         });
     }
@@ -319,6 +357,7 @@ pub fn process_shell_result(
     };
     let raw_output_str = String::from_utf8_lossy(&raw_output).to_string();
     let shell_output = raw_output_str.trim().to_string();
+    let shell_stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
     let shell_rc = result.returncode;
 
     if let Some(ref tx) = prepared.log_tx {
@@ -339,6 +378,7 @@ pub fn process_shell_result(
 
     Ok(ShellResult {
         output: shell_output,
+        stderr: shell_stderr,
         rc: shell_rc,
     })
 }
@@ -752,5 +792,48 @@ mod tests {
         let canon_log_dir = log_dir.canonicalize().unwrap();
         let canon_log = log_path.canonicalize().unwrap();
         assert!(canon_log.starts_with(&canon_log_dir));
+    }
+
+    #[test]
+    fn non_zero_exit_display_includes_output() {
+        let err = ExecError::NonZeroExit {
+            name: "test".into(),
+            rc: 1,
+            output: Some("command failed: file not found".into()),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("command failed: file not found"),
+            "Display must include output: {msg}"
+        );
+    }
+
+    #[test]
+    fn non_zero_exit_display_truncates_long_output() {
+        let long = "a".repeat(1000);
+        let err = ExecError::NonZeroExit {
+            name: "test".into(),
+            rc: 1,
+            output: Some(long),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.len() < 600,
+            "Display must truncate: got {} bytes",
+            msg.len()
+        );
+        // The tail of the output should still appear.
+        assert!(msg.ends_with('a'), "Tail 'a's should survive: {msg}");
+    }
+
+    #[test]
+    fn non_zero_exit_display_omits_empty_output() {
+        let err = ExecError::NonZeroExit {
+            name: "test".into(),
+            rc: 1,
+            output: None,
+        };
+        let msg = err.to_string();
+        assert_eq!(msg, "exec test: exited 1");
     }
 }

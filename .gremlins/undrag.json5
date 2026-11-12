@@ -1,0 +1,272 @@
+{
+  // undrag — implement a feature (plan → implement-and-qa), then run a
+  // single-pass drag reduction on the changed code.  The drag target is
+  // auto-detected from the common ancestor directory of all changed .rs files.
+  //
+  // Usage:
+  //   gremlins launch undrag --instructions "add a --json flag to gremlins ls"
+  //   gremlins launch undrag --plan plans/feature.md
+  //   gremlins launch undrag --plan plans/feature.md --drag-model openai/gpt-4o
+  //
+  // Parameters (launch-time):
+  //   instructions              (optional)  feature description
+  //   plan                      (optional)  path to a plan file
+  //   base_ref                  (optional)  git ref for the worktree (default: HEAD)
+  //   drag-model                (optional)  model for comprehensibility scoring
+  //   estimates-per-survey      (optional)  LLM estimates per survey (default: 5)
+  //   p                         (optional)  package-maintainability weight exponent
+  //   skip-maintainability      (optional)  skip package maintainability scoring
+  //   drag-config               (optional)  path to a drag config JSON file
+  //
+  // NOTE: the bootstrap source is named `drag-model` (not `model`) because
+  // `model` collides with gremlins' own global --model flag.
+  prompt_dir: "prompts",
+  bootstrap: {
+    source: {
+      require_one_of: [
+        ["instructions", "plan"],
+      ],
+      instructions: {
+        type: "string",
+        optional: true,
+      },
+      plan: {
+        type: "filepath",
+        optional: true,
+      },
+      base_ref: {
+        type: "string",
+        optional: true,
+      },
+      "drag-model": {
+        type: "string",
+        optional: true,
+        default: "openrouter/deepseek/deepseek-v4-pro",
+      },
+      "estimates-per-survey": {
+        type: "string",
+        optional: true,
+        default: "5",
+      },
+      p: {
+        type: "string",
+        optional: true,
+      },
+      "skip-maintainability": {
+        type: "string",
+        optional: true,
+      },
+      "drag-config": {
+        type: "filepath",
+        optional: true,
+      },
+    },
+    launch_cmds: [
+      'gremlins:bind_artifact("artifact://plan.md", plan)',
+      'gremlins:bind_artifact("artifact://instructions.md", instructions)',
+      'gremlins:bind_artifact("artifact://base_ref", base_ref)',
+      'BASE_REF={base_ref} && SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "${BASE_REF:-HEAD}") && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && echo "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"',
+      // Write drag scoring params to files for later reference.
+      'printf "%s" {drag-model} > "$GREMLINS_STATE_DIR/artifacts/drag_model.txt"',
+      'printf "%s" {estimates-per-survey} > "$GREMLINS_STATE_DIR/artifacts/comp_estimates.txt"',
+      'printf "%s" {p} > "$GREMLINS_STATE_DIR/artifacts/p.txt"',
+      'printf "%s" {skip-maintainability} > "$GREMLINS_STATE_DIR/artifacts/skip_maint.txt"',
+      // Build the drag config JSON file from the project default.
+      // The `path` field is left unset — detect-target sets it after the
+      // feature is implemented.
+      // The config file is written to TWO places:
+      //   1. $GREMLINS_STATE_DIR/artifacts/drag_config.json — immutable artifact
+      //   2. $GREMLINS_STATE_DIR/drag_config.json — mutable, pointed to by
+      //      GREMLINS_DRAG_CLI_CONFIG so agents pick it up automatically.
+      'CONFIG_SRC={drag-config}; if [ -n "$CONFIG_SRC" ] && [ -f "$CONFIG_SRC" ]; then echo "using drag config: $CONFIG_SRC"; python3 -c "\nimport sys, re, json\nwith open(sys.argv[1]) as f:\n    text = f.read()\ntext = re.sub(r\'(?m)^[ \\t]*//[^\\n]*\\n\', \'\\n\', text)\ntext = re.sub(r\'/\\*[^*]*\\*+(?:[^/*][^*]*\\*+)*/\', \'\', text)\ntext = re.sub(r\',(\\s*[\\}\\])\', r\'\\1\', text)\njson.dump(json.loads(text), sys.stdout)\n" "$CONFIG_SRC" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"; else python3 -c "\nimport sys, re, json\nwith open(sys.argv[1]) as f:\n    text = f.read()\ntext = re.sub(r\'(?m)^[ \\t]*//[^\\n]*\\n\', \'\\n\', text)\ntext = re.sub(r\'/\\*[^*]*\\*+(?:[^/*][^*]*\\*+)*/\', \'\', text)\ntext = re.sub(r\',(\\s*[\\}\\])\', r\'\\1\', text)\njson.dump(json.loads(text), sys.stdout)\n" "$GREMLINS_PROJECT_ROOT/.gremlins/drag-config.json" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"; fi',
+      // Merge bootstrap overrides into the drag config via jq.
+      // Only non-empty bootstrap values apply; unset values keep the
+      // config file's existing value (or the bundled default).
+      'MODEL_VAL={drag-model}; ESTIMATES_VAL={estimates-per-survey}; P_VAL={p}; SKIP_MAINT_VAL={skip-maintainability}',
+      "jq --arg model \"$MODEL_VAL\" --arg estimates \"$ESTIMATES_VAL\" --arg p_val \"$P_VAL\" --arg skip_maint \"$SKIP_MAINT_VAL\" 'if $model != \"\" then .model = $model else . end | if $estimates != \"\" then .estimates_per_survey = ($estimates | tonumber) else . end | if $p_val != \"\" then .weights.p = ($p_val | tonumber) else . end | if $skip_maint != \"\" then (if $skip_maint != \"false\" then .skip_maintainability = true else .skip_maintainability = false end) else . end' \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\" > \"$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json\"",
+      'mv "$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json" "$GREMLINS_STATE_DIR/artifacts/drag_config.json"',
+      'cp "$GREMLINS_STATE_DIR/artifacts/drag_config.json" "$GREMLINS_STATE_DIR/drag_config.json"',
+      'jq \'.format = "json"\' "$GREMLINS_STATE_DIR/artifacts/drag_config.json" > "$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json" && mv "$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json" "$GREMLINS_STATE_DIR/artifacts/drag_config.json" && cp "$GREMLINS_STATE_DIR/artifacts/drag_config.json" "$GREMLINS_STATE_DIR/drag_config.json"',
+    ],
+    cli_out: {
+      base_sha: "artifact://base_sha",
+    },
+    env: 'export GREMLINS_OPENAI_AGENTS_MAX_TURNS="1000"\nexport CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${GREMLINS_PROJECT_ROOT}/.cargo-gremlin-target}"\nexport CARGO_INCREMENTAL=0\nTHE_ENV="${GREMLINS_PROJECT_ROOT}/.gremlins/env"\nif [ -f "$THE_ENV" ]; then\n    source "$THE_ENV"\nfi\nexport PREFIX="${GREMLINS_STATE_DIR}/install"\nexport PATH="${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}"\nexport GREMLINS_DRAG_CLI_CONFIG="$GREMLINS_STATE_DIR/drag_config.json"\n# GREMLINS_DRAG_CLI_CONFIG points to the drag config file.  detect-target\n# sets the `path` field once the feature is implemented.\n',
+  },
+  // ── stages ────────────────────────────────────────────────────────────
+  stages: [
+    // ── feature: plan ─────────────────────────────────────────────────
+    {
+      name: "plan",
+      type: "plan",
+      prompt: ["style_guide.md", "plan.md"],
+    },
+    // ── feature: implement & QA ────────────────────────────────────────
+    {
+      name: "implement-and-qa",
+      type: "implement-and-qa",
+      options: {
+        verify_cmds: "make -j8 check && make -j8 test",
+      },
+    },
+    // ── detect the drag target from the feature diff ───────────────────
+    {
+      name: "detect-target",
+      type: "exec",
+      interpolation: {
+        inputs: {
+          base_sha: 'content("artifact://base_sha")',
+        },
+        outputs: {
+          target: "artifact://drag/target.txt",
+          drag_base_sha: "artifact://drag/drag_base_sha.txt",
+        },
+      },
+      options: {
+        cmds: [
+          // Capture the commit before drag changes start.
+          'git -C "$GREMLIN_WORKDIR" rev-parse HEAD | tr -d \'\\n\' > {drag_base_sha}',
+          'BASE_SHA="{base_sha}"\nCHANGED_FILES=()\n# Collect changed .rs files relative to the feature base.\nwhile IFS= read -r -d \'\' f; do CHANGED_FILES+=("$f"); done < <(git diff "$BASE_SHA...HEAD" --name-only -z -- \'*.rs\')\nif [ ${#CHANGED_FILES[@]} -eq 0 ]; then\n  # No .rs files changed — widen to all changed files.\n  while IFS= read -r -d \'\' f; do CHANGED_FILES+=("$f"); done < <(git diff "$BASE_SHA...HEAD" --name-only -z)\nfi\nif [ ${#CHANGED_FILES[@]} -eq 0 ]; then\n  TARGET="."\nelse\n  # Find the common ancestor directory of all changed files.\n  TARGET=$(dirname "${CHANGED_FILES[0]}")\n  while true; do\n    all_under=1\n    for f in "${CHANGED_FILES[@]}"; do\n      case "$f" in\n        "$TARGET"/*) ;;\n        *) all_under=0; break ;;\n      esac\n    done\n    if [ "$all_under" -eq 1 ] || [ "$TARGET" = "." ]; then\n      break\n    fi\n    TARGET=$(dirname "$TARGET")\n  done\nfi\necho "detected drag target: $TARGET"\nprintf "%s" "$TARGET" > "{target}"\n# Update the mutable drag config with the detected target path\n# so gremlins-drag picks it up via GREMLINS_DRAG_CLI_CONFIG.\njq --arg t "$TARGET" \'.path = $t\' "$GREMLINS_STATE_DIR/drag_config.json" > "$GREMLINS_STATE_DIR/drag_config_tmp.json"\nmv "$GREMLINS_STATE_DIR/drag_config_tmp.json" "$GREMLINS_STATE_DIR/drag_config.json"\ncp "$GREMLINS_STATE_DIR/drag_config.json" "$GREMLINS_STATE_DIR/artifacts/drag_config.json"\n# artifact for: {target}',
+        ],
+      },
+    },
+    // ── drag: baseline score ──────────────────────────────────────────
+    {
+      name: "drag-baseline",
+      type: "exec",
+      interpolation: {
+        outputs: {
+          drag_baseline: "artifact://drag/baseline-report.json",
+          drag_score: "artifact://drag/drag_best.txt",
+        },
+      },
+      options: {
+        cmds: [
+          'gremlins-drag > {drag_baseline}',
+          'DRAG=$(jq \'.drag\' {drag_baseline})\nprintf "%s" "$DRAG" > {drag_score}\necho "baseline drag sum = $DRAG"',
+        ],
+      },
+    },
+    // ── drag: model explanation ───────────────────────────────────────
+    {
+      name: "drag-explain",
+      type: "exec",
+      interpolation: {
+        outputs: {
+          explain: "artifact://drag/explain.txt",
+        },
+      },
+      options: {
+        cmds: [
+          'gremlins-drag --explain > {explain}',
+        ],
+      },
+    },
+    // ── drag: plan the refactoring ────────────────────────────────────
+    {
+      name: "drag-plan",
+      type: "agent",
+      interpolation: {
+        inputs: {
+          target: 'content("artifact://drag/target.txt")',
+          drag_baseline: 'content("artifact://drag/baseline-report.json")',
+          explain: 'content("artifact://drag/explain.txt")',
+          diff: 'content("artifact://diff.txt")',
+        },
+        outputs: {
+          plan: "artifact://drag/plan.md",
+        },
+      },
+      prompt: [
+        'You are planning a refactor of the target at {target} to reduce its drag score.\n\n**Your overriding goal is simple, beautiful, correct code.** Drag is the\nmetric, but genuine maintainability is the objective. The best refactorings\nare often the hardest — restructuring module boundaries, untangling\ncontrol flow, redesigning abstractions. Do not reach for the easy change\nwhen the right change is within reach. Effort spent now on quality means\nfar less maintenance burden later.\n\n## The feature diff\n\nThe target was just modified by a feature implementation.  The diff of\nthat feature is provided below — use it to understand what changed and\nfocus your refactoring on the new or modified code.\n\n<feature_diff>\n{diff}\n</feature_diff>\n\n## Baseline drag report\n\nThe current drag score for the target is shown below.  This is the\nstarting point — your refactoring will reduce it.\n\n<baseline_report>\n{drag_baseline}\n</baseline_report>\n\n## Drag model (how drag is computed)\n\n{explain}\n\n## How refactoring moves affect the score\n\n### token_count\nReducing a module\'s own token count directly lowers its footprint\n(since footprint includes the module itself) and may also reduce\nfootprints of upstream modules that transitively depend on it.\nSmaller total code means less surface area for bugs and lower\ncognitive load. However, token_count alone is a small part of the\ntotal drag: the comprehensibility and package-maintainability\nmultipliers can each amplify drag by up to ~12× (when m=2.5 or\np=2.5). The footprint multiplier (1+footprint)^w2 is unbounded.\n\n### footprint\nA module\'s footprint is the token sum of everything it transitively\ndepends on. Breaking deep dependency chains, inlining small\nsingle-use helpers back into their callers, and avoiding unnecessary\ncross-module couplings all reduce footprint. When a module is\nrefactored to depend on fewer other modules, its footprint\nshrinks — and every upstream module that depends on it may also\nbenefit. Footprint enters the formula as (1+footprint)^w2; larger\nfootprints amplify drag sub-linearly (w2=0.5 gives square-root\ngrowth).\n\n### comprehensibility\nComprehensibility is a multiplier on the footprint term:\nexp(m·(1−comp)). The survey dimensions and their anchors are\ndescribed in the drag model above. To raise comprehensibility,\ntarget the dimensions dragging a module\'s score down: split\ndumping-ground files by concern (cohesion), break up mega-functions\n(sizing), and relocate inline tests out of the production file\n(test_hygiene), alongside naming, control-flow, data-flow, and\nabstraction improvements. The effect is multiplicative with\nfootprint, so improving comprehensibility on a high-footprint module\nyields more drag reduction than on a low-footprint one.\n\n### package maintainability (only when `maint_score` is present)\nPackage maintainability is scored on ten dimensions (each 0–4),\nnormalized over 40 points; the dimensions and their anchors are\ndescribed in the drag model above. The package multiplier\nexp(p·(1−maint)) amplifies the sum of module drags within that\npackage; low maintainability can increase effective drag by up to\nexp(p). Improving any of the ten dimensions — extracting duplicated\nlogic into shared helpers, isolating changes to fewer files,\ntightening cross-module interfaces, flattening deep transitive\nchains, reducing public API surface, or sealing abstraction\nboundaries — raises maint_score and shrinks the package multiplier.\n\n## Splitting vs merging modules\n\nSplitting one module into two can increase or decrease total drag\ndepending on how the split affects each factor:\n\n- **token_count**: Splitting redistributes tokens across modules.\n  Total token_count across the package may stay roughly the same\n  (modulo any new imports, re-exports, or glue code).\n- **footprint**: Each half may still carry the same shared\n  transitive dependencies. If module A imports module B, A\'s\n  footprint includes B\'s tokens plus everything B depends on —\n  so splitting can increase the sum of footprints even when total\n  tokens are unchanged.\n- **comprehensibility**: Smaller, focused modules may be easier\n  to understand (raising comp). Conversely, fragmentation across\n  many files can obscure the overall design and force readers to\n  jump between files (lowering comp). The net effect depends on\n  whether the split creates clean conceptual boundaries or scatters\n  related logic.\n- **package maintainability** (when packages are present): More\n  modules may affect decomposition, change isolation, and\n  duplication scores. A split that creates clean, independent\n  boundaries can improve these dimensions. A split that scatters\n  related logic across files can hurt them. When no packages are\n  scored, this dimension does not apply.\n\nExample — splitting one module into two when both still share the\nsame transitive dependencies:\n\nOne module (2000 tokens, footprint 5000, comp 0.5, w2=0.5, m=2.5):\n  drag = (1+5000)^0.5 · exp(2.5·0.5) ≈ 70.7 · 3.49 ≈ 246.8\n\nSplit into A (1000 tokens) and B (1000 tokens), where A depends on B\nand both depend on shared downstream modules (3000 tokens beyond\nA/B themselves):\n  drag(A) = (1+5000)^0.5 · exp(2.5·0.5) ≈ 70.7 · 3.49 ≈ 246.8\n  drag(B) = (1+4000)^0.5 · exp(2.5·0.5) ≈ 63.3 · 3.49 ≈ 220.8\n  total ≈ 467.6\n\nHere splitting increased total drag because both halves still carry\nthe shared footprint. The outcome can differ when a split severs\nreal dependency edges (reducing actual transitive reach) or when\ncomprehensibility improves enough to offset the footprint penalty.\n\nMerging two modules reverses the analysis: footprint may decrease\n(fewer module-to-module edges), but comprehensibility may suffer if\nthe result is a large, unfocused file. When packages are present,\nthe net effect on package maintainability dimensions depends on\nwhether the merge consolidates related logic or creates a monolithic\nblob. When no packages are scored, this dimension does not apply.\n\n## Your job\n\nWrite a high-level refactoring strategy — not a step-by-step\nimplementation guide. The implementation agent will figure out\nconcrete edits; your job is to set direction.\n\n- Identify 2–4 specific drag drivers in the baseline report\n  (high-footprint modules, low-comprehensibility modules, heavy\n  cross-module coupling, etc.) that the feature diff touched or\n  made worse.\n- For each driver, describe the **strategy** to reduce it:\n  e.g. \"break the dependency chain between X and Y by inverting\n  control through a trait\" or \"split the 3000-token dumping-ground\n  module Z by concern into three focused modules.\"\n- Explain **why** each strategy should reduce drag — which term(s)\n  in the formula it affects.\n- Prioritize the strategies in the order they should be applied.\n- Keep the plan short: a few paragraphs of prose, not a long\n  checklist. The implementation agent has the full codebase and\n  will determine exact details.\n\n### What to avoid\n\n- Test reorganization as a primary strategy (tests are stripped\n  from drag scoring; `mod tests` at bottom of file is fine).\n- Cosmetic-only changes (renames, reordering, whitespace).\n- Splitting files purely to split — only split when it severs\n  real dependency edges or creates cleaner conceptual boundaries.\n\n### Principles\n\n- **Correctness and code quality above all.** Prefer changes that\n  make the code genuinely better, even when they require more work.\n- **Focus on the changed code** (see feature diff). The feature\n  implementation is most likely to carry fresh drag; it also\n  benefits most from review.\n- **Scope is not limited.** If the right fix restructures module\n  boundaries across several files, that is fine. Just make sure\n  it is completable in a single pass.\n\nWrite the plan to `{plan}`. Do NOT edit source files.\n',
+      ],
+      options: {
+        idle_timeout: 600,
+      },
+    },
+    // ── drag: implement & QA ──────────────────────────────────────────
+    {
+      name: "drag-implement-and-qa",
+      type: "implement-and-qa",
+      options: {
+        verify_cmds: "make -j8 check && make -j8 test",
+        diff_base: "artifact://drag/drag_base_sha.txt",
+        artifact_ns: "drag/",
+      },
+    },
+    // ── drag: re-measure after refactoring ──────────────────────────
+    {
+      name: "drag-after",
+      type: "exec",
+      interpolation: {
+        outputs: {
+          drag_after_report: "artifact://drag/after-report.json",
+          drag_after: "artifact://drag/drag_after.txt",
+        },
+      },
+      options: {
+        cmds: [
+          'gremlins-drag > {drag_after_report}',
+          'DRAG=$(jq \'.drag\' {drag_after_report})\nprintf "%s" "$DRAG" > {drag_after}\necho "after drag sum = $DRAG"',
+        ],
+      },
+    },
+    // ── combined diff (feature + drag) ────────────────────────────────
+    {
+      name: "drag-combine-diff",
+      type: "exec",
+      interpolation: {
+        inputs: {
+          base_sha: 'content("artifact://base_sha")',
+        },
+        outputs: {
+          diff: "artifact://final-diff.txt",
+        },
+      },
+      options: {
+        cmds: [
+          'git diff "{base_sha}"...HEAD > {diff}',
+        ],
+      },
+    },
+    // ── commit message ────────────────────────────────────────────────
+    {
+      name: "commit-message",
+      type: "agent",
+      interpolation: {
+        inputs: {
+          plan: 'content("artifact://plan.md")',
+          diff: 'content("artifact://final-diff.txt")',
+          address_summary: 'content("artifact://address-summary.md")',
+          drag_plan: 'content("artifact://drag/plan.md")',
+          drag_before: 'content("artifact://drag/drag_best.txt")',
+          drag_after: 'content("artifact://drag/drag_after.txt")',
+          target: 'content("artifact://drag/target.txt")',
+        },
+        outputs: {
+          message: "artifact://commit_message.txt",
+        },
+      },
+      prompt: [
+        'Write a git commit message describing the changes.\n\n## Feature plan\n\n<plan>\n{plan}\n</plan>\n\n## Combined diff (feature + drag reduction)\n\n<diff>\n{diff}\n</diff>\n\n## Review fixes applied\n\n<summary>\n{address_summary}\n</summary>\n\n## Drag reduction\n\nThe feature was followed by an automatic drag reduction pass.\nDrag before: {drag_before}\nDrag after:  {drag_after}\nTarget: {target}\n\nDrag reduction plan:\n<drag_plan>\n{drag_plan}\n</drag_plan>\n\n## Output\n\nWrite the commit message to the file at `{message}`. Do not read\nother files or run commands — the inputs above are all you need.\n\nA git commit message has this structure:\n\n- A subject line: a concise, imperative-mood summary of the change, at\n  most 72 characters.  Mention that drag reduction was applied.\n- A blank line.\n- A body: a few short paragraphs describing what changed and why,\n  including the drag reduction.  Write fresh prose — do not paste the\n  plan or diff verbatim.\n',
+      ],
+    },
+  ],
+  // ── land ──────────────────────────────────────────────────────────────
+  land: {
+    interpolation: {
+      inputs: {
+        message: "artifact://commit_message.txt",
+      },
+    },
+    land_cmds: [
+      'WORKTREE_HEAD=$(git -C "$GREMLIN_WORKDIR" rev-parse HEAD)',
+      'git merge --squash "$WORKTREE_HEAD"',
+      'git diff --cached --quiet || git commit -F "{message}"',
+    ],
+    clean_cmds: [
+      'git worktree remove --force "$GREMLIN_WORKDIR" || true',
+      "git worktree prune",
+    ],
+  },
+}

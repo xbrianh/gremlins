@@ -65,6 +65,28 @@ pub(crate) fn compute_footprint(
 }
 
 // ---------------------------------------------------------------------------
+// Scoring data model
+// ---------------------------------------------------------------------------
+
+/// Per-module metrics produced by scoring.  Used internally; the output
+/// report uses the recursive [`DragNode`] tree instead.
+pub(crate) struct ModuleDrag {
+    pub module: String,
+    pub file: String,
+    pub token_count: usize,
+    /// Total token count of the module plus all modules transitively
+    /// reachable from it (including the module itself).
+    pub footprint: usize,
+    pub comprehensibility: Option<f64>,
+    /// Lower bound of the 95% CI for comprehensibility (None when no scoring ran).
+    pub ci_lower: Option<f64>,
+    /// Upper bound of the 95% CI for comprehensibility (None when no scoring ran).
+    pub ci_upper: Option<f64>,
+    /// The drag metric: `(1+footprint)^w2 · exp(m·(1−comp))`.
+    pub drag: f64,
+}
+
+// ---------------------------------------------------------------------------
 // Drag tree types
 // ---------------------------------------------------------------------------
 
@@ -75,7 +97,7 @@ pub(crate) fn compute_footprint(
 /// maintainability multiplier applied exactly once per module — from the
 /// module's immediate container.
 ///
-/// Serialization is handled by [`DragNodeOutput`] in `main.rs`, which
+/// Serialization is handled by [`DragNodeOutput`] in `output.rs`, which
 /// keeps the serde attributes out of this pure-computation module.
 #[derive(Clone, Debug)]
 pub(crate) enum DragNode {
@@ -127,7 +149,7 @@ pub(crate) enum DragNode {
 /// direct module drags) + (sum of child container drags)`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_drag_tree(
-    modules: &[super::ModuleDrag],
+    modules: &[ModuleDrag],
     module_pkg: &HashMap<(String, String), String>,
     module_dir_segments: &HashMap<(String, String), Vec<String>>,
     dir_maints: &HashMap<String, DirMaintResult>,
@@ -194,6 +216,7 @@ pub(crate) fn build_drag_tree(
             p,
             skip_maintainability,
             sep,
+            false,
         )?;
 
         package_containers.push(container);
@@ -203,13 +226,28 @@ pub(crate) fn build_drag_tree(
     let orphan_nodes = if orphan_indices.is_empty() {
         Vec::new()
     } else {
-        let mut orphan_trie = TrieNode::default();
+        let mut orphan_trie = DirTrieNode::default();
         for &idx in &orphan_indices {
-            let segments = module_segments(&modules[idx].module);
+            let segments: Vec<String> = module_segments(&modules[idx].module)
+                .into_iter()
+                .map(str::to_string)
+                .collect();
             orphan_trie.insert(&segments, idx);
         }
         let orphan_sep = path_separator(&[modules[orphan_indices[0]].module.as_str()]);
-        let orphan_root = trie_to_drag_node(&orphan_trie, modules, String::new(), 1.0, orphan_sep);
+        let orphan_root = dir_trie_to_drag_node(
+            &orphan_trie,
+            modules,
+            std::path::Path::new(""),
+            "",
+            String::new(),
+            &HashMap::new(),
+            &HashSet::new(),
+            p,
+            true,
+            orphan_sep,
+            true,
+        )?;
         match orphan_root {
             DragNode::Container { children, .. } => children,
             single => vec![single],
@@ -247,24 +285,6 @@ fn drag_of(node: &DragNode) -> f64 {
 // ---------------------------------------------------------------------------
 // Internal trie helpers
 // ---------------------------------------------------------------------------
-
-/// Trie for orphan modules (no package). Keyed by module-path segments.
-#[derive(Default)]
-struct TrieNode {
-    module_indices: Vec<usize>,
-    children: BTreeMap<String, TrieNode>,
-}
-
-impl TrieNode {
-    fn insert(&mut self, segments: &[&str], module_idx: usize) {
-        if segments.is_empty() {
-            self.module_indices.push(module_idx);
-            return;
-        }
-        let child = self.children.entry(segments[0].to_string()).or_default();
-        child.insert(&segments[1..], module_idx);
-    }
-}
 
 /// Trie for package modules, keyed by directory-path segments (relative
 /// to the package source root).
@@ -313,7 +333,7 @@ fn path_separator(paths: &[&str]) -> &'static str {
 #[allow(clippy::too_many_arguments)]
 fn dir_trie_to_drag_node(
     trie: &DirTrieNode,
-    modules: &[super::ModuleDrag],
+    modules: &[ModuleDrag],
     src_dir: &std::path::Path,
     rel_dir: &str,
     display_name: String,
@@ -322,6 +342,7 @@ fn dir_trie_to_drag_node(
     p: f64,
     skip_maintainability: bool,
     sep: &str,
+    flatten_leaf: bool,
 ) -> Result<DragNode, String> {
     // Build the absolute directory path for this trie node.
     let abs_dir = if rel_dir.is_empty() {
@@ -402,9 +423,26 @@ fn dir_trie_to_drag_node(
                 p,
                 skip_maintainability,
                 sep,
+                flatten_leaf,
             )
         })
         .collect::<Result<Vec<_>, String>>()?;
+
+    // Orphan tries flatten leaf containers that hold a single module: there
+    // is no maintainability penalty to preserve, so return the module itself.
+    if flatten_leaf && trie.children.is_empty() && direct_modules.len() <= 1 {
+        if let Some(m) = direct_modules.into_iter().next() {
+            return Ok(m);
+        }
+        return Ok(DragNode::Container {
+            name: display_name,
+            maint_score: None,
+            maint_ci_lower: None,
+            maint_ci_upper: None,
+            drag: 0.0,
+            children: Vec::new(),
+        });
+    }
 
     let mut all_children: Vec<DragNode> = Vec::new();
     all_children.extend(direct_modules);
@@ -463,135 +501,6 @@ fn dir_trie_to_drag_node(
         drag,
         children: all_children,
     })
-}
-
-/// Recursively convert a module-path trie (orphans) into a [`DragNode`]
-/// tree.  Orphans never get maintainability.
-fn trie_to_drag_node(
-    trie: &TrieNode,
-    modules: &[super::ModuleDrag],
-    name: String,
-    maint_mult: f64,
-    sep: &str,
-) -> DragNode {
-    // Direct module children (leaf modules at this trie node).
-    let direct_modules: Vec<DragNode> = trie
-        .module_indices
-        .iter()
-        .map(|&idx| {
-            let m = &modules[idx];
-            DragNode::Module {
-                name: m.module.clone(),
-                file: m.file.clone(),
-                token_count: m.token_count,
-                footprint: m.footprint,
-                comprehensibility: m.comprehensibility,
-                ci_lower: m.ci_lower,
-                ci_upper: m.ci_upper,
-                drag: m.drag,
-            }
-        })
-        .collect();
-
-    // Child containers (subtries that have children of their own).
-    let child_containers: Vec<DragNode> = trie
-        .children
-        .iter()
-        .map(|(seg, child_trie)| {
-            let child_name = if name.is_empty() {
-                seg.clone()
-            } else {
-                format!("{name}{sep}{seg}")
-            };
-            // Subtrees inherit the same maint_mult for drag computation
-            // but always serialize `maint_score: None`.
-            trie_to_drag_node(child_trie, modules, child_name, maint_mult, sep)
-        })
-        .collect();
-
-    // Flatten containers with at most one direct module and no child
-    // subtrees.  Orphans never have maintainability so there is no
-    // penalty to preserve.
-    if trie.children.is_empty() && direct_modules.len() <= 1 {
-        if let Some(m) = direct_modules.into_iter().next() {
-            return m;
-        }
-        // Empty: return a trivial container.
-        return DragNode::Container {
-            name,
-            maint_score: None,
-            maint_ci_lower: None,
-            maint_ci_upper: None,
-            drag: 0.0,
-            children: Vec::new(),
-        };
-    }
-
-    // Compute container drag bottom-up.
-    // Direct modules pay the maint multiplier; child containers already
-    // have maint baked in from their own trie_to_drag_node call.
-    let mut all_children: Vec<DragNode> = Vec::new();
-    all_children.extend(direct_modules);
-    all_children.extend(child_containers);
-
-    let direct_module_drag_sum: f64 = all_children
-        .iter()
-        .filter_map(|c| match c {
-            DragNode::Module { drag, .. } => Some(*drag),
-            _ => None,
-        })
-        .sum();
-    let child_container_drag_sum: f64 = all_children
-        .iter()
-        .filter_map(|c| match c {
-            DragNode::Container { drag, .. } => Some(*drag),
-            _ => None,
-        })
-        .sum();
-
-    let drag = maint_mult * direct_module_drag_sum + child_container_drag_sum;
-
-    // Sort children: modules first, then containers; within each group
-    // sort by drag descending so the highest-drag items appear first.
-    all_children.sort_by(|a, b| {
-        let a_is_module = matches!(a, DragNode::Module { .. });
-        let b_is_module = matches!(b, DragNode::Module { .. });
-        match (a_is_module, b_is_module) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => {
-                // Both same variant: sort by drag descending.
-                let a_drag = drag_of(a);
-                let b_drag = drag_of(b);
-                b_drag
-                    .partial_cmp(&a_drag)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| {
-                        // Tie-break by name for determinism.
-                        match (a, b) {
-                            (
-                                DragNode::Module { name: na, .. },
-                                DragNode::Module { name: nb, .. },
-                            ) => na.cmp(nb),
-                            (
-                                DragNode::Container { name: na, .. },
-                                DragNode::Container { name: nb, .. },
-                            ) => na.cmp(nb),
-                            _ => std::cmp::Ordering::Equal,
-                        }
-                    })
-            }
-        }
-    });
-
-    DragNode::Container {
-        name,
-        maint_score: None,
-        maint_ci_lower: None,
-        maint_ci_upper: None,
-        drag,
-        children: all_children,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -697,8 +606,8 @@ mod tests {
     // ── Drag tree tests (directory trie) ──────────────────────────
 
     /// Helper to make a ModuleDrag with the given fields.
-    fn mdl(name: &str, file: &str, drag: f64) -> super::super::ModuleDrag {
-        super::super::ModuleDrag {
+    fn mdl(name: &str, file: &str, drag: f64) -> ModuleDrag {
+        ModuleDrag {
             module: name.to_string(),
             file: file.to_string(),
             token_count: 100,
@@ -713,7 +622,7 @@ mod tests {
     /// Build a `build_drag_tree` call for Rust-style modules.
     #[allow(clippy::too_many_arguments)]
     fn build_rust_tree(
-        modules: &[super::super::ModuleDrag],
+        modules: &[ModuleDrag],
         module_pkg: &HashMap<(String, String), String>,
         dir_segments: &HashMap<(String, String), Vec<String>>,
         dir_maints: &HashMap<String, DirMaintResult>,
@@ -1438,5 +1347,101 @@ mod tests {
         } else {
             panic!("expected pkg container");
         }
+    }
+
+    // ── Orphan trie / flatten_leaf tests ──────────────────────────────
+
+    #[test]
+    fn tree_single_module_orphan_flattens_to_module() {
+        // The unified dir_trie_to_drag_node path must flatten a lone orphan
+        // leaf exactly as the removed trie_to_drag_node did.  With a single
+        // path segment the root itself is the leaf, so the tree is the module.
+        let modules = vec![mdl("lone_mod", "/lone/mod.rs", 7.0)];
+        let tree = build_rust_tree(
+            &modules,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            2.5,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(tree, DragNode::Module { .. }));
+        assert!((drag_of(&tree) - 7.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn tree_multi_segment_orphan_leaf_flattens_only_leaf_container() {
+        // "lone::mod" spans two path segments; the final leaf flattens to the
+        // module, but the intermediate "lone" container must remain.
+        let modules = vec![mdl("lone::mod", "/lone/mod.rs", 7.0)];
+        let tree = build_rust_tree(
+            &modules,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            2.5,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(tree, DragNode::Container { .. }));
+        assert!((drag_of(&tree) - 7.0).abs() < 1e-9);
+        if let DragNode::Container { name, children, .. } = &tree {
+            assert_eq!(name, "lone");
+            assert_eq!(children.len(), 1);
+            assert!(matches!(&children[0], DragNode::Module { name, .. } if name == "lone::mod"));
+        } else {
+            panic!("expected orphan container");
+        }
+    }
+
+    #[test]
+    fn tree_package_single_module_leaf_is_not_flattened() {
+        // Package trees use flatten_leaf=false: a single module directly in
+        // the source root still lives under a container so the package's
+        // maintainability score is preserved.
+        let src = std::path::PathBuf::from("/pkg/src");
+        let modules = vec![mdl("pkg::m", "/pkg/src/m.rs", 10.0)];
+        let module_pkg = HashMap::from([(
+            ("pkg::m".to_string(), "/pkg/src/m.rs".to_string()),
+            "pkg".to_string(),
+        )]);
+        let dir_segments =
+            HashMap::from([(("pkg::m".to_string(), "/pkg/src/m.rs".to_string()), vec![])]);
+        let dir_maints = dir_maints_map([("/pkg/src", 0.5)]);
+        let pkg_names = HashMap::from([("pkg".to_string(), "pkg".to_string())]);
+        let src_dirs = HashMap::from([("pkg".to_string(), src)]);
+
+        let tree = build_rust_tree(
+            &modules,
+            &module_pkg,
+            &dir_segments,
+            &dir_maints,
+            &HashSet::new(),
+            &pkg_names,
+            &src_dirs,
+            2.5,
+            false,
+        )
+        .unwrap();
+
+        match &tree {
+            DragNode::Container {
+                name, maint_score, ..
+            } => {
+                assert_eq!(name, "pkg");
+                assert_eq!(*maint_score, Some(0.5));
+            }
+            DragNode::Module { .. } => panic!("package single-module leaf must not flatten"),
+        }
+        // The module pays the package's 0.5 penalty: exp(2.5·0.5)·10.
+        let expected = 10.0 * (2.5f64 * 0.5).exp();
+        assert!((drag_of(&tree) - expected).abs() < 1e-9);
     }
 }
