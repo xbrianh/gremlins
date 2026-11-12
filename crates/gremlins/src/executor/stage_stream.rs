@@ -5,7 +5,7 @@
 //! `command_logs/exec-{stage}.log`; every other stage falls back to the
 //! operational log. Live following subscribes to both the run handle's
 //! stage-stream broadcast (for agent/exec content and stage boundaries) and
-//! its log broadcast (for the operational fallback).
+//! its run-scoped bus subscription (for the operational fallback).
 
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
@@ -249,11 +249,25 @@ async fn serve_stage_stream_loop(
             result = recv_log(&mut log_rx), if !log_closed => {
                 match result {
                     Recv::Event(dispatch) => {
-                        let Some(line) = log_event_line(&dispatch) else {
-                            continue;
-                        };
-                        if !process_log_line(kind, &line, writer, &mut offset, &mut dedupe).await {
-                            return;
+                        match dispatch.kind() {
+                            crate::executor::EventKind::LogLine { line, .. } => {
+                                if !process_log_line(kind, line, writer, &mut offset, &mut dedupe)
+                                    .await
+                                {
+                                    return;
+                                }
+                            }
+                            crate::executor::EventKind::RunCompleted { .. }
+                            | crate::executor::EventKind::RunFailed { .. }
+                            | crate::executor::EventKind::RunStopped { .. }
+                            | crate::executor::EventKind::RunRemoved { .. } => {
+                                log_closed = true;
+                                log_rx = None;
+                                if stage_closed {
+                                    return;
+                                }
+                            }
+                            _ => continue,
                         }
                     }
                     Recv::Lagged(n) => {
@@ -302,9 +316,10 @@ async fn recv_log(
 
 /// Extract the raw, un-timestamped message from a run-scoped bus event.
 ///
-/// `LogLine.line` already carries only the message; the log writer stamps
-/// epoch millis separately when it persists the blob, so stage-stream fallback
-/// lines stay timestamp-free just like the historical `log` blob.
+/// `LogLine.line` carries only the message without the `{millis} ` prefix;
+/// `process_log_line` forwards it directly as `{"kind":"log","text":...}`.
+/// This matches the historical strip-on-first-space behavior without an
+/// explicit split, since the bus payload was never stamped in the first place.
 fn log_event_line(
     dispatch: &crate::magic_bus::DispatchEvent<crate::executor::EventKind>,
 ) -> Option<String> {

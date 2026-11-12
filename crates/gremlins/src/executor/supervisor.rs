@@ -2440,23 +2440,48 @@ async fn handle_log(
         log_line!(line);
     }
 
-    // 2. If follow, drain duplicates (lines written during file replay),
+    // 2. If follow, drain duplicates (events that arrived during file replay),
     //    then stream new lines. Monitor the read half for client disconnect.
     if let Some(ref mut rx) = rx {
-        // Drain events that arrived during the file replay — they were
-        // already sent from the file above.
-        while rx.try_recv().is_ok() {}
+        // Build a fingerprint set of messages already replayed from the file.
+        // Each replayed line has the form "[timestamp] message".
+        let replayed: std::collections::HashSet<&str> = content
+            .lines()
+            .filter_map(|l| l.split_once("] ").map(|(_, msg)| msg))
+            .collect();
+
+        // Drain queued events, re-emitting only those whose message was not
+        // already replayed from the file. Bus events arrive at emit time, so
+        // they may precede the log writer's blob flush — discarding them
+        // blindly would lose lines that were never persisted.
+        while let Ok(dispatch) = rx.try_recv() {
+            if let EventKind::LogLine { line, .. } = dispatch.kind() {
+                if !replayed.contains(line.as_str()) {
+                    let stamped = format!("{} {line}", crate::executor::state::now_stamp_millis());
+                    log_line!(stamped);
+                }
+            }
+        }
 
         loop {
             tokio::select! {
                 result = rx.recv() => {
                     match result {
                         crate::magic_bus::Recv::Event(dispatch) => {
-                            let EventKind::LogLine { line, .. } = dispatch.kind() else {
-                                continue;
-                            };
-                            let stamped = format!("{} {line}", dispatch.ts().wall_millis());
-                            log_line!(stamped);
+                            match dispatch.kind() {
+                                EventKind::LogLine { line, .. } => {
+                                    let stamped = format!(
+                                        "{} {line}",
+                                        crate::executor::state::now_stamp_millis()
+                                    );
+                                    log_line!(stamped);
+                                }
+                                EventKind::RunCompleted { .. }
+                                | EventKind::RunFailed { .. }
+                                | EventKind::RunStopped { .. }
+                                | EventKind::RunRemoved { .. } => break,
+                                _ => continue,
+                            }
                         }
                         crate::magic_bus::Recv::Lagged(n) => {
                             log_line!(format!("[skipped {n} lines]"));
