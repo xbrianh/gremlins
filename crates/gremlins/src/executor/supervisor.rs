@@ -4148,43 +4148,12 @@ fn setup_gremlin_channels(
         ))
         .expect("lossless subscription cannot fail");
 
-    // Subscribe to StageBoundary events with a run-scoped prefix and forward
-    // them to the legacy stage_stream_broadcast so the TUI keeps working.
-    // Lossless delivery ensures the forwarder never misses a boundary —
-    // boundaries are rare but state-critical (missing one would leave the
-    // TUI's stage display stuck on the wrong stage).
-    let (_stage_sub, mut stage_rx) = init_bus()
-        .subscribe(SubscriberRegistration::lossless(
-            CorrId::new().with_run(&run_id),
-        ))
-        .expect("stage boundary subscription cannot fail");
-    {
-        let sbc = stage_stream_broadcast.clone();
-        tokio::spawn(async move {
-            loop {
-                match stage_rx.recv().await {
-                    crate::magic_bus::Recv::Event(dispatch) => {
-                        if let EventKind::StageBoundary {
-                            stage,
-                            stage_type,
-                            active,
-                            ..
-                        } = dispatch.kind()
-                        {
-                            let payload = crate::executor::stage_stream::stage_boundary_json(
-                                stage, stage_type, *active,
-                            );
-                            let _ = sbc.send(payload);
-                        }
-                    }
-                    crate::magic_bus::Recv::Closed => break,
-                    // Lossless doesn't produce Lagged, but handle it
-                    // gracefully so a future policy change is safe.
-                    crate::magic_bus::Recv::Lagged(_) => {}
-                }
-            }
-        });
-    }
+    // Stage boundaries are pushed directly into `stage_stream_broadcast` by
+    // `send_stage_boundary` (synchronously, before the stage's content). The
+    // matching `StageBoundary` event still flows on the bus for socket
+    // forwarders and Phase 2, so no per-gremlin forwarding subscription is
+    // needed here — adding one would race with content forwarders and would
+    // leak a task/mailbox for the daemon's lifetime.
 
     spawn_log_writer(log_rx, store, log_broadcast.clone(), relay);
     (log_broadcast, stage_stream_broadcast, interactive_handle)

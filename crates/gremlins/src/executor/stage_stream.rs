@@ -523,24 +523,32 @@ pub(crate) fn stage_boundary_json(stage: &str, stage_type: &str, active: bool) -
     .to_string()
 }
 
-/// Emit a StageBoundary event on the bus. The bus subscriber in
-/// `setup_gremlin_channels` forwards it to the legacy stage-stream broadcast
-/// so the TUI keeps working unchanged.
+/// Emit a StageBoundary event on the bus and synchronously push the legacy
+/// stage-boundary sentinel into the stage-stream broadcast.
 ///
-/// The `_tx` parameter is retained for Phase 2 — it will be removed alongside
-/// `stage_stream_tx` from `RuntimeConfig` once the legacy broadcast is fully
-/// retired.
+/// The synchronous broadcast send must happen here (in the same task that is
+/// about to run the stage) so the boundary is enqueued *before* the content
+/// forwarders can deliver agent/exec output. Routing the legacy broadcast
+/// through a separate bus-forwarding task would race with those forwarders
+/// and let content arrive before its opening boundary.
+///
+/// The direct broadcast send stays until Phase 2 retires `stage_stream_tx`
+/// from `RuntimeConfig`; the bus event is the long-term replacement.
 pub(crate) fn send_stage_boundary(
-    _tx: &Option<broadcast::Sender<String>>,
+    tx: &Option<broadcast::Sender<String>>,
     gremlin_id: &str,
     stage_name: &str,
     stage_type: &str,
 ) {
+    let active = !stage_name.is_empty();
+    if let Some(tx) = tx {
+        let _ = tx.send(stage_boundary_json(stage_name, stage_type, active));
+    }
     crate::executor::supervisor::emit_event(crate::executor::EventKind::StageBoundary {
         id: gremlin_id.to_string(),
         stage: stage_name.to_string(),
         stage_type: stage_type.to_string(),
-        active: !stage_name.is_empty(),
+        active,
     });
 }
 
