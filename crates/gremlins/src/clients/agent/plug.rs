@@ -1,4 +1,5 @@
 use crate::clients::protocol::UsageStats;
+use crate::clients::LogLineFn;
 use rig_core::completion::CompletionRequest;
 use std::sync::Arc;
 
@@ -15,7 +16,7 @@ pub struct LoopHooks {
     #[allow(clippy::type_complexity)]
     pub(crate) emit_token_usage_fn: Arc<dyn Fn(UsageStats, Option<u64>, Option<u64>) + Send + Sync>,
     /// Per-gremlin log-line emitter: called with every agent-loop log message.
-    pub(crate) log_line_fn: Arc<dyn Fn(&str) + Send + Sync>,
+    pub(crate) log_line_fn: LogLineFn,
 }
 
 impl LoopHooks {

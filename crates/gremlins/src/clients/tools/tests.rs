@@ -83,7 +83,7 @@ fn ctx(cwd: &Path) -> AgentLoopRuntime {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -347,7 +347,7 @@ async fn bash_invoke_respects_cwd() {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -387,7 +387,7 @@ async fn bash_invoke_cwd_none_uses_project_root() {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -425,7 +425,7 @@ async fn bash_invoke_cwd_none_diverges_from_process_cwd() {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -871,7 +871,7 @@ async fn mischief_invoke_blocked_in_headless() {
         allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -902,7 +902,7 @@ async fn websearch_invoke_blocked_in_headless() {
         allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -939,7 +939,7 @@ async fn websearch_invoke_blocked_in_headless_no_filter() {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -976,7 +976,7 @@ async fn websearch_invoke_blocked_in_headless_explicit_allowlist() {
         allowed_tools: Some(vec!["Read".into(), "WebSearch".into()]),
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -1013,7 +1013,7 @@ async fn mischief_invoke_allowed_in_chat() {
         allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -1963,7 +1963,7 @@ async fn filtered_tool_does_not_mutate_or_spawn() {
         allowed_tools: Some(vec!["Read".into()]),
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -2917,7 +2917,7 @@ async fn task_no_callback_returns_error() {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -2950,7 +2950,7 @@ async fn task_callback_called_when_set() {
         allowed_tools: None,
         task_fn: Some(task_fn),
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -2981,7 +2981,7 @@ async fn task_empty_prompt_returns_error() {
         allowed_tools: None,
         task_fn: Some(task_fn),
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -3019,7 +3019,7 @@ async fn task_unknown_kind_rejected_before_callback() {
         allowed_tools: None,
         task_fn: Some(task_fn),
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -3052,7 +3052,7 @@ async fn task_result_is_headered_with_kind() {
         allowed_tools: None,
         task_fn: Some(task_fn),
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -3503,7 +3503,7 @@ async fn invoke_does_not_cap_task() {
         allowed_tools: None,
         task_fn: Some(task_fn),
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -3538,7 +3538,7 @@ fn allow_all_ctx(cwd: &Path) -> AgentLoopRuntime {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,

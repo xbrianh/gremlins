@@ -46,7 +46,11 @@ pub(crate) struct StreamState {
 
 /// Emit a stream-json event to stderr (via `log`).
 /// When `on_log` is provided, it is also called with each formatted log line.
-pub(crate) fn emit_event(prefix: &str, evt: &Value, on_log: Option<&(dyn Fn(String) + Send + Sync)>) {
+pub(crate) fn emit_event(
+    prefix: &str,
+    evt: &Value,
+    on_log: Option<&(dyn Fn(String) + Send + Sync)>,
+) {
     use super::format::trunc;
 
     let log_info = |msg: String| {

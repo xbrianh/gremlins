@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::clients::conversation::Conversation;
 use crate::clients::interactive::StreamEventSender;
+use crate::clients::LogLineFn;
 use crate::task_kind::TaskKind;
 
 type ToolFuture = Pin<Box<dyn std::future::Future<Output = ToolOutcome> + Send>>;
@@ -102,7 +103,7 @@ pub(crate) struct AgentLoopRuntime {
     /// Per-gremlin log-line emitter inherited from the parent loop. Nested
     /// Task loops read this to route their begin/end and turn-level records to
     /// the same bus-backed log writer as the parent run.
-    pub(crate) log_line_fn: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    pub(crate) log_line_fn: Option<LogLineFn>,
     /// Prefix prepended to tool call IDs emitted on the shared event stream.
     ///
     /// Nested Task conversations run on the parent's stream but reuse raw
