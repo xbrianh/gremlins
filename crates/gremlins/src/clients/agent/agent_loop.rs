@@ -381,7 +381,6 @@ impl LoopState {
     /// runs — where env_logger may not be installed — still write to the
     /// gremlin log blob via this path.
     pub(super) fn hook_log(&self, msg: &str) {
-        log::info!("{msg}");
         self.hooks.log_line(msg);
     }
 
@@ -1877,7 +1876,6 @@ pub(crate) fn test_ctx(
             skills_available: false,
             discovered_skills: None,
             active_skills: None,
-            token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
             extra_sandbox_roots: Vec::new(),
             hooks: None,
         },

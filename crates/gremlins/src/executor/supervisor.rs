@@ -261,7 +261,8 @@ pub(crate) fn emit_event(event: EventKind) {
         | EventKind::TokenUsage { id, .. }
         | EventKind::StageTransition { id, .. }
         | EventKind::Bail { id, .. }
-        | EventKind::LogLine { id, .. } => {
+        | EventKind::LogLine { id, .. }
+        | EventKind::StageBoundary { id, .. } => {
             if id.is_empty() {
                 CorrId::new()
             } else {
@@ -4146,6 +4147,38 @@ fn setup_gremlin_channels(
             CorrId::new().with_run(&run_id),
         ))
         .expect("lossless subscription cannot fail");
+
+    // Subscribe to StageBoundary events with a run-scoped prefix and forward
+    // them to the legacy stage_stream_broadcast so the TUI keeps working.
+    let (_stage_sub, mut stage_rx) = init_bus()
+        .subscribe(SubscriberRegistration::lag_tolerant(
+            CorrId::new().with_run(&run_id),
+            256,
+        ))
+        .expect("stage boundary subscription cannot fail");
+    {
+        let sbc = stage_stream_broadcast.clone();
+        tokio::spawn(async move {
+            loop {
+                match stage_rx.recv().await {
+                    crate::magic_bus::Recv::Event(dispatch) => {
+                        if let EventKind::StageBoundary { stage, stage_type, active, .. } = dispatch.kind() {
+                            let payload = serde_json::json!({
+                                "kind": "stage_boundary",
+                                "stage": stage,
+                                "stage_type": stage_type,
+                                "active": active,
+                            })
+                            .to_string();
+                            let _ = sbc.send(payload);
+                        }
+                    }
+                    crate::magic_bus::Recv::Lagged(_) | crate::magic_bus::Recv::Closed => break,
+                }
+            }
+        });
+    }
+
     spawn_log_writer(log_rx, store, log_broadcast.clone(), relay);
     (log_broadcast, stage_stream_broadcast, interactive_handle)
 }
@@ -4161,6 +4194,7 @@ async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i
             });
             crate::executor::stage_stream::send_stage_boundary(
                 &gremlin.runtime_config.stage_stream_tx,
+                gremlin.id.as_str(),
                 "",
                 "other",
             );

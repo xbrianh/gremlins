@@ -515,6 +515,7 @@ fn boundary_stage(boundary: &Value) -> String {
 /// operational-log fallback (bootstrap, between stages, or terminal).
 pub(crate) fn send_stage_boundary(
     tx: &Option<broadcast::Sender<String>>,
+    gremlin_id: &str,
     stage_name: &str,
     stage_type: &str,
 ) {
@@ -528,6 +529,12 @@ pub(crate) fn send_stage_boundary(
         .to_string();
         let _ = tx.send(payload);
     }
+    crate::executor::supervisor::emit_event(crate::executor::EventKind::StageBoundary {
+        id: gremlin_id.to_string(),
+        stage: stage_name.to_string(),
+        stage_type: stage_type.to_string(),
+        active: !stage_name.is_empty(),
+    });
 }
 
 // ---------------------------------------------------------------------------
