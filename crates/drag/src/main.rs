@@ -145,7 +145,14 @@ async fn run() -> Result<(), String> {
             eprintln!("warning: could not map to module: {}", file.display());
         }
     }
-    lang::dedup_target_modules(&mut target_modules, &packages)?;
+    let dropped_pkg_keys = lang::dedup_target_modules(&mut target_modules, &packages)?;
+
+    // Build a set of module names that survived dedup so we can skip their
+    // token counts in the package-wide enumeration below — canonical files
+    // recorded in target_modules are the authority, preventing a deduped
+    // binary's file from overwriting the retained library file's token count.
+    let target_module_names: HashSet<String> =
+        target_modules.iter().map(|(m, _, _)| m.clone()).collect();
 
     if target_modules.is_empty() {
         let exts = lang::extensions()
@@ -206,9 +213,15 @@ async fn run() -> Result<(), String> {
         .map(|(_, _, pkg_key)| pkg_key.clone())
         .collect();
 
+    // Exclude packages whose modules were dropped during dedup (e.g. a
+    // binary whose module was superseded by a library of the same name).
+    // Their dependency-graph edges would combine with the retained
+    // library's edges and distort footprints.
     let scoring_packages: Vec<&PackageInfo> = packages
         .iter()
-        .filter(|p| relevant_packages.contains(&p.key()))
+        .filter(|p| {
+            relevant_packages.contains(&p.key()) && !dropped_pkg_keys.contains(&p.key())
+        })
         .collect();
 
     // Run dependency-graph extraction for each package in parallel.
@@ -253,6 +266,13 @@ async fn run() -> Result<(), String> {
                 }
             }
             if let Some((module, _)) = lang::file_to_module(&file, &packages) {
+                // Skip target modules — their token counts come from the
+                // canonical file recorded in target_modules (counted below).
+                // This prevents a deduped binary's file from overwriting the
+                // retained library file's token count (see dedup_target_modules).
+                if target_module_names.contains(&module) {
+                    continue;
+                }
                 let n = count_tokens(bpe, &file)?;
                 token_counts.insert(module, n);
             }
@@ -264,6 +284,8 @@ async fn run() -> Result<(), String> {
     //    discovered packages.
     //    Comprehensibility stays scoped to `--target` modules only.
     for (module, file, _pkg_key) in &target_modules {
+        // Always count from the canonical file — the package-wide enumeration
+        // above skipped these modules, so this is the authoritative source.
         if !token_counts.contains_key(module) {
             let n = count_tokens(bpe, file)?;
             token_counts.insert(module.clone(), n);

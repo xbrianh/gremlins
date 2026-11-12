@@ -67,10 +67,10 @@
       'gremlins:bind_artifact("artifact://base_ref", base_ref)',
       'BASE_REF={base_ref} && SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "${BASE_REF:-HEAD}") && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && echo "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"',
       // Write drag scoring params to files for later reference.
-      'printf "%s" "{drag-model}" > "$GREMLINS_STATE_DIR/artifacts/drag_model.txt"',
-      'printf "%s" "{estimates-per-survey}" > "$GREMLINS_STATE_DIR/artifacts/comp_estimates.txt"',
-      'printf "%s" "{p}" > "$GREMLINS_STATE_DIR/artifacts/p.txt"',
-      'printf "%s" "{skip-maintainability}" > "$GREMLINS_STATE_DIR/artifacts/skip_maint.txt"',
+      'printf "%s" {drag-model} > "$GREMLINS_STATE_DIR/artifacts/drag_model.txt"',
+      'printf "%s" {estimates-per-survey} > "$GREMLINS_STATE_DIR/artifacts/comp_estimates.txt"',
+      'printf "%s" {p} > "$GREMLINS_STATE_DIR/artifacts/p.txt"',
+      'printf "%s" {skip-maintainability} > "$GREMLINS_STATE_DIR/artifacts/skip_maint.txt"',
       // Build the drag config JSON file from the project default.
       // The `path` field is left unset — detect-target sets it after the
       // feature is implemented.
@@ -78,14 +78,15 @@
       //   1. $GREMLINS_STATE_DIR/artifacts/drag_config.json — immutable artifact
       //   2. $GREMLINS_STATE_DIR/drag_config.json — mutable, pointed to by
       //      GREMLINS_DRAG_CLI_CONFIG so agents pick it up automatically.
-      'CONFIG_SRC="{drag-config}"; if [ -n "$CONFIG_SRC" ] && [ -f "$CONFIG_SRC" ]; then echo "using drag config: $CONFIG_SRC"; jq -Rrs \'gsub("/[*]([^*]|[*][^/])*[*]/"; "") | gsub("//[^\n]*"; "")\' "$CONFIG_SRC" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"; else jq -Rrs \'gsub("/[*]([^*]|[*][^/])*[*]/"; "") | gsub("//[^\n]*"; "")\' "$GREMLINS_PROJECT_ROOT/.gremlins/drag-config.json" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"; fi',
+      'CONFIG_SRC={drag-config}; if [ -n "$CONFIG_SRC" ] && [ -f "$CONFIG_SRC" ]; then echo "using drag config: $CONFIG_SRC"; python3 -c "\nimport sys, re, json\nwith open(sys.argv[1]) as f:\n    text = f.read()\ntext = re.sub(r\'(?m)^[ \\t]*//[^\\n]*\\n\', \'\\n\', text)\ntext = re.sub(r\'/\\*[^*]*\\*+(?:[^/*][^*]*\\*+)*/\', \'\', text)\ntext = re.sub(r\',(\\s*[\\}\\])\', r\'\\1\', text)\njson.dump(json.loads(text), sys.stdout)\n" "$CONFIG_SRC" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"; else python3 -c "\nimport sys, re, json\nwith open(sys.argv[1]) as f:\n    text = f.read()\ntext = re.sub(r\'(?m)^[ \\t]*//[^\\n]*\\n\', \'\\n\', text)\ntext = re.sub(r\'/\\*[^*]*\\*+(?:[^/*][^*]*\\*+)*/\', \'\', text)\ntext = re.sub(r\',(\\s*[\\}\\])\', r\'\\1\', text)\njson.dump(json.loads(text), sys.stdout)\n" "$GREMLINS_PROJECT_ROOT/.gremlins/drag-config.json" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"; fi',
       // Merge bootstrap overrides into the drag config via jq.
       // Only non-empty bootstrap values apply; unset values keep the
       // config file's existing value (or the bundled default).
-      'MODEL_VAL="{drag-model}"; ESTIMATES_VAL="{estimates-per-survey}"; P_VAL="{p}"; SKIP_MAINT_VAL="{skip-maintainability}"',
+      'MODEL_VAL={drag-model}; ESTIMATES_VAL={estimates-per-survey}; P_VAL={p}; SKIP_MAINT_VAL={skip-maintainability}',
       "jq --arg model \"$MODEL_VAL\" --arg estimates \"$ESTIMATES_VAL\" --arg p_val \"$P_VAL\" --arg skip_maint \"$SKIP_MAINT_VAL\" 'if $model != \"\" then .model = $model else . end | if $estimates != \"\" then .estimates_per_survey = ($estimates | tonumber) else . end | if $p_val != \"\" then .weights.p = ($p_val | tonumber) else . end | if $skip_maint != \"\" then (if $skip_maint != \"false\" then .skip_maintainability = true else .skip_maintainability = false end) else . end' \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\" > \"$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json\"",
       'mv "$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json" "$GREMLINS_STATE_DIR/artifacts/drag_config.json"',
       'cp "$GREMLINS_STATE_DIR/artifacts/drag_config.json" "$GREMLINS_STATE_DIR/drag_config.json"',
+      'jq \'.format = "json"\' "$GREMLINS_STATE_DIR/artifacts/drag_config.json" > "$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json" && mv "$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json" "$GREMLINS_STATE_DIR/artifacts/drag_config.json" && cp "$GREMLINS_STATE_DIR/artifacts/drag_config.json" "$GREMLINS_STATE_DIR/drag_config.json"',
     ],
     cli_out: {
       base_sha: "artifact://base_sha",

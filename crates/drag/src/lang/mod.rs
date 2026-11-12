@@ -140,13 +140,19 @@ pub fn file_to_module(file: &Path, packages: &[PackageInfo]) -> Option<(String, 
 /// `gremlins`), both map to the same module identifier.  This function keeps
 /// the library target over the binary.  Two same-kind collisions (lib–lib or
 /// bin–bin) are an error rather than an arbitrary silent drop.
+///
+/// Returns the set of package keys that lost at least one module during
+/// deduplication.  The caller should exclude these packages from dependency-
+/// graph construction to prevent a deduped binary's edges from polluting the
+/// retained library module's footprint.
 pub(crate) fn dedup_target_modules(
     target_modules: &mut Vec<(String, PathBuf, String)>,
     packages: &[PackageInfo],
-) -> Result<(), String> {
+) -> Result<HashSet<String>, String> {
     // Map module name → index of the best entry seen so far.
     let mut best: HashMap<String, usize> = HashMap::new();
     let mut drop_indices: Vec<usize> = Vec::new();
+    let mut dropped_pkg_keys: HashSet<String> = HashSet::new();
 
     for (i, (module, file, pkg_key)) in target_modules.iter().enumerate() {
         if let Some(&prev) = best.get(module) {
@@ -155,6 +161,7 @@ pub(crate) fn dedup_target_modules(
             if prev_is_bin && !this_is_bin {
                 // Replace: keep this library entry, drop the previous binary.
                 drop_indices.push(prev);
+                dropped_pkg_keys.insert(target_modules[prev].2.clone());
                 best.insert(module.clone(), i);
             } else if prev_is_bin == this_is_bin {
                 return Err(format!(
@@ -165,6 +172,7 @@ pub(crate) fn dedup_target_modules(
             } else {
                 // Keep the previous library entry, drop this binary.
                 drop_indices.push(i);
+                dropped_pkg_keys.insert(pkg_key.clone());
             }
         } else {
             best.insert(module.clone(), i);
@@ -180,7 +188,7 @@ pub(crate) fn dedup_target_modules(
             file.display()
         );
     }
-    Ok(())
+    Ok(dropped_pkg_keys)
 }
 
 /// Does `pkg_key` refer to a Rust binary target?
