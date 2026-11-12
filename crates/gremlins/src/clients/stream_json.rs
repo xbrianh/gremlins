@@ -1,7 +1,5 @@
 use serde_json::Value;
 
-use crate::core::logging::send_log;
-
 /// Parse a stream-json line and extract state updates.
 /// Returns None if the line is not valid JSON or not a relevant event.
 pub(crate) fn decode_line(line: &[u8]) -> Option<Value> {
@@ -46,14 +44,27 @@ pub(crate) struct StreamState {
     pub(crate) api_error_status: Option<i32>,
 }
 
-/// Emit a stream-json event to the per-gremlin log (via `log_tx`) and also
-/// to stderr (via `log`). When `log_tx` is `None` only the `log` path is used.
+/// Emit a stream-json event to stderr (via `log`).
+/// When `on_log` is provided, it is also called with each formatted log line.
 pub(crate) fn emit_event(
     prefix: &str,
     evt: &Value,
-    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    on_log: Option<&(dyn Fn(String) + Send + Sync)>,
 ) {
     use super::format::trunc;
+
+    let log_info = |msg: String| {
+        log::info!("{msg}");
+        if let Some(ref cb) = on_log {
+            cb(msg);
+        }
+    };
+    let log_warn = |msg: String| {
+        log::warn!("{msg}");
+        if let Some(ref cb) = on_log {
+            cb(msg);
+        }
+    };
 
     let evt_type = evt.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -66,8 +77,7 @@ pub(crate) fn emit_event(
                     "{}using client model={} cwd={} reasoning_effort={}",
                     prefix, model, cwd, "default"
                 );
-                send_log(log_tx, log::Level::Info, &msg);
-                log::info!("{msg}");
+                log_info(msg);
             }
         }
         "assistant" => {
@@ -81,21 +91,18 @@ pub(crate) fn emit_event(
                         Some("text") => {
                             let text = c.get("text").and_then(|v| v.as_str()).unwrap_or("");
                             let msg = format!("{}text: {}", prefix, trunc(text, 200));
-                            send_log(log_tx, log::Level::Info, &msg);
-                            log::info!("{msg}");
+                            log_info(msg);
                         }
                         Some("thinking") => {
                             let thinking = c.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
                             let msg = format!("{}think: {}", prefix, trunc(thinking, 200));
-                            send_log(log_tx, log::Level::Info, &msg);
-                            log::info!("{msg}");
+                            log_info(msg);
                         }
                         Some("tool_use") => {
                             let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("?");
                             let arg = tool_arg(c);
                             let msg = format!("{}tool: {} {}", prefix, name, trunc(&arg, 200));
-                            send_log(log_tx, log::Level::Info, &msg);
-                            log::info!("{msg}");
+                            log_info(msg);
                         }
                         _ => {}
                     }
@@ -114,12 +121,10 @@ pub(crate) fn emit_event(
                         let body = tool_result_body(c.get("content").unwrap_or(&Value::Null));
                         if is_error {
                             let msg = format!("{}result ERROR: {}", prefix, trunc(&body, 200));
-                            send_log(log_tx, log::Level::Warn, &msg);
-                            log::warn!("{msg}");
+                            log_warn(msg);
                         } else {
                             let msg = format!("{}result: {}", prefix, trunc(&body, 200));
-                            send_log(log_tx, log::Level::Info, &msg);
-                            log::info!("{msg}");
+                            log_info(msg);
                         }
                     }
                 }
@@ -137,8 +142,7 @@ pub(crate) fn emit_event(
                 .and_then(|v| v.as_i64())
                 .map_or("?".to_string(), |t| t.to_string());
             let msg = format!("{prefix}final: subtype={subtype} turns={turns} cost={cost_str}");
-            send_log(log_tx, log::Level::Info, &msg);
-            log::info!("{msg}");
+            log_info(msg);
         }
         _ => {}
     }

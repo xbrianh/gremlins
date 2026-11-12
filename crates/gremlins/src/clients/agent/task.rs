@@ -477,6 +477,7 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
+            log_line_fn: None,
 
             id_prefix: String::new(),
             telemetry: tools::AgentLoopTelemetry {
@@ -486,7 +487,6 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
-            log_tx: None,
         }
     }
 
@@ -1105,10 +1105,14 @@ mod tests {
 
         fn runner_with_turns(
             turns: Vec<Vec<rig_core::test_utils::MockStreamEvent>>,
-        ) -> (tools::TaskFn, tokio::sync::mpsc::UnboundedReceiver<String>) {
-            let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut ctx = depth_test_ctx();
-            ctx.log_tx = Some(log_tx);
+        ) -> (
+            tools::TaskFn,
+            crate::clients::agent::agent_loop::LogGuard,
+            std::sync::mpsc::Receiver<String>,
+        ) {
+            let (sink, log_rx) = crate::clients::agent::agent_loop::LogSink::new();
+            let guard = crate::clients::agent::agent_loop::log_guard(sink);
+            let ctx = depth_test_ctx();
             let runner = make_task_runner(
                 rig_core::test_utils::MockCompletionModel::from_stream_turns(turns).erase(),
                 None,
@@ -1125,11 +1129,11 @@ mod tests {
                 None,
                 false,
             );
-            (runner, log_rx)
+            (runner, guard, log_rx)
         }
 
-        /// Drain the log channel into a Vec of lines.
-        fn drain_log(rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>) -> Vec<String> {
+        /// Drain the captured log lines into a Vec.
+        fn drain_log(rx: &std::sync::mpsc::Receiver<String>) -> Vec<String> {
             let mut lines = Vec::new();
             while let Ok(line) = rx.try_recv() {
                 lines.push(line);
@@ -1139,13 +1143,13 @@ mod tests {
 
         #[test]
         fn task_prefix_wraps_a_single_segment_at_depth_one() {
-            let (runner, mut log_rx) = runner_with_turns(vec![turn_text("only")]);
+            let (runner, _guard, log_rx) = runner_with_turns(vec![turn_text("only")]);
             block_on(runner(
                 TaskKind::Scout,
                 "task".into(),
                 Box::new(ConversationStub::new("")),
             ));
-            let lines = drain_log(&mut log_rx);
+            let lines = drain_log(&log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 1, "get {segments:?} from {lines:?}");
             assert_eq!(
@@ -1163,14 +1167,14 @@ mod tests {
         /// its prefix must carry the parent's segment as lineage.
         #[test]
         fn nested_task_prefix_appends_to_the_parent_chain() {
-            let (runner, mut log_rx) =
+            let (runner, _guard, log_rx) =
                 runner_with_turns(vec![turn_task_call(), turn_text("leaf"), turn_text("done")]);
             block_on(runner(
                 TaskKind::Scout,
                 "task".into(),
                 Box::new(ConversationStub::new("")),
             ));
-            let lines = drain_log(&mut log_rx);
+            let lines = drain_log(&log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 2, "got {segments:?} from {lines:?}");
             let (parent, child) = (&segments[0], &segments[1]);
@@ -1189,7 +1193,7 @@ mod tests {
         /// shared parent segment.
         #[test]
         fn sibling_invocations_get_distinct_segments() {
-            let (runner, mut log_rx) = runner_with_turns(vec![turn_text("a"), turn_text("b")]);
+            let (runner, _guard, log_rx) = runner_with_turns(vec![turn_text("a"), turn_text("b")]);
             block_on(async {
                 runner(
                     TaskKind::Scout,
@@ -1204,7 +1208,7 @@ mod tests {
                 )
                 .await;
             });
-            let lines = drain_log(&mut log_rx);
+            let lines = drain_log(&log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 2, "got {segments:?} from {lines:?}");
             assert_ne!(segments[0], segments[1], "siblings must not share an id");

@@ -2,7 +2,7 @@ use super::protocol::UsageStats;
 
 /// Payload emitted by the agent loop after each turn for live token/cost
 /// tracking. The executor layer wires a sink that maps this into a
-/// [`DaemonEvent::TokenUsage`](crate::executor::supervisor::DaemonEvent).
+/// [`EventKind::TokenUsage`](crate::executor::EventKind).
 #[derive(Debug, Clone)]
 pub struct TokenUsageEvent {
     #[allow(dead_code)]

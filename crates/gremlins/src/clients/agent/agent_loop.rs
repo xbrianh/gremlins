@@ -382,7 +382,7 @@ impl LoopState {
     /// gremlin log blob via this path.
     pub(super) fn hook_log(&self, msg: &str) {
         log::info!("{msg}");
-        self.hooks.log(msg);
+        self.hooks.log_line(msg);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1060,13 +1060,9 @@ pub(crate) async fn run_agent_loop(
         trunc(reasoning_effort.unwrap_or("default"), 50)
     );
     log::info!("{prefix}{log_line}");
-    ctx.hooks.log(&format!("{prefix}{log_line}"));
 
     if cwd.is_none() {
         log::info!("{prefix}warning: no cwd set for worktree enforcement");
-        ctx.hooks.log(&format!(
-            "{prefix}warning: no cwd set for worktree enforcement"
-        ));
     }
 
     let mut raw = raw_path
@@ -1134,12 +1130,12 @@ pub(crate) async fn run_agent_loop(
         allowed_tools: opts.tool_filter.map(|s| s.to_vec()),
         task_fn: None,
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
+        log_line_fn: Some(ctx.hooks.log_line_fn.clone()),
         id_prefix: String::new(),
         telemetry,
         active_skills: ctx.params.active_skills.clone(),
         skills_available: ctx.params.skills_available,
         discovered_skills: ctx.params.discovered_skills.clone(),
-        log_tx: ctx.params.log_tx.clone(),
     };
     let tool_defs = tools::tool_definitions(
         opts.tool_filter,
@@ -1250,20 +1246,17 @@ pub(crate) async fn run_agent_loop_nested(
     } else {
         format!("{id_chain}.")
     };
-    // Forward nested-loop log lines to the optional channel so callers
-    // (tests, debug tooling) can observe task begin/turn events without
-    // subscribing to the process-wide logger.
-    let mut hooks = LoopHooks::new();
-    if let Some(log_tx) = nested_tool_ctx.log_tx.clone() {
-        hooks.register_logger(move |msg| {
-            if log::Level::Info <= crate::core::logging::log_level_threshold() {
-                let _ = log_tx.send(msg.to_string());
-            }
-        });
-    }
-    if let Some(log_tx) = &nested_tool_ctx.log_tx {
-        let _ = log_tx.send(format!("{prefix}task: begin (max_turns={max_turns})"));
-    }
+    // Nested-loop log lines go through the process logger; callers observe
+    // task begin/end events via the process-wide logger.
+    let hooks = LoopHooks {
+        log_line_fn: tool_ctx
+            .log_line_fn
+            .clone()
+            .unwrap_or_else(|| Arc::new(|_| {})),
+        ..LoopHooks::new()
+    };
+    hooks.log_line(&format!("{prefix}task: begin (max_turns={max_turns})"));
+    log::info!("{prefix}task: begin (max_turns={max_turns})");
     let result = run_agent_loop_core(
         &model,
         prompt,
@@ -1287,9 +1280,8 @@ pub(crate) async fn run_agent_loop_nested(
         prepopulated_conversation,
     )
     .await;
-    if let Some(log_tx) = &nested_tool_ctx.log_tx {
-        let _ = log_tx.send(format!("{prefix}task: end"));
-    }
+    log::info!("{prefix}task: end");
+    hooks.log_line(&format!("{prefix}task: end"));
     result
 }
 
@@ -1365,8 +1357,7 @@ pub(crate) async fn run_agent_loop_core(
     while state.remaining_turns > 0 {
         if cancel.is_cancelled() {
             log::info!("agent_loop: cancelled before turn (label={})", prefix);
-            log::info!("{prefix}exit: cancelled before turn");
-            hooks.log(&format!("{prefix}exit: cancelled before turn"));
+            state.hook_log(&format!("{prefix}exit: cancelled before turn"));
             return Err(cancelled_error("cancelled", &state.conv.messages()));
         }
 
@@ -1557,16 +1548,12 @@ pub(crate) async fn run_agent_loop_core(
     if state.timed_out {
         log::info!("agent_loop: exit (stream idle timeout, label={})", prefix);
         log::info!("{prefix}exit: stream idle timeout");
-        hooks.log(&format!("{prefix}exit: stream idle timeout"));
         if state.exhausted_timeout_retries {
             log::error!(
                 "agent_loop: exhausted turn-level timeout retries, giving up (label={})",
                 prefix
             );
             log::info!("{prefix}exit: exhausted turn-level timeout retries");
-            hooks.log(&format!(
-                "{prefix}exit: exhausted turn-level timeout retries"
-            ));
             return Err(ClientError::RetryExhausted {
                 message: "exhausted turn-level timeout retries".into(),
             });
@@ -1578,7 +1565,6 @@ pub(crate) async fn run_agent_loop_core(
     if let Some(err) = state.stream_error {
         log::info!("agent_loop: exit (stream error, label={})", prefix);
         log::info!("{prefix}exit: stream error");
-        hooks.log(&format!("{prefix}exit: stream error"));
         if state.exhausted_turn_retries {
             log::error!(
                 "agent_loop: exhausted turn-level retries ({} attempts), giving up (label={}): {err}",
@@ -1586,7 +1572,6 @@ pub(crate) async fn run_agent_loop_core(
                 prefix
             );
             log::info!("{prefix}exit: exhausted turn-level retries");
-            hooks.log(&format!("{prefix}exit: exhausted turn-level retries"));
             return Err(ClientError::RetryExhausted {
                 message: format!(
                     "exhausted turn-level retries ({} attempts): {err}",
@@ -1598,8 +1583,7 @@ pub(crate) async fn run_agent_loop_core(
         return Err(classify(err));
     }
     log::info!("agent_loop: exit (exceeded max turns, label={})", prefix);
-    log::info!("{prefix}exit: exceeded max turns ({max_turns})");
-    hooks.log(&format!("{prefix}exit: exceeded max turns ({max_turns})"));
+    state.hook_log(&format!("{prefix}exit: exceeded max turns ({max_turns})"));
     Err(ClientError::Runtime {
         message: format!("exceeded max turns ({max_turns})"),
     })
@@ -1666,7 +1650,7 @@ fn emit_turn_stats(
     turn: usize,
     stats: Option<&TurnStats>,
     totals: &UsageStats,
-    hooks: &LoopHooks,
+    _hooks: &LoopHooks,
 ) {
     let payload = serde_json::json!({
         "type": "turn_stats",
@@ -1676,7 +1660,6 @@ fn emit_turn_stats(
     });
     let msg = format!("{prefix}{payload}");
     log::info!("{msg}");
-    hooks.log(&msg);
 }
 
 /// Emit stage-end telemetry summary (always emitted, not gated by GREMLINS_TELEMETRY).
@@ -1739,14 +1722,14 @@ pub(super) fn emit_summary(
     );
     let full = format!("{prefix}{msg}");
     log::info!("{full}");
-    hooks.log(&full);
+    hooks.log_line(&full);
 }
 
 pub(super) fn emit_final(prefix: &str, turns: usize, suffix: &str, hooks: &LoopHooks) {
     let msg = format!("final: turns={turns} cost=not-reported{suffix}");
     let full = format!("{prefix}{msg}");
     log::info!("{full}");
-    hooks.log(&full);
+    hooks.log_line(&full);
 }
 
 // ── lifted test helpers (used by conversation/standard.rs tests) ────────
@@ -1885,7 +1868,6 @@ pub(crate) fn test_ctx(
             expected_artifact_paths: vec![],
             system_prompt: None,
             gremlin_id: None,
-            log_tx: None,
             base_env: None,
             allow_all: false,
             task_models: None,
@@ -1921,6 +1903,7 @@ pub(crate) fn test_tool_ctx() -> crate::clients::tools::AgentLoopRuntime {
         allowed_tools: None,
         task_fn: None,
         audit_lock: Some(std::sync::Arc::new(std::sync::Mutex::new(()))),
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: crate::clients::tools::AgentLoopTelemetry {
             stream_events: None,
@@ -1929,7 +1912,6 @@ pub(crate) fn test_tool_ctx() -> crate::clients::tools::AgentLoopRuntime {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     }
 }
 

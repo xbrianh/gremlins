@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use gremlins::executor::socket;
-use gremlins::executor::DaemonEvent;
+use gremlins::executor::EventKind;
 use serde_json::Value;
 use tokio::io::BufReader;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -27,10 +27,10 @@ use super::chat::{parse_chat_event, ChatEvent};
 /// Outbound side of a single daemon socket connection.
 struct OutState {
     /// Daemon events forwarded to the TUI event loop.
-    event_tx: mpsc::UnboundedSender<DaemonEvent>,
+    event_tx: mpsc::UnboundedSender<EventKind>,
     /// Chat events routed to the TUI chat arm.
     chat_tx: mpsc::UnboundedSender<ChatEvent>,
-    /// Raw JSON lines that are neither responses nor DaemonEvents.
+    /// Raw JSON lines that are neither responses nor EventKinds.
     raw_tx: mpsc::UnboundedSender<Value>,
 }
 
@@ -416,12 +416,12 @@ impl DaemonClient {
 }
 
 /// Connect to the executor daemon, create a session, and return the client
-/// handle plus receivers for unsolicited [`DaemonEvent`] values,
+/// handle plus receivers for unsolicited [`EventKind`] values,
 /// [`ChatEvent`] values, and raw JSON lines.
 pub async fn connect() -> Result<
     (
         DaemonClient,
-        mpsc::UnboundedReceiver<DaemonEvent>,
+        mpsc::UnboundedReceiver<EventKind>,
         mpsc::UnboundedReceiver<ChatEvent>,
         mpsc::UnboundedReceiver<Value>,
     ),
@@ -495,7 +495,7 @@ pub async fn connect() -> Result<
 
 /// Background reader: deserialise every incoming line from one connection.
 ///
-/// Unsolicited [`DaemonEvent`] values are classified first and forwarded
+/// Unsolicited [`EventKind`] values are classified first and forwarded
 /// to the TUI event loop. Chat events are classified next. Everything else
 /// is treated as a response to the oldest pending request (FIFO). If no
 /// request is waiting, the line is forwarded as a raw JSON value.
@@ -511,25 +511,25 @@ async fn read_loop(
         };
 
         // Classify event_lagged notifications first — they don't
-        // deserialize as DaemonEvent and would otherwise be misrouted
+        // deserialize as EventKind and would otherwise be misrouted
         // to a pending response waiter, corrupting FIFO alignment.
         if value.get("type").and_then(|v| v.as_str()) == Some("event_lagged") {
             let _ = out.raw_tx.send(value);
             continue;
         }
 
-        // Classify as a DaemonEvent next — unsolicited events can arrive
-        // at any time, even when a request is pending.
-        if let Ok(event) = serde_json::from_value::<DaemonEvent>(value.clone()) {
-            let _ = out.event_tx.send(event);
+        // Classify chat events next — they pattern-match on `type` string
+        // values and would otherwise be deserialized as EventKind, causing
+        // chat output to be sent to event_tx and lost from chat_tx.
+        if let Some(event) = parse_chat_event(&value) {
+            let _ = out.chat_tx.send(event);
             continue;
         }
 
-        // Classify chat events before FIFO response delivery. Chat turns
-        // stream as unsolicited JSON lines and must not be misrouted to a
-        // pending request waiter (which would corrupt FIFO alignment).
-        if let Some(event) = parse_chat_event(&value) {
-            let _ = out.chat_tx.send(event);
+        // Classify as an EventKind next — unsolicited events can arrive
+        // at any time, even when a request is pending.
+        if let Ok(event) = serde_json::from_value::<EventKind>(value.clone()) {
+            let _ = out.event_tx.send(event);
             continue;
         }
 

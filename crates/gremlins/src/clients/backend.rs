@@ -29,8 +29,6 @@ pub struct RunParams {
     pub expected_artifact_paths: Vec<PathBuf>,
     pub system_prompt: Option<String>,
     pub gremlin_id: Option<String>,
-    /// Per-gremlin log channel for streaming log output.
-    pub log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// Base process environment for tool sandboxing.
     /// When set, replaces `std::env::vars()` as the base for bash tool env.
     pub base_env: Option<HashMap<String, String>>,
@@ -101,7 +99,6 @@ impl RunParams {
             expected_artifact_paths: Vec::new(),
             system_prompt: None,
             gremlin_id: None,
-            log_tx: None,
             base_env: None,
             allow_all: false,
             task_models: None,
@@ -135,7 +132,6 @@ impl Clone for RunParams {
             expected_artifact_paths: self.expected_artifact_paths.clone(),
             system_prompt: self.system_prompt.clone(),
             gremlin_id: self.gremlin_id.clone(),
-            log_tx: self.log_tx.clone(),
             base_env: self.base_env.clone(),
             allow_all: self.allow_all,
             task_models: self.task_models.clone(),

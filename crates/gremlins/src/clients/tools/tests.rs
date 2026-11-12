@@ -83,7 +83,7 @@ fn ctx(cwd: &Path) -> AgentLoopRuntime {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -92,7 +92,6 @@ fn ctx(cwd: &Path) -> AgentLoopRuntime {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     }
 }
 
@@ -348,7 +347,7 @@ async fn bash_invoke_respects_cwd() {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -357,7 +356,6 @@ async fn bash_invoke_respects_cwd() {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     };
     let args = serde_json::json!({"command": "pwd; ls"}).to_string();
     let output = bash_invoke(&c, &args, "tool-test-id").await.0;
@@ -389,7 +387,7 @@ async fn bash_invoke_cwd_none_uses_project_root() {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -398,7 +396,6 @@ async fn bash_invoke_cwd_none_uses_project_root() {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     };
     let expected = canonicalize_or_ancestor(&dir);
     let args = serde_json::json!({"command": "pwd"}).to_string();
@@ -428,7 +425,7 @@ async fn bash_invoke_cwd_none_diverges_from_process_cwd() {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -437,7 +434,6 @@ async fn bash_invoke_cwd_none_diverges_from_process_cwd() {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     };
     let expected = canonicalize_or_ancestor(&project);
     // Ensure the daemon cwd is genuinely different from project root.
@@ -875,7 +871,7 @@ async fn mischief_invoke_blocked_in_headless() {
         allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -884,7 +880,6 @@ async fn mischief_invoke_blocked_in_headless() {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     };
     let out = invoke("tool-test-id", "Mischief", &c, "{}").await;
     assert!(
@@ -907,7 +902,7 @@ async fn websearch_invoke_blocked_in_headless() {
         allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -916,7 +911,6 @@ async fn websearch_invoke_blocked_in_headless() {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     };
     let out = invoke(
         "tool-test-id",
@@ -945,7 +939,7 @@ async fn websearch_invoke_blocked_in_headless_no_filter() {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -954,7 +948,6 @@ async fn websearch_invoke_blocked_in_headless_no_filter() {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     };
     let out = invoke(
         "tool-test-id",
@@ -983,7 +976,7 @@ async fn websearch_invoke_blocked_in_headless_explicit_allowlist() {
         allowed_tools: Some(vec!["Read".into(), "WebSearch".into()]),
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -992,7 +985,6 @@ async fn websearch_invoke_blocked_in_headless_explicit_allowlist() {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     };
     let out = invoke(
         "tool-test-id",
@@ -1021,7 +1013,7 @@ async fn mischief_invoke_allowed_in_chat() {
         allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -1030,7 +1022,6 @@ async fn mischief_invoke_allowed_in_chat() {
         active_skills: Some(Arc::new(std::sync::Mutex::new(vec![]))),
         skills_available: true,
         discovered_skills: None,
-        log_tx: None,
     };
     let out = invoke("tool-test-id", "Mischief", &c, "{}").await;
     assert!(
@@ -1972,7 +1963,7 @@ async fn filtered_tool_does_not_mutate_or_spawn() {
         allowed_tools: Some(vec!["Read".into()]),
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -1981,7 +1972,6 @@ async fn filtered_tool_does_not_mutate_or_spawn() {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     };
     let write_args =
         serde_json::json!({"file_path": target.to_str().unwrap(), "content": "nope"}).to_string();
@@ -2927,7 +2917,7 @@ async fn task_no_callback_returns_error() {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -2936,7 +2926,6 @@ async fn task_no_callback_returns_error() {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     };
     let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
     let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -2961,7 +2950,7 @@ async fn task_callback_called_when_set() {
         allowed_tools: None,
         task_fn: Some(task_fn),
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -2970,7 +2959,6 @@ async fn task_callback_called_when_set() {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     };
     let args = serde_json::json!({"kind": "Scout", "prompt": "do something"}).to_string();
     let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -2993,7 +2981,7 @@ async fn task_empty_prompt_returns_error() {
         allowed_tools: None,
         task_fn: Some(task_fn),
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -3002,7 +2990,6 @@ async fn task_empty_prompt_returns_error() {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     };
     let args = serde_json::json!({"kind": "Scout", "prompt": ""}).to_string();
     let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -3032,7 +3019,7 @@ async fn task_unknown_kind_rejected_before_callback() {
         allowed_tools: None,
         task_fn: Some(task_fn),
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -3041,7 +3028,6 @@ async fn task_unknown_kind_rejected_before_callback() {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     };
     let args = serde_json::json!({"kind": "Bogus", "prompt": "go"}).to_string();
     let result = invoke("tool-test-id", "Task", &c, &args).await;
@@ -3066,7 +3052,7 @@ async fn task_result_is_headered_with_kind() {
         allowed_tools: None,
         task_fn: Some(task_fn),
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -3075,7 +3061,6 @@ async fn task_result_is_headered_with_kind() {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     };
     let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
     assert_eq!(
@@ -3518,7 +3503,7 @@ async fn invoke_does_not_cap_task() {
         allowed_tools: None,
         task_fn: Some(task_fn),
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -3527,7 +3512,6 @@ async fn invoke_does_not_cap_task() {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     };
     let args = serde_json::json!({"kind": "Scout", "prompt": "go"}).to_string();
     std::env::set_var("GREMLINS_MAX_TOOL_OUTPUT_BYTES", "10");
@@ -3554,7 +3538,7 @@ fn allow_all_ctx(cwd: &Path) -> AgentLoopRuntime {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-
+        log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
             stream_events: None,
@@ -3563,7 +3547,6 @@ fn allow_all_ctx(cwd: &Path) -> AgentLoopRuntime {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
-        log_tx: None,
     }
 }
 

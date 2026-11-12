@@ -261,14 +261,10 @@ pub(crate) async fn run_parallel(
 
         // Launch the child via the supervisor — it becomes a first-class
         // gremlin visible in `gremlins ls`.
-        let relay = gremlin
-            .runtime_config
-            .log_tx
-            .as_ref()
-            .map(|tx| supervisor::LogRelay {
-                tx: tx.clone(),
-                prefix: format!("[parallel:{}/{}] ", group_name, child_name),
-            });
+        let relay = Some(supervisor::LogRelay {
+            parent_id: gremlin.id.to_string(),
+            prefix: format!("[parallel:{}/{}] ", group_name, child_name),
+        });
         let LaunchResult {
             state_rx,
             gremlin_rx,
@@ -526,7 +522,6 @@ pub(crate) async fn run_parallel(
             env.insert("GREMLIN_WORKDIR".to_string(), parent_workdir.clone());
             env.insert("GREMLIN_FORK_WORKDIR".to_string(), child_workdir.clone());
             let empty_subs = HashMap::new();
-            let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
 
             let result = run_logged_commands(
                 &log_name,
@@ -536,7 +531,6 @@ pub(crate) async fn run_parallel(
                 &empty_subs,
                 None,
                 log_writer,
-                &log_tx,
                 None,
             )
             .await;
@@ -1231,21 +1225,24 @@ mod tests {
 
     // --- Parent log relay ---
 
-    /// Drain `rx` until `deadline`, collecting every line. Used to scan the
-    /// parent's log channel for relayed child lines while ignoring the
-    /// parent's own (unprefixed) lines.
-    async fn drain_log(
-        rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    /// Drain bus event_rx until `deadline`, collecting LogLine lines.
+    async fn drain_log_bus(
+        rx: &mut crate::magic_bus::ReceiverHalf<crate::executor::EventKind>,
         deadline: std::time::Instant,
     ) -> Vec<String> {
         let mut lines = Vec::new();
         while std::time::Instant::now() < deadline {
             match rx.try_recv() {
-                Ok(line) => lines.push(line),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                Ok(dispatch) => {
+                    if let crate::executor::EventKind::LogLine { line, .. } = dispatch.kind() {
+                        lines.push(line.clone());
+                    }
+                }
+                Err(crate::magic_bus::TryRecvError::Empty) => {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                Err(crate::magic_bus::TryRecvError::Closed)
+                | Err(crate::magic_bus::TryRecvError::Lagged(_)) => break,
             }
         }
         lines
@@ -1271,18 +1268,17 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd/true");
 
-        let (parent_log_tx, mut parent_log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        gremlin.runtime_config.log_tx = Some(parent_log_tx.clone());
+        let (_sub, mut parent_log_rx) = crate::executor::supervisor::subscribe_all();
 
         let stage = first_executor_stage(&stages);
         // ErrorPolicy::All with one failing child keeps group_error None so
         // `run_parallel` still cleans up successful children (child `a`).
         let _ = run_parallel(&stage, &mut gremlin, "", "", None, None).await;
 
-        // The child's log writer is a separate spawned task; drain the parent
-        // channel briefly so every relayed line is collected.
+        // The child's log writer is a separate spawned task; drain the bus
+        // briefly so every relayed line is collected.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let lines = drain_log(&mut parent_log_rx, deadline).await;
+        let lines = drain_log_bus(&mut parent_log_rx, deadline).await;
 
         // The successful child `a` is cleaned up after fan-in, so its own log
         // is gone; its lines must still reach the parent channel, prefixed.
@@ -1310,15 +1306,14 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd/true");
 
-        let (parent_log_tx, mut parent_log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        gremlin.runtime_config.log_tx = Some(parent_log_tx.clone());
+        let (_sub, mut parent_log_rx) = crate::executor::supervisor::subscribe_all();
 
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, "", "", None, None).await;
         assert!(result.is_err(), "expected failing child, got Ok");
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let lines = drain_log(&mut parent_log_rx, deadline).await;
+        let lines = drain_log_bus(&mut parent_log_rx, deadline).await;
 
         // Find the relayed lines for the failing child and confirm each
         // payload is the raw, un-timestamped part (not the child's stamped

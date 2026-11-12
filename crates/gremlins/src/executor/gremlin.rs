@@ -175,8 +175,6 @@ pub(crate) struct RuntimeConfig {
     /// The base process environment captured at startup, before any
     /// bootstrap or system vars are layered on.
     pub base_process_env: HashMap<String, String>,
-    /// Per-gremlin log channel. Every gremlin-scoped log event is sent here.
-    pub log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// Broadcast of live stage output lines — exec stdout/stderr — for the
     /// watch pane. When Some, command output is mirrored here in addition to
     /// the per-gremlin log.
@@ -200,7 +198,6 @@ impl Clone for RuntimeConfig {
             default_model: self.default_model.clone(),
             default_task_models: self.default_task_models.clone(),
             base_process_env: self.base_process_env.clone(),
-            log_tx: self.log_tx.clone(),
             stage_stream_tx: self.stage_stream_tx.clone(),
             interactive: self.interactive.clone(),
             stream_events: self.stream_events.clone(),
@@ -256,7 +253,6 @@ impl RuntimeConfig {
             default_model,
             default_task_models,
             base_process_env,
-            log_tx: None,
             stage_stream_tx: None,
             interactive: None,
             stream_events: None,
@@ -1145,8 +1141,6 @@ impl Gremlin {
                     .open_blob(&blob_name, BlobMode::Append)
                     .ok()
                     .map(|b| b as Box<dyn std::io::Write + Send>);
-                let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
-
                 let result = run_logged_commands(
                     &log_name,
                     &substituted_cmds,
@@ -1155,7 +1149,6 @@ impl Gremlin {
                     &substitution_env,
                     None,
                     log_writer,
-                    &log_tx,
                     None,
                 )
                 .await;
@@ -1316,8 +1309,6 @@ impl Gremlin {
             .open_blob("command_logs/clean.log", state::BlobMode::Append)
             .ok()
             .map(|b| b as Box<dyn std::io::Write + Send>);
-        let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
-
         let result = run_logged_commands(
             log_name,
             &substituted,
@@ -1326,7 +1317,6 @@ impl Gremlin {
             &substitution_env,
             None,
             log_writer,
-            &log_tx,
             None,
         )
         .await;

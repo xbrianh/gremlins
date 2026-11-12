@@ -1,5 +1,8 @@
 pub(crate) mod agent;
 
+/// Shared log-line emitter type used by the agent loop and tool runtime.
+pub(crate) type LogLineFn = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
 pub(crate) mod anthropic_bearer_http;
 pub(crate) mod azure_openai_responses_http;
 pub mod backend;

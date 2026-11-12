@@ -761,7 +761,6 @@ pub async fn run_logged_commands(
     substitution_env: &HashMap<String, String>,
     timeout: Option<f64>,
     log_writer: Option<Box<dyn io::Write + Send>>,
-    log_tx: &Option<mpsc::UnboundedSender<String>>,
     line_tx: Option<mpsc::UnboundedSender<LineEvent>>,
 ) -> Result<ShellResult, ProcError> {
     if cmds.is_empty() {
@@ -787,16 +786,7 @@ pub async fn run_logged_commands(
     // Write header (best-effort) through the shared handle.
     if let Some(ref m) = shared {
         let mut g = m.lock().unwrap();
-        write_log_header(
-            &mut *g,
-            log_name,
-            cmds,
-            cwd,
-            env,
-            substitution_env,
-            timeout,
-            log_tx,
-        );
+        write_log_header(&mut *g, log_name, cmds, cwd, env, substitution_env, timeout);
     }
 
     // Build instrumented script.
@@ -824,7 +814,7 @@ pub async fn run_logged_commands(
             );
             if let Some(ref m) = shared {
                 let mut g = m.lock().unwrap();
-                write_log_footer(&mut *g, r.returncode, elapsed, log_tx);
+                write_log_footer(&mut *g, r.returncode, elapsed);
             }
             let stderr = String::from_utf8_lossy(&r.stderr).trim().to_string();
             Ok(ShellResult {
@@ -836,7 +826,7 @@ pub async fn run_logged_commands(
         Err(e) => {
             if let Some(ref m) = shared {
                 let mut g = m.lock().unwrap();
-                write_log_footer(&mut *g, -1, elapsed, log_tx);
+                write_log_footer(&mut *g, -1, elapsed);
             }
             Err(e)
         }
@@ -844,7 +834,6 @@ pub async fn run_logged_commands(
 }
 
 /// Write the log header: metadata, env vars, and command listing.
-#[allow(clippy::too_many_arguments)]
 fn write_log_header(
     writer: &mut dyn io::Write,
     log_name: &str,
@@ -853,7 +842,6 @@ fn write_log_header(
     env: &HashMap<String, String>,
     substitution_env: &HashMap<String, String>,
     timeout: Option<f64>,
-    log_tx: &Option<mpsc::UnboundedSender<String>>,
 ) {
     let _ = writeln!(writer, "=== {log_name} ===");
     let _ = writeln!(writer, "cwd: {}", cwd.display());
@@ -901,25 +889,12 @@ fn write_log_header(
     }
 
     let _ = writer.flush();
-
-    if let Some(ref tx) = log_tx {
-        let _ = tx.send(format!("{log_name}: streaming output started"));
-    }
 }
 
 /// Write the log footer with exit code and duration.
-fn write_log_footer(
-    writer: &mut dyn io::Write,
-    rc: i32,
-    elapsed: f64,
-    log_tx: &Option<mpsc::UnboundedSender<String>>,
-) {
+fn write_log_footer(writer: &mut dyn io::Write, rc: i32, elapsed: f64) {
     let _ = writeln!(writer, "--- exit: {rc} (duration: {elapsed:.1}s) ---");
     let _ = writer.flush();
-
-    if let Some(ref tx) = log_tx {
-        let _ = tx.send(format!("done rc={rc} elapsed={elapsed:.1}s"));
-    }
 }
 
 /// Sanitize a name for use as a log filename component.

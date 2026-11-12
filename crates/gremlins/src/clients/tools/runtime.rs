@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::clients::conversation::Conversation;
 use crate::clients::interactive::StreamEventSender;
+use crate::clients::LogLineFn;
 use crate::task_kind::TaskKind;
 
 type ToolFuture = Pin<Box<dyn std::future::Future<Output = ToolOutcome> + Send>>;
@@ -99,6 +100,10 @@ pub(crate) struct AgentLoopRuntime {
     pub(crate) allowed_tools: Option<Vec<String>>,
     pub(crate) task_fn: Option<TaskFn>,
     pub(crate) audit_lock: Option<Arc<std::sync::Mutex<()>>>,
+    /// Per-gremlin log-line emitter inherited from the parent loop. Nested
+    /// Task loops read this to route their begin/end and turn-level records to
+    /// the same bus-backed log writer as the parent run.
+    pub(crate) log_line_fn: Option<LogLineFn>,
     /// Prefix prepended to tool call IDs emitted on the shared event stream.
     ///
     /// Nested Task conversations run on the parent's stream but reuse raw
@@ -119,10 +124,6 @@ pub(crate) struct AgentLoopRuntime {
     /// Discovered skills for this session. Session-bound so concurrent chat
     /// sessions resolve their own project's skills instead of a shared slot.
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
-    /// Optional log channel for nested agent loops. When set,
-    /// `run_agent_loop_nested` logs "task: begin" and turn-level events
-    /// through this sender instead of using a no-op logger.
-    pub(crate) log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 impl AgentLoopRuntime {
     /// Send one completed live-output line for the tool call identified by

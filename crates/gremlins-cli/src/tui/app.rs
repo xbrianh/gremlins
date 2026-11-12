@@ -65,7 +65,7 @@ pub struct ActiveRun {
     pub status: String,
     /// Most recent stage reported by the daemon.
     pub stage: String,
-    /// Pipeline name carried by [`gremlins::executor::DaemonEvent::RunStarted`].
+    /// Pipeline name carried by [`gremlins::executor::EventKind::RunStarted`].
     pub definition: String,
     /// Project associated with the run.
     pub project: String,
