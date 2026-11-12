@@ -103,18 +103,40 @@ impl<P: Clone> SubscriberMailbox<P> {
             _ => self.try_send(event),
         }
     }
+
+    /// Whether the receiver half has been dropped. Subscribers with a
+    /// closed receiver are dead weight in the registry — their events are
+    /// silently discarded and they can be pruned.
+    #[allow(dead_code)]
+    pub(crate) fn is_closed(&self) -> bool {
+        match self {
+            Self::Lossless(tx) => tx.is_closed(),
+            Self::Backpressured(tx) => tx.is_closed(),
+            Self::LagTolerant(tx) => tx.receiver_count() == 0,
+        }
+    }
 }
 
 /// The producer-side handle returned by `Bus::subscribe()`.
 #[derive(Debug, Clone)]
 pub struct Subscriber<P> {
+    id: u64,
     prefix: CorrId,
     mailbox: SubscriberMailbox<P>,
 }
 
 impl<P: Clone> Subscriber<P> {
-    pub(crate) fn new(prefix: CorrId, mailbox: SubscriberMailbox<P>) -> Self {
-        Self { prefix, mailbox }
+    pub(crate) fn new(id: u64, prefix: CorrId, mailbox: SubscriberMailbox<P>) -> Self {
+        Self {
+            id,
+            prefix,
+            mailbox,
+        }
+    }
+
+    /// Unique identifier among all subscribers. Used for per-registration cleanup.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     pub fn prefix(&self) -> &CorrId {

@@ -205,7 +205,7 @@ fn validate_session_id(id: &str) -> Result<(), String> {
 
 static BUS: OnceLock<Bus<EventKind>> = OnceLock::new();
 
-fn init_bus() -> &'static Bus<EventKind> {
+pub(crate) fn init_bus() -> &'static Bus<EventKind> {
     BUS.get_or_init(|| {
         let bus = Bus::new();
         // One-time registration: log every LogLine event via the log crate so
@@ -245,6 +245,13 @@ pub(crate) fn subscribe_all() -> (Subscriber<EventKind>, ReceiverHalf<EventKind>
     init_bus()
         .subscribe(SubscriberRegistration::lag_tolerant(CorrId::new(), 10_000))
         .expect("lag-tolerant subscription cannot fail")
+}
+
+/// Subscribe to a single gremlin's run-scoped events with lossless delivery.
+pub(crate) fn subscribe_run(id: &str) -> (Subscriber<EventKind>, ReceiverHalf<EventKind>) {
+    init_bus()
+        .subscribe(SubscriberRegistration::lossless(CorrId::new().with_run(id)))
+        .expect("lossless subscription cannot fail")
 }
 
 pub(crate) fn emit_event(event: EventKind) {
@@ -325,8 +332,6 @@ pub(crate) struct RunHandle {
     pub aborted: Arc<AtomicBool>,
     #[allow(dead_code)]
     pub state_tx: watch::Sender<RunState>,
-    /// Broadcast sender for live log subscribers (Op::Log with follow:true).
-    pub log_broadcast: broadcast::Sender<String>,
     /// Broadcast sender for stage-aware live stream subscribers (Op::StageStream with follow:true).
     pub stage_stream_broadcast: broadcast::Sender<String>,
     /// Interactive handle (supervisor → agent loop).
@@ -335,6 +340,10 @@ pub(crate) struct RunHandle {
     /// can read state directly for live gremlins whose state may be in a
     /// TempDir (ephemeral runs) rather than under config::state_root().
     pub store: Arc<dyn state::StateStore + Send + Sync>,
+    /// Flush barrier for the log writer: a follower that wants to read
+    /// persisted history can request a flush and wait for the ack before
+    /// opening the log blob, so that pre-subscription events are visible.
+    pub log_flush: Option<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>,
 }
 
 impl RunHandle {
@@ -2394,16 +2403,44 @@ async fn handle_log(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Subscribe to the broadcast channel *before* replaying history so that
-    // lines emitted during replay are buffered and not lost.
-    let mut rx = if follow {
-        get_run_map()
-            .lock()
-            .unwrap()
-            .get(id)
-            .map(|h| h.log_broadcast.subscribe())
+    // Only subscribe for live runs (still in the run map). A finished run
+    // has no more events; subscribing would wait forever on a sender that
+    // already emitted its terminal event. Check under the run-map lock and
+    // optionally request a flush barrier so pre-subscription log lines are
+    // persisted before we read history.
+    let (log_sub, mut log_rx) = if follow {
+        let (flush, sub_rx) = {
+            let map = get_run_map().lock().unwrap();
+            if let Some(handle) = map.get(id) {
+                // Clone the flush channel, drop the lock before awaiting.
+                (handle.log_flush.clone(), {
+                    let (sub, rx) = subscribe_run(id);
+                    (Some(sub), Some(rx))
+                })
+            } else {
+                (None, (None, None))
+            }
+        };
+        // Request the log writer flush queued events to disk so
+        // pre-subscription lines are visible in the blob we're about
+        // to read.
+        if let Some(flush) = &flush {
+            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+            let _ = flush.send(ack_tx);
+            let _ = ack_rx.await;
+        }
+        sub_rx
     } else {
-        None
+        (None, None)
+    };
+
+    // Clean up the bus subscription on exit so we don't leak a registry
+    // entry; the log_writer subscription and any other per-run subs are
+    // separate.
+    let unsubscribe = |sub: &Option<Subscriber<EventKind>>| {
+        if let Some(ref sub) = sub {
+            init_bus().unsubscribe(sub);
+        }
     };
 
     // 1. Send historical lines from the log.
@@ -2429,36 +2466,84 @@ async fn handle_log(
     macro_rules! log_line {
         ($line:expr) => {
             let payload = serde_json::json!({"type": "log_line", "line": $line, "offset": offset});
-            if writer.write_json_line(&payload).await.is_err() { return; }
+            if writer.write_json_line(&payload).await.is_err() { unsubscribe(&log_sub); return; }
             offset += 1;
         };
     }
+    // Build a per-line deduplication fingerprint set from the replayed
+    // content. Replayed lines may carry a `[timestamp] message` prefix;
+    // we strip the stamp and normalize to just the message body so the
+    // same message arriving live won't be duplicated. Multiline messages
+    // are split just like the log writer and live path.
+    let mut replayed: HashSet<String> = HashSet::new();
     for line in content.lines() {
+        // Strip timestamp prefix if present so we dedupe against the
+        // raw message the bus delivers.
+        let body = line.split_once("] ").map(|(_, msg)| msg).unwrap_or(line);
+        replayed.insert(body.to_string());
         log_line!(line);
     }
 
-    // 2. If follow, drain duplicates (lines broadcast during file replay),
+    // 2. If follow, drain duplicates (events that arrived during file replay),
     //    then stream new lines. Monitor the read half for client disconnect.
-    if let Some(ref mut rx) = rx {
-        // Drain lines that arrived during the file replay — they were already
-        // sent from the file above.
-        while rx.try_recv().is_ok() {}
+    if let Some(ref mut log_rx) = log_rx {
+        // Drain queued events, re-emitting only those whose per-line message
+        // was not already replayed from the file. Bus events arrive at emit
+        // time, so they may precede the log writer's blob flush — discarding
+        // them blindly would lose lines that were never persisted.
+        while let Ok(dispatch) = log_rx.try_recv() {
+            if let EventKind::LogLine { line, .. } = dispatch.kind() {
+                let ts =
+                    crate::executor::state::stamp_from_epoch_millis(dispatch.ts().wall_millis());
+                for part in line.split('\n') {
+                    let stamped = format!("{ts} {part}");
+                    if !replayed.contains(part) {
+                        log_line!(stamped);
+                    }
+                }
+            }
+        }
 
         loop {
             tokio::select! {
-                result = rx.recv() => {
+                result = log_rx.recv() => {
                     match result {
-                        Ok(line) => { log_line!(line); }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                        crate::magic_bus::Recv::Event(dispatch) => {
+                            match dispatch.kind() {
+                                EventKind::LogLine { line, .. } => {
+                                    let ts = crate::executor::state::stamp_from_epoch_millis(
+                                        dispatch.ts().wall_millis(),
+                                    );
+                                    for part in line.split('\n') {
+                                        let stamped = format!("{ts} {part}");
+                                        log_line!(stamped);
+                                    }
+                                }
+                                // Don't break early on terminal events — the
+                                // parent's log writer may still have pending
+                                // relayed child diagnostics to deliver.
+                                EventKind::RunCompleted { .. }
+                                | EventKind::RunFailed { .. }
+                                | EventKind::RunStopped { .. }
+                                | EventKind::RunRemoved { .. } => {
+                                    // Continue following; when the log writer
+                                    // closes its subscription, we'll get
+                                    // Closed and exit naturally.
+                                }
+                                _ => continue,
+                            }
+                        }
+                        crate::magic_bus::Recv::Lagged(n) => {
                             log_line!(format!("[skipped {n} lines]"));
                         }
-                        Err(broadcast::error::RecvError::Closed) => break,
+                        crate::magic_bus::Recv::Closed => break,
                     }
                 }
                 _ = socket::read_json_line(&mut reader) => { break; }
             }
         }
     }
+    unsubscribe(&log_sub);
 }
 
 // ---------------------------------------------------------------------------
@@ -3817,7 +3902,7 @@ async fn cleanup_chat_gremlin(id: &str) {
 async fn register_chat_gremlin(session: &SessionHandle, mut gremlin: Gremlin) {
     let id = gremlin.id.to_string();
 
-    let (log_broadcast, stage_stream_broadcast, interactive_handle) =
+    let (stage_stream_broadcast, interactive_handle, log_flush) =
         setup_gremlin_channels(&mut gremlin, None);
     let store = gremlin.state.store_handle();
 
@@ -3836,10 +3921,10 @@ async fn register_chat_gremlin(session: &SessionHandle, mut gremlin: Gremlin) {
         task: None,
         aborted: Arc::new(AtomicBool::new(false)),
         state_tx,
-        log_broadcast,
         stage_stream_broadcast,
         interactive: interactive_handle,
         store,
+        log_flush: Some(log_flush),
     };
     get_run_map().lock().unwrap().insert(id.clone(), handle);
 
@@ -4112,17 +4197,16 @@ fn state_view_for_id(id: &str) -> Result<StateView, Value> {
 }
 
 /// Set up log + interactive + stage-stream channels on a gremlin. Returns the
-/// log broadcast sender, the stage-stream broadcast sender, and interactive
-/// handle for insertion into the run map.
+/// stage-stream broadcast sender and interactive handle for insertion into the
+/// run map.
 fn setup_gremlin_channels(
     gremlin: &mut Gremlin,
     relay: Option<LogRelay>,
 ) -> (
     broadcast::Sender<String>,
-    broadcast::Sender<String>,
     InteractiveHandle,
+    tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
 ) {
-    let (log_broadcast, _) = broadcast::channel(256);
     let channels = InteractiveChannels::new();
     let (interactive_handle, interactive_session) = channels.split();
     gremlin.runtime_config.interactive = Some(interactive_handle.clone());
@@ -4155,8 +4239,8 @@ fn setup_gremlin_channels(
     // needed here — adding one would race with content forwarders and would
     // leak a task/mailbox for the daemon's lifetime.
 
-    spawn_log_writer(log_rx, store, log_broadcast.clone(), relay);
-    (log_broadcast, stage_stream_broadcast, interactive_handle)
+    let log_flush = spawn_log_writer(log_rx, store, relay);
+    (stage_stream_broadcast, interactive_handle, log_flush)
 }
 
 async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i32, Gremlin) {
@@ -4181,13 +4265,21 @@ async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i
     (exit_code, gremlin)
 }
 
-/// Background task: reads log events from the bus, appends to state blob, broadcasts.
+/// Spawn a task that reads log events from the bus and appends to the state
+/// blob, returning a channel to request a flush barrier (persist queued events).
 fn spawn_log_writer(
     mut log_rx: ReceiverHalf<EventKind>,
     store: Arc<dyn state::StateStore + Send + Sync>,
-    broadcast_tx: broadcast::Sender<String>,
     relay: Option<LogRelay>,
-) {
+) -> tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>> {
+    let (barrier_tx, mut barrier_rx) =
+        tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<()>>();
+
+    enum WriteCmd {
+        Line(String),
+        Flush(tokio::sync::oneshot::Sender<()>),
+    }
+
     tokio::spawn(async move {
         let file: Option<Arc<std::sync::Mutex<Box<dyn state::StateBlob>>>> =
             match store.open("log", state::BlobMode::Append) {
@@ -4201,56 +4293,80 @@ fn spawn_log_writer(
         // A single long-lived blocking writer drains a channel of stamped
         // fragments, so the async task never blocks on the synchronous
         // `StateBlob` handle and no blocking-pool job is spawned per line.
-        let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let broadcast_tx2 = broadcast_tx.clone();
+        let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<WriteCmd>();
         let writer = file.map(|file| {
             tokio::task::spawn_blocking(move || {
-                while let Some(stamped) = write_rx.blocking_recv() {
-                    {
-                        let mut guard = match file.lock() {
-                            Ok(guard) => guard,
-                            Err(_) => return,
-                        };
-                        let _ = guard.write_all(stamped.as_bytes());
-                        let _ = guard.write_all(b"\n");
-                        let _ = guard.flush();
+                while let Some(cmd) = write_rx.blocking_recv() {
+                    match cmd {
+                        WriteCmd::Line(stamped) => {
+                            let mut guard = match file.lock() {
+                                Ok(guard) => guard,
+                                Err(_) => return,
+                            };
+                            let _ = guard.write_all(stamped.as_bytes());
+                            let _ = guard.write_all(b"\n");
+                            let _ = guard.flush();
+                        }
+                        WriteCmd::Flush(ack) => {
+                            let mut guard = match file.lock() {
+                                Ok(guard) => guard,
+                                Err(_) => return,
+                            };
+                            let _ = guard.flush();
+                            let _ = ack.send(());
+                        }
                     }
-                    // Broadcast only after write+flush so handle_log
-                    // replay/deduplication stays consistent.
-                    let _ = broadcast_tx2.send(stamped);
                 }
             })
         });
 
         loop {
-            match log_rx.recv().await {
-                crate::magic_bus::Recv::Event(dispatch) => {
-                    let ts = crate::executor::state::now_stamp_millis();
-                    let line = match dispatch.kind() {
-                        EventKind::LogLine { line, .. } => line,
-                        _ => continue,
-                    };
-                    for part in line.split('\n') {
-                        let stamped = format!("{ts} {part}");
-                        if writer.is_some() {
-                            let _ = write_tx.send(stamped.clone());
+            tokio::select! {
+                result = log_rx.recv() => {
+                    match result {
+                        crate::magic_bus::Recv::Event(dispatch) => {
+                            // Use the event's captured timestamp so the persisted
+                            // record matches the emit time, not the receive time.
+                            let ts =
+                                crate::executor::state::stamp_from_epoch_millis(dispatch.ts().wall_millis());
+                            let line = match dispatch.kind() {
+                                EventKind::LogLine { line, .. } => line,
+                                _ => continue,
+                            };
+                            for part in line.split('\n') {
+                                let stamped = format!("{ts} {part}");
+                                if writer.is_some() {
+                                    let _ = write_tx.send(WriteCmd::Line(stamped.clone()));
+                                }
+                                if let Some(relay) = &relay {
+                                    emit_event(EventKind::LogLine {
+                                        id: relay.parent_id.clone(),
+                                        line: format!("{}{}", relay.prefix, part),
+                                    });
+                                }
+                            }
                         }
-                        if let Some(relay) = &relay {
-                            emit_event(EventKind::LogLine {
-                                id: relay.parent_id.clone(),
-                                line: format!("{}{}", relay.prefix, part),
-                            });
+                        crate::magic_bus::Recv::Lagged(_) => {
+                            // Log writer can't meaningfully recover from lag, but
+                            // this is Lossless so lag shouldn't occur.
                         }
+                        crate::magic_bus::Recv::Closed => break,
                     }
                 }
-                crate::magic_bus::Recv::Lagged(_) => {
-                    // Log writer can't meaningfully recover from lag, but
-                    // this is Lossless so lag shouldn't occur.
+                // Flush barrier: send a flush command through the write channel;
+                // the blocking writer acknowledges it after all prior writes
+                // have been flushed to the blob.
+                Some(ack) = barrier_rx.recv() => {
+                    if writer.is_some() {
+                        let _ = write_tx.send(WriteCmd::Flush(ack));
+                    } else {
+                        let _ = ack.send(());
+                    }
                 }
-                crate::magic_bus::Recv::Closed => break,
             }
         }
     });
+    barrier_tx
 }
 
 fn spawn_gremlin_runner(
@@ -4261,7 +4377,7 @@ fn spawn_gremlin_runner(
     definition_name: &str,
     shutdown_tx: &watch::Sender<bool>,
 ) {
-    let (log_broadcast, stage_stream_broadcast, interactive_handle) =
+    let (stage_stream_broadcast, interactive_handle, log_flush) =
         setup_gremlin_channels(&mut gremlin, None);
     gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
         interactive_handle.evt_tx.clone(),
@@ -4298,10 +4414,10 @@ fn spawn_gremlin_runner(
         task: Some(join_handle),
         aborted,
         state_tx,
-        log_broadcast,
         stage_stream_broadcast,
         interactive: interactive_handle,
         store,
+        log_flush: Some(log_flush),
     };
     get_run_map().lock().unwrap().insert(id.to_string(), handle);
 
@@ -4431,7 +4547,7 @@ pub(crate) struct LogRelay {
 pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> LaunchResult {
     let id = gremlin.id.to_string();
 
-    let (log_broadcast, stage_stream_broadcast, interactive_handle) =
+    let (stage_stream_broadcast, interactive_handle, log_flush) =
         setup_gremlin_channels(&mut gremlin, relay);
     gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
         interactive_handle.evt_tx.clone(),
@@ -4484,10 +4600,10 @@ pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> Lau
         task: Some(join_handle),
         aborted: aborted.clone(),
         state_tx,
-        log_broadcast,
         stage_stream_broadcast,
         interactive: interactive_handle,
         store: store.clone(),
+        log_flush: Some(log_flush),
     };
     // Insert into RUN_MAP *after* spawning so the JoinHandle is present
     // from the moment the entry exists.
@@ -5381,7 +5497,6 @@ model-profiles:
             stage: "starting".to_string(),
             started_at: String::new(),
         });
-        let (log_broadcast, _) = broadcast::channel(1);
         let (stage_stream_broadcast, _) = broadcast::channel(1);
 
         let handle = super::RunHandle {
@@ -5389,10 +5504,10 @@ model-profiles:
             task: None,
             aborted: Arc::new(AtomicBool::new(false)),
             state_tx,
-            log_broadcast,
             stage_stream_broadcast,
             interactive,
             store: store.clone(),
+            log_flush: None,
         };
         super::get_run_map()
             .lock()

@@ -29,6 +29,14 @@ impl Timestamp {
     pub fn wall(&self) -> SystemTime {
         self.wall
     }
+
+    /// Epoch milliseconds for persistence and wire payloads.
+    pub fn wall_millis(&self) -> u64 {
+        self.wall
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
 }
 
 /// A single event dispatched across the bus.
