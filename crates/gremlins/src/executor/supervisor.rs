@@ -4159,27 +4159,22 @@ fn setup_gremlin_channels(
     {
         let sbc = stage_stream_broadcast.clone();
         tokio::spawn(async move {
-            loop {
-                match stage_rx.recv().await {
-                    crate::magic_bus::Recv::Event(dispatch) => {
-                        if let EventKind::StageBoundary {
-                            stage,
-                            stage_type,
-                            active,
-                            ..
-                        } = dispatch.kind()
-                        {
-                            let payload = serde_json::json!({
-                                "kind": "stage_boundary",
-                                "stage": stage,
-                                "stage_type": stage_type,
-                                "active": active,
-                            })
-                            .to_string();
-                            let _ = sbc.send(payload);
-                        }
-                    }
-                    crate::magic_bus::Recv::Lagged(_) | crate::magic_bus::Recv::Closed => break,
+            while let crate::magic_bus::Recv::Event(dispatch) = stage_rx.recv().await {
+                if let EventKind::StageBoundary {
+                    stage,
+                    stage_type,
+                    active,
+                    ..
+                } = dispatch.kind()
+                {
+                    let payload = serde_json::json!({
+                        "kind": "stage_boundary",
+                        "stage": stage,
+                        "stage_type": stage_type,
+                        "active": active,
+                    })
+                    .to_string();
+                    let _ = sbc.send(payload);
                 }
             }
         });

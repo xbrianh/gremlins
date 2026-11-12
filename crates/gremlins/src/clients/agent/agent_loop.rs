@@ -381,6 +381,7 @@ impl LoopState {
     /// runs — where env_logger may not be installed — still write to the
     /// gremlin log blob via this path.
     pub(super) fn hook_log(&self, msg: &str) {
+        log::info!("{msg}");
         self.hooks.log_line(msg);
     }
 
