@@ -22,7 +22,7 @@ use crate::config;
 use crate::executor::socket;
 use crate::executor::state;
 use crate::executor::supervisor::{
-    error_response, get_run_map, resolve_store_for_id, subscribe_run, SharedWriter,
+    error_response, get_run_map, init_bus, resolve_store_for_id, subscribe_run, SharedWriter,
 };
 use crate::magic_bus::{ReceiverHalf, Recv};
 
@@ -128,20 +128,47 @@ async fn serve_stage_stream_loop(
     // broadcast carries content for agent/exec stages plus stage-boundary
     // sentinels; the run-scoped bus subscription carries operational-log
     // fallback content.
-    let stage_rx = if follow {
-        let map = get_run_map().lock().unwrap();
-        map.get(id).map(|h| h.stage_stream_broadcast.subscribe())
+    //
+    // Only subscribe for live runs still in the run map. A finished run
+    // has no more events and its sender is already dropped — subscribing
+    // would wait forever. Check under the run-map lock and request a
+    // flush barrier so pre-subscription log lines are persisted before
+    // we read history.
+    let (stage_rx, log_rx, log_sub) = if follow {
+        let (flush, stage_rx) = {
+            let map = get_run_map().lock().unwrap();
+            let handle = map.get(id);
+            let stage_rx = handle.map(|h| h.stage_stream_broadcast.subscribe());
+            // Clone the flush channel, drop the lock before awaiting.
+            let flush = handle.and_then(|h| h.log_flush.clone());
+            (flush, stage_rx)
+        };
+        // Flush barrier: wait for the log writer to persist currently-queued
+        // events so they're visible when we replay the blob.
+        if let Some(flush) = &flush {
+            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+            let _ = flush.send(ack_tx);
+            let _ = ack_rx.await;
+        }
+        let (log_rx, log_sub) = if flush.is_some() {
+            let (sub, rx) = subscribe_run(id);
+            (Some(rx), Some(sub))
+        } else {
+            (None, None)
+        };
+        (stage_rx, log_rx, log_sub)
     } else {
-        None
+        (None, None, None)
     };
-    let log_rx = if follow {
-        let (_sub, rx) = subscribe_run(id);
-        Some(rx)
-    } else {
-        None
+
+    let unsubscribe = |sub: &Option<crate::magic_bus::Subscriber<crate::executor::EventKind>>| {
+        if let Some(ref sub) = sub {
+            init_bus().unsubscribe(sub);
+        }
     };
 
     if !replay_source(store, kind, &stage_name, writer, &mut offset, &mut dedupe).await {
+        unsubscribe(&log_sub);
         return;
     }
 
@@ -149,6 +176,7 @@ async fn serve_stage_stream_loop(
         return;
     };
     let Some(log_rx) = log_rx else {
+        unsubscribe(&log_sub);
         return;
     };
     let mut stage_rx = Some(stage_rx);
@@ -174,6 +202,7 @@ async fn serve_stage_stream_loop(
                 )
                 .await
                 {
+                    unsubscribe(&log_sub);
                     return;
                 }
             }
@@ -184,6 +213,7 @@ async fn serve_stage_stream_loop(
                     continue;
                 };
                 if !process_log_line(kind, &line, writer, &mut offset, &mut dedupe).await {
+                    unsubscribe(&log_sub);
                     return;
                 }
             }
@@ -204,6 +234,7 @@ async fn serve_stage_stream_loop(
                         )
                         .await
                         {
+                            unsubscribe(&log_sub);
                             return;
                         }
                     }
@@ -215,6 +246,7 @@ async fn serve_stage_stream_loop(
                         )
                         .await
                         {
+                            unsubscribe(&log_sub);
                             return;
                         }
                     }
@@ -222,6 +254,7 @@ async fn serve_stage_stream_loop(
                         stage_closed = true;
                         stage_rx = None;
                         if log_closed {
+                            unsubscribe(&log_sub);
                             return;
                         }
                         // The run ended. If an inactive boundary was not
@@ -240,6 +273,7 @@ async fn serve_stage_stream_loop(
                             )
                             .await
                             {
+                                unsubscribe(&log_sub);
                                 return;
                             }
                         }
@@ -254,6 +288,7 @@ async fn serve_stage_stream_loop(
                                 if !process_log_line(kind, line, writer, &mut offset, &mut dedupe)
                                     .await
                                 {
+                                    unsubscribe(&log_sub);
                                     return;
                                 }
                             }
@@ -261,11 +296,10 @@ async fn serve_stage_stream_loop(
                             | crate::executor::EventKind::RunFailed { .. }
                             | crate::executor::EventKind::RunStopped { .. }
                             | crate::executor::EventKind::RunRemoved { .. } => {
-                                log_closed = true;
-                                log_rx = None;
-                                if stage_closed {
-                                    return;
-                                }
+                                // Terminal events don't close the log stream
+                                // here — the log writer may still relay child
+                                // diagnostics. Wait for the subscription to
+                                // close naturally when the writer shuts down.
                             }
                             _ => continue,
                         }
@@ -279,6 +313,7 @@ async fn serve_stage_stream_loop(
                             )
                             .await
                         {
+                            unsubscribe(&log_sub);
                             return;
                         }
                     }
@@ -286,12 +321,13 @@ async fn serve_stage_stream_loop(
                         log_closed = true;
                         log_rx = None;
                         if stage_closed {
+                            unsubscribe(&log_sub);
                             return;
                         }
                     }
                 }
             }
-            _ = socket::read_json_line(reader) => { return; }
+            _ = socket::read_json_line(reader) => { unsubscribe(&log_sub); return; }
         }
     }
 }
@@ -369,6 +405,11 @@ async fn process_stage_line(
 }
 
 /// Process one line from the operational-log fallback.
+///
+/// Log lines from the bus are raw messages that may contain newlines. The
+/// retired broadcast delivered per-physical-line records; split and emit
+/// each physical line separately so the stage-stream output remains
+/// consistent.
 async fn process_log_line(
     kind: StageStreamKind,
     line: &str,
@@ -377,9 +418,12 @@ async fn process_log_line(
     dedupe: &mut ReplayDedupe,
 ) -> bool {
     if matches!(kind, StageStreamKind::Other) {
-        let value = serde_json::json!({"kind": "log", "text": line});
-        if !dedupe.is_replayed(&value) {
-            return send_stage_line(writer, offset, value).await;
+        for part in line.split('\n') {
+            let value = serde_json::json!({"kind": "log", "text": part});
+            if !dedupe.is_replayed(&value)
+                && !send_stage_line(writer, offset, value).await {
+                    return false;
+                }
         }
     }
     true
@@ -422,7 +466,13 @@ async fn replay_source(
         let payloads: Vec<Value> = match kind {
             StageStreamKind::Agent => agent_stream_lines(&line),
             StageStreamKind::Exec => vec![exec_stream_line(&line)],
-            StageStreamKind::Other => vec![serde_json::json!({"kind": "log", "text": line})],
+            // The persisted log has "[timestamp] message" lines. The bus
+            // delivers raw messages. Strip the timestamp so fingerprints
+            // match between replay and live paths.
+            StageStreamKind::Other => {
+                let text = line.split_once("] ").map(|(_, msg)| msg).unwrap_or(&line);
+                vec![serde_json::json!({"kind": "log", "text": text})]
+            }
         };
         for payload in payloads {
             dedupe.insert(&payload);

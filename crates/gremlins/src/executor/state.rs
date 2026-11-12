@@ -2041,6 +2041,37 @@ pub fn now_stamp_millis() -> String {
     )
 }
 
+/// Convert epoch milliseconds to the `[YYYY-MM-DDTHH:MM:SS.sssZ]` format.
+/// Preserves the wire format while using the event's captured timestamp.
+pub fn stamp_from_epoch_millis(epoch_millis: u64) -> String {
+    let secs = (epoch_millis / 1000) as i64;
+    let millis = (epoch_millis % 1000) as u32;
+    let dur = std::time::Duration::from_secs(secs as u64);
+    let system_time = std::time::UNIX_EPOCH
+        .checked_add(dur)
+        .unwrap_or(std::time::UNIX_EPOCH);
+    let since_epoch = system_time
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = since_epoch.as_secs();
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        let t = secs as libc::time_t;
+        libc::gmtime_r(std::ptr::addr_of!(t), std::ptr::addr_of_mut!(tm));
+        tm
+    };
+    format!(
+        "[{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z]",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
+        millis,
+    )
+}
+
 /// ISO-8601 with microseconds and `+00:00`, matching Python `datetime.isoformat()`.
 pub fn now_iso() -> String {
     let (tm, _, micros) = now_components();

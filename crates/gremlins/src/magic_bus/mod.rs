@@ -23,13 +23,15 @@ pub use subscriber::{Subscriber, SubscriberError};
 
 pub(crate) use subscriber::SubscriberMailbox;
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use futures::future::join_all;
 
 /// A fan-out registry keyed by correlation-id prefixes.
 pub struct Bus<P> {
-    subscribers: RwLock<Vec<(CorrId, SubscriberMailbox<P>)>>,
+    subscribers: RwLock<Vec<(u64, CorrId, SubscriberMailbox<P>)>>,
+    next_id: AtomicU64,
 }
 
 impl<P: Clone + Send + 'static> Default for Bus<P> {
@@ -42,6 +44,7 @@ impl<P: Clone + Send + 'static> Bus<P> {
     pub fn new() -> Self {
         Self {
             subscribers: RwLock::new(Vec::new()),
+            next_id: AtomicU64::new(1),
         }
     }
 
@@ -53,12 +56,13 @@ impl<P: Clone + Send + 'static> Bus<P> {
         let prefix = registration.prefix().clone();
         let policy = registration.policy();
         let (mailbox, receiver) = SubscriberMailbox::for_policy(policy)?;
-        let subscriber = Subscriber::new(prefix.clone(), mailbox.clone());
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let subscriber = Subscriber::new(id, prefix.clone(), mailbox.clone());
 
         self.subscribers
             .write()
             .expect("subscriber registry poisoned")
-            .push((prefix, mailbox));
+            .push((id, prefix, mailbox));
 
         Ok((subscriber, receiver))
     }
@@ -69,11 +73,11 @@ impl<P: Clone + Send + 'static> Bus<P> {
     /// `Closed` once in-flight deliveries drain; the subscriber task can then
     /// close its log blob or connection and exit cleanly.
     pub fn unsubscribe(&self, subscriber: &Subscriber<P>) {
-        let prefix = subscriber.prefix();
+        let id = subscriber.id();
         self.subscribers
             .write()
             .expect("subscriber registry poisoned")
-            .retain(|(p, _)| p != prefix);
+            .retain(|(entry_id, _, _)| *entry_id != id);
     }
 
     /// Fan out synchronously. Never blocks; backpressured subscribers drop
@@ -84,7 +88,7 @@ impl<P: Clone + Send + 'static> Bus<P> {
             .read()
             .expect("subscriber registry poisoned");
 
-        for (prefix, mailbox) in subscribers.iter() {
+        for (_id, prefix, mailbox) in subscribers.iter() {
             if event.corr_id().matches_prefix(prefix) {
                 mailbox.try_send(event.clone());
             }
@@ -106,8 +110,8 @@ impl<P: Clone + Send + 'static> Bus<P> {
 
             subscribers
                 .iter()
-                .filter(|(prefix, _)| event.corr_id().matches_prefix(prefix))
-                .map(|(_, mailbox)| mailbox.clone())
+                .filter(|(_, prefix, _)| event.corr_id().matches_prefix(prefix))
+                .map(|(_, _, mailbox)| mailbox.clone())
                 .collect()
         };
 
