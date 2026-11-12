@@ -22,8 +22,9 @@ use crate::config;
 use crate::executor::socket;
 use crate::executor::state;
 use crate::executor::supervisor::{
-    error_response, get_run_map, resolve_store_for_id, SharedWriter,
+    error_response, get_run_map, resolve_store_for_id, subscribe_run, SharedWriter,
 };
+use crate::magic_bus::{ReceiverHalf, Recv};
 
 // ---------------------------------------------------------------------------
 // StageStreamKind
@@ -123,9 +124,10 @@ async fn serve_stage_stream_loop(
     let mut stage_name = initial_stage_name.to_string();
     let mut dedupe = ReplayDedupe::default();
 
-    // Subscribe to both broadcasts *before* replaying history. The stage
+    // Subscribe to both sources *before* replaying history. The stage
     // broadcast carries content for agent/exec stages plus stage-boundary
-    // sentinels; the log broadcast carries operational-log fallback content.
+    // sentinels; the run-scoped bus subscription carries operational-log
+    // fallback content.
     let stage_rx = if follow {
         let map = get_run_map().lock().unwrap();
         map.get(id).map(|h| h.stage_stream_broadcast.subscribe())
@@ -133,8 +135,8 @@ async fn serve_stage_stream_loop(
         None
     };
     let log_rx = if follow {
-        let map = get_run_map().lock().unwrap();
-        map.get(id).map(|h| h.log_broadcast.subscribe())
+        let (_sub, rx) = subscribe_run(id);
+        Some(rx)
     } else {
         None
     };
@@ -177,7 +179,10 @@ async fn serve_stage_stream_loop(
             }
         }
         if let Some(log_rx) = log_rx.as_mut() {
-            while let Ok(line) = log_rx.try_recv() {
+            while let Ok(dispatch) = log_rx.try_recv() {
+                let Some(line) = log_event_line(&dispatch) else {
+                    continue;
+                };
                 if !process_log_line(kind, &line, writer, &mut offset, &mut dedupe).await {
                     return;
                 }
@@ -243,12 +248,15 @@ async fn serve_stage_stream_loop(
             }
             result = recv_log(&mut log_rx), if !log_closed => {
                 match result {
-                    Ok(line) => {
+                    Recv::Event(dispatch) => {
+                        let Some(line) = log_event_line(&dispatch) else {
+                            continue;
+                        };
                         if !process_log_line(kind, &line, writer, &mut offset, &mut dedupe).await {
                             return;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                    Recv::Lagged(n) => {
                         if matches!(kind, StageStreamKind::Other)
                             && !send_stage_line(
                                 writer,
@@ -260,7 +268,7 @@ async fn serve_stage_stream_loop(
                             return;
                         }
                     }
-                    Err(broadcast::error::RecvError::Closed) => {
+                    Recv::Closed => {
                         log_closed = true;
                         log_rx = None;
                         if stage_closed {
@@ -284,11 +292,25 @@ async fn recv_stage(
 }
 
 async fn recv_log(
-    rx: &mut Option<broadcast::Receiver<String>>,
-) -> Result<String, broadcast::error::RecvError> {
+    rx: &mut Option<ReceiverHalf<crate::executor::EventKind>>,
+) -> Recv<crate::executor::EventKind> {
     match rx.as_mut() {
         Some(rx) => rx.recv().await,
         None => std::future::pending().await,
+    }
+}
+
+/// Extract the raw, un-timestamped message from a run-scoped bus event.
+///
+/// `LogLine.line` already carries only the message; the log writer stamps
+/// epoch millis separately when it persists the blob, so stage-stream fallback
+/// lines stay timestamp-free just like the historical `log` blob.
+fn log_event_line(
+    dispatch: &crate::magic_bus::DispatchEvent<crate::executor::EventKind>,
+) -> Option<String> {
+    match dispatch.kind() {
+        crate::executor::EventKind::LogLine { line, .. } => Some(line.clone()),
+        _ => None,
     }
 }
 
@@ -331,7 +353,7 @@ async fn process_stage_line(
     true
 }
 
-/// Process one line from the operational-log broadcast.
+/// Process one line from the operational-log fallback.
 async fn process_log_line(
     kind: StageStreamKind,
     line: &str,

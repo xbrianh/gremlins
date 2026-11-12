@@ -247,6 +247,13 @@ pub(crate) fn subscribe_all() -> (Subscriber<EventKind>, ReceiverHalf<EventKind>
         .expect("lag-tolerant subscription cannot fail")
 }
 
+/// Subscribe to a single gremlin's run-scoped events with lossless delivery.
+pub(crate) fn subscribe_run(id: &str) -> (Subscriber<EventKind>, ReceiverHalf<EventKind>) {
+    init_bus()
+        .subscribe(SubscriberRegistration::lossless(CorrId::new().with_run(id)))
+        .expect("lossless subscription cannot fail")
+}
+
 pub(crate) fn emit_event(event: EventKind) {
     // Run-bearing events carry a run-scoped correlation id so per-gremlin
     // subscribers (subscribed with a `r:<id>` prefix) receive only their own
@@ -325,8 +332,6 @@ pub(crate) struct RunHandle {
     pub aborted: Arc<AtomicBool>,
     #[allow(dead_code)]
     pub state_tx: watch::Sender<RunState>,
-    /// Broadcast sender for live log subscribers (Op::Log with follow:true).
-    pub log_broadcast: broadcast::Sender<String>,
     /// Broadcast sender for stage-aware live stream subscribers (Op::StageStream with follow:true).
     pub stage_stream_broadcast: broadcast::Sender<String>,
     /// Interactive handle (supervisor → agent loop).
@@ -2394,14 +2399,12 @@ async fn handle_log(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Subscribe to the broadcast channel *before* replaying history so that
-    // lines emitted during replay are buffered and not lost.
+    // Subscribe to the bus *before* replaying history so that events emitted
+    // during replay are queued and not lost. Lossless delivery means every
+    // LogLine survives until the follower drains it.
     let mut rx = if follow {
-        get_run_map()
-            .lock()
-            .unwrap()
-            .get(id)
-            .map(|h| h.log_broadcast.subscribe())
+        let (_sub, rx) = subscribe_run(id);
+        Some(rx)
     } else {
         None
     };
@@ -2437,22 +2440,28 @@ async fn handle_log(
         log_line!(line);
     }
 
-    // 2. If follow, drain duplicates (lines broadcast during file replay),
+    // 2. If follow, drain duplicates (lines written during file replay),
     //    then stream new lines. Monitor the read half for client disconnect.
     if let Some(ref mut rx) = rx {
-        // Drain lines that arrived during the file replay — they were already
-        // sent from the file above.
+        // Drain events that arrived during the file replay — they were
+        // already sent from the file above.
         while rx.try_recv().is_ok() {}
 
         loop {
             tokio::select! {
                 result = rx.recv() => {
                     match result {
-                        Ok(line) => { log_line!(line); }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                        crate::magic_bus::Recv::Event(dispatch) => {
+                            let EventKind::LogLine { line, .. } = dispatch.kind() else {
+                                continue;
+                            };
+                            let stamped = format!("{} {line}", dispatch.ts().wall_millis());
+                            log_line!(stamped);
+                        }
+                        crate::magic_bus::Recv::Lagged(n) => {
                             log_line!(format!("[skipped {n} lines]"));
                         }
-                        Err(broadcast::error::RecvError::Closed) => break,
+                        crate::magic_bus::Recv::Closed => break,
                     }
                 }
                 _ = socket::read_json_line(&mut reader) => { break; }
@@ -3817,8 +3826,7 @@ async fn cleanup_chat_gremlin(id: &str) {
 async fn register_chat_gremlin(session: &SessionHandle, mut gremlin: Gremlin) {
     let id = gremlin.id.to_string();
 
-    let (log_broadcast, stage_stream_broadcast, interactive_handle) =
-        setup_gremlin_channels(&mut gremlin, None);
+    let (stage_stream_broadcast, interactive_handle) = setup_gremlin_channels(&mut gremlin, None);
     let store = gremlin.state.store_handle();
 
     let cancel_token = CancelToken::new();
@@ -3836,7 +3844,6 @@ async fn register_chat_gremlin(session: &SessionHandle, mut gremlin: Gremlin) {
         task: None,
         aborted: Arc::new(AtomicBool::new(false)),
         state_tx,
-        log_broadcast,
         stage_stream_broadcast,
         interactive: interactive_handle,
         store,
@@ -4112,17 +4119,12 @@ fn state_view_for_id(id: &str) -> Result<StateView, Value> {
 }
 
 /// Set up log + interactive + stage-stream channels on a gremlin. Returns the
-/// log broadcast sender, the stage-stream broadcast sender, and interactive
-/// handle for insertion into the run map.
+/// stage-stream broadcast sender and interactive handle for insertion into the
+/// run map.
 fn setup_gremlin_channels(
     gremlin: &mut Gremlin,
     relay: Option<LogRelay>,
-) -> (
-    broadcast::Sender<String>,
-    broadcast::Sender<String>,
-    InteractiveHandle,
-) {
-    let (log_broadcast, _) = broadcast::channel(256);
+) -> (broadcast::Sender<String>, InteractiveHandle) {
     let channels = InteractiveChannels::new();
     let (interactive_handle, interactive_session) = channels.split();
     gremlin.runtime_config.interactive = Some(interactive_handle.clone());
@@ -4155,8 +4157,8 @@ fn setup_gremlin_channels(
     // needed here — adding one would race with content forwarders and would
     // leak a task/mailbox for the daemon's lifetime.
 
-    spawn_log_writer(log_rx, store, log_broadcast.clone(), relay);
-    (log_broadcast, stage_stream_broadcast, interactive_handle)
+    spawn_log_writer(log_rx, store, relay);
+    (stage_stream_broadcast, interactive_handle)
 }
 
 async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i32, Gremlin) {
@@ -4181,11 +4183,10 @@ async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i
     (exit_code, gremlin)
 }
 
-/// Background task: reads log events from the bus, appends to state blob, broadcasts.
+/// Background task: reads log events from the bus and appends to the state blob.
 fn spawn_log_writer(
     mut log_rx: ReceiverHalf<EventKind>,
     store: Arc<dyn state::StateStore + Send + Sync>,
-    broadcast_tx: broadcast::Sender<String>,
     relay: Option<LogRelay>,
 ) {
     tokio::spawn(async move {
@@ -4202,7 +4203,6 @@ fn spawn_log_writer(
         // fragments, so the async task never blocks on the synchronous
         // `StateBlob` handle and no blocking-pool job is spawned per line.
         let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let broadcast_tx2 = broadcast_tx.clone();
         let writer = file.map(|file| {
             tokio::task::spawn_blocking(move || {
                 while let Some(stamped) = write_rx.blocking_recv() {
@@ -4215,9 +4215,6 @@ fn spawn_log_writer(
                         let _ = guard.write_all(b"\n");
                         let _ = guard.flush();
                     }
-                    // Broadcast only after write+flush so handle_log
-                    // replay/deduplication stays consistent.
-                    let _ = broadcast_tx2.send(stamped);
                 }
             })
         });
@@ -4261,8 +4258,7 @@ fn spawn_gremlin_runner(
     definition_name: &str,
     shutdown_tx: &watch::Sender<bool>,
 ) {
-    let (log_broadcast, stage_stream_broadcast, interactive_handle) =
-        setup_gremlin_channels(&mut gremlin, None);
+    let (stage_stream_broadcast, interactive_handle) = setup_gremlin_channels(&mut gremlin, None);
     gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
         interactive_handle.evt_tx.clone(),
     ));
@@ -4298,7 +4294,6 @@ fn spawn_gremlin_runner(
         task: Some(join_handle),
         aborted,
         state_tx,
-        log_broadcast,
         stage_stream_broadcast,
         interactive: interactive_handle,
         store,
@@ -4431,8 +4426,7 @@ pub(crate) struct LogRelay {
 pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> LaunchResult {
     let id = gremlin.id.to_string();
 
-    let (log_broadcast, stage_stream_broadcast, interactive_handle) =
-        setup_gremlin_channels(&mut gremlin, relay);
+    let (stage_stream_broadcast, interactive_handle) = setup_gremlin_channels(&mut gremlin, relay);
     gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
         interactive_handle.evt_tx.clone(),
     ));
@@ -4484,7 +4478,6 @@ pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> Lau
         task: Some(join_handle),
         aborted: aborted.clone(),
         state_tx,
-        log_broadcast,
         stage_stream_broadcast,
         interactive: interactive_handle,
         store: store.clone(),
@@ -5381,7 +5374,6 @@ model-profiles:
             stage: "starting".to_string(),
             started_at: String::new(),
         });
-        let (log_broadcast, _) = broadcast::channel(1);
         let (stage_stream_broadcast, _) = broadcast::channel(1);
 
         let handle = super::RunHandle {
@@ -5389,7 +5381,6 @@ model-profiles:
             task: None,
             aborted: Arc::new(AtomicBool::new(false)),
             state_tx,
-            log_broadcast,
             stage_stream_broadcast,
             interactive,
             store: store.clone(),
