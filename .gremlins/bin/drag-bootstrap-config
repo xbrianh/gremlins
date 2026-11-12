@@ -4,12 +4,10 @@
 # Usage:
 #   drag-bootstrap-config <output_path>
 #
-# Reads the drag config source, strips line and block comments, strips
-# trailing commas, merges bootstrap overrides from environment variables,
-# adds `"format": "json"`, and writes clean JSON to <output_path>.
-#
-# Config sources may use JSON5-style // line comments, /* */ block
-# comments, and trailing commas — these are normalized before jq.
+# Reads a plain JSON drag config source, merges bootstrap overrides
+# from environment variables, adds `"format": "json"`, and writes clean
+# JSON to <output_path>. Config sources must be plain JSON (no comments
+# or trailing commas).
 #
 # Environment:
 #   DRAG_CONFIG_SRC  — path to custom config (optional; falls back to
@@ -25,10 +23,7 @@ OUTFILE="${1:?usage: drag-bootstrap-config <output_path>}"
 
 CONFIG_SRC="${DRAG_CONFIG_SRC:-${GREMLINS_PROJECT_ROOT:-.}/.gremlins/drag-config.json}"
 
-# Normalize JSON5 → JSON: strip // line comments, /* */ block comments
-# (single-line and multi-line), trailing commas, and blank lines.
-perl -0777 -pe 's|^[ \t]*//[^\n]*\n||gm;s|/\*.*?\*/||gs;s|,(\s*[}\]])|$1|g;s|^\s*\n||gm;' "$CONFIG_SRC" \
-  | jq \
+jq \
     --arg model "${DRAG_MODEL:-}" \
     --arg estimates "${DRAG_ESTIMATES:-}" \
     --arg p_val "${DRAG_P:-}" \
@@ -40,4 +35,5 @@ perl -0777 -pe 's|^[ \t]*//[^\n]*\n||gm;s|/\*.*?\*/||gs;s|,(\s*[}\]])|$1|g;s|^\s
       if $skip_maint != "" then (if $skip_maint != "false" then .skip_maintainability = true else .skip_maintainability = false end) else . end |
       .format = "json"
     ' \
+    "$CONFIG_SRC" \
   > "$OUTFILE"
