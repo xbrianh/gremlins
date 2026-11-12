@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# drag-bootstrap-config — strip comments, merge overrides, ensure format.
+#
+# Usage:
+#   drag-bootstrap-config <output_path>
+#
+# Reads a plain JSON drag config source, merges bootstrap overrides
+# from environment variables, adds `"format": "json"`, and writes clean
+# JSON to <output_path>. Config sources must be plain JSON (no comments
+# or trailing commas).
+#
+# Environment:
+#   DRAG_CONFIG_SRC  — path to custom config (optional; falls back to
+#                      $GREMLINS_PROJECT_ROOT/.gremlins/drag-config.json)
+#   DRAG_MODEL       — model override (optional)
+#   DRAG_ESTIMATES   — estimates_per_survey override (optional)
+#   DRAG_P           — weights.p override (optional)
+#   DRAG_SKIP_MAINT  — skip_maintainability override (optional;
+#                      "false" sets .skip_maintainability = false)
+set -euo pipefail
+
+OUTFILE="${1:?usage: drag-bootstrap-config <output_path>}"
+
+CONFIG_SRC="${DRAG_CONFIG_SRC:-${GREMLINS_PROJECT_ROOT:-.}/.gremlins/drag-config.json}"
+
+jq \
+    --arg model "${DRAG_MODEL:-}" \
+    --arg estimates "${DRAG_ESTIMATES:-}" \
+    --arg p_val "${DRAG_P:-}" \
+    --arg skip_maint "${DRAG_SKIP_MAINT:-}" \
+    '
+      if $model != "" then .model = $model else . end |
+      if $estimates != "" then .estimates_per_survey = ($estimates | tonumber) else . end |
+      if $p_val != "" then .weights.p = ($p_val | tonumber) else . end |
+      if $skip_maint != "" then (if $skip_maint != "false" then .skip_maintainability = true else .skip_maintainability = false end) else . end |
+      .format = "json"
+    ' \
+    "$CONFIG_SRC" \
+  > "$OUTFILE"
