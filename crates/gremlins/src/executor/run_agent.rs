@@ -322,7 +322,6 @@ pub(crate) async fn run_agent(
         skills_available: gremlin.discovered_skills.is_some(),
         discovered_skills: gremlin.discovered_skills.clone(),
         active_skills: gremlin.active_skills.clone(),
-        token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
         extra_sandbox_roots: gremlin.extra_sandbox_roots.clone(),
         hooks: Some(hooks),
     };

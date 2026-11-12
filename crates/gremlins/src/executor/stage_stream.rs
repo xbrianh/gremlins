@@ -510,24 +510,46 @@ fn boundary_stage(boundary: &Value) -> String {
         .to_string()
 }
 
-/// Send a stage_boundary sentinel into the stage-stream broadcast when a
-/// stage transition occurs. An empty `stage_name` denotes the inactive
-/// operational-log fallback (bootstrap, between stages, or terminal).
+/// Build the legacy stage_boundary JSON sentinel string for the stage-stream
+/// broadcast. Shared between the bus forwarder and any remaining direct-path
+/// callers so the wire format stays in one place.
+pub(crate) fn stage_boundary_json(stage: &str, stage_type: &str, active: bool) -> String {
+    serde_json::json!({
+        "kind": "stage_boundary",
+        "stage": stage,
+        "stage_type": stage_type,
+        "active": active,
+    })
+    .to_string()
+}
+
+/// Emit a StageBoundary event on the bus and synchronously push the legacy
+/// stage-boundary sentinel into the stage-stream broadcast.
+///
+/// The synchronous broadcast send must happen here (in the same task that is
+/// about to run the stage) so the boundary is enqueued *before* the content
+/// forwarders can deliver agent/exec output. Routing the legacy broadcast
+/// through a separate bus-forwarding task would race with those forwarders
+/// and let content arrive before its opening boundary.
+///
+/// The direct broadcast send stays until Phase 2 retires `stage_stream_tx`
+/// from `RuntimeConfig`; the bus event is the long-term replacement.
 pub(crate) fn send_stage_boundary(
     tx: &Option<broadcast::Sender<String>>,
+    gremlin_id: &str,
     stage_name: &str,
     stage_type: &str,
 ) {
-    if let Some(ref tx) = tx {
-        let payload = serde_json::json!({
-            "kind": "stage_boundary",
-            "stage": stage_name,
-            "stage_type": stage_type,
-            "active": !stage_name.is_empty(),
-        })
-        .to_string();
-        let _ = tx.send(payload);
+    let active = !stage_name.is_empty();
+    if let Some(tx) = tx {
+        let _ = tx.send(stage_boundary_json(stage_name, stage_type, active));
     }
+    crate::executor::supervisor::emit_event(crate::executor::EventKind::StageBoundary {
+        id: gremlin_id.to_string(),
+        stage: stage_name.to_string(),
+        stage_type: stage_type.to_string(),
+        active,
+    });
 }
 
 // ---------------------------------------------------------------------------

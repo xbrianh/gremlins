@@ -261,7 +261,8 @@ pub(crate) fn emit_event(event: EventKind) {
         | EventKind::TokenUsage { id, .. }
         | EventKind::StageTransition { id, .. }
         | EventKind::Bail { id, .. }
-        | EventKind::LogLine { id, .. } => {
+        | EventKind::LogLine { id, .. }
+        | EventKind::StageBoundary { id, .. } => {
             if id.is_empty() {
                 CorrId::new()
             } else {
@@ -4146,6 +4147,14 @@ fn setup_gremlin_channels(
             CorrId::new().with_run(&run_id),
         ))
         .expect("lossless subscription cannot fail");
+
+    // Stage boundaries are pushed directly into `stage_stream_broadcast` by
+    // `send_stage_boundary` (synchronously, before the stage's content). The
+    // matching `StageBoundary` event still flows on the bus for socket
+    // forwarders and Phase 2, so no per-gremlin forwarding subscription is
+    // needed here — adding one would race with content forwarders and would
+    // leak a task/mailbox for the daemon's lifetime.
+
     spawn_log_writer(log_rx, store, log_broadcast.clone(), relay);
     (log_broadcast, stage_stream_broadcast, interactive_handle)
 }
@@ -4161,6 +4170,7 @@ async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i
             });
             crate::executor::stage_stream::send_stage_boundary(
                 &gremlin.runtime_config.stage_stream_tx,
+                gremlin.id.as_str(),
                 "",
                 "other",
             );

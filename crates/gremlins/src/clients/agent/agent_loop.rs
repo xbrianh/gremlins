@@ -376,12 +376,10 @@ impl LoopState {
         }
     }
 
-    /// Emit a log line through both the process-wide logger (env_logger)
-    /// and the per-gremlin log channel wired by the executor. Daemon-mode
-    /// runs — where env_logger may not be installed — still write to the
-    /// gremlin log blob via this path.
+    /// Emit a log line through the per-gremlin log channel wired by the
+    /// executor. The bus routes each `LogLine` event through `log::info!()`
+    /// itself, so this must not also call `log::info!` directly.
     pub(super) fn hook_log(&self, msg: &str) {
-        log::info!("{msg}");
         self.hooks.log_line(msg);
     }
 
@@ -1877,7 +1875,6 @@ pub(crate) fn test_ctx(
             skills_available: false,
             discovered_skills: None,
             active_skills: None,
-            token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
             extra_sandbox_roots: Vec::new(),
             hooks: None,
         },
@@ -5412,7 +5409,13 @@ mod tests {
             &[],
             0,
             0,
-            &LoopHooks::new(),
+            &{
+                let mut hooks = LoopHooks::new();
+                hooks.register_log_line(|msg: &str| {
+                    log::info!("{msg}");
+                });
+                hooks
+            },
             None,
             None,
             Box::new(ConversationStub::new("hi")),

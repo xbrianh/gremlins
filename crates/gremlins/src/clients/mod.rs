@@ -27,5 +27,4 @@ pub mod protocol;
 pub(crate) mod shell_parse;
 pub(crate) mod stream_json;
 pub(crate) mod token_provider;
-pub(crate) mod token_usage;
 pub(crate) mod tools;

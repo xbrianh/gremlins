@@ -62,9 +62,6 @@ pub struct RunParams {
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
     /// Shared mutable reference to active skill names.
     pub active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
-    /// Sink for per-turn token-usage events emitted by the agent loop.
-    /// The executor layer wires this to the daemon event broadcast.
-    pub token_usage_sink: crate::clients::token_usage::TokenUsageSink,
     /// Additional filesystem roots to add to the tool sandbox beyond the
     /// worktree and artifact directory. Threaded from [`GremlinConfig`].
     pub extra_sandbox_roots: Vec<PathBuf>,
@@ -108,7 +105,6 @@ impl RunParams {
             skills_available: false,
             discovered_skills: None,
             active_skills: None,
-            token_usage_sink: crate::clients::token_usage::TokenUsageSink(None),
             extra_sandbox_roots: Vec::new(),
             hooks: None,
         }
@@ -141,7 +137,6 @@ impl Clone for RunParams {
             skills_available: self.skills_available,
             discovered_skills: self.discovered_skills.clone(),
             active_skills: self.active_skills.clone(),
-            token_usage_sink: self.token_usage_sink.clone(),
             extra_sandbox_roots: self.extra_sandbox_roots.clone(),
             hooks: self.hooks.clone(),
         }

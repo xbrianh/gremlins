@@ -100,6 +100,7 @@ pub enum EventKind {
     // ── Stage-stream protocol ─────────────────────────────────────────
     #[serde(rename = "stage_boundary")]
     StageBoundary {
+        id: String,
         stage: String,
         stage_type: String,
         active: bool,
