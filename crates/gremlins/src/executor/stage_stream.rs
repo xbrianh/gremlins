@@ -420,10 +420,9 @@ async fn process_log_line(
     if matches!(kind, StageStreamKind::Other) {
         for part in line.split('\n') {
             let value = serde_json::json!({"kind": "log", "text": part});
-            if !dedupe.is_replayed(&value)
-                && !send_stage_line(writer, offset, value).await {
-                    return false;
-                }
+            if !dedupe.is_replayed(&value) && !send_stage_line(writer, offset, value).await {
+                return false;
+            }
         }
     }
     true
