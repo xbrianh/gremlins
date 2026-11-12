@@ -219,9 +219,7 @@ async fn run() -> Result<(), String> {
     // library's edges and distort footprints.
     let scoring_packages: Vec<&PackageInfo> = packages
         .iter()
-        .filter(|p| {
-            relevant_packages.contains(&p.key()) && !dropped_pkg_keys.contains(&p.key())
-        })
+        .filter(|p| relevant_packages.contains(&p.key()) && !dropped_pkg_keys.contains(&p.key()))
         .collect();
 
     // Run dependency-graph extraction for each package in parallel.
