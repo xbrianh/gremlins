@@ -16,6 +16,11 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 
+use crate::executor::event::EventKind;
+use crate::magic_bus::{
+    Bus, CorrId, DispatchEvent, ReceiverHalf, Subscriber, SubscriberRegistration,
+};
+
 use crate::clients::cancel::CancelToken;
 use crate::clients::client::{Client, ModelURI};
 use crate::clients::interactive::{
@@ -195,73 +200,63 @@ fn validate_session_id(id: &str) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// DaemonEvent — broadcast to subscribers
+// Global event bus
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type")]
-#[allow(dead_code)]
-pub enum DaemonEvent {
-    #[serde(rename = "run_started")]
-    RunStarted {
-        id: String,
-        definition: String,
-        stage: String,
-    },
-    #[serde(rename = "run_completed")]
-    RunCompleted { id: String, exit_code: i32 },
-    #[serde(rename = "run_failed")]
-    RunFailed {
-        id: String,
-        exit_code: i32,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-    },
-    #[serde(rename = "run_stopped")]
-    RunStopped { id: String },
-    #[serde(rename = "run_removed")]
-    RunRemoved { id: String },
-    #[serde(rename = "token_usage")]
-    TokenUsage {
-        id: String,
-        #[serde(flatten)]
-        usage: crate::clients::protocol::UsageStats,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cost_usd: Option<f64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        last_prompt_tokens: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        last_cached_input_tokens: Option<u64>,
-    },
-    // Forward-looking variants — not wired up yet.
-    #[serde(rename = "stage_transition")]
-    StageTransition { id: String, stage: String },
-    #[serde(rename = "log_line")]
-    LogLine { id: String, line: String },
-    #[serde(rename = "bail")]
-    Bail { id: String, reason: String },
-}
+static BUS: OnceLock<Bus<EventKind>> = OnceLock::new();
 
-// ---------------------------------------------------------------------------
-// Global event broadcast channel
-// ---------------------------------------------------------------------------
-
-static EVENT_BROADCAST: OnceLock<broadcast::Sender<DaemonEvent>> = OnceLock::new();
-
-fn init_event_broadcast() -> &'static broadcast::Sender<DaemonEvent> {
-    EVENT_BROADCAST.get_or_init(|| {
-        let (tx, _) = broadcast::channel(10_000);
-        tx
+fn init_bus() -> &'static Bus<EventKind> {
+    BUS.get_or_init(|| {
+        let bus = Bus::new();
+        // One-time registration: log every LogLine event via the log crate so
+        // call sites only need `emit_event(EventKind::LogLine { … })` — the bus
+        // subscriber handles the `log::info!()` side automatically.
+        //
+        // Guard with try_current() so emit_event stays safe to call from
+        // synchronous startup code or non-Tokio threads; the subscription is
+        // skipped when no runtime handle is available.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let (_, mut rx) = bus
+                .subscribe(SubscriberRegistration::lag_tolerant(CorrId::new(), 10_000))
+                .expect("log subscriber");
+            handle.spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        crate::magic_bus::Recv::Event(dispatch) => {
+                            if let EventKind::LogLine { line, .. } = dispatch.kind() {
+                                log::info!("{line}");
+                            }
+                        }
+                        crate::magic_bus::Recv::Lagged(n) => {
+                            log::warn!("log subscriber lagged; {n} log lines dropped");
+                        }
+                        crate::magic_bus::Recv::Closed => break,
+                    }
+                }
+            });
+        }
+        bus
     })
 }
 
-pub(crate) fn get_event_tx() -> &'static broadcast::Sender<DaemonEvent> {
-    init_event_broadcast()
+/// Subscribe to all events on the bus with lag-tolerant delivery (replaces
+/// the old broadcast-channel subscribe for the connection forwarder).
+pub(crate) fn subscribe_all() -> (Subscriber<EventKind>, ReceiverHalf<EventKind>) {
+    init_bus()
+        .subscribe(SubscriberRegistration::lag_tolerant(CorrId::new(), 10_000))
+        .expect("lag-tolerant subscription cannot fail")
 }
 
-pub(crate) fn emit_event(event: DaemonEvent) {
-    if let Some(tx) = EVENT_BROADCAST.get() {
-        let _ = tx.send(event);
+pub(crate) fn emit_event(event: EventKind) {
+    // Log lines carry a run-scoped correlation id so the per-gremlin log
+    // writer (subscribed with a `r:<id>` prefix) receives only its own lines;
+    // every other event keeps an empty id and reaches all subscribers.
+    let corr_id = match &event {
+        EventKind::LogLine { id, .. } => CorrId::new().with_run(id.as_str()),
+        _ => CorrId::new(),
+    };
+    if let Some(bus) = BUS.get() {
+        bus.emit(DispatchEvent::new(corr_id, event));
     }
 }
 
@@ -359,12 +354,12 @@ impl RunHandle {
 
         // Emit the terminal daemon event.
         if result == 0 {
-            emit_event(DaemonEvent::RunCompleted {
+            emit_event(EventKind::RunCompleted {
                 id: id.to_string(),
                 exit_code: 0,
             });
         } else {
-            emit_event(DaemonEvent::RunFailed {
+            emit_event(EventKind::RunFailed {
                 id: id.to_string(),
                 exit_code: result,
                 error: None,
@@ -437,7 +432,7 @@ pub async fn run_supervisor(
     // Initialise the global run_map so launch_child/stop_child work.
     get_run_map();
     session_map();
-    init_event_broadcast();
+    init_bus();
     init_connection_counter();
     // Capture the base environment once at daemon startup. This is the
     // snapshot chat requests without an explicit `env` field fall back to.
@@ -495,7 +490,7 @@ async fn handle_connection(
 
     // Subscribe to the event broadcast *before* spawning so that no
     // events are lost between connection acceptance and task scheduling.
-    let mut event_rx = get_event_tx().subscribe();
+    let (_event_sub, mut event_rx) = subscribe_all();
 
     // Gate the event-forwarding subtask so that one-shot clients always
     // receive their request response before any broadcast events.
@@ -506,22 +501,23 @@ async fn handle_connection(
         let _ = event_start_rx.wait_for(|v| *v).await;
         loop {
             match event_rx.recv().await {
-                Ok(event) => {
-                    let value = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
+                crate::magic_bus::Recv::Event(dispatch) => {
+                    let value =
+                        serde_json::to_value(dispatch.kind()).unwrap_or(serde_json::Value::Null);
                     if event_writer.write_json_line(&value).await.is_err() {
                         break;
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
+                crate::magic_bus::Recv::Lagged(skipped) => {
                     let payload = serde_json::json!({
                         "type": "event_lagged",
-                        "skipped": n,
+                        "skipped": skipped,
                     });
                     if event_writer.write_json_line(&payload).await.is_err() {
                         break;
                     }
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
+                crate::magic_bus::Recv::Closed => break,
             }
         }
     });
@@ -1899,7 +1895,7 @@ async fn handle_rm(request: &Value, _state_root: &Path) -> Value {
 
     gremlin.clean(purge).await;
 
-    emit_event(DaemonEvent::RunRemoved { id: id.to_string() });
+    emit_event(EventKind::RunRemoved { id: id.to_string() });
 
     ok_response(serde_json::json!({"id": id, "removed": true}))
 }
@@ -2275,7 +2271,8 @@ async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
             return error_response("cannot compact an interrupted chat turn");
         }
         let client = gremlin.client.clone();
-        let verbatim_history = crate::executor::run::read_chat_conversation(gremlin, None).await;
+        let verbatim_history =
+            crate::executor::run_agent::read_chat_conversation(gremlin, None).await;
         (client, verbatim_history)
     };
 
@@ -2310,7 +2307,8 @@ async fn handle_compact(_request: &Value, session: &SessionHandle) -> Value {
                     return error_response("active chat gremlin vanished");
                 };
                 if let Err(e) =
-                    crate::executor::run::persist_compacted_conversation(gremlin, &messages).await
+                    crate::executor::run_agent::persist_compacted_conversation(gremlin, &messages)
+                        .await
                 {
                     return error_response(&format!("failed to persist compacted history: {e}"));
                 }
@@ -3055,8 +3053,8 @@ async fn handle_chat(
     // soft-interrupt recovery this artifact is repopulated by
     // `append_chat_conversation_turn` before the agent re-run, so clearing
     // here only affects fresh turns.
-    if let Some(turn_num) = crate::executor::run::chat_turn_from_stage_name(stage.name()) {
-        crate::executor::run::clear_chat_turn_artifact(&gremlin, turn_num).await;
+    if let Some(turn_num) = crate::executor::run_agent::chat_turn_from_stage_name(stage.name()) {
+        crate::executor::run_agent::clear_chat_turn_artifact(&gremlin, turn_num).await;
     }
 
     // 7. Run the stage in the background. Events are forwarded as
@@ -3255,7 +3253,7 @@ async fn run_chat_turn(
 
     // Capture the turn number from the stage name so cancel cleanup
     // can always clear the per-turn artifact.
-    let chat_turn_num = crate::executor::run::chat_turn_from_stage_name(stage.name());
+    let chat_turn_num = crate::executor::run_agent::chat_turn_from_stage_name(stage.name());
 
     // Capture the conversation baseline from the gremlin's persisted state
     // *before* moving it into the stage runner. `run_stage` accumulates the
@@ -3267,7 +3265,7 @@ async fn run_chat_turn(
     // Snapshot the pre-turn conversation length so the soft-cancel path
     // can split off only messages added during this turn, avoiding
     // duplication of prior-turn history in the per-turn artifact.
-    let pre_turn_len = crate::executor::run::read_chat_conversation(
+    let pre_turn_len = crate::executor::run_agent::read_chat_conversation(
         &gremlin,
         chat_turn_num.map(|n| n.saturating_sub(1)),
     )
@@ -3406,7 +3404,7 @@ async fn run_chat_turn(
                             // while we were awaiting the run task.
                             if !soft_cancel.load(Ordering::Acquire) {
                                 if let Some(turn_num) = chat_turn_num {
-                                    crate::executor::run::clear_chat_turn_artifact(
+                                    crate::executor::run_agent::clear_chat_turn_artifact(
                                         &recovered, turn_num,
                                     )
                                     .await;
@@ -3438,12 +3436,12 @@ async fn run_chat_turn(
                             } else {
                                 partial = Vec::new();
                             }
-                            crate::executor::run::strip_unpaired_tool_messages(&mut partial);
+                            crate::executor::run_agent::strip_unpaired_tool_messages(&mut partial);
                             if partial.is_empty() {
                                 partial.push(Message::user(user_prompt.clone()));
                             }
                             if let Some(turn_num) = chat_turn_num {
-                                crate::executor::run::append_chat_conversation_turn(
+                                crate::executor::run_agent::append_chat_conversation_turn(
                                     &recovered,
                                     turn_num,
                                     &partial,
@@ -3459,7 +3457,7 @@ async fn run_chat_turn(
                             // `mark_interrupted()`.
                             if !soft_cancel.load(Ordering::Acquire) {
                                 if let Some(turn_num) = chat_turn_num {
-                                    crate::executor::run::clear_chat_turn_artifact(
+                                    crate::executor::run_agent::clear_chat_turn_artifact(
                                         &recovered, turn_num,
                                     )
                                     .await;
@@ -3551,7 +3549,7 @@ async fn run_chat_turn(
                 match run_task.await {
                     Ok((_, gremlin)) => {
                         if let Some(turn_num) = chat_turn_num {
-                            crate::executor::run::clear_chat_turn_artifact(
+                            crate::executor::run_agent::clear_chat_turn_artifact(
                                 &gremlin,
                                 turn_num,
                             )
@@ -3610,7 +3608,7 @@ async fn run_chat_turn(
                 // chat turn.
                 if let Some(g) = gremlin_for_reinsert {
                     if let Some(turn_num) = chat_turn_num {
-                        crate::executor::run::clear_chat_turn_artifact(
+                        crate::executor::run_agent::clear_chat_turn_artifact(
                             &g,
                             turn_num,
                         )
@@ -3696,7 +3694,8 @@ async fn handle_cancel_chat(request: &Value, writer: &SharedWriter, session: &Se
                         .map(|c| c.turn_count());
 
                     if let Some(turn_num) = turn_num {
-                        crate::executor::run::clear_chat_turn_artifact(&gremlin, turn_num).await;
+                        crate::executor::run_agent::clear_chat_turn_artifact(&gremlin, turn_num)
+                            .await;
                     }
 
                     if let Some(chat) = gremlin
@@ -3828,7 +3827,7 @@ async fn register_chat_gremlin(session: &SessionHandle, mut gremlin: Gremlin) {
     };
     get_run_map().lock().unwrap().insert(id.clone(), handle);
 
-    emit_event(DaemonEvent::RunStarted {
+    emit_event(EventKind::RunStarted {
         id: id.clone(),
         definition: "chat".to_string(),
         stage: "chat".to_string(),
@@ -4107,19 +4106,14 @@ fn setup_gremlin_channels(
     broadcast::Sender<String>,
     InteractiveHandle,
 ) {
-    let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel();
     let (log_broadcast, _) = broadcast::channel(256);
-    gremlin.runtime_config.log_tx = Some(log_tx);
     let channels = InteractiveChannels::new();
     let (interactive_handle, interactive_session) = channels.split();
     gremlin.runtime_config.interactive = Some(interactive_handle.clone());
     gremlin.interactive_session = Some(interactive_session);
 
     // Stage-aware live stream: a dedicated broadcast that carries JSON lines
-    // for agent events (reasoning/text/tool) and exec stdout/stderr. The
-    // interactive-event forwarder below converts agent `InteractiveEvent`s
-    // into stage-stream lines; exec output is fed directly by the exec runner
-    // via `runtime_config.stage_stream_tx`.
+    // for agent events (reasoning/text/tool) and exec stdout/stderr.
     let (stage_stream_broadcast, _) = broadcast::channel(256);
     gremlin.runtime_config.stage_stream_tx = Some(stage_stream_broadcast.clone());
     crate::executor::stage_stream::spawn_stage_stream_forwarder(
@@ -4128,6 +4122,15 @@ fn setup_gremlin_channels(
     );
 
     let store = gremlin.state.store_handle();
+    let run_id = gremlin.id.to_string();
+
+    // Subscribe to the bus with a run-scoped prefix so the log writer
+    // only receives events for this gremlin.
+    let (_log_sub, log_rx) = init_bus()
+        .subscribe(SubscriberRegistration::lossless(
+            CorrId::new().with_run(&run_id),
+        ))
+        .expect("lossless subscription cannot fail");
     spawn_log_writer(log_rx, store, log_broadcast.clone(), relay);
     (log_broadcast, stage_stream_broadcast, interactive_handle)
 }
@@ -4137,9 +4140,10 @@ async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i
         Ok(ec) => ec,
         Err(e) => {
             log::error!("gremlin {}: {e}", gremlin.id.as_str());
-            if let Some(tx) = &gremlin.runtime_config.log_tx {
-                let _ = tx.send(format!("error: {e}"));
-            }
+            emit_event(EventKind::LogLine {
+                id: gremlin.id.to_string(),
+                line: format!("error: {e}"),
+            });
             crate::executor::stage_stream::send_stage_boundary(
                 &gremlin.runtime_config.stage_stream_tx,
                 "",
@@ -4152,9 +4156,9 @@ async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i
     (exit_code, gremlin)
 }
 
-/// Background task: reads log channel, appends to state blob, broadcasts.
+/// Background task: reads log events from the bus, appends to state blob, broadcasts.
 fn spawn_log_writer(
-    mut log_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    mut log_rx: ReceiverHalf<EventKind>,
     store: Arc<dyn state::StateStore + Send + Sync>,
     broadcast_tx: broadcast::Sender<String>,
     relay: Option<LogRelay>,
@@ -4193,23 +4197,32 @@ fn spawn_log_writer(
             })
         });
 
-        while let Some(line) = log_rx.recv().await {
-            let ts = crate::executor::state::now_stamp_millis();
-            // Stamp each newline-separated part so every physical log line
-            // carries a timestamp, even when a single message contains
-            // embedded newlines (e.g. stage names or error text).
-            for part in line.split('\n') {
-                let stamped = format!("{ts} {part}");
-                if writer.is_some() {
-                    let _ = write_tx.send(stamped.clone());
+        loop {
+            match log_rx.recv().await {
+                crate::magic_bus::Recv::Event(dispatch) => {
+                    let ts = crate::executor::state::now_stamp_millis();
+                    let line = match dispatch.kind() {
+                        EventKind::LogLine { line, .. } => line,
+                        _ => continue,
+                    };
+                    for part in line.split('\n') {
+                        let stamped = format!("{ts} {part}");
+                        if writer.is_some() {
+                            let _ = write_tx.send(stamped.clone());
+                        }
+                        if let Some(relay) = &relay {
+                            emit_event(EventKind::LogLine {
+                                id: relay.parent_id.clone(),
+                                line: format!("{}{}", relay.prefix, part),
+                            });
+                        }
+                    }
                 }
-                // Best-effort relay into the parent log: send the raw,
-                // un-timestamped part with the relay prefix applied (the
-                // parent's log writer adds its own timestamp). A failed
-                // send is ignored.
-                if let Some(relay) = &relay {
-                    let _ = relay.tx.send(format!("{}{}", relay.prefix, part));
+                crate::magic_bus::Recv::Lagged(_) => {
+                    // Log writer can't meaningfully recover from lag, but
+                    // this is Lossless so lag shouldn't occur.
                 }
+                crate::magic_bus::Recv::Closed => break,
             }
         }
     });
@@ -4267,7 +4280,7 @@ fn spawn_gremlin_runner(
     };
     get_run_map().lock().unwrap().insert(id.to_string(), handle);
 
-    emit_event(DaemonEvent::RunStarted {
+    emit_event(EventKind::RunStarted {
         id: id.to_string(),
         definition: definition_name.to_string(),
         stage: stage_label.to_string(),
@@ -4382,10 +4395,10 @@ pub(crate) struct LaunchResult {
     pub gremlin_rx: tokio::sync::oneshot::Receiver<Gremlin>,
 }
 
-/// Best-effort relay of a child's log into another gremlin's log channel.
+/// Best-effort relay of a child's log into the parent's event bus.
 #[derive(Clone)]
 pub(crate) struct LogRelay {
-    pub tx: tokio::sync::mpsc::UnboundedSender<String>,
+    pub parent_id: String,
     pub prefix: String,
 }
 
@@ -4458,7 +4471,7 @@ pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> Lau
     // Emit RunStarted so subscribers see the child before its terminal
     // event (finish already emits RunCompleted/RunFailed).
     let definition_name = definition_name_from_tree(&store.state_tree());
-    emit_event(DaemonEvent::RunStarted {
+    emit_event(EventKind::RunStarted {
         id: id.clone(),
         definition: definition_name,
         stage: "starting".to_string(),
@@ -4536,7 +4549,7 @@ fn terminate_and_reap(id: &str) {
         sd.write_terminal_state(1);
     }
     reap_client_for(id);
-    emit_event(DaemonEvent::RunStopped { id: id.to_string() });
+    emit_event(EventKind::RunStopped { id: id.to_string() });
 }
 
 // ---------------------------------------------------------------------------

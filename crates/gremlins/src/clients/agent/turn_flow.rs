@@ -547,5 +547,5 @@ fn emit_turn_metrics(
         reasoning_byte_ratio,
     );
     log::info!("{prefix}{msg}");
-    hooks.log(&format!("{prefix}{msg}"));
+    hooks.log_line(&format!("{prefix}{msg}"));
 }

@@ -29,7 +29,6 @@ use crate::artifacts::uri::Uri;
 use crate::core::proc::{run_logged_commands, ProcError};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run::{truncate, truncate_tail};
-use crate::executor::send_log;
 use crate::executor::state::BlobMode;
 use crate::executor::RunError;
 use crate::schemas::bootstrap::substitute_bootstrap_vars;
@@ -58,7 +57,6 @@ pub async fn run_bootstrap(
     cmds: &[String],
     cwd: &Path,
     env: &HashMap<String, String>,
-    log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     log_writer: Option<Box<dyn std::io::Write + Send>>,
 ) -> Result<(), RunError> {
     let cmds: Vec<String> = cmds
@@ -93,14 +91,12 @@ pub async fn run_bootstrap(
         &empty_env,
         None,
         log_writer,
-        log_tx,
         None,
     )
     .await;
 
     match result {
         Ok(r) if r.rc == 0 => {
-            send_log(log_tx, log::Level::Info, "bootstrap ok");
             log::info!("bootstrap ok");
             Ok(())
         }
@@ -123,7 +119,6 @@ pub async fn run_bootstrap(
                 )
             };
             let msg = format!("bootstrap failed (exit {}): {}", r.rc, detail);
-            send_log(log_tx, log::Level::Error, &msg);
             log::error!("{msg}");
             Err(RunError::BootstrapFailed {
                 exit_code: r.rc,
@@ -133,7 +128,6 @@ pub async fn run_bootstrap(
         Err(ProcError::CalledProcessError(rc, stdout, stderr)) => {
             let detail = failure_detail(&stdout, &stderr);
             let msg = format!("bootstrap failed (exit {rc}): {}", truncate(&detail, 2000));
-            send_log(log_tx, log::Level::Error, &msg);
             log::error!("{msg}");
             Err(RunError::BootstrapFailed {
                 exit_code: rc,
@@ -352,7 +346,6 @@ pub async fn run_definition_bootstrap(
     let bootstrap = gremlin.definition.bootstrap().clone();
     let cwd = gremlin.cwd();
     let env = gremlin.env.clone();
-    let log_tx = gremlin.runtime_config.log_tx.clone();
 
     // For the initial launch (not a fork), run launch_cmds first so the
     // workspace checkout exists before per-workspace cmds run against it.
@@ -360,7 +353,6 @@ pub async fn run_definition_bootstrap(
     // execute here.
     if !skip_launch && !bootstrap.launch_cmds.is_empty() {
         let msg = format!("running {} launch command(s)", bootstrap.launch_cmds.len());
-        send_log(&log_tx, log::Level::Info, &msg);
         log::info!("{msg}");
 
         // Every declared source key gets a value, even an absent one, so an
@@ -394,7 +386,6 @@ pub async fn run_definition_bootstrap(
             match parse_gremlins_command(command) {
                 Some((cmd_name, args)) => {
                     let msg = format!("launch DSL: {}({})", cmd_name, args.join(", "));
-                    send_log(&log_tx, log::Level::Info, &msg);
                     log::info!("{msg}");
                     run_dsl_command(&cmd_name, &args, gremlin).await?;
                 }
@@ -408,7 +399,7 @@ pub async fn run_definition_bootstrap(
                 .open_blob("command_logs/bootstrap.log", BlobMode::Append)
                 .ok()
                 .map(|b| b as Box<dyn std::io::Write + Send>);
-            run_bootstrap(&shell_cmds, &cwd, &env, &log_tx, log_writer).await?;
+            run_bootstrap(&shell_cmds, &cwd, &env, log_writer).await?;
         }
     }
 
@@ -418,12 +409,11 @@ pub async fn run_definition_bootstrap(
             .open_blob("command_logs/bootstrap.log", BlobMode::Append)
             .ok()
             .map(|b| b as Box<dyn std::io::Write + Send>);
-        run_bootstrap(&bootstrap.cmds, &cwd, &env, &log_tx, log_writer).await?;
+        run_bootstrap(&bootstrap.cmds, &cwd, &env, log_writer).await?;
     }
 
     if !skip_launch && !bootstrap.cli_out.is_empty() {
         let msg = format!("running {} cli_out binding(s)", bootstrap.cli_out.len());
-        send_log(&log_tx, log::Level::Info, &msg);
         log::info!("{msg}");
         run_cli_out(gremlin, &bootstrap.cli_out).await?;
     }
@@ -610,23 +600,17 @@ mod tests {
     async fn run_bootstrap_is_a_noop_without_commands() {
         let dir = tempfile::tempdir().unwrap();
         let env = std::env::vars().collect();
-        let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
-        assert!(run_bootstrap(&[], dir.path(), &env, &log_tx, None)
+        assert!(run_bootstrap(&[], dir.path(), &env, None).await.is_ok());
+        assert!(run_bootstrap(&["   ".to_string()], dir.path(), &env, None)
             .await
             .is_ok());
-        assert!(
-            run_bootstrap(&["   ".to_string()], dir.path(), &env, &log_tx, None)
-                .await
-                .is_ok()
-        );
     }
 
     #[tokio::test]
     async fn run_bootstrap_reports_the_exit_code() {
         let dir = tempfile::tempdir().unwrap();
         let env = std::env::vars().collect();
-        let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
-        let error = run_bootstrap(&["exit 7".to_string()], dir.path(), &env, &log_tx, None)
+        let error = run_bootstrap(&["exit 7".to_string()], dir.path(), &env, None)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -639,13 +623,11 @@ mod tests {
     async fn run_bootstrap_reports_stdout_when_stderr_is_blank() {
         let dir = tempfile::tempdir().unwrap();
         let env = std::env::vars().collect();
-        let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
         // stderr says nothing but a newline; the reason is on stdout.
         let error = run_bootstrap(
             &["printf 'the reason'; printf '\\n' >&2; exit 9".to_string()],
             dir.path(),
             &env,
-            &log_tx,
             None,
         )
         .await
@@ -657,12 +639,10 @@ mod tests {
     async fn run_bootstrap_injects_the_cwd_variable() {
         let dir = tempfile::tempdir().unwrap();
         let env = std::env::vars().collect();
-        let log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
         run_bootstrap(
             &["test \"$GREMLINS_BOOTSTRAP_CWD\" = \"$(pwd)\"".to_string()],
             dir.path(),
             &env,
-            &log_tx,
             None,
         )
         .await

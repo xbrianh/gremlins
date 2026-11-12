@@ -108,10 +108,10 @@ pub struct ExecPrepared {
     /// `prepare_exec` for the exec command templates. Merged into the
     /// child shell's environment in `run_shell`.
     pub substitution_env: HashMap<String, String>,
-    /// Per-gremlin log channel for exec stage lifecycle events.
-    pub log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// Stage stream broadcast for live watch pane output.
     pub(crate) stage_stream_tx: Option<broadcast::Sender<String>>,
+    /// Gremlin ID for routing LogLine events to the per-gremlin log writer.
+    pub gremlin_id: Option<String>,
 }
 
 /// Phase 1: resolve interpolation, compute bind paths, substitute commands.
@@ -241,8 +241,8 @@ pub async fn prepare_exec(
         env: HashMap::new(),
         base_env: HashMap::new(),
         substitution_env,
-        log_tx: None,
         stage_stream_tx,
+        gremlin_id: None,
     })
 }
 
@@ -280,14 +280,12 @@ pub async fn run_shell(
         .ok()
         .map(|b| b as Box<dyn std::io::Write + Send>);
 
-    if let Some(ref tx) = prepared.log_tx {
-        let _ = tx.send(format!(
-            "exec {}: running {} command(s) via instrumented script (timeout={:?})",
-            prepared.name,
-            prepared.cmds.len(),
-            prepared.timeout,
-        ));
-    }
+    log::info!(
+        "exec {}: running {} command(s) via instrumented script (timeout={:?})",
+        prepared.name,
+        prepared.cmds.len(),
+        prepared.timeout,
+    );
 
     // Bridge the stage-stream broadcast: create an mpsc channel for raw
     // line events from the process runner, then spawn a task that formats
@@ -323,7 +321,6 @@ pub async fn run_shell(
         &prepared.substitution_env,
         prepared.timeout,
         log_writer,
-        &prepared.log_tx,
         line_tx,
     )
     .await;
@@ -360,11 +357,19 @@ pub fn process_shell_result(
     let shell_stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
     let shell_rc = result.returncode;
 
-    if let Some(ref tx) = prepared.log_tx {
-        let _ = tx.send(format!(
-            "exec {name}: done rc={shell_rc} output_len={}",
-            raw_output_str.len(),
-        ));
+    // Unconditional: always emit the exec completion line, even when
+    // there is no gremlin_id — the log subscriber handles the log::info!
+    // side automatically.
+    {
+        use crate::executor::supervisor::emit_event;
+        use crate::executor::EventKind;
+        emit_event(EventKind::LogLine {
+            id: prepared.gremlin_id.clone().unwrap_or_default(),
+            line: format!(
+                "exec {name}: done rc={shell_rc} output_len={}",
+                raw_output_str.len(),
+            ),
+        });
     }
 
     // A non-zero exit is always an error.
@@ -556,8 +561,8 @@ mod tests {
             env: HashMap::new(),
             base_env: HashMap::new(),
             substitution_env,
-            log_tx: None,
             stage_stream_tx: None,
+            gremlin_id: None,
         };
 
         let state = StateData::with_state_dir(&state_dir);
@@ -586,8 +591,8 @@ mod tests {
             env: HashMap::new(),
             base_env: HashMap::new(),
             substitution_env: HashMap::new(),
-            log_tx: None,
             stage_stream_tx: None,
+            gremlin_id: None,
         }
     }
 
@@ -611,7 +616,6 @@ mod tests {
             name: "resolved".to_string(),
             cmds: vec!["echo \"${GREMLINS_INPUT}\"".to_string()],
             substitution_env,
-            log_tx: None,
             stage_stream_tx: None,
             ..make_prepared("resolved", vec!["echo ok"], &state_dir)
         };

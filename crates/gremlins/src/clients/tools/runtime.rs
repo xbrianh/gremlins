@@ -119,10 +119,6 @@ pub(crate) struct AgentLoopRuntime {
     /// Discovered skills for this session. Session-bound so concurrent chat
     /// sessions resolve their own project's skills instead of a shared slot.
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
-    /// Optional log channel for nested agent loops. When set,
-    /// `run_agent_loop_nested` logs "task: begin" and turn-level events
-    /// through this sender instead of using a no-op logger.
-    pub(crate) log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 impl AgentLoopRuntime {
     /// Send one completed live-output line for the tool call identified by

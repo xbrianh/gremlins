@@ -52,7 +52,6 @@ struct CmdContext {
     last_session_id: Option<String>,
     artifact_dir: Option<PathBuf>,
     gremlin_id: String,
-    log_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 impl CmdBackend {
@@ -197,7 +196,6 @@ impl CmdBackend {
         raw_path: Option<&PathBuf>,
         capture_events: bool,
         idle_timeout: f64,
-        log_tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<
         (
             StreamState,
@@ -281,7 +279,7 @@ impl CmdBackend {
                 if let Some(ref mut evts) = events {
                     evts.push(evt.clone());
                 }
-                stream_json::emit_event(prefix, &evt, log_tx);
+                stream_json::emit_event(prefix, &evt);
             }
         }
 
@@ -362,7 +360,7 @@ impl CmdBackend {
         session_id: Option<&str>,
         gremlin_id: &str,
     ) -> Result<CompletedRun, ClientError> {
-        let (model, cwd, extra_env, prefix, raw_path, capture_events, idle_timeout, artifact_dir, log_tx) = {
+        let (model, cwd, extra_env, prefix, raw_path, capture_events, idle_timeout, artifact_dir) = {
             let ctx_guard = self.ctx.lock().unwrap();
             let ctx = ctx_guard
                 .get(gremlin_id)
@@ -378,7 +376,6 @@ impl CmdBackend {
                 ctx.capture_events,
                 ctx.idle_timeout,
                 ctx.artifact_dir.clone(),
-                ctx.log_tx.clone(),
             )
         };
 
@@ -398,7 +395,6 @@ impl CmdBackend {
                 raw_path.as_ref(),
                 capture_events,
                 idle_timeout,
-                &log_tx,
             )
             .await?;
 
@@ -523,7 +519,6 @@ impl Backend for CmdBackend {
                     last_session_id: None,
                     artifact_dir: params.artifact_dir.clone(),
                     gremlin_id: gremlin_id.clone(),
-                    log_tx: params.log_tx.clone(),
                 },
             );
             *self.last_gremlin_id.lock().unwrap() = Some(gremlin_id.clone());

@@ -2264,7 +2264,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             // ── Daemon events ─────────────────────────────────
             Some(event) = event_rx.recv() => {
                 match event {
-                    gremlins::executor::DaemonEvent::RunStarted { id, definition, stage } => {
+                    gremlins::executor::EventKind::RunStarted { id, definition, stage } => {
                         log::info!("[run started] {id} ({definition}) stage={stage}");
                         app.on_run_started(id, definition, stage);
                         // Invalidate any in-flight ls snapshot so a stale
@@ -2272,14 +2272,14 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // (the snapshot predates the daemon event).
                         status_generation = status_generation.wrapping_add(1);
                     }
-                    gremlins::executor::DaemonEvent::RunCompleted { id, exit_code } => {
+                    gremlins::executor::EventKind::RunCompleted { id, exit_code } => {
                         log::info!("[run completed] {id} (exit {exit_code})");
                         if app.watch_following.as_deref() == Some(id.as_str()) {
                             app.watch_follow_error = None;
                         }
                         app.on_run_completed(id);
                     }
-                    gremlins::executor::DaemonEvent::RunFailed { id, exit_code, error } => {
+                    gremlins::executor::EventKind::RunFailed { id, exit_code, error } => {
                         let err_detail = error.as_deref().unwrap_or("");
                         if err_detail.is_empty() {
                             log::info!("[run failed] {id} (exit {exit_code})");
@@ -2291,14 +2291,14 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         }
                         app.on_run_failed(id);
                     }
-                    gremlins::executor::DaemonEvent::RunStopped { id } => {
+                    gremlins::executor::EventKind::RunStopped { id } => {
                         log::info!("[run stopped] {id}");
                         if app.watch_following.as_deref() == Some(id.as_str()) {
                             app.watch_follow_error = None;
                         }
                         app.on_run_stopped(id);
                     }
-                    gremlins::executor::DaemonEvent::RunRemoved { id } => {
+                    gremlins::executor::EventKind::RunRemoved { id } => {
                         log::info!("[run removed] {id}");
                         if app.watch_following.as_deref() == Some(id.as_str()) {
                             close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
@@ -2309,19 +2309,19 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // already removed from active_runs.
                         status_generation = status_generation.wrapping_add(1);
                     }
-                    gremlins::executor::DaemonEvent::StageTransition { id, stage } => {
+                    gremlins::executor::EventKind::StageTransition { id, stage } => {
                         log::info!("[{id}] stage → {stage}");
                         app.on_stage_transition(id, stage);
                     }
-                    gremlins::executor::DaemonEvent::LogLine { id, line } => {
+                    gremlins::executor::EventKind::LogLine { id, line } => {
                         if app.following_log.as_deref() == Some(&id) {
                             live_area.push_transcript_line(line.clone());
                         }
                     }
-                    gremlins::executor::DaemonEvent::Bail { id, reason } => {
+                    gremlins::executor::EventKind::Bail { id, reason } => {
                         log::info!("[{id}] bail: {reason}");
                     }
-                    gremlins::executor::DaemonEvent::TokenUsage {
+                    gremlins::executor::EventKind::TokenUsage {
                         id,
                         usage,
                         cost_usd,
@@ -2341,6 +2341,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             last_cached_input_tokens,
                         );
                     }
+                    // Session-scoped / stage-stream kinds never arrive on the
+                    // control socket; ignore anything else.
+                    _ => {}
                 }
             }
 

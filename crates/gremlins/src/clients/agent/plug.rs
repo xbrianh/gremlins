@@ -7,12 +7,6 @@ use std::sync::Arc;
 /// dependency is replaced by a typed handler slot that the caller
 /// (in `executor/run.rs`) wires up with closures.
 pub struct LoopHooks {
-    /// Log sink: `(message)`. Prefix is already baked into the
-    /// message by the agent loop call site. The default no-op handler
-    /// discards; the executor wires this to the per-gremlin log
-    /// channel.
-    #[allow(clippy::type_complexity)]
-    pub(crate) log_fn: Arc<dyn Fn(&str) + Send + Sync>,
     /// Prompt debug dumper: called with every serialized
     /// [`CompletionRequest`]; the closure checks `log_level_threshold`
     /// and writes to the state store.
@@ -20,22 +14,18 @@ pub struct LoopHooks {
     /// Token-usage emitter: `(totals, last_prompt_tokens, last_cached_input_tokens)`.
     #[allow(clippy::type_complexity)]
     pub(crate) emit_token_usage_fn: Arc<dyn Fn(UsageStats, Option<u64>, Option<u64>) + Send + Sync>,
+    /// Per-gremlin log-line emitter: called with every agent-loop log message.
+    pub(crate) log_line_fn: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 impl LoopHooks {
     /// Create a no-op hook set. All slots default to silent discards.
     pub(crate) fn new() -> Self {
         Self {
-            log_fn: Arc::new(|_| {}),
             dump_prompt_debug_fn: Arc::new(|_| {}),
             emit_token_usage_fn: Arc::new(|_, _, _| {}),
+            log_line_fn: Arc::new(|_| {}),
         }
-    }
-
-    /// Emit a log line through the registered handler. The message
-    /// already carries the stage/model/task prefix.
-    pub(crate) fn log(&self, msg: &str) {
-        (self.log_fn)(msg);
     }
 
     /// Dump a serialized request via the registered debug dumper.
@@ -53,12 +43,17 @@ impl LoopHooks {
         (self.emit_token_usage_fn)(totals, last_prompt_tokens, last_cached_input_tokens);
     }
 
-    /// Register a log handler.
-    pub(crate) fn register_logger<F>(&mut self, f: F)
+    /// Emit a log line through the registered log handler.
+    pub(crate) fn log_line(&self, msg: &str) {
+        (self.log_line_fn)(msg);
+    }
+
+    /// Register a log-line emitter.
+    pub(crate) fn register_log_line<F>(&mut self, f: F)
     where
         F: Fn(&str) + Send + Sync + 'static,
     {
-        self.log_fn = Arc::new(f);
+        self.log_line_fn = Arc::new(f);
     }
 
     /// Register a prompt debug dumper.
@@ -81,9 +76,9 @@ impl LoopHooks {
 impl Clone for LoopHooks {
     fn clone(&self) -> Self {
         Self {
-            log_fn: self.log_fn.clone(),
             dump_prompt_debug_fn: self.dump_prompt_debug_fn.clone(),
             emit_token_usage_fn: self.emit_token_usage_fn.clone(),
+            log_line_fn: self.log_line_fn.clone(),
         }
     }
 }
