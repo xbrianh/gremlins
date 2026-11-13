@@ -285,34 +285,14 @@ pub(crate) async fn run_agent(
             }
         });
     }
-    // Interactive session: take the pre-created handle or create a fresh one.
-    let interactive = match gremlin.interactive_session.take() {
-        Some(session) => Some(session),
-        None => match gremlin.runtime_config.interactive.as_ref() {
-            Some(handle) => {
-                let (tx, rx) = tokio::sync::mpsc::channel(8);
-                if let Some(actor_tx) = gremlin.runtime_config.actor_tx.clone() {
-                    let _ =
-                        actor_tx.send(super::supervisor::actor::ActorMsg::SetRunInteractiveCmd {
-                            id: gremlin.id.to_string(),
-                            cmd_tx: tx,
-                            respond: tokio::sync::oneshot::channel().0,
-                        });
-                }
-                Some(crate::clients::interactive::InteractiveSession {
-                    cmd_rx: rx,
-                    pause: handle.pause.clone(),
-                })
-            }
-            None => None,
-        },
-    };
-
     // Register the stream-event hook only when an interactive session exists
     // (chat, debug, or pipeline runs launched through the actor). Naked runs
     // and tests skip the hook so `wants_stream_events` stays false, avoiding
     // live-output channel allocation and EventKind construction overhead.
-    if interactive.is_some() {
+    //
+    // Check non-consumingly: the actual session is constructed below (the
+    // single authoritative construction site).
+    if gremlin.interactive_session.is_some() || gremlin.runtime_config.interactive.is_some() {
         let gremlin_id = gremlin.id.to_string();
         hooks.register_stream_event(move |event: EventKind| {
             let gremlin_id = gremlin_id.clone();

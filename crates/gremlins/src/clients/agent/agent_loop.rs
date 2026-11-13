@@ -10,7 +10,7 @@ use rig_core::driver::DynModel;
 use rig_core::error::ProviderError;
 use rig_core::operation::Completion;
 use rig_core::streaming::Streamed;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, watch, Semaphore};
 
 use crate::clients::backend::RunParams;
 use crate::clients::event::EventKind;
@@ -587,19 +587,23 @@ impl LoopState {
     ) -> Result<ToolDispatchOutcome, ClientError> {
         let ctx = tool_ctx.clone();
         // Forward live tool output only for the duration of this batch. The
-        // receiver is borrowed by the select below, so later batches never
-        // hear stale chunks and Esc/clear cannot resurrect old output.
-        // When cancellation wins the race after a line is dequeued, that
-        // line is dropped rather than forwarded. The old permit-based
-        // reservation prevented this; the bus-based path accepts the
-        // trade-off since a cancelled run discards its output anyway.
-        let forward_live_output = async {
-            if let Some(rx) = self.live_output_rx.as_mut() {
-                if self.hooks.wants_stream_events {
+        // receiver is taken for the duration of this batch, so later batches
+        // never hear stale chunks and Esc/clear cannot resurrect old output.
+        //
+        // Spawn the forwarder as a task so `exec_fut` completing never drops
+        // an in-flight `emit_stream_event` (which would lose the line already
+        // dequeued from `rx`). After the batch finishes, the stop signal
+        // flushes the forwarder and the receiver is returned to `self`.
+        let hooks = self.hooks.clone();
+        let stop_tx = if self.hooks.wants_stream_events {
+            if let Some(mut rx) = self.live_output_rx.take() {
+                let hooks = hooks.clone();
+                let (stop_tx, mut stop_rx) = watch::channel(false);
+                let handle = tokio::spawn(async move {
                     loop {
                         let line = tokio::select! {
                             biased;
-                            _ = cancel.cancelled() => break,
+                            _ = stop_rx.changed() => break,
                             line = rx.recv() => line,
                         };
                         let Some(line) = line else {
@@ -607,8 +611,8 @@ impl LoopState {
                         };
                         tokio::select! {
                             biased;
-                            _ = cancel.cancelled() => break,
-                            _ = self.hooks.emit_stream_event(EventKind::ToolOutputChunk {
+                            _ = stop_rx.changed() => break,
+                            _ = hooks.emit_stream_event(EventKind::ToolOutputChunk {
                                 id: line.id,
                                 name: line.name,
                                 call: line.call,
@@ -616,15 +620,25 @@ impl LoopState {
                             }) => {}
                         }
                     }
-                } else {
-                    // Drain the channel so the sender doesn't block when
-                    // no stream subscriber will consume the live output.
-                    while rx.recv().await.is_some() {}
-                }
+                    rx
+                });
+                Some((stop_tx, handle))
+            } else {
+                None
             }
-            // Park forever so this branch never resolves the select; the
-            // sender intentionally outlives an individual tool batch.
-            std::future::pending::<()>().await;
+        } else {
+            // Drain the channel so the sender doesn't block when
+            // no stream subscriber will consume the live output.
+            if let Some(mut rx) = self.live_output_rx.take() {
+                let handle = tokio::spawn(async move {
+                    while rx.recv().await.is_some() {}
+                    rx
+                });
+                let (stop_tx, _) = watch::channel(false);
+                Some((stop_tx, handle))
+            } else {
+                None
+            }
         };
         let sem = Arc::new(Semaphore::new(tools::MAX_CONCURRENT_TOOLS));
         // Borrow self.conv as &dyn Conversation so concurrent async blocks
@@ -644,8 +658,22 @@ impl LoopState {
         }));
 
         let outcomes = tokio::select! {
-            outcomes = exec_fut => outcomes,
-            _ = forward_live_output => unreachable!("live-output forwarder parks forever"),
+            outcomes = exec_fut => {
+                // Normal completion: signal the forwarder to stop, then
+                // await it. The forwarder's in-flight send (if any)
+                // completes before the rx is returned, so no line is
+                // lost. The post-batch drain in emit_tool_results picks
+                // up any remaining lines queued after the forwarder
+                // exited.
+                if let Some((stop_tx, handle)) = stop_tx {
+                    let _ = stop_tx.send(true);
+                    self.live_output_rx = Some(handle.await.unwrap_or_else(|_| {
+                        let (_tx, rx) = mpsc::channel(1);
+                        rx
+                    }));
+                }
+                outcomes
+            }
             _ = cancel.cancelled() => {
                 // Esc / cancel_chat during a tool batch: drop the join_all
                 // future (cancelling pending tool futures) and unwind the
@@ -654,6 +682,17 @@ impl LoopState {
                 // to complete.
                 self.hook_log(&format!("agent_loop: cancelled mid-tool (label={})", prefix));
                 self.hook_log(&format!("{prefix}exit: cancelled mid-tool"));
+                // Signal the forwarder to stop, then await it so its
+                // in-flight send completes and the rx is returned.
+                if let Some((stop_tx, handle)) = stop_tx {
+                    let _ = stop_tx.send(true);
+                    self.live_output_rx = Some(handle.await.unwrap_or_else(|_| {
+                        // If the forwarder panicked, create a fresh empty
+                        // channel so the agent loop doesn't crash.
+                        let (_tx, rx) = mpsc::channel(1);
+                        rx
+                    }));
+                }
                 discard_tool_output(&mut self.live_output_rx);
                 return Err(cancelled_error("cancelled", &self.conv.messages()));
             }
@@ -663,6 +702,14 @@ impl LoopState {
                 // (files written, bash commands run) are not unwound.
                 self.hook_log(&format!("agent_loop: paused mid-tool (label={})", prefix));
                 self.hook_log(&format!("{prefix}pause: entering interactive mode (mid-tool)"));
+                // Signal the forwarder to stop and await it.
+                if let Some((stop_tx, handle)) = stop_tx {
+                    let _ = stop_tx.send(true);
+                    self.live_output_rx = Some(handle.await.unwrap_or_else(|_| {
+                        let (_tx, rx) = mpsc::channel(1);
+                        rx
+                    }));
+                }
                 discard_tool_output(&mut self.live_output_rx);
                 if let Some(ref p) = self.pause {
                     p.reset();

@@ -10,7 +10,7 @@
 //! [`ActorMsg`] messages carried by the [`TurnCtx`](super::TurnCtx) mailbox.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
@@ -23,6 +23,7 @@ use crate::definition::ChatDefinition;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run_agent;
 use crate::executor::supervisor::chat::chat_payload;
+use crate::executor::supervisor::BusSubGuard;
 use crate::executor::supervisor::SharedWriter;
 use crate::executor::RunError;
 
@@ -47,22 +48,38 @@ pub(crate) struct TurnFinalizer {
     session_id: String,
     done: Arc<watch::Sender<bool>>,
     writer: SharedWriter,
+    /// Bus subscription guard: dropped before the gremlin is re-inserted so
+    /// the next turn's events don't fill the old, undrained mailbox.
+    _stream_guard: Mutex<Option<BusSubGuard>>,
 }
 
 impl TurnFinalizer {
-    /// Build a finalizer from the shared turn context and the connection
-    /// writer. Every field is cloned out of `ctx` so the finalizer owns its
-    /// own copies of the actor mailbox / cancel / done triple.
-    pub(crate) fn new(ctx: &super::TurnCtx, writer: SharedWriter) -> Self {
+    /// Build a finalizer from the shared turn context, the connection
+    /// writer, and the bus subscription guard. Every field is cloned so the
+    /// finalizer owns its own copies of the actor mailbox / cancel / done
+    /// triple.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        actor_tx: &mpsc::UnboundedSender<ActorMsg>,
+        session_id: &str,
+        id: &str,
+        turn: &Option<String>,
+        turn_cancel: &Arc<CancelToken>,
+        soft_cancel: &Arc<AtomicBool>,
+        done: &Arc<watch::Sender<bool>>,
+        writer: SharedWriter,
+        stream_guard: BusSubGuard,
+    ) -> Self {
         Self {
-            id: ctx.id.clone(),
-            turn: ctx.turn.clone(),
-            turn_cancel: Arc::clone(&ctx.turn_cancel),
-            soft_cancel: Arc::clone(&ctx.soft_cancel),
-            actor_tx: ctx.actor_tx.clone(),
-            session_id: ctx.session_id.clone(),
-            done: Arc::clone(&ctx.done),
+            id: id.to_string(),
+            turn: turn.clone(),
+            turn_cancel: Arc::clone(turn_cancel),
+            soft_cancel: Arc::clone(soft_cancel),
+            actor_tx: actor_tx.clone(),
+            session_id: session_id.to_string(),
+            done: Arc::clone(done),
             writer,
+            _stream_guard: Mutex::new(Some(stream_guard)),
         }
     }
 
@@ -75,8 +92,17 @@ impl TurnFinalizer {
         let _ = self.done.send(true);
     }
 
-    /// Re-insert the gremlin into the session.
+    /// Drop the bus subscription guard so the next turn (which reuses
+    /// the same run id) gets its own fresh subscription instead of
+    /// filling this turn's undrained mailbox.
+    fn drop_guard(&self) {
+        drop(self._stream_guard.lock().unwrap().take());
+    }
+
+    /// Re-insert the gremlin into the session. Drops the bus guard first
+    /// so the next turn's events don't queue into this turn's mailbox.
     pub(crate) async fn reinsert(&self, gremlin: Gremlin) {
+        self.drop_guard();
         Client::new(self.actor_tx.clone())
             .session_reinsert_gremlin(&self.session_id, &self.id, gremlin)
             .await;
@@ -212,6 +238,11 @@ impl TurnFinalizer {
     /// Re-insert the gremlin and mark `current_turn.interrupted`. If hard
     /// cancellation has won, falls back to [`Self::hard_cancel`] instead.
     async fn reinsert_and_mark_interrupted(&self, gremlin: Gremlin, chat_turn_num: Option<usize>) {
+        // Drop the bus guard before re-inserting the gremlin so the next
+        // turn gets its own subscription. Both the happy path
+        // (session_reinsert_and_mark_interrupted) and the fallback
+        // (hard_cancel -> reinsert) re-insert the gremlin.
+        self.drop_guard();
         if !self.soft_cancel.load(Ordering::Acquire) {
             // Hard cancel won while we were re-inserting.
             self.hard_cancel(Some(gremlin), chat_turn_num).await;

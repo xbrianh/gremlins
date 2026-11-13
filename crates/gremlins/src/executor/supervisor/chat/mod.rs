@@ -515,23 +515,33 @@ async fn run_chat_turn(
     mut gremlin: Gremlin,
     writer: SharedWriter,
 ) {
-    // Terminal-path resources live on the finalizer so every exit path
-    // re-inserts the gremlin and clears the in-flight turn the same way.
-    let finalizer = TurnFinalizer::new(&ctx, writer.clone());
-
     let id = ctx.id;
     let turn = ctx.turn;
     let turn_cancel = ctx.turn_cancel;
     let soft_cancel = ctx.soft_cancel;
 
-    // Subscribe to this run's stream events *before* spawning the stage runner
-    // so no early event (Ready, first chunks) is missed. The bounded buffer
-    // makes a slow front-end apply backpressure to the agent loop rather than
-    // dropping live stream events. The guard unsubscribes on every exit path:
-    // a leaked backpressured mailbox would otherwise stay full and stall the
-    // agent loop of a later turn (chat reuses the same run id).
+    // Subscribe to this run's stream events *before* spawning the stage
+    // runner so no early event (Ready, first chunks) is missed. The bounded
+    // buffer makes a slow front-end apply backpressure to the agent loop
+    // rather than dropping live stream events. The guard moves into the
+    // TurnFinalizer so it's dropped before the gremlin is re-inserted —
+    // otherwise the next turn (same run id) fills the old, undrained mailbox.
     let (stream_sub, mut stream_rx) = super::subscribe_run_backpressured(&id, 256);
-    let _stream_guard = super::BusSubGuard::new(stream_sub);
+    let stream_guard = super::BusSubGuard::new(stream_sub);
+
+    // Terminal-path resources live on the finalizer so every exit path
+    // re-inserts the gremlin and clears the in-flight turn the same way.
+    let finalizer = TurnFinalizer::new(
+        &ctx.actor_tx,
+        &ctx.session_id,
+        &id,
+        &turn,
+        &turn_cancel,
+        &soft_cancel,
+        &ctx.done,
+        writer.clone(),
+        stream_guard,
+    );
 
     // Capture the turn number from the stage name so cancel cleanup
     // can always clear the per-turn artifact.

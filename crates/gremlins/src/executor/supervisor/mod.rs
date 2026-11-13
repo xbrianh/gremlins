@@ -339,8 +339,26 @@ async fn handle_connection(
         loop {
             match event_rx.recv().await {
                 crate::magic_bus::Recv::Event(dispatch) => {
-                    let value =
-                        serde_json::to_value(dispatch.kind()).unwrap_or(serde_json::Value::Null);
+                    let kind = dispatch.kind();
+                    // Stream events belong to per-run/session subscribers
+                    // (chat, debug). Forwarding them through the global
+                    // control socket duplicates chat output and lets
+                    // unrelated runs' stream events leak into other sessions.
+                    if matches!(
+                        kind,
+                        EventKind::StreamChunk { .. }
+                            | EventKind::ReasoningChunk { .. }
+                            | EventKind::ToolOutputChunk { .. }
+                            | EventKind::ToolResult { .. }
+                            | EventKind::TurnComplete { .. }
+                            | EventKind::Done { .. }
+                            | EventKind::StreamReset
+                            | EventKind::Ready { .. }
+                            | EventKind::Ended { .. }
+                    ) {
+                        continue;
+                    }
+                    let value = serde_json::to_value(kind).unwrap_or(serde_json::Value::Null);
                     if event_writer.write_json_line(&value).await.is_err() {
                         break;
                     }
