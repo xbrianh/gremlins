@@ -1,10 +1,14 @@
 //! Client-side replay and dedup for the `/watch` stream pane.
 //!
-//! When a watch follow starts, this module replays the tail of the
-//! stage-appropriate blob (agent stream, exec log, or operational log),
-//! builds a dedup fingerprint set, and then attaches to the live
-//! `stage_stream` socket. Lines already replayed are skipped by the
-//! live follower so the watch pane never shows duplicates.
+//! When a watch follow starts, this module first subscribes to the live
+//! `stage_stream` socket (so no output is lost), then replays the tail of
+//! the stage-appropriate blob (agent stream, exec log, or operational log)
+//! to backfill history, builds a dedup fingerprint set, and then drains
+//! the buffered live stream. Lines already replayed are skipped so the
+//! watch pane never shows duplicates.
+//!
+//! The dedup checkpoint is cleared on every `stage_boundary` so one stage's
+//! history cannot suppress another stage's identical output.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -52,29 +56,20 @@ fn safe_name(name: &str) -> String {
 
 // ── Dedup fingerprints ─────────────────────────────────────────
 
-/// Build a dedup fingerprint from an old-style `stage_stream_line`
-/// envelope value.
+/// Compute a dedup fingerprint from a decoded stage_stream_line envelope.
 fn fingerprint(env: &serde_json::Value) -> String {
     let kind = env.get("kind").and_then(|v| v.as_str()).unwrap_or("");
     let text = env.get("text").and_then(|v| v.as_str()).unwrap_or("");
     format!("{kind}:{text}")
 }
 
-/// Compute a dedup fingerprint from a raw line (either an EventKind
-/// JSON value or an old-style `stage_stream_line` envelope).
+/// Compute a dedup fingerprint from a live EventKind JSON value.
 ///
-/// Structural events (`done`, `stream_reset`, etc.) always return
-/// `None` — they carry no text content worth deduplicating.
+/// Returns `None` for structural events (`done`, `stream_reset`,
+/// `stage_boundary`, `turn_complete`, `tool_output_chunk`, `tool_result`)
+/// — they carry no text content worth deduplicating.
 fn live_fingerprint(raw: &serde_json::Value) -> Option<String> {
-    if raw.get("type").and_then(|v| v.as_str()) == Some("stage_stream_line") {
-        let kind = raw.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-        let text = raw.get("text").and_then(|v| v.as_str()).unwrap_or("");
-        return Some(format!("{kind}:{text}"));
-    }
     // Structural events carry no text content worth deduplicating.
-    // Match raw type tags directly rather than classified kinds to avoid
-    // vocabulary mismatches (e.g. classify_stream_value maps
-    // "tool_output_chunk" → "tool_output").
     match raw.get("type").and_then(|v| v.as_str()) {
         Some("done")
         | Some("stream_reset")
@@ -116,8 +111,7 @@ fn format_tool_use_str(block: &serde_json::Value) -> String {
 }
 
 /// Decode one raw line from an `artifacts/stream-*.jsonl` blob into
-/// `stage_stream_line` envelope(s). Replicates the old daemon-side
-/// `agent_stream_lines` so replay looks identical to live streaming.
+/// `stage_stream_line` envelope(s).
 fn decode_agent_stream_line_to_envelopes(line: &str) -> Vec<serde_json::Value> {
     let parsed = match serde_json::from_str::<serde_json::Value>(line) {
         Ok(v) => v,
@@ -129,7 +123,7 @@ fn decode_agent_stream_line_to_envelopes(line: &str) -> Vec<serde_json::Value> {
             })];
         }
     };
-    let kind = match parsed.get("type").and_then(|v| v.as_str()) {
+    match parsed.get("type").and_then(|v| v.as_str()) {
         // Transcript records (persisted format).
         Some("assistant") => {
             if let Some(content) = parsed
@@ -161,11 +155,11 @@ fn decode_agent_stream_line_to_envelopes(line: &str) -> Vec<serde_json::Value> {
                     })
                     .collect();
             }
-            return vec![serde_json::json!({
+            vec![serde_json::json!({
                 "type": "stage_stream_line",
                 "kind": "log",
                 "text": line,
-            })];
+            })]
         }
         Some("user") => {
             if let Some(content) = parsed
@@ -196,65 +190,69 @@ fn decode_agent_stream_line_to_envelopes(line: &str) -> Vec<serde_json::Value> {
                     })
                     .collect();
             }
-            return vec![serde_json::json!({
+            vec![serde_json::json!({
                 "type": "stage_stream_line",
                 "kind": "log",
                 "text": line,
-            })];
+            })]
         }
-        Some("reminder") => "log",
-        // Legacy live-event schema compatibility.
-        Some("stream_chunk") => "text",
-        Some("reasoning_chunk") => "reasoning",
-        Some("tool_output_chunk") => "tool_output",
-        Some("tool_result") => "tool_result",
-        Some("turn_complete") => "turn_complete",
-        Some("done") => "done",
-        Some("stream_reset") => "stream_reset",
-        _ => "log",
-    };
-    let text = parsed
-        .get("text")
-        .or(parsed.get("message"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(line);
-    vec![serde_json::json!({
-        "type": "stage_stream_line",
-        "kind": kind,
-        "text": text,
-    })]
+        Some("reminder") => vec![serde_json::json!({
+            "type": "stage_stream_line",
+            "kind": "log",
+            "text": line,
+        })],
+        _ => vec![serde_json::json!({
+            "type": "stage_stream_line",
+            "kind": "log",
+            "text": line,
+        })],
+    }
 }
 
 // ── Entry point ────────────────────────────────────────────────
 
-/// Replay the tail of the stage-appropriate blob, build a dedup set,
-/// then follow the live stage stream (falling back to operational log).
+/// Subscribe to the live stage stream, replay blob history, then drain
+/// the buffered live stream with deduplication.
 ///
 /// All output is sent through `log_tx` tagged with `follow_id` and
 /// `generation` so the event loop ignores messages from superseded
 /// follows.
+///
+/// The dedup checkpoint is cleared on `stage_boundary` events so one
+/// stage's output never suppresses another stage's identical output.
 pub(crate) async fn replay_and_dedup(
     client: Arc<DaemonClient>,
     follow_id: String,
-    current_stage: String,
+    _current_stage: String,
+    replay_stage: String,
     generation: u64,
     log_tx: mpsc::UnboundedSender<serde_json::Value>,
 ) {
-    let mut dedup: HashSet<String> = HashSet::new();
+    let send_error = |msg: &str| {
+        let _ = log_tx.send(serde_json::json!({
+            "type": "view_error",
+            "id": follow_id,
+            "generation": generation,
+            "message": msg,
+        }));
+    };
 
-    // ── Blob selection ──────────────────────────────────────
-    let blob = if current_stage.is_empty() {
+    // ── Subscribe first so no live output is lost ─────────
+    let stage_result = client.follow_stage_stream(&follow_id).await;
+
+    // ── Blob selection ────────────────────────────────────
+    let blob = if replay_stage.is_empty() {
         "log".to_string()
     } else if let Ok(def) = client.read_definition(&follow_id).await {
         let stage_type = def
             .get("stages")
-            .and_then(|stages| find_in_tree(stages, &current_stage));
+            .and_then(|stages| find_in_tree(stages, &replay_stage));
         match stage_type.as_deref() {
             Some("agent") => {
-                format!("artifacts/stream-{}.jsonl", safe_name(&current_stage))
+                format!("artifacts/stream-{}.jsonl", safe_name(&replay_stage))
             }
             Some("exec") => {
-                format!("command_logs/exec-{}.log", safe_name(&current_stage))
+                format!("command_logs/exec-{}.log", safe_name(&replay_stage))
             }
             _ => "log".to_string(),
         }
@@ -262,7 +260,9 @@ pub(crate) async fn replay_and_dedup(
         "log".to_string()
     };
 
-    // ── Replay ──────────────────────────────────────────────
+    let mut dedup: HashSet<String> = HashSet::new();
+
+    // ── Replay blob history ───────────────────────────────
     if let Ok(lines) = client.read_blob(&follow_id, &blob, 500).await {
         'replay: for line in lines {
             let envelopes: Vec<serde_json::Value> = if blob.starts_with("artifacts/stream-") {
@@ -300,12 +300,23 @@ pub(crate) async fn replay_and_dedup(
         }
     }
 
-    // ── Live following ──────────────────────────────────────
-    let stage_result = client.follow_stage_stream(&follow_id).await;
+    // ── Drain buffered live stream ────────────────────────
     match stage_result {
         Ok((mut rx, handle)) => {
             let _guard = AbortOnDrop(handle);
             while let Some(raw) = rx.recv().await {
+                // Clear dedup on stage boundaries so one stage's history
+                // cannot suppress another stage's identical output.
+                if raw.get("type").and_then(|v| v.as_str()) == Some("stage_boundary") {
+                    dedup.clear();
+                }
+
+                // Filter unclassified events — lifecycle traffic like
+                // `stage_transition` must not reach the watch pane.
+                if classify_stream_value(&raw).is_none() {
+                    continue;
+                }
+
                 // Skip lines whose fingerprint was already replayed.
                 if let Some(fp) = live_fingerprint(&raw) {
                     if dedup.contains(&fp) {
@@ -322,14 +333,9 @@ pub(crate) async fn replay_and_dedup(
                     break;
                 }
             }
-            let _ = log_tx.send(serde_json::json!({
-                "type": "view_error",
-                "id": follow_id,
-                "generation": generation,
-                "message": "stage stream closed",
-            }));
+            send_error("stage stream closed");
         }
-        Err(_stage_err) => {
+        Err(_) => {
             // Fall back to operational log.
             match client.follow_log(&follow_id).await {
                 Ok((mut rx, handle)) => {
@@ -348,20 +354,10 @@ pub(crate) async fn replay_and_dedup(
                             break;
                         }
                     }
-                    let _ = log_tx.send(serde_json::json!({
-                        "type": "view_error",
-                        "id": follow_id,
-                        "generation": generation,
-                        "message": "log stream closed",
-                    }));
+                    send_error("log stream closed");
                 }
                 Err(e) => {
-                    let _ = log_tx.send(serde_json::json!({
-                        "type": "view_error",
-                        "id": follow_id,
-                        "generation": generation,
-                        "message": e,
-                    }));
+                    send_error(&e);
                 }
             }
         }

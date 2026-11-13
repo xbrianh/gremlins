@@ -187,17 +187,30 @@ fn start_watch_follow(
     let client = Arc::clone(client);
     let follow_id = id.clone();
 
-    // Snapshot the current stage name so we know which blob to replay.
-    // The stage field in ActiveRun is kept up to date by StageTransition
-    // events; falls back to empty (→ operational log) when unknown.
-    let current_stage = app
-        .active_runs
-        .get(&follow_id)
-        .map(|r| r.stage.clone())
-        .unwrap_or_default();
+    // Snapshot the current stage and sub_stage so we know which blob
+    // to replay. For terminal runs (done/failed/stopped), always
+    // select the operational log so final diagnostics remain visible.
+    let run = app.active_runs.get(&follow_id);
+    let is_terminal = run.map_or(true, |r| {
+        matches!(r.status.as_str(), "done" | "failed" | "stopped")
+    });
+    let current_stage = if is_terminal {
+        String::new()
+    } else {
+        run.map(|r| r.stage.clone()).unwrap_or_default()
+    };
+    // Use sub_stage (leaf) for blob lookup when available; falls back
+    // to stage for top-level stages and terminal runs.
+    let replay_stage = if is_terminal {
+        String::new()
+    } else if let Some(r) = run {
+        if r.sub_stage.is_empty() { r.stage.clone() } else { r.sub_stage.clone() }
+    } else {
+        String::new()
+    };
 
     let follow_task = tokio::spawn(async move {
-        watch_replay::replay_and_dedup(client, follow_id, current_stage, generation, log_tx).await;
+        watch_replay::replay_and_dedup(client, follow_id, current_stage, replay_stage, generation, log_tx).await;
     });
     *watch_follow_handle = Some(follow_task);
 }
@@ -2258,9 +2271,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // already removed from active_runs.
                         status_generation = status_generation.wrapping_add(1);
                     }
-                    gremlins::executor::EventKind::StageTransition { id, stage } => {
-                        log::info!("[{id}] stage → {stage}");
-                        app.on_stage_transition(id, stage);
+                    gremlins::executor::EventKind::StageTransition { id, stage, sub_stage } => {
+                        log::info!("[{id}] stage → {stage}, sub_stage={:?}", sub_stage);
+                        app.on_stage_transition(id, stage, sub_stage);
                     }
                     gremlins::executor::EventKind::LogLine { id, line } => {
                         if app.following_log.as_deref() == Some(&id) {
