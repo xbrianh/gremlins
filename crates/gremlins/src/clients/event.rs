@@ -116,4 +116,13 @@ pub enum EventKind {
         stage_type: String,
         active: bool,
     },
+
+    // ── Exec output (stdout/stderr from exec stages) ───────────────────
+    #[serde(rename = "exec_output")]
+    ExecOutput {
+        id: String,
+        is_stderr: bool,
+        text: String,
+        ts: String,
+    },
 }
