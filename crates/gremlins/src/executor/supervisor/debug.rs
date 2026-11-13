@@ -1,11 +1,10 @@
 //! Interactive debug handler (`handle_debug` op).
 
-use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::io::BufReader;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::clients::interactive::{InteractiveCommand, InteractiveEvent};
 use crate::config;
@@ -13,8 +12,9 @@ use crate::executor::gremlin::validate_gremlin_id;
 use crate::executor::socket;
 use crate::executor::state;
 
+use super::actor::ActorMsg;
 use super::ops::resolve_store_for_id;
-use super::{error_response, get_run_map, DebugDetachGuard, SharedWriter};
+use super::{error_response, DebugDetachGuard, SharedWriter};
 
 pub(crate) async fn send_debug_status(writer: &SharedWriter, stage: &str) {
     let payload = serde_json::json!({"type": "status", "stage": stage});
@@ -23,7 +23,7 @@ pub(crate) async fn send_debug_status(writer: &SharedWriter, stage: &str) {
 
 pub(crate) async fn handle_debug(
     request: &Value,
-    _state_root: &Path,
+    actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
     mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: &SharedWriter,
 ) {
@@ -45,7 +45,7 @@ pub(crate) async fn handle_debug(
     // Resolve a StateStore: for live gremlins (including ephemeral) use the
     // handle stored in the RunHandle; otherwise open the persistent store
     // under `config::state_root()`.
-    let store = match resolve_store_for_id(id) {
+    let store = match resolve_store_for_id(id, actor_tx).await {
         Ok(store) => store,
         Err(resp) => {
             let _ = writer.write_json_line(&resp).await;
@@ -121,10 +121,18 @@ pub(crate) async fn handle_debug(
         }
     }
 
-    // Get the interactive handle from the run map.
-    let interactive_handle = {
-        let map = get_run_map().lock().unwrap();
-        map.get(id).map(|h| h.interactive.clone())
+    // Get the interactive handle from the actor.
+    let (interactive_tx, interactive_rx) = oneshot::channel();
+    let interactive_handle = if actor_tx
+        .send(ActorMsg::GetRunInteractive {
+            id: id.to_string(),
+            respond: interactive_tx,
+        })
+        .is_ok()
+    {
+        interactive_rx.await.ok().flatten()
+    } else {
+        None
     };
 
     let interactive_handle = match interactive_handle {

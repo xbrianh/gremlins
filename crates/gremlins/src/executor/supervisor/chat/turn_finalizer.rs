@@ -5,12 +5,15 @@
 //! connection writer) and consolidates the repetitive re-insert-and-clear
 //! sequences that `run_chat_turn` used to spell out inline. Each method is a
 //! faithful extraction of one of those sequences.
+//!
+//! Session and run-map state is actor-owned; the finalizer reaches it through
+//! [`ActorMsg`] messages carried by the [`TurnCtx`](super::TurnCtx) mailbox.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use rig_core::completion::Message;
@@ -19,11 +22,12 @@ use crate::clients::cancel::CancelToken;
 use crate::definition::ChatDefinition;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run_agent;
-use crate::executor::supervisor::chat::{chat_payload, reinsert_chat_gremlin};
-use crate::executor::supervisor::get_run_map;
-use crate::executor::supervisor::session::SessionHandle;
+use crate::executor::supervisor::chat::chat_payload;
 use crate::executor::supervisor::SharedWriter;
 use crate::executor::RunError;
+
+use crate::executor::supervisor::actor::ActorMsg;
+use crate::executor::supervisor::actor_client::Client;
 
 /// Handle returned by the task that runs a chat stage, carrying the stage
 /// result and the gremlin back to the forwarding task.
@@ -39,7 +43,8 @@ pub(crate) struct TurnFinalizer {
     turn: Option<String>,
     turn_cancel: Arc<CancelToken>,
     soft_cancel: Arc<AtomicBool>,
-    session: SessionHandle,
+    actor_tx: mpsc::UnboundedSender<ActorMsg>,
+    session_id: String,
     done: Arc<watch::Sender<bool>>,
     writer: SharedWriter,
 }
@@ -47,14 +52,15 @@ pub(crate) struct TurnFinalizer {
 impl TurnFinalizer {
     /// Build a finalizer from the shared turn context and the connection
     /// writer. Every field is cloned out of `ctx` so the finalizer owns its
-    /// own copies of the session/cancel/done triple.
+    /// own copies of the actor mailbox / cancel / done triple.
     pub(crate) fn new(ctx: &super::TurnCtx, writer: SharedWriter) -> Self {
         Self {
             id: ctx.id.clone(),
             turn: ctx.turn.clone(),
             turn_cancel: Arc::clone(&ctx.turn_cancel),
             soft_cancel: Arc::clone(&ctx.soft_cancel),
-            session: Arc::clone(&ctx.session),
+            actor_tx: ctx.actor_tx.clone(),
+            session_id: ctx.session_id.clone(),
             done: Arc::clone(&ctx.done),
             writer,
         }
@@ -63,18 +69,17 @@ impl TurnFinalizer {
     /// Clear `current_turn` on the session (only when it still points at this
     /// turn's cancel token), then publish `true` on `done` so waiters proceed.
     pub(crate) async fn clear_turn_and_signal(&self) {
-        let mut s = self.session.lock().await;
-        if let Some(cur) = &s.current_turn {
-            if Arc::ptr_eq(&cur.cancel, &self.turn_cancel) {
-                s.current_turn = None;
-            }
-        }
+        Client::new(self.actor_tx.clone())
+            .session_clear_current_turn(&self.session_id, Arc::clone(&self.turn_cancel))
+            .await;
         let _ = self.done.send(true);
     }
 
     /// Re-insert the gremlin into the session.
     pub(crate) async fn reinsert(&self, gremlin: Gremlin) {
-        reinsert_chat_gremlin(&self.id, gremlin, &self.session).await;
+        Client::new(self.actor_tx.clone())
+            .session_reinsert_gremlin(&self.session_id, &self.id, gremlin)
+            .await;
     }
 
     /// Re-insert the gremlin when present, then clear the in-flight turn and
@@ -146,9 +151,7 @@ impl TurnFinalizer {
     /// `ended` with reason `interrupted`.
     ///
     /// A hard cancel may race the soft path at two points before the final
-    /// section; both are re-checked. The final re-insertion + interrupted
-    /// update is one session-locked transition so a hard cancel cannot win
-    /// between reinsert and the `interrupted` flag flip.
+    /// section; both are re-checked.
     pub(crate) async fn soft_interrupt(
         &self,
         mut recovered: Gremlin,
@@ -199,38 +202,29 @@ impl TurnFinalizer {
             chat.mark_interrupted();
         }
 
-        // Re-insert the gremlin and mark current_turn interrupted in one
-        // session-locked transition. Holding the lock across both operations
-        // closes the TOCTOU window where a hard cancel could win between
-        // reinsertion and the interrupted flag flip.
+        // Re-insert the gremlin, then mark `current_turn` interrupted. The
+        // actor guards the interrupted flip by the turn's cancel token, so a
+        // hard cancel that won the race is not mis-marked.
         self.reinsert_and_mark_interrupted(recovered, chat_turn_num)
             .await;
     }
 
-    /// Re-insert the gremlin and mark `current_turn.interrupted` under one
-    /// session lock. If hard cancellation has won, falls back to
-    /// [`Self::hard_cancel`] instead.
+    /// Re-insert the gremlin and mark `current_turn.interrupted`. If hard
+    /// cancellation has won, falls back to [`Self::hard_cancel`] instead.
     async fn reinsert_and_mark_interrupted(&self, gremlin: Gremlin, chat_turn_num: Option<usize>) {
-        let mut s = self.session.lock().await;
         if !self.soft_cancel.load(Ordering::Acquire) {
-            // Hard cancel won while we were waiting for the lock.
-            drop(s);
+            // Hard cancel won while we were re-inserting.
             self.hard_cancel(Some(gremlin), chat_turn_num).await;
             return;
         }
-        // Inline reinsert — same guards as `reinsert_chat_gremlin`.
-        if !s.chat_ids.contains(&self.id) || !get_run_map().lock().unwrap().contains_key(&self.id) {
-            drop(gremlin);
-        } else {
-            s.chat_gremlins.insert(self.id.clone(), gremlin);
-        }
-        // Mark interrupted under the same lock — no race window.
-        if let Some(cur) = &mut s.current_turn {
-            if Arc::ptr_eq(&cur.cancel, &self.turn_cancel) {
-                cur.interrupted = true;
-            }
-        }
-        drop(s);
+        Client::new(self.actor_tx.clone())
+            .session_reinsert_and_mark_interrupted(
+                &self.session_id,
+                &self.id,
+                gremlin,
+                Arc::clone(&self.turn_cancel),
+            )
+            .await;
         let _ = self.done.send(true);
         self.write(serde_json::json!({
             "type": "ended",

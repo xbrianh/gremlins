@@ -31,6 +31,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tokio::sync::mpsc;
+
 use indexmap::IndexMap;
 use serde_json::{Map, Value};
 
@@ -186,6 +188,10 @@ pub(crate) struct RuntimeConfig {
     /// every stream event. Chat and debug mode set this; normal pipelines
     /// leave it None for zero overhead.
     pub stream_events: Option<StreamEventSender>,
+    /// The actor's mailbox: `launch_child` / `stop_child` reach through this
+    /// to register parallel-executor children in the run map without
+    /// reaching into a global lock.
+    pub actor_tx: Option<mpsc::UnboundedSender<super::supervisor::actor::ActorMsg>>,
 }
 
 impl Clone for RuntimeConfig {
@@ -201,6 +207,7 @@ impl Clone for RuntimeConfig {
             stage_stream_tx: self.stage_stream_tx.clone(),
             interactive: self.interactive.clone(),
             stream_events: self.stream_events.clone(),
+            actor_tx: self.actor_tx.clone(),
         }
     }
 }
@@ -256,6 +263,7 @@ impl RuntimeConfig {
             stage_stream_tx: None,
             interactive: None,
             stream_events: None,
+            actor_tx: None,
         }
     }
 }

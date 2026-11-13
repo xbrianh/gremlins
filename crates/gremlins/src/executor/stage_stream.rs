@@ -9,20 +9,20 @@
 
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
 use tokio::io::BufReader;
 use tokio::net::unix::OwnedReadHalf;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::clients::interactive::InteractiveEvent;
 use crate::config;
 use crate::executor::socket;
 use crate::executor::state;
+use crate::executor::supervisor::actor::ActorMsg;
 use crate::executor::supervisor::{
-    error_response, get_run_map, init_bus, resolve_store_for_id, subscribe_run, SharedWriter,
+    error_response, init_bus, resolve_store_for_id, subscribe_run, SharedWriter,
 };
 use crate::magic_bus::{ReceiverHalf, Recv};
 
@@ -61,7 +61,7 @@ const STAGE_STREAM_MAX_HISTORY: usize = 500;
 /// the already-open receivers — no queued live event is discarded.
 pub(crate) async fn handle_stage_stream(
     request: &Value,
-    _state_root: &Path,
+    actor_tx: &mpsc::UnboundedSender<ActorMsg>,
     mut reader: BufReader<OwnedReadHalf>,
     writer: &SharedWriter,
 ) {
@@ -77,7 +77,7 @@ pub(crate) async fn handle_stage_stream(
         return;
     }
 
-    let store = match resolve_store_for_id(id) {
+    let store = match resolve_store_for_id(id, actor_tx).await {
         Ok(store) => store,
         Err(resp) => {
             let _ = writer.write_json_line(&resp).await;
@@ -107,16 +107,28 @@ pub(crate) async fn handle_stage_stream(
         classify_stage_stream(&store, &stage_name).await
     };
 
-    serve_stage_stream_loop(id, &store, follow, kind, &stage_name, &mut reader, writer).await;
+    serve_stage_stream_loop(
+        id,
+        &store,
+        follow,
+        kind,
+        &stage_name,
+        actor_tx,
+        &mut reader,
+        writer,
+    )
+    .await;
 }
 
 /// Core loop: replay history + follow live, with stage-boundary re-evaluation.
+#[allow(clippy::too_many_arguments)]
 async fn serve_stage_stream_loop(
     id: &str,
     store: &Arc<dyn state::StateStore + Send + Sync>,
     follow: bool,
     mut kind: StageStreamKind,
     initial_stage_name: &str,
+    actor_tx: &mpsc::UnboundedSender<ActorMsg>,
     reader: &mut BufReader<OwnedReadHalf>,
     writer: &SharedWriter,
 ) {
@@ -135,14 +147,21 @@ async fn serve_stage_stream_loop(
     // flush barrier so pre-subscription log lines are persisted before
     // we read history.
     let (stage_rx, log_rx, log_sub) = if follow {
-        let (flush, stage_rx) = {
-            let map = get_run_map().lock().unwrap();
-            let handle = map.get(id);
-            let stage_rx = handle.map(|h| h.stage_stream_broadcast.subscribe());
-            // Clone the flush channel, drop the lock before awaiting.
-            let flush = handle.and_then(|h| h.log_flush.clone());
-            (flush, stage_rx)
+        let (stage_tx_opt, flush) = {
+            let (tx, rx) = oneshot::channel();
+            if actor_tx
+                .send(ActorMsg::GetRunStageStreamAndFlush {
+                    id: id.to_string(),
+                    respond: tx,
+                })
+                .is_ok()
+            {
+                rx.await.ok().unwrap_or((None, None))
+            } else {
+                (None, None)
+            }
         };
+        let stage_rx = stage_tx_opt.map(|tx| tx.subscribe());
         // Flush barrier: wait for the log writer to persist currently-queued
         // events so they're visible when we replay the blob.
         if let Some(flush) = &flush {

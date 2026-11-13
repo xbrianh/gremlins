@@ -8,13 +8,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::config;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state::{self, FileSystemStateStore};
 use crate::executor::{null_field, str_field};
 
-use super::{error_response, get_run_map};
+use super::actor::ActorMsg;
+use super::error_response;
 
 pub(crate) struct StateView {
     id: String,
@@ -136,10 +138,21 @@ pub(crate) fn open_persisted_gremlin(id: &str) -> Result<(Gremlin, PathBuf), Val
     Ok((gremlin, state_dir))
 }
 
-pub(crate) fn state_view_for_id(id: &str) -> Result<StateView, Value> {
-    let live = {
-        let map = get_run_map().lock().unwrap();
-        map.get(id).map(|h| h.store.clone())
+pub(crate) async fn state_view_for_id(
+    id: &str,
+    actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
+) -> Result<StateView, Value> {
+    let (store_tx, store_rx) = oneshot::channel();
+    let live = if actor_tx
+        .send(ActorMsg::GetRunStore {
+            id: id.to_string(),
+            respond: store_tx,
+        })
+        .is_ok()
+    {
+        store_rx.await.ok().flatten()
+    } else {
+        None
     };
     if let Some(store) = live {
         return StateView::from_live(id, &store);

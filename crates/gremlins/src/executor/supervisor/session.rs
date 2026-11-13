@@ -1,117 +1,24 @@
 //! Session management: session lifecycle, socket accept loop, and teardown.
-
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, OnceLock};
+//!
+//! All session state lives in [`super::actor`] behind [`super::actor::ActorMsg`].
+//! This module is the IO layer: it owns the session sockets and translates
+//! socket requests into actor messages.
 
 use serde_json::Value;
 use tokio::io::BufReader;
 use tokio::net::unix::OwnedReadHalf;
 use tokio::net::UnixListener;
-use tokio::sync::mpsc;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
-use crate::executor::gremlin::Gremlin;
 use crate::executor::socket;
 
-use super::chat::{cleanup_chat_gremlin, handle_cancel_chat, handle_chat};
+use super::actor::ActorMsg;
+use super::actor_client::Client;
+use super::chat::{handle_cancel_chat, handle_chat};
 use super::debug::handle_debug;
-use super::event::ConnectionGuard;
 use super::log_handler::handle_log;
 use super::ops::{handle_chat_model, handle_compact, handle_session_stop};
-use super::{error_response, ok_response, CurrentTurn, SharedWriter};
-
-/// Daemon-side assets for one interactive front-end session.
-///
-/// Owns chat gremlins, the in-flight turn, and all session-socket connections.
-/// Lifetime is bound to the main session-socket connection; teardown drops
-/// gremlins and closes aux sockets.
-pub(crate) struct ClientSession {
-    pub(crate) session_id: String,
-    /// The task that owns the session's [`UnixListener`]. Stored so teardown
-    /// can stop accepting new connections before the socket is unlinked.
-    pub(crate) listener_task: Option<tokio::task::JoinHandle<()>>,
-    /// Chat gremlins currently parked in the session, keyed by gremlin id.
-    /// A gremlin is moved out while a turn is running and re-inserted when
-    /// the turn finishes.
-    pub(crate) chat_gremlins: HashMap<String, Gremlin>,
-    /// Gremlin ids owned by this session. Kept separate from
-    /// `chat_gremlins` because an in-flight turn temporarily removes its
-    /// gremlin from the map without relinquishing ownership.
-    pub(crate) chat_ids: HashSet<String>,
-    /// The in-flight chat turn, if any.
-    pub(crate) current_turn: Option<CurrentTurn>,
-    /// Auxiliary socket tasks (log follow, debug) opened on the session
-    /// socket. Aborted when the session dies.
-    pub(crate) aux_sockets: Vec<tokio::task::JoinHandle<()>>,
-    /// Set when the main socket reaches EOF/error; stops the dispatcher and
-    /// rejects newly-arriving aux connections. Distinct from `torn_down`:
-    /// teardown still runs after request-side closure so session resources
-    /// are drained exactly once on the EOF path.
-    pub(crate) closed: bool,
-    /// Set when teardown has begun. Teardown is idempotent under this flag,
-    /// but the flag is *not* set by request-side closure (`closed`).
-    pub(crate) torn_down: bool,
-    /// Session-scoped set of active skill names. Shared with the agent loop
-    /// so the LoadSkill tool can add names mid-turn. `/clear` resets it.
-    pub(crate) active_skills: Arc<Mutex<Vec<String>>>,
-    /// Skill names the operator explicitly requested on the last turn
-    /// (the `skills` field from the chat request). Used to compute the
-    /// delta when merging operator toggles with model LoadSkill pushes.
-    pub(crate) operator_skills: Vec<String>,
-}
-
-impl ClientSession {
-    pub(crate) fn new(session_id: String) -> Self {
-        Self {
-            session_id,
-            listener_task: None,
-            chat_gremlins: HashMap::new(),
-            chat_ids: HashSet::new(),
-            current_turn: None,
-            aux_sockets: Vec::new(),
-            closed: false,
-            torn_down: false,
-            active_skills: Arc::new(Mutex::new(Vec::new())),
-            operator_skills: Vec::new(),
-        }
-    }
-
-    /// Cancel the current turn only if it belongs to `id`. Returns the done
-    /// receiver so the caller can wait for the turn to drain.
-    pub(crate) fn cancel_turn_for_id(&self, id: &str) -> Option<watch::Receiver<bool>> {
-        self.current_turn.as_ref().and_then(|cur| {
-            if cur.id == id {
-                cur.soft_cancel.store(false, Ordering::Relaxed);
-                cur.cancel.cancel();
-                Some(cur.done.clone())
-            } else {
-                None
-            }
-        })
-    }
-
-    /// Hard-cancel the current turn regardless of which gremlin owns it.
-    /// Returns the done receiver so the caller can wait for the turn to drain.
-    pub(crate) fn cancel_current_turn(&self) -> Option<watch::Receiver<bool>> {
-        self.current_turn.as_ref().map(|cur| {
-            cur.soft_cancel.store(false, Ordering::Relaxed);
-            cur.cancel.cancel();
-            cur.done.clone()
-        })
-    }
-}
-
-/// Shared handle to a [`ClientSession`], keyed by session id.
-pub(crate) type SessionHandle = Arc<tokio::sync::Mutex<ClientSession>>;
-
-/// Global session map. Ids are unforgeable, returned by `create_session`.
-static SESSION_MAP: OnceLock<Arc<Mutex<HashMap<String, SessionHandle>>>> = OnceLock::new();
-
-pub(crate) fn session_map() -> &'static Arc<Mutex<HashMap<String, SessionHandle>>> {
-    SESSION_MAP.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
-}
+use super::{error_response, ok_response, ConnectionGuard, SharedWriter};
 
 /// Validate `id` as a session identifier.
 pub(crate) fn validate_session_id(id: &str) -> Result<(), String> {
@@ -136,59 +43,47 @@ pub(crate) fn validate_session_id(id: &str) -> Result<(), String> {
 pub(crate) async fn run_session_listener(
     listener: UnixListener,
     session_id: String,
-    session: SessionHandle,
-    state_root: PathBuf,
-    shutdown_tx: watch::Sender<bool>,
+    actor_tx: mpsc::UnboundedSender<ActorMsg>,
 ) {
     const SESSION_MAIN_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
     // Set once the main connection has shut down and the session has been
-    // torn down. The accept loop watches it so it can stop accepting new
-    // aux connections and drop the listener.
+    // torn down. The accept loop watches it so it can stop accepting new aux
+    // connections and drop the listener.
     let (death_tx, mut death_rx) = watch::channel(false);
-    let mut shutdown_rx = shutdown_tx.subscribe();
 
     // The first connection must be the session main connection. Bound the
-    // wait so a client that crashes between `create_session` and connect
-    // does not leave a zombie session in `SESSION_MAP` forever.
+    // wait so a client that crashes between `create_session` and connect does
+    // not leave a zombie session in the actor's session map forever.
     let first = tokio::time::timeout(SESSION_MAIN_CONNECT_TIMEOUT, listener.accept()).await;
     match first {
         Ok(Ok((stream, _addr))) => {
             let (read_half, write_half) = stream.into_split();
-            let session_for_task = Arc::clone(&session);
-            let state_root_for_task = state_root.clone();
-            let shutdown_tx_for_task = shutdown_tx.clone();
+            let actor_tx_for_task = actor_tx.clone();
+            let session_id_for_task = session_id.clone();
             let death_tx_for_task = death_tx.clone();
             let _main_handle = tokio::spawn(async move {
-                let _guard = ConnectionGuard::new(&shutdown_tx_for_task);
                 let writer = SharedWriter::new(write_half);
-                handle_session_main(
-                    read_half,
-                    writer,
-                    Arc::clone(&session_for_task),
-                    &state_root_for_task,
-                )
-                .await;
+                handle_session_main(read_half, writer, session_id_for_task, actor_tx_for_task)
+                    .await;
                 let _ = death_tx_for_task.send(true);
             });
         }
         Ok(Err(e)) => {
             log::error!("session {session_id}: first accept error: {e}");
-            teardown_session_from_listener(&session, &state_root).await;
+            request_teardown(&actor_tx, &session_id, false).await;
             return;
         }
         Err(_) => {
             log::warn!("session {session_id}: timed out waiting for main connection");
-            teardown_session_from_listener(&session, &state_root).await;
+            request_teardown(&actor_tx, &session_id, false).await;
             return;
         }
     }
 
     // Subsequent connections are auxiliary sockets on the same session
-    // socket. The main connection death signal and the supervisor shutdown
-    // signal both stop the loop without torn-down here: the main task and
-    // `run_supervisor` own teardown respectively.
-    let mut tear_down_on_exit = false;
+    // socket. The main connection death signal stops the loop without teardown
+    // here: the main task owns teardown.
     loop {
         tokio::select! {
             _ = death_rx.changed() => {
@@ -196,47 +91,36 @@ pub(crate) async fn run_session_listener(
                     break;
                 }
             }
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    break;
-                }
-            }
             result = listener.accept() => {
                 match result {
                     Ok((stream, _addr)) => {
                         let (read_half, write_half) = stream.into_split();
-                        let session_for_task = Arc::clone(&session);
-                        let state_root_for_task = state_root.clone();
-                        let shutdown_tx_for_task = shutdown_tx.clone();
+                        let actor_tx_for_task = actor_tx.clone();
+                        let session_id_for_task = session_id.clone();
                         let aux_task = tokio::spawn(async move {
-                            let _guard = ConnectionGuard::new(&shutdown_tx_for_task);
                             handle_session_aux(
                                 read_half,
                                 write_half,
-                                Arc::clone(&session_for_task),
-                                &state_root_for_task,
+                                session_id_for_task,
+                                actor_tx_for_task,
                             )
                             .await;
                         });
-                        let mut s = session.lock().await;
-                        if s.closed {
-                            aux_task.abort();
-                        } else {
-                            s.aux_sockets.push(aux_task);
-                        }
+                        // Register the aux socket with the actor so teardown
+                        // can abort it. A session that already closed refuses
+                        // the connection (the task aborts itself).
+                        Client::new(actor_tx.clone())
+                            .session_push_aux_socket(&session_id, aux_task)
+                            .await;
                     }
                     Err(e) => {
                         log::error!("session {session_id}: accept error: {e}");
-                        tear_down_on_exit = true;
+                        request_teardown(&actor_tx, &session_id, false).await;
                         break;
                     }
                 }
             }
         }
-    }
-
-    if tear_down_on_exit {
-        teardown_session_from_listener(&session, &state_root).await;
     }
 }
 
@@ -245,25 +129,29 @@ pub(crate) async fn run_session_listener(
 pub(crate) async fn handle_session_main(
     main_read: OwnedReadHalf,
     writer: SharedWriter,
-    session: SessionHandle,
-    state_root: &Path,
+    session_id: String,
+    actor_tx: mpsc::UnboundedSender<ActorMsg>,
 ) {
+    // Hold the connection-count guard for the lifetime of the main connection.
+    let _guard = ConnectionGuard::new(&actor_tx);
+
     let (request_tx, request_rx) = mpsc::channel::<Value>(64);
 
-    let reader_session = Arc::clone(&session);
+    let reader_actor_tx = actor_tx.clone();
+    let reader_session_id = session_id.clone();
     let mut reader_handle = tokio::spawn(async move {
-        run_session_main_reader(main_read, request_tx, reader_session).await;
+        run_session_main_reader(main_read, request_tx, reader_actor_tx, reader_session_id).await;
     });
 
-    let dispatcher_session = Arc::clone(&session);
+    let dispatcher_actor_tx = actor_tx.clone();
     let dispatcher_writer = writer.clone();
-    let dispatcher_state_root = state_root.to_path_buf();
+    let dispatcher_session_id = session_id.clone();
     let mut dispatcher_handle = tokio::spawn(async move {
         run_session_dispatcher(
             request_rx,
             dispatcher_writer,
-            dispatcher_session,
-            dispatcher_state_root,
+            dispatcher_session_id,
+            dispatcher_actor_tx,
         )
         .await;
     });
@@ -285,21 +173,18 @@ pub(crate) async fn handle_session_main(
             let _ = reader_handle.await;
         }
     }
-    teardown_session(&session, state_root).await;
+    request_teardown(&actor_tx, &session_id, true).await;
 }
 
 /// Read JSON-lines from main socket, forward to dispatcher. On EOF/error,
-/// mark session closed and cancel in-flight turn.
+/// mark the session closed (the actor cancels the in-flight turn).
 pub(crate) async fn run_session_main_reader(
     main_read: OwnedReadHalf,
     request_tx: mpsc::Sender<Value>,
-    session: SessionHandle,
+    actor_tx: mpsc::UnboundedSender<ActorMsg>,
+    session_id: String,
 ) {
     let mut reader = BufReader::new(main_read);
-    let session_id = {
-        let s = session.lock().await;
-        s.session_id.clone()
-    };
 
     loop {
         match socket::read_json_line(&mut reader).await {
@@ -310,13 +195,9 @@ pub(crate) async fn run_session_main_reader(
             }
             Ok(None) | Err(_) => {
                 log::debug!("session {session_id}: main socket EOF/error");
-                let mut s = session.lock().await;
-                if !s.closed {
-                    s.closed = true;
-                    if let Some(cur) = &s.current_turn {
-                        cur.cancel.cancel();
-                    }
-                }
+                Client::new(actor_tx.clone())
+                    .session_mark_closed(&session_id)
+                    .await;
                 break;
             }
         }
@@ -332,14 +213,9 @@ pub(crate) enum SessionOp {
 pub(crate) async fn run_session_dispatcher(
     mut request_rx: mpsc::Receiver<Value>,
     writer: SharedWriter,
-    session: SessionHandle,
-    state_root: PathBuf,
+    session_id: String,
+    actor_tx: mpsc::UnboundedSender<ActorMsg>,
 ) {
-    let session_id = {
-        let s = session.lock().await;
-        s.session_id.clone()
-    };
-
     loop {
         let request = match request_rx.recv().await {
             Some(request) => request,
@@ -358,22 +234,20 @@ pub(crate) async fn run_session_dispatcher(
             continue;
         }
 
-        match handle_session_op(op.as_str(), &request, &state_root, &writer, &session).await {
-            SessionOp::CloseRequested => {
-                // Tear down before acknowledging so the client cannot race
-                // ahead while the gremlin is still live.
-                teardown_session(&session, &state_root).await;
-                let _ = writer
-                    .write_json_line(&ok_response(serde_json::json!({})))
-                    .await;
-                return;
-            }
+        match handle_session_op(op.as_str(), &request, &writer, &session_id, &actor_tx).await {
+            // `handle_session_op` already tore the session down (and awaited
+            // it) before acknowledging, so the client cannot race ahead while
+            // the gremlin is still live.
+            SessionOp::CloseRequested => return,
             SessionOp::Continue => {}
         }
 
         // EOF may have been observed while this op was still running. Stop
         // processing queued requests for the now-dead session.
-        if session_is_closed(&session).await {
+        if Client::new(actor_tx.clone())
+            .session_is_closed(&session_id)
+            .await
+        {
             break;
         }
     }
@@ -382,35 +256,43 @@ pub(crate) async fn run_session_dispatcher(
 pub(crate) async fn handle_session_op(
     op: &str,
     request: &Value,
-    state_root: &Path,
     writer: &SharedWriter,
-    session: &SessionHandle,
+    session_id: &str,
+    actor_tx: &mpsc::UnboundedSender<ActorMsg>,
 ) -> SessionOp {
     match op {
         "chat" => {
-            handle_chat(request, state_root, writer, session).await;
+            handle_chat(request, writer, actor_tx, session_id).await;
             SessionOp::Continue
         }
         "chat_model" => {
-            let resp = handle_chat_model(request, session).await;
+            let resp = handle_chat_model(request, actor_tx, session_id).await;
             let _ = writer.write_json_line(&resp).await;
             SessionOp::Continue
         }
         "cancel_chat" => {
-            handle_cancel_chat(request, writer, session).await;
+            handle_cancel_chat(request, writer, actor_tx, session_id).await;
             SessionOp::Continue
         }
         "compact" => {
-            let resp = handle_compact(request, session).await;
+            let resp = handle_compact(request, actor_tx, session_id).await;
             let _ = writer.write_json_line(&resp).await;
             SessionOp::Continue
         }
         "stop" => {
-            let resp = handle_session_stop(request, session).await;
+            let resp = handle_session_stop(request, actor_tx, session_id).await;
             let _ = writer.write_json_line(&resp).await;
             SessionOp::Continue
         }
-        "close_session" => SessionOp::CloseRequested,
+        "close_session" => {
+            // Tear down before acknowledging so the client cannot race ahead
+            // while the gremlin is still live.
+            request_teardown(actor_tx, session_id, true).await;
+            let _ = writer
+                .write_json_line(&ok_response(serde_json::json!({})))
+                .await;
+            SessionOp::CloseRequested
+        }
         _ => {
             let resp = error_response(&format!("unknown session op: {op:?}"));
             let _ = writer.write_json_line(&resp).await;
@@ -419,24 +301,18 @@ pub(crate) async fn handle_session_op(
     }
 }
 
-pub(crate) async fn session_is_closed(session: &SessionHandle) -> bool {
-    session.lock().await.closed
-}
-
 /// Serve a single auxiliary connection. First request names a streaming op
-/// (`log`/`debug`).
+/// (`log`/`debug`/`stage_stream`).
 pub(crate) async fn handle_session_aux(
     read_half: OwnedReadHalf,
     write_half: tokio::net::unix::OwnedWriteHalf,
-    session: SessionHandle,
-    state_root: &Path,
+    session_id: String,
+    actor_tx: mpsc::UnboundedSender<ActorMsg>,
 ) {
+    // Hold the connection-count guard for the lifetime of the aux connection.
+    let _guard = ConnectionGuard::new(&actor_tx);
     let writer = SharedWriter::new(write_half);
     let mut reader = BufReader::new(read_half);
-    let session_id = {
-        let s = session.lock().await;
-        s.session_id.clone()
-    };
 
     let request = match socket::read_json_line(&mut reader).await {
         Ok(Some(v)) => v,
@@ -455,16 +331,16 @@ pub(crate) async fn handle_session_aux(
     let op = request.get("op").and_then(|v| v.as_str()).unwrap_or("");
     match op {
         "log" => {
-            handle_log(&request, state_root, reader, &writer).await;
+            handle_log(&request, &actor_tx, reader, &writer).await;
         }
         "stage_stream" => {
             crate::executor::stage_stream::handle_stage_stream(
-                &request, state_root, reader, &writer,
+                &request, &actor_tx, reader, &writer,
             )
             .await;
         }
         "debug" => {
-            handle_debug(&request, state_root, reader, &writer).await;
+            handle_debug(&request, &actor_tx, reader, &writer).await;
         }
         _ => {
             let resp = error_response(&format!("unknown session op: {op:?}"));
@@ -489,75 +365,17 @@ pub(crate) fn verify_session_id(request: &Value, expected: &str) -> Result<(), V
     }
 }
 
-/// Tear down a session: cancel in-flight turn, abort aux sockets, drop chat
-/// gremlins, remove session state, unlink session socket.
-pub(crate) async fn teardown_session(session: &SessionHandle, state_root: &Path) {
-    teardown_session_impl(session, state_root, true).await;
-}
-
-/// Listener-exit variant of [`teardown_session`] — does NOT abort the listener.
-pub(crate) async fn teardown_session_from_listener(session: &SessionHandle, state_root: &Path) {
-    teardown_session_impl(session, state_root, false).await;
-}
-
-pub(crate) async fn teardown_session_impl(
-    session: &SessionHandle,
-    state_root: &Path,
+/// Ask the actor to tear down a session and wait for the drain to finish.
+///
+/// `abort_listener` stops the listener task before the socket is unlinked.
+/// Callers *outside* the listener (the main connection) pass `true`; the
+/// listener itself passes `false` so it does not abort its own task.
+async fn request_teardown(
+    actor_tx: &mpsc::UnboundedSender<ActorMsg>,
+    session_id: &str,
     abort_listener: bool,
 ) {
-    let (chat_ids, chat_gremlins, aux_sockets, listener_task, session_id, turn_done) = {
-        let mut s = session.lock().await;
-        if s.torn_down {
-            return;
-        }
-        s.torn_down = true;
-        s.closed = true;
-
-        let turn_done = s.cancel_current_turn();
-
-        let chat_ids: Vec<String> = s.chat_ids.drain().collect();
-        let chat_gremlins = std::mem::take(&mut s.chat_gremlins);
-        let aux_sockets = std::mem::take(&mut s.aux_sockets);
-        let listener_task = s.listener_task.take();
-        (
-            chat_ids,
-            chat_gremlins,
-            aux_sockets,
-            listener_task,
-            s.session_id.clone(),
-            turn_done,
-        )
-    };
-
-    if abort_listener {
-        if let Some(listener_task) = listener_task {
-            listener_task.abort();
-        }
-    } else {
-        drop(listener_task);
-    }
-
-    // Abort aux sockets and await them so their connection-count guards run
-    // before we reap the gremlins and remove the session.
-    for aux in aux_sockets {
-        aux.abort();
-        let _ = aux.await;
-    }
-
-    // Wait for a cancelled in-flight turn to finish and relinquish its
-    // `Gremlin` before we clean up the run map entry it may still touch.
-    if let Some(mut done) = turn_done {
-        let _ = done.wait_for(|v| *v).await;
-    }
-
-    for id in &chat_ids {
-        cleanup_chat_gremlin(id).await;
-    }
-
-    // Drop any parked gremlins only after `cleanup_chat_gremlin` has removed
-    // their run-map entries and reaped their clients.
-    drop(chat_gremlins);
-
-    session_map().lock().unwrap().remove(&session_id);
-    socket::unlink_session_socket(state_root, &session_id);
+    Client::new(actor_tx.clone())
+        .session_teardown(session_id, abort_listener)
+        .await;
 }

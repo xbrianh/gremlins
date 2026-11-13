@@ -19,7 +19,7 @@ use crate::executor::agent_runner::{commit_agent, prepare_agent};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state;
 use crate::executor::state::{Checkout, Collision, FileSystemStateStore};
-use crate::executor::supervisor::{emit_event, get_run_map};
+use crate::executor::supervisor::emit_event;
 use crate::executor::EventKind;
 use crate::executor::RunError;
 use crate::task_kind::TaskKind;
@@ -342,22 +342,28 @@ pub(crate) async fn run_agent(
     });
 
     // Interactive session: take the pre-created handle or create a fresh one.
-    let interactive = gremlin.interactive_session.take().or_else(|| {
-        let (tx, rx) = tokio::sync::mpsc::channel(8);
-        let interactive = gremlin.runtime_config.interactive.as_ref();
-        let pause = interactive.map(|h| h.pause.clone());
-        if let Ok(mut map) = get_run_map().lock() {
-            if let Some(handle) = map.get_mut(gremlin.id.as_str()) {
-                handle.interactive.cmd_tx = tx;
+    let interactive = match gremlin.interactive_session.take() {
+        Some(session) => Some(session),
+        None => match gremlin.runtime_config.interactive.as_ref() {
+            Some(handle) => {
+                let (tx, rx) = tokio::sync::mpsc::channel(8);
+                if let Some(actor_tx) = gremlin.runtime_config.actor_tx.clone() {
+                    let _ =
+                        actor_tx.send(super::supervisor::actor::ActorMsg::SetRunInteractiveCmd {
+                            id: gremlin.id.to_string(),
+                            cmd_tx: tx,
+                            respond: tokio::sync::oneshot::channel().0,
+                        });
+                }
+                Some(crate::clients::interactive::InteractiveSession {
+                    cmd_rx: rx,
+                    evt_tx: handle.evt_tx.clone(),
+                    pause: handle.pause.clone(),
+                })
             }
-        }
-        let pause = pause?;
-        interactive.map(|h| crate::clients::interactive::InteractiveSession {
-            cmd_rx: rx,
-            evt_tx: h.evt_tx.clone(),
-            pause,
-        })
-    });
+            None => None,
+        },
+    };
 
     log::debug!(
         "agent stage '{}' (gremlin={}): invoking client.run (model={})",

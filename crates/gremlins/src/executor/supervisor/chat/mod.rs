@@ -2,6 +2,10 @@
 //! and chat gremlin lifecycle.
 //!
 //! Terminal-path handling for a turn lives in [`turn_finalizer`].
+//!
+//! All session and run-map state lives in [`super::actor`]; this module reaches
+//! it exclusively through [`ActorMsg`] messages. There is no shared session
+//! handle and no `RUN_MAP` lock — the actor serializes every transition.
 
 mod turn_finalizer;
 
@@ -13,10 +17,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use serde_json::{Map, Value};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use crate::clients::cancel::CancelToken;
-use crate::clients::client::{Client, ModelURI};
+use crate::clients::client::{Client as ModelClient, ModelURI};
 use crate::clients::interactive::{InteractiveEvent, StreamEventSender};
 use crate::clients::protocol::{add_opt, UsageStats};
 use crate::config;
@@ -24,13 +28,9 @@ use crate::definition::ChatDefinition;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
 use crate::executor::state;
 
-use super::event::{emit_event, init_bus, EventKind};
-use super::lifecycle::setup_gremlin_channels;
-use super::lifecycle::terminate_and_reap;
-use super::session::SessionHandle;
-use super::{
-    error_response, get_run_map, ok_response, CurrentTurn, RunHandle, RunState, SharedWriter,
-};
+use super::actor::ActorMsg;
+use super::actor_client::Client;
+use super::{error_response, ok_response, CurrentTurn, SharedWriter};
 
 /// Daemon process environment, captured once at startup. Requests without `env`
 /// fall back to this snapshot.
@@ -56,11 +56,13 @@ pub(crate) fn resolve_chat_env(
 
 pub(crate) async fn handle_chat(
     request: &Value,
-    _state_root: &Path,
     writer: &SharedWriter,
-    session: &SessionHandle,
+    actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
+    session_id: &str,
 ) {
     log::debug!("handle_chat: received chat request");
+
+    let client = Client::new(actor_tx.clone());
 
     // The daemon owns the conversation; the session owns the gremlin. The
     // front-end never sends a gremlin id — it only addresses the session.
@@ -162,18 +164,13 @@ pub(crate) async fn handle_chat(
     //
     //    The session owns at most one chat gremlin today, but
     //    representations keep a map for multiple.
-    let mut id = reusable_chat_gremlin_id(session).await;
+    let mut id = reusable_chat_gremlin_id(actor_tx, session_id).await;
     if let Some(existing) = &id {
         // The gremlin may have been removed from the run map by a control-side
         // `stop`. Treat it as gone and let the next message start fresh.
-        if !get_run_map()
-            .lock()
-            .unwrap()
-            .contains_key(existing.as_str())
-        {
-            let mut s = session.lock().await;
-            s.chat_ids.remove(existing);
-            s.chat_gremlins.remove(existing);
+        if !client.contains_run(existing).await {
+            let _ = client.session_take_gremlin(session_id, existing).await;
+            let _ = client.session_remove_chat_id(session_id, existing).await;
             id = None;
         }
     }
@@ -191,23 +188,18 @@ pub(crate) async fn handle_chat(
         tokio::task::spawn_blocking(move || crate::skills::discover(&project_root_for_skills))
             .await
             .unwrap_or_default();
-    let (active_skills, active_skills_arc) = {
-        let mut s = session.lock().await;
-        let skills_arc = Arc::clone(&s.active_skills);
-        let prev_operator = std::mem::take(&mut s.operator_skills);
-        let mut guard = skills_arc.lock().unwrap();
-        // Merge operator toggles into the active set: add names the operator
-        // newly requested, remove names the operator explicitly dropped.
-        for name in &requested_skills {
-            if !guard.contains(name) {
-                guard.push(name.clone());
-            }
+    // The actor merges the operator toggles into the session's active set and
+    // returns the resulting names plus the shared `Arc` the agent loop reads.
+    let (active_skills, active_skills_arc) = match client
+        .session_update_skills(session_id, requested_skills.clone())
+        .await
+    {
+        Some(skills) => skills,
+        None => {
+            let resp = error_response("session closed");
+            let _ = writer.write_json_line(&resp).await;
+            return;
         }
-        guard.retain(|name| requested_skills.contains(name) || !prev_operator.contains(name));
-        s.operator_skills = requested_skills.clone();
-        let names = guard.clone();
-        drop(guard);
-        (names, skills_arc)
     };
     let (trusted_section, unresolved_skills) =
         crate::skills::build_system_prompt_section(&all_skills, &active_skills);
@@ -219,74 +211,72 @@ pub(crate) async fn handle_chat(
     let id = match id {
         Some(id) => id,
         None => {
-            let gremlin =
-                match create_chat_gremlin(&chat_model, &system_prompt, &project_root, &env) {
-                    Ok(g) => g,
-                    Err(e) => {
-                        let resp = error_response(&e);
-                        let _ = writer.write_json_line(&resp).await;
-                        return;
-                    }
-                };
-            let id = gremlin.id.to_string();
-            {
-                let mut s = session.lock().await;
-                if s.closed {
-                    drop(gremlin);
-                    let resp = error_response("session closed");
+            let gremlin = match create_chat_gremlin(
+                actor_tx,
+                &chat_model,
+                &system_prompt,
+                &project_root,
+                &env,
+            ) {
+                Ok(g) => g,
+                Err(e) => {
+                    let resp = error_response(&e);
                     let _ = writer.write_json_line(&resp).await;
                     return;
                 }
-                s.chat_ids.insert(id.clone());
+            };
+            let id = gremlin.id.to_string();
+            if client.session_is_closed(session_id).await {
+                drop(gremlin);
+                let resp = error_response("session closed");
+                let _ = writer.write_json_line(&resp).await;
+                return;
             }
-            register_chat_gremlin(session, gremlin).await;
+            // `register_chat_gremlin` parks the gremlin and installs the
+            // run-map entry; ownership is registered as part of that message.
+            client.register_chat_gremlin(session_id, gremlin).await;
             id
         }
     };
 
     // Ensure the id is still marked as owned by this session (for the reuse
     // path it already is, and this keeps the invariant local).
-    {
-        let mut s = session.lock().await;
-        if s.closed {
-            let resp = error_response("session closed");
-            let _ = writer.write_json_line(&resp).await;
-            return;
-        }
-        s.chat_ids.insert(id.clone());
+    if client.session_is_closed(session_id).await {
+        let resp = error_response("session closed");
+        let _ = writer.write_json_line(&resp).await;
+        return;
     }
+    client.session_add_chat_id(session_id, &id).await;
 
     // 6. Take the gremlin out of the session, install this turn's definition,
-    //    stream channel, and a fresh per-turn cancel token, then drop the
-    //    session lock before running so other ops are not serialized.
+    //    stream channel, and a fresh per-turn cancel token. The session is
+    //    actor-owned, so other ops are never serialized behind a lock here.
     let (stream_tx, stream_rx) = tokio::sync::mpsc::channel::<InteractiveEvent>(256);
     let turn_cancel = CancelToken::new();
-    let mut gremlin = {
-        let mut s = session.lock().await;
-        match s.chat_gremlins.remove(&id) {
-            Some(g) => g,
-            None => {
-                let resp = error_response(&format!("unknown chat gremlin {id:?}"));
-                let _ = writer.write_json_line(&resp).await;
-                return;
-            }
+    let mut gremlin = match client.session_take_gremlin(session_id, &id).await {
+        Some(g) => g,
+        None => {
+            let resp = error_response(&format!("unknown chat gremlin {id:?}"));
+            let _ = writer.write_json_line(&resp).await;
+            return;
         }
     };
     // Rebuild the parsed model handle for the reused gremlin so a `/model`
     // change takes effect on the next turn rather than only after the chat
     // gremlin is recreated. Build the client before mutating the gremlin so
     // a failure re-inserts it unchanged (old definition, old client).
-    let client = match Client::from_uri(chat_model.clone()) {
+    let llm_client = match ModelClient::from_uri(chat_model.clone()) {
         Ok(client) => client,
         Err(e) => {
-            let mut s = session.lock().await;
-            s.chat_gremlins.insert(id.clone(), gremlin);
+            let _ = client
+                .session_reinsert_gremlin(session_id, &id, gremlin)
+                .await;
             let resp = error_response(&format!("invalid chat model '{chat_model}': {e}"));
             let _ = writer.write_json_line(&resp).await;
             return;
         }
     };
-    gremlin.client = client;
+    gremlin.client = llm_client;
     // Inject the dynamic preamble (repo context + skills) on every turn so
     // newly activated skills and refreshed repository snapshots reach the model.
     // The preamble is part of the user turn, not the system prompt, so the
@@ -320,20 +310,17 @@ pub(crate) async fn handle_chat(
 
     // Point the run-map handle's cancel token at this turn so `stop` cancels
     // the in-flight stage rather than a stale persistent token.
-    if let Ok(mut map) = get_run_map().lock() {
-        if let Some(handle) = map.get_mut(id.as_str()) {
-            handle.cancel = turn_cancel.clone();
-        }
-    }
+    client.set_run_cancel(&id, turn_cancel.clone()).await;
 
     let stage = match gremlin.definition.next_stage().await {
         Ok(s) => s,
         Err(e) => {
             // Re-insert the gremlin (it is still owned by this session)
-            // and report the error. The id remains in `chat_ids` so
-            // session teardown still shuts it down.
-            let mut s = session.lock().await;
-            s.chat_gremlins.insert(id.clone(), gremlin);
+            // and report the error. The id remains owned so session
+            // teardown still shuts it down.
+            let _ = client
+                .session_reinsert_gremlin(session_id, &id, gremlin)
+                .await;
             let resp = error_response(&format!("definition error: {e}"));
             let _ = writer.write_json_line(&resp).await;
             return;
@@ -357,18 +344,19 @@ pub(crate) async fn handle_chat(
     let (done_tx, done_rx) = watch::channel(false);
     let done_tx = Arc::new(done_tx);
     let soft_cancel = Arc::new(AtomicBool::new(false));
-    {
-        let mut s = session.lock().await;
-        s.current_turn = Some(CurrentTurn {
-            id: id.clone(),
-            turn: turn.clone(),
-            cancel: turn_cancel.clone(),
-            soft_cancel: Arc::clone(&soft_cancel),
-            done: done_rx,
-            done_tx: Arc::clone(&done_tx),
-            interrupted: false,
-        });
-    }
+    client
+        .session_set_current_turn(
+            session_id,
+            CurrentTurn {
+                id: id.clone(),
+                turn: turn.clone(),
+                cancel: turn_cancel.clone(),
+                soft_cancel: Arc::clone(&soft_cancel),
+                done: done_rx,
+                interrupted: false,
+            },
+        )
+        .await;
 
     let writer_for_turn = writer.clone();
     let turn_ctx = TurnCtx {
@@ -376,7 +364,8 @@ pub(crate) async fn handle_chat(
         turn: turn.clone(),
         turn_cancel: turn_cancel.clone(),
         soft_cancel: Arc::clone(&soft_cancel),
-        session: Arc::clone(session),
+        actor_tx: actor_tx.clone(),
+        session_id: session_id.to_string(),
         done: done_tx,
     };
     tokio::spawn(async move {
@@ -407,73 +396,44 @@ pub(crate) async fn handle_chat(
 
 /// Return the session's parked chat gremlin id, waiting for an in-flight
 /// turn to re-insert.
-pub(crate) async fn reusable_chat_gremlin_id(session: &SessionHandle) -> Option<String> {
+pub(crate) async fn reusable_chat_gremlin_id(
+    actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
+    session_id: &str,
+) -> Option<String> {
     loop {
-        let (id, wait) = {
-            let s = session.lock().await;
-            if s.closed {
-                return None;
-            }
-            if let Some(id) = s.chat_gremlins.keys().next().cloned() {
-                (Some(id), None)
-            } else if let Some(cur) = &s.current_turn {
-                // The watch channel is sticky: if `done` is already
-                // `true` the turn completed but did not re-insert a
-                // gremlin (e.g. a stop removed it after a soft
-                // interrupt).  Waiting on a completed turn with no
-                // parked gremlin would spin forever, so return
-                // `None` immediately.
-                if *cur.done.borrow() {
-                    (None, None)
-                } else {
-                    (None, Some(cur.done.clone()))
-                }
-            } else {
-                (None, None)
-            }
-        };
-        match (id, wait) {
-            (Some(id), _) => return Some(id),
-            (None, Some(mut done)) => {
-                if done.wait_for(|v| *v).await.is_err() {
-                    // Sender dropped without publishing. Re-check the
-                    // session under the lock: the turn may have been
-                    // cleared by another path and re-inserted the
-                    // gremlin in the meantime.
-                    let s = session.lock().await;
-                    if let Some(id) = s.chat_gremlins.keys().next().cloned() {
-                        return Some(id);
-                    }
-                    return None;
-                }
-                continue;
-            }
-            (None, None) => return None,
-        }
-    }
-}
+        // Parked gremlin wins; otherwise look at the in-flight turn.
+        let client = Client::new(actor_tx.clone());
+        let (ids, turn) = tokio::join!(
+            client.session_get_chat_gremlin_keys(session_id),
+            client.session_get_current_turn(session_id),
+        );
 
-/// Re-insert a finished turn's gremlin, or drop if session no longer owns it.
-/// Returns true if re-inserted.
-pub(crate) async fn reinsert_chat_gremlin(
-    id: &str,
-    gremlin: Gremlin,
-    session: &SessionHandle,
-) -> bool {
-    let mut s = session.lock().await;
-    if !s.chat_ids.contains(id) {
-        drop(gremlin);
-        return false;
+        if let Some(id) = ids.into_iter().next() {
+            return Some(id);
+        }
+
+        let done = match turn {
+            Some(turn) if !*turn.done.borrow() => Some(turn.done),
+            // A turn with `done == true` completed but left no parked gremlin
+            // (e.g. a stop removed it after a soft interrupt). Waiting on it
+            // would spin forever, so report "no reusable gremlin".
+            Some(_) => return None,
+            None => return None,
+        };
+
+        let mut done = done.expect("in-flight turn checked above");
+        if done.wait_for(|v| *v).await.is_err() {
+            // Sender dropped without publishing. Re-check the session: the
+            // turn may have been cleared by another path and re-inserted the
+            // gremlin in the meantime.
+            return Client::new(actor_tx.clone())
+                .session_get_chat_gremlin_keys(session_id)
+                .await
+                .into_iter()
+                .next();
+        }
+        // The turn finished — loop to re-check the parked set.
     }
-    // Guard against resurrection: if the gremlin was stopped (via `stop`
-    // from any connection), the run-map entry is gone and we must not
-    // re-insert.
-    if !get_run_map().lock().unwrap().contains_key(id) {
-        drop(gremlin);
-        return false;
-    }
-    s.chat_gremlins.insert(id.to_string(), gremlin);
-    true
 }
 
 /// Read persisted `state.json.token_usage` as [`UsageStats`].
@@ -531,8 +491,11 @@ pub(crate) struct TurnCtx {
     turn: Option<String>,
     turn_cancel: Arc<CancelToken>,
     soft_cancel: Arc<AtomicBool>,
-    session: SessionHandle,
-    done: Arc<watch::Sender<bool>>,
+    /// Mailbox for the supervisor actor — the turn reaches session and
+    /// run-map state exclusively through it.
+    pub(crate) actor_tx: mpsc::UnboundedSender<ActorMsg>,
+    pub(crate) session_id: String,
+    pub(crate) done: Arc<watch::Sender<bool>>,
 }
 
 async fn run_chat_turn(
@@ -763,7 +726,8 @@ async fn run_chat_turn(
 pub(crate) async fn handle_cancel_chat(
     request: &Value,
     writer: &SharedWriter,
-    session: &SessionHandle,
+    actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
+    session_id: &str,
 ) {
     let turn = request
         .get("turn")
@@ -774,202 +738,107 @@ pub(crate) async fn handle_cancel_chat(
         .and_then(|v| v.as_str())
         .unwrap_or("hard");
     let soft = mode == "soft";
-    let s = session.lock().await;
-    let matches = match &s.current_turn {
+
+    let client = Client::new(actor_tx.clone());
+    let snapshot = client.session_get_current_turn(session_id).await;
+    let matches = match &snapshot {
         Some(cur) => turn
             .as_deref()
             .is_none_or(|t| Some(t) == cur.turn.as_deref()),
         None => false,
     };
-    if matches {
-        // If the turn has already been interrupted (soft-cancel finished),
-        // only a hard cancel is meaningful: clean up the artifact and the
-        // `interrupted` flag, then emit `ended` so the TUI can retire the
-        // turn. A soft cancel on an already-interrupted turn is a no-op.
-        if let Some(cur) = &s.current_turn {
-            if cur.interrupted {
-                if soft {
-                    // Already interrupted — soft cancel is a no-op.
-                    drop(s);
-                    let _ = writer
-                        .write_json_line(&ok_response(serde_json::json!({})))
-                        .await;
-                    return;
-                }
-
-                // Hard cancel on an interrupted turn: take the gremlin
-                // from the session, clear the partial artifact and the
-                // interrupt flag, then re-insert.  Emit `ended` directly
-                // since the turn task has already returned.
-                let id = cur.id.clone();
-                let turn = cur.turn.clone();
-                let done_tx = Arc::clone(&cur.done_tx);
-                drop(s);
-
-                let gremlin_opt = {
-                    let mut s = session.lock().await;
-                    s.chat_gremlins.remove(&id)
-                };
-
-                if let Some(mut gremlin) = gremlin_opt {
-                    let turn_num = gremlin
-                        .definition
-                        .as_any_mut()
-                        .and_then(|a| a.downcast_ref::<ChatDefinition>())
-                        .map(|c| c.turn_count());
-
-                    if let Some(turn_num) = turn_num {
-                        crate::executor::run_agent::clear_chat_turn_artifact(&gremlin, turn_num)
-                            .await;
-                    }
-
-                    if let Some(chat) = gremlin
-                        .definition
-                        .as_any_mut()
-                        .and_then(|a| a.downcast_mut::<ChatDefinition>())
-                    {
-                        chat.clear_interrupted();
-                    }
-
-                    let mut s = session.lock().await;
-                    s.chat_gremlins.insert(id.clone(), gremlin);
-                    s.current_turn = None;
-                    drop(s);
-                } else {
-                    let mut s = session.lock().await;
-                    s.current_turn = None;
-                    drop(s);
-                }
-
-                let _ = done_tx.send(true);
-
-                let payload = chat_payload(
-                    &turn,
-                    serde_json::json!({"type": "ended", "id": id, "reason": "cancelled"}),
-                );
-                let _ = writer.write_json_line(&payload).await;
-                let _ = writer
-                    .write_json_line(&ok_response(serde_json::json!({})))
-                    .await;
-                return;
-            }
-
-            // Normal (non-interrupted) path: cancel the token but leave
-            // `current_turn` installed — its `done` watch receiver is what
-            // `handle_chat` waits on when the gremlin is temporarily out
-            // of `chat_gremlins`. `run_chat_turn::finish` clears
-            // `current_turn` once the turn has completed and re-inserted
-            // (or dropped) the gremlin.
-            let already_cancelled = cur.cancel.is_cancelled();
-            if soft {
-                // Only honour a soft request when the token has not yet
-                // been cancelled — a hard cancel that arrived first
-                // must not be overwritten by a late soft request.
-                if !already_cancelled {
-                    cur.soft_cancel.store(true, Ordering::Release);
-                }
-            } else {
-                cur.soft_cancel.store(false, Ordering::Release);
-            }
-            if !already_cancelled {
-                cur.cancel.cancel();
-            }
-        }
+    if !matches {
+        let _ = writer
+            .write_json_line(&ok_response(serde_json::json!({})))
+            .await;
+        return;
     }
+    let cur = snapshot.expect("matched turn is present");
+
+    // If the turn has already been interrupted (soft-cancel finished),
+    // only a hard cancel is meaningful: clean up the artifact and the
+    // `interrupted` flag, then emit `ended` so the TUI can retire the
+    // turn. A soft cancel on an already-interrupted turn is a no-op.
+    if cur.interrupted {
+        if soft {
+            // Already interrupted — soft cancel is a no-op.
+            let _ = writer
+                .write_json_line(&ok_response(serde_json::json!({})))
+                .await;
+            return;
+        }
+
+        // Hard cancel on an interrupted turn: take the gremlin from the
+        // session, clear the partial artifact and the interrupt flag, then
+        // re-insert. Emit `ended` directly since the turn task has already
+        // returned.
+        let id = cur.id.clone();
+        let turn = cur.turn.clone();
+        let mut done_rx = cur.done.clone();
+
+        let gremlin_opt = client.session_take_gremlin(session_id, &id).await;
+
+        if let Some(mut gremlin) = gremlin_opt {
+            let turn_num = gremlin
+                .definition
+                .as_any_mut()
+                .and_then(|a| a.downcast_ref::<ChatDefinition>())
+                .map(|c| c.turn_count());
+
+            if let Some(turn_num) = turn_num {
+                crate::executor::run_agent::clear_chat_turn_artifact(&gremlin, turn_num).await;
+            }
+
+            if let Some(chat) = gremlin
+                .definition
+                .as_any_mut()
+                .and_then(|a| a.downcast_mut::<ChatDefinition>())
+            {
+                chat.clear_interrupted();
+            }
+
+            let _ = client
+                .session_reinsert_gremlin(session_id, &id, gremlin)
+                .await;
+        }
+
+        // Clear the in-flight turn and publish completion (the cancel token is
+        // the turn's identity guard; only the matching turn is cleared).
+        client
+            .session_clear_current_turn(session_id, Arc::clone(&cur.cancel))
+            .await;
+        let _ = done_rx.wait_for(|v| *v).await;
+
+        let payload = chat_payload(
+            &turn,
+            serde_json::json!({"type": "ended", "id": id, "reason": "cancelled"}),
+        );
+        let _ = writer.write_json_line(&payload).await;
+        let _ = writer
+            .write_json_line(&ok_response(serde_json::json!({})))
+            .await;
+        return;
+    }
+
+    // Normal (non-interrupted) path: cancel the token but leave
+    // `current_turn` installed — its `done` watch receiver is what
+    // `handle_chat` waits on when the gremlin is temporarily out
+    // of `chat_gremlins`. `run_chat_turn::finish` clears
+    // `current_turn` once the turn has completed and re-inserted
+    // (or dropped) the gremlin.
+    let _ = client
+        .session_cancel_turn(session_id, Some(&cur.id), soft)
+        .await;
+
     let _ = writer
         .write_json_line(&ok_response(serde_json::json!({})))
         .await;
 }
 
-/// Shut down a chat gremlin: remove run-map entry, write terminal state,
-/// reap client, emit RunStopped.
-pub(crate) async fn cleanup_chat_gremlin(id: &str) {
-    if validate_gremlin_id(id).is_err() {
-        return;
-    }
-
-    // Snapshot the cancel token before removing from the run-map
-    // so we can stop the in-flight turn.
-    let cancel = {
-        let map = get_run_map().lock().unwrap();
-        map.get(id).map(|h| h.cancel.clone())
-    };
-
-    // Cancel the in-flight turn so the model stops writing.
-    if let Some(cancel) = cancel {
-        cancel.cancel();
-    }
-
-    // Remove from RUN_MAP. If the id wasn't there (already stopped by
-    // the operator mid-session), the persistent map entry still needs
-    // removing so the gremlin doesn't linger.
-    let (state_tx, log_sub) = {
-        let mut map = get_run_map().lock().unwrap();
-        match map.remove(id) {
-            Some(handle) => (Some(handle.state_tx.clone()), handle.log_sub),
-            None => (None, None),
-        }
-    };
-
-    // Unsubscribe the log-writer subscription so the log task drains.
-    if let Some(ref sub) = log_sub {
-        init_bus().unsubscribe(sub);
-    }
-
-    if let Some(state_tx) = state_tx {
-        let _ = state_tx.send(RunState {
-            id: id.to_string(),
-            status: "stopped".to_string(),
-            stage: String::new(),
-            started_at: String::new(),
-        });
-    }
-
-    terminate_and_reap(id);
-}
-
-async fn register_chat_gremlin(session: &SessionHandle, mut gremlin: Gremlin) {
-    let id = gremlin.id.to_string();
-
-    let (stage_stream_broadcast, interactive_handle, log_flush, log_sub) =
-        setup_gremlin_channels(&mut gremlin, None);
-    let store = gremlin.state.store_handle();
-
-    let cancel_token = CancelToken::new();
-    gremlin.cancel_token = Some(cancel_token.clone());
-
-    let (state_tx, _state_rx) = watch::channel(RunState {
-        id: id.clone(),
-        status: "running".to_string(),
-        stage: "chat".to_string(),
-        started_at: state::now_stamp(),
-    });
-
-    let handle = RunHandle {
-        cancel: cancel_token,
-        task: None,
-        aborted: Arc::new(AtomicBool::new(false)),
-        state_tx,
-        stage_stream_broadcast,
-        interactive: interactive_handle,
-        store,
-        log_flush: Some(log_flush),
-        log_sub: Some(log_sub),
-    };
-    get_run_map().lock().unwrap().insert(id.clone(), handle);
-
-    emit_event(EventKind::RunStarted {
-        id: id.clone(),
-        definition: "chat".to_string(),
-        stage: "chat".to_string(),
-    });
-
-    session.lock().await.chat_gremlins.insert(id, gremlin);
-}
-
 static CHAT_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) fn create_chat_gremlin(
+    _actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
     default_model: &ModelURI,
     system_prompt: &str,
     project_root: &Path,
@@ -983,16 +852,10 @@ pub(crate) fn create_chat_gremlin(
     // Generate ID — use an atomic counter so concurrent chat sessions
     // never collide. Chat gremlins are ephemeral so they never appear
     // under config::state_root().
-    let gremlin_id = loop {
+    let gremlin_id = {
         let seq = CHAT_SEQ.fetch_add(1, Ordering::Relaxed);
         let candidate = format!("chat-{seq:04x}");
-        let id = validate_gremlin_id(&candidate).map_err(|e| format!("invalid id: {e}"))?;
-        // Double-check the run_map in case a previous chat session with
-        // the same counter value is still alive (extremely unlikely but
-        // cheap to guard against).
-        if !get_run_map().lock().unwrap().contains_key(id.as_str()) {
-            break id;
-        }
+        validate_gremlin_id(&candidate).map_err(|e| format!("invalid id: {e}"))?
     };
 
     // Build initial state and create StateData (which writes state.json).
@@ -1032,7 +895,7 @@ pub(crate) fn create_chat_gremlin(
         .map_err(|e| format!("failed to create log: {e}"))?;
 
     let runtime_config = RuntimeConfig::snapshot(None);
-    let client = Client::from_uri(default_model.clone())
+    let client = ModelClient::from_uri(default_model.clone())
         .map_err(|e| format!("invalid default model '{default_model}': {e}"))?;
 
     Ok(Gremlin {

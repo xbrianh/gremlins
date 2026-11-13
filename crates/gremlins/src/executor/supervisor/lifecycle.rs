@@ -1,20 +1,17 @@
 //! Child gremlin lifecycle: launch, stop, channel setup, and task spawning.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 
-use crate::clients::cancel::CancelToken;
 use crate::clients::client::Client;
-use crate::clients::interactive::{InteractiveChannels, InteractiveHandle, StreamEventSender};
+use crate::clients::interactive::{InteractiveChannels, InteractiveHandle};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state;
 use crate::magic_bus::{CorrId, ReceiverHalf, SubscriberRegistration};
 
 use super::event::{emit_event, init_bus, EventKind};
-use super::state_view::definition_name_from_tree;
-use super::{get_run_map, RunHandle, RunState};
+use super::RunState;
 
 /// Set up log + interactive + stage-stream channels on a gremlin. Returns the
 /// stage-stream broadcast sender, interactive handle, log flush channel, and
@@ -69,7 +66,10 @@ pub(crate) fn setup_gremlin_channels(
     )
 }
 
-async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i32, Gremlin) {
+pub(crate) async fn run_gremlin_task(
+    mut gremlin: Gremlin,
+    resume_from: Option<&str>,
+) -> (i32, Gremlin) {
     let exit_code = match gremlin.run(resume_from).await {
         Ok(ec) => ec,
         Err(e) => {
@@ -196,72 +196,25 @@ fn spawn_log_writer(
 }
 
 pub(crate) fn spawn_gremlin_runner(
-    mut gremlin: Gremlin,
-    id: &str,
+    actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
+    gremlin: Gremlin,
     stage_label: &str,
     resume_from: Option<&str>,
     definition_name: &str,
-    shutdown_tx: &watch::Sender<bool>,
+    notify_shutdown: bool,
 ) {
-    let (stage_stream_broadcast, interactive_handle, log_flush, log_sub) =
-        setup_gremlin_channels(&mut gremlin, None);
-    gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
-        interactive_handle.evt_tx.clone(),
-    ));
-    let store = gremlin.state.store_handle();
-
-    let cancel_token = CancelToken::new();
-    let (state_tx, _state_rx) = watch::channel(RunState {
-        id: id.to_string(),
-        status: "running".to_string(),
-        stage: stage_label.to_string(),
-        started_at: state::now_stamp(),
-    });
-
-    let aborted = Arc::new(AtomicBool::new(false));
-    gremlin.cancel_token = Some(cancel_token.clone());
-    let id_owned = id.to_string();
-    let state_tx_clone = state_tx.clone();
-    let shutdown_tx_clone = shutdown_tx.clone();
-    let resume_from_owned = resume_from.map(String::from);
-    let aborted_for_task = aborted.clone();
-
-    let (go_tx, go_rx) = tokio::sync::oneshot::channel();
-    let log_sub_clone = log_sub.clone();
-    let join_handle = tokio::spawn(async move {
-        let _ = go_rx.await;
-        let (result, _gremlin) = run_gremlin_task(gremlin, resume_from_owned.as_deref()).await;
-        if !aborted_for_task.load(Ordering::Relaxed) {
-            RunHandle::finish(
-                &id_owned,
-                result,
-                &state_tx_clone,
-                Some(&shutdown_tx_clone),
-                Some(log_sub_clone),
-            );
-        }
-    });
-
-    let handle = RunHandle {
-        cancel: cancel_token,
-        task: Some(join_handle),
-        aborted,
-        state_tx,
-        stage_stream_broadcast,
-        interactive: interactive_handle,
-        store,
-        log_flush: Some(log_flush),
-        log_sub: Some(log_sub),
-    };
-    get_run_map().lock().unwrap().insert(id.to_string(), handle);
-
-    emit_event(EventKind::RunStarted {
-        id: id.to_string(),
-        definition: definition_name.to_string(),
-        stage: stage_label.to_string(),
-    });
-
-    let _ = go_tx.send(());
+    let (respond, _rx) = tokio::sync::oneshot::channel();
+    actor_tx
+        .send(super::actor::ActorMsg::LaunchRun {
+            gremlin,
+            stage_label: stage_label.to_string(),
+            resume_from: resume_from.map(String::from),
+            definition_name: definition_name.to_string(),
+            notify_shutdown,
+            respond,
+        })
+        .expect("actor alive");
+    // Fire-and-forget: the actor sends the id back but no caller awaits it.
 }
 
 // ---------------------------------------------------------------------------
@@ -283,129 +236,47 @@ pub(crate) struct LogRelay {
     pub prefix: String,
 }
 
-/// Launch a pre-configured child gremlin into the run map. Synchronous — no `.await`.
-pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> LaunchResult {
-    let id = gremlin.id.to_string();
-
-    let (stage_stream_broadcast, interactive_handle, log_flush, log_sub) =
-        setup_gremlin_channels(&mut gremlin, relay);
-    gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
-        interactive_handle.evt_tx.clone(),
-    ));
-    let store = gremlin.state.store_handle();
-
-    let cancel_token = gremlin
-        .cancel_token
-        .clone()
-        .unwrap_or_else(CancelToken::new);
-    let (state_tx, state_rx) = watch::channel(RunState {
-        id: id.clone(),
-        status: "running".to_string(),
-        stage: "starting".to_string(),
-        started_at: state::now_stamp(),
-    });
-
-    let state_tx_clone = state_tx.clone();
-
-    let aborted = Arc::new(AtomicBool::new(false));
-    let aborted_for_task = aborted.clone();
-
-    let id_clone = id.clone();
-
-    // Spawn before inserting into run_map so the JoinHandle is available
-    // from the moment the entry exists. A oneshot barrier prevents the
-    // task from running (and potentially finishing) before the entry is
-    // inserted — no race window in either direction.
-    let (go_tx, go_rx) = tokio::sync::oneshot::channel();
-    let (gremlin_tx, gremlin_rx) = tokio::sync::oneshot::channel();
-    let log_sub_clone = log_sub.clone();
-    let join_handle = tokio::spawn(async move {
-        let _ = go_rx.await;
-        let (result, gremlin) = run_gremlin_task(gremlin, None).await;
-        // Send the gremlin back to the parallel coordinator so it can
-        // keep TempDirs alive during post-processing.
-        let _ = gremlin_tx.send(gremlin);
-        if !aborted_for_task.load(Ordering::Relaxed) {
-            // Don't signal shutdown — the parent gremlin is still running.
-            RunHandle::finish(
-                &id_clone,
-                result,
-                &state_tx_clone,
-                None::<&watch::Sender<bool>>,
-                Some(log_sub_clone),
-            );
-        }
-    });
-
-    let handle = RunHandle {
-        cancel: cancel_token,
-        task: Some(join_handle),
-        aborted: aborted.clone(),
-        state_tx,
-        stage_stream_broadcast,
-        interactive: interactive_handle,
-        store: store.clone(),
-        log_flush: Some(log_flush),
-        log_sub: Some(log_sub),
-    };
-    // Insert into RUN_MAP *after* spawning so the JoinHandle is present
-    // from the moment the entry exists.
-    get_run_map().lock().unwrap().insert(id.clone(), handle);
-
-    // Emit RunStarted so subscribers see the child before its terminal
-    // event (finish already emits RunCompleted/RunFailed).
-    let definition_name = definition_name_from_tree(&store.state_tree());
-    emit_event(EventKind::RunStarted {
-        id: id.clone(),
-        definition: definition_name,
-        stage: "starting".to_string(),
-    });
-
-    // Now the entry is visible — let the task proceed.
-    let _ = go_tx.send(());
-
-    LaunchResult {
-        state_rx,
-        gremlin_rx,
-    }
+/// Launch a pre-configured child gremlin into the run map.
+///
+/// The actor owns channel setup, the run-map insert, the spawned task and the
+/// `RunStarted` event; this just sends `LaunchChild` and awaits the reply.
+pub(crate) async fn launch_child(
+    actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
+    gremlin: Gremlin,
+    relay: Option<LogRelay>,
+) -> LaunchResult {
+    let (respond, rx) = tokio::sync::oneshot::channel();
+    actor_tx
+        .send(super::actor::ActorMsg::LaunchChild {
+            gremlin,
+            relay,
+            respond,
+        })
+        .expect("actor alive");
+    rx.await.expect("actor died")
 }
 
 /// Stop a child gremlin by aborting its task and cleaning up.
 ///
 /// A no-op when the child is not in the run map (already finished or never
 /// launched).
-pub(crate) async fn stop_child(id: &str) {
-    let run_map = get_run_map();
-    let (state_tx, log_sub) = {
-        let mut map = run_map.lock().unwrap();
-        match map.get(id) {
-            Some(handle) => {
-                handle.cancel.cancel();
-                if let Some(ref task) = handle.task {
-                    task.abort();
-                }
-                handle.aborted.store(true, Ordering::Relaxed);
-                // Clone what we need before removing the entry.
-                let state_tx = handle.state_tx.clone();
-                let log_sub = handle.log_sub.clone();
-                // Remove from run_map and broadcast terminal state while we
-                // still hold the lock — no race window for a duplicate finish.
-                map.remove(id);
-                (Some(state_tx), log_sub)
-            }
-            None => (None, None),
-        }
-    };
-    if let Some(state_tx) = state_tx {
-        // Don't signal shutdown — the parent gremlin is still running.
+pub(crate) async fn stop_child(actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>, id: &str) {
+    let (respond, rx) = tokio::sync::oneshot::channel();
+    let _ = actor_tx.send(super::actor::ActorMsg::StopRun {
+        id: id.to_string(),
+        respond,
+    });
+    // The actor already removed the entry and published the terminal state;
+    // `Some(..)` means the id was live and the follow-up work is ours.
+    if let Ok(Some((state_tx, log_sub))) = rx.await {
         let _ = state_tx.send(RunState {
             id: id.to_string(),
             status: "stopped".to_string(),
             stage: String::new(),
             started_at: String::new(),
         });
-        // Write terminal state to disk so the aborted child isn't
-        // reported as orphan and has a recorded exit_code.
+        // Write terminal state to disk so the aborted child isn't reported as
+        // orphan and has a recorded exit_code.
         if let Ok(sd) = state::StateData::open(id) {
             sd.write_terminal_state(1);
         }
@@ -413,8 +284,8 @@ pub(crate) async fn stop_child(id: &str) {
         if let Some(ref sub) = log_sub {
             init_bus().unsubscribe(sub);
         }
-        // Reap backend resources that the aborted task would have
-        // reaped in Gremlin::finish.
+        // Reap backend resources that the aborted task would have reaped in
+        // Gremlin::finish.
         reap_client_for(id);
     }
 }

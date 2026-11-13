@@ -3,10 +3,10 @@
 //! `put` write path), which are query-like in that they inspect terminal
 //! gremlins rather than driving lifecycle transitions.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::config;
 use crate::definition::{GremlinDefinition, StaticDefinition};
@@ -14,8 +14,9 @@ use crate::executor::gremlin::Gremlin;
 use crate::executor::state::{self, FileSystemStateStore};
 use crate::executor::str_field;
 
+use super::super::actor::{acquire_id_lock, ActorMsg};
 use super::super::state_view::state_view_for_id;
-use super::super::{error_response, get_id_lock, get_run_map, ok_response, valid_id};
+use super::super::{error_response, ok_response, valid_id};
 
 // ---------------------------------------------------------------------------
 // ls
@@ -52,19 +53,25 @@ fn extract_token_cost_fields(tree: &Map<String, Value>) -> serde_json::Map<Strin
     fields
 }
 
-pub(crate) async fn handle_ls(_request: &Value, _state_root: &Path) -> Value {
+pub(crate) async fn handle_ls(
+    _request: &Value,
+    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
+) -> Value {
     let mut rows: Vec<Value> = Vec::new();
 
-    let live_ids: std::collections::HashSet<String>;
+    let (live_ids, pairs): (std::collections::HashSet<String>, Vec<(String, _)>) = {
+        let (tx, rx) = oneshot::channel();
+        let (ids, stores) = if actor_tx
+            .send(ActorMsg::ListRunStoresWithIds { respond: tx })
+            .is_ok()
+        {
+            rx.await.unwrap_or_default()
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        (ids.into_iter().collect(), stores)
+    };
     {
-        let map = get_run_map().lock().unwrap();
-        live_ids = map.keys().cloned().collect();
-        let pairs: Vec<(String, Arc<dyn state::StateStore + Send + Sync>)> = map
-            .iter()
-            .map(|(id, handle)| (id.clone(), handle.store.clone()))
-            .collect();
-        drop(map);
-
         for (id, store) in &pairs {
             let tree = store.state_tree();
             let stage = str_field(&tree, "stage");
@@ -153,12 +160,15 @@ pub(crate) async fn handle_ls(_request: &Value, _state_root: &Path) -> Value {
 // status
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn handle_status(request: &Value, _state_root: &Path) -> Value {
+pub(crate) async fn handle_status(
+    request: &Value,
+    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
+) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    match state_view_for_id(id) {
+    match state_view_for_id(id, actor_tx).await {
         Ok(view) => ok_response(Value::Object(view.common_json())),
         Err(resp) => resp,
     }
@@ -168,12 +178,15 @@ pub(crate) async fn handle_status(request: &Value, _state_root: &Path) -> Value 
 // info
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn handle_info(request: &Value, _state_root: &Path) -> Value {
+pub(crate) async fn handle_info(
+    request: &Value,
+    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
+) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    let view = match state_view_for_id(id) {
+    let view = match state_view_for_id(id, actor_tx).await {
         Ok(view) => view,
         Err(resp) => return resp,
     };
@@ -190,23 +203,30 @@ pub(crate) async fn handle_info(request: &Value, _state_root: &Path) -> Value {
 // artifact
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn handle_artifact(request: &Value) -> Value {
+pub(crate) async fn handle_artifact(
+    request: &Value,
+    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
+) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
 
     if request.get("put").and_then(|v| v.as_str()).is_some() {
-        let id_lock = get_id_lock(id);
-        let _guard = id_lock.lock().await;
+        let _guard = acquire_id_lock(actor_tx, id).await;
 
-        {
-            let map = get_run_map().lock().unwrap();
-            if map.contains_key(id) {
-                return error_response(&format!(
-                    "gremlin {id} is running — cannot write artifacts to an active gremlin"
-                ));
-            }
+        let (contains_tx, contains_rx) = oneshot::channel();
+        let is_running = actor_tx
+            .send(ActorMsg::ContainsRun {
+                id: id.to_string(),
+                respond: contains_tx,
+            })
+            .is_ok()
+            && contains_rx.await.unwrap_or(false);
+        if is_running {
+            return error_response(&format!(
+                "gremlin {id} is running — cannot write artifacts to an active gremlin"
+            ));
         }
 
         let store = match state::StateData::open(id).map(|sd| sd.store_handle()) {
@@ -245,7 +265,7 @@ pub(crate) async fn handle_artifact(request: &Value) -> Value {
         }
     }
 
-    let store = match resolve_store_for_id(id) {
+    let store = match resolve_store_for_id(id, actor_tx).await {
         Ok(store) => store,
         Err(resp) => return resp,
     };
@@ -278,14 +298,16 @@ pub(crate) async fn handle_artifact(request: &Value) -> Value {
 // snapshot
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn handle_snapshot(request: &Value, _state_root: &Path) -> Value {
+pub(crate) async fn handle_snapshot(
+    request: &Value,
+    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
+) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
 
-    let id_lock = get_id_lock(id);
-    let _guard = id_lock.lock().await;
+    let _guard = acquire_id_lock(actor_tx, id).await;
 
     if let Err(e) = config::init_global() {
         return error_response(&format!("config init: {e}"));
@@ -357,12 +379,21 @@ pub(crate) async fn handle_snapshot(request: &Value, _state_root: &Path) -> Valu
     }))
 }
 
-pub(crate) fn resolve_store_for_id(
+pub(crate) async fn resolve_store_for_id(
     id: &str,
+    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
 ) -> Result<Arc<dyn state::StateStore + Send + Sync>, Value> {
-    let live = {
-        let map = get_run_map().lock().unwrap();
-        map.get(id).map(|handle| handle.store.clone())
+    let (store_tx, store_rx) = oneshot::channel();
+    let live = if actor_tx
+        .send(ActorMsg::GetRunStore {
+            id: id.to_string(),
+            respond: store_tx,
+        })
+        .is_ok()
+    {
+        store_rx.await.ok().flatten()
+    } else {
+        None
     };
     if let Some(store) = live {
         return Ok(store);

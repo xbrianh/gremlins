@@ -19,7 +19,7 @@ The module was split from a monolithic `supervisor.rs` during the
 | `lifecycle.rs` | Child gremlin lifecycle: `setup_gremlin_channels`, `run_gremlin_task`, `spawn_log_writer`, `spawn_gremlin_runner`, `launch_child`/`stop_child`, `terminate_and_reap`. |
 | `log_handler.rs` | Streaming log handler (`handle_log`) and `LogSource` enum. |
 | `debug.rs` | Interactive debug handler (`handle_debug`) and `send_debug_status`. |
-| `session.rs` | Client session lifecycle: `ClientSession` struct, `SessionOp` enum, `run_session_listener`/`run_session_dispatcher`, `handle_session_main`/`handle_session_op`, session map, and `teardown_session`. |
+| `session.rs` | Client session IO layer: `SessionOp` enum, `run_session_listener`/`run_session_dispatcher`, `handle_session_main`/`handle_session_op`/`handle_session_aux`, and `verify_session_id`. Session state lives in `actor.rs`; this module only talks to it via `ActorMsg`. |
 | `state_view.rs` | `StateView` — a uniform JSON snapshot of a gremlin's state across live (run map) and persisted (disk) sources. Used by the read-only query ops. |
 | `chat/` | TUI chat turn lifecycle. See `chat/AGENTS.md`. |
 | `ops/` | Socket op handlers. See `ops/AGENTS.md`. |
@@ -89,8 +89,9 @@ and emits the terminal `DaemonEvent`.
   Unix socket (`<session_id>.sock`) for sideline channels (log, debug,
   chat). The session id uses a `sess-` prefix to never collide with gremlin
   ids.
-- **Chat gremlins are session-scoped.** A `ClientSession` owns its chat
-  gremlins; they are parked in `chat_gremlins` between turns. A turn
+- **Chat gremlins are session-scoped.** A session owns its chat
+  gremlins (in the actor's `SessionState`); they are parked in
+  `chat_gremlins` between turns. A turn
   removes its gremlin while running and re-inserts it when done.
 - **The event bus is global.** `init_bus` creates a single `Bus<EventKind>`
   on first access. Subscribers filter by run id via `subscribe_run`.
@@ -102,7 +103,7 @@ and emits the terminal `DaemonEvent`.
 | Add a new op handler | Add a function in the appropriate `ops/` sub-module, wire it in `dispatch_op` (`mod.rs`). |
 | Change child launch/stop | `lifecycle.rs::launch_child` / `stop_child` |
 | Change the event bus | `event.rs::init_bus`, `subscribe_run`, `emit_event` |
-| Understand session lifecycle | `session.rs::ClientSession`, `run_session_listener`, `teardown_session` |
+| Understand session lifecycle | `session.rs::run_session_listener` / `handle_session_main`; state in `actor.rs::SessionState` |
 | Debug a chat turn | `chat/mod.rs::run_chat_turn` + `chat/turn_finalizer.rs` |
 | Understand the interactive debug flow | `debug.rs::handle_debug` |
 | Read gremlin state for a query | `state_view.rs::state_view_for_id` |

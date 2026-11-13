@@ -1,8 +1,12 @@
 //! Single-instance executor supervisor.
-//! The supervisor owns the run map and the accept loop. It holds a
-//! `HashMap<String, RunHandle>` and dispatches socket requests to the
-//! appropriate handler.
+//!
+//! The supervisor owns an actor task that holds the run map, session map, and
+//! connection counter. The accept loop dispatches socket requests to the
+//! appropriate handlers, which communicate with the actor via
+//! [`ActorMsg`] messages.
 
+pub(crate) mod actor;
+pub(crate) mod actor_client;
 pub(crate) mod chat;
 pub(crate) mod debug;
 pub(crate) mod event;
@@ -15,16 +19,15 @@ pub(crate) mod state_view;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::io::BufReader;
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use crate::executor::event::EventKind;
 use crate::executor::gremlin::validate_gremlin_id;
@@ -32,8 +35,6 @@ use crate::executor::socket::{self, GremlinsDaemonLock};
 use crate::executor::state;
 
 // ── Re-exports needed by external executor modules ──────────────────────
-// `CancelToken` and `InteractiveHandle` are also used in mod.rs itself via
-// the struct definitions below (CurrentTurn, RunHandle, DebugDetachGuard).
 pub(crate) use crate::clients::cancel::CancelToken;
 pub(crate) use crate::clients::interactive::InteractiveHandle;
 
@@ -43,10 +44,7 @@ pub(crate) use crate::clients::interactive::{InteractiveChannels, InteractiveCom
 // Items consumed by mod.rs itself.
 pub(crate) use self::chat::{add_usage_stats, base_process_env, usage_stats_from_state};
 pub(crate) use self::debug::handle_debug;
-pub(crate) use self::event::{
-    check_shutdown, emit_event, init_bus, init_connection_counter, subscribe_all, subscribe_run,
-    ConnectionGuard,
-};
+pub(crate) use self::event::{emit_event, init_bus, subscribe_all, subscribe_run};
 pub(crate) use self::lifecycle::{launch_child, stop_child, LaunchResult, LogRelay};
 pub(crate) use self::log_handler::handle_log;
 pub(crate) use self::ops::resolve_store_for_id;
@@ -55,20 +53,18 @@ pub(crate) use self::ops::{
     handle_resume, handle_rm, handle_snapshot, handle_status, handle_stop,
     stop_session_chat_gremlin,
 };
-pub(crate) use self::session::{session_map, teardown_session, SessionHandle};
+#[allow(unused_imports)]
+pub(crate) use self::session::handle_session_main;
 
 // Items needed by tests (referenced as `super::TypeName` in tests.rs).
 #[allow(unused_imports)]
 pub(crate) use self::chat::{
-    chat_payload, cleanup_chat_gremlin, create_chat_gremlin, handle_chat, reinsert_chat_gremlin,
-    resolve_chat_env, reusable_chat_gremlin_id,
+    chat_payload, create_chat_gremlin, handle_chat, resolve_chat_env, reusable_chat_gremlin_id,
 };
 #[allow(unused_imports)]
 pub(crate) use self::ops::resolve_filepath_source_values;
 #[allow(unused_imports)]
 pub(crate) use self::ops::{handle_chat_model, handle_compact, parallel_runtime_keys};
-#[allow(unused_imports)]
-pub(crate) use self::session::{handle_session_main, ClientSession};
 
 // ---------------------------------------------------------------------------
 // SharedWriter — Arc<Mutex<WriteHalf>> for concurrent socket writes
@@ -142,10 +138,6 @@ pub(crate) struct CurrentTurn {
     /// the value is sticky so a waiter that subscribes after the turn
     /// finished still proceeds immediately.
     pub(crate) done: watch::Receiver<bool>,
-    /// Sender paired with `done`. Kept here so paths that clear
-    /// `current_turn` outside of `run_chat_turn` (e.g. hard-cancel of an
-    /// already-interrupted turn) can still publish completion.
-    pub(crate) done_tx: Arc<watch::Sender<bool>>,
     /// True when a soft-interrupt has already emitted `ended` for this
     /// turn. The turn stays alive so a hard cancel within the double-press
     /// window can still clean up the partial artifact and interrupt flag.
@@ -175,70 +167,9 @@ pub(crate) struct RunHandle {
     /// opening the log blob, so that pre-subscription events are visible.
     pub log_flush: Option<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>,
     /// Bus subscriber for the run's lossless log-writer subscription.
-    /// Held so [`RunHandle::finish`] and stop paths can unregister it,
-    /// preventing the run's log task, blocking writer, and state store
-    /// from living until daemon exit.
+    /// Held so finish and stop paths can unregister it, preventing the run's
+    /// log task, blocking writer, and state store from living until daemon exit.
     pub log_sub: Option<crate::magic_bus::Subscriber<EventKind>>,
-}
-
-impl RunHandle {
-    /// Post-run cleanup: remove from run_map, broadcast terminal state,
-    /// emit daemon event, optionally signal shutdown when the daemon is idle.
-    pub(crate) fn finish(
-        id: &str,
-        result: i32,
-        state_tx: &watch::Sender<RunState>,
-        shutdown_tx: Option<&watch::Sender<bool>>,
-        log_sub: Option<crate::magic_bus::Subscriber<EventKind>>,
-    ) {
-        let run_map = get_run_map();
-        let is_empty = {
-            let mut map = run_map.lock().unwrap();
-            // Remove before publishing — if the entry is already gone,
-            // a concurrent handle_stop / stop_child won the race and
-            // already published the terminal state.
-            if map.remove(id).is_none() {
-                return;
-            }
-            map.is_empty()
-        };
-
-        // Publish terminal state after winning the removal race.
-        // state_tx is a clone held by the spawned task, so it outlives
-        // the RunHandle that was just dropped by map.remove().
-        let _ = state_tx.send(RunState {
-            id: id.to_string(),
-            status: if result == 0 { "done" } else { "stopped" }.to_string(),
-            stage: String::new(),
-            started_at: String::new(),
-        });
-
-        // Emit the terminal daemon event.
-        if result == 0 {
-            emit_event(EventKind::RunCompleted {
-                id: id.to_string(),
-                exit_code: 0,
-            });
-        } else {
-            emit_event(EventKind::RunFailed {
-                id: id.to_string(),
-                exit_code: result,
-                error: None,
-            });
-        }
-        if is_empty {
-            if let Some(tx) = shutdown_tx {
-                check_shutdown(tx);
-            }
-        }
-
-        // Unsubscribe the log-writer subscription so its receiver observes
-        // Closed, the spawned log task drains and exits, and the blocking
-        // writer / state store are released before daemon shutdown.
-        if let Some(ref sub) = log_sub {
-            init_bus().unsubscribe(sub);
-        }
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -250,32 +181,29 @@ pub struct RunState {
 }
 
 // ---------------------------------------------------------------------------
-// Global run_map — shared between the supervisor socket loop and the
-// parallel executor so that forked children are first-class gremlins.
+// Connection guard — RAII counter via the actor
 // ---------------------------------------------------------------------------
 
-static RUN_MAP: OnceLock<Arc<Mutex<HashMap<String, RunHandle>>>> = OnceLock::new();
-
-pub(crate) fn get_run_map() -> &'static Arc<Mutex<HashMap<String, RunHandle>>> {
-    RUN_MAP.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+/// RAII guard: sends `ConnectionUp` on construction, `ConnectionDown` on drop.
+pub(crate) struct ConnectionGuard {
+    actor_tx: Option<mpsc::UnboundedSender<actor::ActorMsg>>,
 }
 
-// ---------------------------------------------------------------------------
-// Per-ID async mutex that serialises rm and resume for the same gremlin id,
-// preventing clean(true) from nuking a workspace that a concurrent resume
-// just registered in RUN_MAP.
-// ---------------------------------------------------------------------------
+impl ConnectionGuard {
+    pub(crate) fn new(actor_tx: &mpsc::UnboundedSender<actor::ActorMsg>) -> Self {
+        let _ = actor_tx.send(actor::ActorMsg::ConnectionUp);
+        Self {
+            actor_tx: Some(actor_tx.clone()),
+        }
+    }
+}
 
-type IdLockMap = HashMap<String, Arc<tokio::sync::Mutex<()>>>;
-
-static ID_LOCKS: OnceLock<Mutex<IdLockMap>> = OnceLock::new();
-
-pub(crate) fn get_id_lock(id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let map = ID_LOCKS.get_or_init(|| Mutex::new(IdLockMap::new()));
-    let mut map = map.lock().unwrap();
-    map.entry(id.to_string())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        if let Some(tx) = self.actor_tx.take() {
+            let _ = tx.send(actor::ActorMsg::ConnectionDown);
+        }
+    }
 }
 
 /// Validate `"id"` field from a JSON-RPC-style request against [`validate_gremlin_id`].
@@ -297,15 +225,15 @@ pub async fn run_supervisor(
     state_root: PathBuf,
     _lock: GremlinsDaemonLock,
 ) {
-    // Initialise the global run_map so launch_child/stop_child work.
-    get_run_map();
-    session_map();
     init_bus();
-    init_connection_counter();
     // Capture the base environment once at daemon startup. This is the
     // snapshot chat requests without an explicit `env` field fall back to.
     let _ = base_process_env();
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+    // Spawn the actor — it owns the run map, session map, connection counter,
+    // and idle-shutdown logic.
+    let actor_tx = actor::spawn_actor(state_root.clone(), shutdown_tx);
 
     loop {
         tokio::select! {
@@ -318,11 +246,10 @@ pub async fn run_supervisor(
                 match result {
                     Ok((stream, _addr)) => {
                         log::info!("supervisor: accepted connection");
-                        let state_root = state_root.clone();
-                        let shutdown_tx = shutdown_tx.clone();
+                        let actor_tx = actor_tx.clone();
                         tokio::spawn(async move {
-                            let _guard = ConnectionGuard::new(&shutdown_tx);
-                            handle_connection(stream, state_root, shutdown_tx).await;
+                            let _guard = ConnectionGuard::new(&actor_tx);
+                            handle_connection(stream, actor_tx).await;
                         });
                     }
                     Err(e) => {
@@ -335,21 +262,29 @@ pub async fn run_supervisor(
     }
 
     log::info!("supervisor: shutting down");
-    // Stop session listeners first so no new session connections are
-    // accepted, then tear each session down (which cancels chat turns and
-    // reaps gremlins) before unlinking the control socket.
-    let _ = shutdown_tx.send(true);
-    let sessions: Vec<SessionHandle> = session_map().lock().unwrap().values().cloned().collect();
-    for session in &sessions {
-        teardown_session(session, &state_root).await;
+
+    // Tear down every session. The actor does the surgery; we just fire the
+    // requests and wait for completion.
+    let (respond, rx) = tokio::sync::oneshot::channel();
+    let _ = actor_tx.send(actor::ActorMsg::SessionGetAll { respond });
+    if let Ok(session_ids) = rx.await {
+        for session_id in session_ids {
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let _ = actor_tx.send(actor::ActorMsg::SessionTeardown {
+                session_id,
+                abort_listener: true,
+                respond: done_tx,
+            });
+            let _ = done_rx.await;
+        }
     }
+
     socket::unlink_socket(&state_root);
 }
 
 async fn handle_connection(
     stream: tokio::net::UnixStream,
-    state_root: PathBuf,
-    shutdown_tx: watch::Sender<bool>,
+    actor_tx: mpsc::UnboundedSender<actor::ActorMsg>,
 ) {
     let (read_half, write_half) = stream.into_split();
     let writer = SharedWriter::new(write_half);
@@ -412,13 +347,13 @@ async fn handle_connection(
         if op == "log" {
             // Unblock events now that the streaming op is starting.
             let _ = event_start_tx.send(true);
-            handle_log(&request, &state_root, reader, &writer).await;
+            handle_log(&request, &actor_tx, reader, &writer).await;
             break;
         }
 
         if op == "debug" {
             let _ = event_start_tx.send(true);
-            handle_debug(&request, &state_root, reader, &writer).await;
+            handle_debug(&request, &actor_tx, reader, &writer).await;
             break;
         }
 
@@ -426,16 +361,13 @@ async fn handle_connection(
         if op == "stage_stream" {
             let _ = event_start_tx.send(true);
             crate::executor::stage_stream::handle_stage_stream(
-                &request,
-                &state_root,
-                reader,
-                &writer,
+                &request, &actor_tx, reader, &writer,
             )
             .await;
             break;
         }
 
-        dispatch_op(&op, &request, &state_root, &shutdown_tx, &writer).await;
+        dispatch_op(&op, &request, &actor_tx, &writer).await;
         // Unblock events *after* the response is written so one-shot
         // clients always read the response before any broadcast event.
         // Skip for "version" — the version handshake is a one-shot
@@ -454,9 +386,8 @@ async fn handle_connection(
     // accumulate permanent work for each emission.
     init_bus().unsubscribe(&_event_sub);
 
-    // After cleanup the run map may have drained; let shutdown observe it
-    // once the connection counter is decremented by the accept loop.
-    check_shutdown(&shutdown_tx);
+    // After this connection drops the `ConnectionGuard` will fire a
+    // `ConnectionDown` message, which triggers idle-shutdown inside the actor.
 }
 
 // ---------------------------------------------------------------------------
@@ -466,27 +397,26 @@ async fn handle_connection(
 pub(crate) async fn dispatch_op(
     op: &str,
     request: &Value,
-    state_root: &Path,
-    shutdown_tx: &watch::Sender<bool>,
+    actor_tx: &mpsc::UnboundedSender<actor::ActorMsg>,
     writer: &SharedWriter,
 ) {
     let resp = match op {
         "version" => ok_response(serde_json::json!({"version": crate::VERSION})),
-        "launch" => handle_launch(request, state_root, shutdown_tx).await,
-        "create_session" => handle_create_session(request, state_root, shutdown_tx).await,
+        "launch" => handle_launch(request, actor_tx).await,
+        "create_session" => handle_create_session(request, actor_tx).await,
         "stop" => {
             if let Some(id) = request.get("id").and_then(|v| v.as_str()) {
-                stop_session_chat_gremlin(id).await;
+                stop_session_chat_gremlin(id, actor_tx).await;
             }
-            handle_stop(request, shutdown_tx).await
+            handle_stop(request, actor_tx).await
         }
-        "resume" => handle_resume(request, state_root, shutdown_tx).await,
-        "ls" => handle_ls(request, state_root).await,
-        "rm" => handle_rm(request, state_root).await,
-        "status" => handle_status(request, state_root).await,
-        "info" => handle_info(request, state_root).await,
-        "artifact" => handle_artifact(request).await,
-        "snapshot" => handle_snapshot(request, state_root).await,
+        "resume" => handle_resume(request, actor_tx).await,
+        "ls" => handle_ls(request, actor_tx).await,
+        "rm" => handle_rm(request, actor_tx).await,
+        "status" => handle_status(request, actor_tx).await,
+        "info" => handle_info(request, actor_tx).await,
+        "artifact" => handle_artifact(request, actor_tx).await,
+        "snapshot" => handle_snapshot(request, actor_tx).await,
         "model" => handle_model(request).await,
         _ => error_response(&format!("unknown op: {op:?}")),
     };
