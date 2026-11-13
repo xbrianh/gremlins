@@ -110,7 +110,7 @@
       options: {
         cmds: [
           // Capture the commit before drag changes start.
-          'git -C "$GREMLIN_WORKDIR" rev-parse HEAD | tr -d \'\\\' > {drag_base_sha}',
+          'git -C "$GREMLIN_WORKDIR" rev-parse HEAD | tr -d \'\\n\' > {drag_base_sha}',
           'BASE_SHA="{base_sha}"\nCHANGED_FILES=()\n# Collect changed .rs files relative to the feature base.\nwhile IFS= read -r -d \'\' f; do CHANGED_FILES+=("$f"); done < <(git diff "$BASE_SHA...HEAD" --name-only -z -- \'*.rs\')\nif [ ${#CHANGED_FILES[@]} -eq 0 ]; then\n  # No .rs files changed — widen to all changed files.\n  while IFS= read -r -d \'\' f; do CHANGED_FILES+=("$f"); done < <(git diff "$BASE_SHA...HEAD" --name-only -z)\nfi\nif [ ${#CHANGED_FILES[@]} -eq 0 ]; then\n  TARGET="."\nelse\n  # Find the common ancestor directory of all changed files.\n  TARGET=$(dirname "${CHANGED_FILES[0]}")\n  while true; do\n    all_under=1\n    for f in "${CHANGED_FILES[@]}"; do\n      case "$f" in\n        "$TARGET"/*) ;;\n        *) all_under=0; break ;;\n      esac\n    done\n    if [ "$all_under" -eq 1 ] || [ "$TARGET" = "." ]; then\n      break\n    fi\n    TARGET=$(dirname "$TARGET")\n  done\nfi\necho "detected drag target: $TARGET"\nprintf "%s" "$TARGET" > "{target}"\n# artifact for: {target}',
         ],
       },
@@ -130,7 +130,7 @@
       },
       options: {
         cmds: [
-          'gremlins-drag {target} > {drag_baseline}',
+          'gremlins-drag "{target}" > {drag_baseline}',
           'DRAG=$(jq \'.drag\' {drag_baseline})\nprintf "%s" "$DRAG" > {drag_score}\necho "baseline drag sum = $DRAG"',
         ],
       },
@@ -197,7 +197,7 @@
       },
       options: {
         cmds: [
-          'gremlins-drag {target} > {drag_after_report}',
+          'gremlins-drag "{target}" > {drag_after_report}',
           'DRAG=$(jq \'.drag\' {drag_after_report})\nprintf "%s" "$DRAG" > {drag_after}\necho "after drag sum = $DRAG"',
         ],
       },

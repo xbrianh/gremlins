@@ -2041,7 +2041,7 @@ async fn validate(
 ) -> Result<(), String> {
     let prepared = prepare_launch(definition, raw_args, cli_model).await?;
     eprintln!(
-        "valid: {} (definition: {})",
+        "valid: {} (root: {})",
         prepared.definition,
         prepared.project_root.display()
     );

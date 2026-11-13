@@ -125,14 +125,20 @@ async fn run() -> Result<(), String> {
     // Resolve target files from each CLI path.
     let mut target_files = Vec::new();
     let mut packages = Vec::new();
+    let mut path_errors: Vec<String> = Vec::new();
     for p in &cli.paths {
         // 1. Discover packages anchored at this path.
         let path_packages = lang::discover_packages(p);
         // 2. Resolve this path to recognized source files.
-        let path_files = resolve_path_files(p)?;
-        target_files.extend(path_files);
+        match resolve_path_files(p) {
+            Ok(path_files) => target_files.extend(path_files),
+            Err(e) => path_errors.push(format!("{}: {e}", p.display())),
+        }
         packages.extend(path_packages);
     }
+    // Deduplicate target files (overlapping paths can produce duplicates).
+    target_files.sort();
+    target_files.dedup();
     // Deduplicate packages (same package may be discovered from multiple paths).
     packages.sort_by_key(|p| p.key());
     packages.dedup_by_key(|p| p.key());
@@ -148,6 +154,11 @@ async fn run() -> Result<(), String> {
     }
     let dropped_pkg_keys = lang::dedup_target_modules(&mut target_modules, &packages)?;
 
+    // Report any per-path errors as warnings (but continue with valid paths).
+    for err in &path_errors {
+        eprintln!("warning: {err}");
+    }
+
     // Build a set of module names that survived dedup so we can skip their
     // token counts in the package-wide enumeration below — canonical files
     // recorded in target_modules are the authority, preventing a deduped
@@ -161,10 +172,19 @@ async fn run() -> Result<(), String> {
             .map(|e| format!(".{e}"))
             .collect::<Vec<_>>()
             .join(", ");
-        return Err(format!(
+        let mut msg = format!(
             "no recognized modules ({exts}) found in paths: {}",
-            cli.paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
-        ));
+            cli.paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if !path_errors.is_empty() {
+            msg.push_str("\npath errors: ");
+            msg.push_str(&path_errors.join("; "));
+        }
+        return Err(msg);
     }
 
     // ── resolve model & cache path early (both needed for key computation) ──
