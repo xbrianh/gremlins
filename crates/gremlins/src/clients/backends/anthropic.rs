@@ -7,7 +7,6 @@ use rig_core::http_client::DynHttpClient;
 use rig_core::providers::anthropic::{Anthropic, AnthropicConfig};
 
 use crate::clients::cancel::CancelToken;
-use crate::clients::anthropic_bearer_http::BearerHttpClient;
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::cancels::CancelsMap;
 use crate::clients::config::ProviderAuth;
@@ -242,18 +241,11 @@ impl Backend for AnthropicBackend {
                     http_client,
                     auth_scope,
                 } => {
-                    let token =
-                        token_provider.get_token(auth_scope.as_str()).await.map_err(
-                            |e| ClientError::Runtime {
-                                message: format!("Anthropic token acquisition failed: {e}"),
-                            },
-                        )?;
-                    let wrapped =
-                        BearerHttpClient::new(http_client.clone(), token).map_err(|e| {
-                            ClientError::Runtime {
-                                message: format!("failed to build bearer HTTP client: {e}"),
-                            }
-                        })?;
+                    let wrapped = LazyAuthHttpClient::<BearerStrategy>::new(
+                        http_client.clone(),
+                        token_provider.clone(),
+                        auth_scope.clone(),
+                    );
                     let client = AnthropicConfig::new("unused")
                         .with_beta("compact-2026-09-04")
                         .with_base_url(base_url)
@@ -342,19 +334,14 @@ impl Backend for AnthropicBackend {
                 message: format!("failed to build compaction request: {e}"),
             })?;
 
-        // For dynamic auth, wrap the raw HTTP client in a bearer client.
+        // For dynamic auth, use LazyAuthHttpClient to acquire a fresh
+        // token per request.
         let resp: http::Response<rig_core::http_client::LazyBody<Vec<u8>>> = if let Some(ref tp) = self.token_provider {
-            let token = tp
-                .get_token(&self.auth_scope)
-                .await
-                .map_err(|e| ClientError::Runtime {
-                    message: format!("compaction token acquisition failed: {e}"),
-                })?;
-            let bearer = BearerHttpClient::new(self.raw_http.clone(), token).map_err(|e| {
-                ClientError::Runtime {
-                    message: format!("failed to build bearer HTTP client: {e}"),
-                }
-            })?;
+            let bearer = LazyAuthHttpClient::<BearerStrategy>::new(
+                self.raw_http.clone(),
+                tp.clone(),
+                self.auth_scope.clone(),
+            );
             bearer.send(req).await.map_err(|e| ClientError::Runtime {
                 message: format!("compaction HTTP request failed: {e}"),
             })?

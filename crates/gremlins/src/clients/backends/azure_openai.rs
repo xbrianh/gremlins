@@ -210,23 +210,21 @@ impl Backend for AzureOpenAiBackend {
                     http_client,
                     auth_scope,
                 } => {
-                    let token =
-                        token_provider.get_token(auth_scope).await.map_err(|e| {
-                            ClientError::Runtime {
-                                message: format!(
-                                    "Azure OpenAI token acquisition failed: {e}"
-                                ),
-                            }
-                        })?;
-                    let client = OpenAIConfig::with_alternate_key(&AZURE, token)
+                    let wrapped = LazyAuthHttpClient::<ApiKeyStrategy>::new(
+                        http_client.clone(),
+                        token_provider.clone(),
+                        auth_scope.clone(),
+                    );
+                    let wrapped = AzureResponsesHttpClient::new(
+                        DynHttpClient::new(wrapped),
+                        endpoint.clone(),
+                        api_version.clone(),
+                    );
+                    let client = OpenAIConfig::with_alternate_key(&AZURE, "unused")
                         .with_route(Route::Responses)
                         .with_api_version(api_version)
                         .with_base_url(endpoint)
-                        .connect(AzureResponsesHttpClient::new(
-                            http_client.clone(),
-                            endpoint,
-                            api_version,
-                        ));
+                        .connect(wrapped);
                     Ok(client.completion(&model_name).erase())
                 }
             }

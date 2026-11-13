@@ -2,8 +2,10 @@
 //!
 //! When a `Backend::make_model` creates a model for a dynamic-auth backend,
 //! token acquisition hasn't happened yet (it's async and happens per-attempt).
-//! These wrappers hold a `TokenProvider` + scope and acquire a token on the
-//! first outgoing request, caching it for the lifetime of the model.
+//! These wrappers hold a `TokenProvider` + scope and acquire a fresh token
+//! on every outgoing request. Token caching and refresh is owned by the
+//! `TokenProvider` implementations (which delegate to the Azure SDK's
+//! `TokenCredential` with its own in-memory cache).
 //!
 //! A single generic [`LazyAuthHttpClient<H>`] is parameterized by a
 //! [`HeaderStrategy`]:
@@ -13,7 +15,7 @@
 //!   `api-key` with the acquired token.
 
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response};
@@ -89,20 +91,18 @@ impl HeaderStrategy for ApiKeyStrategy {
     }
 }
 
-// ── LazyAuthHttpClient ──────────────────────────────────────────────────
+// ── LazyAuthHttpClient ───────────────────────────────────────────────────
 
-/// Wraps a [`DynHttpClient`] and acquires a token from a [`TokenProvider`] on
-/// the first request, caching it for the lifetime of the client.  The token is
-/// injected according to the [`HeaderStrategy`] `H`.
+/// Wraps a [`DynHttpClient`] and acquires a fresh token from a
+/// [`TokenProvider`] on every outgoing request, injecting it according to
+/// the [`HeaderStrategy`] `H`. The [`TokenProvider`] owns caching and
+/// refresh — typically backed by the Azure SDK's `TokenCredential` which
+/// caches tokens in memory and auto-refreshes ~5 minutes before expiry.
 #[derive(Clone)]
 pub(crate) struct LazyAuthHttpClient<H: HeaderStrategy> {
     inner: DynHttpClient,
     token_provider: Arc<dyn TokenProvider>,
     scope: String,
-    /// Cached token.  A `Mutex` because the underlying `HttpClientExt`
-    /// methods take `&self` and are called from async contexts that may be
-    /// multi-threaded.
-    token: Arc<Mutex<Option<String>>>,
     _phantom: std::marker::PhantomData<H>,
 }
 
@@ -116,36 +116,24 @@ impl<H: HeaderStrategy> LazyAuthHttpClient<H> {
             inner,
             token_provider,
             scope,
-            token: Arc::new(Mutex::new(None)),
             _phantom: std::marker::PhantomData,
         }
     }
 
-    /// Acquire a token (lazily, cached after first call).
+    /// Acquire a fresh token from the [`TokenProvider`] on every call.
+    /// The provider owns caching and refresh — this is a cheap mutex
+    /// lock + cache lookup when backed by the Azure SDK.
     async fn acquire_token(&self) -> std::result::Result<String, String> {
-        // Fast path: cached.
-        {
-            let guard = self.token.lock().unwrap();
-            if let Some(ref t) = *guard {
-                return Ok(t.clone());
-            }
-        }
         let token = self
             .token_provider
             .get_token(&self.scope)
             .await
             .map_err(|e| format!("token acquisition failed: {e}"))?;
-        // Validate.
         let t = token.trim();
         if t.is_empty() {
             return Err("acquired token is empty".into());
         }
-        let mut guard = self.token.lock().unwrap();
-        // Double-check: another caller may have beaten us.
-        if guard.is_none() {
-            *guard = Some(t.to_string());
-        }
-        Ok(guard.clone().unwrap())
+        Ok(t.to_string())
     }
 
     /// Rewrite the request by stripping headers (per the strategy) and
@@ -228,7 +216,7 @@ mod tests {
     use super::*;
     use http::HeaderMap;
 
-    // ── BearerStrategy ──────────────────────────────────────────────
+    // ── BearerStrategy ──────────────────────────────────────────────────
 
     #[test]
     fn bearer_strategy_header_name_is_authorization() {
@@ -269,7 +257,7 @@ mod tests {
         assert!(headers.get("x-api-key").is_none());
     }
 
-    // ── ApiKeyStrategy ──────────────────────────────────────────────
+    // ── ApiKeyStrategy ──────────────────────────────────────────────────────
 
     #[test]
     fn apikey_strategy_header_name_is_api_key() {
