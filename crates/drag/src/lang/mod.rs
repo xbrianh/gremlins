@@ -26,11 +26,13 @@ impl PackageInfo {
         }
     }
 
-    /// Unique key that disambiguates packages across languages.
+    /// Unique key that disambiguates packages across languages and
+    /// workspaces.  Rust keys include the Cargo.toml directory so that
+    /// same-named crates in different workspaces are not collapsed.
     /// Used to decide which dependency graphs to union for scoring.
     pub fn key(&self) -> String {
         match self {
-            PackageInfo::Rust(r) => format!("rust:{}", r.pkg_name),
+            PackageInfo::Rust(r) => format!("rust:{}:{}", r.pkg_name, r.dir.display()),
             PackageInfo::Python(p) => format!("python:{}", p.dir.display()),
         }
     }
@@ -302,43 +304,37 @@ mod tests {
     // ── dedup_target_modules ─────────────────────────────────────────
 
     fn rust_pkg(name: &str, target_name: &str, is_bin: bool) -> PackageInfo {
-        PackageInfo::Rust(rust::RustPackage {
+        let pkg = PackageInfo::Rust(rust::RustPackage {
             dir: PathBuf::from(format!("/{name}")),
             pkg_name: name.to_string(),
             target_name: target_name.to_string(),
             is_bin,
-        })
+        });
+        pkg
     }
 
     #[test]
     fn dedup_keeps_unique_modules() {
+        let pkg_a = rust_pkg("a", "a", false);
+        let pkg_b = rust_pkg("b", "b", false);
         let mut modules = vec![
-            ("foo".into(), PathBuf::from("a/foo.rs"), "rust:a".into()),
-            ("bar".into(), PathBuf::from("b/bar.rs"), "rust:b".into()),
+            ("foo".into(), PathBuf::from("a/foo.rs"), pkg_a.key()),
+            ("bar".into(), PathBuf::from("b/bar.rs"), pkg_b.key()),
         ];
-        let packages = vec![rust_pkg("a", "a", false), rust_pkg("b", "b", false)];
+        let packages = vec![pkg_a, pkg_b];
         dedup_target_modules(&mut modules, &packages).unwrap();
         assert_eq!(modules.len(), 2);
     }
 
     #[test]
     fn dedup_lib_beats_bin() {
+        let pkg_bin = rust_pkg("mybin", "mylib", true);
+        let pkg_lib = rust_pkg("mylib", "mylib", false);
         let mut modules = vec![
-            (
-                "mylib".into(),
-                PathBuf::from("bin/main.rs"),
-                "rust:mybin".into(),
-            ),
-            (
-                "mylib".into(),
-                PathBuf::from("lib/lib.rs"),
-                "rust:mylib".into(),
-            ),
+            ("mylib".into(), PathBuf::from("bin/main.rs"), pkg_bin.key()),
+            ("mylib".into(), PathBuf::from("lib/lib.rs"), pkg_lib.key()),
         ];
-        let packages = vec![
-            rust_pkg("mybin", "mylib", true),
-            rust_pkg("mylib", "mylib", false),
-        ];
+        let packages = vec![pkg_bin, pkg_lib];
         dedup_target_modules(&mut modules, &packages).unwrap();
         assert_eq!(modules.len(), 1);
         // The library entry should survive.
@@ -347,11 +343,13 @@ mod tests {
 
     #[test]
     fn dedup_same_kind_collision_is_an_error() {
+        let pkg_a = rust_pkg("a", "a", false);
+        let pkg_b = rust_pkg("b", "b", false);
         let mut modules = vec![
-            ("dup".into(), PathBuf::from("first.rs"), "rust:a".into()),
-            ("dup".into(), PathBuf::from("second.rs"), "rust:b".into()),
+            ("dup".into(), PathBuf::from("first.rs"), pkg_a.key()),
+            ("dup".into(), PathBuf::from("second.rs"), pkg_b.key()),
         ];
-        let packages = vec![rust_pkg("a", "a", false), rust_pkg("b", "b", false)];
+        let packages = vec![pkg_a, pkg_b];
         assert!(dedup_target_modules(&mut modules, &packages).is_err());
     }
 }

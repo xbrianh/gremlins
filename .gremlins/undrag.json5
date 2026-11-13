@@ -76,7 +76,7 @@
       base_sha: "artifact://base_sha",
       drag_config: "artifact://drag_config.json",
     },
-    env: 'export GREMLINS_OPENAI_AGENTS_MAX_TURNS="1000"\nexport CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${GREMLINS_PROJECT_ROOT}/.cargo-gremlin-target}"\nexport CARGO_INCREMENTAL=0\nTHE_ENV="${GREMLINS_PROJECT_ROOT}/.gremlins/env"\nif [ -f "$THE_ENV" ]; then\n    source "$THE_ENV"\nfi\nexport PREFIX="${GREMLINS_STATE_DIR}/install"\nexport PATH="${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}"\nexport GREMLINS_DRAG_CLI_CONFIG="$GREMLINS_STATE_DIR/artifacts/drag_config.json"\n# GREMLINS_DRAG_CLI_CONFIG points to the drag config artifact.  detect-target\n# sets the `path` field once the feature is implemented.\n',
+    env: 'export GREMLINS_OPENAI_AGENTS_MAX_TURNS="1000"\nexport CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${GREMLINS_PROJECT_ROOT}/.cargo-gremlin-target}"\nexport CARGO_INCREMENTAL=0\nTHE_ENV="${GREMLINS_PROJECT_ROOT}/.gremlins/env"\nif [ -f "$THE_ENV" ]; then\n    source "$THE_ENV"\nfi\nexport PREFIX="${GREMLINS_STATE_DIR}/install"\nexport PATH="${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}"\nexport GREMLINS_DRAG_CLI_CONFIG="$GREMLINS_STATE_DIR/artifacts/drag_config.json"\n# GREMLINS_DRAG_CLI_CONFIG is frozen at bootstrap.  Targets are\n# passed on the gremlins-drag CLI by each drag stage.\n',
   },
   // ── stages ────────────────────────────────────────────────────────────
   stages: [
@@ -101,19 +101,17 @@
       interpolation: {
         inputs: {
           base_sha: 'content("artifact://base_sha")',
-          drag_config: "artifact://drag_config.json",
         },
         outputs: {
           target: "artifact://drag/target.txt",
           drag_base_sha: "artifact://drag/drag_base_sha.txt",
-          drag_config: "artifact://drag_config.json",
         },
       },
       options: {
         cmds: [
           // Capture the commit before drag changes start.
           'git -C "$GREMLIN_WORKDIR" rev-parse HEAD | tr -d \'\\n\' > {drag_base_sha}',
-          'BASE_SHA="{base_sha}"\nCHANGED_FILES=()\n# Collect changed .rs files relative to the feature base.\nwhile IFS= read -r -d \'\' f; do CHANGED_FILES+=("$f"); done < <(git diff "$BASE_SHA...HEAD" --name-only -z -- \'*.rs\')\nif [ ${#CHANGED_FILES[@]} -eq 0 ]; then\n  # No .rs files changed — widen to all changed files.\n  while IFS= read -r -d \'\' f; do CHANGED_FILES+=("$f"); done < <(git diff "$BASE_SHA...HEAD" --name-only -z)\nfi\nif [ ${#CHANGED_FILES[@]} -eq 0 ]; then\n  TARGET="."\nelse\n  # Find the common ancestor directory of all changed files.\n  TARGET=$(dirname "${CHANGED_FILES[0]}")\n  while true; do\n    all_under=1\n    for f in "${CHANGED_FILES[@]}"; do\n      case "$f" in\n        "$TARGET"/*) ;;\n        *) all_under=0; break ;;\n      esac\n    done\n    if [ "$all_under" -eq 1 ] || [ "$TARGET" = "." ]; then\n      break\n    fi\n    TARGET=$(dirname "$TARGET")\n  done\nfi\necho "detected drag target: $TARGET"\nprintf "%s" "$TARGET" > "{target}"\n# Update the drag config artifact with the detected target path.\n# GREMLINS_DRAG_CLI_CONFIG points directly to this artifact, so\n# all gremlins-drag invocations pick up the updated path.\njq --arg t "$TARGET" \'.path = $t\' {drag_config} > {drag_config}.tmp\nmv {drag_config}.tmp {drag_config}\n# artifact for: {target}',
+          'BASE_SHA="{base_sha}"\nCHANGED_FILES=()\n# Collect changed .rs files relative to the feature base.\nwhile IFS= read -r -d \'\' f; do CHANGED_FILES+=("$f"); done < <(git diff "$BASE_SHA...HEAD" --name-only -z -- \'*.rs\')\nif [ ${#CHANGED_FILES[@]} -eq 0 ]; then\n  # No .rs files changed — widen to all changed files.\n  while IFS= read -r -d \'\' f; do CHANGED_FILES+=("$f"); done < <(git diff "$BASE_SHA...HEAD" --name-only -z)\nfi\nif [ ${#CHANGED_FILES[@]} -eq 0 ]; then\n  TARGET="."\nelse\n  # Find the common ancestor directory of all changed files.\n  TARGET=$(dirname "${CHANGED_FILES[0]}")\n  while true; do\n    all_under=1\n    for f in "${CHANGED_FILES[@]}"; do\n      case "$f" in\n        "$TARGET"/*) ;;\n        *) all_under=0; break ;;\n      esac\n    done\n    if [ "$all_under" -eq 1 ] || [ "$TARGET" = "." ]; then\n      break\n    fi\n    TARGET=$(dirname "$TARGET")\n  done\nfi\necho "detected drag target: $TARGET"\nprintf "%s" "$TARGET" > "{target}"\n# artifact for: {target}',
         ],
       },
     },
@@ -122,6 +120,9 @@
       name: "drag-baseline",
       type: "exec",
       interpolation: {
+        inputs: {
+          target: 'content("artifact://drag/target.txt")',
+        },
         outputs: {
           drag_baseline: "artifact://drag/baseline-report.json",
           drag_score: "artifact://drag/drag_best.txt",
@@ -129,7 +130,7 @@
       },
       options: {
         cmds: [
-          'gremlins-drag > {drag_baseline}',
+          'gremlins-drag "{target}" > {drag_baseline}',
           'DRAG=$(jq \'.drag\' {drag_baseline})\nprintf "%s" "$DRAG" > {drag_score}\necho "baseline drag sum = $DRAG"',
         ],
       },
@@ -186,6 +187,9 @@
       name: "drag-after",
       type: "exec",
       interpolation: {
+        inputs: {
+          target: 'content("artifact://drag/target.txt")',
+        },
         outputs: {
           drag_after_report: "artifact://drag/after-report.json",
           drag_after: "artifact://drag/drag_after.txt",
@@ -193,7 +197,7 @@
       },
       options: {
         cmds: [
-          'gremlins-drag > {drag_after_report}',
+          'gremlins-drag "{target}" > {drag_after_report}',
           'DRAG=$(jq \'.drag\' {drag_after_report})\nprintf "%s" "$DRAG" > {drag_after}\necho "after drag sum = $DRAG"',
         ],
       },

@@ -55,6 +55,18 @@ enum Cmds {
         #[arg(long)]
         model: Option<String>,
     },
+    /// Validate a definition — parse, resolve, and check bootstrap inputs
+    /// without launching a gremlin.
+    Validate {
+        /// Gremlin definition: a bare name (resolved under .gremlins/) or a path.
+        definition: String,
+        /// Free-form --key value pairs passed to bootstrap sources.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+        /// Model spec supplying `default_model` only when the definition YAML has none.
+        #[arg(long)]
+        model: Option<String>,
+    },
     /// List gremlins from the state root as a plain-column table.
     Ls {
         /// Only list gremlins whose `project_root` is the current directory.
@@ -212,6 +224,11 @@ async fn main() {
             ephemeral,
             model,
         }) => launch(&definition, args, ephemeral, model).await,
+        Some(Cmds::Validate {
+            definition,
+            args,
+            model,
+        }) => validate(&definition, args, model).await,
         Some(Cmds::Ls { here }) => ls(here).await,
         Some(Cmds::Info { id }) => info(&id).await,
         Some(Cmds::Stop { id }) => stop(&id).await,
@@ -1895,21 +1912,31 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
 }
 
 // ---------------------------------------------------------------------------
-// launch
+// launch / validate — shared preparation
 // ---------------------------------------------------------------------------
 
-async fn launch(
+/// Result of preparing a definition for launch: everything the daemon needs
+/// to create and run the gremlin.
+struct PreparedLaunch {
+    definition: String,
+    resolved_args: Vec<String>,
+    project_root: PathBuf,
+    model_override: Option<String>,
+}
+
+/// Parse, resolve, and validate a definition and its bootstrap inputs.
+/// Returns everything needed to either launch or validate-only.
+async fn prepare_launch(
     definition: &str,
     mut raw_args: Vec<String>,
-    ephemeral: bool,
     cli_model: Option<String>,
-) -> Result<(), String> {
+) -> Result<PreparedLaunch, String> {
     // `--model` is a reserved launch option, but the free-form bootstrap-arg
     // list is a trailing var-arg, so clap captures `--model` there once any
     // bootstrap input has been seen. Pull it back out before bootstrap
     // parsing so `gremlins launch demo --goal text --model cmd/true` works.
     let model_override = extract_model_override(&mut raw_args, cli_model)?;
-    let model_override = model_override.as_deref();
+    let model_override_str = model_override.clone();
 
     // Parse --key value pairs up front so malformed trailing args fail fast,
     // before any config or definition resolution.
@@ -1930,7 +1957,7 @@ async fn launch(
         .and_then(|c| c.default_model().map(String::from));
     let gremlin_def = StaticDefinition::from_json5_file(
         &definition_path,
-        model_override,
+        model_override.as_deref(),
         default_model.as_deref(),
     )
     .map_err(|e| format!("invalid definition: {e}"))?;
@@ -1973,14 +2000,30 @@ async fn launch(
         }
     }
 
+    Ok(PreparedLaunch {
+        definition: definition.to_string(),
+        resolved_args,
+        project_root,
+        model_override: model_override_str,
+    })
+}
+
+async fn launch(
+    definition: &str,
+    raw_args: Vec<String>,
+    ephemeral: bool,
+    cli_model: Option<String>,
+) -> Result<(), String> {
+    let prepared = prepare_launch(definition, raw_args, cli_model).await?;
+
     // Send launch request to executor.
     let response = executor_request(serde_json::json!({
         "op": "launch",
-        "definition": definition,
-        "args": resolved_args,
-        "project_root": project_root.to_string_lossy(),
+        "definition": prepared.definition,
+        "args": prepared.resolved_args,
+        "project_root": prepared.project_root.to_string_lossy(),
         "ephemeral": ephemeral,
-        "model": model_override,
+        "model": prepared.model_override.as_deref(),
     }))
     .await?;
 
@@ -1988,6 +2031,20 @@ async fn launch(
 
     let id = response.get("id").and_then(|v| v.as_str()).unwrap_or("");
     println!("{id}");
+    Ok(())
+}
+
+async fn validate(
+    definition: &str,
+    raw_args: Vec<String>,
+    cli_model: Option<String>,
+) -> Result<(), String> {
+    let prepared = prepare_launch(definition, raw_args, cli_model).await?;
+    eprintln!(
+        "valid: {} (root: {})",
+        prepared.definition,
+        prepared.project_root.display()
+    );
     Ok(())
 }
 
