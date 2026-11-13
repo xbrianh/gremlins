@@ -13,11 +13,12 @@ use crate::cache::{append_cache_entry, compute_cache_key, CacheEntry};
 use crate::config::ComprehensibilityConfig;
 use crate::scoring::ModuleDrag;
 use crate::util::{
-    extract_json, mean_with_ci, truncate, CacheState, CompAgentError, ComprehensibilityScores,
+    extract_json, jitter, mean_with_ci, truncate, CacheState, CompAgentError,
+    ComprehensibilityScores,
 };
 
 const MAX_COMP_RETRIES: u32 = 3;
-const COMP_BACKOFF: [f64; 2] = [1.0, 2.0];
+const COMP_BACKOFF: [(f64, f64); 2] = [(2.0, 1.0), (8.0, 4.0)];
 
 /// Handle for a single comprehensibility scoring task.
 /// On success returns all the info needed to compute the mean and write the cache.
@@ -204,16 +205,15 @@ pub(crate) async fn score_comprehensibility(
                             if matches!(&e, CompAgentError::Retryable(_))
                                 && attempt + 1 < MAX_COMP_RETRIES
                             {
+                                let (base, half) = COMP_BACKOFF[attempt as usize];
+                                let delay = jitter(base, half);
                                 eprintln!(
-                                    "  [{module}] attempt {}/{}: {e} — retrying in {:.0}s",
+                                    "  [{module}] attempt {}/{}: {e} — retrying in {:.1}s",
                                     attempt + 1,
                                     MAX_COMP_RETRIES,
-                                    COMP_BACKOFF[attempt as usize]
+                                    delay
                                 );
-                                tokio::time::sleep(Duration::from_secs_f64(
-                                    COMP_BACKOFF[attempt as usize],
-                                ))
-                                .await;
+                                tokio::time::sleep(Duration::from_secs_f64(delay)).await;
                                 continue;
                             }
                             return Err(format!(
