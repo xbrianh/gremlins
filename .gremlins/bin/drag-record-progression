@@ -8,8 +8,7 @@
 #                          CONFIG_OUT
 #
 # The current target is read from CONFIG_PATH (which GREMLINS_DRAG_CLI_CONFIG
-# also points to).  All gremlins-drag invocations use the env var — no
-# --config or target arguments needed.
+# also points to).  Targets are passed positionally on every gremlins-drag call.
 #
 # When the target broadens (changed files span a wider common root), this
 # script recomputes ALL prior progression entries by checking out each
@@ -73,9 +72,10 @@ common_prefix() {
 }
 
 # Run gremlins-drag and extract the .drag field.
-# Config and target are read from GREMLINS_DRAG_CLI_CONFIG env var.
+# Config is read from GREMLINS_DRAG_CLI_CONFIG; target is passed positionally.
 drag_sum() {
-    gremlins-drag | jq '.drag'
+    local target="$1"
+    gremlins-drag "$target" | jq '.drag'
 }
 
 # Sanitize a numeric value read from a file.
@@ -195,7 +195,7 @@ if [ "$NEW_TARGET" != "$CURRENT_TARGET" ]; then
 
         git -C "$WORKDIR" checkout --quiet "$SHA"
 
-        DRAG=$(drag_sum)
+        DRAG=$(drag_sum "$NEW_TARGET")
 
         if [ "$FIRST" = true ]; then
             # Baseline entry: drag_before stays null.
@@ -221,7 +221,7 @@ if [ "$NEW_TARGET" != "$CURRENT_TARGET" ]; then
     trap - EXIT
 
     # Compute current iteration drag at HEAD with the new target.
-    CURRENT_DRAG=$(drag_sum)
+    CURRENT_DRAG=$(drag_sum "$NEW_TARGET")
     DRAG_BEFORE="$PREV_DRAG"
     DRAG_AFTER="$CURRENT_DRAG"
 
@@ -233,7 +233,7 @@ if [ "$NEW_TARGET" != "$CURRENT_TARGET" ]; then
     info "record-progression: best drag reset to $BEST_DRAG (from rescored progression)"
 
     # Re-run to get the full report for drag_current.json.
-    gremlins-drag > "$STATE_DIR/drag_current.json"
+    gremlins-drag "$NEW_TARGET" > "$STATE_DIR/drag_current.json"
 
     info "record-progression: recomputed progression with target=$NEW_TARGET, drag=$CURRENT_DRAG"
 else
