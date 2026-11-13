@@ -4,7 +4,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::clients::conversation::Conversation;
-use crate::clients::interactive::StreamEventSender;
 use crate::clients::LogLineFn;
 use crate::task_kind::TaskKind;
 
@@ -79,14 +78,17 @@ pub(crate) struct ToolOutputLine {
     pub(crate) text: String,
 }
 
-/// Bundled send-side telemetry channels for the agent loop: stream events
-/// (model deltas, tool results, turn-complete events) and live tool-output
-/// line forwarding (`Bash`/`WebSearch`).
+/// Bundled send-side telemetry channels for the agent loop: stream-event
+/// hooks (model deltas, tool results, turn-complete events) and live
+/// tool-output line forwarding (`Bash`/`WebSearch`).
 ///
 /// Cloned cheaply — every nested loop inherits the parent's channels.
 #[derive(Clone)]
 pub(crate) struct AgentLoopTelemetry {
-    pub(crate) stream_events: Option<StreamEventSender>,
+    /// Inversion-of-control hooks carrying the stream-event emitter. Nested
+    /// loops inherit the parent's hooks so child tool events reach the parent
+    /// stream with the correct id prefix.
+    pub(crate) hooks: crate::clients::agent::plug::LoopHooks,
     pub(crate) tool_output: Option<tokio::sync::mpsc::Sender<ToolOutputLine>>,
 }
 

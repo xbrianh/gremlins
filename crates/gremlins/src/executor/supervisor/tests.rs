@@ -7,12 +7,11 @@ use super::{
     resolve_filepath_source_values, usage_stats_from_state,
 };
 use crate::clients::client::{Client, ModelURI};
-use crate::clients::interactive::InteractiveEvent;
 use crate::clients::protocol::UsageStats;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::socket;
 use crate::executor::stage_stream::{
-    agent_stream_line, exec_stream_line, interactive_event_to_stage_line, stage_line_envelope,
+    agent_stream_line, event_kind_to_stage_line, exec_stream_line, stage_line_envelope,
 };
 use crate::schemas::bootstrap::{InputSource, InputSources};
 use crate::test_support::Sandbox;
@@ -1585,8 +1584,8 @@ fn chat_payload_serializes_tool_result() {
 }
 
 #[test]
-fn interactive_event_to_stage_line_maps_agent_events() {
-    let line = interactive_event_to_stage_line(&InteractiveEvent::StreamChunk {
+fn event_kind_to_stage_line_maps_agent_events() {
+    let line = event_kind_to_stage_line(&crate::executor::EventKind::StreamChunk {
         text: "hi".to_string(),
     })
     .unwrap();
@@ -1594,7 +1593,7 @@ fn interactive_event_to_stage_line_maps_agent_events() {
     assert_eq!(v["kind"], "text");
     assert_eq!(v["text"], "hi");
 
-    let line = interactive_event_to_stage_line(&InteractiveEvent::ReasoningChunk {
+    let line = event_kind_to_stage_line(&crate::executor::EventKind::ReasoningChunk {
         text: "think".to_string(),
     })
     .unwrap();
@@ -1602,7 +1601,7 @@ fn interactive_event_to_stage_line_maps_agent_events() {
     assert_eq!(v["kind"], "reasoning");
     assert_eq!(v["text"], "think");
 
-    let line = interactive_event_to_stage_line(&InteractiveEvent::ToolResult {
+    let line = event_kind_to_stage_line(&crate::executor::EventKind::ToolResult {
         id: "call_1".to_string(),
         name: "Bash".to_string(),
         call: "Bash(command=\"ls\")".to_string(),
@@ -1614,11 +1613,13 @@ fn interactive_event_to_stage_line_maps_agent_events() {
     assert_eq!(v["name"], "Bash");
 
     // Lifecycle events are not stage content.
-    assert!(interactive_event_to_stage_line(&InteractiveEvent::Ready { turn: 0 }).is_none());
-    assert!(interactive_event_to_stage_line(&InteractiveEvent::Ended {
-        reason: "resumed".to_string(),
-    })
-    .is_none());
+    assert!(event_kind_to_stage_line(&crate::executor::EventKind::Ready { turn: 0 }).is_none());
+    assert!(
+        event_kind_to_stage_line(&crate::executor::EventKind::Ended {
+            reason: "resumed".to_string(),
+        })
+        .is_none()
+    );
 }
 
 #[test]

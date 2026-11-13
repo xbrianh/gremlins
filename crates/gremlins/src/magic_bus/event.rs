@@ -72,6 +72,11 @@ impl<P> DispatchEvent<P> {
         &self.kind
     }
 
+    /// Consume the event, yielding its payload.
+    pub fn into_kind(self) -> P {
+        self.kind
+    }
+
     pub fn ts(&self) -> Timestamp {
         self.ts
     }

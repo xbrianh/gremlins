@@ -20,12 +20,14 @@ use super::done_helpers::done_user_message;
 use crate::clients::cancel::CancelToken;
 use crate::clients::conversation::Conversation;
 use crate::clients::error::ClientError;
+use crate::clients::event::EventKind;
 use crate::clients::format::{format_tool_call, trunc};
-use crate::clients::interactive::InteractiveEvent;
 use crate::clients::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
 use crate::clients::tools::{self, AgentLoopRuntime};
 
-use super::agent_loop::{emit_final, emit_summary, DoneDecision, EmptyTurnAction, LoopState};
+use super::agent_loop::{
+    cancelled_error, emit_final, emit_summary, DoneDecision, EmptyTurnAction, LoopState,
+};
 
 fn missing_artifacts(expected: &[PathBuf]) -> Vec<&PathBuf> {
     expected
@@ -87,7 +89,7 @@ fn completed_run(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_done_decision(
     state: &mut LoopState,
-    tool_ctx: &AgentLoopRuntime,
+    _tool_ctx: &AgentLoopRuntime,
     cancel: &CancelToken,
     nested: bool,
     text: &str,
@@ -203,20 +205,19 @@ pub(super) async fn handle_done_decision(
                     &state.hooks,
                 );
             }
-            if !nested && tool_ctx.telemetry.wants_stream_events() {
+            if !nested && state.hooks.wants_stream_events {
                 log::debug!("agent_loop: broadcasting Done (turn={})", state.turn_num);
-                tool_ctx
-                    .telemetry
-                    .send_stream_event(
-                        InteractiveEvent::Done {
-                            text: result_text.clone(),
-                            summary: done_summary.clone(),
-                            usage: Some(usage.clone()),
-                        },
-                        cancel,
-                        &state.conv.messages(),
-                    )
-                    .await?;
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        return Err(cancelled_error("cancelled", &state.conv.messages()));
+                    }
+                    _ = state.hooks.emit_stream_event(EventKind::Done {
+                        text: result_text.clone(),
+                        summary: done_summary.clone(),
+                        usage: Some(usage.clone()),
+                    }) => {}
+                }
             }
             let artifact =
                 state
@@ -395,7 +396,7 @@ pub(super) fn fold_turn_usage(state: &mut LoopState, turn_usage: Option<&Usage>)
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn emit_turn_artifacts(
     state: &mut LoopState,
-    tool_ctx: &AgentLoopRuntime,
+    _tool_ctx: &AgentLoopRuntime,
     cancel: &CancelToken,
     nested: bool,
     text: &str,
@@ -411,25 +412,24 @@ pub(super) async fn emit_turn_artifacts(
     captured: &mut Option<Vec<serde_json::Value>>,
     prefix: &str,
 ) -> Result<(), ClientError> {
-    if !nested && tool_ctx.telemetry.wants_stream_events() {
+    if !nested && state.hooks.wants_stream_events {
         log::debug!(
             "agent_loop: broadcasting TurnComplete (turn={})",
             state.turn_num
         );
-        tool_ctx
-            .telemetry
-            .send_stream_event(
-                InteractiveEvent::TurnComplete {
-                    turn: state.turn_num,
-                    text: text.to_string(),
-                    tool_calls: tool_calls.iter().map(format_tool_call).collect(),
-                    stats: turn_stats.clone(),
-                    totals: Some(totals.clone()),
-                },
-                cancel,
-                &state.conv.messages(),
-            )
-            .await?;
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Err(cancelled_error("cancelled", &state.conv.messages()));
+            }
+            _ = state.hooks.emit_stream_event(EventKind::TurnComplete {
+                turn: state.turn_num,
+                text: text.to_string(),
+                tool_calls: tool_calls.iter().map(format_tool_call).collect(),
+                stats: turn_stats.clone(),
+                totals: Some(totals.clone()),
+            }) => {}
+        }
     }
 
     if !reasoning.is_empty() {

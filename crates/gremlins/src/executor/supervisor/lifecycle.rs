@@ -35,7 +35,7 @@ pub(crate) fn setup_gremlin_channels(
     let (stage_stream_broadcast, _) = broadcast::channel(256);
     gremlin.runtime_config.stage_stream_tx = Some(stage_stream_broadcast.clone());
     crate::executor::stage_stream::spawn_stage_stream_forwarder(
-        interactive_handle.evt_tx.subscribe(),
+        gremlin.id.to_string(),
         stage_stream_broadcast.clone(),
     );
 

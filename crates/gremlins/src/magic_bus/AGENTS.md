@@ -53,7 +53,7 @@ run -> stage -> turn -> tool -> attempt
 | Variant | Backing channel | Producer behavior | Analog in old code |
 |---|---|---|---|
 | `Lossless` | unbounded `mpsc` | never blocks, never drops | `log_tx` |
-| `Backpressured { bound }` | bounded `mpsc` | `emit` drops when full; `emit_async` awaits capacity | chat `StreamEventSender::Mpsc` |
+| `Backpressured { bound }` | bounded `mpsc` | `emit` drops when full; `emit_async` awaits capacity | chat stream subscriber |
 | `LagTolerant { capacity }` | `broadcast` | drops on `Lagged`; receiver resyncs from folded state | `EVENT_BROADCAST` |
 
 Bounded and lag-tolerant channels require a non-zero capacity

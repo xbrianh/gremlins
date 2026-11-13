@@ -17,8 +17,9 @@ use rig_core::streaming::{Item, StreamEvent, Streamed};
 
 use crate::clients::cancel::CancelToken;
 use crate::clients::error::ClientError;
+use crate::clients::event::EventKind;
 use crate::clients::format::{apply_chunk, assistant_tool_message, format_tool_call};
-use crate::clients::interactive::{InteractiveEvent, InteractiveSession};
+use crate::clients::interactive::InteractiveSession;
 use crate::clients::tools::AgentLoopRuntime;
 
 use super::agent_loop::{
@@ -35,7 +36,7 @@ pub(super) async fn consume_stream_events(
     state: &mut LoopState,
     mut response: Streamed<Completion>,
     model: &DynModel<Completion>,
-    tool_ctx: &AgentLoopRuntime,
+    _tool_ctx: &AgentLoopRuntime,
     cancel: &CancelToken,
     opts: &LoopOpts<'_>,
     prefix: &str,
@@ -84,10 +85,9 @@ pub(super) async fn consume_stream_events(
                 };
                 state.system_prompt = Some(amended_system);
 
-                if state.cmd_rx.is_some() && state.evt_tx.is_some() && state.pause.is_some() {
+                if state.cmd_rx.is_some() && state.pause.is_some() {
                     let mut session = InteractiveSession {
                         cmd_rx: state.cmd_rx.take().unwrap(),
-                        evt_tx: state.evt_tx.take().unwrap(),
                         pause: state.pause.clone().unwrap(),
                     };
                     match interactive_loop(
@@ -95,19 +95,18 @@ pub(super) async fn consume_stream_events(
                         &mut *state.conv,
                         &mut session,
                         state.turn_num,
+                        &state.hooks,
                     )
                     .await
                     {
                         Ok(InteractiveLoopResult::Resumed) => {
                             state.system_prompt = state.original_system_prompt.clone();
                             state.cmd_rx = Some(session.cmd_rx);
-                            state.evt_tx = Some(session.evt_tx);
                             state.interactive_active = false;
                             break;
                         }
                         Ok(InteractiveLoopResult::RunOneTurn) => {
                             state.cmd_rx = Some(session.cmd_rx);
-                            state.evt_tx = Some(session.evt_tx);
                             state.pending_run_one_turn = true;
                             break;
                         }
@@ -194,42 +193,43 @@ pub(super) async fn consume_stream_events(
                     first_token = Some(now);
                 }
                 last_token = Some(now);
-                if !nested && tool_ctx.telemetry.wants_stream_events() {
+                if !nested && state.hooks.wants_stream_events {
                     match &chunk {
                         Item::Event(StreamEvent::Text { ref text, .. }) => {
-                            tool_ctx
-                                .telemetry
-                                .send_stream_event(
-                                    InteractiveEvent::StreamChunk { text: text.clone() },
-                                    cancel,
-                                    &stream_snapshot,
-                                )
-                                .await?;
+                            tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => {
+                                    return Err(cancelled_error("cancelled", &stream_snapshot));
+                                }
+                                _ = state.hooks.emit_stream_event(EventKind::StreamChunk {
+                                    text: text.clone(),
+                                }) => {}
+                            }
                         }
                         Item::Event(StreamEvent::Reasoning { ref text, .. }) => {
-                            tool_ctx
-                                .telemetry
-                                .send_stream_event(
-                                    InteractiveEvent::ReasoningChunk { text: text.clone() },
-                                    cancel,
-                                    &stream_snapshot,
-                                )
-                                .await?;
+                            tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => {
+                                    return Err(cancelled_error("cancelled", &stream_snapshot));
+                                }
+                                _ = state.hooks.emit_stream_event(EventKind::ReasoningChunk {
+                                    text: text.clone(),
+                                }) => {}
+                            }
                         }
                         Item::Event(StreamEvent::End {
                             content: rig_core::completion::message::AssistantContent::ToolCall(tc),
                             ..
                         }) => {
-                            tool_ctx
-                                .telemetry
-                                .send_stream_event(
-                                    InteractiveEvent::ReasoningChunk {
-                                        text: format_tool_call(tc),
-                                    },
-                                    cancel,
-                                    &stream_snapshot,
-                                )
-                                .await?;
+                            tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => {
+                                    return Err(cancelled_error("cancelled", &stream_snapshot));
+                                }
+                                _ = state.hooks.emit_stream_event(EventKind::ReasoningChunk {
+                                    text: format_tool_call(tc),
+                                }) => {}
+                            }
                         }
                         _ => {}
                     }
@@ -279,7 +279,7 @@ pub(super) async fn consume_stream_events(
 pub(super) async fn finish_stream_turn(
     state: &mut LoopState,
     acc: StreamAccumulator,
-    tool_ctx: &AgentLoopRuntime,
+    _tool_ctx: &AgentLoopRuntime,
     cancel: &CancelToken,
     nested: bool,
 ) -> Result<StreamTurnOutcome, ClientError> {
@@ -291,15 +291,14 @@ pub(super) async fn finish_stream_turn(
         if state.interactive_active {
             state.pending_run_one_turn = true;
         }
-        if !nested {
-            tool_ctx
-                .telemetry
-                .send_stream_event(
-                    InteractiveEvent::StreamReset,
-                    cancel,
-                    &state.conv.messages(),
-                )
-                .await?;
+        if !nested && state.hooks.wants_stream_events {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    return Err(cancelled_error("cancelled", &state.conv.messages()));
+                }
+                _ = state.hooks.emit_stream_event(EventKind::StreamReset) => {}
+            }
         }
         return Ok(StreamTurnOutcome::Continue);
     }

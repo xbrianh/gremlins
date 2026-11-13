@@ -481,7 +481,7 @@ mod tests {
 
             id_prefix: String::new(),
             telemetry: tools::AgentLoopTelemetry {
-                stream_events: None,
+                hooks: crate::clients::agent::plug::LoopHooks::new(),
                 tool_output: None,
             },
             active_skills: None,

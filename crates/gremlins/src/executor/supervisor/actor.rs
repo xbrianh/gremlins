@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::clients::cancel::CancelToken;
-use crate::clients::interactive::{InteractiveCommand, InteractiveHandle, StreamEventSender};
+use crate::clients::interactive::{InteractiveCommand, InteractiveHandle};
 use crate::executor::event::EventKind;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
 use crate::executor::socket;
@@ -679,8 +679,6 @@ impl ActorState {
         gremlin.runtime_config.actor_tx = Some(self.actor_tx.clone());
         let (stage_stream_broadcast, interactive, log_flush, log_sub) =
             setup_gremlin_channels(&mut gremlin, None);
-        gremlin.runtime_config.stream_events =
-            Some(StreamEventSender::Broadcast(interactive.evt_tx.clone()));
 
         let cancel = CancelToken::new();
         gremlin.cancel_token = Some(Arc::clone(&cancel));
@@ -747,8 +745,6 @@ impl ActorState {
         gremlin.runtime_config.actor_tx = Some(self.actor_tx.clone());
         let (stage_stream_broadcast, interactive, log_flush, log_sub) =
             setup_gremlin_channels(&mut gremlin, relay);
-        gremlin.runtime_config.stream_events =
-            Some(StreamEventSender::Broadcast(interactive.evt_tx.clone()));
 
         // Children inherit the cancel token their parent installed.
         let cancel = gremlin
@@ -831,8 +827,6 @@ impl ActorState {
         gremlin.runtime_config.actor_tx = Some(self.actor_tx.clone());
         let (stage_stream_broadcast, interactive, log_flush, log_sub) =
             setup_gremlin_channels(&mut gremlin, None);
-        gremlin.runtime_config.stream_events =
-            Some(StreamEventSender::Broadcast(interactive.evt_tx.clone()));
 
         self.insert_run_entry(
             id.clone(),

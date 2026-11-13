@@ -12,7 +12,7 @@ pub enum DeliveryPolicy {
     /// `log_tx`.
     Lossless,
     /// Bounded `mpsc` — producers await capacity on `emit_async`.
-    /// Equivalent to today's chat `StreamEventSender::Mpsc`.
+    /// Used by the chat turn's stream subscriber.
     Backpressured { bound: usize },
     /// `broadcast` — drops on `Lagged`; the subscriber resyncs from its own
     /// folded state. Equivalent to today's `EVENT_BROADCAST`.
