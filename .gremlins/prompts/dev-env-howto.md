@@ -1,17 +1,6 @@
 ## Development environment
 
-A pure Rust workspace. No Python, no PyO3, no native extensions.
-
-## When in doubt
-
-run `cargo check`. It's the quickest way to verify compilation and is usually
-enough. Don't reach for the full test suite here.
-
-## Avoid repetitive commands
-
-Never re-run the same command unless you've made code changes. An identical
-`cargo check` or `cargo test` without intervening edits will produce the same
-result and just wastes a turn.
+A pure Rust workspace.
 
 ## Makefile recipes
 
@@ -33,24 +22,19 @@ parallelism and ensures consistent flags.
 
 ### Running tests
 
-A dedicated verify stage runs `make check && make test` after this stage
-finishes, so do **not** run the full `make test` suite yourself. For the code
-you changed, run a targeted single test:
+To run a targeted single test:
 
 ```bash
 cargo test -p gremlins --lib -- <test_name>
 ```
 
-If you need the full suite, `make test` runs `cargo test -q -p gremlins --lib`,
-but leave that to the verify stage. The Makefile auto-detects core count, so
-explicit `-j` flags are unnecessary but harmless.
+To run the entire suite:
 
-### Check before you think you're done
+```bash
+make test
+```
 
-The verify stage runs `make check && make test` after this stage finishes,
-so do **not** run either yourself. `cargo check` is sufficient to verify
-compilation for the code you changed, and a targeted
-`cargo test -p gremlins --lib -- <test_name>` is fine.
+The Makefile auto-detects core count, so explicit `-j` flags are unnecessary but harmless.
 
 ## Batch replacement over iterative edits
 
@@ -59,22 +43,3 @@ missing separator in template references), do a single `rg` to
 enumerate all occurrences, then apply every edit in one batch pass.
 Iterating "find one → fix → find another" wastes turns and risks
 introducing regressions from partial fixes.
-
-## Searching code safely
-
-**Always use `rg` (ripgrep), never `grep -r`.** `rg` respects `.gitignore`
-and skips `target/` by default. `grep -r` with an empty file list (e.g.
-from a `$(find …)` that returned nothing) silently falls back to searching
-the entire working directory — including `target/` — which can dump
-megabytes of garbage into context and overflow the model's token window.
-
-When you need to understand a dependency's trait or type definition, look
-in the cargo registry source, not the worktree:
-
-```bash
-# Find where a dependency's source lives
-find ~/.cargo/registry/src -path "*<crate-name>*" -name "*.rs" | head -5
-```
-
-Do **not** run `cargo doc` just to grep its output. The generated HTML
-is enormous and useless for code search.
