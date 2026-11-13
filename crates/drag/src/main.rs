@@ -234,13 +234,15 @@ async fn run() -> Result<(), String> {
         .map(|(_, _, pkg_key)| pkg_key.clone())
         .collect();
 
-    // Exclude packages whose modules were dropped during dedup (e.g. a
-    // binary whose module was superseded by a library of the same name).
-    // Their dependency-graph edges would combine with the retained
-    // library's edges and distort footprints.
+    // Packages from which at least one module was dropped during dedup
+    // (e.g. a binary whose module was superseded by a library of the same
+    // name) still have remaining modules that need source dirs, token
+    // counts, and maintainability scoring.  We only skip their
+    // dependency-graph edges below (see edge filtering in the await loop),
+    // not the packages themselves.
     let scoring_packages: Vec<&PackageInfo> = packages
         .iter()
-        .filter(|p| relevant_packages.contains(&p.key()) && !dropped_pkg_keys.contains(&p.key()))
+        .filter(|p| relevant_packages.contains(&p.key()))
         .collect();
 
     // Run dependency-graph extraction for each package in parallel.
@@ -253,7 +255,15 @@ async fn run() -> Result<(), String> {
     }
     for (i, handle) in handles.into_iter().enumerate() {
         match handle.await {
-            Ok(Ok(pkg_edges)) => edges.extend(pkg_edges),
+            Ok(Ok(pkg_edges)) => {
+                // Skip dependency-graph edges from packages whose modules
+                // were dropped during dedup (see scoring_packages above).
+                // Their edges would combine with the retained library's
+                // edges and distort footprints.
+                if !dropped_pkg_keys.contains(scoring_packages[i].key().as_str()) {
+                    edges.extend(pkg_edges);
+                }
+            }
             Ok(Err(e)) => {
                 let pkg_name = scoring_packages[i].name();
                 eprintln!("gremlins-drag: dependency graph skipped for {pkg_name}: {e}");
