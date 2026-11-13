@@ -210,23 +210,23 @@ impl Backend for AzureOpenAiBackend {
                     http_client,
                     auth_scope,
                 } => {
-                    let token =
-                        token_provider.get_token(auth_scope).await.map_err(|e| {
-                            ClientError::Runtime {
-                                message: format!(
-                                    "Azure OpenAI token acquisition failed: {e}"
-                                ),
-                            }
-                        })?;
-                    let client = OpenAIConfig::with_alternate_key(&AZURE, token)
+                    // Token is acquired lazily on first request — the
+                    // TokenProvider owns caching and refresh.
+                    let wrapped = LazyAuthHttpClient::<ApiKeyStrategy>::new(
+                        http_client.clone(),
+                        token_provider.clone(),
+                        auth_scope.clone(),
+                    );
+                    let azure_client = AzureResponsesHttpClient::new(
+                        DynHttpClient::new(wrapped),
+                        endpoint.clone(),
+                        api_version.clone(),
+                    );
+                    let client = OpenAIConfig::with_alternate_key(&AZURE, "unused")
                         .with_route(Route::Responses)
                         .with_api_version(api_version)
                         .with_base_url(endpoint)
-                        .connect(AzureResponsesHttpClient::new(
-                            http_client.clone(),
-                            endpoint,
-                            api_version,
-                        ));
+                        .connect(azure_client);
                     Ok(client.completion(&model_name).erase())
                 }
             }
@@ -271,13 +271,13 @@ impl Backend for AzureOpenAiBackend {
                     ref token_provider,
                     ref auth_scope,
                 } => {
-                    let wrapped = LazyAuthHttpClient::<ApiKeyStrategy>::new(
+                    let lazy_client = LazyAuthHttpClient::<ApiKeyStrategy>::new(
                         http_client.clone(),
                         token_provider.clone(),
                         auth_scope.clone(),
                     );
-                    let wrapped = AzureResponsesHttpClient::new(
-                        DynHttpClient::new(wrapped),
+                    let azure_client = AzureResponsesHttpClient::new(
+                        DynHttpClient::new(lazy_client),
                         endpoint.clone(),
                         api_version.clone(),
                     );
@@ -285,7 +285,7 @@ impl Backend for AzureOpenAiBackend {
                         .with_route(Route::Responses)
                         .with_api_version(api_version)
                         .with_base_url(endpoint)
-                        .connect(wrapped);
+                        .connect(azure_client);
                     Some(client.completion(&model).erase())
                 }
             }
