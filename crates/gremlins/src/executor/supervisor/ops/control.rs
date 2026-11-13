@@ -3,10 +3,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 
 use serde_json::Value;
-use tokio::sync::watch;
+use tokio::sync::mpsc;
 
 use crate::config;
 use crate::definition::{StageSpec, StaticDefinition};
@@ -14,60 +13,55 @@ use crate::executor::event::EventKind;
 use crate::executor::gremlin::{Gremlin, GremlinConfig};
 use crate::executor::state;
 
+use super::super::actor_client::Client;
 use super::super::event::emit_event;
-use super::super::event::init_bus;
 use super::super::lifecycle::spawn_gremlin_runner;
 use super::super::lifecycle::terminate_and_reap;
-use super::super::session::{session_map, SessionHandle};
-use super::super::{error_response, get_id_lock, get_run_map, ok_response, valid_id, RunState};
+use super::super::{error_response, ok_response, valid_id};
 
-pub(crate) async fn handle_session_stop(request: &Value, session: &SessionHandle) -> Value {
+pub(crate) async fn handle_session_stop(
+    request: &Value,
+    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
+    session_id: &str,
+) -> Value {
     if let Some(id) = request.get("id").and_then(|v| v.as_str()) {
-        let mut s = session.lock().await;
-        let _gremlin = s.chat_gremlins.remove(id);
-        s.chat_ids.remove(id);
-        let done = s.cancel_turn_for_id(id);
-        drop(s);
-        if let Some(mut done_rx) = done {
-            let _ = done_rx.wait_for(|v| *v).await;
+        // Relinquish ownership, drop the parked gremlin, then cancel the
+        // in-flight turn and wait for it to drain.
+        let client = Client::new(actor_tx.clone());
+        client.session_remove_chat_id(session_id, id).await;
+        client.session_take_gremlin(session_id, id).await;
+        if let Some(mut done) = client
+            .session_cancel_turn(session_id, Some(id), false)
+            .await
+        {
+            let _ = done.wait_for(|v| *v).await;
         }
     }
-    handle_stop(request, &watch::channel(false).0).await
+    handle_stop(request, actor_tx).await
 }
 
 /// Remove a chat gremlin from whichever session owns it and cancel its turn.
-pub(crate) async fn stop_session_chat_gremlin(id: &str) {
-    let live = {
-        let map = get_run_map().lock().unwrap();
-        map.contains_key(id)
-    };
+pub(crate) async fn stop_session_chat_gremlin(
+    id: &str,
+    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
+) {
+    let client = Client::new(actor_tx.clone());
+    let live = client.contains_run(id).await;
 
-    let sessions: Vec<SessionHandle> = session_map().lock().unwrap().values().cloned().collect();
-    for session in sessions {
-        let mut s = session.lock().await;
-        if s.chat_ids.remove(id) {
-            let _gremlin = s.chat_gremlins.remove(id);
-            let done = s.cancel_turn_for_id(id);
-            drop(s);
-            if live {
-                if let Some(mut done) = done {
-                    let _ = done.wait_for(|v| *v).await;
-                }
-            }
-            return;
+    for session_id in client.session_get_all().await {
+        if !client.session_remove_chat_id(&session_id, id).await {
+            continue;
         }
-    }
-}
-
-async fn clear_soft_cancel_for(id: &str) {
-    let sessions: Vec<SessionHandle> = session_map().lock().unwrap().values().cloned().collect();
-    for session in sessions {
-        let s = session.lock().await;
-        if let Some(cur) = &s.current_turn {
-            if cur.id == id {
-                cur.soft_cancel.store(false, Ordering::Relaxed);
+        client.session_take_gremlin(&session_id, id).await;
+        let done = client
+            .session_cancel_turn(&session_id, Some(id), false)
+            .await;
+        if live {
+            if let Some(mut done) = done {
+                let _ = done.wait_for(|v| *v).await;
             }
         }
+        return;
     }
 }
 
@@ -77,8 +71,7 @@ async fn clear_soft_cancel_for(id: &str) {
 
 pub(crate) async fn handle_launch(
     request: &Value,
-    _state_root: &Path,
-    shutdown_tx: &watch::Sender<bool>,
+    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
 ) -> Value {
     let definition = request
         .get("definition")
@@ -182,7 +175,7 @@ pub(crate) async fn handle_launch(
 
     let id = gremlin.id.to_string();
 
-    spawn_gremlin_runner(gremlin, &id, "starting", None, definition_name, shutdown_tx);
+    spawn_gremlin_runner(actor_tx, gremlin, "starting", None, definition_name, true);
 
     ok_response(serde_json::json!({"id": id}))
 }
@@ -191,44 +184,22 @@ pub(crate) async fn handle_launch(
 // stop
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn handle_stop(request: &Value, _shutdown_tx: &watch::Sender<bool>) -> Value {
+pub(crate) async fn handle_stop(
+    request: &Value,
+    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
+) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
 
-    clear_soft_cancel_for(id).await;
+    // The actor owns the run map: it removes the entry, cancels the task,
+    // publishes the terminal state and releases the log subscription. A
+    // `Some` reply means the id was live and the reap below is still ours.
+    let client = Client::new(actor_tx.clone());
+    let stopped = client.stop_run(id).await;
 
-    let run_map = get_run_map();
-
-    let stopped_live = {
-        let mut map = run_map.lock().unwrap();
-        if let Some(handle) = map.get(id) {
-            handle.cancel.cancel();
-            if let Some(ref task) = handle.task {
-                task.abort();
-            }
-            handle.aborted.store(true, Ordering::Relaxed);
-            let state_tx = handle.state_tx.clone();
-            let log_sub = handle.log_sub.clone();
-            map.remove(id);
-            let _ = state_tx.send(RunState {
-                id: id.to_string(),
-                status: "stopped".to_string(),
-                stage: String::new(),
-                started_at: String::new(),
-            });
-            // Unsubscribe the log-writer subscription so the log task drains.
-            if let Some(ref sub) = log_sub {
-                init_bus().unsubscribe(sub);
-            }
-            true
-        } else {
-            false
-        }
-    };
-
-    if stopped_live {
+    if stopped.is_some() {
         terminate_and_reap(id);
         return ok_response(serde_json::json!({"id": id, "status": "stopping"}));
     }
@@ -367,22 +338,18 @@ fn collect_parallel_runtime_keys(stage: &StageSpec, rerun: bool, keys: &mut Para
 
 pub(crate) async fn handle_resume(
     request: &Value,
-    _state_root: &Path,
-    shutdown_tx: &watch::Sender<bool>,
+    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
 ) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
 
-    let id_lock = get_id_lock(id);
-    let _guard = id_lock.lock().await;
+    let client = Client::new(actor_tx.clone());
+    let _guard = client.acquire_id_lock(id).await;
 
-    {
-        let map = get_run_map().lock().unwrap();
-        if map.contains_key(id) {
-            return error_response(&format!("gremlin {id} is already running"));
-        }
+    if client.contains_run(id).await {
+        return error_response(&format!("gremlin {id} is already running"));
     }
 
     let mut gremlin = match Gremlin::from(id) {
@@ -496,12 +463,12 @@ pub(crate) async fn handle_resume(
     let definition_name = gremlin.state.read_str("kind");
 
     spawn_gremlin_runner(
+        actor_tx,
         gremlin,
-        id,
         &resume_stage,
         Some(&resume_stage),
         &definition_name,
-        shutdown_tx,
+        true,
     );
 
     ok_response(serde_json::json!({ "id": id, "resume_from": resume_stage }))
@@ -511,7 +478,10 @@ pub(crate) async fn handle_resume(
 // rm
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn handle_rm(request: &Value, _state_root: &Path) -> Value {
+pub(crate) async fn handle_rm(
+    request: &Value,
+    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
+) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
         Err(resp) => return resp,
@@ -522,16 +492,13 @@ pub(crate) async fn handle_rm(request: &Value, _state_root: &Path) -> Value {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let id_lock = get_id_lock(id);
-    let _guard = id_lock.lock().await;
+    let client = Client::new(actor_tx.clone());
+    let _guard = client.acquire_id_lock(id).await;
 
-    {
-        let map = get_run_map().lock().unwrap();
-        if map.contains_key(id) {
-            return error_response(&format!(
-                "gremlin {id} is running — use `gremlins stop {id}` first"
-            ));
-        }
+    if client.contains_run(id).await {
+        return error_response(&format!(
+            "gremlin {id} is running — use `gremlins stop {id}` first"
+        ));
     }
 
     let gremlin = match Gremlin::from(id) {

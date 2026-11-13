@@ -1,16 +1,11 @@
-//! Global event bus and connection counter.
+//! Global event bus.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
-
-use tokio::sync::watch;
+use std::sync::OnceLock;
 
 pub(crate) use crate::executor::event::EventKind;
 use crate::magic_bus::{
     Bus, CorrId, DispatchEvent, ReceiverHalf, Subscriber, SubscriberRegistration,
 };
-
-use super::get_run_map;
 
 // ---------------------------------------------------------------------------
 // Global event bus
@@ -93,58 +88,5 @@ pub(crate) fn emit_event(event: EventKind) {
     };
     if let Some(bus) = BUS.get() {
         bus.emit(DispatchEvent::new(corr_id, event));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Global connection counter
-// ---------------------------------------------------------------------------
-
-static CONNECTION_COUNT: OnceLock<Arc<AtomicUsize>> = OnceLock::new();
-
-pub(crate) fn init_connection_counter() -> &'static Arc<AtomicUsize> {
-    CONNECTION_COUNT.get_or_init(|| Arc::new(AtomicUsize::new(0)))
-}
-
-pub(crate) fn get_connection_count() -> &'static AtomicUsize {
-    init_connection_counter().as_ref()
-}
-
-/// RAII guard: decrements connection count on drop, signals idle-shutdown.
-pub(crate) struct ConnectionGuard {
-    shutdown_tx: Option<watch::Sender<bool>>,
-}
-
-impl ConnectionGuard {
-    pub(crate) fn new(shutdown_tx: &watch::Sender<bool>) -> Self {
-        get_connection_count().fetch_add(1, Ordering::Relaxed);
-        Self {
-            shutdown_tx: Some(shutdown_tx.clone()),
-        }
-    }
-}
-
-impl Drop for ConnectionGuard {
-    fn drop(&mut self) {
-        let prev = get_connection_count().fetch_sub(1, Ordering::Relaxed);
-        if prev == 1 {
-            if let Some(tx) = &self.shutdown_tx {
-                check_shutdown(tx);
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Shutdown helper
-// ---------------------------------------------------------------------------
-
-/// Signal shutdown when there are no running gremlins and no open
-/// connections. Safe to call from any task.
-pub(crate) fn check_shutdown(shutdown_tx: &watch::Sender<bool>) {
-    let runs_empty = get_run_map().lock().unwrap().is_empty();
-    let conns_zero = get_connection_count().load(Ordering::Relaxed) == 0;
-    if runs_empty && conns_zero {
-        let _ = shutdown_tx.send(true);
     }
 }

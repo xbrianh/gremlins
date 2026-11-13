@@ -1,12 +1,12 @@
 //! Streaming log handler (`handle_log` op).
 
 use std::collections::HashSet;
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::io::BufReader;
+use tokio::sync::mpsc;
 
 use crate::config;
 use crate::executor::gremlin::validate_gremlin_id;
@@ -14,13 +14,14 @@ use crate::executor::socket;
 use crate::executor::state::{self, FileSystemStateStore};
 use crate::magic_bus::Subscriber;
 
-use super::event::{init_bus, subscribe_run, EventKind};
+use super::actor_client::Client;
+use super::event::{init_bus, EventKind};
 use super::ops::resolve_store_for_id;
-use super::{error_response, get_run_map, SharedWriter};
+use super::{error_response, SharedWriter};
 
 pub(crate) async fn handle_log(
     request: &Value,
-    _state_root: &Path,
+    actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
     mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: &SharedWriter,
 ) {
@@ -46,7 +47,7 @@ pub(crate) async fn handle_log(
         Path(PathBuf),
     }
 
-    let (source, unknown) = match resolve_store_for_id(id) {
+    let (source, unknown) = match resolve_store_for_id(id, actor_tx).await {
         Ok(store) => (LogSource::Store(store), false),
         Err(_) => {
             let sd = FileSystemStateStore::open(id)
@@ -73,22 +74,17 @@ pub(crate) async fn handle_log(
 
     // Only subscribe for live runs (still in the run map). A finished run
     // has no more events; subscribing would wait forever on a sender that
-    // already emitted its terminal event. Check under the run-map lock and
-    // optionally request a flush barrier so pre-subscription log lines are
-    // persisted before we read history.
+    // already emitted its terminal event. The combined message atomically
+    // checks the run map and subscribes inside the actor, closing the TOCTOU
+    // window that existed when these were two separate messages.
     let (log_sub, mut log_rx) = if follow {
-        let (flush, sub_rx) = {
-            let map = get_run_map().lock().unwrap();
-            if let Some(handle) = map.get(id) {
-                // Clone the flush channel, drop the lock before awaiting.
-                (handle.log_flush.clone(), {
-                    let (sub, rx) = subscribe_run(id);
-                    (Some(sub), Some(rx))
-                })
+        let client = Client::new(actor_tx.clone());
+        let (flush, sub_rx) =
+            if let Some((flush, sub, rx)) = client.get_run_log_flush_and_subscribe(id).await {
+                (Some(flush), (Some(sub), Some(rx)))
             } else {
                 (None, (None, None))
-            }
-        };
+            };
         // Request the log writer flush queued events to disk so
         // pre-subscription lines are visible in the blob we're about
         // to read.

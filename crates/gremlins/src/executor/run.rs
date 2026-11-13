@@ -808,6 +808,14 @@ mod tests {
         let data = serde_json::json!({"id":"gr-test","attempt":"test-0001","stage":"starting","model":default_model});
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
 
+        // Spawn a test actor so the parallel executor has a mailbox for
+        // launch_child / stop_child.
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+        let actor_tx =
+            crate::executor::supervisor::actor::spawn_actor(config::state_root(), shutdown_tx);
+        let mut runtime_config = crate::executor::gremlin::RuntimeConfig::snapshot(None);
+        runtime_config.actor_tx = Some(actor_tx);
+
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),
             definition: Box::new(StaticDefinition::new(
@@ -830,7 +838,7 @@ mod tests {
             client: Client::parse(default_model).unwrap(),
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
-            runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot(None),
+            runtime_config,
             cancel_token: None,
             interactive_session: None,
             clean_cmds: Vec::new(),
@@ -857,8 +865,8 @@ mod tests {
         assert_eq!(stage_key("a/b", "c"), "a/b/c");
     }
 
-    #[test]
-    fn loop_iter_defaults_to_one() {
+    #[tokio::test]
+    async fn loop_iter_defaults_to_one() {
         let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
         assert_eq!(gremlin.loop_iter, "1");
     }
@@ -1135,8 +1143,8 @@ mod tests {
     // --- agent ---
 
     /// Regression: ensure task-model maps aren't confused with stage-model maps.
-    #[test]
-    fn resolve_task_models_uses_task_maps_not_stage_maps() {
+    #[tokio::test]
+    async fn resolve_task_models_uses_task_maps_not_stage_maps() {
         let (_sandbox, mut gremlin) = test_gremlin(vec![], "cmd/true");
         gremlin
             .runtime_config

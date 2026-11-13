@@ -119,6 +119,15 @@ pub(crate) async fn run_parallel(
 
     let total_children = children.len();
 
+    // The actor mailbox is threaded onto every launched gremlin's runtime
+    // config so parallel children can be registered without a global run map.
+    // When running standalone (no supervisor), spawn a throwaway actor for
+    // the duration of this parallel group; it exits when the last sender drops.
+    let actor_tx = gremlin.runtime_config.actor_tx.clone().unwrap_or_else(|| {
+        let (shutdown_tx, _rx) = tokio::sync::watch::channel(false);
+        supervisor::actor::spawn_actor(crate::config::state_root(), shutdown_tx)
+    });
+
     log::debug!(
         "parallel group {group_name}: starting with {total_children} children (max_concurrent={max_concurrent:?}, cancel_on_error={cancel_on_error}, error_policy={error_policy:?})"
     );
@@ -268,7 +277,7 @@ pub(crate) async fn run_parallel(
         let LaunchResult {
             state_rx,
             gremlin_rx,
-        } = supervisor::launch_child(child_gremlin, relay);
+        } = supervisor::launch_child(&actor_tx, child_gremlin, relay).await;
 
         launched.push(LaunchedChild {
             child_name,
@@ -404,7 +413,7 @@ pub(crate) async fn run_parallel(
                             // lookup via the child_ids vec.
                             for &running_idx in &running {
                                 if let Some(rid) = child_ids.get(running_idx) {
-                                    supervisor::stop_child(rid).await;
+                                    supervisor::stop_child(&actor_tx, rid).await;
                                 }
                             }
                             child_results.push(ChildOutcome {
@@ -828,6 +837,14 @@ mod tests {
 
         let state_data = StateData::open("gr-test").unwrap();
 
+        // Spawn a test actor so the parallel executor has a mailbox for
+        // launch_child / stop_child.
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+        let actor_tx =
+            crate::executor::supervisor::actor::spawn_actor(config::state_root(), shutdown_tx);
+        let mut runtime_config = RuntimeConfig::snapshot(None);
+        runtime_config.actor_tx = Some(actor_tx);
+
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),
             definition_path: None,
@@ -850,7 +867,7 @@ mod tests {
             client: crate::clients::client::Client::parse(default_model).unwrap(),
             loop_iter: "1".to_string(),
             stage_inputs: HashMap::new(),
-            runtime_config: RuntimeConfig::snapshot(None),
+            runtime_config,
             cancel_token: None,
             interactive_session: None,
             clean_cmds: Vec::new(),

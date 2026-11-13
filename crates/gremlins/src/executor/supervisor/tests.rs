@@ -1,5 +1,6 @@
 //! Tests for the supervisor module.
 
+use super::actor::{self, ActorMsg};
 use super::{
     add_usage_stats, create_chat_gremlin, handle_artifact, handle_chat_model, handle_compact,
     handle_launch, handle_model, parallel_runtime_keys, resolve_chat_env,
@@ -21,10 +22,73 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 fn model(spec: &str) -> ModelURI {
     ModelURI::parse(spec).unwrap()
+}
+
+/// Spawn a supervisor actor backed by a throwaway state root.
+async fn spawn_test_actor() -> (
+    mpsc::UnboundedSender<ActorMsg>,
+    tokio::sync::watch::Sender<bool>,
+) {
+    let state_root = std::env::temp_dir().join(format!(
+        "gremlins-test-{}",
+        crate::executor::state::token_hex(8)
+    ));
+    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+    let actor_tx = super::actor::spawn_actor(state_root, shutdown_tx.clone());
+    (actor_tx, shutdown_tx)
+}
+
+/// Create a session in the actor and return its id.
+async fn create_session(actor_tx: &mpsc::UnboundedSender<ActorMsg>) -> String {
+    let (respond, rx) = oneshot::channel();
+    actor_tx.send(ActorMsg::CreateSession { respond }).unwrap();
+    rx.await.unwrap()
+}
+
+/// Tear a session down and wait for the drain to finish.
+async fn teardown_session(actor_tx: &mpsc::UnboundedSender<ActorMsg>, session_id: &str) {
+    let (respond, rx) = oneshot::channel();
+    if actor_tx
+        .send(ActorMsg::SessionTeardown {
+            session_id: session_id.to_string(),
+            abort_listener: true,
+            respond,
+        })
+        .is_ok()
+    {
+        let _ = rx.await;
+    }
+}
+
+/// Whether the actor still has a live run-map entry for `id`.
+async fn contains_run(actor_tx: &mpsc::UnboundedSender<ActorMsg>, id: &str) -> bool {
+    let (respond, rx) = oneshot::channel();
+    if actor_tx
+        .send(ActorMsg::ContainsRun {
+            id: id.to_string(),
+            respond,
+        })
+        .is_err()
+    {
+        return false;
+    }
+    rx.await.unwrap_or(false)
+}
+
+/// Whether the actor still knows about `session_id`.
+async fn session_exists(actor_tx: &mpsc::UnboundedSender<ActorMsg>, session_id: &str) -> bool {
+    let (respond, rx) = oneshot::channel();
+    if actor_tx.send(ActorMsg::SessionGetAll { respond }).is_err() {
+        return false;
+    }
+    rx.await
+        .unwrap_or_default()
+        .iter()
+        .any(|id| id == session_id)
 }
 
 #[tokio::test]
@@ -61,27 +125,32 @@ async fn turn_completion_watch_is_lossless_and_broadcasts() {
 /// turn that already completed.
 #[tokio::test]
 async fn reusable_chat_gremlin_id_returns_none_when_done_turn_has_no_gremlin() {
-    let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-        super::ClientSession::new("test-sess".to_string()),
-    ));
-    let (tx, rx) = watch::channel(true); // already completed
-    {
-        let mut s = session.lock().await;
-        s.current_turn = Some(super::CurrentTurn {
-            id: "grem-1".to_string(),
-            turn: Some("1".to_string()),
-            cancel: super::CancelToken::new(),
-            soft_cancel: Arc::new(AtomicBool::new(false)),
-            done: rx,
-            done_tx: Arc::new(tx),
-            interrupted: true,
-        });
-        // gremlin was stopped externally — chat_gremlins is empty
-    }
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let session_id = create_session(&actor_tx).await;
+
+    let (_tx, rx) = watch::channel(true); // already completed
+    let turn = super::CurrentTurn {
+        id: "grem-1".to_string(),
+        turn: Some("1".to_string()),
+        cancel: super::CancelToken::new(),
+        soft_cancel: Arc::new(AtomicBool::new(false)),
+        done: rx,
+        interrupted: true,
+    };
+    let (respond, rx) = oneshot::channel();
+    actor_tx
+        .send(ActorMsg::SessionSetCurrentTurn {
+            session_id: session_id.clone(),
+            turn,
+            respond,
+        })
+        .unwrap();
+    let _ = rx.await;
+    // gremlin was stopped externally — chat_gremlins is empty
 
     let result = tokio::time::timeout(
         Duration::from_secs(2),
-        super::reusable_chat_gremlin_id(&session),
+        super::reusable_chat_gremlin_id(&actor_tx, &session_id),
     )
     .await;
 
@@ -169,19 +238,46 @@ async fn read_until_type_inner(
 
 /// Wait until the chat gremlin has been re-inserted after its turn, then
 /// extract a value through the provided closure.
-async fn wait_for_chat_gremlin<T>(
-    session: &super::SessionHandle,
+async fn wait_for_chat_gremlin_actor<T>(
+    actor_tx: &mpsc::UnboundedSender<ActorMsg>,
+    session_id: &str,
     id: &str,
     extract: impl Fn(&Gremlin) -> T,
 ) -> T {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let val = {
-                let s = session.lock().await;
-                s.chat_gremlins.get(id).map(&extract)
-            };
-            if let Some(v) = val {
-                return v;
+            let (respond, rx) = oneshot::channel();
+            actor_tx
+                .send(ActorMsg::SessionGetChatGremlinKeys {
+                    session_id: session_id.to_string(),
+                    respond,
+                })
+                .unwrap();
+            let keys = rx.await.unwrap();
+            if keys.iter().any(|k| k == id) {
+                // Take, inspect, re-insert.
+                let (respond, rx) = oneshot::channel();
+                actor_tx
+                    .send(ActorMsg::SessionTakeGremlin {
+                        session_id: session_id.to_string(),
+                        id: id.to_string(),
+                        respond,
+                    })
+                    .unwrap();
+                if let Some(gremlin) = rx.await.unwrap() {
+                    let val = extract(&gremlin);
+                    let (respond, rx) = oneshot::channel();
+                    actor_tx
+                        .send(ActorMsg::SessionReinsertGremlin {
+                            session_id: session_id.to_string(),
+                            id: id.to_string(),
+                            gremlin,
+                            respond,
+                        })
+                        .unwrap();
+                    let _ = rx.await;
+                    return val;
+                }
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -200,24 +296,27 @@ fn sandbox_dirs(config: Option<&str>) -> (Sandbox, PathBuf, PathBuf) {
     (sandbox, project_root, state_root)
 }
 
-/// Create a UnixStream pair, returning (writer, reader, server_read, session).
-fn chat_pair(
-    name: &str,
+/// Create a UnixStream pair and a session in the actor, returning
+/// (writer, reader, server_read, session_id).
+async fn chat_pair_actor(
+    actor_tx: &mpsc::UnboundedSender<ActorMsg>,
 ) -> (
     super::SharedWriter,
     tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
     tokio::net::unix::OwnedReadHalf,
-    super::SessionHandle,
+    String,
 ) {
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
     let (server_read, server_write) = server.into_split();
     let writer = super::SharedWriter::new(server_write);
     let (client_read, _client_write) = client.into_split();
     let reader = tokio::io::BufReader::new(client_read);
-    let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-        super::ClientSession::new(name.to_string()),
-    ));
-    (writer, reader, server_read, session)
+
+    let (respond, rx) = oneshot::channel();
+    actor_tx.send(ActorMsg::CreateSession { respond }).unwrap();
+    let session_id = rx.await.unwrap();
+
+    (writer, reader, server_read, session_id)
 }
 
 #[test]
@@ -503,7 +602,7 @@ async fn handle_launch_resolves_relative_filepath_against_project_root() {
     )
     .unwrap();
 
-    let (shutdown_tx, _) = watch::channel(false);
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
     let request = |plan: &str| {
         serde_json::json!({
             "op": "launch",
@@ -515,19 +614,21 @@ async fn handle_launch_resolves_relative_filepath_against_project_root() {
 
     // A relative `filepath` value that exists under `project_root` (but not
     // the daemon cwd) must validate and launch successfully.
-    let resp = handle_launch(&request("plan.md"), sandbox.path(), &shutdown_tx).await;
+    let resp = handle_launch(&request("plan.md"), &actor_tx).await;
     assert_eq!(
         resp.get("type").and_then(Value::as_str),
         Some("ok"),
         "relative filepath under project_root must launch: {resp}"
     );
     let id = resp["id"].as_str().unwrap().to_string();
-    super::get_run_map().lock().unwrap().remove(&id);
+    let (respond, rx) = oneshot::channel();
+    let _ = actor_tx.send(ActorMsg::StopRun { id, respond });
+    let _ = rx.await;
 
     // A relative `filepath` value that exists nowhere under `project_root`
     // must fail validation with the existing error; the daemon cwd is not
     // allowed to satisfy it.
-    let resp = handle_launch(&request("missing.md"), sandbox.path(), &shutdown_tx).await;
+    let resp = handle_launch(&request("missing.md"), &actor_tx).await;
     assert_eq!(resp.get("type").and_then(Value::as_str), Some("error"));
     let message = resp
         .get("message")
@@ -541,7 +642,8 @@ async fn handle_launch_resolves_relative_filepath_against_project_root() {
 
 #[tokio::test]
 async fn handle_artifact_returns_error_for_missing_id() {
-    let resp = handle_artifact(&serde_json::json!({"op": "artifact"})).await;
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let resp = handle_artifact(&serde_json::json!({"op": "artifact"}), &actor_tx).await;
     assert_eq!(resp.get("type").and_then(Value::as_str), Some("error"));
     assert!(resp
         .get("message")
@@ -551,7 +653,12 @@ async fn handle_artifact_returns_error_for_missing_id() {
 
 #[tokio::test]
 async fn handle_artifact_returns_error_for_invalid_id() {
-    let resp = handle_artifact(&serde_json::json!({"op": "artifact", "id": "../etc"})).await;
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let resp = handle_artifact(
+        &serde_json::json!({"op": "artifact", "id": "../etc"}),
+        &actor_tx,
+    )
+    .await;
     assert_eq!(resp.get("type").and_then(Value::as_str), Some("error"));
     assert!(resp
         .get("message")
@@ -640,9 +747,12 @@ fn model_parser_reserves_profile_provider() {
 #[tokio::test]
 async fn handle_artifact_returns_unknown_gremlin_for_missing_state() {
     let _sandbox = Sandbox::new();
-    let resp =
-        handle_artifact(&serde_json::json!({"op": "artifact", "id": "gr-missing", "list": true}))
-            .await;
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let resp = handle_artifact(
+        &serde_json::json!({"op": "artifact", "id": "gr-missing", "list": true}),
+        &actor_tx,
+    )
+    .await;
     assert_eq!(resp.get("type").and_then(Value::as_str), Some("error"));
     assert!(resp
         .get("message")
@@ -653,6 +763,7 @@ async fn handle_artifact_returns_unknown_gremlin_for_missing_state() {
 #[tokio::test]
 async fn handle_artifact_lists_keys_and_reads_content_from_persisted_state() {
     let _sandbox = Sandbox::new();
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
     let mut initial = serde_json::Map::new();
     initial.insert("id".into(), Value::String("gr-1".into()));
     let store =
@@ -665,8 +776,11 @@ async fn handle_artifact_lists_keys_and_reads_content_from_persisted_state() {
         .await
         .unwrap();
 
-    let list_resp =
-        handle_artifact(&serde_json::json!({"op": "artifact", "id": "gr-1", "list": true})).await;
+    let list_resp = handle_artifact(
+        &serde_json::json!({"op": "artifact", "id": "gr-1", "list": true}),
+        &actor_tx,
+    )
+    .await;
     assert_eq!(list_resp.get("type").and_then(Value::as_str), Some("ok"));
     assert_eq!(
         list_resp
@@ -678,6 +792,7 @@ async fn handle_artifact_lists_keys_and_reads_content_from_persisted_state() {
 
     let content_resp = handle_artifact(
         &serde_json::json!({"op": "artifact", "id": "gr-1", "artifact": "artifact://out"}),
+        &actor_tx,
     )
     .await;
     assert_eq!(content_resp.get("type").and_then(Value::as_str), Some("ok"));
@@ -690,18 +805,25 @@ async fn handle_artifact_lists_keys_and_reads_content_from_persisted_state() {
 #[tokio::test]
 async fn handle_artifact_reads_live_run_map_store() {
     let _sandbox = Sandbox::new();
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
 
     // Ephemeral store — its state lives in a TempDir, unreachable via
     // config::state_root(), so this exercises the run-map branch that makes
     // the op work for live/ephemeral chat gremlins.
-    let store: Arc<dyn crate::executor::state::StateStore + Send + Sync> = Arc::new(
-        crate::executor::state::FileSystemStateStore::create(
-            "gr-live",
-            &serde_json::Map::new(),
-            /* ephemeral */ true,
-        )
-        .unwrap(),
-    );
+    let tmp = tempfile::TempDir::new().unwrap();
+    let project_root = tmp.path().join("proj");
+    std::fs::create_dir_all(&project_root).unwrap();
+
+    let gremlin = create_chat_gremlin(
+        "chat-test",
+        &model("cmd/echo"),
+        "helpful",
+        &project_root,
+        &HashMap::new(),
+    )
+    .unwrap();
+    let id = gremlin.id.to_string();
+    let store = gremlin.state.store_handle();
     store
         .write_into_registry(
             &crate::artifacts::uri::Uri::parse("artifact://live").unwrap(),
@@ -710,35 +832,26 @@ async fn handle_artifact_reads_live_run_map_store() {
         .await
         .unwrap();
 
-    let channels = super::InteractiveChannels::new();
-    let (interactive, _session) = channels.split();
-    let (state_tx, _state_rx) = watch::channel(super::RunState {
-        id: "gr-live".to_string(),
-        status: "running".to_string(),
-        stage: "starting".to_string(),
-        started_at: String::new(),
-    });
-    let (stage_stream_broadcast, _) = broadcast::channel(1);
+    // Register the gremlin so the actor installs a live run-map entry.
+    // Create a real session so the orphan guard permits registration.
+    let session_id = create_session(&actor_tx).await;
+    let (respond, rx) = oneshot::channel();
+    actor_tx
+        .send(ActorMsg::RegisterChatGremlin {
+            session_id: session_id.clone(),
+            id: id.clone(),
+            gremlin,
+            cancel: super::CancelToken::new(),
+            respond,
+        })
+        .unwrap();
+    let _ = rx.await;
 
-    let handle = super::RunHandle {
-        cancel: super::CancelToken::new(),
-        task: None,
-        aborted: Arc::new(AtomicBool::new(false)),
-        state_tx,
-        stage_stream_broadcast,
-        interactive,
-        store: store.clone(),
-        log_flush: None,
-        log_sub: None,
-    };
-    super::get_run_map()
-        .lock()
-        .unwrap()
-        .insert("gr-live".to_string(), handle);
-
-    let list_resp =
-        handle_artifact(&serde_json::json!({"op": "artifact", "id": "gr-live", "list": true}))
-            .await;
+    let list_resp = handle_artifact(
+        &serde_json::json!({"op": "artifact", "id": id, "list": true}),
+        &actor_tx,
+    )
+    .await;
     assert_eq!(list_resp.get("type").and_then(Value::as_str), Some("ok"));
     assert_eq!(
         list_resp
@@ -748,7 +861,8 @@ async fn handle_artifact_reads_live_run_map_store() {
         Some(vec!["artifact://live"])
     );
     let content_resp = handle_artifact(
-        &serde_json::json!({"op": "artifact", "id": "gr-live", "artifact": "artifact://live"}),
+        &serde_json::json!({"op": "artifact", "id": id, "artifact": "artifact://live"}),
+        &actor_tx,
     )
     .await;
     assert_eq!(content_resp.get("type").and_then(Value::as_str), Some("ok"));
@@ -757,13 +871,17 @@ async fn handle_artifact_reads_live_run_map_store() {
         Some("live artifact")
     );
 
-    // Clean up the run-map entry so it does not leak into other tests.
-    super::get_run_map().lock().unwrap().remove("gr-live");
+    // Clean up the run-map entry and session so they do not leak.
+    let (respond, rx) = oneshot::channel();
+    let _ = actor_tx.send(ActorMsg::StopRun { id, respond });
+    let _ = rx.await;
+    teardown_session(&actor_tx, &session_id).await;
 }
 
 #[tokio::test]
 async fn handle_artifact_returns_error_for_unbound_artifact() {
     let _sandbox = Sandbox::new();
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
     let mut initial = serde_json::Map::new();
     initial.insert("id".into(), Value::String("gr-2".into()));
     let _store =
@@ -771,6 +889,7 @@ async fn handle_artifact_returns_error_for_unbound_artifact() {
 
     let resp = handle_artifact(
         &serde_json::json!({"op": "artifact", "id": "gr-2", "artifact": "artifact://missing"}),
+        &actor_tx,
     )
     .await;
     assert_eq!(resp.get("type").and_then(Value::as_str), Some("error"));
@@ -782,14 +901,15 @@ async fn handle_artifact_returns_error_for_unbound_artifact() {
 
 #[tokio::test]
 async fn chat_turn_refreshes_env_and_falls_back_to_base_snapshot() {
-    let (_sandbox, project_root, state_root) =
+    let (_sandbox, project_root, _state_root) =
         sandbox_dirs(Some(r#"{"default-model": "cmd/echo"}"#));
 
     // `run_supervisor` captures this at daemon startup; establish the
     // same snapshot here so the absent-field fallback can be asserted.
     let base_env = super::base_process_env().clone();
 
-    let (writer, mut reader, _server_read, session) = chat_pair("sess-test");
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let (writer, mut reader, _server_read, session_id) = chat_pair_actor(&actor_tx).await;
 
     let chat = |turn: &str, env: Option<serde_json::Value>| {
         let mut req = serde_json::json!({
@@ -810,15 +930,15 @@ async fn chat_turn_refreshes_env_and_falls_back_to_base_snapshot() {
             "1",
             Some(serde_json::json!({"GREMLINS_CHAT_ENV_TEST": "first"})),
         ),
-        &state_root,
         &writer,
-        &session,
+        &actor_tx,
+        &session_id,
     )
     .await;
     let ack = read_until_type(&mut reader, "ok").await;
     let id = ack["id"].as_str().unwrap().to_string();
     {
-        let env = wait_for_chat_gremlin(&session, &id, |g| g.env.clone()).await;
+        let env = wait_for_chat_gremlin_actor(&actor_tx, &session_id, &id, |g| g.env.clone()).await;
         assert_eq!(
             env.get("GREMLINS_CHAT_ENV_TEST").map(String::as_str),
             Some("first")
@@ -831,14 +951,14 @@ async fn chat_turn_refreshes_env_and_falls_back_to_base_snapshot() {
             "2",
             Some(serde_json::json!({"GREMLINS_CHAT_ENV_TEST": "second"})),
         ),
-        &state_root,
         &writer,
-        &session,
+        &actor_tx,
+        &session_id,
     )
     .await;
     read_until_type(&mut reader, "ok").await;
     {
-        let env = wait_for_chat_gremlin(&session, &id, |g| g.env.clone()).await;
+        let env = wait_for_chat_gremlin_actor(&actor_tx, &session_id, &id, |g| g.env.clone()).await;
         assert_eq!(
             env.get("GREMLINS_CHAT_ENV_TEST").map(String::as_str),
             Some("second")
@@ -846,41 +966,35 @@ async fn chat_turn_refreshes_env_and_falls_back_to_base_snapshot() {
     }
 
     // Absent env: fall back to the daemon's base process snapshot.
-    super::handle_chat(&chat("3", None), &state_root, &writer, &session).await;
+    super::handle_chat(&chat("3", None), &writer, &actor_tx, &session_id).await;
     read_until_type(&mut reader, "ok").await;
     {
-        let env = wait_for_chat_gremlin(&session, &id, |g| g.env.clone()).await;
+        let env = wait_for_chat_gremlin_actor(&actor_tx, &session_id, &id, |g| g.env.clone()).await;
         assert_eq!(
             env, base_env,
             "absent env must fall back to the daemon base process snapshot"
         );
     }
 
-    super::teardown_session(&session, &state_root).await;
+    teardown_session(&actor_tx, &session_id).await;
 
-    {
-        let s = session.lock().await;
-        assert!(
-            s.chat_ids.is_empty(),
-            "teardown must drain session chat ids"
-        );
-        assert!(
-            s.chat_gremlins.is_empty(),
-            "teardown must drop parked chat gremlins"
-        );
-    }
     assert!(
-        !super::get_run_map().lock().unwrap().contains_key(&id),
+        !session_exists(&actor_tx, &session_id).await,
+        "teardown must remove the session from the actor"
+    );
+    assert!(
+        !contains_run(&actor_tx, &id).await,
         "teardown must remove the chat gremlin from the run map"
     );
 }
 
 #[tokio::test]
 async fn chat_reuse_rebuilds_client_after_model_change() {
-    let (_sandbox, project_root, state_root) =
+    let (_sandbox, project_root, _state_root) =
         sandbox_dirs(Some(r#"{"default-model": "cmd/echo"}"#));
 
-    let (writer, mut reader, _server_read, session) = chat_pair("sess-model-reuse");
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let (writer, mut reader, _server_read, session_id) = chat_pair_actor(&actor_tx).await;
 
     let chat = |turn: &str| {
         serde_json::json!({
@@ -892,13 +1006,15 @@ async fn chat_reuse_rebuilds_client_after_model_change() {
     };
 
     // First turn seeds the chat gremlin with the default model.
-    super::handle_chat(&chat("1"), &state_root, &writer, &session).await;
+    super::handle_chat(&chat("1"), &writer, &actor_tx, &session_id).await;
     let ack = read_until_type(&mut reader, "ok").await;
     let id = ack["id"].as_str().unwrap().to_string();
-    let before = wait_for_chat_gremlin(&session, &id, |g| g.client.clone()).await;
+    let before =
+        wait_for_chat_gremlin_actor(&actor_tx, &session_id, &id, |g| g.client.clone()).await;
     assert_eq!(before, Client::parse("cmd/echo").unwrap());
     assert_eq!(
-        wait_for_chat_gremlin(&session, &id, |g| g.state.read_str("model")).await,
+        wait_for_chat_gremlin_actor(&actor_tx, &session_id, &id, |g| g.state.read_str("model"))
+            .await,
         "cmd/echo"
     );
 
@@ -908,25 +1024,26 @@ async fn chat_reuse_rebuilds_client_after_model_change() {
     assert_eq!(set["model"], "cmd/true");
     assert_eq!(set["source"], "tui.json");
 
-    super::handle_chat(&chat("2"), &state_root, &writer, &session).await;
+    super::handle_chat(&chat("2"), &writer, &actor_tx, &session_id).await;
     read_until_type(&mut reader, "ok").await;
-    let after = wait_for_chat_gremlin(&session, &id, |g| g.client.clone()).await;
+    let after =
+        wait_for_chat_gremlin_actor(&actor_tx, &session_id, &id, |g| g.client.clone()).await;
     assert_eq!(after, Client::parse("cmd/true").unwrap());
     assert_eq!(
-        wait_for_chat_gremlin(&session, &id, |g| g.state.read_str("model")).await,
+        wait_for_chat_gremlin_actor(&actor_tx, &session_id, &id, |g| g.state.read_str("model"))
+            .await,
         "cmd/true"
     );
 
-    super::teardown_session(&session, &state_root).await;
+    teardown_session(&actor_tx, &session_id).await;
 }
 
 #[tokio::test]
 async fn chat_model_reports_null_when_no_gremlin_exists() {
-    let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-        super::ClientSession::new("sess-model-none".to_string()),
-    ));
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let session_id = create_session(&actor_tx).await;
 
-    let resp = handle_chat_model(&serde_json::json!({}), &session).await;
+    let resp = handle_chat_model(&serde_json::json!({}), &actor_tx, &session_id).await;
 
     assert_eq!(resp["type"], "ok");
     assert!(resp["model"].is_null());
@@ -934,13 +1051,12 @@ async fn chat_model_reports_null_when_no_gremlin_exists() {
 
 #[tokio::test]
 async fn chat_model_is_session_scoped_and_reads_parked_gremlin() {
-    let (_sandbox, project_root, state_root) =
+    let (_sandbox, project_root, _state_root) =
         sandbox_dirs(Some(r#"{"default-model": "cmd/echo"}"#));
 
-    let (writer, mut reader, _server_read, session_a) = chat_pair("sess-model-a");
-    let session_b: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-        super::ClientSession::new("sess-model-b".to_string()),
-    ));
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let (writer, mut reader, _server_read, session_a) = chat_pair_actor(&actor_tx).await;
+    let session_b = create_session(&actor_tx).await;
 
     super::handle_chat(
         &serde_json::json!({
@@ -949,37 +1065,39 @@ async fn chat_model_is_session_scoped_and_reads_parked_gremlin() {
             "turn": "1",
             "project_root": project_root.to_string_lossy(),
         }),
-        &state_root,
         &writer,
+        &actor_tx,
         &session_a,
     )
     .await;
     let ack = read_until_type(&mut reader, "ok").await;
     let id = ack["id"].as_str().unwrap().to_string();
     assert_eq!(
-        wait_for_chat_gremlin(&session_a, &id, |g| g.state.read_str("model")).await,
+        wait_for_chat_gremlin_actor(&actor_tx, &session_a, &id, |g| g.state.read_str("model"))
+            .await,
         "cmd/echo"
     );
 
-    let resp_a = handle_chat_model(&serde_json::json!({}), &session_a).await;
+    let resp_a = handle_chat_model(&serde_json::json!({}), &actor_tx, &session_a).await;
     assert_eq!(resp_a["model"], "cmd/echo");
 
     // A session with no gremlin of its own must not observe session A's
     // model; the lookup is scoped to the requesting session.
-    let resp_b = handle_chat_model(&serde_json::json!({}), &session_b).await;
+    let resp_b = handle_chat_model(&serde_json::json!({}), &actor_tx, &session_b).await;
     assert_eq!(resp_b["type"], "ok");
     assert!(resp_b["model"].is_null());
 
-    super::teardown_session(&session_a, &state_root).await;
-    super::teardown_session(&session_b, &state_root).await;
+    teardown_session(&actor_tx, &session_a).await;
+    teardown_session(&actor_tx, &session_b).await;
 }
 
 #[tokio::test]
 async fn chat_model_reports_null_when_model_field_is_empty() {
-    let (_sandbox, project_root, state_root) =
+    let (_sandbox, project_root, _state_root) =
         sandbox_dirs(Some(r#"{"default-model": "cmd/echo"}"#));
 
-    let (writer, mut reader, _server_read, session) = chat_pair("sess-model-empty");
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let (writer, mut reader, _server_read, session_id) = chat_pair_actor(&actor_tx).await;
 
     super::handle_chat(
         &serde_json::json!({
@@ -988,41 +1106,59 @@ async fn chat_model_reports_null_when_model_field_is_empty() {
             "turn": "1",
             "project_root": project_root.to_string_lossy(),
         }),
-        &state_root,
         &writer,
-        &session,
+        &actor_tx,
+        &session_id,
     )
     .await;
     let ack = read_until_type(&mut reader, "ok").await;
     let id = ack["id"].as_str().unwrap().to_string();
     assert_eq!(
-        wait_for_chat_gremlin(&session, &id, |g| g.state.read_str("model")).await,
+        wait_for_chat_gremlin_actor(&actor_tx, &session_id, &id, |g| g.state.read_str("model"))
+            .await,
         "cmd/echo"
     );
 
-    {
-        let s = session.lock().await;
-        let gremlin = s.chat_gremlins.get(&id).unwrap();
-        let fields = serde_json::json!({ "model": "" })
-            .as_object()
-            .unwrap()
-            .clone();
-        gremlin.state.patch(&[], &fields);
-    }
+    // Take the parked gremlin, blank its model field, and re-insert it.
+    let (respond, rx) = oneshot::channel();
+    actor_tx
+        .send(ActorMsg::SessionTakeGremlin {
+            session_id: session_id.clone(),
+            id: id.clone(),
+            respond,
+        })
+        .unwrap();
+    let gremlin = rx.await.unwrap().unwrap();
+    let fields = serde_json::json!({ "model": "" })
+        .as_object()
+        .unwrap()
+        .clone();
+    gremlin.state.patch(&[], &fields);
+    let (respond, rx) = oneshot::channel();
+    actor_tx
+        .send(ActorMsg::SessionReinsertGremlin {
+            session_id: session_id.clone(),
+            id: id.clone(),
+            gremlin,
+            respond,
+        })
+        .unwrap();
+    let _ = rx.await;
 
-    let resp = handle_chat_model(&serde_json::json!({}), &session).await;
+    let resp = handle_chat_model(&serde_json::json!({}), &actor_tx, &session_id).await;
     assert_eq!(resp["type"], "ok");
     assert!(resp["model"].is_null());
 
-    super::teardown_session(&session, &state_root).await;
+    teardown_session(&actor_tx, &session_id).await;
 }
 
 #[tokio::test]
 async fn chat_model_falls_back_to_run_map_while_turn_is_in_flight() {
-    let (_sandbox, project_root, state_root) =
+    let (_sandbox, project_root, _state_root) =
         sandbox_dirs(Some(r#"{"default-model": "cmd/echo"}"#));
 
-    let (writer, mut reader, _server_read, session) = chat_pair("sess-model-inflight");
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let (writer, mut reader, _server_read, session_id) = chat_pair_actor(&actor_tx).await;
 
     super::handle_chat(
         &serde_json::json!({
@@ -1031,59 +1167,72 @@ async fn chat_model_falls_back_to_run_map_while_turn_is_in_flight() {
             "turn": "1",
             "project_root": project_root.to_string_lossy(),
         }),
-        &state_root,
         &writer,
-        &session,
+        &actor_tx,
+        &session_id,
     )
     .await;
     let ack = read_until_type(&mut reader, "ok").await;
     let id = ack["id"].as_str().unwrap().to_string();
     assert_eq!(
-        wait_for_chat_gremlin(&session, &id, |g| g.state.read_str("model")).await,
+        wait_for_chat_gremlin_actor(&actor_tx, &session_id, &id, |g| g.state.read_str("model"))
+            .await,
         "cmd/echo"
     );
 
     // Simulate an in-flight turn: the gremlin leaves `chat_gremlins` but
     // its id remains on `current_turn`, and the run map still carries the
     // same store (a cloned Arc, so it survives the dropped `Gremlin`).
-    let done_tx;
-    {
-        let mut s = session.lock().await;
-        s.chat_gremlins.remove(&id);
-        let (tx, rx) = watch::channel(false);
-        done_tx = Arc::new(tx);
-        s.current_turn = Some(super::CurrentTurn {
+    let (respond, rx) = oneshot::channel();
+    actor_tx
+        .send(ActorMsg::SessionTakeGremlin {
+            session_id: session_id.clone(),
             id: id.clone(),
-            turn: Some("1".to_string()),
-            cancel: super::CancelToken::new(),
-            soft_cancel: Arc::new(AtomicBool::new(false)),
-            done: rx,
-            done_tx: Arc::clone(&done_tx),
-            interrupted: false,
-        });
-    }
+            respond,
+        })
+        .unwrap();
+    let _gremlin = rx.await.unwrap().unwrap();
 
-    let resp = handle_chat_model(&serde_json::json!({}), &session).await;
+    let (done_tx, done_rx) = watch::channel(false);
+    let done_tx = Arc::new(done_tx);
+    let turn = super::CurrentTurn {
+        id: id.clone(),
+        turn: Some("1".to_string()),
+        cancel: super::CancelToken::new(),
+        soft_cancel: Arc::new(AtomicBool::new(false)),
+        done: done_rx,
+        interrupted: false,
+    };
+    let (respond, rx) = oneshot::channel();
+    actor_tx
+        .send(ActorMsg::SessionSetCurrentTurn {
+            session_id: session_id.clone(),
+            turn,
+            respond,
+        })
+        .unwrap();
+    let _ = rx.await;
+
+    let resp = handle_chat_model(&serde_json::json!({}), &actor_tx, &session_id).await;
     assert_eq!(resp["model"], "cmd/echo");
 
-    {
-        let mut s = session.lock().await;
-        s.current_turn = None;
-        s.chat_ids.clear();
-    }
-    super::cleanup_chat_gremlin(&id).await;
+    // Publish turn completion so teardown does not block waiting on the
+    // simulated in-flight turn's `done` watch.
+    let _ = done_tx.send(true);
+    teardown_session(&actor_tx, &session_id).await;
 }
 
 #[tokio::test]
 async fn chat_stage_model_wins_over_default_model_by_stage() {
-    let (_sandbox, project_root, state_root) = sandbox_dirs(Some(
+    let (_sandbox, project_root, _state_root) = sandbox_dirs(Some(
         r#"default-model: "cmd/default"
 default-model-by-stage:
   chat: cmd/echo
 "#,
     ));
 
-    let (writer, mut reader, _server_read, session) = chat_pair("sess-stage-model");
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let (writer, mut reader, _server_read, session_id) = chat_pair_actor(&actor_tx).await;
 
     let set = handle_model(&serde_json::json!({ "op": "model", "model": "cmd/true" })).await;
     assert_eq!(set["model"], "cmd/true");
@@ -1096,9 +1245,9 @@ default-model-by-stage:
             "turn": "1",
             "project_root": project_root.to_string_lossy(),
         }),
-        &state_root,
         &writer,
-        &session,
+        &actor_tx,
+        &session_id,
     )
     .await;
     let ack = read_until_type(&mut reader, "ok").await;
@@ -1111,25 +1260,26 @@ default-model-by-stage:
     // passes to next_stage, so this verifies both the state.json
     // entry and the stage's effective model (which is never the
     // default-model-by-stage fallback).
-    let store = super::get_run_map()
-        .lock()
-        .unwrap()
-        .get(&id)
-        .unwrap()
-        .store
-        .clone();
+    let (respond, rx) = oneshot::channel();
+    actor_tx
+        .send(ActorMsg::GetRunStore {
+            id: id.clone(),
+            respond,
+        })
+        .unwrap();
+    let store = rx.await.unwrap().unwrap();
     let state = store.read_str("model");
     assert_eq!(
         state, "cmd/true",
         "chat definition must carry the TUI-resolved model, not the default-model-by-stage entry"
     );
 
-    super::teardown_session(&session, &state_root).await;
+    teardown_session(&actor_tx, &session_id).await;
 }
 
 #[tokio::test]
 async fn chat_resolves_profile_default_model() {
-    let (_sandbox, project_root, state_root) = sandbox_dirs(Some(
+    let (_sandbox, project_root, _state_root) = sandbox_dirs(Some(
         r#"default-model: "profile/fast"
 model-profiles:
   fast:
@@ -1137,7 +1287,8 @@ model-profiles:
 "#,
     ));
 
-    let (writer, mut reader, _server_read, session) = chat_pair("sess-profile-test");
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let (writer, mut reader, _server_read, session_id) = chat_pair_actor(&actor_tx).await;
 
     let request = serde_json::json!({
         "op": "chat",
@@ -1146,17 +1297,17 @@ model-profiles:
         "project_root": project_root.to_string_lossy(),
     });
 
-    super::handle_chat(&request, &state_root, &writer, &session).await;
+    super::handle_chat(&request, &writer, &actor_tx, &session_id).await;
     let ack = read_until_type(&mut reader, "ok").await;
     assert_eq!(ack["status"], "streaming");
     assert!(!ack["id"].as_str().unwrap().is_empty());
 
-    super::teardown_session(&session, &state_root).await;
+    teardown_session(&actor_tx, &session_id).await;
 }
 
 #[tokio::test]
 async fn chat_reports_error_on_unknown_profile() {
-    let (_sandbox, project_root, state_root) = sandbox_dirs(Some(
+    let (_sandbox, project_root, _state_root) = sandbox_dirs(Some(
         r#"default-model: "profile/nope"
 model-profiles:
   fast:
@@ -1164,7 +1315,8 @@ model-profiles:
 "#,
     ));
 
-    let (writer, mut reader, _server_read, session) = chat_pair("sess-unknown-profile");
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let (writer, mut reader, _server_read, session_id) = chat_pair_actor(&actor_tx).await;
 
     let request = serde_json::json!({
         "op": "chat",
@@ -1173,7 +1325,7 @@ model-profiles:
         "project_root": project_root.to_string_lossy(),
     });
 
-    super::handle_chat(&request, &state_root, &writer, &session).await;
+    super::handle_chat(&request, &writer, &actor_tx, &session_id).await;
     let err = read_until_type(&mut reader, "error").await;
     assert!(
         err["message"]
@@ -1183,12 +1335,12 @@ model-profiles:
         "expected unknown profile error, got: {err}"
     );
 
-    super::teardown_session(&session, &state_root).await;
+    teardown_session(&actor_tx, &session_id).await;
 }
 
 #[tokio::test]
 async fn chat_reports_error_on_empty_profile_model() {
-    let (_sandbox, project_root, state_root) = sandbox_dirs(Some(
+    let (_sandbox, project_root, _state_root) = sandbox_dirs(Some(
         r#"default-model: "profile/empty"
 model-profiles:
   empty:
@@ -1196,7 +1348,8 @@ model-profiles:
 "#,
     ));
 
-    let (writer, mut reader, _server_read, session) = chat_pair("sess-empty-profile");
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let (writer, mut reader, _server_read, session_id) = chat_pair_actor(&actor_tx).await;
 
     let request = serde_json::json!({
         "op": "chat",
@@ -1205,54 +1358,64 @@ model-profiles:
         "project_root": project_root.to_string_lossy(),
     });
 
-    super::handle_chat(&request, &state_root, &writer, &session).await;
+    super::handle_chat(&request, &writer, &actor_tx, &session_id).await;
     let err = read_until_type(&mut reader, "error").await;
     assert!(
         err["message"].as_str().unwrap().contains("has no model"),
         "expected empty profile client error, got: {err}"
     );
 
-    super::teardown_session(&session, &state_root).await;
+    teardown_session(&actor_tx, &session_id).await;
 }
 
 #[tokio::test]
 async fn stop_session_chat_gremlin_removes_ownership_and_cancels_turn() {
-    let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-        super::ClientSession::new("sess-stop-test".to_string()),
-    ));
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let session_id = create_session(&actor_tx).await;
+
     let cancel = super::CancelToken::new();
-    let done_tx;
-    {
-        let mut s = session.lock().await;
-        s.chat_ids.insert("chat-stop".to_string());
-        let (tx, rx) = watch::channel(false);
-        done_tx = Arc::new(tx);
-        s.current_turn = Some(super::CurrentTurn {
+    let (done_tx, done_rx) = watch::channel(false);
+    let _done_tx = Arc::new(done_tx);
+    let turn = super::CurrentTurn {
+        id: "chat-stop".to_string(),
+        turn: Some("1".to_string()),
+        cancel: cancel.clone(),
+        soft_cancel: Arc::new(AtomicBool::new(false)),
+        done: done_rx,
+        interrupted: false,
+    };
+    let (respond, rx) = oneshot::channel();
+    actor_tx
+        .send(ActorMsg::SessionSetCurrentTurn {
+            session_id: session_id.clone(),
+            turn,
+            respond,
+        })
+        .unwrap();
+    let _ = rx.await;
+
+    let (respond, rx) = oneshot::channel();
+    actor_tx
+        .send(ActorMsg::SessionAddChatId {
+            session_id: session_id.clone(),
             id: "chat-stop".to_string(),
-            turn: Some("1".to_string()),
-            cancel: cancel.clone(),
-            soft_cancel: Arc::new(AtomicBool::new(false)),
-            done: rx,
-            done_tx: Arc::clone(&done_tx),
-            interrupted: false,
-        });
-    }
+            respond,
+        })
+        .unwrap();
+    let _ = rx.await;
 
-    super::session_map()
-        .lock()
-        .unwrap()
-        .insert("sess-stop-test".to_string(), Arc::clone(&session));
-
-    super::stop_session_chat_gremlin("chat-stop").await;
-    super::session_map()
-        .lock()
-        .unwrap()
-        .remove("sess-stop-test");
+    super::stop_session_chat_gremlin("chat-stop", &actor_tx).await;
 
     assert!(cancel.is_cancelled());
-    let s = session.lock().await;
-    assert!(!s.chat_ids.contains("chat-stop"));
-    assert!(s.chat_gremlins.is_empty());
+    let (respond, rx) = oneshot::channel();
+    actor_tx
+        .send(ActorMsg::SessionGetChatIds {
+            session_id: session_id.clone(),
+            respond,
+        })
+        .unwrap();
+    let ids = rx.await.unwrap();
+    assert!(!ids.iter().any(|id| id == "chat-stop"));
 }
 
 /// The chat gremlin must anchor against the caller-supplied project root:
@@ -1267,6 +1430,7 @@ fn create_chat_gremlin_seeds_project_root() {
     std::fs::create_dir_all(&state_root).unwrap();
 
     let gremlin = create_chat_gremlin(
+        "chat-pr",
         &model("cmd/echo"),
         "you are helpful",
         &project_root,
@@ -1305,8 +1469,14 @@ fn create_chat_gremlin_seeds_environment() {
         ("HOME".to_string(), "/home/operator".to_string()),
     ]);
 
-    let gremlin =
-        create_chat_gremlin(&model("cmd/echo"), "you are helpful", &project_root, &env).unwrap();
+    let gremlin = create_chat_gremlin(
+        "chat-env",
+        &model("cmd/echo"),
+        "you are helpful",
+        &project_root,
+        &env,
+    )
+    .unwrap();
 
     assert_eq!(
         gremlin.env, env,
@@ -1343,14 +1513,12 @@ async fn main_socket_eof_still_tears_down_session() {
     let state_root = sandbox.path().join("state");
     std::fs::create_dir_all(&state_root).unwrap();
 
-    let session_id = "sess-eof-test".to_string();
-    let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-        super::ClientSession::new(session_id.clone()),
-    ));
-    super::session_map()
-        .lock()
-        .unwrap()
-        .insert(session_id.clone(), Arc::clone(&session));
+    // The actor's state root must match the sandbox so teardown unlinks the
+    // session socket from the right place.
+    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+    let actor_tx = actor::spawn_actor(state_root.clone(), shutdown_tx);
+
+    let session_id = create_session(&actor_tx).await;
 
     let listener = socket::bind_session_socket(&state_root, &session_id).unwrap();
     let client = socket::connect_session_socket(&state_root, &session_id)
@@ -1360,10 +1528,10 @@ async fn main_socket_eof_still_tears_down_session() {
     let (server_read, server_write) = server.into_split();
     let writer = super::SharedWriter::new(server_write);
 
-    let session_for_task = Arc::clone(&session);
-    let state_root_for_task = state_root.clone();
+    let actor_tx_for_task = actor_tx.clone();
+    let session_id_for_task = session_id.clone();
     let handle = tokio::spawn(async move {
-        super::handle_session_main(server_read, writer, session_for_task, &state_root_for_task)
+        super::handle_session_main(server_read, writer, session_id_for_task, actor_tx_for_task)
             .await;
     });
 
@@ -1371,11 +1539,7 @@ async fn main_socket_eof_still_tears_down_session() {
 
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if !super::session_map()
-                .lock()
-                .unwrap()
-                .contains_key(&session_id)
-            {
+            if !session_exists(&actor_tx, &session_id).await {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1506,10 +1670,9 @@ fn stage_line_envelope_flattens_payload() {
 
 #[tokio::test]
 async fn handle_compact_empty_session_errors() {
-    let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-        super::ClientSession::new("test-compact-empty".to_string()),
-    ));
-    let resp = handle_compact(&serde_json::Value::Null, &session).await;
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let session_id = create_session(&actor_tx).await;
+    let resp = handle_compact(&serde_json::Value::Null, &actor_tx, &session_id).await;
     assert_eq!(resp["type"], "error");
     assert!(resp["message"]
         .as_str()
@@ -1522,10 +1685,12 @@ async fn handle_compact_parked_gremlin_no_history_returns_nothing_to_compact() {
     let tmp = tempfile::TempDir::new().unwrap();
     let project_root = tmp.path().join("proj");
     std::fs::create_dir_all(&project_root).unwrap();
-    let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-        super::ClientSession::new("test-compact-parked".to_string()),
-    ));
+
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let session_id = create_session(&actor_tx).await;
+
     let gremlin = create_chat_gremlin(
+        "chat-cmp",
         &model("cmd/echo"),
         "helpful",
         &project_root,
@@ -1533,12 +1698,19 @@ async fn handle_compact_parked_gremlin_no_history_returns_nothing_to_compact() {
     )
     .unwrap();
     let id = gremlin.id.to_string();
-    {
-        let mut s = session.lock().await;
-        s.chat_ids.insert(id.clone());
-        s.chat_gremlins.insert(id.clone(), gremlin);
-    }
-    let resp = handle_compact(&serde_json::Value::Null, &session).await;
+    let (respond, rx) = oneshot::channel();
+    actor_tx
+        .send(ActorMsg::RegisterChatGremlin {
+            session_id: session_id.clone(),
+            id: id.clone(),
+            gremlin,
+            cancel: super::CancelToken::new(),
+            respond,
+        })
+        .unwrap();
+    let _ = rx.await;
+
+    let resp = handle_compact(&serde_json::Value::Null, &actor_tx, &session_id).await;
     // Fresh chat gremlin has no conversation history, so there is nothing
     // to compact.
     assert_eq!(resp["type"], "ok");
@@ -1548,15 +1720,21 @@ async fn handle_compact_parked_gremlin_no_history_returns_nothing_to_compact() {
 
 #[tokio::test]
 async fn handle_compact_id_in_ids_but_not_gremlins_errors() {
-    let session: super::SessionHandle = Arc::new(tokio::sync::Mutex::new(
-        super::ClientSession::new("test-compact-missing".to_string()),
-    ));
-    {
-        let mut s = session.lock().await;
-        s.chat_ids.insert("ghost-id".to_string());
-        // chat_gremlins intentionally left empty
-    }
-    let resp = handle_compact(&serde_json::Value::Null, &session).await;
+    let (actor_tx, _shutdown) = spawn_test_actor().await;
+    let session_id = create_session(&actor_tx).await;
+
+    let (respond, rx) = oneshot::channel();
+    actor_tx
+        .send(ActorMsg::SessionAddChatId {
+            session_id: session_id.clone(),
+            id: "ghost-id".to_string(),
+            respond,
+        })
+        .unwrap();
+    let _ = rx.await;
+    // chat_gremlins intentionally left empty
+
+    let resp = handle_compact(&serde_json::Value::Null, &actor_tx, &session_id).await;
     assert_eq!(resp["type"], "error");
     assert!(resp["message"]
         .as_str()
