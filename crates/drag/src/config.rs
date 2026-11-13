@@ -24,11 +24,6 @@ const BUNDLED_CONFIG: &str = include_str!("../config/bundled.json5");
 #[derive(Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct DragConfig {
-    /// Target path (file or directory) to score.
-    /// When GREMLINS_DRAG_CLI_CONFIG is set, this field provides the
-    /// target — no positional CLI argument is required.
-    #[serde(default)]
-    pub path: Option<String>,
     #[serde(default)]
     pub weights: WeightsConfig,
     #[serde(default)]
@@ -61,7 +56,6 @@ fn default_estimates() -> usize {
 impl Default for DragConfig {
     fn default() -> Self {
         Self {
-            path: None,
             weights: WeightsConfig::default(),
             model: None,
             tokenizer: String::new(),

@@ -28,10 +28,12 @@ use lang::PackageInfo;
 #[derive(Parser)]
 #[command(name = "gremlins-drag")]
 struct Cli {
-    /// Source file or directory to score. Recognized extensions: .rs, .py.
+    /// Source files or directories to score. Recognized extensions: .rs, .py.
     /// If a file, scores that module. If a directory, scores all modules
     /// under it. Required unless --explain or --clear-cache is used.
-    path: Option<PathBuf>,
+    /// At least one path must be provided.
+    #[arg(required_unless_present_any = ["explain", "clear_cache"])]
+    paths: Vec<PathBuf>,
 
     /// Path to a JSON5 config file. Overrides the bundled config.
     /// Mutually exclusive with GREMLINS_DRAG_CLI_CONFIG.
@@ -120,21 +122,20 @@ async fn run() -> Result<(), String> {
         return Ok(());
     }
 
-    // When GREMLINS_DRAG_CLI_CONFIG is set, the target comes from
-    // config.path; otherwise it must be passed as a positional argument.
-    let path = cli
-        .path
-        .or_else(|| config.path.clone().map(PathBuf::from))
-        .ok_or_else(|| {
-            "<PATH> is required unless --explain or --clear-cache is used".to_string()
-        })?;
-
-    // 1. Discover packages (Rust + Python, best-effort) anchored at the
-    //    user-supplied path so that packages are found regardless of cwd.
-    let packages = lang::discover_packages(&path);
-
-    // 2. Resolve the input path to a list of recognized source files
-    let target_files = resolve_path_files(&path)?;
+    // Resolve target files from each CLI path.
+    let mut target_files = Vec::new();
+    let mut packages = Vec::new();
+    for p in &cli.paths {
+        // 1. Discover packages anchored at this path.
+        let path_packages = lang::discover_packages(p);
+        // 2. Resolve this path to recognized source files.
+        let path_files = resolve_path_files(p)?;
+        target_files.extend(path_files);
+        packages.extend(path_packages);
+    }
+    // Deduplicate packages (same package may be discovered from multiple paths).
+    packages.sort_by_key(|p| p.key());
+    packages.dedup_by_key(|p| p.key());
 
     // 3. Map files to module paths, tracking which package each belongs to.
     let mut target_modules: Vec<(String, PathBuf, String)> = Vec::new(); // (module, file, pkg_key)
@@ -161,8 +162,8 @@ async fn run() -> Result<(), String> {
             .collect::<Vec<_>>()
             .join(", ");
         return Err(format!(
-            "no recognized modules ({exts}) found at: {}",
-            path.display()
+            "no recognized modules ({exts}) found in paths: {}",
+            cli.paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
         ));
     }
 
