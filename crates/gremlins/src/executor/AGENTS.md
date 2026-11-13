@@ -21,8 +21,11 @@ semantics. Keep those seams intact.
 | `state.rs` | `state.json` I/O, flock-guarded atomic updates, `StateData`, and the artifact registry. `StateStore` is the unified storage seam; `FileSystemStateStore` is the real implementation. |
 | `run.rs` | The sequential stage loop. `Gremlin::run` walks `next_stage()` in declaration order, drives each through `run_stage_scoped`, and owns attempt/`loop_iter`/bail bookkeeping. `run_stage` dispatches by `ExecutorStage` variant. |
 | `parallel.rs` | Parallel fan-out/fan-in. Forks one child gremlin per child stage, launches via supervisor, awaits `RunState` channels, applies `ErrorPolicy`, merges artifacts, and cleans up children. |
-| `supervisor.rs` | Single-instance daemon. Owns the global `RUN_MAP` (`HashMap<String, RunHandle>`), the socket accept loop and op dispatch (`launch`/`stop`/`resume`/`ls`/`status`/`info`/`log`/`debug`/`chat`), `DaemonEvent` broadcast, and `launch_child`/`stop_child`. |
+| `supervisor/` | Single-instance daemon, split into sub-modules since the `break-executor` refactor. `mod.rs` owns the accept loop, `RunHandle`/`RunState`, and op dispatch. See `supervisor/AGENTS.md` for the full sub-module map. |
 | `agent_runner.rs` | Agent leaf execution: `prepare_agent` (resolve everything without touching the client) and `commit_agent` (verify outputs were produced). |
+| `run_agent.rs` | Agent stage runner: `resolve_task_models`, `run_agent`, chat conversation persistence (`messages_from_conversation`, `persist_chat_conversation_turn`, `read_chat_conversation`, `append_chat_conversation_turn`, `persist_compacted_conversation`), and tool-call accounting. |
+| `run_exec.rs` | Exec stage runner: thin wrapper around `prepare_exec` + `run_shell` + `commit_exec` from `exec_runner`. |
+| `stage_stream.rs` | Stage stream protocol: `StageStreamKind` classification, live + replay serving (`serve_stage_stream_loop`), `agent_stream_lines`/`exec_stream_line` formatting, and `ReplayDedupe` for resume tail replay. |
 | `socket.rs` | Unix-domain socket + daemon lock helpers (`GremlinsDaemonLock`, `bind_socket`, `connect_socket`, JSON-line read/write). The socket lives at `$state_root/executor.sock`. |
 | `exec_runner.rs` | Exec leaf execution: `prepare_exec`, `run_shell`, and `commit_exec`. Owns `ExecPrepared` and `ExecError`. |
 | `bootstrap.rs` | Worktree bootstrap: `bootstrap.cmds`, `bootstrap.launch_cmds`, and `bootstrap.cli_out`, plus the small `gremlins:bind_artifact(...)` DSL. |
@@ -128,7 +131,10 @@ reconstructs the lock from the inherited fd (`socket.rs`).
 | Change environment assembly | `gremlin.rs::resolve_env`, `system_env`, `framework_subs` |
 | Understand forking | `gremlin.rs::Gremlin::fork`, `parallel.rs::run_parallel` |
 | Change parallel error policy / merging | `parallel.rs` — `run_parallel`, `merge_child_artifacts`, `aggregate_child_costs` |
-| Add a supervisor op | `supervisor.rs::dispatch_op` + a `handle_<op>` function |
+| Add a supervisor op | `supervisor/ops/` — `control.rs` (launch/stop/resume/rm), `model.rs` (model/chat_model/compact), `query.rs` (ls/status/info/artifact/snapshot). Wire new ops through `dispatch_op` in `supervisor/mod.rs`. |
+| Add or change stage streaming / replay | `stage_stream.rs` — `serve_stage_stream_loop`, `ReplayDedupe`, `agent_stream_lines` |
+| Add or change agent stage execution / conversation I/O | `run_agent.rs` + `agent_runner.rs` |
+| Add or change exec stage execution | `run_exec.rs` + `exec_runner.rs` |
 | Change the daemon socket/lock protocol | `socket.rs::GremlinsDaemonLock`, `bind_socket`, `connect_socket` |
 | Change bootstrap behavior / DSL | `bootstrap.rs::run_definition_bootstrap`, `parse_gremlins_command`, `bind_artifact` |
 | Change exec/agent leaf execution | `exec_runner.rs` / `agent_runner.rs` (`prepare_*` + `commit_*`) |
