@@ -284,6 +284,16 @@ pub(crate) async fn handle_session_op(
             let _ = writer.write_json_line(&resp).await;
             SessionOp::Continue
         }
+        "read_blob" => {
+            let resp = handle_read_blob(request, actor_tx).await;
+            let _ = writer.write_json_line(&resp).await;
+            SessionOp::Continue
+        }
+        "read_definition" => {
+            let resp = handle_read_definition(request, actor_tx).await;
+            let _ = writer.write_json_line(&resp).await;
+            SessionOp::Continue
+        }
         "close_session" => {
             // Tear down before acknowledging so the client cannot race ahead
             // while the gremlin is still live.
@@ -334,10 +344,7 @@ pub(crate) async fn handle_session_aux(
             handle_log(&request, &actor_tx, reader, &writer).await;
         }
         "stage_stream" => {
-            crate::executor::stage_stream::handle_stage_stream(
-                &request, &actor_tx, reader, &writer,
-            )
-            .await;
+            crate::executor::stage_stream::handle_stage_stream(&request, reader, &writer).await;
         }
         "debug" => {
             handle_debug(&request, &actor_tx, reader, &writer).await;
@@ -346,6 +353,72 @@ pub(crate) async fn handle_session_aux(
             let resp = error_response(&format!("unknown session op: {op:?}"));
             let _ = writer.write_json_line(&resp).await;
         }
+    }
+}
+
+async fn handle_read_blob(request: &Value, actor_tx: &mpsc::UnboundedSender<ActorMsg>) -> Value {
+    let id = match super::valid_id(request) {
+        Ok(id) => id.to_string(),
+        Err(resp) => return resp,
+    };
+    let blob = request.get("blob").and_then(|v| v.as_str()).unwrap_or("");
+    // Restrict reads to the three blob families the plan allows:
+    // the operational log, agent stream artifacts, and exec command logs.
+    if blob.is_empty()
+        || blob.contains("..")
+        || blob.starts_with('/')
+        || !(blob == "log"
+            || blob.starts_with("artifacts/stream-")
+            || blob.starts_with("command_logs/exec-"))
+    {
+        return error_response("invalid blob path");
+    }
+    let tail = request.get("tail").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
+
+    let store = match super::ops::resolve_store_for_id(&id, actor_tx).await {
+        Ok(store) => store,
+        Err(resp) => return resp,
+    };
+
+    let lines = crate::executor::blob_io::read_store_blob_tail(&store, blob, tail).await;
+    ok_response(serde_json::json!({"lines": lines}))
+}
+
+async fn handle_read_definition(
+    request: &Value,
+    actor_tx: &mpsc::UnboundedSender<ActorMsg>,
+) -> Value {
+    let id = match super::valid_id(request) {
+        Ok(id) => id.to_string(),
+        Err(resp) => return resp,
+    };
+
+    let store = match super::ops::resolve_store_for_id(&id, actor_tx).await {
+        Ok(store) => store,
+        Err(resp) => return resp,
+    };
+
+    // Read definition.json from the store
+    let store_for_read = store;
+    let result = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        use std::io::Read;
+        let mut blob = store_for_read
+            .open("definition.json", crate::executor::state::BlobMode::Read)
+            .map_err(|e| format!("failed to open definition: {e}"))?;
+        let mut bytes = Vec::new();
+        blob.read_to_end(&mut bytes)
+            .map_err(|e| format!("failed to read definition: {e}"))?;
+        let def = crate::definition::StaticDefinition::from_expanded_bytes(&bytes, None, None)
+            .map_err(|e| format!("failed to parse definition: {e}"))?;
+        Ok(def.to_expanded_json())
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))
+    .and_then(|r| r);
+
+    match result {
+        Ok(json) => ok_response(json),
+        Err(msg) => error_response(&msg),
     }
 }
 

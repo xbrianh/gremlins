@@ -12,6 +12,7 @@ pub mod markdown;
 pub mod motif;
 pub mod screen;
 pub mod theme;
+mod watch_replay;
 pub mod widgets;
 
 #[cfg(test)]
@@ -52,7 +53,7 @@ type ChatModelQuery = (u64, Result<Option<String>, String>);
 /// Drop-guard that aborts a JoinHandle on drop, ensuring a dedicated
 /// log-follow socket is closed even when the outer forwarding task is
 /// cancelled via `abort()`.
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
+pub(crate) struct AbortOnDrop(pub(crate) tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
@@ -185,70 +186,18 @@ fn start_watch_follow(
     let log_tx = log_tx.clone();
     let client = Arc::clone(client);
     let follow_id = id.clone();
+
+    // Snapshot the current stage name so we know which blob to replay.
+    // The stage field in ActiveRun is kept up to date by StageTransition
+    // events; falls back to empty (→ operational log) when unknown.
+    let current_stage = app
+        .active_runs
+        .get(&follow_id)
+        .map(|r| r.stage.clone())
+        .unwrap_or_default();
+
     let follow_task = tokio::spawn(async move {
-        // Try stage stream first for running gremlins; fall back to operational log.
-        let stage_result = client.follow_stage_stream(&follow_id).await;
-        match stage_result {
-            Ok((mut rx, handle)) => {
-                let _guard = AbortOnDrop(handle);
-                while let Some(raw) = rx.recv().await {
-                    // Stage stream lines already have kind/text fields; forward as-is
-                    // but tagged with the view_log envelope so the log_rx handler
-                    // routes them to the watch pane.
-                    let tagged = serde_json::json!({
-                        "type": "view_log",
-                        "id": follow_id,
-                        "generation": generation,
-                        "line": raw.to_string(),
-                    });
-                    if log_tx.send(tagged).is_err() {
-                        break;
-                    }
-                }
-                let _ = log_tx.send(serde_json::json!({
-                    "type": "view_error",
-                    "id": follow_id,
-                    "generation": generation,
-                    "message": "stage stream closed",
-                }));
-            }
-            Err(_stage_err) => {
-                // Fall back to operational log
-                match client.follow_log(&follow_id).await {
-                    Ok((mut rx, handle)) => {
-                        let _guard = AbortOnDrop(handle);
-                        while let Some(raw) = rx.recv().await {
-                            let Some(line) = raw.get("line").and_then(|v| v.as_str()) else {
-                                continue;
-                            };
-                            let tagged = serde_json::json!({
-                                "type": "view_log",
-                                "id": follow_id,
-                                "generation": generation,
-                                "line": line,
-                            });
-                            if log_tx.send(tagged).is_err() {
-                                break;
-                            }
-                        }
-                        let _ = log_tx.send(serde_json::json!({
-                            "type": "view_error",
-                            "id": follow_id,
-                            "generation": generation,
-                            "message": "log stream closed",
-                        }));
-                    }
-                    Err(e) => {
-                        let _ = log_tx.send(serde_json::json!({
-                            "type": "view_error",
-                            "id": follow_id,
-                            "generation": generation,
-                            "message": e,
-                        }));
-                    }
-                }
-            }
-        }
+        watch_replay::replay_and_dedup(client, follow_id, current_stage, generation, log_tx).await;
     });
     *watch_follow_handle = Some(follow_task);
 }
