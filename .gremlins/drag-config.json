@@ -1,4 +1,11 @@
 {
   "model": "openrouter/openai/gpt-6-luna",
-  "format": "json"
+  "format": "json",
+  "estimates_per_survey": 5,
+  "weights": {
+    "w1": 0.5,
+    "w2": 0.5,
+    "m": 2.5,
+    "p": 2.5
+  }
 }
