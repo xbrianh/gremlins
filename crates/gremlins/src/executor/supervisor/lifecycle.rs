@@ -61,7 +61,12 @@ pub(crate) fn setup_gremlin_channels(
     // leak a task/mailbox for the daemon's lifetime.
 
     let log_flush = spawn_log_writer(log_rx, store, relay);
-    (stage_stream_broadcast, interactive_handle, log_flush, log_sub)
+    (
+        stage_stream_broadcast,
+        interactive_handle,
+        log_flush,
+        log_sub,
+    )
 }
 
 async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i32, Gremlin) {
@@ -227,7 +232,13 @@ pub(crate) fn spawn_gremlin_runner(
         let _ = go_rx.await;
         let (result, _gremlin) = run_gremlin_task(gremlin, resume_from_owned.as_deref()).await;
         if !aborted_for_task.load(Ordering::Relaxed) {
-            RunHandle::finish(&id_owned, result, &state_tx_clone, Some(&shutdown_tx_clone), Some(log_sub_clone));
+            RunHandle::finish(
+                &id_owned,
+                result,
+                &state_tx_clone,
+                Some(&shutdown_tx_clone),
+                Some(log_sub_clone),
+            );
         }
     });
 

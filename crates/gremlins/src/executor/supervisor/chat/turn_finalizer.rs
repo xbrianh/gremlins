@@ -203,17 +203,14 @@ impl TurnFinalizer {
         // session-locked transition. Holding the lock across both operations
         // closes the TOCTOU window where a hard cancel could win between
         // reinsertion and the interrupted flag flip.
-        self.reinsert_and_mark_interrupted(recovered, chat_turn_num).await;
+        self.reinsert_and_mark_interrupted(recovered, chat_turn_num)
+            .await;
     }
 
     /// Re-insert the gremlin and mark `current_turn.interrupted` under one
     /// session lock. If hard cancellation has won, falls back to
     /// [`Self::hard_cancel`] instead.
-    async fn reinsert_and_mark_interrupted(
-        &self,
-        gremlin: Gremlin,
-        chat_turn_num: Option<usize>,
-    ) {
+    async fn reinsert_and_mark_interrupted(&self, gremlin: Gremlin, chat_turn_num: Option<usize>) {
         let mut s = self.session.lock().await;
         if !self.soft_cancel.load(Ordering::Acquire) {
             // Hard cancel won while we were waiting for the lock.
@@ -222,9 +219,7 @@ impl TurnFinalizer {
             return;
         }
         // Inline reinsert — same guards as `reinsert_chat_gremlin`.
-        if !s.chat_ids.contains(&self.id)
-            || !get_run_map().lock().unwrap().contains_key(&self.id)
-        {
+        if !s.chat_ids.contains(&self.id) || !get_run_map().lock().unwrap().contains_key(&self.id) {
             drop(gremlin);
         } else {
             s.chat_gremlins.insert(self.id.clone(), gremlin);
