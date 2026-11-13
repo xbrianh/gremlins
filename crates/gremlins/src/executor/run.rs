@@ -98,12 +98,7 @@ async fn run_stage_scoped(
     // child's agent/exec output.
     let scoped = !scope.is_empty();
     if scoped {
-        send_stage_boundary(
-            &gremlin.runtime_config.stage_stream_tx,
-            gremlin.id.as_str(),
-            stage.name(),
-            stage.stage_type(),
-        );
+        send_stage_boundary(gremlin.id.as_str(), stage.name(), stage.stage_type());
     }
 
     // Keep `state.stage` pointed at the enclosing composite so `ls`,
@@ -160,12 +155,7 @@ async fn run_stage_scoped(
     };
 
     if scoped {
-        send_stage_boundary(
-            &gremlin.runtime_config.stage_stream_tx,
-            gremlin.id.as_str(),
-            "",
-            "other",
-        );
+        send_stage_boundary(gremlin.id.as_str(), "", "other");
     }
     result
 }
@@ -607,21 +597,11 @@ impl Gremlin {
                     stage.stage_type()
                 ),
             });
-            send_stage_boundary(
-                &self.runtime_config.stage_stream_tx,
-                self.id.as_str(),
-                stage.name(),
-                stage.stage_type(),
-            );
+            send_stage_boundary(self.id.as_str(), stage.name(), stage.stage_type());
 
             let stage_result = run_stage(&stage, self).await;
             self.loop_iter = saved_loop_iter;
-            send_stage_boundary(
-                &self.runtime_config.stage_stream_tx,
-                self.id.as_str(),
-                "",
-                "other",
-            );
+            send_stage_boundary(self.id.as_str(), "", "other");
 
             match stage_result {
                 Ok(()) => {}
@@ -664,12 +644,7 @@ impl Gremlin {
 
     /// Reap clients, fold subprocess cost into total, write terminal state.
     fn finish(&mut self, exit_code: i32) {
-        send_stage_boundary(
-            &self.runtime_config.stage_stream_tx,
-            self.id.as_str(),
-            "",
-            "other",
-        );
+        send_stage_boundary(self.id.as_str(), "", "other");
         let msg = format!("finished (exit_code={exit_code})");
         emit_event(EventKind::LogLine {
             id: self.id.to_string(),

@@ -26,7 +26,6 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::io::BufReader;
 use tokio::net::UnixListener;
-use tokio::sync::broadcast;
 use tokio::sync::{mpsc, watch};
 
 use crate::executor::event::EventKind;
@@ -46,7 +45,7 @@ pub(crate) use self::chat::{add_usage_stats, base_process_env, usage_stats_from_
 pub(crate) use self::debug::handle_debug;
 pub(crate) use self::event::{
     emit_event, emit_run_event_async, init_bus, subscribe_all, subscribe_run,
-    subscribe_run_backpressured, subscribe_run_lag_tolerant,
+    subscribe_run_backpressured,
 };
 pub(crate) use self::lifecycle::{launch_child, stop_child, LaunchResult, LogRelay};
 pub(crate) use self::log_handler::handle_log;
@@ -184,8 +183,6 @@ pub(crate) struct RunHandle {
     pub aborted: Arc<AtomicBool>,
     #[allow(dead_code)]
     pub state_tx: watch::Sender<RunState>,
-    /// Broadcast sender for stage-aware live stream subscribers (Op::StageStream with follow:true).
-    pub stage_stream_broadcast: broadcast::Sender<String>,
     /// Interactive handle (supervisor → agent loop).
     pub interactive: InteractiveHandle,
     /// State store handle — stored so handle_status / handle_info / handle_ls
@@ -200,10 +197,6 @@ pub(crate) struct RunHandle {
     /// Held so finish and stop paths can unregister it, preventing the run's
     /// log task, blocking writer, and state store from living until daemon exit.
     pub log_sub: Option<crate::magic_bus::Subscriber<EventKind>>,
-    /// Bus subscriber for the run's lag-tolerant stage-stream forwarder.
-    /// Held so finish and stop paths can unregister it, letting the forwarder
-    /// task drain and drop its broadcast handle.
-    pub stage_stream_sub: Option<crate::magic_bus::Subscriber<EventKind>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -355,6 +348,7 @@ async fn handle_connection(
                             | EventKind::StreamReset
                             | EventKind::Ready { .. }
                             | EventKind::Ended { .. }
+                            | EventKind::ExecOutput { .. }
                     ) {
                         continue;
                     }

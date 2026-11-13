@@ -3,9 +3,8 @@
 //!
 //! Agent stages replay `artifacts/stream-{stage}.jsonl`; exec stages replay
 //! `command_logs/exec-{stage}.log`; every other stage falls back to the
-//! operational log. Live following subscribes to both the run handle's
-//! stage-stream broadcast (for agent/exec content and stage boundaries) and
-//! its run-scoped bus subscription (for the operational fallback).
+//! operational log. Live following subscribes to the run's bus subscription
+//! (lossless, `r:<id>` prefix) — a single source for all stage content.
 
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
@@ -14,18 +13,16 @@ use std::sync::Arc;
 use serde_json::{Map, Value};
 use tokio::io::BufReader;
 use tokio::net::unix::OwnedReadHalf;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 
-use crate::clients::event::EventKind;
 use crate::config;
 use crate::executor::socket;
 use crate::executor::state;
 use crate::executor::supervisor::actor::ActorMsg;
 use crate::executor::supervisor::{
-    error_response, init_bus, resolve_store_for_id, subscribe_run, subscribe_run_lag_tolerant,
-    SharedWriter,
+    error_response, init_bus, resolve_store_for_id, subscribe_run, SharedWriter,
 };
-use crate::magic_bus::{ReceiverHalf, Recv};
+use crate::magic_bus::Recv;
 
 // ---------------------------------------------------------------------------
 // StageStreamKind
@@ -137,32 +134,30 @@ async fn serve_stage_stream_loop(
     let mut stage_name = initial_stage_name.to_string();
     let mut dedupe = ReplayDedupe::default();
 
-    // Subscribe to both sources *before* replaying history. The stage
-    // broadcast carries content for agent/exec stages plus stage-boundary
-    // sentinels; the run-scoped bus subscription carries operational-log
-    // fallback content.
+    // Subscribe to the run's bus *before* replaying history. A single lossless
+    // subscription delivers every EventKind for this run: StageBoundary,
+    // stream events (agent), ExecOutput (exec), and LogLine (operational
+    // fallback).
     //
     // Only subscribe for live runs still in the run map. A finished run
     // has no more events and its sender is already dropped — subscribing
-    // would wait forever. Check under the run-map lock and request a
-    // flush barrier so pre-subscription log lines are persisted before
-    // we read history.
-    let (stage_rx, log_rx, log_sub) = if follow {
-        let (stage_tx_opt, flush) = {
+    // would wait forever. Request a flush barrier so pre-subscription log
+    // lines are persisted before we read history.
+    let (bus_rx, bus_sub) = if follow {
+        let flush = {
             let (tx, rx) = oneshot::channel();
             if actor_tx
-                .send(ActorMsg::GetRunStageStreamAndFlush {
+                .send(ActorMsg::GetRunLogFlush {
                     id: id.to_string(),
                     respond: tx,
                 })
                 .is_ok()
             {
-                rx.await.ok().unwrap_or((None, None))
+                rx.await.ok().flatten()
             } else {
-                (None, None)
+                None
             }
         };
-        let stage_rx = stage_tx_opt.map(|tx| tx.subscribe());
         // Flush barrier: wait for the log writer to persist currently-queued
         // events so they're visible when we replay the blob.
         if let Some(flush) = &flush {
@@ -170,15 +165,14 @@ async fn serve_stage_stream_loop(
             let _ = flush.send(ack_tx);
             let _ = ack_rx.await;
         }
-        let (log_rx, log_sub) = if flush.is_some() {
+        if flush.is_some() {
             let (sub, rx) = subscribe_run(id);
             (Some(rx), Some(sub))
         } else {
             (None, None)
-        };
-        (stage_rx, log_rx, log_sub)
+        }
     } else {
-        (None, None, None)
+        (None, None)
     };
 
     let unsubscribe = |sub: &Option<crate::magic_bus::Subscriber<crate::executor::EventKind>>| {
@@ -188,95 +182,68 @@ async fn serve_stage_stream_loop(
     };
 
     if !replay_source(store, kind, &stage_name, writer, &mut offset, &mut dedupe).await {
-        unsubscribe(&log_sub);
+        unsubscribe(&bus_sub);
         return;
     }
 
-    let Some(stage_rx) = stage_rx else {
+    let Some(mut bus_rx) = bus_rx else {
         return;
     };
-    let Some(log_rx) = log_rx else {
-        unsubscribe(&log_sub);
-        return;
-    };
-    let mut stage_rx = Some(stage_rx);
-    let mut log_rx = Some(log_rx);
-
-    let mut stage_closed = false;
-    let mut log_closed = false;
 
     loop {
         // Drain events that arrived while we were replaying. Do not discard
         // them; deduplicate only records whose fingerprint is covered by the
         // replay checkpoint, and always process queued stage boundaries.
-        if let Some(stage_rx) = stage_rx.as_mut() {
-            while let Ok(line) = stage_rx.try_recv() {
-                if !process_stage_line(
-                    store,
-                    &mut kind,
-                    &mut stage_name,
-                    &line,
-                    writer,
-                    &mut offset,
-                    &mut dedupe,
-                )
-                .await
-                {
-                    unsubscribe(&log_sub);
-                    return;
-                }
-            }
-        }
-        if let Some(log_rx) = log_rx.as_mut() {
-            while let Ok(dispatch) = log_rx.try_recv() {
-                let Some(line) = log_event_line(&dispatch) else {
-                    continue;
-                };
-                if !process_log_line(kind, &line, writer, &mut offset, &mut dedupe).await {
-                    unsubscribe(&log_sub);
-                    return;
-                }
+        while let Ok(dispatch) = bus_rx.try_recv() {
+            if !process_event(
+                store,
+                &mut kind,
+                &mut stage_name,
+                &dispatch,
+                writer,
+                &mut offset,
+                &mut dedupe,
+            )
+            .await
+            {
+                unsubscribe(&bus_sub);
+                return;
             }
         }
 
         tokio::select! {
-            result = recv_stage(&mut stage_rx), if !stage_closed => {
+            result = bus_rx.recv() => {
                 match result {
-                    Ok(line) => {
-                        if !process_stage_line(
+                    Recv::Event(dispatch) => {
+                        if !process_event(
                             store,
                             &mut kind,
                             &mut stage_name,
-                            &line,
+                            &dispatch,
                             writer,
                             &mut offset,
                             &mut dedupe,
                         )
                         .await
                         {
-                            unsubscribe(&log_sub);
+                            unsubscribe(&bus_sub);
                             return;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        if !send_stage_line(
-                            writer,
-                            &mut offset,
-                            serde_json::json!({ "kind": "lagged", "skipped": n }),
-                        )
-                        .await
+                    Recv::Lagged(n) => {
+                        if matches!(kind, StageStreamKind::Other)
+                            && !send_stage_line(
+                                writer,
+                                &mut offset,
+                                serde_json::json!({ "kind": "lagged", "skipped": n }),
+                            )
+                            .await
                         {
-                            unsubscribe(&log_sub);
+                            unsubscribe(&bus_sub);
                             return;
                         }
                     }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        stage_closed = true;
-                        stage_rx = None;
-                        if log_closed {
-                            unsubscribe(&log_sub);
-                            return;
-                        }
+                    Recv::Closed => {
                         // The run ended. If an inactive boundary was not
                         // observed, force the operational-log fallback so the
                         // final diagnostics are still replayed.
@@ -293,159 +260,192 @@ async fn serve_stage_stream_loop(
                             )
                             .await
                             {
-                                unsubscribe(&log_sub);
+                                unsubscribe(&bus_sub);
                                 return;
                             }
                         }
+                        unsubscribe(&bus_sub);
+                        return;
                     }
                 }
             }
-            result = recv_log(&mut log_rx), if !log_closed => {
-                match result {
-                    Recv::Event(dispatch) => {
-                        match dispatch.kind() {
-                            crate::executor::EventKind::LogLine { line, .. } => {
-                                if !process_log_line(kind, line, writer, &mut offset, &mut dedupe)
-                                    .await
-                                {
-                                    unsubscribe(&log_sub);
-                                    return;
-                                }
-                            }
-                            crate::executor::EventKind::RunCompleted { .. }
-                            | crate::executor::EventKind::RunFailed { .. }
-                            | crate::executor::EventKind::RunStopped { .. }
-                            | crate::executor::EventKind::RunRemoved { .. } => {
-                                // Terminal events don't close the log stream
-                                // here — the log writer may still relay child
-                                // diagnostics. Wait for the subscription to
-                                // close naturally when the writer shuts down.
-                            }
-                            _ => continue,
-                        }
-                    }
-                    Recv::Lagged(n) => {
-                        if matches!(kind, StageStreamKind::Other)
-                            && !send_stage_line(
-                                writer,
-                                &mut offset,
-                                serde_json::json!({"kind": "lagged", "skipped": n}),
-                            )
-                            .await
-                        {
-                            unsubscribe(&log_sub);
-                            return;
-                        }
-                    }
-                    Recv::Closed => {
-                        log_closed = true;
-                        log_rx = None;
-                        if stage_closed {
-                            unsubscribe(&log_sub);
-                            return;
-                        }
-                    }
-                }
-            }
-            _ = socket::read_json_line(reader) => { unsubscribe(&log_sub); return; }
+            _ = socket::read_json_line(reader) => { unsubscribe(&bus_sub); return; }
         }
     }
 }
 
-async fn recv_stage(
-    rx: &mut Option<broadcast::Receiver<String>>,
-) -> Result<String, broadcast::error::RecvError> {
-    match rx.as_mut() {
-        Some(rx) => rx.recv().await,
-        None => std::future::pending().await,
-    }
-}
-
-async fn recv_log(
-    rx: &mut Option<ReceiverHalf<crate::executor::EventKind>>,
-) -> Recv<crate::executor::EventKind> {
-    match rx.as_mut() {
-        Some(rx) => rx.recv().await,
-        None => std::future::pending().await,
-    }
-}
-
-/// Extract the raw, un-timestamped message from a run-scoped bus event.
+/// Process one bus event, dispatching on the EventKind variant.
 ///
-/// `LogLine.line` carries only the message without the `{millis} ` prefix;
-/// `process_log_line` forwards it directly as `{"kind":"log","text":...}`.
-/// This matches the historical strip-on-first-space behavior without an
-/// explicit split, since the bus payload was never stamped in the first place.
-fn log_event_line(
-    dispatch: &crate::magic_bus::DispatchEvent<crate::executor::EventKind>,
-) -> Option<String> {
-    match dispatch.kind() {
-        crate::executor::EventKind::LogLine { line, .. } => Some(line.clone()),
-        _ => None,
-    }
-}
-
-/// Process one line from the stage-stream broadcast.
-///
-/// Stage boundaries reclassify the current source and trigger a replay of the
-/// newly active blob. Content lines are forwarded only for agent/exec stages,
-/// and only when they were not already replayed.
+/// StageBoundary reclassifies the current source and triggers a replay of the
+/// newly active blob. Stream/agent events and ExecOutput are forwarded only
+/// when in agent/exec stage context. LogLine is forwarded only in Other
+/// context. All payloads go through dedup.
 #[allow(clippy::too_many_arguments)]
-async fn process_stage_line(
+async fn process_event(
     store: &Arc<dyn state::StateStore + Send + Sync>,
     kind: &mut StageStreamKind,
     stage_name: &mut String,
-    line: &str,
+    dispatch: &crate::magic_bus::DispatchEvent<crate::executor::EventKind>,
     writer: &SharedWriter,
     offset: &mut u64,
     dedupe: &mut ReplayDedupe,
 ) -> bool {
-    if let Some(boundary) = parse_stage_boundary(line) {
-        let new_kind = boundary_kind(&boundary);
-        let new_stage = boundary_stage(&boundary);
-        if new_kind != *kind || new_stage != *stage_name {
-            *kind = new_kind;
-            *stage_name = new_stage;
-            if !send_stage_line(writer, offset, boundary).await {
-                return false;
+    match dispatch.kind() {
+        crate::executor::EventKind::StageBoundary {
+            stage,
+            stage_type,
+            active: _active,
+            ..
+        } => {
+            let new_kind = match stage_type.as_str() {
+                "agent" => StageStreamKind::Agent,
+                "exec" => StageStreamKind::Exec,
+                _ => StageStreamKind::Other,
+            };
+            let new_stage = stage;
+            if new_kind != *kind || new_stage != stage_name {
+                *kind = new_kind;
+                *stage_name = new_stage.to_string();
+                let boundary_payload = serde_json::json!({
+                    "kind": "stage_boundary",
+                    "stage": new_stage,
+                    "stage_type": stage_type,
+                });
+                if !send_stage_line(writer, offset, boundary_payload).await {
+                    return false;
+                }
+                if matches!(*kind, StageStreamKind::Agent | StageStreamKind::Exec) {
+                    dedupe.reset();
+                }
+                return replay_source(store, *kind, stage_name, writer, offset, dedupe).await;
             }
-            return replay_source(store, *kind, stage_name, writer, offset, dedupe).await;
+            // Duplicate boundary for the same source — nothing to replay or show.
+            true
         }
-        // Duplicate boundary for the same source — nothing to replay or show.
-        return true;
-    }
-
-    if matches!(*kind, StageStreamKind::Agent | StageStreamKind::Exec) {
-        let value = live_stage_line(line);
-        if !dedupe.is_replayed(&value) {
-            return send_stage_line(writer, offset, value).await;
-        }
-    }
-    true
-}
-
-/// Process one line from the operational-log fallback.
-///
-/// Log lines from the bus are raw messages that may contain newlines. The
-/// retired broadcast delivered per-physical-line records; split and emit
-/// each physical line separately so the stage-stream output remains
-/// consistent.
-async fn process_log_line(
-    kind: StageStreamKind,
-    line: &str,
-    writer: &SharedWriter,
-    offset: &mut u64,
-    dedupe: &mut ReplayDedupe,
-) -> bool {
-    if matches!(kind, StageStreamKind::Other) {
-        for part in line.split('\n') {
-            let value = serde_json::json!({"kind": "log", "text": part});
-            if !dedupe.is_replayed(&value) && !send_stage_line(writer, offset, value).await {
-                return false;
+        crate::executor::EventKind::ExecOutput {
+            is_stderr,
+            text,
+            ts,
+            ..
+        } => {
+            if matches!(*kind, StageStreamKind::Other) {
+                return true;
             }
+            let kind_str = if *is_stderr { "stderr" } else { "stdout" };
+            let value = serde_json::json!({"kind": kind_str, "text": text, "ts": ts});
+            if !dedupe.is_replayed(&value) {
+                return send_stage_line(writer, offset, value).await;
+            }
+            true
         }
+        // Agent stream events
+        crate::executor::EventKind::StreamChunk { text } => {
+            if !matches!(*kind, StageStreamKind::Agent) {
+                return true;
+            }
+            let value = serde_json::json!({"kind": "text", "text": text});
+            if !dedupe.is_replayed(&value) {
+                return send_stage_line(writer, offset, value).await;
+            }
+            true
+        }
+        crate::executor::EventKind::ReasoningChunk { text } => {
+            if !matches!(*kind, StageStreamKind::Agent) {
+                return true;
+            }
+            let value = serde_json::json!({"kind": "reasoning", "text": text});
+            if !dedupe.is_replayed(&value) {
+                return send_stage_line(writer, offset, value).await;
+            }
+            true
+        }
+        crate::executor::EventKind::ToolOutputChunk {
+            id,
+            name,
+            call,
+            text,
+        } => {
+            if !matches!(*kind, StageStreamKind::Agent) {
+                return true;
+            }
+            let value = serde_json::json!({"kind": "tool_output", "id": id, "name": name, "call": call, "text": text});
+            if !dedupe.is_replayed(&value) {
+                return send_stage_line(writer, offset, value).await;
+            }
+            true
+        }
+        crate::executor::EventKind::ToolResult {
+            id,
+            name,
+            call,
+            output,
+        } => {
+            if !matches!(*kind, StageStreamKind::Agent) {
+                return true;
+            }
+            let value = serde_json::json!({"kind": "tool_result", "id": id, "name": name, "call": call, "output": output});
+            if !dedupe.is_replayed(&value) {
+                return send_stage_line(writer, offset, value).await;
+            }
+            true
+        }
+        crate::executor::EventKind::TurnComplete {
+            turn,
+            text,
+            tool_calls,
+            stats,
+            totals,
+        } => {
+            if !matches!(*kind, StageStreamKind::Agent) {
+                return true;
+            }
+            let value = serde_json::json!({"kind": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls, "stats": stats, "totals": totals});
+            if !dedupe.is_replayed(&value) {
+                return send_stage_line(writer, offset, value).await;
+            }
+            true
+        }
+        crate::executor::EventKind::Done { text, summary, .. } => {
+            if !matches!(*kind, StageStreamKind::Agent) {
+                return true;
+            }
+            let value = serde_json::json!({"kind": "done", "text": text, "summary": summary});
+            if !dedupe.is_replayed(&value) {
+                return send_stage_line(writer, offset, value).await;
+            }
+            true
+        }
+        crate::executor::EventKind::StreamReset => {
+            if !matches!(*kind, StageStreamKind::Agent) {
+                return true;
+            }
+            let value = serde_json::json!({"kind": "stream_reset"});
+            if !dedupe.is_replayed(&value) {
+                return send_stage_line(writer, offset, value).await;
+            }
+            true
+        }
+        // Operational log fallback
+        crate::executor::EventKind::LogLine { line, .. } => {
+            if matches!(kind, StageStreamKind::Other) {
+                for part in line.split('\n') {
+                    let value = serde_json::json!({"kind": "log", "text": part});
+                    if !dedupe.is_replayed(&value) && !send_stage_line(writer, offset, value).await
+                    {
+                        return false;
+                    }
+                }
+            }
+            true
+        }
+        // Terminal events: don't close, let the subscription close naturally.
+        crate::executor::EventKind::RunCompleted { .. }
+        | crate::executor::EventKind::RunFailed { .. }
+        | crate::executor::EventKind::RunStopped { .. }
+        | crate::executor::EventKind::RunRemoved { .. } => true,
+        // Silently ignore lifecycle events (Ready, Ended, etc.).
+        _ => true,
     }
-    true
 }
 
 /// Send a stage-stream payload wrapped in the `stage_stream_line` envelope.
@@ -584,72 +584,16 @@ fn read_tail_lines<R: Read + Seek + ?Sized>(
 }
 
 // ---------------------------------------------------------------------------
-// stage_boundary handling
+// stage_boundary helpers
 // ---------------------------------------------------------------------------
 
-/// Try to parse a broadcast line as a `stage_boundary` sentinel.
-/// Returns the parsed object when found, or `None`.
-fn parse_stage_boundary(line: &str) -> Option<Value> {
-    let v: Value = serde_json::from_str(line).ok()?;
-    if v.get("kind").and_then(|v| v.as_str()) == Some("stage_boundary") {
-        Some(v)
-    } else {
-        None
-    }
-}
-
-/// Derive a `StageStreamKind` from a stage_boundary payload.
-fn boundary_kind(boundary: &Value) -> StageStreamKind {
-    match boundary.get("stage_type").and_then(|v| v.as_str()) {
-        Some("agent") => StageStreamKind::Agent,
-        Some("exec") => StageStreamKind::Exec,
-        _ => StageStreamKind::Other,
-    }
-}
-
-/// Extract the stage identity from a stage_boundary payload.
-fn boundary_stage(boundary: &Value) -> String {
-    boundary
-        .get("stage")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
-}
-
-/// Build the legacy stage_boundary JSON sentinel string for the stage-stream
-/// broadcast. Shared between the bus forwarder and any remaining direct-path
-/// callers so the wire format stays in one place.
-pub(crate) fn stage_boundary_json(stage: &str, stage_type: &str, active: bool) -> String {
-    serde_json::json!({
-        "kind": "stage_boundary",
-        "stage": stage,
-        "stage_type": stage_type,
-        "active": active,
-    })
-    .to_string()
-}
-
-/// Emit a StageBoundary event on the bus and synchronously push the legacy
-/// stage-boundary sentinel into the stage-stream broadcast.
+/// Emit a StageBoundary event on the bus.
 ///
-/// The synchronous broadcast send must happen here (in the same task that is
-/// about to run the stage) so the boundary is enqueued *before* the content
-/// forwarders can deliver agent/exec output. Routing the legacy broadcast
-/// through a separate bus-forwarding task would race with those forwarders
-/// and let content arrive before its opening boundary.
-///
-/// The direct broadcast send stays until Phase 2 retires `stage_stream_tx`
-/// from `RuntimeConfig`; the bus event is the long-term replacement.
-pub(crate) fn send_stage_boundary(
-    tx: &Option<broadcast::Sender<String>>,
-    gremlin_id: &str,
-    stage_name: &str,
-    stage_type: &str,
-) {
+/// The bus is now the single transport for stage boundaries and stage content:
+/// the serve_stage_stream_loop subscriber receives this event in emission
+/// order, before the stage content it opens.
+pub(crate) fn send_stage_boundary(gremlin_id: &str, stage_name: &str, stage_type: &str) {
     let active = !stage_name.is_empty();
-    if let Some(tx) = tx {
-        let _ = tx.send(stage_boundary_json(stage_name, stage_type, active));
-    }
     crate::executor::supervisor::emit_event(crate::executor::EventKind::StageBoundary {
         id: gremlin_id.to_string(),
         stage: stage_name.to_string(),
@@ -659,7 +603,7 @@ pub(crate) fn send_stage_boundary(
 }
 
 // ---------------------------------------------------------------------------
-// Envelope / translation helpers
+// Envelope helpers
 // ---------------------------------------------------------------------------
 
 /// Wrap a stage-stream payload object in the `stage_stream_line` envelope,
@@ -679,13 +623,6 @@ pub(crate) fn stage_line_envelope(value: Value, offset: u64) -> Value {
     );
     obj.insert("offset".to_string(), Value::from(offset));
     Value::Object(obj)
-}
-
-/// Parse a live stage-stream broadcast line (already JSON) into a value.
-/// Plain-string log lines fall back to a `text` payload.
-fn live_stage_line(line: &str) -> Value {
-    serde_json::from_str::<Value>(line)
-        .unwrap_or_else(|_| serde_json::json!({"kind": "text", "text": line}))
 }
 
 /// Convert one line of the agent raw stream (`artifacts/stream-*.jsonl`) into
@@ -991,92 +928,6 @@ fn payload_fingerprint(payload: &Value) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Agent event → stage-stream line translation
-// ---------------------------------------------------------------------------
-
-/// Spawn a task that translates agent stream `EventKind`s into stage-stream
-/// JSON lines and forwards them to the stage-stream broadcast.
-///
-/// Subscribes with lag-tolerant delivery so a slow front-end drops stream
-/// events on overflow rather than growing daemon memory unboundedly. The
-/// subscription receives **all** run-scoped events (log lines, token usage,
-/// run lifecycle, …); `event_kind_to_stage_line` filters to stream events
-/// only, returning `None` for everything else.
-///
-/// Returns the bus subscriber so the caller can unsubscribe when the run
-/// finishes; the spawned task does not clean it up itself.
-pub(crate) fn spawn_stage_stream_forwarder(
-    id: String,
-    stage_stream_tx: broadcast::Sender<String>,
-) -> crate::magic_bus::Subscriber<EventKind> {
-    let (sub, mut rx) = subscribe_run_lag_tolerant(&id, 256);
-    tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Recv::Event(dispatch) => {
-                    if let Some(line) = event_kind_to_stage_line(dispatch.kind()) {
-                        let _ = stage_stream_tx.send(line);
-                    }
-                }
-                Recv::Lagged(_) => continue,
-                Recv::Closed => break,
-            }
-        }
-    });
-    sub
-}
-
-/// Convert a stream `EventKind` into a stage-stream JSON line.
-///
-/// Returns `None` for lifecycle events (`Ready`/`Ended`) that are not stage
-/// content and for non-stream events.
-pub(crate) fn event_kind_to_stage_line(event: &EventKind) -> Option<String> {
-    use serde_json::json;
-    match event {
-        EventKind::ReasoningChunk { text } => {
-            Some(json!({"kind": "reasoning", "text": text}).to_string())
-        }
-        EventKind::StreamChunk { text } => {
-            Some(json!({"kind": "text", "text": text}).to_string())
-        }
-        EventKind::ToolOutputChunk {
-            id,
-            name,
-            call,
-            text,
-        } => Some(
-            json!({"kind": "tool_output", "id": id, "name": name, "call": call, "text": text})
-                .to_string(),
-        ),
-        EventKind::ToolResult {
-            id,
-            name,
-            call,
-            output,
-        } => Some(
-            json!({"kind": "tool_result", "id": id, "name": name, "call": call, "output": output})
-                .to_string(),
-        ),
-        EventKind::TurnComplete {
-            turn,
-            text,
-            tool_calls,
-            stats,
-            totals,
-        } => Some(
-            json!({"kind": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls, "stats": stats, "totals": totals})
-                .to_string(),
-        ),
-        EventKind::Done {
-            text, summary, ..
-        } => Some(json!({"kind": "done", "text": text, "summary": summary}).to_string()),
-        EventKind::StreamReset => Some(json!({"kind": "stream_reset"}).to_string()),
-        // Lifecycle and non-stream events.
-        _ => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1084,43 +935,6 @@ pub(crate) fn event_kind_to_stage_line(event: &EventKind) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn event_kind_to_stage_line_maps_agent_events() {
-        let line = event_kind_to_stage_line(&EventKind::StreamChunk {
-            text: "hi".to_string(),
-        })
-        .unwrap();
-        let v: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(v["kind"], "text");
-        assert_eq!(v["text"], "hi");
-
-        let line = event_kind_to_stage_line(&EventKind::ReasoningChunk {
-            text: "think".to_string(),
-        })
-        .unwrap();
-        let v: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(v["kind"], "reasoning");
-        assert_eq!(v["text"], "think");
-
-        let line = event_kind_to_stage_line(&EventKind::ToolResult {
-            id: "call_1".to_string(),
-            name: "Bash".to_string(),
-            call: "Bash(command=\"ls\")".to_string(),
-            output: "ok".to_string(),
-        })
-        .unwrap();
-        let v: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(v["kind"], "tool_result");
-        assert_eq!(v["name"], "Bash");
-
-        // Lifecycle events are not stage content.
-        assert!(event_kind_to_stage_line(&EventKind::Ready { turn: 0 }).is_none());
-        assert!(event_kind_to_stage_line(&EventKind::Ended {
-            reason: "resumed".to_string(),
-        })
-        .is_none());
-    }
 
     #[test]
     fn agent_stream_line_decodes_persisted_transcript_records() {
@@ -1203,36 +1017,6 @@ mod tests {
         assert_eq!(v["kind"], "text");
         assert_eq!(v["text"], "hi");
         assert_eq!(v["offset"], 3);
-    }
-
-    #[test]
-    fn parse_stage_boundary_detects_sentinel() {
-        let v = parse_stage_boundary(
-            r#"{"kind":"stage_boundary","stage":"implement","stage_type":"agent"}"#,
-        );
-        assert!(v.is_some());
-        let v = v.unwrap();
-        assert_eq!(v["stage"], "implement");
-        assert_eq!(boundary_stage(&v), "implement");
-
-        assert!(parse_stage_boundary(r#"{"kind":"text","text":"hi"}"#).is_none());
-        assert!(parse_stage_boundary("not json").is_none());
-    }
-
-    #[test]
-    fn boundary_kind_maps_types() {
-        assert_eq!(
-            boundary_kind(&json!({"kind":"stage_boundary","stage_type":"agent"})),
-            StageStreamKind::Agent
-        );
-        assert_eq!(
-            boundary_kind(&json!({"kind":"stage_boundary","stage_type":"exec"})),
-            StageStreamKind::Exec
-        );
-        assert_eq!(
-            boundary_kind(&json!({"kind":"stage_boundary","stage_type":"bootstrap"})),
-            StageStreamKind::Other
-        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 
 use crate::clients::client::Client;
 use crate::clients::interactive::{InteractiveChannels, InteractiveHandle};
@@ -14,35 +14,21 @@ use super::event::{emit_event, init_bus, EventKind};
 use super::RunState;
 
 /// Set up log + interactive + stage-stream channels on a gremlin. Returns the
-/// stage-stream broadcast sender, interactive handle, log flush channel, the
-/// log-writer bus subscriber (so the caller can unsubscribe when the run
-/// finishes), and the stage-stream forwarder's bus subscriber.
+/// interactive handle, log flush channel, and the log-writer bus subscriber
+/// (so the caller can unsubscribe when the run finishes).
 #[allow(clippy::type_complexity)]
 pub(crate) fn setup_gremlin_channels(
     gremlin: &mut Gremlin,
     relay: Option<LogRelay>,
 ) -> (
-    broadcast::Sender<String>,
     InteractiveHandle,
     tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
-    crate::magic_bus::Subscriber<EventKind>,
     crate::magic_bus::Subscriber<EventKind>,
 ) {
     let channels = InteractiveChannels::new();
     let (interactive_handle, interactive_session) = channels.split();
     gremlin.runtime_config.interactive = Some(interactive_handle.clone());
     gremlin.interactive_session = Some(interactive_session);
-
-    // Stage-aware live stream: a dedicated broadcast that carries JSON lines
-    // for agent events (reasoning/text/tool) and exec stdout/stderr. The
-    // forwarder subscribes to the bus and returns its subscriber so the
-    // caller can unsubscribe when the run finishes.
-    let (stage_stream_broadcast, _) = broadcast::channel(256);
-    gremlin.runtime_config.stage_stream_tx = Some(stage_stream_broadcast.clone());
-    let stage_stream_sub = crate::executor::stage_stream::spawn_stage_stream_forwarder(
-        gremlin.id.to_string(),
-        stage_stream_broadcast.clone(),
-    );
 
     let store = gremlin.state.store_handle();
     let run_id = gremlin.id.to_string();
@@ -55,21 +41,11 @@ pub(crate) fn setup_gremlin_channels(
         ))
         .expect("lossless subscription cannot fail");
 
-    // Stage boundaries are pushed directly into `stage_stream_broadcast` by
-    // `send_stage_boundary` (synchronously, before the stage's content). The
-    // matching `StageBoundary` event still flows on the bus for socket
-    // forwarders and Phase 2, so no per-gremlin forwarding subscription is
-    // needed here — adding one would race with content forwarders and would
-    // leak a task/mailbox for the daemon's lifetime.
+    // Stage boundaries flow on the bus via send_stage_boundary; the
+    // serve_stage_stream_loop handler subscribes directly.
 
     let log_flush = spawn_log_writer(log_rx, store, relay);
-    (
-        stage_stream_broadcast,
-        interactive_handle,
-        log_flush,
-        log_sub,
-        stage_stream_sub,
-    )
+    (interactive_handle, log_flush, log_sub)
 }
 
 pub(crate) async fn run_gremlin_task(
@@ -84,12 +60,7 @@ pub(crate) async fn run_gremlin_task(
                 id: gremlin.id.to_string(),
                 line: format!("error: {e}"),
             });
-            crate::executor::stage_stream::send_stage_boundary(
-                &gremlin.runtime_config.stage_stream_tx,
-                gremlin.id.as_str(),
-                "",
-                "other",
-            );
+            crate::executor::stage_stream::send_stage_boundary(gremlin.id.as_str(), "", "other");
             gremlin.state.write_terminal_state(1);
             1
         }

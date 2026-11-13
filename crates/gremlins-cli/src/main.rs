@@ -1728,7 +1728,7 @@ async fn land(id: &str) -> Result<(), String> {
     let workdir = raw.get("workdir").and_then(Value::as_str).unwrap_or("");
     let worktree = (!workdir.is_empty()).then(|| PathBuf::from(workdir));
 
-    let prepared = prepare_exec(&exec, &store, &store, "", &HashMap::new(), None)
+    let prepared = prepare_exec(&exec, &store, &store, "", &HashMap::new())
         .await
         .map_err(|e| format!("gremlin {id}: {e}"))?;
 

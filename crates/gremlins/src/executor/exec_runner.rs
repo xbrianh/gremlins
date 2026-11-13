@@ -2,8 +2,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 
-use tokio::sync::broadcast;
-
 use crate::artifacts::resolve::{resolve_interpolation_map, ResolveError};
 use crate::artifacts::uri::Uri;
 use crate::core::proc::{run_logged_commands, LineEvent, ProcError, ProcResult, ShellResult};
@@ -108,8 +106,6 @@ pub struct ExecPrepared {
     /// `prepare_exec` for the exec command templates. Merged into the
     /// child shell's environment in `run_shell`.
     pub substitution_env: HashMap<String, String>,
-    /// Stage stream broadcast for live watch pane output.
-    pub(crate) stage_stream_tx: Option<broadcast::Sender<String>>,
     /// Gremlin ID for routing LogLine events to the per-gremlin log writer.
     pub gremlin_id: Option<String>,
 }
@@ -125,7 +121,6 @@ pub async fn prepare_exec(
     local_state: &dyn StateStore,
     loop_iter: &str,
     framework_subs: &HashMap<String, String>,
-    stage_stream_tx: Option<broadcast::Sender<String>>,
 ) -> Result<ExecPrepared, ExecError> {
     let name = &exec.name;
     let str_opts = vars::string_options(&exec.options);
@@ -241,7 +236,6 @@ pub async fn prepare_exec(
         env: HashMap::new(),
         base_env: HashMap::new(),
         substitution_env,
-        stage_stream_tx,
         gremlin_id: None,
     })
 }
@@ -287,31 +281,25 @@ pub async fn run_shell(
         prepared.timeout,
     );
 
-    // Bridge the stage-stream broadcast: create an mpsc channel for raw
-    // line events from the process runner, then spawn a task that formats
-    // them as JSON with timestamps and forwards to the broadcast.
-    let line_tx: Option<mpsc::UnboundedSender<LineEvent>> =
-        prepared.stage_stream_tx.clone().map(|bcast| {
-            let (tx, mut rx) = mpsc::unbounded_channel::<LineEvent>();
-            tokio::spawn(async move {
-                while let Some(ev) = rx.recv().await {
-                    let kind = if ev.is_stderr { "stderr" } else { "stdout" };
-                    let ts = state::now_stamp_millis();
-                    let line = serde_json::json!({
-                        "kind": kind,
-                        "text": ev.text,
-                        "ts": ts,
-                    })
-                    .to_string();
-                    // A broadcast send fails when there are no subscribers
-                    // (normal before Ctrl+O is opened). Keep draining the
-                    // process channel so later subscribers still receive
-                    // output; history replay covers the unwatched gap.
-                    let _ = bcast.send(line);
-                }
-            });
-            tx
+    // Bridge raw line events from the process runner to the event bus: the
+    // mpsc channel feeds a task that re-emits each line as an ExecOutput
+    // event for the live watch pane.
+    let gremlin_id = prepared.gremlin_id.clone();
+    let line_tx: Option<mpsc::UnboundedSender<LineEvent>> = gremlin_id.map(|gid| {
+        let (tx, mut rx) = mpsc::unbounded_channel::<LineEvent>();
+        tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                let ts = state::now_stamp_millis();
+                crate::executor::supervisor::emit_event(crate::executor::EventKind::ExecOutput {
+                    id: gid.clone(),
+                    is_stderr: ev.is_stderr,
+                    text: ev.text,
+                    ts,
+                });
+            }
         });
+        tx
+    });
 
     let result = run_logged_commands(
         &log_name,
@@ -448,7 +436,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
         };
-        let prepared = prepare_exec(&optional_exec, &store, &store, "", &fw, None)
+        let prepared = prepare_exec(&optional_exec, &store, &store, "", &fw)
             .await
             .unwrap();
         assert_eq!(prepared.output_uris[0].0, "out");
@@ -461,7 +449,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
-        let err = prepare_exec(&non_optional_exec, &store, &store, "", &fw, None)
+        let err = prepare_exec(&non_optional_exec, &store, &store, "", &fw)
             .await
             .err()
             .expect("expected duplicate-producer error");
@@ -482,9 +470,7 @@ mod tests {
             outputs_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &store, &store, "", &fw, None)
-            .await
-            .unwrap();
+        let prepared = prepare_exec(&exec, &store, &store, "", &fw).await.unwrap();
         let err = commit_exec(&prepared, &store).await.unwrap_err();
         assert!(matches!(err, ExecError::MissingArtifact { .. }));
         assert!(!store.is_registered("artifact://out.txt").await);
@@ -504,9 +490,7 @@ mod tests {
             outputs_map: HashMap::from([("out?".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &store, &store, "", &fw, None)
-            .await
-            .unwrap();
+        let prepared = prepare_exec(&exec, &store, &store, "", &fw).await.unwrap();
         commit_exec(&prepared, &store).await.unwrap();
         assert!(!store.is_registered("artifact://out.txt").await);
     }
@@ -525,9 +509,7 @@ mod tests {
             outputs_map: HashMap::from([("out".to_string(), "artifact://out.txt".to_string())]),
         };
         let fw = HashMap::new();
-        let prepared = prepare_exec(&exec, &store, &store, "", &fw, None)
-            .await
-            .unwrap();
+        let prepared = prepare_exec(&exec, &store, &store, "", &fw).await.unwrap();
         fs::write(&prepared.output_paths["out"], "data").unwrap();
         commit_exec(&prepared, &store).await.unwrap();
         assert!(store.is_registered("artifact://out.txt").await);
@@ -561,7 +543,6 @@ mod tests {
             env: HashMap::new(),
             base_env: HashMap::new(),
             substitution_env,
-            stage_stream_tx: None,
             gremlin_id: None,
         };
 
@@ -591,7 +572,6 @@ mod tests {
             env: HashMap::new(),
             base_env: HashMap::new(),
             substitution_env: HashMap::new(),
-            stage_stream_tx: None,
             gremlin_id: None,
         }
     }
@@ -616,7 +596,6 @@ mod tests {
             name: "resolved".to_string(),
             cmds: vec!["echo \"${GREMLINS_INPUT}\"".to_string()],
             substitution_env,
-            stage_stream_tx: None,
             ..make_prepared("resolved", vec!["echo ok"], &state_dir)
         };
         let state = StateData::with_state_dir(&state_dir);

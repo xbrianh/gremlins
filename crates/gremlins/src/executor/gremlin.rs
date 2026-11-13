@@ -177,10 +177,6 @@ pub(crate) struct RuntimeConfig {
     /// The base process environment captured at startup, before any
     /// bootstrap or system vars are layered on.
     pub base_process_env: HashMap<String, String>,
-    /// Broadcast of live stage output lines — exec stdout/stderr — for the
-    /// watch pane. When Some, command output is mirrored here in addition to
-    /// the per-gremlin log.
-    pub stage_stream_tx: Option<tokio::sync::broadcast::Sender<String>>,
     /// Interactive handle (supervisor → agent loop).
     pub interactive: Option<InteractiveHandle>,
     /// The actor's mailbox: `launch_child` / `stop_child` reach through this
@@ -199,7 +195,6 @@ impl Clone for RuntimeConfig {
             default_model: self.default_model.clone(),
             default_task_models: self.default_task_models.clone(),
             base_process_env: self.base_process_env.clone(),
-            stage_stream_tx: self.stage_stream_tx.clone(),
             interactive: self.interactive.clone(),
             actor_tx: self.actor_tx.clone(),
         }
@@ -254,7 +249,6 @@ impl RuntimeConfig {
             default_model,
             default_task_models,
             base_process_env,
-            stage_stream_tx: None,
             interactive: None,
             actor_tx: None,
         }

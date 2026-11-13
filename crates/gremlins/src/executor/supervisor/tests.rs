@@ -10,9 +10,7 @@ use crate::clients::client::{Client, ModelURI};
 use crate::clients::protocol::UsageStats;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::socket;
-use crate::executor::stage_stream::{
-    agent_stream_line, event_kind_to_stage_line, exec_stream_line, stage_line_envelope,
-};
+use crate::executor::stage_stream::{agent_stream_line, exec_stream_line, stage_line_envelope};
 use crate::schemas::bootstrap::{InputSource, InputSources};
 use crate::test_support::Sandbox;
 use serde_json::Value;
@@ -1581,45 +1579,6 @@ fn chat_payload_serializes_tool_result() {
     assert_eq!(value["call"], "Grep(pattern=\"fn\")");
     assert_eq!(value["output"], "x.rs:1:fn");
     assert_eq!(value["turn"], "t-9");
-}
-
-#[test]
-fn event_kind_to_stage_line_maps_agent_events() {
-    let line = event_kind_to_stage_line(&crate::executor::EventKind::StreamChunk {
-        text: "hi".to_string(),
-    })
-    .unwrap();
-    let v: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(v["kind"], "text");
-    assert_eq!(v["text"], "hi");
-
-    let line = event_kind_to_stage_line(&crate::executor::EventKind::ReasoningChunk {
-        text: "think".to_string(),
-    })
-    .unwrap();
-    let v: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(v["kind"], "reasoning");
-    assert_eq!(v["text"], "think");
-
-    let line = event_kind_to_stage_line(&crate::executor::EventKind::ToolResult {
-        id: "call_1".to_string(),
-        name: "Bash".to_string(),
-        call: "Bash(command=\"ls\")".to_string(),
-        output: "ok".to_string(),
-    })
-    .unwrap();
-    let v: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(v["kind"], "tool_result");
-    assert_eq!(v["name"], "Bash");
-
-    // Lifecycle events are not stage content.
-    assert!(event_kind_to_stage_line(&crate::executor::EventKind::Ready { turn: 0 }).is_none());
-    assert!(
-        event_kind_to_stage_line(&crate::executor::EventKind::Ended {
-            reason: "resumed".to_string(),
-        })
-        .is_none()
-    );
 }
 
 #[test]
