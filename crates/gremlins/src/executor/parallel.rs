@@ -121,11 +121,12 @@ pub(crate) async fn run_parallel(
 
     // The actor mailbox is threaded onto every launched gremlin's runtime
     // config so parallel children can be registered without a global run map.
-    let actor_tx = gremlin
-        .runtime_config
-        .actor_tx
-        .clone()
-        .ok_or_else(|| RunError::Message("parallel: actor mailbox unavailable".to_string()))?;
+    // When running standalone (no supervisor), spawn a throwaway actor for
+    // the duration of this parallel group; it exits when the last sender drops.
+    let actor_tx = gremlin.runtime_config.actor_tx.clone().unwrap_or_else(|| {
+        let (shutdown_tx, _rx) = tokio::sync::watch::channel(false);
+        supervisor::actor::spawn_actor(crate::config::state_root(), shutdown_tx)
+    });
 
     log::debug!(
         "parallel group {group_name}: starting with {total_children} children (max_concurrent={max_concurrent:?}, cancel_on_error={cancel_on_error}, error_policy={error_policy:?})"

@@ -13,7 +13,7 @@ pub(crate) use turn_finalizer::TurnFinalizer;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use serde_json::{Map, Value};
@@ -211,21 +211,23 @@ pub(crate) async fn handle_chat(
     let id = match id {
         Some(id) => id,
         None => {
-            let gremlin = match create_chat_gremlin(
-                actor_tx,
-                &chat_model,
-                &system_prompt,
-                &project_root,
-                &env,
-            ) {
-                Ok(g) => g,
-                Err(e) => {
-                    let resp = error_response(&e);
+            let id = match client.reserve_chat_id().await {
+                Some(id) => id,
+                None => {
+                    let resp = error_response("actor unavailable");
                     let _ = writer.write_json_line(&resp).await;
                     return;
                 }
             };
-            let id = gremlin.id.to_string();
+            let gremlin =
+                match create_chat_gremlin(&id, &chat_model, &system_prompt, &project_root, &env) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        let resp = error_response(&e);
+                        let _ = writer.write_json_line(&resp).await;
+                        return;
+                    }
+                };
             if client.session_is_closed(session_id).await {
                 drop(gremlin);
                 let resp = error_response("session closed");
@@ -417,8 +419,18 @@ pub(crate) async fn reusable_chat_gremlin_id(
             // A turn with `done == true` completed but left no parked gremlin
             // (e.g. a stop removed it after a soft interrupt). Waiting on it
             // would spin forever, so report "no reusable gremlin".
-            Some(_) => return None,
-            None => return None,
+            Some(_) => {
+                // The turn finished but its done watch may have fired
+                // before the gremlin was re-parked. Recheck.
+                let ids = client.session_get_chat_gremlin_keys(session_id).await;
+                return ids.into_iter().next();
+            }
+            None => {
+                // A gremlin may have been parked between the two lookups.
+                // Recheck before giving up.
+                let ids = client.session_get_chat_gremlin_keys(session_id).await;
+                return ids.into_iter().next();
+            }
         };
 
         let mut done = done.expect("in-flight turn checked above");
@@ -835,10 +847,8 @@ pub(crate) async fn handle_cancel_chat(
         .await;
 }
 
-static CHAT_SEQ: AtomicUsize = AtomicUsize::new(0);
-
 pub(crate) fn create_chat_gremlin(
-    _actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
+    id: &str,
     default_model: &ModelURI,
     system_prompt: &str,
     project_root: &Path,
@@ -849,14 +859,8 @@ pub(crate) fn create_chat_gremlin(
 
     let project_root = project_root.to_path_buf();
 
-    // Generate ID — use an atomic counter so concurrent chat sessions
-    // never collide. Chat gremlins are ephemeral so they never appear
-    // under config::state_root().
-    let gremlin_id = {
-        let seq = CHAT_SEQ.fetch_add(1, Ordering::Relaxed);
-        let candidate = format!("chat-{seq:04x}");
-        validate_gremlin_id(&candidate).map_err(|e| format!("invalid id: {e}"))?
-    };
+    // Id is pre-reserved through the actor, so no collision check needed.
+    let gremlin_id = validate_gremlin_id(id).map_err(|e| format!("invalid id: {e}"))?;
 
     // Build initial state and create StateData (which writes state.json).
     let initial: Map<String, Value> = serde_json::json!({

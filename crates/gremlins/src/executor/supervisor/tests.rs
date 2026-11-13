@@ -815,7 +815,7 @@ async fn handle_artifact_reads_live_run_map_store() {
     std::fs::create_dir_all(&project_root).unwrap();
 
     let gremlin = create_chat_gremlin(
-        &actor_tx,
+        "chat-test",
         &model("cmd/echo"),
         "helpful",
         &project_root,
@@ -1429,9 +1429,8 @@ fn create_chat_gremlin_seeds_project_root() {
     let state_root = tmp.path().join("state");
     std::fs::create_dir_all(&state_root).unwrap();
 
-    let (actor_tx, _rx) = mpsc::unbounded_channel();
     let gremlin = create_chat_gremlin(
-        &actor_tx,
+        "chat-pr",
         &model("cmd/echo"),
         "you are helpful",
         &project_root,
@@ -1470,9 +1469,8 @@ fn create_chat_gremlin_seeds_environment() {
         ("HOME".to_string(), "/home/operator".to_string()),
     ]);
 
-    let (actor_tx, _rx) = mpsc::unbounded_channel();
     let gremlin = create_chat_gremlin(
-        &actor_tx,
+        "chat-env",
         &model("cmd/echo"),
         "you are helpful",
         &project_root,
@@ -1692,7 +1690,7 @@ async fn handle_compact_parked_gremlin_no_history_returns_nothing_to_compact() {
     let session_id = create_session(&actor_tx).await;
 
     let gremlin = create_chat_gremlin(
-        &actor_tx,
+        "chat-cmp",
         &model("cmd/echo"),
         "helpful",
         &project_root,

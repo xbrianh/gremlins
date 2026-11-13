@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::io::BufReader;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use crate::config;
 use crate::executor::gremlin::validate_gremlin_id;
@@ -14,8 +14,8 @@ use crate::executor::socket;
 use crate::executor::state::{self, FileSystemStateStore};
 use crate::magic_bus::Subscriber;
 
-use super::actor::ActorMsg;
-use super::event::{init_bus, subscribe_run, EventKind};
+use super::actor_client::Client;
+use super::event::{init_bus, EventKind};
 use super::ops::resolve_store_for_id;
 use super::{error_response, SharedWriter};
 
@@ -74,31 +74,17 @@ pub(crate) async fn handle_log(
 
     // Only subscribe for live runs (still in the run map). A finished run
     // has no more events; subscribing would wait forever on a sender that
-    // already emitted its terminal event. Check under the run-map lock and
-    // optionally request a flush barrier so pre-subscription log lines are
-    // persisted before we read history.
+    // already emitted its terminal event. The combined message atomically
+    // checks the run map and subscribes inside the actor, closing the TOCTOU
+    // window that existed when these were two separate messages.
     let (log_sub, mut log_rx) = if follow {
-        let (flush, sub_rx) = {
-            let (flush_tx, flush_rx) = oneshot::channel();
-            let log_flush = if actor_tx
-                .send(ActorMsg::GetRunLogFlush {
-                    id: id.to_string(),
-                    respond: flush_tx,
-                })
-                .is_ok()
-            {
-                flush_rx.await.ok().flatten()
-            } else {
-                None
-            };
-            if let Some(flush) = log_flush {
-                // Subscribe before awaiting the flush so no event is missed.
-                let (sub, rx) = subscribe_run(id);
+        let client = Client::new(actor_tx.clone());
+        let (flush, sub_rx) =
+            if let Some((flush, sub, rx)) = client.get_run_log_flush_and_subscribe(id).await {
                 (Some(flush), (Some(sub), Some(rx)))
             } else {
                 (None, (None, None))
-            }
-        };
+            };
         // Request the log writer flush queued events to disk so
         // pre-subscription lines are visible in the blob we're about
         // to read.

@@ -279,6 +279,14 @@ impl Client {
         rx.await.ok().flatten()
     }
 
+    /// Reserve a `chat-{seq:04x}` id through the actor so it never collides
+    /// with a live pipeline run.
+    pub(crate) async fn reserve_chat_id(&self) -> Option<String> {
+        let (respond, rx) = oneshot::channel();
+        self.tx.send(ActorMsg::ReserveChatId { respond }).ok()?;
+        rx.await.ok()
+    }
+
     pub(crate) async fn session_mark_closed(&self, session_id: &str) {
         let (respond, rx) = oneshot::channel();
         if self
@@ -385,5 +393,30 @@ impl Client {
         id: &str,
     ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
         actor::acquire_id_lock(&self.tx, id).await
+    }
+
+    // ── Combined liveness + subscribe ──────────────────────────────────
+
+    /// Get the log flush handle *and* a per-run bus subscriber + receiver in
+    /// one actor round-trip. The actor checks the run map and calls
+    /// `subscribe_run` inside the same handler, closing the TOCTOU window
+    /// where the run finishes between the liveness check and the
+    /// subscription.
+    pub(crate) async fn get_run_log_flush_and_subscribe(
+        &self,
+        id: &str,
+    ) -> Option<actor::FlushAndSubscribe> {
+        let (respond, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ActorMsg::GetRunLogFlushAndSubscribe {
+                id: id.to_string(),
+                respond,
+            })
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
     }
 }

@@ -266,9 +266,10 @@ pub(crate) async fn stop_child(actor_tx: &mpsc::UnboundedSender<super::actor::Ac
         id: id.to_string(),
         respond,
     });
-    // The actor already removed the entry and published the terminal state;
-    // `Some(..)` means the id was live and the follow-up work is ours.
-    if let Ok(Some((state_tx, log_sub))) = rx.await {
+    // The actor already removed the entry, published the terminal state, and
+    // released the log subscription; `Some(..)` means the id was live and the
+    // follow-up work is ours.
+    if let Ok(Some(state_tx)) = rx.await {
         let _ = state_tx.send(RunState {
             id: id.to_string(),
             status: "stopped".to_string(),
@@ -279,10 +280,6 @@ pub(crate) async fn stop_child(actor_tx: &mpsc::UnboundedSender<super::actor::Ac
         // orphan and has a recorded exit_code.
         if let Ok(sd) = state::StateData::open(id) {
             sd.write_terminal_state(1);
-        }
-        // Unsubscribe the log-writer subscription so the log task drains.
-        if let Some(ref sub) = log_sub {
-            init_bus().unsubscribe(sub);
         }
         // Reap backend resources that the aborted task would have reaped in
         // Gremlin::finish.

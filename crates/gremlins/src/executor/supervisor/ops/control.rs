@@ -13,7 +13,6 @@ use crate::executor::event::EventKind;
 use crate::executor::gremlin::{Gremlin, GremlinConfig};
 use crate::executor::state;
 
-use super::super::actor;
 use super::super::actor_client::Client;
 use super::super::event::emit_event;
 use super::super::lifecycle::spawn_gremlin_runner;
@@ -198,7 +197,7 @@ pub(crate) async fn handle_stop(
     // publishes the terminal state and releases the log subscription. A
     // `Some` reply means the id was live and the reap below is still ours.
     let client = Client::new(actor_tx.clone());
-    let stopped: Option<actor::StoppedRun> = client.stop_run(id).await;
+    let stopped = client.stop_run(id).await;
 
     if stopped.is_some() {
         terminate_and_reap(id);

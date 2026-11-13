@@ -36,9 +36,9 @@ use crate::executor::event::EventKind;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
 use crate::executor::socket;
 use crate::executor::state;
-use crate::magic_bus::Subscriber;
+use crate::magic_bus::{ReceiverHalf, Subscriber};
 
-use super::event::{emit_event, init_bus};
+use super::event::{emit_event, init_bus, subscribe_run};
 use super::lifecycle::{run_gremlin_task, setup_gremlin_channels, LaunchResult, LogRelay};
 use super::state_view::definition_name_from_tree;
 use super::{CurrentTurn, RunHandle, RunState};
@@ -52,13 +52,20 @@ pub(crate) type StoreHandle = Arc<dyn state::StateStore + Send + Sync>;
 pub(crate) type LogFlushHandle = mpsc::UnboundedSender<oneshot::Sender<()>>;
 
 /// What [`ActorMsg::StopRun`] hands back when the id was live: the run's state
-/// broadcaster and its log subscription, so the caller can finish
-/// `terminate_and_reap` and release the log task.
-pub(crate) type StoppedRun = (watch::Sender<RunState>, Option<Subscriber<EventKind>>);
+/// broadcaster so the caller can finish `terminate_and_reap`.
+pub(crate) type StoppedRun = watch::Sender<RunState>;
 
 /// Result of [`ActorMsg::SessionUpdateSkills`]: the active skill names and the
 /// shared set the agent loop reads.
 pub(crate) type ActiveSkills = (Vec<String>, Arc<Mutex<Vec<String>>>);
+
+/// Result of [`ActorMsg::GetRunLogFlushAndSubscribe`]: flush handle, bus
+/// subscriber, and receiver for log follow.
+pub(crate) type FlushAndSubscribe = (
+    LogFlushHandle,
+    Subscriber<EventKind>,
+    ReceiverHalf<EventKind>,
+);
 
 /// The actor's mailbox sender. All callers outside this module reach the
 /// supervisor through this lightweight handle.
@@ -203,8 +210,8 @@ pub(crate) enum ActorMsg {
         result: i32,
         notify_shutdown: bool,
     },
-    /// Stop a run and hand the caller what it needs for follow-up work
-    /// (`terminate_and_reap`). `None` means the id was not live.
+    /// Stop a run and hand the caller the state broadcaster for follow-up
+    /// work (`terminate_and_reap`). `None` means the id was not live.
     StopRun {
         id: String,
         respond: oneshot::Sender<Option<StoppedRun>>,
@@ -241,9 +248,16 @@ pub(crate) enum ActorMsg {
         cmd_tx: mpsc::Sender<InteractiveCommand>,
         respond: oneshot::Sender<bool>,
     },
+    #[allow(dead_code)]
     GetRunLogFlush {
         id: String,
         respond: oneshot::Sender<Option<LogFlushHandle>>,
+    },
+    /// Combined liveness check + subscription in one actor round-trip to
+    /// close the TOCTOU window in log_handler.
+    GetRunLogFlushAndSubscribe {
+        id: String,
+        respond: oneshot::Sender<Option<FlushAndSubscribe>>,
     },
     #[allow(dead_code)]
     GetRunCancel {
@@ -410,6 +424,12 @@ pub(crate) enum ActorMsg {
         session_id: String,
         respond: oneshot::Sender<Option<String>>,
     },
+    /// Reserve a `chat-{seq:04x}` id that is not currently in the run map.
+    /// The actor increments its internal counter and checks `runs` so the
+    /// id cannot collide with a pipeline run.
+    ReserveChatId {
+        respond: oneshot::Sender<String>,
+    },
 
     // ── Connections ────────────────────────────────────────────────────
     /// One more control/session connection. Sent from `ConnectionGuard::new`.
@@ -450,6 +470,9 @@ pub(crate) struct ActorState {
     /// Per-id async mutexes that serialize `rm`/`resume`/`snapshot` (the old
     /// `ID_LOCKS`).
     id_locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    /// Monotonic counter for `chat-{seq:04x}` ids, checked against the live
+    /// run map so chat ids never collide with pipeline runs.
+    chat_seq: usize,
     /// Handle on our own mailbox, cloned into spawned run tasks so they can
     /// report completion.
     actor_tx: mpsc::UnboundedSender<ActorMsg>,
@@ -482,6 +505,7 @@ pub(crate) async fn run_actor(
         shutdown_tx,
         state_root,
         id_locks: HashMap::new(),
+        chat_seq: 0,
         actor_tx,
     };
 
@@ -575,6 +599,7 @@ impl ActorState {
             | ActorMsg::GetRunStageStreamAndFlush { .. }
             | ActorMsg::SetRunInteractiveCmd { .. }
             | ActorMsg::GetRunLogFlush { .. }
+            | ActorMsg::GetRunLogFlushAndSubscribe { .. }
             | ActorMsg::GetRunCancel { .. }
             | ActorMsg::ListRunStores { .. }
             | ActorMsg::ListRunIds { .. }
@@ -605,7 +630,8 @@ impl ActorState {
             | ActorMsg::SessionSetListenerTask { .. }
             | ActorMsg::SessionPushAuxSocket { .. }
             | ActorMsg::SessionGetAll { .. }
-            | ActorMsg::SessionGetChatModel { .. }) => self.handle_session(other).await,
+            | ActorMsg::SessionGetChatModel { .. }
+            | ActorMsg::ReserveChatId { .. }) => self.handle_session(other).await,
 
             // ── Connections ────────────────────────────────────────────
             ActorMsg::ConnectionUp => self.connection_count += 1,
@@ -935,11 +961,11 @@ impl ActorState {
 
                 let _ = handle.state_tx.send(terminal_state(&id, "stopped"));
 
-                // The caller (`stop_child` / `handle_stop`) handles log-sub
-                // cleanup after it writes terminal state and reaps the
-                // backend. The actor only publishes the terminal event; the
-                // subscription is the caller's responsibility to unsubscribe.
-                let _ = respond.send(Some((handle.state_tx.clone(), handle.log_sub)));
+                // Release the log subscription so the log task, blocking
+                // writer, and state store drain promptly.
+                self.release_log_sub(handle.log_sub);
+
+                let _ = respond.send(Some(handle.state_tx.clone()));
             }
 
             ActorMsg::ContainsRun { id, respond } => {
@@ -997,6 +1023,16 @@ impl ActorState {
                         .get(&id)
                         .and_then(|handle| handle.log_flush.clone()),
                 );
+            }
+
+            ActorMsg::GetRunLogFlushAndSubscribe { id, respond } => {
+                let result = self.runs.get(&id).and_then(|handle| {
+                    handle.log_flush.clone().map(|flush| {
+                        let (sub, rx) = subscribe_run(&id);
+                        (flush, sub, rx)
+                    })
+                });
+                let _ = respond.send(result);
             }
 
             ActorMsg::GetRunCancel { id, respond } => {
@@ -1333,7 +1369,14 @@ impl ActorState {
                         session.chat_gremlins.insert(id.clone(), gremlin);
                         if let Some(cur) = session.current_turn.as_mut() {
                             if Arc::ptr_eq(&cur.cancel, &cancel) {
-                                cur.interrupted = true;
+                                // Only mark interrupted if the cancel was a
+                                // soft cancel. A hard cancel that wins the
+                                // race after the caller checked soft_cancel
+                                // should reinsert the gremlin without
+                                // parking the partial turn.
+                                if cur.soft_cancel.load(std::sync::atomic::Ordering::Acquire) {
+                                    cur.interrupted = true;
+                                }
                             }
                         }
                         done = true;
@@ -1379,6 +1422,11 @@ impl ActorState {
                 let _ = respond.send(model);
             }
 
+            ActorMsg::ReserveChatId { respond } => {
+                let id = self.reserve_chat_id();
+                let _ = respond.send(id);
+            }
+
             // Routing error: the dispatcher should only route session
             // variants here. Log and no-op so a future enum addition doesn't
             // crash the single-threaded actor.
@@ -1400,6 +1448,21 @@ impl ActorState {
     fn release_log_sub(&self, sub: Option<Subscriber<EventKind>>) {
         if let Some(sub) = sub {
             init_bus().unsubscribe(&sub);
+        }
+    }
+
+    /// Allocate a `chat-{seq:04x}` id that is not present in the live run map.
+    /// The actor is single-threaded, so no TOCTOU window exists between the
+    /// check and the subsequent insertion.
+    fn reserve_chat_id(&mut self) -> String {
+        loop {
+            self.chat_seq += 1;
+            let candidate = format!("chat-{:04x}", self.chat_seq);
+            // `validate_gremlin_id` is infallible for this format but we
+            // guard anyway.
+            if !self.runs.contains_key(&candidate) && validate_gremlin_id(&candidate).is_ok() {
+                return candidate;
+            }
         }
     }
 
