@@ -187,16 +187,32 @@ pub(crate) async fn handle_log(
                                         log_line!(stamped);
                                     }
                                 }
-                                // Don't break early on terminal events — the
-                                // parent's log writer may still have pending
-                                // relayed child diagnostics to deliver.
+                                // Terminal event: the run is done. Drain any
+                                // remaining relayed child diagnostic log lines,
+                                // then break so the follower doesn't hang.
                                 EventKind::RunCompleted { .. }
                                 | EventKind::RunFailed { .. }
                                 | EventKind::RunStopped { .. }
                                 | EventKind::RunRemoved { .. } => {
-                                    // Continue following; when the log writer
-                                    // closes its subscription, we'll get
-                                    // Closed and exit naturally.
+                                    // Unregister so no new events arrive.
+                                    unsubscribe(&log_sub);
+                                    // Drain buffered lines (child relay
+                                    // diagnostics emitted after the terminal
+                                    // event).
+                                    while let Ok(dispatch) = log_rx.try_recv() {
+                                        if let EventKind::LogLine { line, .. } =
+                                            dispatch.kind()
+                                        {
+                                            let ts = crate::executor::state::stamp_from_epoch_millis(
+                                                dispatch.ts().wall_millis(),
+                                            );
+                                            for part in line.split('\n') {
+                                                let stamped = format!("{ts} {part}");
+                                                log_line!(stamped);
+                                            }
+                                        }
+                                    }
+                                    break;
                                 }
                                 _ => continue,
                             }

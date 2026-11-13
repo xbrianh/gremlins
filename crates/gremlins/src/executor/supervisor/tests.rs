@@ -729,6 +729,7 @@ async fn handle_artifact_reads_live_run_map_store() {
         interactive,
         store: store.clone(),
         log_flush: None,
+        log_sub: None,
     };
     super::get_run_map()
         .lock()

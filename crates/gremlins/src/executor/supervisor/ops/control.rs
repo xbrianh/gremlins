@@ -15,6 +15,7 @@ use crate::executor::gremlin::{Gremlin, GremlinConfig};
 use crate::executor::state;
 
 use super::super::event::emit_event;
+use super::super::event::init_bus;
 use super::super::lifecycle::spawn_gremlin_runner;
 use super::super::lifecycle::terminate_and_reap;
 use super::super::session::{session_map, SessionHandle};
@@ -209,6 +210,7 @@ pub(crate) async fn handle_stop(request: &Value, _shutdown_tx: &watch::Sender<bo
             }
             handle.aborted.store(true, Ordering::Relaxed);
             let state_tx = handle.state_tx.clone();
+            let log_sub = handle.log_sub.clone();
             map.remove(id);
             let _ = state_tx.send(RunState {
                 id: id.to_string(),
@@ -216,6 +218,10 @@ pub(crate) async fn handle_stop(request: &Value, _shutdown_tx: &watch::Sender<bo
                 stage: String::new(),
                 started_at: String::new(),
             });
+            // Unsubscribe the log-writer subscription so the log task drains.
+            if let Some(ref sub) = log_sub {
+                init_bus().unsubscribe(sub);
+            }
             true
         } else {
             false

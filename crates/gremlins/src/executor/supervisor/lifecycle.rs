@@ -17,8 +17,8 @@ use super::state_view::definition_name_from_tree;
 use super::{get_run_map, RunHandle, RunState};
 
 /// Set up log + interactive + stage-stream channels on a gremlin. Returns the
-/// stage-stream broadcast sender and interactive handle for insertion into the
-/// run map.
+/// stage-stream broadcast sender, interactive handle, log flush channel, and
+/// the bus subscriber (so the caller can unsubscribe when the run finishes).
 pub(crate) fn setup_gremlin_channels(
     gremlin: &mut Gremlin,
     relay: Option<LogRelay>,
@@ -26,6 +26,7 @@ pub(crate) fn setup_gremlin_channels(
     broadcast::Sender<String>,
     InteractiveHandle,
     tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
+    crate::magic_bus::Subscriber<EventKind>,
 ) {
     let channels = InteractiveChannels::new();
     let (interactive_handle, interactive_session) = channels.split();
@@ -46,7 +47,7 @@ pub(crate) fn setup_gremlin_channels(
 
     // Subscribe to the bus with a run-scoped prefix so the log writer
     // only receives events for this gremlin.
-    let (_log_sub, log_rx) = init_bus()
+    let (log_sub, log_rx) = init_bus()
         .subscribe(SubscriberRegistration::lossless(
             CorrId::new().with_run(&run_id),
         ))
@@ -60,7 +61,7 @@ pub(crate) fn setup_gremlin_channels(
     // leak a task/mailbox for the daemon's lifetime.
 
     let log_flush = spawn_log_writer(log_rx, store, relay);
-    (stage_stream_broadcast, interactive_handle, log_flush)
+    (stage_stream_broadcast, interactive_handle, log_flush, log_sub)
 }
 
 async fn run_gremlin_task(mut gremlin: Gremlin, resume_from: Option<&str>) -> (i32, Gremlin) {
@@ -197,7 +198,7 @@ pub(crate) fn spawn_gremlin_runner(
     definition_name: &str,
     shutdown_tx: &watch::Sender<bool>,
 ) {
-    let (stage_stream_broadcast, interactive_handle, log_flush) =
+    let (stage_stream_broadcast, interactive_handle, log_flush, log_sub) =
         setup_gremlin_channels(&mut gremlin, None);
     gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
         interactive_handle.evt_tx.clone(),
@@ -221,11 +222,12 @@ pub(crate) fn spawn_gremlin_runner(
     let aborted_for_task = aborted.clone();
 
     let (go_tx, go_rx) = tokio::sync::oneshot::channel();
+    let log_sub_clone = log_sub.clone();
     let join_handle = tokio::spawn(async move {
         let _ = go_rx.await;
         let (result, _gremlin) = run_gremlin_task(gremlin, resume_from_owned.as_deref()).await;
         if !aborted_for_task.load(Ordering::Relaxed) {
-            RunHandle::finish(&id_owned, result, &state_tx_clone, Some(&shutdown_tx_clone));
+            RunHandle::finish(&id_owned, result, &state_tx_clone, Some(&shutdown_tx_clone), Some(log_sub_clone));
         }
     });
 
@@ -238,6 +240,7 @@ pub(crate) fn spawn_gremlin_runner(
         interactive: interactive_handle,
         store,
         log_flush: Some(log_flush),
+        log_sub: Some(log_sub),
     };
     get_run_map().lock().unwrap().insert(id.to_string(), handle);
 
@@ -273,7 +276,7 @@ pub(crate) struct LogRelay {
 pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> LaunchResult {
     let id = gremlin.id.to_string();
 
-    let (stage_stream_broadcast, interactive_handle, log_flush) =
+    let (stage_stream_broadcast, interactive_handle, log_flush, log_sub) =
         setup_gremlin_channels(&mut gremlin, relay);
     gremlin.runtime_config.stream_events = Some(StreamEventSender::Broadcast(
         interactive_handle.evt_tx.clone(),
@@ -304,6 +307,7 @@ pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> Lau
     // inserted — no race window in either direction.
     let (go_tx, go_rx) = tokio::sync::oneshot::channel();
     let (gremlin_tx, gremlin_rx) = tokio::sync::oneshot::channel();
+    let log_sub_clone = log_sub.clone();
     let join_handle = tokio::spawn(async move {
         let _ = go_rx.await;
         let (result, gremlin) = run_gremlin_task(gremlin, None).await;
@@ -317,6 +321,7 @@ pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> Lau
                 result,
                 &state_tx_clone,
                 None::<&watch::Sender<bool>>,
+                Some(log_sub_clone),
             );
         }
     });
@@ -330,6 +335,7 @@ pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> Lau
         interactive: interactive_handle,
         store: store.clone(),
         log_flush: Some(log_flush),
+        log_sub: Some(log_sub),
     };
     // Insert into RUN_MAP *after* spawning so the JoinHandle is present
     // from the moment the entry exists.
@@ -359,7 +365,7 @@ pub(crate) fn launch_child(mut gremlin: Gremlin, relay: Option<LogRelay>) -> Lau
 /// launched).
 pub(crate) async fn stop_child(id: &str) {
     let run_map = get_run_map();
-    let state_tx = {
+    let (state_tx, log_sub) = {
         let mut map = run_map.lock().unwrap();
         match map.get(id) {
             Some(handle) => {
@@ -370,12 +376,13 @@ pub(crate) async fn stop_child(id: &str) {
                 handle.aborted.store(true, Ordering::Relaxed);
                 // Clone what we need before removing the entry.
                 let state_tx = handle.state_tx.clone();
+                let log_sub = handle.log_sub.clone();
                 // Remove from run_map and broadcast terminal state while we
                 // still hold the lock — no race window for a duplicate finish.
                 map.remove(id);
-                Some(state_tx)
+                (Some(state_tx), log_sub)
             }
-            None => None,
+            None => (None, None),
         }
     };
     if let Some(state_tx) = state_tx {
@@ -390,6 +397,10 @@ pub(crate) async fn stop_child(id: &str) {
         // reported as orphan and has a recorded exit_code.
         if let Ok(sd) = state::StateData::open(id) {
             sd.write_terminal_state(1);
+        }
+        // Unsubscribe the log-writer subscription so the log task drains.
+        if let Some(ref sub) = log_sub {
+            init_bus().unsubscribe(sub);
         }
         // Reap backend resources that the aborted task would have
         // reaped in Gremlin::finish.

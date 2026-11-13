@@ -174,6 +174,11 @@ pub(crate) struct RunHandle {
     /// persisted history can request a flush and wait for the ack before
     /// opening the log blob, so that pre-subscription events are visible.
     pub log_flush: Option<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>,
+    /// Bus subscriber for the run's lossless log-writer subscription.
+    /// Held so [`RunHandle::finish`] and stop paths can unregister it,
+    /// preventing the run's log task, blocking writer, and state store
+    /// from living until daemon exit.
+    pub log_sub: Option<crate::magic_bus::Subscriber<EventKind>>,
 }
 
 impl RunHandle {
@@ -184,6 +189,7 @@ impl RunHandle {
         result: i32,
         state_tx: &watch::Sender<RunState>,
         shutdown_tx: Option<&watch::Sender<bool>>,
+        log_sub: Option<crate::magic_bus::Subscriber<EventKind>>,
     ) {
         let run_map = get_run_map();
         let is_empty = {
@@ -224,6 +230,13 @@ impl RunHandle {
             if let Some(tx) = shutdown_tx {
                 check_shutdown(tx);
             }
+        }
+
+        // Unsubscribe the log-writer subscription so its receiver observes
+        // Closed, the spawned log task drains and exits, and the blocking
+        // writer / state store are released before daemon shutdown.
+        if let Some(ref sub) = log_sub {
+            init_bus().unsubscribe(sub);
         }
     }
 }
@@ -436,6 +449,10 @@ async fn handle_connection(
     // Abort the event-forwarding subtask so it doesn't leak the write
     // half or linger waiting for broadcasts after the client is gone.
     event_handle.abort();
+
+    // Unregister the bus subscription so repeated control connections don't
+    // accumulate permanent work for each emission.
+    init_bus().unsubscribe(&_event_sub);
 
     // After cleanup the run map may have drained; let shutdown observe it
     // once the connection counter is decremented by the accept loop.

@@ -24,7 +24,7 @@ use crate::definition::ChatDefinition;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
 use crate::executor::state;
 
-use super::event::{emit_event, EventKind};
+use super::event::{emit_event, init_bus, EventKind};
 use super::lifecycle::setup_gremlin_channels;
 use super::lifecycle::terminate_and_reap;
 use super::session::SessionHandle;
@@ -903,13 +903,18 @@ pub(crate) async fn cleanup_chat_gremlin(id: &str) {
     // Remove from RUN_MAP. If the id wasn't there (already stopped by
     // the operator mid-session), the persistent map entry still needs
     // removing so the gremlin doesn't linger.
-    let state_tx = {
+    let (state_tx, log_sub) = {
         let mut map = get_run_map().lock().unwrap();
         match map.remove(id) {
-            Some(handle) => Some(handle.state_tx.clone()),
-            None => None,
+            Some(handle) => (Some(handle.state_tx.clone()), handle.log_sub),
+            None => (None, None),
         }
     };
+
+    // Unsubscribe the log-writer subscription so the log task drains.
+    if let Some(ref sub) = log_sub {
+        init_bus().unsubscribe(sub);
+    }
 
     if let Some(state_tx) = state_tx {
         let _ = state_tx.send(RunState {
@@ -926,7 +931,7 @@ pub(crate) async fn cleanup_chat_gremlin(id: &str) {
 async fn register_chat_gremlin(session: &SessionHandle, mut gremlin: Gremlin) {
     let id = gremlin.id.to_string();
 
-    let (stage_stream_broadcast, interactive_handle, log_flush) =
+    let (stage_stream_broadcast, interactive_handle, log_flush, log_sub) =
         setup_gremlin_channels(&mut gremlin, None);
     let store = gremlin.state.store_handle();
 
@@ -949,6 +954,7 @@ async fn register_chat_gremlin(session: &SessionHandle, mut gremlin: Gremlin) {
         interactive: interactive_handle,
         store,
         log_flush: Some(log_flush),
+        log_sub: Some(log_sub),
     };
     get_run_map().lock().unwrap().insert(id.clone(), handle);
 

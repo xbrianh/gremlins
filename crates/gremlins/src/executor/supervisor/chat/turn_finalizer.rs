@@ -20,6 +20,7 @@ use crate::definition::ChatDefinition;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run_agent;
 use crate::executor::supervisor::chat::{chat_payload, reinsert_chat_gremlin};
+use crate::executor::supervisor::get_run_map;
 use crate::executor::supervisor::session::SessionHandle;
 use crate::executor::supervisor::SharedWriter;
 use crate::executor::RunError;
@@ -144,8 +145,10 @@ impl TurnFinalizer {
     /// `current_turn` alive (marked interrupted), signal completion, and emit
     /// `ended` with reason `interrupted`.
     ///
-    /// A hard cancel may race the soft path at two points; both are re-checked
-    /// and fall back to [`Self::hard_cancel`] when hard cancellation won.
+    /// A hard cancel may race the soft path at two points before the final
+    /// section; both are re-checked. The final re-insertion + interrupted
+    /// update is one session-locked transition so a hard cancel cannot win
+    /// between reinsert and the `interrupted` flag flip.
     pub(crate) async fn soft_interrupt(
         &self,
         mut recovered: Gremlin,
@@ -196,18 +199,43 @@ impl TurnFinalizer {
             chat.mark_interrupted();
         }
 
-        // Re-insert the gremlin but keep `current_turn` alive (marked
-        // interrupted) so a hard cancel within the double-press window can
-        // still clean up the artifact.
-        self.reinsert(recovered).await;
+        // Re-insert the gremlin and mark current_turn interrupted in one
+        // session-locked transition. Holding the lock across both operations
+        // closes the TOCTOU window where a hard cancel could win between
+        // reinsertion and the interrupted flag flip.
+        self.reinsert_and_mark_interrupted(recovered, chat_turn_num).await;
+    }
+
+    /// Re-insert the gremlin and mark `current_turn.interrupted` under one
+    /// session lock. If hard cancellation has won, falls back to
+    /// [`Self::hard_cancel`] instead.
+    async fn reinsert_and_mark_interrupted(
+        &self,
+        gremlin: Gremlin,
+        chat_turn_num: Option<usize>,
+    ) {
+        let mut s = self.session.lock().await;
+        if !self.soft_cancel.load(Ordering::Acquire) {
+            // Hard cancel won while we were waiting for the lock.
+            drop(s);
+            self.hard_cancel(Some(gremlin), chat_turn_num).await;
+            return;
+        }
+        // Inline reinsert — same guards as `reinsert_chat_gremlin`.
+        if !s.chat_ids.contains(&self.id)
+            || !get_run_map().lock().unwrap().contains_key(&self.id)
         {
-            let mut s = self.session.lock().await;
-            if let Some(cur) = &mut s.current_turn {
-                if Arc::ptr_eq(&cur.cancel, &self.turn_cancel) {
-                    cur.interrupted = true;
-                }
+            drop(gremlin);
+        } else {
+            s.chat_gremlins.insert(self.id.clone(), gremlin);
+        }
+        // Mark interrupted under the same lock — no race window.
+        if let Some(cur) = &mut s.current_turn {
+            if Arc::ptr_eq(&cur.cancel, &self.turn_cancel) {
+                cur.interrupted = true;
             }
         }
+        drop(s);
         let _ = self.done.send(true);
         self.write(serde_json::json!({
             "type": "ended",
