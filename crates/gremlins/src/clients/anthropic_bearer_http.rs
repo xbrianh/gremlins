@@ -21,6 +21,7 @@ use rig_core::wasm_compat::WasmCompatSend;
 ///
 /// Cheaply cloneable — the inner client and the pre-formatted bearer header
 /// value are both cheap to clone.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct BearerHttpClient {
     inner: DynHttpClient,
@@ -37,6 +38,7 @@ impl Default for BearerHttpClient {
     }
 }
 
+#[allow(dead_code)]
 impl BearerHttpClient {
     /// Wrap `inner` so every request carries `Authorization: Bearer <token>`
     /// instead of whatever API-key header rig's `AnthropicKey` injects.
