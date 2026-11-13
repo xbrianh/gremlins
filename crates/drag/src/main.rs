@@ -234,18 +234,28 @@ async fn run() -> Result<(), String> {
         .map(|(_, _, pkg_key)| pkg_key.clone())
         .collect();
 
-    // Exclude packages whose modules were dropped during dedup (e.g. a
-    // binary whose module was superseded by a library of the same name).
-    // Their dependency-graph edges would combine with the retained
-    // library's edges and distort footprints.
+    // Packages from which at least one module was dropped during dedup
+    // (e.g. a binary whose module was superseded by a library of the same
+    // name) still have remaining modules that need source dirs, token
+    // counts, and maintainability scoring.  We only skip their
+    // dependency-graph extraction below (see the spawn loop), not the
+    // packages themselves.
     let scoring_packages: Vec<&PackageInfo> = packages
         .iter()
-        .filter(|p| relevant_packages.contains(&p.key()) && !dropped_pkg_keys.contains(&p.key()))
+        .filter(|p| relevant_packages.contains(&p.key()))
         .collect();
 
     // Run dependency-graph extraction for each package in parallel.
+    // Skip partially deduplicated packages — their edges would combine
+    // with the retained library's edges and distort footprints, so we
+    // avoid the expensive subprocess work entirely.
     let mut handles = Vec::new();
+    let mut dep_packages: Vec<&PackageInfo> = Vec::new();
     for pkg in &scoring_packages {
+        if dropped_pkg_keys.contains(pkg.key().as_str()) {
+            continue;
+        }
+        dep_packages.push(pkg);
         let pkg = (*pkg).clone();
         handles.push(tokio::task::spawn_blocking(move || {
             lang::dependency_graph(&pkg)
@@ -253,9 +263,11 @@ async fn run() -> Result<(), String> {
     }
     for (i, handle) in handles.into_iter().enumerate() {
         match handle.await {
-            Ok(Ok(pkg_edges)) => edges.extend(pkg_edges),
+            Ok(Ok(pkg_edges)) => {
+                edges.extend(pkg_edges);
+            }
             Ok(Err(e)) => {
-                let pkg_name = scoring_packages[i].name();
+                let pkg_name = dep_packages[i].name();
                 eprintln!("gremlins-drag: dependency graph skipped for {pkg_name}: {e}");
             }
             Err(e) => {
