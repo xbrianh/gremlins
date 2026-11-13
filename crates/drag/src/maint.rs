@@ -22,7 +22,7 @@ use gremlins::executor::gremlin::{Gremlin, GremlinConfig};
 use gremlins::model_uri::ModelURI;
 
 use crate::config::MaintainabilityConfig;
-use crate::util::{extract_json, mean_with_ci, truncate, CacheState, CompAgentError};
+use crate::util::{extract_json, jitter, mean_with_ci, truncate, CacheState, CompAgentError};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -88,7 +88,7 @@ fn compute_maint_ci(
 }
 
 const MAX_MAINT_RETRIES: u32 = 3;
-const MAINT_BACKOFF: [f64; 2] = [1.0, 2.0];
+const MAINT_BACKOFF: [(f64, f64); 2] = [(2.0, 1.0), (8.0, 4.0)];
 
 /// Handle for a single per-estimate multi-dimension maintainability task.
 /// Returns (dir_path, dimension_scores) — all dimensions scored in one call.
@@ -259,15 +259,15 @@ pub(crate) async fn score_directory_maintainability(
                             if matches!(&e, CompAgentError::Retryable(_))
                                 && attempt + 1 < MAX_MAINT_RETRIES
                             {
+                                let (base, half) = MAINT_BACKOFF[attempt as usize];
+                                let delay = jitter(base, half);
                                 eprintln!(
-                                    "  [{dir_name}] maintainability attempt {}/{}: {e} — retrying in {:.0}s",
+                                    "  [{dir_name}] maintainability attempt {}/{}: {e} — retrying in {:.1}s",
                                     attempt + 1,
                                     MAX_MAINT_RETRIES,
-                                    MAINT_BACKOFF[attempt as usize]
+                                    delay
                                 );
-                                tokio::time::sleep(Duration::from_secs_f64(
-                                    MAINT_BACKOFF[attempt as usize],
-                                ))
+                                tokio::time::sleep(Duration::from_secs_f64(delay))
                                 .await;
                                 continue;
                             }

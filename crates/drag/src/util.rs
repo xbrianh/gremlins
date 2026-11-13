@@ -6,6 +6,8 @@
 // from the entry-point crate root.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
 // Concurrency limiter
@@ -17,11 +19,17 @@ use std::path::PathBuf;
 /// stream, artifact files, sockets).  This cap keeps total open fds well
 /// under typical process soft limits (256 on macOS default; 1024 on Linux).
 ///
+/// The value also works in tandem with the jittered retry backoff in
+/// `comp_agent` and `maint`: with 8 concurrent runs and backoff windows
+/// up to 8 s (base 8 s ± 4 s), we avoid thundering-herd retry storms
+/// against rate-limited model providers while keeping aggregate scoring
+/// wall-clock time acceptable.
+///
 /// This is a compile-time constant that requires editing the source to
 /// change.  If you see "Too many open files" errors even with this bound,
 /// consider raising your process fd limit (`ulimit -n`) or lowering this
 /// value and rebuilding.
-pub(crate) const MAX_CONCURRENT_SCORING_RUNS: usize = 16;
+pub(crate) const MAX_CONCURRENT_SCORING_RUNS: usize = 8;
 
 // ---------------------------------------------------------------------------
 // Cache state type
@@ -155,6 +163,46 @@ pub(crate) fn mean_with_ci(values: &[f64]) -> (f64, f64, f64) {
     let t_crit = t_critical_95(n - 1);
     let margin = t_crit * std_err;
     (m, m - margin, m + margin)
+}
+
+// ---------------------------------------------------------------------------
+// Jittered backoff
+// ---------------------------------------------------------------------------
+
+/// Return a uniformly-distributed delay in `[base - half_window, base + half_window]`.
+///
+/// Combines a per-call atomic counter with system-clock subsecond nanos so
+/// concurrent callers always receive distinct delays.  The result is clamped
+/// to `[0, base + half_window]` so a mis-specified backoff constant can never
+/// yield a negative `Duration`.
+///
+/// Not cryptographically random and not meant to be.
+pub(crate) fn jitter(base: f64, half_window: f64) -> f64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let ctr = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let r = jitter_rng(nanos, ctr);
+    (base + (r - 0.5) * half_window * 2.0).max(0.0)
+}
+
+/// Deterministic jitter PRF: mixes a nanosecond timestamp with an atomic
+/// counter so concurrent callers produce distinct delays even when the
+/// counter only differs in low bits.
+///
+/// Mixing approach:
+/// - Multiply `nanos` and `ctr` independently by a large odd constant
+///   (Knuth's MMIX multiplier) to spread their bits across all 64 positions.
+/// - Add the two products so both inputs influence every output bit.
+/// - Convert to `[0.0, 1.0)` via division by `u64::MAX`.
+fn jitter_rng(nanos: u32, ctr: u64) -> f64 {
+    const MUL: u64 = 6364136223846793005; // Knuth MMIX
+    let mixed = (nanos as u64)
+        .wrapping_mul(MUL)
+        .wrapping_add(ctr.wrapping_mul(MUL));
+    (mixed as f64) / (u64::MAX as f64)
 }
 
 // ---------------------------------------------------------------------------
@@ -469,5 +517,73 @@ mod tests {
         // All identical → variance = 0 → no margin.
         assert!((lo - 0.5).abs() < 1e-12);
         assert!((hi - 0.5).abs() < 1e-12);
+    }
+
+    // ── jitter tests ──
+
+    #[test]
+    fn jitter_stays_in_window() {
+        let base = 2.0;
+        let half = 1.0;
+        for _ in 0..1000 {
+            let d = jitter(base, half);
+            assert!(
+                d >= base - half,
+                "delay {d} below lower bound {}",
+                base - half
+            );
+            assert!(
+                d <= base + half,
+                "delay {d} above upper bound {}",
+                base + half
+            );
+        }
+    }
+
+    #[test]
+    fn jitter_is_nonnegative_for_shipped_constants() {
+        for (base, half) in [(2.0, 1.0), (8.0, 4.0)] {
+            for _ in 0..100 {
+                assert!(jitter(base, half) >= 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn jitter_clamps_negative_to_zero() {
+        // When half_window > base (mis-specification), jitter must not return negative.
+        let d = jitter(1.0, 5.0);
+        assert!(d >= 0.0, "jitter returned negative delay: {d}");
+        assert!(d <= 6.0, "jitter exceeded base + half_window");
+    }
+
+    #[test]
+    fn jitter_concurrent_callers_diverge() {
+        // Simulate a herd of concurrent callers at the same wall-clock instant
+        // by calling jitter in a tight loop.  Not all values should be identical.
+        let vals: Vec<f64> = (0..100).map(|_| jitter(8.0, 4.0)).collect();
+        let unique: std::collections::HashSet<u64> =
+            vals.iter().map(|v| (v * 1_000_000.0) as u64).collect();
+        assert!(
+            unique.len() > 1,
+            "all concurrent jitter calls returned the same value"
+        );
+    }
+
+    #[test]
+    fn jitter_fixed_timestamp_different_counters_diverge() {
+        // Regression: with a fixed nanosecond timestamp, different counters
+        // must produce different delays.  Without counter mixing, low-bit
+        // differences are lost during u64 → f64 conversion.
+        let nanos: u32 = 123456789;
+        let vals: Vec<f64> = (0..100).map(|ctr| jitter_rng(nanos, ctr)).collect();
+        // Quantize to microsecond precision so rounding doesn't hide real differences.
+        let unique: std::collections::HashSet<u64> =
+            vals.iter().map(|v| (v * 1_000_000.0) as u64).collect();
+        assert!(
+            unique.len() > 99,
+            "counters 0–99 with fixed nanos={nanos} only produced {} unique values",
+            unique.len()
+        );
     }
 }
