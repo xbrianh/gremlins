@@ -16,13 +16,14 @@ use tokio::io::BufReader;
 use tokio::net::unix::OwnedReadHalf;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use crate::clients::interactive::InteractiveEvent;
+use crate::clients::event::EventKind;
 use crate::config;
 use crate::executor::socket;
 use crate::executor::state;
 use crate::executor::supervisor::actor::ActorMsg;
 use crate::executor::supervisor::{
-    error_response, init_bus, resolve_store_for_id, subscribe_run, SharedWriter,
+    error_response, init_bus, resolve_store_for_id, subscribe_run, subscribe_run_lag_tolerant,
+    SharedWriter,
 };
 use crate::magic_bus::{ReceiverHalf, Recv};
 
@@ -993,41 +994,52 @@ fn payload_fingerprint(payload: &Value) -> String {
 // Agent event → stage-stream line translation
 // ---------------------------------------------------------------------------
 
-/// Spawn a task that translates agent `InteractiveEvent`s into stage-stream
+/// Spawn a task that translates agent stream `EventKind`s into stage-stream
 /// JSON lines and forwards them to the stage-stream broadcast.
+///
+/// Subscribes with lag-tolerant delivery so a slow front-end drops stream
+/// events on overflow rather than growing daemon memory unboundedly. The
+/// subscription receives **all** run-scoped events (log lines, token usage,
+/// run lifecycle, …); `event_kind_to_stage_line` filters to stream events
+/// only, returning `None` for everything else.
+///
+/// Returns the bus subscriber so the caller can unsubscribe when the run
+/// finishes; the spawned task does not clean it up itself.
 pub(crate) fn spawn_stage_stream_forwarder(
-    mut evt_rx: broadcast::Receiver<InteractiveEvent>,
+    id: String,
     stage_stream_tx: broadcast::Sender<String>,
-) {
+) -> crate::magic_bus::Subscriber<EventKind> {
+    let (sub, mut rx) = subscribe_run_lag_tolerant(&id, 256);
     tokio::spawn(async move {
         loop {
-            match evt_rx.recv().await {
-                Ok(event) => {
-                    if let Some(line) = interactive_event_to_stage_line(&event) {
+            match rx.recv().await {
+                Recv::Event(dispatch) => {
+                    if let Some(line) = event_kind_to_stage_line(dispatch.kind()) {
                         let _ = stage_stream_tx.send(line);
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
+                Recv::Lagged(_) => continue,
+                Recv::Closed => break,
             }
         }
     });
+    sub
 }
 
-/// Convert an agent `InteractiveEvent` into a stage-stream JSON line.
+/// Convert a stream `EventKind` into a stage-stream JSON line.
 ///
-/// Returns `None` for interactive lifecycle events (`Ready`/`Ended`) that are
-/// not stage content.
-pub(crate) fn interactive_event_to_stage_line(event: &InteractiveEvent) -> Option<String> {
+/// Returns `None` for lifecycle events (`Ready`/`Ended`) that are not stage
+/// content and for non-stream events.
+pub(crate) fn event_kind_to_stage_line(event: &EventKind) -> Option<String> {
     use serde_json::json;
     match event {
-        InteractiveEvent::ReasoningChunk { text } => {
+        EventKind::ReasoningChunk { text } => {
             Some(json!({"kind": "reasoning", "text": text}).to_string())
         }
-        InteractiveEvent::StreamChunk { text } => {
+        EventKind::StreamChunk { text } => {
             Some(json!({"kind": "text", "text": text}).to_string())
         }
-        InteractiveEvent::ToolOutputChunk {
+        EventKind::ToolOutputChunk {
             id,
             name,
             call,
@@ -1036,7 +1048,7 @@ pub(crate) fn interactive_event_to_stage_line(event: &InteractiveEvent) -> Optio
             json!({"kind": "tool_output", "id": id, "name": name, "call": call, "text": text})
                 .to_string(),
         ),
-        InteractiveEvent::ToolResult {
+        EventKind::ToolResult {
             id,
             name,
             call,
@@ -1045,7 +1057,7 @@ pub(crate) fn interactive_event_to_stage_line(event: &InteractiveEvent) -> Optio
             json!({"kind": "tool_result", "id": id, "name": name, "call": call, "output": output})
                 .to_string(),
         ),
-        InteractiveEvent::TurnComplete {
+        EventKind::TurnComplete {
             turn,
             text,
             tool_calls,
@@ -1055,14 +1067,12 @@ pub(crate) fn interactive_event_to_stage_line(event: &InteractiveEvent) -> Optio
             json!({"kind": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls, "stats": stats, "totals": totals})
                 .to_string(),
         ),
-        InteractiveEvent::Done {
-            text,
-            summary,
-            usage: _,
+        EventKind::Done {
+            text, summary, ..
         } => Some(json!({"kind": "done", "text": text, "summary": summary}).to_string()),
-        InteractiveEvent::StreamReset => Some(json!({"kind": "stream_reset"}).to_string()),
-        // Ready/Ended are interactive lifecycle events, not stage content.
-        InteractiveEvent::Ready { .. } | InteractiveEvent::Ended { .. } => None,
+        EventKind::StreamReset => Some(json!({"kind": "stream_reset"}).to_string()),
+        // Lifecycle and non-stream events.
+        _ => None,
     }
 }
 
@@ -1076,8 +1086,8 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn interactive_event_to_stage_line_maps_agent_events() {
-        let line = interactive_event_to_stage_line(&InteractiveEvent::StreamChunk {
+    fn event_kind_to_stage_line_maps_agent_events() {
+        let line = event_kind_to_stage_line(&EventKind::StreamChunk {
             text: "hi".to_string(),
         })
         .unwrap();
@@ -1085,7 +1095,7 @@ mod tests {
         assert_eq!(v["kind"], "text");
         assert_eq!(v["text"], "hi");
 
-        let line = interactive_event_to_stage_line(&InteractiveEvent::ReasoningChunk {
+        let line = event_kind_to_stage_line(&EventKind::ReasoningChunk {
             text: "think".to_string(),
         })
         .unwrap();
@@ -1093,7 +1103,7 @@ mod tests {
         assert_eq!(v["kind"], "reasoning");
         assert_eq!(v["text"], "think");
 
-        let line = interactive_event_to_stage_line(&InteractiveEvent::ToolResult {
+        let line = event_kind_to_stage_line(&EventKind::ToolResult {
             id: "call_1".to_string(),
             name: "Bash".to_string(),
             call: "Bash(command=\"ls\")".to_string(),
@@ -1105,8 +1115,8 @@ mod tests {
         assert_eq!(v["name"], "Bash");
 
         // Lifecycle events are not stage content.
-        assert!(interactive_event_to_stage_line(&InteractiveEvent::Ready { turn: 0 }).is_none());
-        assert!(interactive_event_to_stage_line(&InteractiveEvent::Ended {
+        assert!(event_kind_to_stage_line(&EventKind::Ready { turn: 0 }).is_none());
+        assert!(event_kind_to_stage_line(&EventKind::Ended {
             reason: "resumed".to_string(),
         })
         .is_none());

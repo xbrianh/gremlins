@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::clients::cancel::CancelToken;
-use crate::clients::interactive::{InteractiveCommand, InteractiveHandle, StreamEventSender};
+use crate::clients::interactive::{InteractiveCommand, InteractiveHandle};
 use crate::executor::event::EventKind;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
 use crate::executor::socket;
@@ -677,10 +677,8 @@ impl ActorState {
         // (agent interactive swap, parallel children) can reach the run map
         // without a global.
         gremlin.runtime_config.actor_tx = Some(self.actor_tx.clone());
-        let (stage_stream_broadcast, interactive, log_flush, log_sub) =
+        let (stage_stream_broadcast, interactive, log_flush, log_sub, stage_stream_sub) =
             setup_gremlin_channels(&mut gremlin, None);
-        gremlin.runtime_config.stream_events =
-            Some(StreamEventSender::Broadcast(interactive.evt_tx.clone()));
 
         let cancel = CancelToken::new();
         gremlin.cancel_token = Some(Arc::clone(&cancel));
@@ -719,6 +717,7 @@ impl ActorState {
             store,
             Some(log_flush),
             Some(log_sub),
+            stage_stream_sub,
             RunState {
                 id: id.clone(),
                 status: "running".to_string(),
@@ -745,10 +744,8 @@ impl ActorState {
     ) {
         let id = gremlin.id.to_string();
         gremlin.runtime_config.actor_tx = Some(self.actor_tx.clone());
-        let (stage_stream_broadcast, interactive, log_flush, log_sub) =
+        let (stage_stream_broadcast, interactive, log_flush, log_sub, stage_stream_sub) =
             setup_gremlin_channels(&mut gremlin, relay);
-        gremlin.runtime_config.stream_events =
-            Some(StreamEventSender::Broadcast(interactive.evt_tx.clone()));
 
         // Children inherit the cancel token their parent installed.
         let cancel = gremlin
@@ -789,6 +786,7 @@ impl ActorState {
             store,
             Some(log_flush),
             Some(log_sub),
+            stage_stream_sub,
             RunState {
                 id: id.clone(),
                 status: "running".to_string(),
@@ -829,10 +827,8 @@ impl ActorState {
         }
 
         gremlin.runtime_config.actor_tx = Some(self.actor_tx.clone());
-        let (stage_stream_broadcast, interactive, log_flush, log_sub) =
+        let (stage_stream_broadcast, interactive, log_flush, log_sub, stage_stream_sub) =
             setup_gremlin_channels(&mut gremlin, None);
-        gremlin.runtime_config.stream_events =
-            Some(StreamEventSender::Broadcast(interactive.evt_tx.clone()));
 
         self.insert_run_entry(
             id.clone(),
@@ -846,6 +842,7 @@ impl ActorState {
             gremlin.state.store_handle(),
             Some(log_flush),
             Some(log_sub),
+            stage_stream_sub,
             RunState {
                 id: id.clone(),
                 status: "running".to_string(),
@@ -885,6 +882,7 @@ impl ActorState {
         store: StoreHandle,
         log_flush: Option<LogFlushHandle>,
         log_sub: Option<Subscriber<EventKind>>,
+        stage_stream_sub: Subscriber<EventKind>,
         initial_state: RunState,
     ) -> watch::Receiver<RunState> {
         let (state_tx, state_rx) = watch::channel(initial_state);
@@ -900,6 +898,7 @@ impl ActorState {
                 store,
                 log_flush,
                 log_sub,
+                stage_stream_sub: Some(stage_stream_sub),
             },
         );
         state_rx
@@ -941,6 +940,7 @@ impl ActorState {
                 }
 
                 self.release_log_sub(handle.log_sub);
+                self.release_stage_stream_sub(handle.stage_stream_sub);
 
                 if notify_shutdown {
                     self.maybe_shutdown();
@@ -964,6 +964,7 @@ impl ActorState {
                 // Release the log subscription so the log task, blocking
                 // writer, and state store drain promptly.
                 self.release_log_sub(handle.log_sub);
+                self.release_stage_stream_sub(handle.stage_stream_sub);
 
                 let _ = respond.send(Some(handle.state_tx.clone()));
             }
@@ -1446,6 +1447,14 @@ impl ActorState {
     /// Unsubscribe a finished run's log-writer subscription so its log task
     /// drains and releases the writer + state store.
     fn release_log_sub(&self, sub: Option<Subscriber<EventKind>>) {
+        if let Some(sub) = sub {
+            init_bus().unsubscribe(&sub);
+        }
+    }
+
+    /// Unsubscribe a finished run's stage-stream forwarder subscription so the
+    /// forwarder task drains and drops its stage-stream broadcast handle.
+    fn release_stage_stream_sub(&self, sub: Option<Subscriber<EventKind>>) {
         if let Some(sub) = sub {
             init_bus().unsubscribe(&sub);
         }

@@ -6,7 +6,7 @@ pub(crate) use super::agent::plug::LoopHooks;
 use super::agent::task_models::TaskModelSelector;
 use super::cancel::CancelToken;
 use super::conversation::Conversation;
-use super::interactive::{InteractiveSession, StreamEventSender};
+use super::interactive::InteractiveSession;
 use super::params::ResolvedParams;
 use super::protocol::{CompactionResult, CompletedRun};
 use async_trait::async_trait;
@@ -48,9 +48,6 @@ pub struct RunParams {
     /// Supervisor-owned cancel token. When set, the backend uses it instead of
     /// creating its own, so `gremlins stop` cancels in-flight agent loops.
     pub cancel_token: Option<Arc<CancelToken>>,
-    /// Sender for stream events. When Some, the agent loop emits
-    /// every stream event (reasoning, text, tool results, turn complete, done).
-    pub stream_events: Option<StreamEventSender>,
     /// The conversation this run starts from. Its history (carrying original
     /// roles) is replayed verbatim; the run's `prompt` is applied on top as
     /// the next user message.
@@ -100,7 +97,6 @@ impl RunParams {
             allow_all: false,
             task_models: None,
             cancel_token: None,
-            stream_events: None,
             prepopulated_conversation: crate::conversation::new_blank_for_run_params(),
             skills_available: false,
             discovered_skills: None,
@@ -132,7 +128,6 @@ impl Clone for RunParams {
             allow_all: self.allow_all,
             task_models: self.task_models.clone(),
             cancel_token: self.cancel_token.clone(),
-            stream_events: self.stream_events.clone(),
             prepopulated_conversation: self.prepopulated_conversation.clone(),
             skills_available: self.skills_available,
             discovered_skills: self.discovered_skills.clone(),

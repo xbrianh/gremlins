@@ -15,6 +15,7 @@ pub(crate) mod compaction;
 pub mod config;
 pub mod conversation;
 pub(crate) mod error;
+pub(crate) mod event;
 pub(crate) mod format;
 pub mod github_auth;
 pub(crate) mod interactive;

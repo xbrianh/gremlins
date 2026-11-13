@@ -44,7 +44,10 @@ pub(crate) use crate::clients::interactive::{InteractiveChannels, InteractiveCom
 // Items consumed by mod.rs itself.
 pub(crate) use self::chat::{add_usage_stats, base_process_env, usage_stats_from_state};
 pub(crate) use self::debug::handle_debug;
-pub(crate) use self::event::{emit_event, init_bus, subscribe_all, subscribe_run};
+pub(crate) use self::event::{
+    emit_event, emit_run_event_async, init_bus, subscribe_all, subscribe_run,
+    subscribe_run_backpressured, subscribe_run_lag_tolerant,
+};
 pub(crate) use self::lifecycle::{launch_child, stop_child, LaunchResult, LogRelay};
 pub(crate) use self::log_handler::handle_log;
 pub(crate) use self::ops::resolve_store_for_id;
@@ -121,6 +124,33 @@ impl Drop for DebugDetachGuard {
     }
 }
 
+/// RAII guard that unsubscribes a bus subscriber on drop.
+///
+/// Chat turns and debug sessions register run-scoped subscriptions; a
+/// subscription that outlived its consumer would accumulate and — once its
+/// bounded buffer filled — stall the agent loop of a later run that reuses the
+/// same id. Dropping this guard unsubscribes on every exit path, including
+/// early returns.
+pub(crate) struct BusSubGuard {
+    subscriber: Option<crate::magic_bus::Subscriber<EventKind>>,
+}
+
+impl BusSubGuard {
+    pub(crate) fn new(subscriber: crate::magic_bus::Subscriber<EventKind>) -> Self {
+        Self {
+            subscriber: Some(subscriber),
+        }
+    }
+}
+
+impl Drop for BusSubGuard {
+    fn drop(&mut self) {
+        if let Some(subscriber) = self.subscriber.take() {
+            init_bus().unsubscribe(&subscriber);
+        }
+    }
+}
+
 /// The in-flight chat turn for a connection, if any.
 pub(crate) struct CurrentTurn {
     pub(crate) id: String,
@@ -170,6 +200,10 @@ pub(crate) struct RunHandle {
     /// Held so finish and stop paths can unregister it, preventing the run's
     /// log task, blocking writer, and state store from living until daemon exit.
     pub log_sub: Option<crate::magic_bus::Subscriber<EventKind>>,
+    /// Bus subscriber for the run's lag-tolerant stage-stream forwarder.
+    /// Held so finish and stop paths can unregister it, letting the forwarder
+    /// task drain and drop its broadcast handle.
+    pub stage_stream_sub: Option<crate::magic_bus::Subscriber<EventKind>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -305,8 +339,26 @@ async fn handle_connection(
         loop {
             match event_rx.recv().await {
                 crate::magic_bus::Recv::Event(dispatch) => {
-                    let value =
-                        serde_json::to_value(dispatch.kind()).unwrap_or(serde_json::Value::Null);
+                    let kind = dispatch.kind();
+                    // Stream events belong to per-run/session subscribers
+                    // (chat, debug). Forwarding them through the global
+                    // control socket duplicates chat output and lets
+                    // unrelated runs' stream events leak into other sessions.
+                    if matches!(
+                        kind,
+                        EventKind::StreamChunk { .. }
+                            | EventKind::ReasoningChunk { .. }
+                            | EventKind::ToolOutputChunk { .. }
+                            | EventKind::ToolResult { .. }
+                            | EventKind::TurnComplete { .. }
+                            | EventKind::Done { .. }
+                            | EventKind::StreamReset
+                            | EventKind::Ready { .. }
+                            | EventKind::Ended { .. }
+                    ) {
+                        continue;
+                    }
+                    let value = serde_json::to_value(kind).unwrap_or(serde_json::Value::Null);
                     if event_writer.write_json_line(&value).await.is_err() {
                         break;
                     }

@@ -5,11 +5,11 @@ use rig_core::operation::Completion;
 
 use crate::clients::conversation::Conversation;
 use crate::clients::error::ClientError;
-use crate::clients::interactive::{
-    InteractiveCommand, InteractiveEvent, InteractiveSession, PauseToken,
-};
+use crate::clients::event::EventKind;
+use crate::clients::interactive::{InteractiveCommand, InteractiveSession, PauseToken};
 
 use super::agent_loop::{InteractiveBoundary, LoopState};
+use super::plug::LoopHooks;
 
 /// Future that resolves when a [`PauseToken`] fires, or never if there is no token.
 pub(super) async fn maybe_pause(pause: &Option<Arc<PauseToken>>) {
@@ -35,18 +35,21 @@ pub(super) enum InteractiveLoopResult {
 /// Interactive state machine. Called when the operator triggers pause
 /// (via [`PauseToken`]) or when re-entering after a `RunTurn`/`Inject`.
 ///
-/// On entry, broadcasts `Ready { turn }`. Then blocks reading
-/// `InteractiveCommand`s from the session's `cmd_rx`.
-/// `Inject` and `RunTurn` return so the outer turn loop executes exactly
-/// one turn and then re-enters this function.
+/// On entry, emits `Ready { turn }` through the stream-event hook. Then blocks
+/// reading `InteractiveCommand`s from the session's `cmd_rx`. `Inject` and
+/// `RunTurn` return so the outer turn loop executes exactly one turn and then
+/// re-enters this function.
 pub(super) async fn interactive_loop(
     _model: &DynModel<Completion>,
     conv: &mut dyn Conversation,
     session: &mut InteractiveSession,
     turn: usize,
+    hooks: &LoopHooks,
 ) -> Result<InteractiveLoopResult, ClientError> {
     log::debug!("interactive_loop: broadcasting Ready (turn={turn})");
-    let _ = session.evt_tx.send(InteractiveEvent::Ready { turn });
+    if hooks.wants_stream_events {
+        hooks.emit_stream_event(EventKind::Ready { turn }).await;
+    }
 
     log::debug!("interactive_loop: waiting for command (turn={turn})");
     let cmd = match session.cmd_rx.recv().await {
@@ -56,9 +59,13 @@ pub(super) async fn interactive_loop(
         }
         None => {
             log::debug!("interactive_loop: cmd_rx closed, ending session (turn={turn})");
-            let _ = session.evt_tx.send(InteractiveEvent::Ended {
-                reason: "disconnect".to_string(),
-            });
+            if hooks.wants_stream_events {
+                hooks
+                    .emit_stream_event(EventKind::Ended {
+                        reason: "disconnect".to_string(),
+                    })
+                    .await;
+            }
             return Ok(InteractiveLoopResult::Resumed);
         }
     };
@@ -78,18 +85,26 @@ pub(super) async fn interactive_loop(
         }
         InteractiveCommand::Bail(reason) => {
             log::debug!("interactive_loop: Bail command (reason={reason:?}, turn={turn})");
-            let _ = session.evt_tx.send(InteractiveEvent::Ended {
-                reason: "bailed".to_string(),
-            });
+            if hooks.wants_stream_events {
+                hooks
+                    .emit_stream_event(EventKind::Ended {
+                        reason: "bailed".to_string(),
+                    })
+                    .await;
+            }
             Err(ClientError::Bail {
                 reason: format!("operator bailed: {reason}"),
             })
         }
         InteractiveCommand::Quit => {
             log::debug!("interactive_loop: Quit command (turn={turn})");
-            let _ = session.evt_tx.send(InteractiveEvent::Ended {
-                reason: "resumed".to_string(),
-            });
+            if hooks.wants_stream_events {
+                hooks
+                    .emit_stream_event(EventKind::Ended {
+                        reason: "resumed".to_string(),
+                    })
+                    .await;
+            }
             Ok(InteractiveLoopResult::Resumed)
         }
     }
@@ -102,27 +117,32 @@ pub(super) async fn await_interactive_turn(
     model: &DynModel<Completion>,
     prefix: &str,
 ) -> Result<InteractiveBoundary, ClientError> {
-    if state.cmd_rx.is_some() && state.evt_tx.is_some() && state.pause.is_some() {
+    if state.cmd_rx.is_some() && state.pause.is_some() {
         if state.pending_run_one_turn {
             state.pending_run_one_turn = false;
             state.interactive_active = true;
         } else if state.interactive_active {
             let mut session = InteractiveSession {
                 cmd_rx: state.cmd_rx.take().unwrap(),
-                evt_tx: state.evt_tx.take().unwrap(),
                 pause: state.pause.clone().unwrap(),
             };
-            match interactive_loop(model, &mut *state.conv, &mut session, state.turn_num).await {
+            match interactive_loop(
+                model,
+                &mut *state.conv,
+                &mut session,
+                state.turn_num,
+                &state.hooks,
+            )
+            .await
+            {
                 Ok(InteractiveLoopResult::Resumed) => {
                     state.interactive_active = false;
                     state.system_prompt = state.original_system_prompt.clone();
                     state.cmd_rx = Some(session.cmd_rx);
-                    state.evt_tx = Some(session.evt_tx);
                     return Ok(InteractiveBoundary::ContinueLoop);
                 }
                 Ok(InteractiveLoopResult::RunOneTurn) => {
                     state.cmd_rx = Some(session.cmd_rx);
-                    state.evt_tx = Some(session.evt_tx);
                 }
                 Err(e) => {
                     state.hook_log(&format!(
@@ -154,20 +174,25 @@ pub(super) async fn await_interactive_turn(
 
             let mut session = InteractiveSession {
                 cmd_rx: state.cmd_rx.take().unwrap(),
-                evt_tx: state.evt_tx.take().unwrap(),
                 pause: state.pause.clone().unwrap(),
             };
-            match interactive_loop(model, &mut *state.conv, &mut session, state.turn_num).await {
+            match interactive_loop(
+                model,
+                &mut *state.conv,
+                &mut session,
+                state.turn_num,
+                &state.hooks,
+            )
+            .await
+            {
                 Ok(InteractiveLoopResult::Resumed) => {
                     state.system_prompt = state.original_system_prompt.clone();
                     state.cmd_rx = Some(session.cmd_rx);
-                    state.evt_tx = Some(session.evt_tx);
                     return Ok(InteractiveBoundary::ContinueLoop);
                 }
                 Ok(InteractiveLoopResult::RunOneTurn) => {
                     state.interactive_active = true;
                     state.cmd_rx = Some(session.cmd_rx);
-                    state.evt_tx = Some(session.evt_tx);
                 }
                 Err(e) => {
                     state.hook_log(&format!(

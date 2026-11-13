@@ -1,7 +1,11 @@
+use crate::clients::event::EventKind;
 use crate::clients::protocol::UsageStats;
 use crate::clients::LogLineFn;
 use rig_core::completion::CompletionRequest;
+use std::future::Future;
 use std::sync::Arc;
+
+pub(crate) use crate::clients::event::StreamEventFn;
 
 /// Inversion-of-control hooks that decouple the agent loop from
 /// `crate::executor` and `crate::landscape`. Every cross-package
@@ -17,6 +21,13 @@ pub struct LoopHooks {
     pub(crate) emit_token_usage_fn: Arc<dyn Fn(UsageStats, Option<u64>, Option<u64>) + Send + Sync>,
     /// Per-gremlin log-line emitter: called with every agent-loop log message.
     pub(crate) log_line_fn: LogLineFn,
+    /// Async stream-event emitter. No-ops unless [`register_stream_event`]
+    /// was called.
+    ///
+    /// [`register_stream_event`]: LoopHooks::register_stream_event
+    pub(crate) emit_stream_event_fn: StreamEventFn,
+    /// True when stream-event emission is wired (the hook is registered).
+    pub(crate) wants_stream_events: bool,
 }
 
 impl LoopHooks {
@@ -26,6 +37,8 @@ impl LoopHooks {
             dump_prompt_debug_fn: Arc::new(|_| {}),
             emit_token_usage_fn: Arc::new(|_, _, _| {}),
             log_line_fn: Arc::new(|_| {}),
+            emit_stream_event_fn: Arc::new(|_| Box::pin(std::future::ready(()))),
+            wants_stream_events: false,
         }
     }
 
@@ -47,6 +60,11 @@ impl LoopHooks {
     /// Emit a log line through the registered log handler.
     pub(crate) fn log_line(&self, msg: &str) {
         (self.log_line_fn)(msg);
+    }
+
+    /// Emit a stream event through the registered hook. No-ops when not wired.
+    pub(crate) async fn emit_stream_event(&self, event: EventKind) {
+        (self.emit_stream_event_fn)(event).await;
     }
 
     /// Register a log-line emitter.
@@ -72,6 +90,20 @@ impl LoopHooks {
     {
         self.emit_token_usage_fn = Arc::new(f);
     }
+
+    /// Register a stream-event emitter.
+    ///
+    /// The executor wires this to the run-scoped bus emitter (`run_agent.rs`),
+    /// so every interactive and actor-launched run forwards its stream events
+    /// to per-run subscribers (chat, debug, stage stream).
+    pub(crate) fn register_stream_event<F, Fut>(&mut self, f: F)
+    where
+        F: Fn(EventKind) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.emit_stream_event_fn = Arc::new(move |event| Box::pin(f(event)));
+        self.wants_stream_events = true;
+    }
 }
 
 impl Clone for LoopHooks {
@@ -80,6 +112,8 @@ impl Clone for LoopHooks {
             dump_prompt_debug_fn: self.dump_prompt_debug_fn.clone(),
             emit_token_usage_fn: self.emit_token_usage_fn.clone(),
             log_line_fn: self.log_line_fn.clone(),
+            emit_stream_event_fn: self.emit_stream_event_fn.clone(),
+            wants_stream_events: self.wants_stream_events,
         }
     }
 }

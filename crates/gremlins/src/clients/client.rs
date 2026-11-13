@@ -359,7 +359,6 @@ pub(crate) async fn run_naked(
         expected_artifact_paths: vec![],
         reminder_budget: 0,
         completion_nudge_budget: 0,
-        stream_events: None,
         prepopulated_conversation: conv,
         hooks: LoopHooks::new(),
     };

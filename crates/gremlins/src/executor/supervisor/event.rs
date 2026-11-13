@@ -62,6 +62,41 @@ pub(crate) fn subscribe_run(id: &str) -> (Subscriber<EventKind>, ReceiverHalf<Ev
         .expect("lossless subscription cannot fail")
 }
 
+/// Subscribe to a single gremlin's run-scoped stream events with lag-tolerant
+/// (broadcast) delivery. Drops events on overflow instead of buffering
+/// unboundedly — the right choice for debug consumers and the stage-stream
+/// forwarder where a slow consumer should not grow daemon memory.
+pub(crate) fn subscribe_run_lag_tolerant(
+    id: &str,
+    capacity: usize,
+) -> (Subscriber<EventKind>, ReceiverHalf<EventKind>) {
+    init_bus()
+        .subscribe(SubscriberRegistration::lag_tolerant(
+            CorrId::new().with_run(id),
+            capacity,
+        ))
+        .expect("lag-tolerant subscription cannot fail")
+}
+
+/// Subscribe to a single gremlin's run-scoped stream events with bounded,
+/// backpressured delivery.
+///
+/// The chat turn is the sole consumer of a run's stream events. A bounded
+/// buffer caps daemon memory for a runaway chat while an awaited send (see
+/// [`emit_run_event_async`]) applies backpressure to the agent loop instead
+/// of dropping live stream events.
+pub(crate) fn subscribe_run_backpressured(
+    id: &str,
+    bound: usize,
+) -> (Subscriber<EventKind>, ReceiverHalf<EventKind>) {
+    init_bus()
+        .subscribe(SubscriberRegistration::backpressured(
+            CorrId::new().with_run(id),
+            bound,
+        ))
+        .expect("backpressured subscription cannot fail")
+}
+
 pub(crate) fn emit_event(event: EventKind) {
     // Run-bearing events carry a run-scoped correlation id so per-gremlin
     // subscribers (subscribed with a `r:<id>` prefix) receive only their own
@@ -88,5 +123,28 @@ pub(crate) fn emit_event(event: EventKind) {
     };
     if let Some(bus) = BUS.get() {
         bus.emit(DispatchEvent::new(corr_id, event));
+    }
+}
+
+/// Emit an event tagged with a specific run id so per-run subscribers
+/// (subscribed with an `r:<id>` prefix) receive it.
+///
+/// Stream events (`Ready`, `StreamChunk`, `ToolResult`, …) carry no `id`
+/// field of their own, so [`emit_event`] would route them with an empty
+/// correlation id and no per-run subscriber would ever match. The agent-loop
+/// stream-event hook knows the run it belongs to and supplies the id here.
+///
+/// Delivery is asynchronous so a backpressured subscriber (the chat turn)
+/// applies backpressure to the agent loop instead of silently dropping live
+/// stream events; lossless and lag-tolerant subscribers still deliver
+/// synchronously under the hood.
+pub(crate) async fn emit_run_event_async(id: &str, event: EventKind) {
+    let corr_id = if id.is_empty() {
+        CorrId::new()
+    } else {
+        CorrId::new().with_run(id)
+    };
+    if let Some(bus) = BUS.get() {
+        bus.emit_async(DispatchEvent::new(corr_id, event)).await;
     }
 }

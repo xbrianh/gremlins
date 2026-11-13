@@ -285,6 +285,22 @@ pub(crate) async fn run_agent(
             }
         });
     }
+    // Register the stream-event hook only when an interactive session exists
+    // (chat, debug, or pipeline runs launched through the actor). Naked runs
+    // and tests skip the hook so `wants_stream_events` stays false, avoiding
+    // live-output channel allocation and EventKind construction overhead.
+    //
+    // Check non-consumingly: the actual session is constructed below (the
+    // single authoritative construction site).
+    if gremlin.interactive_session.is_some() || gremlin.runtime_config.interactive.is_some() {
+        let gremlin_id = gremlin.id.to_string();
+        hooks.register_stream_event(move |event: EventKind| {
+            let gremlin_id = gremlin_id.clone();
+            async move {
+                crate::executor::supervisor::emit_run_event_async(&gremlin_id, event).await;
+            }
+        });
+    }
     let prepopulated_conversation: Box<dyn crate::clients::conversation::Conversation> =
         Box::new(conv);
 
@@ -317,7 +333,6 @@ pub(crate) async fn run_agent(
         allow_all: prepared.allow_all,
         task_models,
         cancel_token: gremlin.cancel_token.clone(),
-        stream_events: gremlin.runtime_config.stream_events.clone(),
         prepopulated_conversation,
         skills_available: gremlin.discovered_skills.is_some(),
         discovered_skills: gremlin.discovered_skills.clone(),
@@ -357,7 +372,6 @@ pub(crate) async fn run_agent(
                 }
                 Some(crate::clients::interactive::InteractiveSession {
                     cmd_rx: rx,
-                    evt_tx: handle.evt_tx.clone(),
                     pause: handle.pause.clone(),
                 })
             }

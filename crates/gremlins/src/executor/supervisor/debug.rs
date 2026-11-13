@@ -4,17 +4,20 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::io::BufReader;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 
-use crate::clients::interactive::{InteractiveCommand, InteractiveEvent};
+use crate::clients::event::EventKind;
+use crate::clients::interactive::InteractiveCommand;
 use crate::config;
 use crate::executor::gremlin::validate_gremlin_id;
 use crate::executor::socket;
 use crate::executor::state;
+use crate::executor::supervisor::event::subscribe_run_lag_tolerant;
+use crate::magic_bus::Recv;
 
 use super::actor::ActorMsg;
 use super::ops::resolve_store_for_id;
-use super::{error_response, DebugDetachGuard, SharedWriter};
+use super::{error_response, BusSubGuard, DebugDetachGuard, SharedWriter};
 
 pub(crate) async fn send_debug_status(writer: &SharedWriter, stage: &str) {
     let payload = serde_json::json!({"type": "status", "stage": stage});
@@ -147,9 +150,11 @@ pub(crate) async fn handle_debug(
 
     send_debug_status(writer, "got_handle").await;
 
-    // Subscribe to interactive events *before* triggering pause so we don't miss
-    // the Ready broadcast.
-    let mut evt_rx = interactive_handle.evt_tx.subscribe();
+    // Subscribe to stream events via the bus *before* triggering pause so we
+    // don't miss the Ready broadcast. The agent loop emits through the bus
+    // hook; this subscriber receives only events for this run id.
+    let (stream_sub, mut evt_rx) = subscribe_run_lag_tolerant(id, 256);
+    let _stream_guard = BusSubGuard::new(stream_sub);
 
     // Signal the agent loop to pause at its next yield point.
     let mut detach_guard = DebugDetachGuard::new(interactive_handle.clone());
@@ -164,21 +169,17 @@ pub(crate) async fn handle_debug(
         tokio::select! {
             result = evt_rx.recv() => {
                 match result {
-                    Ok(InteractiveEvent::Ready { turn: _turn }) => {
-                        break true;
-                    }
-                    Ok(InteractiveEvent::Ended { reason: _reason }) => {
-                        break false;
-                    }
-                    Ok(_other) => {
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_n)) => {
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        break false;
-                    }
+                    Recv::Event(dispatch) => match dispatch.kind() {
+                        EventKind::Ready { .. } => {
+                            break true;
+                        }
+                        EventKind::Ended { .. } => {
+                            break false;
+                        }
+                        _ => continue,
+                    },
+                    Recv::Lagged(_) => continue,
+                    Recv::Closed => break false,
                 }
             }
             _ = &mut cmd_tx_closed => {
@@ -266,7 +267,7 @@ pub(crate) async fn handle_debug(
                     }
                 }
             }
-            // Read events from the agent loop.
+            // Read events from the agent loop via the bus.
             result = evt_rx.recv() => {
                 macro_rules! emit {
                     ($payload:expr) => {
@@ -277,43 +278,47 @@ pub(crate) async fn handle_debug(
                     };
                 }
                 match result {
-                    Ok(InteractiveEvent::Ready { .. }) => {
-                        // Agent re-entered interactive mode (after RunOneTurn).
-                    }
-                    Ok(InteractiveEvent::TurnComplete { turn, text, tool_calls, stats, totals }) => {
-                        emit!(serde_json::json!({"type": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls, "stats": stats, "totals": totals}));
-                    }
-                    Ok(InteractiveEvent::Done { text, usage, .. }) => {
-                        emit!(serde_json::json!({"type": "done", "text": text, "usage": usage}));
-                    }
-                    Ok(InteractiveEvent::Ended { reason }) => {
-                        let payload = serde_json::json!({"type": "ended", "reason": reason});
-                        let _ = writer.write_json_line(&payload).await;
-                        break;
-                    }
-                    Ok(InteractiveEvent::StreamChunk { text }) => {
-                        emit!(serde_json::json!({"type": "stream_chunk", "text": text}));
-                    }
-                    Ok(InteractiveEvent::ReasoningChunk { text }) => {
-                        emit!(serde_json::json!({"type": "reasoning_chunk", "text": text}));
-                    }
-                    Ok(InteractiveEvent::ToolOutputChunk { id, name, call, text }) => {
-                        emit!(serde_json::json!({"type": "tool_output_chunk", "id": id, "name": name, "call": call, "text": text}));
-                    }
-                    Ok(InteractiveEvent::StreamReset) => {
-                        emit!(serde_json::json!({"type": "stream_reset"}));
-                    }
-                    Ok(InteractiveEvent::ToolResult { id, name, call, output }) => {
-                        emit!(serde_json::json!({"type": "tool_result", "id": id, "name": name, "call": call, "output": output}));
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Recv::Event(dispatch) => match dispatch.kind() {
+                        EventKind::Ready { .. } => {
+                            // Agent re-entered interactive mode (after RunOneTurn).
+                        }
+                        EventKind::TurnComplete { turn, text, tool_calls, stats, totals } => {
+                            emit!(serde_json::json!({"type": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls, "stats": stats, "totals": totals}));
+                        }
+                        EventKind::Done { text, usage, .. } => {
+                            emit!(serde_json::json!({"type": "done", "text": text, "usage": usage}));
+                        }
+                        EventKind::Ended { reason } => {
+                            let payload = serde_json::json!({"type": "ended", "reason": reason});
+                            let _ = writer.write_json_line(&payload).await;
+                            break;
+                        }
+                        EventKind::StreamChunk { text } => {
+                            emit!(serde_json::json!({"type": "stream_chunk", "text": text}));
+                        }
+                        EventKind::ReasoningChunk { text } => {
+                            emit!(serde_json::json!({"type": "reasoning_chunk", "text": text}));
+                        }
+                        EventKind::ToolOutputChunk { id, name, call, text } => {
+                            emit!(serde_json::json!({"type": "tool_output_chunk", "id": id, "name": name, "call": call, "text": text}));
+                        }
+                        EventKind::StreamReset => {
+                            emit!(serde_json::json!({"type": "stream_reset"}));
+                        }
+                        EventKind::ToolResult { id, name, call, output } => {
+                            emit!(serde_json::json!({"type": "tool_result", "id": id, "name": name, "call": call, "output": output}));
+                        }
+                        _ => {}
+                    },
+                    Recv::Lagged(_) => continue,
+                    Recv::Closed => break,
                 }
             }
         }
     }
 
     // Clear the pause signal so the agent loop resumes normal operation.
+    // The `_stream_guard` unsubscribes `stream_sub` on scope exit.
     detach_guard.disarm();
     interactive_handle.pause.reset();
 }

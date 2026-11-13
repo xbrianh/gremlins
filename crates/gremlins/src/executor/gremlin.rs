@@ -39,7 +39,7 @@ use serde_json::{Map, Value};
 use crate::artifacts::uri::Uri;
 use crate::clients::cancel::CancelToken;
 use crate::clients::client::{Client, ModelURI};
-use crate::clients::interactive::{InteractiveHandle, InteractiveSession, StreamEventSender};
+use crate::clients::interactive::{InteractiveHandle, InteractiveSession};
 use crate::config;
 use crate::core::proc::{run_logged_commands, sanitize_log_filename};
 use crate::core::{discovery, env_file};
@@ -183,11 +183,6 @@ pub(crate) struct RuntimeConfig {
     pub stage_stream_tx: Option<tokio::sync::broadcast::Sender<String>>,
     /// Interactive handle (supervisor → agent loop).
     pub interactive: Option<InteractiveHandle>,
-    /// Sender for stream events (reasoning chunks, stream chunks,
-    /// tool results, turn complete, done). When Some, the agent loop emits
-    /// every stream event. Chat and debug mode set this; normal pipelines
-    /// leave it None for zero overhead.
-    pub stream_events: Option<StreamEventSender>,
     /// The actor's mailbox: `launch_child` / `stop_child` reach through this
     /// to register parallel-executor children in the run map without
     /// reaching into a global lock.
@@ -206,7 +201,6 @@ impl Clone for RuntimeConfig {
             base_process_env: self.base_process_env.clone(),
             stage_stream_tx: self.stage_stream_tx.clone(),
             interactive: self.interactive.clone(),
-            stream_events: self.stream_events.clone(),
             actor_tx: self.actor_tx.clone(),
         }
     }
@@ -262,7 +256,6 @@ impl RuntimeConfig {
             base_process_env,
             stage_stream_tx: None,
             interactive: None,
-            stream_events: None,
             actor_tx: None,
         }
     }

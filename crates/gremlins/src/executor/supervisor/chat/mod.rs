@@ -21,12 +21,13 @@ use tokio::sync::{mpsc, watch};
 
 use crate::clients::cancel::CancelToken;
 use crate::clients::client::{Client as ModelClient, ModelURI};
-use crate::clients::interactive::{InteractiveEvent, StreamEventSender};
+use crate::clients::event::EventKind;
 use crate::clients::protocol::{add_opt, UsageStats};
 use crate::config;
 use crate::definition::ChatDefinition;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
 use crate::executor::state;
+use crate::magic_bus::Recv;
 
 use super::actor::ActorMsg;
 use super::actor_client::Client;
@@ -250,10 +251,9 @@ pub(crate) async fn handle_chat(
     }
     client.session_add_chat_id(session_id, &id).await;
 
-    // 6. Take the gremlin out of the session, install this turn's definition,
-    //    stream channel, and a fresh per-turn cancel token. The session is
-    //    actor-owned, so other ops are never serialized behind a lock here.
-    let (stream_tx, stream_rx) = tokio::sync::mpsc::channel::<InteractiveEvent>(256);
+    // 6. Take the gremlin out of the session, install this turn's definition
+    //    and a fresh per-turn cancel token. The session is actor-owned, so
+    //    other ops are never serialized behind a lock here.
     let turn_cancel = CancelToken::new();
     let mut gremlin = match client.session_take_gremlin(session_id, &id).await {
         Some(g) => g,
@@ -300,7 +300,6 @@ pub(crate) async fn handle_chat(
     // Keep the state.json `model` field in sync too.
     let state_patch = serde_json::json!({"model": chat_model.to_string()});
     gremlin.state.patch(&[], state_patch.as_object().unwrap());
-    gremlin.runtime_config.stream_events = Some(StreamEventSender::Mpsc(stream_tx));
     gremlin.cancel_token = Some(turn_cancel.clone());
     // Refresh the environment on every turn: the chat gremlin is persistent
     // and reused across turns, so a later turn's operator environment must
@@ -371,7 +370,7 @@ pub(crate) async fn handle_chat(
         done: done_tx,
     };
     tokio::spawn(async move {
-        run_chat_turn(turn_ctx, stage, gremlin, stream_rx, writer_for_turn).await;
+        run_chat_turn(turn_ctx, stage, gremlin, writer_for_turn).await;
     });
 
     // Acknowledge the request so the TUI's `send_request` completes.
@@ -514,17 +513,35 @@ async fn run_chat_turn(
     ctx: TurnCtx,
     stage: crate::definition::ExecutorStage,
     mut gremlin: Gremlin,
-    mut stream_rx: tokio::sync::mpsc::Receiver<InteractiveEvent>,
     writer: SharedWriter,
 ) {
-    // Terminal-path resources live on the finalizer so every exit path
-    // re-inserts the gremlin and clears the in-flight turn the same way.
-    let finalizer = TurnFinalizer::new(&ctx, writer.clone());
-
     let id = ctx.id;
     let turn = ctx.turn;
     let turn_cancel = ctx.turn_cancel;
     let soft_cancel = ctx.soft_cancel;
+
+    // Subscribe to this run's stream events *before* spawning the stage
+    // runner so no early event (Ready, first chunks) is missed. The bounded
+    // buffer makes a slow front-end apply backpressure to the agent loop
+    // rather than dropping live stream events. The guard moves into the
+    // TurnFinalizer so it's dropped before the gremlin is re-inserted —
+    // otherwise the next turn (same run id) fills the old, undrained mailbox.
+    let (stream_sub, mut stream_rx) = super::subscribe_run_backpressured(&id, 256);
+    let stream_guard = super::BusSubGuard::new(stream_sub);
+
+    // Terminal-path resources live on the finalizer so every exit path
+    // re-inserts the gremlin and clears the in-flight turn the same way.
+    let finalizer = TurnFinalizer::new(
+        &ctx.actor_tx,
+        &ctx.session_id,
+        &id,
+        &turn,
+        &turn_cancel,
+        &soft_cancel,
+        &ctx.done,
+        writer.clone(),
+        stream_guard,
+    );
 
     // Capture the turn number from the stage name so cancel cleanup
     // can always clear the per-turn artifact.
@@ -576,27 +593,41 @@ async fn run_chat_turn(
             biased;
 
             result = stream_rx.recv() => {
-                match result {
-                    Some(InteractiveEvent::StreamChunk { text }) => {
+                let event = match result {
+                    Recv::Event(dispatch) => dispatch.into_kind(),
+                    // Backpressured receivers never lag; ignore defensively.
+                    Recv::Lagged(_) => continue,
+                    Recv::Closed => {
+                        finalizer
+                            .stream_terminal(
+                                &mut run_task,
+                                serde_json::json!({"type": "error", "id": id, "message": "agent exited before completing"}),
+                            )
+                            .await;
+                        return;
+                    }
+                };
+                match event {
+                    EventKind::StreamChunk { text } => {
                         send!(serde_json::json!({"type": "stream_chunk", "text": text}));
                     }
-                    Some(InteractiveEvent::ReasoningChunk { text }) => {
+                    EventKind::ReasoningChunk { text } => {
                         send!(serde_json::json!({"type": "reasoning_chunk", "text": text}));
                     }
-                    Some(InteractiveEvent::ToolOutputChunk { id, name, call, text }) => {
+                    EventKind::ToolOutputChunk { id, name, call, text } => {
                         send!(serde_json::json!({"type": "tool_output_chunk", "id": id, "name": name, "call": call, "text": text}));
                     }
-                    Some(InteractiveEvent::StreamReset) => {
+                    EventKind::StreamReset => {
                         send!(serde_json::json!({"type": "stream_reset"}));
                     }
-                    Some(InteractiveEvent::ToolResult { id, name, call, output }) => {
+                    EventKind::ToolResult { id, name, call, output } => {
                         send!(serde_json::json!({"type": "tool_result", "id": id, "name": name, "call": call, "output": output}));
                     }
-                    Some(InteractiveEvent::TurnComplete { turn: tc_turn, text, tool_calls, stats, totals }) => {
+                    EventKind::TurnComplete { turn: tc_turn, text, tool_calls, stats, totals } => {
                         let total = totals.as_ref().map(|t| add_usage_stats(&baseline_usage, t));
                         send!(serde_json::json!({"type": "turn_complete", "loop_turn": tc_turn, "text": text, "tool_calls": tool_calls, "stats": stats, "total": total}));
                     }
-                    Some(InteractiveEvent::Done { text, summary, usage }) => {
+                    EventKind::Done { text, summary, usage } => {
                         let usage = usage.as_ref().map(|u| add_usage_stats(&baseline_usage, u));
                         finalizer
                             .stream_terminal(
@@ -606,7 +637,7 @@ async fn run_chat_turn(
                             .await;
                         return;
                     }
-                    Some(InteractiveEvent::Ended { reason }) => {
+                    EventKind::Ended { reason } => {
                         finalizer
                             .stream_terminal(
                                 &mut run_task,
@@ -615,18 +646,12 @@ async fn run_chat_turn(
                             .await;
                         return;
                     }
-                    Some(InteractiveEvent::Ready { .. }) => {
+                    EventKind::Ready { .. } => {
                         // Ignore Ready in chat mode.
                     }
-                    None => {
-                        finalizer
-                            .stream_terminal(
-                                &mut run_task,
-                                serde_json::json!({"type": "error", "id": id, "message": "agent exited before completing"}),
-                            )
-                            .await;
-                        return;
-                    }
+                    // Other run-scoped events (log lines, token usage, run
+                    // lifecycle) are not part of the chat stream protocol.
+                    _ => {}
                 }
             }
             _ = turn_cancel.cancelled() => {
@@ -691,10 +716,9 @@ async fn run_chat_turn(
                 // The run task finished without a terminal event on the
                 // stream channel. This is the error path: `run_stage`
                 // returned Err, the agent panicked, or the task was
-                // cancelled. The mpsc sender inside
-                // `gremlin.runtime_config.stream_events` stays alive
-                // (held by the now-completed JoinHandle's Gremlin),
-                // so `stream_rx` would block forever without this branch.
+                // cancelled. The bus subscriber is still held by this task's
+                // `BusSubGuard`, so `stream_rx` would block forever without
+                // this branch.
                 let (gremlin_for_reinsert, message) = match task_result {
                     Ok((Ok(()), gremlin)) => {
                         (Some(gremlin), "agent completed without terminal event".to_string())
