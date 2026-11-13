@@ -19,9 +19,7 @@ use crate::config;
 use crate::executor::socket;
 use crate::executor::state;
 use crate::executor::supervisor::actor::ActorMsg;
-use crate::executor::supervisor::{
-    error_response, init_bus, resolve_store_for_id, subscribe_run, SharedWriter,
-};
+use crate::executor::supervisor::{error_response, init_bus, resolve_store_for_id, SharedWriter};
 use crate::executor::EventKind;
 use crate::magic_bus::Recv;
 
@@ -135,20 +133,21 @@ async fn serve_stage_stream_loop(
     let mut stage_name = initial_stage_name.to_string();
     let mut dedupe = ReplayDedupe::default();
 
-    // Subscribe to the run's bus *before* replaying history. A single lossless
-    // subscription delivers every EventKind for this run: StageBoundary,
-    // stream events (agent), ExecOutput (exec), and LogLine (operational
-    // fallback).
+    // Atomic liveness check + subscription. GetRunLogFlushAndSubscribe
+    // looks up the flush handle and calls subscribe_run inside the same
+    // actor handler, closing the TOCTOU window where the run could finish
+    // between a separate flush check and subscription — a missed terminal
+    // event that would leave /watch waiting forever.
     //
     // Only subscribe for live runs still in the run map. A finished run
     // has no more events and its sender is already dropped — subscribing
     // would wait forever. Request a flush barrier so pre-subscription log
     // lines are persisted before we read history.
     let (bus_rx, bus_sub) = if follow {
-        let flush = {
+        let result = {
             let (tx, rx) = oneshot::channel();
             if actor_tx
-                .send(ActorMsg::GetRunLogFlush {
+                .send(ActorMsg::GetRunLogFlushAndSubscribe {
                     id: id.to_string(),
                     respond: tx,
                 })
@@ -159,15 +158,13 @@ async fn serve_stage_stream_loop(
                 None
             }
         };
-        // Flush barrier: wait for the log writer to persist currently-queued
-        // events so they're visible when we replay the blob.
-        if let Some(flush) = &flush {
+        if let Some((flush, sub, rx)) = result {
+            // Flush barrier: wait for the log writer to persist
+            // pre-subscription events so they're visible when we
+            // replay the blob.
             let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
             let _ = flush.send(ack_tx);
             let _ = ack_rx.await;
-        }
-        if flush.is_some() {
-            let (sub, rx) = subscribe_run(id);
             (Some(rx), Some(sub))
         } else {
             (None, None)
@@ -196,7 +193,7 @@ async fn serve_stage_stream_loop(
         // them; deduplicate only records whose fingerprint is covered by the
         // replay checkpoint, and always process queued stage boundaries.
         while let Ok(dispatch) = bus_rx.try_recv() {
-            if !process_event(
+            match process_event(
                 store,
                 &mut kind,
                 &mut stage_name,
@@ -207,8 +204,14 @@ async fn serve_stage_stream_loop(
             )
             .await
             {
-                unsubscribe(&bus_sub);
-                return;
+                ProcessOutcome::Continue => {}
+                ProcessOutcome::Terminal => {
+                    unsubscribe(&bus_sub);
+                }
+                ProcessOutcome::Stop => {
+                    unsubscribe(&bus_sub);
+                    return;
+                }
             }
         }
 
@@ -216,7 +219,7 @@ async fn serve_stage_stream_loop(
             result = bus_rx.recv() => {
                 match result {
                     Recv::Event(dispatch) => {
-                        if !process_event(
+                        match process_event(
                             store,
                             &mut kind,
                             &mut stage_name,
@@ -227,8 +230,14 @@ async fn serve_stage_stream_loop(
                         )
                         .await
                         {
-                            unsubscribe(&bus_sub);
-                            return;
+                            ProcessOutcome::Continue => {}
+                            ProcessOutcome::Terminal => {
+                                unsubscribe(&bus_sub);
+                            }
+                            ProcessOutcome::Stop => {
+                                unsubscribe(&bus_sub);
+                                return;
+                            }
                         }
                     }
                     Recv::Lagged(_) => {
@@ -266,6 +275,20 @@ async fn serve_stage_stream_loop(
     }
 }
 
+/// Outcome of processing one bus event.
+#[derive(PartialEq, Eq)]
+enum ProcessOutcome {
+    /// Event processed; keep following.
+    Continue,
+    /// Terminal event (RunCompleted / RunFailed / RunStopped / RunRemoved)
+    /// seen. The caller must unregister the subscriber so the receiver
+    /// drains and returns [`Recv::Closed`], which triggers the final-log
+    /// fallback.
+    Terminal,
+    /// Write to the client failed — stop immediately.
+    Stop,
+}
+
 /// Process one bus event, dispatching on the EventKind variant.
 ///
 /// StageBoundary reclassifies the current source and triggers a replay of the
@@ -281,7 +304,7 @@ async fn process_event(
     writer: &SharedWriter,
     offset: &mut u64,
     dedupe: &mut ReplayDedupe,
-) -> bool {
+) -> ProcessOutcome {
     match dispatch.kind() {
         EventKind::StageBoundary {
             stage,
@@ -305,15 +328,20 @@ async fn process_event(
                     "active": active,
                 });
                 if !send_stage_line(writer, offset, boundary_payload).await {
-                    return false;
+                    return ProcessOutcome::Stop;
                 }
                 if matches!(*kind, StageStreamKind::Agent | StageStreamKind::Exec) {
                     dedupe.reset();
                 }
-                return replay_source(store, *kind, stage_name, writer, offset, dedupe).await;
+                if replay_source(store, *kind, stage_name, writer, offset, dedupe).await {
+                    ProcessOutcome::Continue
+                } else {
+                    ProcessOutcome::Stop
+                }
+            } else {
+                // Duplicate boundary for the same source — nothing to replay or show.
+                ProcessOutcome::Continue
             }
-            // Duplicate boundary for the same source — nothing to replay or show.
-            true
         }
         EventKind::ExecOutput {
             is_stderr,
@@ -322,35 +350,50 @@ async fn process_event(
             ..
         } => {
             if matches!(*kind, StageStreamKind::Other) {
-                return true;
+                return ProcessOutcome::Continue;
             }
             let kind_str = if *is_stderr { "stderr" } else { "stdout" };
             let value = serde_json::json!({"kind": kind_str, "text": text, "ts": ts});
             if !dedupe.is_replayed(&value) {
-                return send_stage_line(writer, offset, value).await;
+                if send_stage_line(writer, offset, value).await {
+                    ProcessOutcome::Continue
+                } else {
+                    ProcessOutcome::Stop
+                }
+            } else {
+                ProcessOutcome::Continue
             }
-            true
         }
         // Agent stream events
         EventKind::StreamChunk { text } => {
             if !matches!(*kind, StageStreamKind::Agent) {
-                return true;
+                return ProcessOutcome::Continue;
             }
             let value = serde_json::json!({"kind": "text", "text": text});
             if !dedupe.is_replayed(&value) {
-                return send_stage_line(writer, offset, value).await;
+                if send_stage_line(writer, offset, value).await {
+                    ProcessOutcome::Continue
+                } else {
+                    ProcessOutcome::Stop
+                }
+            } else {
+                ProcessOutcome::Continue
             }
-            true
         }
         EventKind::ReasoningChunk { text } => {
             if !matches!(*kind, StageStreamKind::Agent) {
-                return true;
+                return ProcessOutcome::Continue;
             }
             let value = serde_json::json!({"kind": "reasoning", "text": text});
             if !dedupe.is_replayed(&value) {
-                return send_stage_line(writer, offset, value).await;
+                if send_stage_line(writer, offset, value).await {
+                    ProcessOutcome::Continue
+                } else {
+                    ProcessOutcome::Stop
+                }
+            } else {
+                ProcessOutcome::Continue
             }
-            true
         }
         EventKind::ToolOutputChunk {
             id,
@@ -359,13 +402,18 @@ async fn process_event(
             text,
         } => {
             if !matches!(*kind, StageStreamKind::Agent) {
-                return true;
+                return ProcessOutcome::Continue;
             }
             let value = serde_json::json!({"kind": "tool_output", "id": id, "name": name, "call": call, "text": text});
             if !dedupe.is_replayed(&value) {
-                return send_stage_line(writer, offset, value).await;
+                if send_stage_line(writer, offset, value).await {
+                    ProcessOutcome::Continue
+                } else {
+                    ProcessOutcome::Stop
+                }
+            } else {
+                ProcessOutcome::Continue
             }
-            true
         }
         EventKind::ToolResult {
             id,
@@ -374,13 +422,18 @@ async fn process_event(
             output,
         } => {
             if !matches!(*kind, StageStreamKind::Agent) {
-                return true;
+                return ProcessOutcome::Continue;
             }
             let value = serde_json::json!({"kind": "tool_result", "id": id, "name": name, "call": call, "output": output});
             if !dedupe.is_replayed(&value) {
-                return send_stage_line(writer, offset, value).await;
+                if send_stage_line(writer, offset, value).await {
+                    ProcessOutcome::Continue
+                } else {
+                    ProcessOutcome::Stop
+                }
+            } else {
+                ProcessOutcome::Continue
             }
-            true
         }
         EventKind::TurnComplete {
             turn,
@@ -390,33 +443,48 @@ async fn process_event(
             totals,
         } => {
             if !matches!(*kind, StageStreamKind::Agent) {
-                return true;
+                return ProcessOutcome::Continue;
             }
             let value = serde_json::json!({"kind": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls, "stats": stats, "totals": totals});
             if !dedupe.is_replayed(&value) {
-                return send_stage_line(writer, offset, value).await;
+                if send_stage_line(writer, offset, value).await {
+                    ProcessOutcome::Continue
+                } else {
+                    ProcessOutcome::Stop
+                }
+            } else {
+                ProcessOutcome::Continue
             }
-            true
         }
         EventKind::Done { text, summary, .. } => {
             if !matches!(*kind, StageStreamKind::Agent) {
-                return true;
+                return ProcessOutcome::Continue;
             }
             let value = serde_json::json!({"kind": "done", "text": text, "summary": summary});
             if !dedupe.is_replayed(&value) {
-                return send_stage_line(writer, offset, value).await;
+                if send_stage_line(writer, offset, value).await {
+                    ProcessOutcome::Continue
+                } else {
+                    ProcessOutcome::Stop
+                }
+            } else {
+                ProcessOutcome::Continue
             }
-            true
         }
         EventKind::StreamReset => {
             if !matches!(*kind, StageStreamKind::Agent) {
-                return true;
+                return ProcessOutcome::Continue;
             }
             let value = serde_json::json!({"kind": "stream_reset"});
             if !dedupe.is_replayed(&value) {
-                return send_stage_line(writer, offset, value).await;
+                if send_stage_line(writer, offset, value).await {
+                    ProcessOutcome::Continue
+                } else {
+                    ProcessOutcome::Stop
+                }
+            } else {
+                ProcessOutcome::Continue
             }
-            true
         }
         // Operational log fallback
         EventKind::LogLine { line, .. } => {
@@ -425,19 +493,22 @@ async fn process_event(
                     let value = serde_json::json!({"kind": "log", "text": part});
                     if !dedupe.is_replayed(&value) && !send_stage_line(writer, offset, value).await
                     {
-                        return false;
+                        return ProcessOutcome::Stop;
                     }
                 }
             }
-            true
+            ProcessOutcome::Continue
         }
-        // Terminal events: don't close, let the subscription close naturally.
+        // Terminal events: return Terminal so the caller unregisters the
+        // subscriber, which lets the lossless-buffer sender drop and the
+        // receiver observe Recv::Closed — triggering the final-log
+        // fallback in the main loop.
         EventKind::RunCompleted { .. }
         | EventKind::RunFailed { .. }
         | EventKind::RunStopped { .. }
-        | EventKind::RunRemoved { .. } => true,
+        | EventKind::RunRemoved { .. } => ProcessOutcome::Terminal,
         // Silently ignore lifecycle events (Ready, Ended, etc.).
-        _ => true,
+        _ => ProcessOutcome::Continue,
     }
 }
 

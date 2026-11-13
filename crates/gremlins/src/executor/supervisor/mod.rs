@@ -44,8 +44,7 @@ pub(crate) use crate::clients::interactive::{InteractiveChannels, InteractiveCom
 pub(crate) use self::chat::{add_usage_stats, base_process_env, usage_stats_from_state};
 pub(crate) use self::debug::handle_debug;
 pub(crate) use self::event::{
-    emit_event, emit_run_event_async, init_bus, subscribe_all, subscribe_run,
-    subscribe_run_backpressured,
+    emit_event, emit_run_event_async, init_bus, subscribe_all, subscribe_run_backpressured,
 };
 pub(crate) use self::lifecycle::{launch_child, stop_child, LaunchResult, LogRelay};
 pub(crate) use self::log_handler::handle_log;
