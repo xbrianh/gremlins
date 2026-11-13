@@ -184,13 +184,25 @@ pub(crate) fn jitter(base: f64, half_window: f64) -> f64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos();
-    // Mix counter and nanos so concurrent callers at the same wall-clock
-    // tick still get different delays.
-    let mixed = (nanos as u64)
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(ctr);
-    let r = (mixed as f64) / (u64::MAX as f64);
+    let r = jitter_rng(nanos, ctr);
     (base + (r - 0.5) * half_window * 2.0).max(0.0)
+}
+
+/// Deterministic jitter PRF: mixes a nanosecond timestamp with an atomic
+/// counter so concurrent callers produce distinct delays even when the
+/// counter only differs in low bits.
+///
+/// Mixing approach:
+/// - Multiply `nanos` and `ctr` independently by a large odd constant
+///   (Knuth's MMIX multiplier) to spread their bits across all 64 positions.
+/// - Add the two products so both inputs influence every output bit.
+/// - Convert to `[0.0, 1.0)` via division by `u64::MAX`.
+fn jitter_rng(nanos: u32, ctr: u64) -> f64 {
+    const MUL: u64 = 6364136223846793005; // Knuth MMIX
+    let mixed = (nanos as u64)
+        .wrapping_mul(MUL)
+        .wrapping_add(ctr.wrapping_mul(MUL));
+    (mixed as f64) / (u64::MAX as f64)
 }
 
 // ---------------------------------------------------------------------------
@@ -555,6 +567,23 @@ mod tests {
         assert!(
             unique.len() > 1,
             "all concurrent jitter calls returned the same value"
+        );
+    }
+
+    #[test]
+    fn jitter_fixed_timestamp_different_counters_diverge() {
+        // Regression: with a fixed nanosecond timestamp, different counters
+        // must produce different delays.  Without counter mixing, low-bit
+        // differences are lost during u64 → f64 conversion.
+        let nanos: u32 = 123456789;
+        let vals: Vec<f64> = (0..100).map(|ctr| jitter_rng(nanos, ctr)).collect();
+        // Quantize to microsecond precision so rounding doesn't hide real differences.
+        let unique: std::collections::HashSet<u64> =
+            vals.iter().map(|v| (v * 1_000_000.0) as u64).collect();
+        assert!(
+            unique.len() > 99,
+            "counters 0–99 with fixed nanos={nanos} only produced {} unique values",
+            unique.len()
         );
     }
 }
