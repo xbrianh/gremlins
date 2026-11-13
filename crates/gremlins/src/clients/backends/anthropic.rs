@@ -241,6 +241,8 @@ impl Backend for AnthropicBackend {
                     http_client,
                     auth_scope,
                 } => {
+                    // Token is acquired lazily on first request — the
+                    // TokenProvider owns caching and refresh.
                     let wrapped = LazyAuthHttpClient::<BearerStrategy>::new(
                         http_client.clone(),
                         token_provider.clone(),
@@ -335,7 +337,8 @@ impl Backend for AnthropicBackend {
             })?;
 
         // For dynamic auth, use LazyAuthHttpClient to acquire a fresh
-        // token per request.
+        // token per request. Token acquisition errors surface nested
+        // inside the client error ("token acquisition failed: …").
         let resp: http::Response<rig_core::http_client::LazyBody<Vec<u8>>> = if let Some(ref tp) = self.token_provider {
             let bearer = LazyAuthHttpClient::<BearerStrategy>::new(
                 self.raw_http.clone(),
