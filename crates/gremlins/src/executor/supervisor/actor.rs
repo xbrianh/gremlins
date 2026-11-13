@@ -1400,11 +1400,6 @@ impl ActorState {
         }
     }
 
-    /// Unsubscribe a finished run's stage-stream forwarder subscription so the
-    /// forwarder task drains and drops its stage-stream broadcast handle.
-    #[allow(dead_code)]
-    fn release_stage_stream_sub(&self, _sub: Option<Subscriber<EventKind>>) {}
-
     /// Allocate a `chat-{seq:04x}` id that is not present in the live run map.
     /// The actor is single-threaded, so no TOCTOU window exists between the
     /// check and the subsequent insertion.

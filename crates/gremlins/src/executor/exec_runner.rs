@@ -106,7 +106,8 @@ pub struct ExecPrepared {
     /// `prepare_exec` for the exec command templates. Merged into the
     /// child shell's environment in `run_shell`.
     pub substitution_env: HashMap<String, String>,
-    /// Gremlin ID for routing LogLine events to the per-gremlin log writer.
+    /// Gremlin ID for routing ExecOutput events to the per-gremlin bus subscriber
+    /// and LogLine events to the per-gremlin log writer.
     pub gremlin_id: Option<String>,
 }
 
