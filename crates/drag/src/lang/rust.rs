@@ -703,7 +703,7 @@ pub(super) fn file_to_rust_module(
         if let super::PackageInfo::Rust(rpkg) = pkg {
             let src_dir = rpkg.dir.join("src");
             if let Ok(rel) = file.strip_prefix(&src_dir) {
-                let key = format!("rust:{}", rpkg.pkg_name);
+                let key = pkg.key();
                 return Some((
                     file_rel_to_module(rel, &rpkg.target_name, rpkg.is_bin)?,
                     key,
