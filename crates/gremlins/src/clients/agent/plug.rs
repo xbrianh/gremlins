@@ -3,15 +3,9 @@ use crate::clients::protocol::UsageStats;
 use crate::clients::LogLineFn;
 use rig_core::completion::CompletionRequest;
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
-/// Async stream-event emitter. Called from the agent loop to send
-/// stream events (StreamChunk, ReasoningChunk, ToolOutputChunk,
-/// ToolResult, TurnComplete, Done, StreamReset, Ready, Ended).
-/// The executor wires this to `bus.emit()` or `bus.emit_async()`.
-pub(crate) type StreamEventFn =
-    Arc<dyn Fn(EventKind) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+pub(crate) use crate::clients::event::StreamEventFn;
 
 /// Inversion-of-control hooks that decouple the agent loop from
 /// `crate::executor` and `crate::landscape`. Every cross-package
@@ -99,10 +93,9 @@ impl LoopHooks {
 
     /// Register a stream-event emitter.
     ///
-    /// The executor wires this to `bus.emit()` in a follow-up phase; until
-    /// then the hook is exercised only by the agent-loop tests, so it is
-    /// allowed to be dead in non-test builds.
-    #[allow(dead_code)]
+    /// The executor wires this to the run-scoped bus emitter (`run_agent.rs`),
+    /// so every interactive and actor-launched run forwards its stream events
+    /// to per-run subscribers (chat, debug, stage stream).
     pub(crate) fn register_stream_event<F, Fut>(&mut self, f: F)
     where
         F: Fn(EventKind) -> Fut + Send + Sync + 'static,

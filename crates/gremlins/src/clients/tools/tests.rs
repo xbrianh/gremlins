@@ -86,7 +86,8 @@ fn ctx(cwd: &Path) -> AgentLoopRuntime {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,
@@ -350,7 +351,8 @@ async fn bash_invoke_respects_cwd() {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,
@@ -390,7 +392,8 @@ async fn bash_invoke_cwd_none_uses_project_root() {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,
@@ -428,7 +431,8 @@ async fn bash_invoke_cwd_none_diverges_from_process_cwd() {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,
@@ -874,7 +878,8 @@ async fn mischief_invoke_blocked_in_headless() {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,
@@ -905,7 +910,8 @@ async fn websearch_invoke_blocked_in_headless() {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,
@@ -942,7 +948,8 @@ async fn websearch_invoke_blocked_in_headless_no_filter() {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,
@@ -979,7 +986,8 @@ async fn websearch_invoke_blocked_in_headless_explicit_allowlist() {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,
@@ -1016,7 +1024,8 @@ async fn mischief_invoke_allowed_in_chat() {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: Some(Arc::new(std::sync::Mutex::new(vec![]))),
@@ -1966,7 +1975,8 @@ async fn filtered_tool_does_not_mutate_or_spawn() {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,
@@ -2920,7 +2930,8 @@ async fn task_no_callback_returns_error() {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,
@@ -2953,7 +2964,8 @@ async fn task_callback_called_when_set() {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,
@@ -2984,7 +2996,8 @@ async fn task_empty_prompt_returns_error() {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,
@@ -3022,7 +3035,8 @@ async fn task_unknown_kind_rejected_before_callback() {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,
@@ -3055,7 +3069,8 @@ async fn task_result_is_headered_with_kind() {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,
@@ -3506,7 +3521,8 @@ async fn invoke_does_not_cap_task() {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,
@@ -3541,7 +3557,8 @@ fn allow_all_ctx(cwd: &Path) -> AgentLoopRuntime {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,

@@ -79,16 +79,16 @@ pub(crate) struct ToolOutputLine {
 }
 
 /// Bundled send-side telemetry channels for the agent loop: stream-event
-/// hooks (model deltas, tool results, turn-complete events) and live
-/// tool-output line forwarding (`Bash`/`WebSearch`).
+/// emitter and live tool-output line forwarding (`Bash`/`WebSearch`).
 ///
 /// Cloned cheaply — every nested loop inherits the parent's channels.
 #[derive(Clone)]
 pub(crate) struct AgentLoopTelemetry {
-    /// Inversion-of-control hooks carrying the stream-event emitter. Nested
-    /// loops inherit the parent's hooks so child tool events reach the parent
-    /// stream with the correct id prefix.
-    pub(crate) hooks: crate::clients::agent::plug::LoopHooks,
+    /// Async stream-event emitter. Nested loops inherit the parent's hook so
+    /// child tool events reach the parent stream with the correct id prefix.
+    pub(crate) emit_stream_event: Option<crate::clients::event::StreamEventFn>,
+    /// True when a stream-event consumer is wired.
+    pub(crate) wants_stream_events: bool,
     pub(crate) tool_output: Option<tokio::sync::mpsc::Sender<ToolOutputLine>>,
 }
 

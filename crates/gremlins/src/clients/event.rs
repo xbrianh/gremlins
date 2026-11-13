@@ -4,9 +4,20 @@
 //! The bus routes `DispatchEvent<EventKind>` values to subscribers based on
 //! segment-aware `CorrId` prefix matching.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::clients::protocol::{TurnStats, UsageStats};
+
+/// Async stream-event emitter. Called from the agent loop to send stream
+/// events (StreamChunk, ReasoningChunk, ToolOutputChunk, ToolResult,
+/// TurnComplete, Done, StreamReset, Ready, Ended). The executor wires this to
+/// the run-scoped bus emitter.
+pub(crate) type StreamEventFn =
+    Arc<dyn Fn(EventKind) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Every event kind that flows through the bus.
 ///

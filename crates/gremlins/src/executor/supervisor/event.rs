@@ -62,6 +62,22 @@ pub(crate) fn subscribe_run(id: &str) -> (Subscriber<EventKind>, ReceiverHalf<Ev
         .expect("lossless subscription cannot fail")
 }
 
+/// Subscribe to a single gremlin's run-scoped stream events with lag-tolerant
+/// (broadcast) delivery. Drops events on overflow instead of buffering
+/// unboundedly — the right choice for debug consumers and the stage-stream
+/// forwarder where a slow consumer should not grow daemon memory.
+pub(crate) fn subscribe_run_lag_tolerant(
+    id: &str,
+    capacity: usize,
+) -> (Subscriber<EventKind>, ReceiverHalf<EventKind>) {
+    init_bus()
+        .subscribe(SubscriberRegistration::lag_tolerant(
+            CorrId::new().with_run(id),
+            capacity,
+        ))
+        .expect("lag-tolerant subscription cannot fail")
+}
+
 /// Subscribe to a single gremlin's run-scoped stream events with bounded,
 /// backpressured delivery.
 ///

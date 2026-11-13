@@ -27,7 +27,7 @@ use crate::config;
 use crate::definition::ChatDefinition;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
 use crate::executor::state;
-use crate::magic_bus::{Recv, Subscriber};
+use crate::magic_bus::Recv;
 
 use super::actor::ActorMsg;
 use super::actor_client::Client;
@@ -509,32 +509,6 @@ pub(crate) struct TurnCtx {
     pub(crate) done: Arc<watch::Sender<bool>>,
 }
 
-/// RAII guard that unsubscribes a bus subscriber when dropped.
-///
-/// The chat turn registers a backpressured subscription scoped to its run id;
-/// because chat reuses the same gremlin/run id across turns, a subscription
-/// that outlived its turn would accumulate and — once its bounded buffer
-/// filled — stall the agent loop of a later turn.
-struct BusSubGuard {
-    subscriber: Option<Subscriber<EventKind>>,
-}
-
-impl BusSubGuard {
-    fn new(subscriber: Subscriber<EventKind>) -> Self {
-        Self {
-            subscriber: Some(subscriber),
-        }
-    }
-}
-
-impl Drop for BusSubGuard {
-    fn drop(&mut self) {
-        if let Some(subscriber) = self.subscriber.take() {
-            super::init_bus().unsubscribe(&subscriber);
-        }
-    }
-}
-
 async fn run_chat_turn(
     ctx: TurnCtx,
     stage: crate::definition::ExecutorStage,
@@ -557,7 +531,7 @@ async fn run_chat_turn(
     // a leaked backpressured mailbox would otherwise stay full and stall the
     // agent loop of a later turn (chat reuses the same run id).
     let (stream_sub, mut stream_rx) = super::subscribe_run_backpressured(&id, 256);
-    let _stream_guard = BusSubGuard::new(stream_sub);
+    let _stream_guard = super::BusSubGuard::new(stream_sub);
 
     // Capture the turn number from the stage name so cancel cleanup
     // can always clear the per-turn artifact.

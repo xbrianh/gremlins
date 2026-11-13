@@ -12,12 +12,12 @@ use crate::config;
 use crate::executor::gremlin::validate_gremlin_id;
 use crate::executor::socket;
 use crate::executor::state;
-use crate::executor::supervisor::event::{init_bus, subscribe_run};
+use crate::executor::supervisor::event::subscribe_run_lag_tolerant;
 use crate::magic_bus::Recv;
 
 use super::actor::ActorMsg;
 use super::ops::resolve_store_for_id;
-use super::{error_response, DebugDetachGuard, SharedWriter};
+use super::{error_response, BusSubGuard, DebugDetachGuard, SharedWriter};
 
 pub(crate) async fn send_debug_status(writer: &SharedWriter, stage: &str) {
     let payload = serde_json::json!({"type": "status", "stage": stage});
@@ -153,7 +153,8 @@ pub(crate) async fn handle_debug(
     // Subscribe to stream events via the bus *before* triggering pause so we
     // don't miss the Ready broadcast. The agent loop emits through the bus
     // hook; this subscriber receives only events for this run id.
-    let (stream_sub, mut evt_rx) = subscribe_run(id);
+    let (stream_sub, mut evt_rx) = subscribe_run_lag_tolerant(id, 256);
+    let _stream_guard = BusSubGuard::new(stream_sub);
 
     // Signal the agent loop to pause at its next yield point.
     let mut detach_guard = DebugDetachGuard::new(interactive_handle.clone());
@@ -317,7 +318,7 @@ pub(crate) async fn handle_debug(
     }
 
     // Clear the pause signal so the agent loop resumes normal operation.
-    init_bus().unsubscribe(&stream_sub);
+    // The `_stream_guard` unsubscribes `stream_sub` on scope exit.
     detach_guard.disarm();
     interactive_handle.pause.reset();
 }

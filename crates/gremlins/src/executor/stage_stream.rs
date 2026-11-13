@@ -22,7 +22,8 @@ use crate::executor::socket;
 use crate::executor::state;
 use crate::executor::supervisor::actor::ActorMsg;
 use crate::executor::supervisor::{
-    error_response, init_bus, resolve_store_for_id, subscribe_run, SharedWriter,
+    error_response, init_bus, resolve_store_for_id, subscribe_run, subscribe_run_lag_tolerant,
+    SharedWriter,
 };
 use crate::magic_bus::{ReceiverHalf, Recv};
 
@@ -996,12 +997,19 @@ fn payload_fingerprint(payload: &Value) -> String {
 /// Spawn a task that translates agent stream `EventKind`s into stage-stream
 /// JSON lines and forwards them to the stage-stream broadcast.
 ///
-/// STOPGAP (Phase 2b): Subscribe to the bus for stream events only. This
-/// replaces the old `broadcast::Receiver<InteractiveEvent>` approach. Phase
-/// 2b will convert this to a proper bus subscriber with its own run-scoped
-/// prefix.
-pub(crate) fn spawn_stage_stream_forwarder(id: String, stage_stream_tx: broadcast::Sender<String>) {
-    let (sub, mut rx) = subscribe_run(&id);
+/// Subscribes with lag-tolerant delivery so a slow front-end drops stream
+/// events on overflow rather than growing daemon memory unboundedly. The
+/// subscription receives **all** run-scoped events (log lines, token usage,
+/// run lifecycle, …); `event_kind_to_stage_line` filters to stream events
+/// only, returning `None` for everything else.
+///
+/// Returns the bus subscriber so the caller can unsubscribe when the run
+/// finishes; the spawned task does not clean it up itself.
+pub(crate) fn spawn_stage_stream_forwarder(
+    id: String,
+    stage_stream_tx: broadcast::Sender<String>,
+) -> crate::magic_bus::Subscriber<EventKind> {
+    let (sub, mut rx) = subscribe_run_lag_tolerant(&id, 256);
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
@@ -1014,9 +1022,8 @@ pub(crate) fn spawn_stage_stream_forwarder(id: String, stage_stream_tx: broadcas
                 Recv::Closed => break,
             }
         }
-        // Unsubscribe when the forwarder exits.
-        init_bus().unsubscribe(&sub);
     });
+    sub
 }
 
 /// Convert a stream `EventKind` into a stage-stream JSON line.

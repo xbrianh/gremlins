@@ -589,9 +589,10 @@ impl LoopState {
         // Forward live tool output only for the duration of this batch. The
         // receiver is borrowed by the select below, so later batches never
         // hear stale chunks and Esc/clear cannot resurrect old output.
-        // Capacity is reserved on the chat stream *before* a tool line is
-        // dequeued, so the select dropping this branch at batch completion
-        // can release an unused permit but can never drop an in-flight line.
+        // When cancellation wins the race after a line is dequeued, that
+        // line is dropped rather than forwarded. The old permit-based
+        // reservation prevented this; the bus-based path accepts the
+        // trade-off since a cancelled run discards its output anyway.
         let forward_live_output = async {
             if let Some(rx) = self.live_output_rx.as_mut() {
                 if self.hooks.wants_stream_events {
@@ -1022,13 +1023,12 @@ pub(crate) async fn run_agent_loop(
         }
         tools::SandboxMode::Roots(allowed_roots)
     };
-    // Only build the live-output channel when a subscriber will actually
-    // consume it. Non-interactive pipeline runs have no stream-event hook
-    // wired, so building the channel would still cost per-line `String`
-    // allocation plus a forwarder that drains-and-discards every chunk.
-    // The bounded mpsc gives the read loop backpressure: when the forwarder
-    // or chat consumer is slow, `emit_output` awaits capacity instead of
-    // dropping live chunks.
+    // Only build the live-output channel when a stream-event subscriber is
+    // wired (chat, debug, or actor-launched pipeline runs). Naked runs and
+    // tests skip the channel, avoiding per-line String allocation and a
+    // forwarder that drains-and-discards every chunk. The bounded mpsc gives
+    // the read loop backpressure: when the forwarder or chat consumer is
+    // slow, `emit_output` awaits capacity instead of dropping live chunks.
     let (tool_output_tx, tool_output_rx) = if ctx.hooks.wants_stream_events {
         let (tx, rx) = mpsc::channel::<tools::ToolOutputLine>(1024);
         (Some(tx), Some(rx))
@@ -1036,7 +1036,8 @@ pub(crate) async fn run_agent_loop(
         (None, None)
     };
     let telemetry = AgentLoopTelemetry {
-        hooks: ctx.hooks.clone(),
+        emit_stream_event: Some(ctx.hooks.emit_stream_event_fn.clone()),
+        wants_stream_events: ctx.hooks.wants_stream_events,
         tool_output: tool_output_tx,
     };
     let mut tool_ctx = AgentLoopRuntime {
@@ -1153,7 +1154,8 @@ pub(crate) async fn run_agent_loop_nested(
     // forwarder, so a child never competes with the parent for a bounded stream
     // slot — the two-forwarder design could stall a small-capacity stream.
     nested_tool_ctx.telemetry = AgentLoopTelemetry {
-        hooks: tool_ctx.telemetry.hooks.clone(),
+        emit_stream_event: tool_ctx.telemetry.emit_stream_event.clone(),
+        wants_stream_events: tool_ctx.telemetry.wants_stream_events,
         tool_output: tool_ctx.telemetry.tool_output.clone(),
     };
     // Prefix this task's tool call IDs with its chain so two tasks that reuse a
@@ -1174,8 +1176,12 @@ pub(crate) async fn run_agent_loop_nested(
         // Inherit the parent's stream-event hook so the child's tool-output
         // and tool-result events reach the parent stream (prefixed with this
         // task's id chain) rather than being silently dropped.
-        emit_stream_event_fn: tool_ctx.telemetry.hooks.emit_stream_event_fn.clone(),
-        wants_stream_events: tool_ctx.telemetry.hooks.wants_stream_events,
+        emit_stream_event_fn: tool_ctx
+            .telemetry
+            .emit_stream_event
+            .clone()
+            .unwrap_or_else(|| Arc::new(|_| Box::pin(std::future::ready(())))),
+        wants_stream_events: tool_ctx.telemetry.wants_stream_events,
         ..LoopHooks::new()
     };
     hooks.log_line(&format!("{prefix}task: begin (max_turns={max_turns})"));
@@ -1826,7 +1832,8 @@ pub(crate) fn test_tool_ctx() -> crate::clients::tools::AgentLoopRuntime {
         log_line_fn: None,
         id_prefix: String::new(),
         telemetry: crate::clients::tools::AgentLoopTelemetry {
-            hooks: crate::clients::agent::plug::LoopHooks::new(),
+            emit_stream_event: None,
+            wants_stream_events: false,
             tool_output: None,
         },
         active_skills: None,

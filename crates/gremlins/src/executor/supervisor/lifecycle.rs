@@ -14,8 +14,10 @@ use super::event::{emit_event, init_bus, EventKind};
 use super::RunState;
 
 /// Set up log + interactive + stage-stream channels on a gremlin. Returns the
-/// stage-stream broadcast sender, interactive handle, log flush channel, and
-/// the bus subscriber (so the caller can unsubscribe when the run finishes).
+/// stage-stream broadcast sender, interactive handle, log flush channel, the
+/// log-writer bus subscriber (so the caller can unsubscribe when the run
+/// finishes), and the stage-stream forwarder's bus subscriber.
+#[allow(clippy::type_complexity)]
 pub(crate) fn setup_gremlin_channels(
     gremlin: &mut Gremlin,
     relay: Option<LogRelay>,
@@ -24,6 +26,7 @@ pub(crate) fn setup_gremlin_channels(
     InteractiveHandle,
     tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
     crate::magic_bus::Subscriber<EventKind>,
+    crate::magic_bus::Subscriber<EventKind>,
 ) {
     let channels = InteractiveChannels::new();
     let (interactive_handle, interactive_session) = channels.split();
@@ -31,10 +34,12 @@ pub(crate) fn setup_gremlin_channels(
     gremlin.interactive_session = Some(interactive_session);
 
     // Stage-aware live stream: a dedicated broadcast that carries JSON lines
-    // for agent events (reasoning/text/tool) and exec stdout/stderr.
+    // for agent events (reasoning/text/tool) and exec stdout/stderr. The
+    // forwarder subscribes to the bus and returns its subscriber so the
+    // caller can unsubscribe when the run finishes.
     let (stage_stream_broadcast, _) = broadcast::channel(256);
     gremlin.runtime_config.stage_stream_tx = Some(stage_stream_broadcast.clone());
-    crate::executor::stage_stream::spawn_stage_stream_forwarder(
+    let stage_stream_sub = crate::executor::stage_stream::spawn_stage_stream_forwarder(
         gremlin.id.to_string(),
         stage_stream_broadcast.clone(),
     );
@@ -63,6 +68,7 @@ pub(crate) fn setup_gremlin_channels(
         interactive_handle,
         log_flush,
         log_sub,
+        stage_stream_sub,
     )
 }
 
