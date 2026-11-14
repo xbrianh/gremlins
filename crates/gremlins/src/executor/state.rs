@@ -1462,8 +1462,11 @@ impl StateStore for FileSystemStateStore {
         // Seed into a temporary directory so that a partial (failed) fork
         // is never visible to [`latest_attempt_dir`].  Only after state.json
         // is written do we rename into place.
-        let tmp_dir =
-            child_dir.with_file_name(format!(".{gremlin_id}-{next:04}.tmp.{}", rand_hex(4)));
+        let tmp_dir = child_dir.with_file_name(format!(
+            ".{}-{next:04}.tmp.{}",
+            state_safe_id(&gremlin_id),
+            rand_hex(4),
+        ));
         tokio::fs::create_dir_all(&tmp_dir).await?;
         let child_ad = tmp_dir.join("artifacts");
         tokio::fs::create_dir_all(&child_ad).await?;
@@ -1609,15 +1612,20 @@ impl StateStore for FileSystemStateStore {
                 // Defence-in-depth: verify the recorded gremlin id in
                 // state.json matches `id` so that a stale directory whose
                 // safe_id happens to share a prefix never gets removed
-                // accidentally.
+                // accidentally. Skip only when a readable, non-empty
+                // recorded id positively identifies a different gremlin —
+                // a malformed or absent `id` field is not disqualifying.
                 let state_json = path.join("state.json");
                 if state_json.is_file() {
-                    let recorded = read_state_json(Some(&state_json))
+                    let tree = read_state_json(Some(&state_json));
+                    let recorded = tree
                         .get("id")
                         .and_then(|v| v.as_str())
-                        .map(str::to_string);
-                    if recorded.as_deref() != Some(&id) {
-                        continue;
+                        .filter(|s| !s.is_empty());
+                    if let Some(recorded) = recorded {
+                        if recorded != id {
+                            continue;
+                        }
                     }
                 }
                 if let Err(error) = std::fs::remove_dir_all(&path) {

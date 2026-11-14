@@ -156,7 +156,13 @@ pub(crate) async fn handle_log(
         // time, so they may precede the log writer's blob flush — discarding
         // them blindly would lose lines that were never persisted.
         while let Ok(dispatch) = log_rx.try_recv() {
-            if let EventKind::LogLine { line, .. } = dispatch.kind() {
+            if let EventKind::LogLine { id: line_id, line } = dispatch.kind() {
+                // Ancestor matching delivers child LogLine events (e.g.
+                // `parent:child` → `r:parent`). Drop those — the LogRelay
+                // pathway emits prefixed copies with the parent id set.
+                if line_id != id {
+                    continue;
+                }
                 let ts =
                     crate::executor::state::stamp_from_epoch_millis(dispatch.ts().wall_millis());
                 for part in line.split('\n') {
@@ -174,7 +180,14 @@ pub(crate) async fn handle_log(
                     match result {
                         crate::magic_bus::Recv::Event(dispatch) => {
                             match dispatch.kind() {
-                                EventKind::LogLine { line, .. } => {
+                                EventKind::LogLine { id: line_id, line } => {
+                                    // Keep only the logged-in run's own lines —
+                                    // child lines arrive via ancestor matching
+                                    // but are served through the LogRelay pathway
+                                    // with a prefix.
+                                    if line_id != id {
+                                        continue;
+                                    }
                                     let ts = crate::executor::state::stamp_from_epoch_millis(
                                         dispatch.ts().wall_millis(),
                                     );
@@ -183,22 +196,32 @@ pub(crate) async fn handle_log(
                                         log_line!(stamped);
                                     }
                                 }
-                                // Terminal event: the run is done. Drain any
-                                // remaining relayed child diagnostic log lines,
-                                // then break so the follower doesn't hang.
-                                EventKind::RunCompleted { .. }
-                                | EventKind::RunFailed { .. }
-                                | EventKind::RunStopped { .. }
-                                | EventKind::RunRemoved { .. } => {
+                                // Terminal event: the run is done. Only break
+                                // when the terminal event's id matches the requested
+                                // run — ancestor matching may deliver child terminal
+                                // events (e.g. `parent:child` completing), but the
+                                // parent follower must continue for siblings and the
+                                // parent's own terminal event.
+                                EventKind::RunCompleted { id: ev_id, .. }
+                                | EventKind::RunFailed { id: ev_id, .. }
+                                | EventKind::RunStopped { id: ev_id }
+                                | EventKind::RunRemoved { id: ev_id }
+                                    if ev_id == id =>
+                                {
                                     // Unregister so no new events arrive.
                                     unsubscribe(&log_sub);
                                     // Drain buffered lines (child relay
                                     // diagnostics emitted after the terminal
                                     // event).
                                     while let Ok(dispatch) = log_rx.try_recv() {
-                                        if let EventKind::LogLine { line, .. } =
+                                        if let EventKind::LogLine { id: line_id, line } =
                                             dispatch.kind()
                                         {
+                                            // Post-terminal drain: same
+                                            // run-scoped filter as above.
+                                            if line_id != id {
+                                                continue;
+                                            }
                                             let ts = crate::executor::state::stamp_from_epoch_millis(
                                                 dispatch.ts().wall_millis(),
                                             );
