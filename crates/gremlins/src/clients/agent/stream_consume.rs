@@ -18,15 +18,14 @@ use rig_core::streaming::{Item, StreamEvent, Streamed};
 use crate::clients::cancel::CancelToken;
 use crate::clients::error::ClientError;
 use crate::clients::format::{apply_chunk, assistant_tool_message, format_tool_call};
-use crate::clients::interactive::InteractiveSession;
 use crate::clients::tools::AgentLoopRuntime;
-use gremlins_magic_bus::EventKind;
+use gremlins_magic_bus::{emit_run_event_async, EventKind};
 
 use super::agent_loop::{
     cancelled_error, retry_backoff, LoopOpts, LoopState, StreamAccumulator, StreamTurnOutcome,
     StreamTurnOutput,
 };
-use super::interactive::{interactive_loop, maybe_pause, InteractiveLoopResult};
+use super::interactive::{maybe_pause, InteractiveLoopResult};
 
 /// Drive the model stream to completion: forward live deltas, accumulate
 /// assistant content, and handle cancellation, operator pause, idle
@@ -78,43 +77,12 @@ pub(super) async fn consume_stream_events(
                 }
                 log::debug!("agent_loop: entering interactive mode mid-stream (label={})", prefix);
 
-                let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
-                let amended_system = match &state.system_prompt {
-                    Some(sp) => format!("{sp}{debug_note}"),
-                    None => debug_note.trim_start().to_string(),
-                };
-                state.system_prompt = Some(amended_system);
-
-                if state.cmd_rx.is_some() && state.pause.is_some() {
-                    let mut session = InteractiveSession {
-                        cmd_rx: state.cmd_rx.take().unwrap(),
-                        pause: state.pause.clone().unwrap(),
-                    };
-                    match interactive_loop(
-                        model,
-                        &mut *state.conv,
-                        &mut session,
-                        state.turn_num,
-                        &state.hooks,
-                    )
-                    .await
-                    {
-                        Ok(InteractiveLoopResult::Resumed) => {
-                            state.system_prompt = state.original_system_prompt.clone();
-                            state.cmd_rx = Some(session.cmd_rx);
-                            state.interactive_active = false;
-                            break;
-                        }
-                        Ok(InteractiveLoopResult::RunOneTurn) => {
-                            state.cmd_rx = Some(session.cmd_rx);
-                            state.pending_run_one_turn = true;
-                            break;
-                        }
-                        Err(e) => {
-                            state.hook_log(&format!("agent_loop: exit (operator bailed, label={})", prefix));
-                            state.hook_log(&format!("{prefix}exit: operator bailed"));
-                            return Err(e);
-                        }
+                match state.enter_interactive_mode(model, prefix).await? {
+                    InteractiveLoopResult::Resumed => {
+                        state.interactive_active = false;
+                    }
+                    InteractiveLoopResult::RunOneTurn => {
+                        state.pending_run_one_turn = true;
                     }
                 }
                 break;
@@ -193,7 +161,7 @@ pub(super) async fn consume_stream_events(
                     first_token = Some(now);
                 }
                 last_token = Some(now);
-                if !nested && state.hooks.wants_stream_events {
+                if !nested {
                     match &chunk {
                         Item::Event(StreamEvent::Text { ref text, .. }) => {
                             tokio::select! {
@@ -201,7 +169,7 @@ pub(super) async fn consume_stream_events(
                                 _ = cancel.cancelled() => {
                                     return Err(cancelled_error("cancelled", &stream_snapshot));
                                 }
-                                _ = state.hooks.emit_stream_event(EventKind::StreamChunk {
+                                _ = emit_run_event_async(&state.message_prefix, EventKind::StreamChunk {
                                     text: text.clone(),
                                 }) => {}
                             }
@@ -212,7 +180,7 @@ pub(super) async fn consume_stream_events(
                                 _ = cancel.cancelled() => {
                                     return Err(cancelled_error("cancelled", &stream_snapshot));
                                 }
-                                _ = state.hooks.emit_stream_event(EventKind::ReasoningChunk {
+                                _ = emit_run_event_async(&state.message_prefix, EventKind::ReasoningChunk {
                                     text: text.clone(),
                                 }) => {}
                             }
@@ -226,7 +194,7 @@ pub(super) async fn consume_stream_events(
                                 _ = cancel.cancelled() => {
                                     return Err(cancelled_error("cancelled", &stream_snapshot));
                                 }
-                                _ = state.hooks.emit_stream_event(EventKind::ReasoningChunk {
+                                _ = emit_run_event_async(&state.message_prefix, EventKind::ReasoningChunk {
                                     text: format_tool_call(tc),
                                 }) => {}
                             }
@@ -291,13 +259,13 @@ pub(super) async fn finish_stream_turn(
         if state.interactive_active {
             state.pending_run_one_turn = true;
         }
-        if !nested && state.hooks.wants_stream_events {
+        if !nested {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
                     return Err(cancelled_error("cancelled", &state.conv.messages()));
                 }
-                _ = state.hooks.emit_stream_event(EventKind::StreamReset) => {}
+                _ = emit_run_event_async(&state.message_prefix, EventKind::StreamReset) => {}
             }
         }
         return Ok(StreamTurnOutcome::Continue);

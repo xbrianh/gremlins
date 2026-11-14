@@ -19,6 +19,7 @@ use crate::clients::tools::schema::validate_tool_args;
 use crate::clients::tools::tool_specs::ToolMode;
 use crate::core::paths::*;
 use crate::test_support::EnvGuard;
+use gremlins_magic_bus::{subscribe_run, EventKind, Recv};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -83,13 +84,8 @@ fn ctx(cwd: &Path) -> AgentLoopRuntime {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: "test.".to_string(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
@@ -99,32 +95,60 @@ fn ctx(cwd: &Path) -> AgentLoopRuntime {
 #[tokio::test]
 async fn emit_output_prefixes_the_tool_call_id() {
     let dir = tmp();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<ToolOutputLine>(4);
     let mut c = ctx(&dir);
     c.id_prefix = "a3f1.".to_string();
-    c.telemetry.tool_output = Some(tx);
+    c.message_prefix = "test.run".to_string();
+
+    let (_sub, mut rx) = subscribe_run("test.run");
 
     c.emit_output("call_0", "Bash", "Bash echo hi", "hi\n")
         .await;
-    let line = rx.recv().await.expect("a line was emitted");
-    assert_eq!(
-        line.id, "a3f1.call_0",
-        "id must carry the task-chain prefix"
-    );
-    assert_eq!(line.name, "Bash");
-    assert_eq!(line.text, "hi\n");
+
+    let (id, name, call, text) = loop {
+        match rx.recv().await {
+            Recv::Event(dispatch) => {
+                if let EventKind::ToolOutputChunk {
+                    id,
+                    name,
+                    call,
+                    text,
+                } = dispatch.into_kind()
+                {
+                    break (id, name, call, text);
+                }
+            }
+            Recv::Lagged(_) => continue,
+            Recv::Closed => panic!("bus closed before a chunk was emitted"),
+        }
+    };
+    assert_eq!(id, "a3f1.call_0", "id must carry the task-chain prefix");
+    assert_eq!(name, "Bash");
+    assert_eq!(call, "Bash echo hi");
+    assert_eq!(text, "hi\n");
 }
 
 #[tokio::test]
 async fn emit_output_without_prefix_keeps_the_raw_id() {
     let dir = tmp();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<ToolOutputLine>(4);
     let mut c = ctx(&dir);
-    c.telemetry.tool_output = Some(tx);
+    c.message_prefix = "test.run".to_string();
+
+    let (_sub, mut rx) = subscribe_run("test.run");
 
     c.emit_output("call_0", "Bash", "call", "x").await;
-    let line = rx.recv().await.expect("a line was emitted");
-    assert_eq!(line.id, "call_0", "top-level ids must stay unprefixed");
+
+    let id = loop {
+        match rx.recv().await {
+            Recv::Event(dispatch) => {
+                if let EventKind::ToolOutputChunk { id, .. } = dispatch.into_kind() {
+                    break id;
+                }
+            }
+            Recv::Lagged(_) => continue,
+            Recv::Closed => panic!("bus closed before a chunk was emitted"),
+        }
+    };
+    assert_eq!(id, "call_0", "top-level ids must stay unprefixed");
 }
 
 #[tokio::test]
@@ -214,8 +238,9 @@ async fn bash_echo_and_env() {
 async fn bash_streaming_emits_completed_lines_and_final_flush() {
     let dir = tmp();
     let mut c = ctx(&dir);
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<ToolOutputLine>(8);
-    c.telemetry.tool_output = Some(tx);
+    c.message_prefix = "test.bash".to_string();
+
+    let (_sub, mut rx) = subscribe_run("test.bash");
 
     // No trailing newline: the final flush must emit the trailing partial
     // with an appended `\n`.
@@ -224,10 +249,12 @@ async fn bash_streaming_emits_completed_lines_and_final_flush() {
     assert_eq!(out, "a\nbb\nccc");
 
     let mut chunks = Vec::new();
-    while let Ok(line) = rx.try_recv() {
-        assert_eq!(line.id, "tool-test-id");
-        assert_eq!(line.name, "Bash");
-        chunks.push(line.text);
+    while let Ok(dispatch) = rx.try_recv() {
+        if let EventKind::ToolOutputChunk { id, name, text, .. } = dispatch.into_kind() {
+            assert_eq!(id, "tool-test-id");
+            assert_eq!(name, "Bash");
+            chunks.push(text);
+        }
     }
     let joined: String = chunks.concat();
     assert_eq!(
@@ -348,13 +375,8 @@ async fn bash_invoke_respects_cwd() {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
@@ -389,13 +411,8 @@ async fn bash_invoke_cwd_none_uses_project_root() {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
@@ -428,13 +445,8 @@ async fn bash_invoke_cwd_none_diverges_from_process_cwd() {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
@@ -875,13 +887,8 @@ async fn mischief_invoke_blocked_in_headless() {
         allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
         task_fn: None,
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
@@ -907,13 +914,8 @@ async fn websearch_invoke_blocked_in_headless() {
         allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
         task_fn: None,
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
@@ -945,13 +947,8 @@ async fn websearch_invoke_blocked_in_headless_no_filter() {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
@@ -983,13 +980,8 @@ async fn websearch_invoke_blocked_in_headless_explicit_allowlist() {
         allowed_tools: Some(vec!["Read".into(), "WebSearch".into()]),
         task_fn: None,
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
@@ -1021,13 +1013,8 @@ async fn mischief_invoke_allowed_in_chat() {
         allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
         task_fn: None,
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: Some(Arc::new(std::sync::Mutex::new(vec![]))),
         skills_available: true,
         discovered_skills: None,
@@ -1972,13 +1959,8 @@ async fn filtered_tool_does_not_mutate_or_spawn() {
         allowed_tools: Some(vec!["Read".into()]),
         task_fn: None,
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
@@ -2927,13 +2909,8 @@ async fn task_no_callback_returns_error() {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
@@ -2961,13 +2938,8 @@ async fn task_callback_called_when_set() {
         allowed_tools: None,
         task_fn: Some(task_fn),
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
@@ -2993,13 +2965,8 @@ async fn task_empty_prompt_returns_error() {
         allowed_tools: None,
         task_fn: Some(task_fn),
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
@@ -3032,13 +2999,8 @@ async fn task_unknown_kind_rejected_before_callback() {
         allowed_tools: None,
         task_fn: Some(task_fn),
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
@@ -3066,13 +3028,8 @@ async fn task_result_is_headered_with_kind() {
         allowed_tools: None,
         task_fn: Some(task_fn),
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
@@ -3518,13 +3475,8 @@ async fn invoke_does_not_cap_task() {
         allowed_tools: None,
         task_fn: Some(task_fn),
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
@@ -3554,13 +3506,8 @@ fn allow_all_ctx(cwd: &Path) -> AgentLoopRuntime {
         allowed_tools: None,
         task_fn: None,
         audit_lock: None,
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,

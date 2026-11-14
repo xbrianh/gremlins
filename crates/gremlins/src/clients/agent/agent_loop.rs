@@ -10,21 +10,21 @@ use rig_core::driver::DynModel;
 use rig_core::error::ProviderError;
 use rig_core::operation::Completion;
 use rig_core::streaming::Streamed;
-use tokio::sync::{mpsc, watch, Semaphore};
+use tokio::sync::{mpsc, Semaphore};
 
 use crate::clients::backend::RunParams;
 use crate::clients::interactive::{InteractiveCommand, InteractiveSession, PauseToken};
 use gremlins_magic_bus::EventKind;
 
 use super::interactive::{interactive_loop, maybe_pause, InteractiveLoopResult};
-use super::plug::LoopHooks;
 use crate::clients::cancel::{default_classify, is_retryable, CancelToken, ErrorClassifier};
 use crate::clients::conversation::{Conversation, TurnScriptError};
 use crate::clients::error::ClientError;
 use crate::clients::format::{enrich_log_line, format_tool_call_parts, trunc};
 use crate::clients::protocol::{CompletedRun, TurnStats, UsageStats};
 use crate::clients::tools::tool_specs::ToolMode;
-use crate::clients::tools::{self, AgentLoopRuntime, AgentLoopTelemetry, ToolOutcome};
+use crate::clients::tools::{self, AgentLoopRuntime, ToolOutcome};
+use gremlins_magic_bus::{emit_event, emit_run_event_async};
 
 // ── Architecture ────────────────────────────────────────────────────────────
 // agent_loop.rs orchestrates a single agent turn-sequence:
@@ -50,15 +50,6 @@ pub(super) fn cancelled_error(message: impl Into<String>, history: &[Message]) -
     }
 }
 
-/// Discard any tool-output lines currently queued in the live-output
-/// receiver. Used when leaving a tool batch without the normal post-batch
-/// drain so stale chunks cannot be replayed by a later batch.
-fn discard_tool_output(rx: &mut Option<mpsc::Receiver<tools::ToolOutputLine>>) {
-    if let Some(rx) = rx.as_mut() {
-        while rx.try_recv().is_ok() {}
-    }
-}
-
 /// Sleep for the turn-level backoff, aborting early when the cancel token is
 /// set. Returns `true` if cancellation was observed (the caller must abandon
 /// the retry and unwind), `false` if the full backoff elapsed.
@@ -78,9 +69,11 @@ pub(crate) struct RunContext {
     pub(crate) reminder_budget: usize,
     pub(crate) completion_nudge_budget: usize,
     pub(crate) prepopulated_conversation: Box<dyn Conversation>,
-    /// Inversion-of-control hooks carrying cross-package dependencies
-    /// (prompt-debug, token-usage).
-    pub(crate) hooks: LoopHooks,
+    /// Prompt debug dumper: called with every serialized CompletionRequest.
+    pub(crate) dump_prompt_debug_fn: Arc<dyn Fn(&CompletionRequest) + Send + Sync>,
+    /// Token-usage emitter: (UsageStats, last_prompt_tokens, last_cached_input_tokens).
+    #[allow(clippy::type_complexity)]
+    pub(crate) emit_token_usage_fn: Arc<dyn Fn(UsageStats, Option<u64>, Option<u64>) + Send + Sync>,
 }
 
 impl RunContext {
@@ -100,7 +93,14 @@ impl RunContext {
             reminder_budget: crate::config::artifact_reminder_budget(),
             completion_nudge_budget: crate::config::completion_nudge_budget(),
             prepopulated_conversation: params.prepopulated_conversation.clone(),
-            hooks: params.hooks.clone().unwrap_or_else(LoopHooks::new),
+            dump_prompt_debug_fn: params
+                .dump_prompt_debug_fn
+                .clone()
+                .unwrap_or_else(|| Arc::new(|_| {})),
+            emit_token_usage_fn: params
+                .emit_token_usage_fn
+                .clone()
+                .unwrap_or_else(|| Arc::new(|_, _, _| {})),
             params,
         }
     }
@@ -148,7 +148,6 @@ pub(super) enum ToolDispatchOutcome {
 pub(super) struct LoopState {
     pub(super) system_prompt: Option<String>,
     pub(super) original_system_prompt: Option<String>,
-    pub(super) live_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
     pub(super) conv: Box<dyn Conversation>,
     pub(super) turns: usize,
     pub(super) turn_num: usize,
@@ -171,7 +170,11 @@ pub(super) struct LoopState {
     pub(super) reminder_budget: usize,
     pub(super) completion_nudge_budget: usize,
     pub(super) single_turn: bool,
-    pub(super) hooks: LoopHooks,
+    pub(super) dump_prompt_debug_fn: Arc<dyn Fn(&CompletionRequest) + Send + Sync>,
+    #[allow(clippy::type_complexity)]
+    pub(super) emit_token_usage_fn: Arc<dyn Fn(UsageStats, Option<u64>, Option<u64>) + Send + Sync>,
+    /// Run-scoped id for direct bus emission of log lines and stream events.
+    pub(super) message_prefix: String,
 }
 
 /// Accumulated state from one model completion stream.
@@ -236,7 +239,7 @@ pub(super) enum EmptyTurnAction {
 }
 
 impl LoopState {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub(super) fn new(
         system_prompt: Option<String>,
         prompt: &str,
@@ -245,11 +248,12 @@ impl LoopState {
         completion_nudge_budget: usize,
         single_turn: bool,
         interactive: Option<InteractiveSession>,
-        tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
         max_turns: usize,
         prefix: &str,
         preserve_reasoning_in_history: bool,
-        hooks: &LoopHooks,
+        dump_prompt_debug_fn: Arc<dyn Fn(&CompletionRequest) + Send + Sync>,
+        emit_token_usage_fn: Arc<dyn Fn(UsageStats, Option<u64>, Option<u64>) + Send + Sync>,
+        message_prefix: &str,
     ) -> Self {
         // Destructure the interactive session into its components so we can
         // thread them independently through the loop.
@@ -274,7 +278,6 @@ impl LoopState {
         Self {
             system_prompt,
             original_system_prompt,
-            live_output_rx: tool_output_rx,
             conv,
             turns: 0,
             turn_num: 0,
@@ -297,15 +300,26 @@ impl LoopState {
             reminder_budget,
             completion_nudge_budget,
             single_turn,
-            hooks: hooks.clone(),
+            dump_prompt_debug_fn,
+            emit_token_usage_fn,
+            message_prefix: message_prefix.to_string(),
         }
     }
 
-    /// Emit a log line through the per-gremlin log channel wired by the
-    /// executor. The bus routes each `LogLine` event through `log::info!()`
-    /// itself, so this must not also call `log::info!` directly.
+    /// Emit a log line to both `log::info!` (handled by the `log` crate
+    /// subscriber) and the event bus (when a message prefix is set).
+    ///
+    /// When `message_prefix` is empty (naked runs / tests with no subscriber),
+    /// the `emit_event` call is skipped to avoid per-message allocation and
+    /// lock overhead on the hot path.
     pub(super) fn hook_log(&self, msg: &str) {
-        self.hooks.log_line(msg);
+        log::info!("{msg}");
+        if !self.message_prefix.is_empty() {
+            emit_event(EventKind::LogLine {
+                id: self.message_prefix.clone(),
+                line: msg.to_string(),
+            });
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -335,7 +349,7 @@ impl LoopState {
 
         // Dump the full prompt to the state directory when
         // GREMLINS_LOG_LEVEL=DEBUG and a debug store is configured.
-        self.hooks.dump_prompt_debug(&builder);
+        (self.dump_prompt_debug_fn)(&builder);
 
         // Phase 2: launch the model stream, handling pre-stream errors and
         // retry inline (each path returns early).
@@ -586,60 +600,6 @@ impl LoopState {
         cancel: &CancelToken,
     ) -> Result<ToolDispatchOutcome, ClientError> {
         let ctx = tool_ctx.clone();
-        // Forward live tool output only for the duration of this batch. The
-        // receiver is taken for the duration of this batch, so later batches
-        // never hear stale chunks and Esc/clear cannot resurrect old output.
-        //
-        // Spawn the forwarder as a task so `exec_fut` completing never drops
-        // an in-flight `emit_stream_event` (which would lose the line already
-        // dequeued from `rx`). After the batch finishes, the stop signal
-        // flushes the forwarder and the receiver is returned to `self`.
-        let hooks = self.hooks.clone();
-        let stop_tx = if self.hooks.wants_stream_events {
-            if let Some(mut rx) = self.live_output_rx.take() {
-                let hooks = hooks.clone();
-                let (stop_tx, mut stop_rx) = watch::channel(false);
-                let handle = tokio::spawn(async move {
-                    loop {
-                        let line = tokio::select! {
-                            biased;
-                            _ = stop_rx.changed() => break,
-                            line = rx.recv() => line,
-                        };
-                        let Some(line) = line else {
-                            break;
-                        };
-                        tokio::select! {
-                            biased;
-                            _ = stop_rx.changed() => break,
-                            _ = hooks.emit_stream_event(EventKind::ToolOutputChunk {
-                                id: line.id,
-                                name: line.name,
-                                call: line.call,
-                                text: line.text,
-                            }) => {}
-                        }
-                    }
-                    rx
-                });
-                Some((stop_tx, handle))
-            } else {
-                None
-            }
-        } else {
-            // Drain the channel so the sender doesn't block when
-            // no stream subscriber will consume the live output.
-            if let Some(mut rx) = self.live_output_rx.take() {
-                let handle = tokio::spawn(async move {
-                    while rx.recv().await.is_some() {}
-                    rx
-                });
-                let (stop_tx, _) = watch::channel(false);
-                Some((stop_tx, handle))
-            } else {
-                None
-            }
-        };
         let sem = Arc::new(Semaphore::new(tools::MAX_CONCURRENT_TOOLS));
         // Borrow self.conv as &dyn Conversation so concurrent async blocks
         // can seed child task loops without needing a mutable borrow.
@@ -659,19 +619,6 @@ impl LoopState {
 
         let outcomes = tokio::select! {
             outcomes = exec_fut => {
-                // Normal completion: signal the forwarder to stop, then
-                // await it. The forwarder's in-flight send (if any)
-                // completes before the rx is returned, so no line is
-                // lost. The post-batch drain in emit_tool_results picks
-                // up any remaining lines queued after the forwarder
-                // exited.
-                if let Some((stop_tx, handle)) = stop_tx {
-                    let _ = stop_tx.send(true);
-                    self.live_output_rx = Some(handle.await.unwrap_or_else(|_| {
-                        let (_tx, rx) = mpsc::channel(1);
-                        rx
-                    }));
-                }
                 outcomes
             }
             _ = cancel.cancelled() => {
@@ -682,18 +629,6 @@ impl LoopState {
                 // to complete.
                 self.hook_log(&format!("agent_loop: cancelled mid-tool (label={})", prefix));
                 self.hook_log(&format!("{prefix}exit: cancelled mid-tool"));
-                // Signal the forwarder to stop, then await it so its
-                // in-flight send completes and the rx is returned.
-                if let Some((stop_tx, handle)) = stop_tx {
-                    let _ = stop_tx.send(true);
-                    self.live_output_rx = Some(handle.await.unwrap_or_else(|_| {
-                        // If the forwarder panicked, create a fresh empty
-                        // channel so the agent loop doesn't crash.
-                        let (_tx, rx) = mpsc::channel(1);
-                        rx
-                    }));
-                }
-                discard_tool_output(&mut self.live_output_rx);
                 return Err(cancelled_error("cancelled", &self.conv.messages()));
             }
             _ = maybe_pause(&self.pause) => {
@@ -702,15 +637,6 @@ impl LoopState {
                 // (files written, bash commands run) are not unwound.
                 self.hook_log(&format!("agent_loop: paused mid-tool (label={})", prefix));
                 self.hook_log(&format!("{prefix}pause: entering interactive mode (mid-tool)"));
-                // Signal the forwarder to stop and await it.
-                if let Some((stop_tx, handle)) = stop_tx {
-                    let _ = stop_tx.send(true);
-                    self.live_output_rx = Some(handle.await.unwrap_or_else(|_| {
-                        let (_tx, rx) = mpsc::channel(1);
-                        rx
-                    }));
-                }
-                discard_tool_output(&mut self.live_output_rx);
                 if let Some(ref p) = self.pause {
                     p.reset();
                 }
@@ -720,56 +646,24 @@ impl LoopState {
                 // cleanly without duplicate history entries.
                 self.conv.pop_last_assistant_turn();
 
-                // Amend system prompt with operator note.
-                let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
-                let amended_system = match &self.system_prompt {
-                    Some(sp) => format!("{sp}{debug_note}"),
-                    None => debug_note.trim_start().to_string(),
-                };
-                self.system_prompt = Some(amended_system);
-
-                // Enter interactive mode.
-                if self.cmd_rx.is_some() && self.pause.is_some() {
-                    let mut session = InteractiveSession {
-                        cmd_rx: self.cmd_rx.take().unwrap(),
-                        pause: self.pause.clone().unwrap(),
-                    };
-                    match interactive_loop(
-                        model,
-                        &mut *self.conv,
-                        &mut session,
-                        self.turn_num,
-                        &self.hooks,
-                    )
-                    .await
-                    {
-                        Ok(InteractiveLoopResult::Resumed) => {
-                            self.system_prompt = self.original_system_prompt.clone();
-                            self.cmd_rx = Some(session.cmd_rx);
-                            self.interactive_active = false;
-                            return Ok(ToolDispatchOutcome::ReexecuteTurn);
-                        }
-                        Ok(InteractiveLoopResult::RunOneTurn) => {
-                            self.cmd_rx = Some(session.cmd_rx);
-                            self.pending_run_one_turn = true;
-                            return Ok(ToolDispatchOutcome::ReexecuteTurn);
-                        }
-                        Err(e) => {
-                            self.hook_log(&format!("agent_loop: exit (operator bailed, label={})", prefix));
-                            self.hook_log(&format!("{prefix}exit: operator bailed"));
-                            return Err(e);
-                        }
+                match self.enter_interactive_mode(model, prefix).await? {
+                    InteractiveLoopResult::Resumed => {
+                        self.interactive_active = false;
+                        return Ok(ToolDispatchOutcome::ReexecuteTurn);
+                    }
+                    InteractiveLoopResult::RunOneTurn => {
+                        self.pending_run_one_turn = true;
+                        return Ok(ToolDispatchOutcome::ReexecuteTurn);
                     }
                 }
-                return Ok(ToolDispatchOutcome::ReexecuteTurn);
             }
         };
 
         Ok(ToolDispatchOutcome::Completed(outcomes))
     }
 
-    /// Emit tool results in request order: drain trailing live output,
-    /// publish ToolResult events, extend history, and roll the prompt forward.
+    /// Emit tool results in request order, publish ToolResult events,
+    /// extend history, and roll the prompt forward.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn emit_tool_results(
         &mut self,
@@ -782,28 +676,6 @@ impl LoopState {
         captured: &mut Option<Vec<serde_json::Value>>,
         cancel: &CancelToken,
     ) -> Result<(), ClientError> {
-        // Tools send their final chunks just before returning. The select
-        // above stops at the first completed future, so drain anything still
-        // sitting in the receiver before emitting ToolResult events.
-        if let Some(rx) = self.live_output_rx.as_mut() {
-            while let Ok(line) = rx.try_recv() {
-                if self.hooks.wants_stream_events {
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => {
-                            return Err(cancelled_error("cancelled", &self.conv.messages()));
-                        }
-                        _ = self.hooks.emit_stream_event(EventKind::ToolOutputChunk {
-                            id: line.id,
-                            name: line.name,
-                            call: line.call,
-                            text: line.text,
-                        }) => {}
-                    }
-                }
-            }
-        }
-
         // Jobs and results are 1:1 and in request order; `job_count` stands in
         // for `tool_calls.len()` when bumping the turn counter below.
         let job_count = jobs.len();
@@ -820,22 +692,20 @@ impl LoopState {
                     evts.push(result_evt);
                 }
             }
-            // Emit tool result via the stream-event hook when registered.
-            if self.hooks.wants_stream_events {
-                // Per-tool preview budget (Read uses a larger preview).
-                let display = trunc(&output, tools::display_truncation(&job.name));
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => {
-                        return Err(cancelled_error("cancelled", &self.conv.messages()));
-                    }
-                    _ = self.hooks.emit_stream_event(EventKind::ToolResult {
-                        id: format!("{}{}", tool_ctx.id_prefix, job.id),
-                        name: job.name.clone(),
-                        call: job.call.clone(),
-                        output: display,
-                    }) => {}
+            // Emit tool result via direct bus call.
+            // Per-tool preview budget (Read uses a larger preview).
+            let display = trunc(&output, tools::display_truncation(&job.name));
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    return Err(cancelled_error("cancelled", &self.conv.messages()));
                 }
+                _ = emit_run_event_async(&self.message_prefix, EventKind::ToolResult {
+                    id: format!("{}{}", tool_ctx.id_prefix, job.id),
+                    name: job.name.clone(),
+                    call: job.call.clone(),
+                    output: display,
+                }) => {}
             }
 
             result_msgs.push(Message::tool_result(
@@ -860,6 +730,68 @@ impl LoopState {
         prefix: &str,
     ) -> Result<InteractiveBoundary, ClientError> {
         super::interactive::await_interactive_turn(self, model, prefix).await
+    }
+
+    /// Enter interactive mode: amend system prompt with debug note, then
+    /// drive the interactive_loop state machine. On success, the session's
+    /// cmd_rx is restored, and on Resumed the original system_prompt is
+    /// restored. The caller handles the InteractiveLoopResult to dispatch
+    /// the appropriate control-flow action.
+    ///
+    /// The session invariant (`cmd_rx` and `pause` must both be `Some`)
+    /// is guarded before amending the system prompt so a partial session
+    /// cannot permanently consume `cmd_rx` or leak the operator debug note.
+    pub(super) async fn enter_interactive_mode(
+        &mut self,
+        model: &DynModel<Completion>,
+        prefix: &str,
+    ) -> Result<InteractiveLoopResult, ClientError> {
+        // Guard: both must be present to enter interactive mode.
+        // Old code panicked on invariant violation; we degrade to
+        // Resumed so callers don't wedge.
+        if self.cmd_rx.is_none() || self.pause.is_none() {
+            return Ok(InteractiveLoopResult::Resumed);
+        }
+
+        let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
+        let amended_system = match &self.system_prompt {
+            Some(sp) => format!("{sp}{debug_note}"),
+            None => debug_note.trim_start().to_string(),
+        };
+        self.system_prompt = Some(amended_system);
+
+        let mut session = InteractiveSession {
+            cmd_rx: self.cmd_rx.take().unwrap(),
+            pause: self.pause.clone().unwrap(),
+        };
+
+        match interactive_loop(
+            model,
+            &mut *self.conv,
+            &mut session,
+            self.turn_num,
+            &self.message_prefix,
+        )
+        .await
+        {
+            Ok(InteractiveLoopResult::Resumed) => {
+                self.system_prompt = self.original_system_prompt.clone();
+                self.cmd_rx = Some(session.cmd_rx);
+                Ok(InteractiveLoopResult::Resumed)
+            }
+            Ok(InteractiveLoopResult::RunOneTurn) => {
+                self.cmd_rx = Some(session.cmd_rx);
+                Ok(InteractiveLoopResult::RunOneTurn)
+            }
+            Err(e) => {
+                self.hook_log(&format!(
+                    "agent_loop: exit (operator bailed, label={})",
+                    prefix
+                ));
+                self.hook_log(&format!("{prefix}exit: operator bailed"));
+                Err(e)
+            }
+        }
     }
 
     /// Fold this turn's provider usage into the running totals and return the
@@ -989,6 +921,141 @@ impl LoopState {
             input_tokens,
         )
     }
+
+    // ── summary / final helpers ───────────────────────────────
+
+    /// Emit stage-end telemetry summary (always emitted, not gated by GREMLINS_TELEMETRY).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn emit_summary(
+        &self,
+        prefix: &str,
+        turns: usize,
+        loop_start: Instant,
+        total_prompt: Option<u64>,
+        total_completion: Option<u64>,
+        total_cached: Option<u64>,
+        total_cache_creation: Option<u64>,
+        total_reasoning: Option<u64>,
+    ) {
+        let wall = loop_start.elapsed();
+        let total_prompt_u = total_prompt.unwrap_or(0);
+        let total_completion_u = total_completion.unwrap_or(0);
+        let token_total = total_prompt_u + total_completion_u;
+
+        let prompt_avg = if turns > 0 {
+            total_prompt_u / turns as u64
+        } else {
+            0
+        };
+        let completion_avg = if turns > 0 {
+            total_completion_u / turns as u64
+        } else {
+            0
+        };
+        let cached_avg = if total_prompt_u > 0 {
+            format!(
+                "{:.0}%",
+                (total_cached.unwrap_or(0) as f64 / total_prompt_u as f64) * 100.0
+            )
+        } else {
+            "-".into()
+        };
+        let reasoning_pct = if total_completion_u > 0 {
+            format!(
+                "{:.0}%",
+                (total_reasoning.unwrap_or(0) as f64 / total_completion_u as f64) * 100.0
+            )
+        } else {
+            "-".into()
+        };
+
+        let msg = format!(
+            "summary: turns={} wall={:.1}s token_total={} prompt_avg={} completion_avg={} cached_avg={} cache_creation={} reasoning_pct={}",
+            turns,
+            wall.as_secs_f64(),
+            token_total,
+            prompt_avg,
+            completion_avg,
+            cached_avg,
+            total_cache_creation.unwrap_or(0),
+            reasoning_pct,
+        );
+        self.hook_log(&format!("{prefix}{msg}"));
+    }
+
+    pub(super) fn emit_final(&self, prefix: &str, turns: usize, suffix: &str) {
+        let msg = format!("final: turns={turns} cost=not-reported{suffix}");
+        self.hook_log(&format!("{prefix}{msg}"));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn emit_turn_metrics(
+        &self,
+        prefix: &str,
+        turn: usize,
+        first_token: Option<Instant>,
+        last_token: Option<Instant>,
+        turn_start: Instant,
+        reasoning: &str,
+        text: &str,
+        tool_calls: &[ToolCall],
+        usage: Option<&Usage>,
+    ) {
+        if !crate::config::telemetry_enabled() {
+            return;
+        }
+
+        let ttft = first_token
+            .map(|ft| ft.duration_since(turn_start))
+            .map(|d| format!("{:.1}s", d.as_secs_f64()))
+            .unwrap_or_else(|| "-".into());
+
+        let gen_time = match (first_token, last_token) {
+            (Some(ft), Some(lt)) => {
+                let d = lt.duration_since(ft);
+                format!("{:.1}s", d.as_secs_f64())
+            }
+            _ => "-".into(),
+        };
+
+        let prompt = usage.and_then(|u| u.input_tokens).unwrap_or(0);
+        let completion = usage.and_then(|u| u.output_tokens).unwrap_or(0);
+        let cached = usage.and_then(|u| u.cached_input_tokens).unwrap_or(0);
+        let reasoning_tok = usage.and_then(|u| u.reasoning_tokens).unwrap_or(0);
+
+        let cache_pct = if prompt > 0 {
+            format!("{:.0}%", (cached as f64 / (prompt as f64).max(1.0)) * 100.0)
+        } else {
+            "-".into()
+        };
+
+        let reasoning_bytes = reasoning.len();
+        let text_bytes = text.len();
+        let total_bytes = reasoning_bytes + text_bytes;
+        let reasoning_byte_ratio = if total_bytes > 0 {
+            format!(
+                "{:.0}%",
+                (reasoning_bytes as f64 / total_bytes as f64) * 100.0
+            )
+        } else {
+            "-".into()
+        };
+
+        let msg = format!(
+            "metrics: turn={} ttft={} gen={} tools={} prompt={} completion={} cached={}({}) reasoning_tok={} reasoning_byte_ratio={}",
+            turn,
+            ttft,
+            gen_time,
+            tool_calls.len(),
+            prompt,
+            completion,
+            cached,
+            cache_pct,
+            reasoning_tok,
+            reasoning_byte_ratio,
+        );
+        self.hook_log(&format!("{prefix}{msg}"));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1072,23 +1139,8 @@ pub(crate) async fn run_agent_loop(
         }
         tools::SandboxMode::Roots(allowed_roots)
     };
-    // Only build the live-output channel when a stream-event subscriber is
-    // wired (chat, debug, or actor-launched pipeline runs). Naked runs and
-    // tests skip the channel, avoiding per-line String allocation and a
-    // forwarder that drains-and-discards every chunk. The bounded mpsc gives
-    // the read loop backpressure: when the forwarder or chat consumer is
-    // slow, `emit_output` awaits capacity instead of dropping live chunks.
-    let (tool_output_tx, tool_output_rx) = if ctx.hooks.wants_stream_events {
-        let (tx, rx) = mpsc::channel::<tools::ToolOutputLine>(1024);
-        (Some(tx), Some(rx))
-    } else {
-        (None, None)
-    };
-    let telemetry = AgentLoopTelemetry {
-        emit_stream_event: Some(ctx.hooks.emit_stream_event_fn.clone()),
-        wants_stream_events: ctx.hooks.wants_stream_events,
-        tool_output: tool_output_tx,
-    };
+    // Run-scoped id for direct bus emission. Empty for naked runs/tests.
+    let message_prefix = ctx.params.gremlin_id.clone().unwrap_or_default();
     let mut tool_ctx = AgentLoopRuntime {
         cwd: cwd.clone(),
         extra_env,
@@ -1098,9 +1150,8 @@ pub(crate) async fn run_agent_loop(
         allowed_tools: opts.tool_filter.map(|s| s.to_vec()),
         task_fn: None,
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
-        log_line_fn: Some(ctx.hooks.log_line_fn.clone()),
         id_prefix: String::new(),
-        telemetry,
+        message_prefix: message_prefix.clone(),
         active_skills: ctx.params.active_skills.clone(),
         skills_available: ctx.params.skills_available,
         discovered_skills: ctx.params.discovered_skills.clone(),
@@ -1147,9 +1198,9 @@ pub(crate) async fn run_agent_loop(
         &ctx.expected_artifact_paths,
         ctx.reminder_budget,
         ctx.completion_nudge_budget,
-        &ctx.hooks,
+        Arc::clone(&ctx.dump_prompt_debug_fn),
+        Arc::clone(&ctx.emit_token_usage_fn),
         interactive,
-        tool_output_rx,
         ctx.prepopulated_conversation.clone(),
     )
     .await
@@ -1198,15 +1249,7 @@ pub(crate) async fn run_agent_loop_nested(
     nested_tool_ctx.skills_available = false;
     nested_tool_ctx.active_skills = None;
     // Nested loops keep the parent's stream (so their `ToolResult` events reach
-    // the parent TUI) and inherit the parent's tool-output sender rather than
-    // owning a second forwarder. Only the top-level loop runs the live-output
-    // forwarder, so a child never competes with the parent for a bounded stream
-    // slot — the two-forwarder design could stall a small-capacity stream.
-    nested_tool_ctx.telemetry = AgentLoopTelemetry {
-        emit_stream_event: tool_ctx.telemetry.emit_stream_event.clone(),
-        wants_stream_events: tool_ctx.telemetry.wants_stream_events,
-        tool_output: tool_ctx.telemetry.tool_output.clone(),
-    };
+    // the parent TUI) via the same `message_prefix`.
     // Prefix this task's tool call IDs with its chain so two tasks that reuse a
     // raw provider ID (e.g. `call_0`) don't collide on the parent TUI's per-ID
     // live slots. Model history keeps the original IDs.
@@ -1215,26 +1258,13 @@ pub(crate) async fn run_agent_loop_nested(
     } else {
         format!("{id_chain}.")
     };
-    // Nested-loop log lines go through the process logger; callers observe
-    // task begin/end events via the process-wide logger.
-    let hooks = LoopHooks {
-        log_line_fn: tool_ctx
-            .log_line_fn
-            .clone()
-            .unwrap_or_else(|| Arc::new(|_| {})),
-        // Inherit the parent's stream-event hook so the child's tool-output
-        // and tool-result events reach the parent stream (prefixed with this
-        // task's id chain) rather than being silently dropped.
-        emit_stream_event_fn: tool_ctx
-            .telemetry
-            .emit_stream_event
-            .clone()
-            .unwrap_or_else(|| Arc::new(|_| Box::pin(std::future::ready(())))),
-        wants_stream_events: tool_ctx.telemetry.wants_stream_events,
-        ..LoopHooks::new()
-    };
-    hooks.log_line(&format!("{prefix}task: begin (max_turns={max_turns})"));
     log::info!("{prefix}task: begin (max_turns={max_turns})");
+    if !nested_tool_ctx.message_prefix.is_empty() {
+        emit_event(EventKind::LogLine {
+            id: nested_tool_ctx.message_prefix.clone(),
+            line: format!("{prefix}task: begin (max_turns={max_turns})"),
+        });
+    }
     let result = run_agent_loop_core(
         &model,
         prompt,
@@ -1252,14 +1282,19 @@ pub(crate) async fn run_agent_loop_nested(
         &[],
         0,
         completion_nudge_budget,
-        &hooks,
-        None,
+        Arc::new(|_| {}),
+        Arc::new(|_, _, _| {}),
         None,
         prepopulated_conversation,
     )
     .await;
     log::info!("{prefix}task: end");
-    hooks.log_line(&format!("{prefix}task: end"));
+    if !nested_tool_ctx.message_prefix.is_empty() {
+        emit_event(EventKind::LogLine {
+            id: nested_tool_ctx.message_prefix.clone(),
+            line: format!("{prefix}task: end"),
+        });
+    }
     result
 }
 
@@ -1292,7 +1327,7 @@ fn turn_stats(turn: usize, usage: Option<&Usage>) -> Option<TurnStats> {
 
 // ── agent loop ────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) async fn run_agent_loop_core(
     model: &DynModel<Completion>,
     prompt: &str,
@@ -1310,9 +1345,9 @@ pub(crate) async fn run_agent_loop_core(
     expected_artifact_paths: &[PathBuf],
     reminder_budget: usize,
     completion_nudge_budget: usize,
-    hooks: &LoopHooks,
+    dump_prompt_debug_fn: Arc<dyn Fn(&CompletionRequest) + Send + Sync>,
+    emit_token_usage_fn: Arc<dyn Fn(UsageStats, Option<u64>, Option<u64>) + Send + Sync>,
     interactive: Option<InteractiveSession>,
-    tool_output_rx: Option<mpsc::Receiver<tools::ToolOutputLine>>,
     prepopulated_conversation: Box<dyn Conversation>,
 ) -> Result<CompletedRun, ClientError> {
     let mut state = LoopState::new(
@@ -1323,11 +1358,12 @@ pub(crate) async fn run_agent_loop_core(
         completion_nudge_budget,
         opts.single_turn,
         interactive,
-        tool_output_rx,
         max_turns,
         prefix,
         opts.preserve_reasoning_in_history,
-        hooks,
+        dump_prompt_debug_fn,
+        emit_token_usage_fn,
+        &tool_ctx.message_prefix,
     );
     let loop_start = Instant::now();
     let turn_retry_backoff = crate::config::turn_retry_backoff();
@@ -1404,14 +1440,14 @@ pub(crate) async fn run_agent_loop_core(
         let turn_stats = turn_stats(state.turn_num, turn_usage.as_ref());
         let totals = state.fold_turn_usage(turn_usage.as_ref());
 
-        // ── Emit cumulative token usage via hooks ─────
+        // ── Emit cumulative token usage ─────
         let (last_prompt, last_cached) = turn_stats
             .as_ref()
             .map(|ts| (ts.prompt_tokens, ts.cached_input_tokens))
             .unwrap_or((None, None));
-        hooks.emit_token_usage(totals.clone(), last_prompt, last_cached);
+        (state.emit_token_usage_fn)(totals.clone(), last_prompt, last_cached);
 
-        emit_turn_stats(prefix, state.turn_num, turn_stats.as_ref(), &totals, hooks);
+        emit_turn_stats(prefix, state.turn_num, turn_stats.as_ref(), &totals);
 
         state
             .emit_turn_artifacts(
@@ -1510,8 +1546,8 @@ pub(crate) async fn run_agent_loop_core(
         } else {
             ""
         };
-        emit_final(prefix, state.turns, suffix, hooks);
-        emit_summary(
+        state.emit_final(prefix, state.turns, suffix);
+        state.emit_summary(
             prefix,
             state.turn_num,
             loop_start,
@@ -1520,7 +1556,6 @@ pub(crate) async fn run_agent_loop_core(
             state.total_cached_tokens,
             state.total_cache_creation_tokens,
             state.total_reasoning_tokens,
-            hooks,
         );
     }
 
@@ -1624,13 +1659,7 @@ fn write_raw(raw: &mut Option<std::fs::File>, evt: &serde_json::Value) {
 ///
 /// This is always logged regardless of the telemetry gate; timing and output
 /// byte-ratio extras live in the [`emit_turn_metrics`] path in `turn_flow.rs`.
-fn emit_turn_stats(
-    prefix: &str,
-    turn: usize,
-    stats: Option<&TurnStats>,
-    totals: &UsageStats,
-    _hooks: &LoopHooks,
-) {
+fn emit_turn_stats(prefix: &str, turn: usize, stats: Option<&TurnStats>, totals: &UsageStats) {
     let payload = serde_json::json!({
         "type": "turn_stats",
         "turn": turn,
@@ -1639,76 +1668,6 @@ fn emit_turn_stats(
     });
     let msg = format!("{prefix}{payload}");
     log::info!("{msg}");
-}
-
-/// Emit stage-end telemetry summary (always emitted, not gated by GREMLINS_TELEMETRY).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn emit_summary(
-    prefix: &str,
-    turns: usize,
-    loop_start: Instant,
-    total_prompt: Option<u64>,
-    total_completion: Option<u64>,
-    total_cached: Option<u64>,
-    total_cache_creation: Option<u64>,
-    total_reasoning: Option<u64>,
-    hooks: &LoopHooks,
-) {
-    let wall = loop_start.elapsed();
-    let total_prompt_u = total_prompt.unwrap_or(0);
-    let total_completion_u = total_completion.unwrap_or(0);
-    let token_total = total_prompt_u + total_completion_u;
-
-    let prompt_avg = if turns > 0 {
-        total_prompt_u / turns as u64
-    } else {
-        0
-    };
-    let completion_avg = if turns > 0 {
-        total_completion_u / turns as u64
-    } else {
-        0
-    };
-    let cached_avg = if total_prompt_u > 0 {
-        format!(
-            "{:.0}%",
-            (total_cached.unwrap_or(0) as f64 / total_prompt_u as f64) * 100.0
-        )
-    } else {
-        "-".into()
-    };
-    // Reasoning tokens are a subset of completion/output tokens, so report the
-    // ratio against completion — "how much of the model's output was reasoning".
-    let reasoning_pct = if total_completion_u > 0 {
-        format!(
-            "{:.0}%",
-            (total_reasoning.unwrap_or(0) as f64 / total_completion_u as f64) * 100.0
-        )
-    } else {
-        "-".into()
-    };
-
-    let msg = format!(
-        "summary: turns={} wall={:.1}s token_total={} prompt_avg={} completion_avg={} cached_avg={} cache_creation={} reasoning_pct={}",
-        turns,
-        wall.as_secs_f64(),
-        token_total,
-        prompt_avg,
-        completion_avg,
-        cached_avg,
-        total_cache_creation.unwrap_or(0),
-        reasoning_pct,
-    );
-    let full = format!("{prefix}{msg}");
-    log::info!("{full}");
-    hooks.log_line(&full);
-}
-
-pub(super) fn emit_final(prefix: &str, turns: usize, suffix: &str, hooks: &LoopHooks) {
-    let msg = format!("final: turns={turns} cost=not-reported{suffix}");
-    let full = format!("{prefix}{msg}");
-    log::info!("{full}");
-    hooks.log_line(&full);
 }
 
 // ── lifted test helpers (used by conversation/standard.rs tests) ────────
@@ -1856,7 +1815,8 @@ pub(crate) fn test_ctx(
             discovered_skills: None,
             active_skills: None,
             extra_sandbox_roots: Vec::new(),
-            hooks: None,
+            dump_prompt_debug_fn: None,
+            emit_token_usage_fn: None,
         },
         prefix: "[t] ".into(),
         idle_timeout: 0.05,
@@ -1864,7 +1824,8 @@ pub(crate) fn test_ctx(
         reminder_budget: 0,
         completion_nudge_budget: 0,
         prepopulated_conversation: conv,
-        hooks: crate::clients::agent::plug::LoopHooks::new(),
+        dump_prompt_debug_fn: Arc::new(|_| {}),
+        emit_token_usage_fn: Arc::new(|_, _, _| {}),
     }
 }
 
@@ -1879,13 +1840,8 @@ pub(crate) fn test_tool_ctx() -> crate::clients::tools::AgentLoopRuntime {
         allowed_tools: None,
         task_fn: None,
         audit_lock: Some(std::sync::Arc::new(std::sync::Mutex::new(()))),
-        log_line_fn: None,
         id_prefix: String::new(),
-        telemetry: crate::clients::tools::AgentLoopTelemetry {
-            emit_stream_event: None,
-            wants_stream_events: false,
-            tool_output: None,
-        },
+        message_prefix: String::new(),
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
@@ -1898,13 +1854,13 @@ mod tests {
     use crate::clients::conversation::ConversationStub;
     use crate::clients::format::{assistant_tool_message, key_arg};
     use crate::clients::interactive::InteractiveChannels;
+    use gremlins_magic_bus::{self, Recv};
     use http::StatusCode;
     use rig_core::completion::message::AssistantContent;
     use rig_core::message::{Issuer, Reasoning, ReasoningContent, ToolFunction, UserContent};
     use rig_core::operation::Completion;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use tokio::sync::broadcast::error::RecvError;
 
     #[test]
     fn turn_stats_passes_through_partial_usage_without_zero_filling() {
@@ -4579,32 +4535,32 @@ mod tests {
     /// child result can't collide on the parent TUI's per-ID live slots.
     #[tokio::test]
     async fn nested_task_shares_stream_and_prefixes_ids() {
+        gremlins_magic_bus::init_bus();
         let _env = crate::test_support::EnvGuard::lock();
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
         let mut ctx = test_ctx(None, None);
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
-        // Small bounded stream, mirroring the chat path's backpressure.
-        let (stream_tx, mut stream_rx) = mpsc::channel::<EventKind>(8);
+        // Use a test-specific run id so the per-run bus subscription doesn't
+        // pick up events from other parallel tests.
+        ctx.params.gremlin_id = Some("nested_task_shares_stream".to_string());
 
         let collected = Arc::new(std::sync::Mutex::new(Vec::<EventKind>::new()));
         let sink = collected.clone();
+        let (_sub, mut bus_rx) = gremlins_magic_bus::subscribe_run("nested_task_shares_stream");
         let drain = tokio::spawn(async move {
-            while let Some(ev) = stream_rx.recv().await {
-                sink.lock().unwrap().push(ev);
+            loop {
+                match bus_rx.recv().await {
+                    Recv::Event(e) => {
+                        let kind = e.into_kind();
+                        sink.lock().unwrap().push(kind);
+                    }
+                    Recv::Closed => break,
+                    Recv::Lagged(_) => continue,
+                }
             }
         });
-
-        // The stream-event hook mirrors the chat path's bounded, awaited send.
-        let mut hooks = LoopHooks::new();
-        hooks.register_stream_event(move |event: EventKind| {
-            let stream_tx = stream_tx.clone();
-            async move {
-                let _ = stream_tx.send(event).await;
-            }
-        });
-        ctx.hooks = hooks;
 
         // parent turn 1 delegates, child runs a Bash command (live output)
         // then finishes, parent turn 2 finishes.
@@ -4862,6 +4818,7 @@ mod tests {
     /// Ready, and waits for a command.
     #[tokio::test]
     async fn interactive_pause_at_turn_boundary_broadcasts_ready() {
+        gremlins_magic_bus::init_bus();
         let channels = InteractiveChannels::new();
         let (handle, session) = channels.split();
 
@@ -4885,14 +4842,7 @@ mod tests {
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let dyn_model = model.erase();
-        let (evt_tx, mut evt_rx) = tokio::sync::broadcast::channel::<EventKind>(64);
-        let mut hooks = LoopHooks::new();
-        hooks.register_stream_event(move |event: EventKind| {
-            let tx = evt_tx.clone();
-            async move {
-                let _ = tx.send(event);
-            }
-        });
+        let (_sub, mut evt_rx) = gremlins_magic_bus::subscribe_all();
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
                 &dyn_model,
@@ -4911,9 +4861,9 @@ mod tests {
                 &[],
                 0,
                 0,
-                &hooks,
+                Arc::new(|_| {}),
+                Arc::new(|_, _, _| {}),
                 Some(session),
-                None,
                 Box::new(ConversationStub::new("hi")),
             )
             .await
@@ -4923,10 +4873,13 @@ mod tests {
         let ready = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match evt_rx.recv().await {
-                    Ok(EventKind::Ready { .. }) => return true,
-                    Ok(EventKind::Ended { .. }) => return false,
-                    Err(RecvError::Closed) => return false,
-                    _ => continue,
+                    gremlins_magic_bus::Recv::Event(e) => match e.into_kind() {
+                        EventKind::Ready { .. } => return true,
+                        EventKind::Ended { .. } => return false,
+                        _ => continue,
+                    },
+                    gremlins_magic_bus::Recv::Closed => return false,
+                    gremlins_magic_bus::Recv::Lagged(_) => continue,
                 }
             }
         })
@@ -4950,6 +4903,7 @@ mod tests {
     /// it, emits TurnComplete, then Quit resumes normal operation.
     #[tokio::test]
     async fn interactive_inject_then_run_turn_then_quit() {
+        gremlins_magic_bus::init_bus();
         let dir = std::env::temp_dir().join(format!(
             "gremlins-oa-int-{}-{}",
             std::process::id(),
@@ -4998,14 +4952,7 @@ mod tests {
             ],
         ]);
         let dyn_model = model.erase();
-        let (evt_tx, mut evt_rx) = tokio::sync::broadcast::channel::<EventKind>(64);
-        let mut hooks = LoopHooks::new();
-        hooks.register_stream_event(move |event: EventKind| {
-            let tx = evt_tx.clone();
-            async move {
-                let _ = tx.send(event);
-            }
-        });
+        let (_sub, mut evt_rx) = gremlins_magic_bus::subscribe_all();
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
                 &dyn_model,
@@ -5024,9 +4971,9 @@ mod tests {
                 &[],
                 0,
                 0,
-                &hooks,
+                Arc::new(|_| {}),
+                Arc::new(|_, _, _| {}),
                 Some(session),
-                None,
                 Box::new(ConversationStub::new("hi")),
             )
             .await
@@ -5036,7 +4983,9 @@ mod tests {
         let ready = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match evt_rx.recv().await {
-                    Ok(EventKind::Ready { .. }) => return true,
+                    Recv::Event(e) if matches!(e.kind(), EventKind::Ready { .. }) => return true,
+                    Recv::Closed => return false,
+                    Recv::Lagged(_) => continue,
                     _ => continue,
                 }
             }
@@ -5055,7 +5004,11 @@ mod tests {
         let tc = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match evt_rx.recv().await {
-                    Ok(EventKind::TurnComplete { .. }) => return true,
+                    Recv::Event(e) if matches!(e.kind(), EventKind::TurnComplete { .. }) => {
+                        return true
+                    }
+                    Recv::Closed => return false,
+                    Recv::Lagged(_) => continue,
                     _ => continue,
                 }
             }
@@ -5078,6 +5031,7 @@ mod tests {
     /// Bail during interactive mode terminates the agent loop.
     #[tokio::test]
     async fn interactive_bail_terminates_agent() {
+        gremlins_magic_bus::init_bus();
         let channels = InteractiveChannels::new();
         let (handle, session) = channels.split();
 
@@ -5098,14 +5052,7 @@ mod tests {
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let dyn_model = model.erase();
-        let (evt_tx, mut evt_rx) = tokio::sync::broadcast::channel::<EventKind>(64);
-        let mut hooks = LoopHooks::new();
-        hooks.register_stream_event(move |event: EventKind| {
-            let tx = evt_tx.clone();
-            async move {
-                let _ = tx.send(event);
-            }
-        });
+        let (_sub, mut evt_rx) = gremlins_magic_bus::subscribe_all();
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
                 &dyn_model,
@@ -5124,9 +5071,9 @@ mod tests {
                 &[],
                 0,
                 0,
-                &hooks,
+                Arc::new(|_| {}),
+                Arc::new(|_, _, _| {}),
                 Some(session),
-                None,
                 Box::new(ConversationStub::new("hi")),
             )
             .await
@@ -5136,7 +5083,9 @@ mod tests {
         let ready = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match evt_rx.recv().await {
-                    Ok(EventKind::Ready { .. }) => return true,
+                    Recv::Event(e) if matches!(e.kind(), EventKind::Ready { .. }) => return true,
+                    Recv::Closed => return false,
+                    Recv::Lagged(_) => continue,
                     _ => continue,
                 }
             }
@@ -5167,6 +5116,7 @@ mod tests {
     /// the interactive loop returns Resumed gracefully.
     #[tokio::test]
     async fn interactive_cmd_tx_drop_resumes_gracefully() {
+        gremlins_magic_bus::init_bus();
         let channels = InteractiveChannels::new();
         let (handle, session) = channels.split();
 
@@ -5187,14 +5137,7 @@ mod tests {
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let dyn_model = model.erase();
-        let (evt_tx, mut evt_rx) = tokio::sync::broadcast::channel::<EventKind>(64);
-        let mut hooks = LoopHooks::new();
-        hooks.register_stream_event(move |event: EventKind| {
-            let tx = evt_tx.clone();
-            async move {
-                let _ = tx.send(event);
-            }
-        });
+        let (_sub, mut evt_rx) = gremlins_magic_bus::subscribe_all();
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
                 &dyn_model,
@@ -5213,9 +5156,9 @@ mod tests {
                 &[],
                 0,
                 0,
-                &hooks,
+                Arc::new(|_| {}),
+                Arc::new(|_, _, _| {}),
                 Some(session),
-                None,
                 Box::new(ConversationStub::new("hi")),
             )
             .await
@@ -5225,7 +5168,9 @@ mod tests {
         let ready = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match evt_rx.recv().await {
-                    Ok(EventKind::Ready { .. }) => return true,
+                    Recv::Event(e) if matches!(e.kind(), EventKind::Ready { .. }) => return true,
+                    Recv::Closed => return false,
+                    Recv::Lagged(_) => continue,
                     _ => continue,
                 }
             }
@@ -5253,6 +5198,7 @@ mod tests {
     /// `run_agent_loop_core` directly.
     #[tokio::test]
     async fn run_agent_loop_with_interactive_session_broadcasts_ready() {
+        gremlins_magic_bus::init_bus();
         let dir = std::env::temp_dir().join(format!(
             "gremlins-oa-ral-int-{}-{}",
             std::process::id(),
@@ -5270,7 +5216,7 @@ mod tests {
         // at the turn boundary before the first API call.
         handle.pause.pause();
 
-        let (evt_tx, mut evt_rx) = tokio::sync::broadcast::channel::<EventKind>(64);
+        let (_sub, mut evt_rx) = gremlins_magic_bus::subscribe_all();
 
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
             rig_core::test_utils::MockStreamEvent::text("ok"),
@@ -5284,14 +5230,6 @@ mod tests {
         let mut ctx = test_ctx(Some(dir.clone()), None);
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
-        let mut hooks = LoopHooks::new();
-        hooks.register_stream_event(move |event: EventKind| {
-            let tx = evt_tx.clone();
-            async move {
-                let _ = tx.send(event);
-            }
-        });
-        ctx.hooks = hooks;
         let cancel = CancelToken::new();
 
         let agent = tokio::spawn(async move {
@@ -5310,10 +5248,13 @@ mod tests {
         let ready = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match evt_rx.recv().await {
-                    Ok(EventKind::Ready { .. }) => return true,
-                    Ok(EventKind::Ended { .. }) => return false,
-                    Err(RecvError::Closed) => return false,
-                    _ => continue,
+                    Recv::Event(e) => match e.into_kind() {
+                        EventKind::Ready { .. } => return true,
+                        EventKind::Ended { .. } => return false,
+                        _ => continue,
+                    },
+                    Recv::Closed => return false,
+                    Recv::Lagged(_) => continue,
                 }
             }
         })
@@ -5377,14 +5318,8 @@ mod tests {
             &[],
             0,
             0,
-            &{
-                let mut hooks = LoopHooks::new();
-                hooks.register_log_line(|msg: &str| {
-                    log::info!("{msg}");
-                });
-                hooks
-            },
-            None,
+            Arc::new(|_| {}),
+            Arc::new(|_, _, _| {}),
             None,
             Box::new(ConversationStub::new("hi")),
         )
@@ -5467,8 +5402,8 @@ mod tests {
             &[],
             0,
             0,
-            &LoopHooks::new(),
-            None,
+            Arc::new(|_| {}),
+            Arc::new(|_, _, _| {}),
             None,
             // Run against the shipped implementation, not the stub: this test
             // guards the prompt-commit invariant in `StandardConversation`.

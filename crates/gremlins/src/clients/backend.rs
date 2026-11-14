@@ -2,15 +2,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub(crate) use super::agent::plug::LoopHooks;
 use super::agent::task_models::TaskModelSelector;
 use super::cancel::CancelToken;
 use super::conversation::Conversation;
 use super::interactive::InteractiveSession;
 use super::params::ResolvedParams;
-use super::protocol::{CompactionResult, CompletedRun};
+use super::protocol::{CompactionResult, CompletedRun, UsageStats};
 use async_trait::async_trait;
 use indexmap::IndexMap;
+use rig_core::completion::CompletionRequest;
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 
@@ -62,10 +62,15 @@ pub struct RunParams {
     /// Additional filesystem roots to add to the tool sandbox beyond the
     /// worktree and artifact directory. Threaded from [`GremlinConfig`].
     pub extra_sandbox_roots: Vec<PathBuf>,
-    /// Inversion-of-control hooks that carry cross-package dependencies
-    /// (prompt-debug, token-usage) into the agent loop. `None` defaults
-    /// to no-op hooks.
-    pub hooks: Option<LoopHooks>,
+    /// Prompt debug dumper: called with every serialized CompletionRequest.
+    /// `None` defaults to a silent no-op.
+    #[allow(clippy::type_complexity)]
+    pub dump_prompt_debug_fn: Option<Arc<dyn Fn(&CompletionRequest) + Send + Sync>>,
+    /// Token-usage emitter: `(totals, last_prompt_tokens, last_cached_input_tokens)`.
+    /// `None` defaults to a silent no-op.
+    #[allow(clippy::type_complexity)]
+    pub emit_token_usage_fn:
+        Option<Arc<dyn Fn(UsageStats, Option<u64>, Option<u64>) + Send + Sync>>,
 }
 
 impl RunParams {
@@ -102,7 +107,8 @@ impl RunParams {
             discovered_skills: None,
             active_skills: None,
             extra_sandbox_roots: Vec::new(),
-            hooks: None,
+            dump_prompt_debug_fn: None,
+            emit_token_usage_fn: None,
         }
     }
 }
@@ -133,7 +139,8 @@ impl Clone for RunParams {
             discovered_skills: self.discovered_skills.clone(),
             active_skills: self.active_skills.clone(),
             extra_sandbox_roots: self.extra_sandbox_roots.clone(),
-            hooks: self.hooks.clone(),
+            dump_prompt_debug_fn: self.dump_prompt_debug_fn.clone(),
+            emit_token_usage_fn: self.emit_token_usage_fn.clone(),
         }
     }
 }

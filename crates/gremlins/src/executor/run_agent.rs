@@ -9,10 +9,12 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::artifacts::uri::Uri;
 use crate::clients::backend::RunParams;
 use crate::clients::client::ModelURI;
+use crate::clients::protocol::UsageStats;
 use crate::config;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent};
@@ -22,11 +24,10 @@ use crate::executor::state::{Checkout, Collision, FileSystemStateStore};
 use crate::executor::RunError;
 use crate::task_kind::TaskKind;
 use gremlins_magic_bus::emit_event;
-use gremlins_magic_bus::emit_run_event_async;
 use gremlins_magic_bus::EventKind;
 use indexmap::IndexMap;
 use rig_core::completion::message::{AssistantContent, UserContent};
-use rig_core::completion::Message;
+use rig_core::completion::{CompletionRequest, Message};
 
 use crate::executor::run::{
     agent_commit_err, agent_prepare_err, client_run_err, collect_checkout_keys, resolve_client,
@@ -234,14 +235,12 @@ pub(crate) async fn run_agent(
         )>,
     ));
 
-    // ── Build inversion-of-control hooks ─────
-    // Wires cross-package dependencies (log, prompt-debug,
-    // token-usage) into the agent loop without the loop importing
-    // `crate::executor` or `crate::landscape`.
-    let mut hooks = crate::clients::agent::plug::LoopHooks::new();
-    {
+    // ── Build inversion-of-control callbacks ─────
+    // Wires cross-package dependencies (prompt-debug, token-usage) into
+    // the agent loop without the loop importing `crate::executor`.
+    let dump_prompt_debug_fn: Arc<dyn Fn(&CompletionRequest) + Send + Sync> = {
         let store = gremlin.state.store_handle();
-        hooks.register_prompt_debug(move |request| {
+        Arc::new(move |request| {
             if crate::executor::log_level_threshold() < log::LevelFilter::Debug {
                 return;
             }
@@ -260,16 +259,17 @@ pub(crate) async fn run_agent(
                     log::warn!("dump_prompt_if_debug: failed to open {name}: {e}");
                 }
             }
-        });
-    }
-    {
+        })
+    };
+    #[allow(clippy::type_complexity)]
+    let emit_token_usage_fn: Arc<dyn Fn(UsageStats, Option<u64>, Option<u64>) + Send + Sync> = {
         let gremlin_id = gremlin.id.to_string();
         let client_for_cost = client.clone();
         let baseline_usage = crate::executor::supervisor::usage_stats_from_state(
             gremlin.state.read_field("token_usage").as_ref(),
         );
         let live_usage_tracker = live_usage.clone();
-        hooks.register_token_usage(
+        Arc::new(
             move |totals, last_prompt_tokens, last_cached_input_tokens| {
                 let usage = crate::executor::supervisor::add_usage_stats(&baseline_usage, &totals);
                 let cost_usd = client_for_cost.total_cost_usd();
@@ -283,35 +283,8 @@ pub(crate) async fn run_agent(
                     last_cached_input_tokens,
                 });
             },
-        );
-    }
-    {
-        let gremlin_id = gremlin.id.to_string();
-        hooks.register_log_line(move |msg: &str| {
-            if log::Level::Info <= crate::executor::log_level_threshold() {
-                emit_event(EventKind::LogLine {
-                    id: gremlin_id.clone(),
-                    line: msg.to_string(),
-                });
-            }
-        });
-    }
-    // Register the stream-event hook only when an interactive session exists
-    // (chat, debug, or pipeline runs launched through the actor). Naked runs
-    // and tests skip the hook so `wants_stream_events` stays false, avoiding
-    // live-output channel allocation and EventKind construction overhead.
-    //
-    // Check non-consumingly: the actual session is constructed below (the
-    // single authoritative construction site).
-    if gremlin.interactive_session.is_some() || gremlin.runtime_config.interactive.is_some() {
-        let gremlin_id = gremlin.id.to_string();
-        hooks.register_stream_event(move |event: EventKind| {
-            let gremlin_id = gremlin_id.clone();
-            async move {
-                emit_run_event_async(&gremlin_id, event).await;
-            }
-        });
-    }
+        )
+    };
     let prepopulated_conversation: Box<dyn crate::clients::conversation::Conversation> =
         Box::new(conv);
 
@@ -349,7 +322,8 @@ pub(crate) async fn run_agent(
         discovered_skills: gremlin.discovered_skills.clone(),
         active_skills: gremlin.active_skills.clone(),
         extra_sandbox_roots: gremlin.extra_sandbox_roots.clone(),
-        hooks: Some(hooks),
+        dump_prompt_debug_fn: Some(dump_prompt_debug_fn),
+        emit_token_usage_fn: Some(emit_token_usage_fn),
     };
 
     let effective_model = params

@@ -153,8 +153,8 @@ pub(crate) struct InteractiveHandle {
 
 /// Threaded through [`RunParams`] into the agent loop. The agent loop reads
 /// commands from `cmd_rx` and watches `pause` for immediate interrupt
-/// signals. Stream events are emitted through the agent loop's `LoopHooks`
-/// rather than this session.
+/// signals. Stream events are emitted through the agent loop's token-usage
+/// and prompt-debug callbacks rather than this session.
 #[derive(Debug)]
 pub struct InteractiveSession {
     pub cmd_rx: mpsc::Receiver<InteractiveCommand>,

@@ -4,8 +4,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::clients::conversation::Conversation;
-use crate::clients::LogLineFn;
 use crate::task_kind::TaskKind;
+use gremlins_magic_bus::{emit_run_event_async, EventKind};
 
 type ToolFuture = Pin<Box<dyn std::future::Future<Output = ToolOutcome> + Send>>;
 
@@ -67,31 +67,6 @@ impl SandboxMode {
     }
 }
 
-/// One live tool-output chunk streamed from a running tool into the TUI's
-/// embedded tool slot. Display-only; never reaches the model or the
-/// permanent transcript.
-#[derive(Clone, Debug)]
-pub(crate) struct ToolOutputLine {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) call: String,
-    pub(crate) text: String,
-}
-
-/// Bundled send-side telemetry channels for the agent loop: stream-event
-/// emitter and live tool-output line forwarding (`Bash`/`WebSearch`).
-///
-/// Cloned cheaply — every nested loop inherits the parent's channels.
-#[derive(Clone)]
-pub(crate) struct AgentLoopTelemetry {
-    /// Async stream-event emitter. Nested loops inherit the parent's hook so
-    /// child tool events reach the parent stream with the correct id prefix.
-    pub(crate) emit_stream_event: Option<crate::clients::StreamEventFn>,
-    /// True when a stream-event consumer is wired.
-    pub(crate) wants_stream_events: bool,
-    pub(crate) tool_output: Option<tokio::sync::mpsc::Sender<ToolOutputLine>>,
-}
-
 #[derive(Clone)]
 pub(crate) struct AgentLoopRuntime {
     pub cwd: Option<PathBuf>,
@@ -102,10 +77,6 @@ pub(crate) struct AgentLoopRuntime {
     pub(crate) allowed_tools: Option<Vec<String>>,
     pub(crate) task_fn: Option<TaskFn>,
     pub(crate) audit_lock: Option<Arc<std::sync::Mutex<()>>>,
-    /// Per-gremlin log-line emitter inherited from the parent loop. Nested
-    /// Task loops read this to route their begin/end and turn-level records to
-    /// the same bus-backed log writer as the parent run.
-    pub(crate) log_line_fn: Option<LogLineFn>,
     /// Prefix prepended to tool call IDs emitted on the shared event stream.
     ///
     /// Nested Task conversations run on the parent's stream but reuse raw
@@ -114,8 +85,9 @@ pub(crate) struct AgentLoopRuntime {
     /// loop sets its own task-chain prefix to keep IDs unique. Empty at the top
     /// level, so top-level IDs are unchanged.
     pub(crate) id_prefix: String,
-    /// Bundled send-side telemetry channels. Cloned into every nested loop.
-    pub(crate) telemetry: AgentLoopTelemetry,
+    /// Run-scoped id (gremlin_id) used for direct bus emission of log lines
+    /// and stream events. Empty in tests / naked runs.
+    pub(crate) message_prefix: String,
     /// Shared mutable reference to session active skill names.
     /// The LoadSkill tool pushes names here; the supervisor reads them
     /// at the next turn boundary.
@@ -127,24 +99,21 @@ pub(crate) struct AgentLoopRuntime {
     /// sessions resolve their own project's skills instead of a shared slot.
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
 }
+
 impl AgentLoopRuntime {
-    /// Send one completed live-output line for the tool call identified by
-    /// `id` to the optional display channel. Tool results returned to the
-    /// model are unaffected.
-    ///
-    /// Awaits channel capacity so a slow live-output forwarder throttles the
-    /// producing read loop rather than overflowing the buffer and silently
-    /// dropping chunks from the live tool stream.
+    /// Emit one live tool-output chunk directly to the bus, tagged with the
+    /// run-scoped `message_prefix`. The chunk id carries `id_prefix` so nested
+    /// task loops keep their IDs unique on the shared stream.
     pub(crate) async fn emit_output(&self, id: &str, name: &str, call: &str, text: &str) {
-        if let Some(tx) = &self.telemetry.tool_output {
-            let _ = tx
-                .send(ToolOutputLine {
-                    id: format!("{}{id}", self.id_prefix),
-                    name: name.to_string(),
-                    call: call.to_string(),
-                    text: text.to_string(),
-                })
-                .await;
-        }
+        emit_run_event_async(
+            &self.message_prefix,
+            EventKind::ToolOutputChunk {
+                id: format!("{}{}", self.id_prefix, id),
+                name: name.to_string(),
+                call: call.to_string(),
+                text: text.to_string(),
+            },
+        )
+        .await;
     }
 }

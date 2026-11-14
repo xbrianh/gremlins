@@ -1,20 +1,5 @@
 pub(crate) mod agent;
 
-/// Shared log-line emitter type used by the agent loop and tool runtime.
-pub(crate) type LogLineFn = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
-
-/// Async stream-event emitter. Called from the agent loop to send stream
-/// events (StreamChunk, ReasoningChunk, ToolOutputChunk, ToolResult,
-/// TurnComplete, Done, StreamReset, Ready, Ended). The executor wires this to
-/// the run-scoped bus emitter.
-pub(crate) type StreamEventFn = std::sync::Arc<
-    dyn Fn(
-            gremlins_magic_bus::EventKind,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-        + Send
-        + Sync,
->;
-
 pub(crate) mod anthropic_bearer_http;
 pub(crate) mod azure_openai_responses_http;
 pub mod backend;
