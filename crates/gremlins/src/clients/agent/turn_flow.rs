@@ -246,6 +246,7 @@ pub(super) fn handle_empty_turn(
     reasoning: &str,
     reasoning_items: &[Sealed<Reasoning>],
     expected_artifact_paths: &[PathBuf],
+    input_tokens: Option<u64>,
     loop_start: Instant,
     raw: &mut Option<std::fs::File>,
     captured: &mut Option<Vec<serde_json::Value>>,
@@ -257,7 +258,9 @@ pub(super) fn handle_empty_turn(
 
     if text.is_empty() && !reasoning.is_empty() && !state.single_turn {
         log::debug!("reasoning-only turn: turn={} — continuing", state.turn_num);
-        state.conv.record_turn("", reasoning_items, &[], None);
+        state
+            .conv
+            .record_turn("", reasoning_items, &[], input_tokens);
         state.conv.set_next_prompt("Continue.");
         return EmptyTurnAction::ContinueLoop;
     }
@@ -279,7 +282,9 @@ pub(super) fn handle_empty_turn(
                 missing.len(),
                 state.reminder_budget,
             ));
-            state.conv.record_turn(text, reasoning_items, &[], None);
+            state
+                .conv
+                .record_turn(text, reasoning_items, &[], input_tokens);
             let reminder = artifact_reminder(&missing);
             write_raw(
                 raw,
@@ -309,7 +314,9 @@ pub(super) fn handle_empty_turn(
         if let Some(evts) = captured.as_mut() {
             evts.push(serde_json::json!({"type": "reminder", "message": nudge_msg}));
         }
-        state.conv.record_turn(text, reasoning_items, &[], None);
+        state
+            .conv
+            .record_turn(text, reasoning_items, &[], input_tokens);
         state.conv.set_next_prompt(nudge_msg);
         return EmptyTurnAction::ContinueLoop;
     }

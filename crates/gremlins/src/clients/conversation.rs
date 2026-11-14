@@ -183,6 +183,14 @@ pub(crate) trait Conversation: Send + Sync {
     fn tool_evidence(&self) -> String {
         collect_tool_evidence(&self.messages())
     }
+
+    /// Whether a compaction pass during [`render_turn`] replaced the
+    /// prefix (e.g. auto-compaction triggered by token threshold).
+    /// Defaults to `false`; [`StandardConversation`] sets this when its
+    /// auto-compaction path fires.
+    fn compacted_prefix(&self) -> bool {
+        false
+    }
 }
 
 /// Upper bound on [`collect_tool_evidence`] output, so a child that read a

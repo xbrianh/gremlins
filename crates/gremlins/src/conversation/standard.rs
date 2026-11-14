@@ -65,6 +65,16 @@ pub(crate) struct StandardConversation {
     finalized_messages: Option<Vec<Message>>,
     /// Backend for model construction and server-side API calls.
     backend: Option<Arc<dyn Backend>>,
+    /// Set to `true` when [`render_turn`] auto-compacts the prefix.
+    /// Persistence uses this signal to write a full replacement transcript
+    /// instead of an incremental diff that would leave compacted-away
+    /// messages in older per-turn artifacts.
+    compacted_prefix: bool,
+    /// The compaction token threshold for auto-compaction in headless runs.
+    /// Initialized from the daemon global [`crate::config::compaction_threshold_tokens`]
+    /// but may be overridden per-conversation (e.g. TUI chat pins it to
+    /// [`u64::MAX`] via request env).
+    compaction_threshold_tokens: u64,
 }
 
 impl StandardConversation {
@@ -75,6 +85,7 @@ impl StandardConversation {
         backend: Option<Arc<dyn Backend>>,
     ) -> Self {
         let history = prepopulated_messages.unwrap_or_default();
+        let threshold = crate::config::compaction_threshold_tokens();
         Self {
             history,
             next_prompt: Message::user(prompt.to_string()),
@@ -84,6 +95,8 @@ impl StandardConversation {
             last_prompt_tokens: None,
             finalized_messages: None,
             backend,
+            compacted_prefix: false,
+            compaction_threshold_tokens: threshold,
         }
     }
 
@@ -99,6 +112,16 @@ impl StandardConversation {
     /// not a synthetic placeholder prompt.
     pub(crate) fn committed_history(&self) -> Vec<Message> {
         self.history.clone()
+    }
+
+    /// Override the compaction token threshold for this conversation.
+    ///
+    /// The TUI chat gremlin calls this with [`u64::MAX`] to opt out of
+    /// auto-compaction during interactive sessions. The override is
+    /// per-conversation rather than a process-wide environment variable, so
+    /// headless pipeline runs inside the same daemon still compact.
+    pub(crate) fn set_compaction_threshold_tokens(&mut self, threshold: u64) {
+        self.compaction_threshold_tokens = threshold;
     }
 
     /// Run compaction on the current history. Called by the `/compact` TUI
@@ -188,6 +211,8 @@ impl Conversation for StandardConversation {
             last_text: self.last_text.clone(),
             last_prompt_tokens: self.last_prompt_tokens,
             finalized_messages: self.finalized_messages.clone(),
+            compacted_prefix: self.compacted_prefix,
+            compaction_threshold_tokens: self.compaction_threshold_tokens,
             backend: self.backend.clone(),
         })
     }
@@ -247,13 +272,14 @@ impl Conversation for StandardConversation {
 
         // Auto-compact when the previous turn's prompt grew past the
         // configured token threshold, before the byte-size gate below.
-        let threshold = crate::config::compaction_threshold_tokens();
+        let threshold = self.compaction_threshold_tokens;
         if let Some(tokens) = self.last_prompt_tokens {
             if tokens > threshold {
                 log::info!(
                     "auto-compaction: last_prompt_tokens={tokens} exceeds threshold={threshold}"
                 );
                 self.compact(combined_system.as_deref(), None).await;
+                self.compacted_prefix = true;
                 self.last_prompt_tokens = None;
             }
         }
@@ -358,6 +384,8 @@ impl Conversation for StandardConversation {
             last_text: String::new(),
             last_prompt_tokens: None,
             finalized_messages: None,
+            compacted_prefix: false,
+            compaction_threshold_tokens: self.compaction_threshold_tokens,
             backend: self.backend.clone(),
         })
     }
@@ -444,6 +472,10 @@ impl Conversation for StandardConversation {
             all.push(self.next_prompt.clone());
         }
         all
+    }
+
+    fn compacted_prefix(&self) -> bool {
+        self.compacted_prefix
     }
 }
 

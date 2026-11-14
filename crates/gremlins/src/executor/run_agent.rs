@@ -203,12 +203,22 @@ pub(crate) async fn run_agent(
             None
         }
     };
-    let conv = crate::conversation::standard::StandardConversation::new(
+    let mut conv = crate::conversation::standard::StandardConversation::new(
         "",
         false,
         verbatim_history,
         backend,
     );
+    // Let the request environment override the compaction threshold
+    // so the TUI chat gremlin can pin it to u64::MAX without changing
+    // the daemon's process-wide environment (which would affect
+    // headless pipeline runs as well).
+    if let Some(t) = stage_env
+        .get("GREMLINS_COMPACTION_THRESHOLD_TOKENS")
+        .and_then(|v| v.parse().ok())
+    {
+        conv.set_compaction_threshold_tokens(t);
+    }
 
     // ── Live usage tracker for failure persistence ─────
     // Stores (combined_usage, stage_local_usage, cost_usd).
@@ -446,22 +456,33 @@ pub(crate) async fn run_agent(
 
     if is_chat {
         if let (Some(conversation), Some(turn_num)) = (&completed.conversation, chat_turn) {
-            let messages = conversation.messages();
-            let diff: Vec<Message> =
-                if canonical_prefix.is_empty() || messages.len() < canonical_prefix.len() {
-                    messages.clone()
-                } else {
-                    let cp = &messages[..canonical_prefix.len()];
-                    let same = serde_json::to_string(cp).unwrap_or_default()
-                        == serde_json::to_string(&canonical_prefix).unwrap_or_default();
-                    if same {
-                        messages[canonical_prefix.len()..].to_vec()
-                    } else {
+            if conversation.compacted_prefix() {
+                // Compaction replaced the prefix — write the full compacted
+                // transcript as turn 0001 and clear all other per-turn
+                // artifacts so the next submission does not reload
+                // compacted-away messages or duplicate retained ones.
+                let messages = conversation.messages();
+                if let Err(e) = persist_compacted_conversation(gremlin, &messages).await {
+                    log::warn!("chat: failed to persist compacted conversation: {e}");
+                }
+            } else {
+                let messages = conversation.messages();
+                let diff: Vec<Message> =
+                    if canonical_prefix.is_empty() || messages.len() < canonical_prefix.len() {
                         messages.clone()
-                    }
-                };
-            if let Err(e) = persist_chat_conversation_turn(gremlin, turn_num, &diff).await {
-                log::warn!("chat: failed to persist conversation turn {turn_num}: {e}");
+                    } else {
+                        let cp = &messages[..canonical_prefix.len()];
+                        let same = serde_json::to_string(cp).unwrap_or_default()
+                            == serde_json::to_string(&canonical_prefix).unwrap_or_default();
+                        if same {
+                            messages[canonical_prefix.len()..].to_vec()
+                        } else {
+                            messages.clone()
+                        }
+                    };
+                if let Err(e) = persist_chat_conversation_turn(gremlin, turn_num, &diff).await {
+                    log::warn!("chat: failed to persist conversation turn {turn_num}: {e}");
+                }
             }
         }
     }
