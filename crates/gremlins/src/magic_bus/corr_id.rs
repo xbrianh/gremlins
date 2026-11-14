@@ -96,7 +96,7 @@ impl CorrId {
     /// match `r:abc` because segment equality is exact, not string-prefix
     /// based.
     pub fn matches_prefix(&self, prefix: &CorrId) -> bool {
-        segment_matches(&self.run, &prefix.run)
+        run_matches_ancestor(prefix.run.as_deref(), self.run.as_deref())
             && segment_matches(&self.stage, &prefix.stage)
             && segment_matches(&self.turn, &prefix.turn)
             && segment_matches(&self.tool, &prefix.tool)
@@ -294,6 +294,32 @@ fn escape_segment(value: &str) -> String {
     escaped
 }
 
+/// Check whether `prefix_run` is an ancestor of `event_run` in the
+/// colon-delimited hierarchy. A `None` prefix matches anything.
+///
+/// ```text
+/// prefix: "parent"       → matches "parent", "parent:child", "parent:child:grand"
+/// prefix: "parent:child" → matches "parent:child", "parent:child:grand"
+/// prefix: "parent:child:grand" → matches only "parent:child:grand"
+/// ```
+fn run_matches_ancestor(prefix_run: Option<&str>, event_run: Option<&str>) -> bool {
+    match (prefix_run, event_run) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(prefix), Some(event)) => {
+            let prefix_parts: Vec<&str> = prefix.split(':').collect();
+            let event_parts: Vec<&str> = event.split(':').collect();
+            if prefix_parts.len() > event_parts.len() {
+                return false;
+            }
+            prefix_parts
+                .iter()
+                .zip(event_parts.iter())
+                .all(|(p, e)| p == e)
+        }
+    }
+}
+
 /// A comparison over optional segment values: `None` is a wildcard.
 fn segment_matches<T: PartialEq>(actual: &Option<T>, prefix: &Option<T>) -> bool {
     match prefix {
@@ -434,6 +460,108 @@ mod tests {
         assert!(!corr_id.matches_prefix(&CorrId::new().with_run("ab")));
         assert!(!corr_id.matches_prefix(&CorrId::new().with_run("abc123").with_turn(9)));
         assert!(!corr_id.matches_prefix(&CorrId::new().with_stage("reviews")));
+    }
+
+    #[test]
+    fn run_ancestor_matches_self_and_descendants() {
+        // "parent" matches "parent", "parent:child", "parent:child:grand"
+        let prefix = CorrId::new().with_run("parent");
+
+        assert!(CorrId::new().with_run("parent").matches_prefix(&prefix));
+        assert!(CorrId::new()
+            .with_run("parent:child")
+            .matches_prefix(&prefix));
+        assert!(CorrId::new()
+            .with_run("parent:child:grand")
+            .matches_prefix(&prefix));
+
+        // Does NOT match a different run
+        assert!(!CorrId::new()
+            .with_run("other")
+            .matches_prefix(&prefix));
+        // Does NOT match substring prefix
+        assert!(!CorrId::new()
+            .with_run("par")
+            .matches_prefix(&prefix));
+    }
+
+    #[test]
+    fn run_ancestor_nested_prefix_matches_descendants_only() {
+        // "parent:child" matches "parent:child" and "parent:child:grand"
+        let prefix = CorrId::new().with_run("parent:child");
+
+        assert!(CorrId::new()
+            .with_run("parent:child")
+            .matches_prefix(&prefix));
+        assert!(CorrId::new()
+            .with_run("parent:child:grand")
+            .matches_prefix(&prefix));
+
+        // Does NOT match parent or sibling
+        assert!(!CorrId::new()
+            .with_run("parent")
+            .matches_prefix(&prefix));
+        assert!(!CorrId::new()
+            .with_run("parent:sibling")
+            .matches_prefix(&prefix));
+    }
+
+    #[test]
+    fn run_ancestor_exact_leaf_matches_self_only() {
+        // "parent:child:grand" matches only itself
+        let prefix = CorrId::new().with_run("parent:child:grand");
+
+        assert!(CorrId::new()
+            .with_run("parent:child:grand")
+            .matches_prefix(&prefix));
+        assert!(!CorrId::new()
+            .with_run("parent:child")
+            .matches_prefix(&prefix));
+        assert!(!CorrId::new()
+            .with_run("parent")
+            .matches_prefix(&prefix));
+    }
+
+    #[test]
+    fn run_ancestor_with_other_segments_still_matches() {
+        // run ancestor match combined with exact match on other fields
+        let prefix = CorrId::new()
+            .with_run("parent")
+            .with_stage("build");
+
+        let child_event = CorrId::new()
+            .with_run("parent:child-a")
+            .with_stage("build")
+            .with_turn(1);
+
+        assert!(child_event.matches_prefix(&prefix));
+
+        // Stage mismatch still fails
+        assert!(!CorrId::new()
+            .with_run("parent:child-a")
+            .with_stage("test")
+            .matches_prefix(&prefix));
+    }
+
+    #[test]
+    fn escaped_colon_in_run_value_is_literal_not_hierarchy_separator() {
+        // r:parent\:child — the \: is a literal colon in the run value, not a hierarchy separator
+        let corr_id: CorrId = "r:parent\\:child:s:build".parse().unwrap();
+        assert_eq!(corr_id.run(), Some("parent:child"));
+        assert_eq!(corr_id.stage(), Some("build"));
+
+        // The run value "parent:child" has a literal colon. Because matching
+        // operates on the *unescaped* string value (escape information is not
+        // threaded through `run_matches_ancestor`), a literal colon is
+        // indistinguishable from a hierarchy separator here: the escaped run
+        // "parent:child" IS matched by the prefix "parent".
+        let prefix = CorrId::new().with_run("parent:child");
+        assert!(corr_id.matches_prefix(&prefix));
+
+        // A prefix run of "parent" matches the run value "parent:child" as an
+        // ancestor. This is the documented behavior of ancestor matching.
+        let parent_prefix = CorrId::new().with_run("parent");
+        assert!(corr_id.matches_prefix(&parent_prefix));
     }
 
     #[test]

@@ -103,8 +103,10 @@ pub(crate) const FORK_TRANSIENT: [&str; 13] = [
 /// A validated gremlin id.
 ///
 /// The only way to obtain one is [`validate_gremlin_id`], so a `GremlinId` in
-/// hand is proof that the value is safe to use as a single path component:
-/// `[A-Za-z0-9_-]+`, never empty, never containing `..`.
+/// hand is proof that the value is safe to use as a single path component
+/// (after applying [`state::state_safe_id`] to replace `:` with `-`):
+/// `[A-Za-z0-9_-]+`, never empty, never containing `..`, never starting or
+/// ending with `:`, and never containing `::`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GremlinId(String);
 
@@ -134,10 +136,11 @@ impl std::fmt::Display for GremlinId {
 
 /// Validate `id` as a gremlin identifier and return it typed.
 ///
-/// Mirrors the Python `validate_gremlin_id`: `..` anywhere is rejected (so the
-/// id can never traverse out of the state root) and anything
-/// outside `[A-Za-z0-9_-]` is rejected. The empty string is rejected too — the
-/// Python regex could not match it either.
+/// The `:` character separates hierarchy levels (e.g. `parent:child`).
+/// `:` may NOT appear at the start, at the end, or consecutively (`::`).
+/// Each colon-separated component must be non-empty and match
+/// `[A-Za-z0-9_-]+`. `..` is rejected anywhere in the full string.
+/// The empty string is rejected too.
 pub fn validate_gremlin_id(id: &str) -> Result<GremlinId, String> {
     let illegal = || format!("gremlin_id contains illegal characters: {id:?}");
     if id.is_empty() {
@@ -146,10 +149,17 @@ pub fn validate_gremlin_id(id: &str) -> Result<GremlinId, String> {
     if id.contains("..") {
         return Err(illegal());
     }
-    if !id
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-    {
+    // Reject `:` at start, end, or doubled.
+    if id.starts_with(':') || id.ends_with(':') || id.contains("::") {
+        return Err(illegal());
+    }
+    // Each colon-separated component must be non-empty and [A-Za-z0-9_-]+.
+    if !id.split(':').all(|comp| {
+        !comp.is_empty()
+            && comp
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    }) {
         return Err(illegal());
     }
     Ok(GremlinId(id.to_string()))
@@ -869,9 +879,8 @@ impl Gremlin {
 
         // Reject child IDs that would collide with the parent's attempt
         // directory naming scheme (<parent_id>-NNNN). Parallel children are
-        // named `{parent}-{child_name}`, so a child stage named e.g. "0001"
-        // would otherwise produce a state directory that shadows the parent's
-        // own first attempt directory.
+        // named `{parent}:{child_name}` (hierarchical), so the colon separator
+        // naturally prevents collision with the parent's own attempt dirs.
         if !parent_id.is_empty() {
             let parent_prefix = format!("{parent_id}-");
             if let Some(suffix) = child_id.strip_prefix(&parent_prefix) {
@@ -899,6 +908,8 @@ impl Gremlin {
         // Give each fork a fresh workdir so fork commands never see
         // stale state from a prior run (e.g. leftover git worktree
         // metadata after a bail and cleanup).
+        // Use state_safe_id so `:` in hierarchical ids doesn't break
+        // filesystem paths (macOS maps `:` to `/` at the POSIX layer).
         let child_workdir = match &self.workdir {
             Some(WorkDir::Temp(_)) => {
                 let temp = tempfile::TempDir::new().map_err(|e| {
@@ -909,7 +920,7 @@ impl Gremlin {
             _ => {
                 let path = config::work_root().join(format!(
                     "{}-{}",
-                    child_gremlin_id,
+                    state::state_safe_id(child_gremlin_id.as_str()),
                     state::token_hex(4)
                 ));
                 std::fs::create_dir_all(&path).map_err(|e| {

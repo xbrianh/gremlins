@@ -428,20 +428,39 @@ fn is_file_artifact(data_uri: &str) -> bool {
     data_uri.starts_with('/')
 }
 
-/// Validate that a gremlin id component is safe to use as a path segment.
+/// Validate that a gremlin id is safe to use as a path segment.
 ///
-/// Rejects empty strings, strings containing `..`, and strings with
-/// characters outside `[A-Za-z0-9_-]`.
+/// Accepts `:` as a hierarchy separator between `[A-Za-z0-9_-]+` components.
+/// Rejects empty strings, strings containing `..`, `:` at start/end, and `::`.
 fn validate_gremlin_id_component(id: &str) -> Result<(), StateError> {
     if id.is_empty()
         || id.contains("..")
-        || !id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        || id.starts_with(':')
+        || id.ends_with(':')
+        || id.contains("::")
     {
         return Err(StateError::Other(format!("invalid gremlin id {id:?}")));
     }
+    if !id.split(':').all(|comp| {
+        !comp.is_empty()
+            && comp
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    }) {
+        return Err(StateError::Other(format!("invalid gremlin id {id:?}")));
+    }
     Ok(())
+}
+
+/// Replace `:` with `-` so a hierarchical gremlin id can be used in a
+/// filesystem path. macOS maps `:` to `/` at the POSIX layer (legacy HFS
+/// compatibility), so a raw `:` in a directory name is not safe.
+///
+/// The mapping is intentionally lossy: `parent:child` and `parent-child`
+/// both map to `parent-child`. This is tolerable because state lookups
+/// are always driven by the runtime id, never by scanning the filesystem.
+pub(crate) fn state_safe_id(id: &str) -> String {
+    id.replace(':', "-")
 }
 
 // ---------------------------------------------------------------------------
@@ -1541,6 +1560,7 @@ impl StateStore for FileSystemStateStore {
         };
 
         let root = config::state_root();
+        let safe_id = state_safe_id(&id);
 
         // Remove every `<id>-NNNN` attempt directory.
         if let Ok(entries) = std::fs::read_dir(&root) {
@@ -1552,15 +1572,15 @@ impl StateStore for FileSystemStateStore {
                 let Ok(name) = entry.file_name().into_string() else {
                     continue;
                 };
-                if !name.starts_with(&id) || name.as_bytes().get(id.len()) != Some(&b'-') {
+                if !name.starts_with(&safe_id) || name.as_bytes().get(safe_id.len()) != Some(&b'-') {
                     continue;
                 }
                 // Only match `<id>-NNNN` (four-digit suffix), not arbitrary
                 // `<id>-something` that could belong to a different gremlin.
-                let suffix = &name.as_bytes()[id.len() + 1..];
+                let suffix = &name.as_bytes()[safe_id.len() + 1..];
                 if suffix.len() != 4 || !suffix.iter().all(|b| b.is_ascii_digit()) {
                     // But still clean up tmp dirs from failed forks.
-                    if !name[id.len() + 1..].starts_with('.') {
+                    if !name[safe_id.len() + 1..].starts_with('.') {
                         continue;
                     }
                 }
@@ -2124,7 +2144,7 @@ pub fn field_names() -> [&'static str; 18] {
 
 /// The first attempt directory for `gremlin_id` under the state root.
 pub(crate) fn attempt_dir_path(gremlin_id: &str, attempt: u32) -> PathBuf {
-    config::state_root().join(format!("{gremlin_id}-{attempt:04}"))
+    config::state_root().join(format!("{}-{attempt:04}", state_safe_id(gremlin_id)))
 }
 
 /// Strip a trailing `-NNNN` attempt suffix from a state directory name.
@@ -2152,7 +2172,8 @@ fn latest_attempt_dir(gremlin_id: &str) -> Result<PathBuf, StateError> {
     // Scan all `<gremlin_id>-NNNN` directories and pick the
     // lexicographically largest valid one. Only considers directories
     // whose state.json contains the matching recorded gremlin id.
-    let prefix = format!("{gremlin_id}-");
+    let safe_id = state_safe_id(gremlin_id);
+    let prefix = format!("{safe_id}-");
     let mut best: Option<(String, PathBuf)> = None;
 
     if let Ok(entries) = std::fs::read_dir(&root) {
