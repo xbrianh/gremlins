@@ -451,7 +451,10 @@ fn build_dir_manifest(dir: &Path) -> Result<Option<String>, String> {
     let files: Vec<_> = crate::lang::collect_source_files(dir)
         .map_err(|e| format!("failed to collect source files in {}: {e}", dir.display()))?
         .into_iter()
-        .filter(|f| f.parent() == Some(dir))
+        .filter(|f| {
+            f.strip_prefix(dir)
+                .is_ok_and(|p| p.components().count() == 1)
+        })
         .collect();
 
     if files.is_empty() {
@@ -657,8 +660,14 @@ fn compute_dir_cache_key(
     estimates: usize,
     config_hash: &str,
 ) -> Result<String, String> {
-    let files = crate::lang::collect_source_files(dir)
-        .map_err(|e| format!("failed to collect source files in {}: {e}", dir.display()))?;
+    let files: Vec<_> = crate::lang::collect_source_files(dir)
+        .map_err(|e| format!("failed to collect source files in {}: {e}", dir.display()))?
+        .into_iter()
+        .filter(|f| {
+            f.strip_prefix(dir)
+                .is_ok_and(|p| p.components().count() == 1)
+        })
+        .collect();
 
     // Per-file hashes, sorted by relative path for determinism.
     let mut file_hashes: Vec<(String, String)> = Vec::with_capacity(files.len());
@@ -676,7 +685,7 @@ fn compute_dir_cache_key(
     file_hashes.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"v8\0");
+    hasher.update(b"v9\0");
     hasher.update(dir.to_string_lossy().as_bytes());
     hasher.update(b"\0");
     for (path, hash) in &file_hashes {
@@ -1010,6 +1019,55 @@ mod tests {
         let key_other_dir =
             compute_dir_cache_key(tmp2.path(), 2, "config-hash").expect("alternate directory key");
         assert_ne!(key, key_other_dir, "directory path must affect the key");
+    }
+
+    #[test]
+    fn compute_dir_cache_key_includes_direct_children_only() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+
+        // Direct child file.
+        std::fs::write(tmp.path().join("a.rs"), "// a").expect("write a.rs");
+        // Nested file — should be excluded from the key.
+        std::fs::create_dir_all(tmp.path().join("sub")).expect("create sub");
+        std::fs::write(tmp.path().join("sub/b.rs"), "// b").expect("write b.rs");
+
+        let key_only_direct =
+            compute_dir_cache_key(tmp.path(), 2, "config-hash").expect("key with direct child");
+
+        // Remove the nested file — key must be unchanged since it wasn't included.
+        std::fs::remove_dir_all(tmp.path().join("sub")).expect("remove sub");
+        let key_without_nested =
+            compute_dir_cache_key(tmp.path(), 2, "config-hash").expect("key without nested");
+        assert_eq!(
+            key_only_direct, key_without_nested,
+            "key must be insensitive to nested files"
+        );
+
+        // Change the direct file — key must change.
+        std::fs::write(tmp.path().join("a.rs"), "// changed").expect("write changed");
+        let key_changed =
+            compute_dir_cache_key(tmp.path(), 2, "config-hash").expect("key after direct change");
+        assert_ne!(
+            key_without_nested, key_changed,
+            "key must detect direct file change"
+        );
+    }
+
+    #[test]
+    fn compute_dir_cache_key_trailing_slash_dir_still_detects_file_changes() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(tmp.path().join("x.rs"), "// v1").expect("write x.rs");
+
+        // Path with trailing slash — strip_prefix + component count is robust.
+        let with_slash = format!("{}/", tmp.path().display());
+        let key1 = compute_dir_cache_key(Path::new(&with_slash), 2, "config-hash")
+            .expect("key with trailing-slash path");
+
+        // Modify the file; the key must change (proving the file was found).
+        std::fs::write(tmp.path().join("x.rs"), "// v2").expect("write v2");
+        let key2 = compute_dir_cache_key(Path::new(&with_slash), 2, "config-hash")
+            .expect("key after file change");
+        assert_ne!(key1, key2, "trailing-slash path must detect file changes");
     }
 
     // ── validate_maint_scores ──
