@@ -59,7 +59,12 @@ pub enum EventKind {
         last_cached_input_tokens: Option<u64>,
     },
     #[serde(rename = "stage_transition")]
-    StageTransition { id: String, stage: String },
+    StageTransition {
+        id: String,
+        stage: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sub_stage: Option<String>,
+    },
     #[serde(rename = "log_line")]
     LogLine { id: String, line: String },
     #[serde(rename = "bail")]

@@ -65,6 +65,8 @@ pub struct ActiveRun {
     pub status: String,
     /// Most recent stage reported by the daemon.
     pub stage: String,
+    /// Active leaf stage for blob lookup during nested execution.
+    pub sub_stage: String,
     /// Pipeline name carried by [`gremlins::executor::EventKind::RunStarted`].
     pub definition: String,
     /// Project associated with the run.
@@ -89,6 +91,7 @@ impl ActiveRun {
         Self {
             status: status.into(),
             stage: String::new(),
+            sub_stage: String::new(),
             definition: String::new(),
             project: String::new(),
             prompt_tokens: None,
@@ -285,6 +288,7 @@ impl App {
             ActiveRun {
                 status,
                 stage,
+                sub_stage: String::new(),
                 definition,
                 project,
                 prompt_tokens,
@@ -318,6 +322,7 @@ impl App {
                 e.insert(ActiveRun {
                     status: "running".to_string(),
                     stage,
+                    sub_stage: String::new(),
                     definition,
                     project: self.project_name.clone(),
                     prompt_tokens: None,
@@ -364,9 +369,10 @@ impl App {
     }
 
     /// Update the stage of an existing run in-place.
-    pub fn on_stage_transition(&mut self, id: String, stage: String) {
+    pub fn on_stage_transition(&mut self, id: String, stage: String, sub_stage: Option<String>) {
         if let Some(run) = self.active_runs.get_mut(&id) {
             run.stage = stage;
+            run.sub_stage = sub_stage.unwrap_or_default();
         }
     }
 
@@ -416,6 +422,7 @@ impl App {
                 e.insert(ActiveRun {
                     status: "running".to_string(),
                     stage: String::new(),
+                    sub_stage: String::new(),
                     definition: String::new(),
                     project: self.project_name.clone(),
                     prompt_tokens,

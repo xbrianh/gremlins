@@ -44,11 +44,11 @@ pub(crate) use crate::clients::interactive::{InteractiveChannels, InteractiveCom
 pub(crate) use self::chat::{add_usage_stats, base_process_env, usage_stats_from_state};
 pub(crate) use self::debug::handle_debug;
 pub(crate) use self::event::{
-    emit_event, emit_run_event_async, init_bus, subscribe_all, subscribe_run_backpressured,
+    emit_event, emit_run_event_async, init_bus, subscribe_all, subscribe_run,
+    subscribe_run_backpressured,
 };
 pub(crate) use self::lifecycle::{launch_child, stop_child, LaunchResult, LogRelay};
 pub(crate) use self::log_handler::handle_log;
-pub(crate) use self::ops::resolve_store_for_id;
 pub(crate) use self::ops::{
     handle_artifact, handle_create_session, handle_info, handle_launch, handle_ls, handle_model,
     handle_resume, handle_rm, handle_snapshot, handle_status, handle_stop,
@@ -399,16 +399,6 @@ async fn handle_connection(
         if op == "debug" {
             let _ = event_start_tx.send(true);
             handle_debug(&request, &actor_tx, reader, &writer).await;
-            break;
-        }
-
-        // stage_stream — delegated to `executor::stage_stream`.
-        if op == "stage_stream" {
-            let _ = event_start_tx.send(true);
-            crate::executor::stage_stream::handle_stage_stream(
-                &request, &actor_tx, reader, &writer,
-            )
-            .await;
             break;
         }
 

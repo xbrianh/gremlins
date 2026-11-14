@@ -83,6 +83,7 @@ pub enum RunError {
 }
 
 pub mod agent_runner;
+pub mod blob_io;
 pub mod bootstrap;
 pub mod event;
 pub mod exec_runner;

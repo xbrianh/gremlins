@@ -110,14 +110,15 @@ async fn run_stage_scoped(
         ExecutorStage::Agent { .. } | ExecutorStage::Exec { .. }
     ) {
         gremlin.state.set_stage(stage.name(), None, display_stage);
-        let event_stage = if display_stage.is_empty() {
-            stage.name()
+        let (event_stage, sub_stage) = if display_stage.is_empty() {
+            (stage.name().to_string(), None)
         } else {
-            display_stage
+            (display_stage.to_string(), Some(stage.name().to_string()))
         };
         crate::executor::supervisor::emit_event(EventKind::StageTransition {
             id: gremlin.id.to_string(),
-            stage: event_stage.to_string(),
+            stage: event_stage,
+            sub_stage,
         });
     }
 
@@ -571,6 +572,7 @@ impl Gremlin {
             crate::executor::supervisor::emit_event(EventKind::StageTransition {
                 id: self.id.to_string(),
                 stage: stage.name().to_string(),
+                sub_stage: None,
             });
 
             let existing_attempt = self.state.read_str("attempt");

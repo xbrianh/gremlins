@@ -42,7 +42,7 @@ pub(crate) fn setup_gremlin_channels(
         .expect("lossless subscription cannot fail");
 
     // Stage boundaries flow on the bus via send_stage_boundary; the
-    // serve_stage_stream_loop handler subscribes directly.
+    // stage_stream proxy subscriber picks them up.
 
     let log_flush = spawn_log_writer(log_rx, store, relay);
     (interactive_handle, log_flush, log_sub)

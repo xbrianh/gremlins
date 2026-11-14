@@ -10,7 +10,6 @@ use crate::clients::client::{Client, ModelURI};
 use crate::clients::protocol::UsageStats;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::socket;
-use crate::executor::stage_stream::{agent_stream_line, exec_stream_line, stage_line_envelope};
 use crate::schemas::bootstrap::{InputSource, InputSources};
 use crate::test_support::Sandbox;
 use serde_json::Value;
@@ -1579,51 +1578,6 @@ fn chat_payload_serializes_tool_result() {
     assert_eq!(value["call"], "Grep(pattern=\"fn\")");
     assert_eq!(value["output"], "x.rs:1:fn");
     assert_eq!(value["turn"], "t-9");
-}
-
-#[test]
-fn agent_stream_line_derives_kind_from_type() {
-    assert_eq!(
-        agent_stream_line(r#"{"type":"stream_chunk","text":"hi"}"#)["kind"],
-        "text"
-    );
-    assert_eq!(
-        agent_stream_line(r#"{"type":"reasoning_chunk","text":"x"}"#)["kind"],
-        "reasoning"
-    );
-    assert_eq!(
-        agent_stream_line(r#"{"type":"tool_result","output":"y"}"#)["kind"],
-        "tool_result"
-    );
-    assert_eq!(
-        agent_stream_line(r#"{"type":"stream_reset"}"#)["kind"],
-        "stream_reset"
-    );
-    // Unrecognized event types fall back to `unknown`.
-    assert_eq!(
-        agent_stream_line(r#"{"type":"assistant","text":"z"}"#)["kind"],
-        "unknown"
-    );
-    // Non-JSON input is tolerated.
-    assert_eq!(agent_stream_line("not json")["kind"], "unknown");
-}
-
-#[test]
-fn exec_stream_line_tags_all_as_stdout() {
-    // Historical blobs have interleaved stdout/stderr without tagging;
-    // we can't distinguish them, so everything is stdout.
-    assert_eq!(exec_stream_line("plain output")["kind"], "stdout");
-    assert_eq!(exec_stream_line("plain output")["text"], "plain output");
-    assert_eq!(exec_stream_line("[stderr] boom")["kind"], "stdout");
-}
-
-#[test]
-fn stage_line_envelope_flattens_payload() {
-    let v = stage_line_envelope(serde_json::json!({"kind": "text", "text": "hi"}), 3);
-    assert_eq!(v["type"], "stage_stream_line");
-    assert_eq!(v["kind"], "text");
-    assert_eq!(v["text"], "hi");
-    assert_eq!(v["offset"], 3);
 }
 
 // ── handle_compact ──────────────────────────────────────────

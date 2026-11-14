@@ -364,6 +364,56 @@ impl DaemonClient {
         Ok((rx, handle))
     }
 
+    /// Read the tail of a store blob (for replay before live following).
+    pub async fn read_blob(
+        &self,
+        id: &str,
+        blob: &str,
+        tail: usize,
+    ) -> Result<Vec<String>, String> {
+        let request = serde_json::json!({
+            "op": "read_blob",
+            "id": id,
+            "blob": blob,
+            "tail": tail,
+        });
+        let resp = self.send_session_request(request).await?;
+        if resp.get("type").and_then(|v| v.as_str()) == Some("error") {
+            return Err(resp
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error")
+                .to_string());
+        }
+        let lines: Vec<String> = resp
+            .get("lines")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(lines)
+    }
+
+    /// Read the gremlin's hermetic definition tree.
+    pub async fn read_definition(&self, id: &str) -> Result<serde_json::Value, String> {
+        let request = serde_json::json!({
+            "op": "read_definition",
+            "id": id,
+        });
+        let resp = self.send_session_request(request).await?;
+        if resp.get("type").and_then(|v| v.as_str()) == Some("error") {
+            return Err(resp
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error")
+                .to_string());
+        }
+        Ok(resp)
+    }
+
     /// Close the current session and create a fresh one.
     ///
     /// Used by `/clear` (releases the old chat gremlin and starts a fresh

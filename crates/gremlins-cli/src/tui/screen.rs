@@ -912,6 +912,41 @@ fn pad_to_display_width(s: &str, target: usize) -> String {
     out
 }
 
+/// Normalize a stage-stream JSON line (old envelope or new EventKind) to a
+/// canonical `kind` string for display routing.
+pub(crate) fn classify_stream_value(value: &serde_json::Value) -> Option<String> {
+    // Old `stage_stream_line` envelope: "type" == "stage_stream_line",
+    // display kind lives in "kind".
+    if value.get("type").and_then(|v| v.as_str()) == Some("stage_stream_line") {
+        return value.get("kind").and_then(|v| v.as_str()).map(String::from);
+    }
+
+    // New EventKind: map serde "type" tag to canonical display kind.
+    match value.get("type").and_then(|v| v.as_str()) {
+        Some("stream_chunk") => Some("text".to_string()),
+        Some("reasoning_chunk") => Some("reasoning".to_string()),
+        Some("tool_output_chunk") => Some("tool_output".to_string()),
+        Some("tool_result") => Some("tool_result".to_string()),
+        Some("turn_complete") => Some("turn_complete".to_string()),
+        Some("done") => Some("done".to_string()),
+        Some("stream_reset") => Some("stream_reset".to_string()),
+        Some("stage_boundary") => Some("stage_boundary".to_string()),
+        Some("exec_output") => {
+            if value
+                .get("is_stderr")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                Some("stderr".to_string())
+            } else {
+                Some("stdout".to_string())
+            }
+        }
+        Some("log_line") => Some("log".to_string()),
+        _ => value.get("kind").and_then(|v| v.as_str()).map(String::from),
+    }
+}
+
 /// Column widths computed from the visible runs for aligned rendering.
 struct ColumnWidths {
     id: usize,
@@ -1054,7 +1089,9 @@ impl RunsView {
     /// lines rather than individual stream deltas.
     pub fn push_stream_line(&mut self, line: String) {
         if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
-            match obj.get("kind").and_then(|v| v.as_str()) {
+            let kind = classify_stream_value(&obj);
+
+            match kind.as_deref() {
                 Some("text") => {
                     let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
                     self.push_text_fragment("text", text);
@@ -1064,6 +1101,44 @@ impl RunsView {
                 Some("reasoning") => {
                     let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
                     self.push_text_fragment("reasoning", text);
+                    self.trim_stream_lines();
+                    return;
+                }
+                Some("stdout") | Some("stderr") => {
+                    let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    // Exec output is line-oriented; push each line as a
+                    // standalone entry for clean rendering.
+                    let k = kind.as_deref().unwrap_or("stdout");
+                    for part in text.split('\n') {
+                        let sl = serde_json::json!({"kind": k, "text": part}).to_string();
+                        // Reset tail state so exec lines don't coalesce into
+                        // the last agent text fragment.
+                        self.stream_tail_kind = None;
+                        self.stream_tail_open = false;
+                        self.stream_lines.push_back(sl);
+                    }
+                    self.trim_stream_lines();
+                    return;
+                }
+                Some("log") => {
+                    // Operational-log line — store as raw (the render closure
+                    // pulls text/line from the JSON).
+                    self.stream_tail_kind = None;
+                    self.stream_tail_open = false;
+                    self.stream_lines.push_back(line);
+                    self.trim_stream_lines();
+                    return;
+                }
+                Some("tool_output")
+                | Some("tool_result")
+                | Some("tool_call")
+                | Some("turn_complete")
+                | Some("stage_boundary") => {
+                    // Discrete events — push verbatim; the render closure
+                    // formats them.
+                    self.stream_tail_kind = None;
+                    self.stream_tail_open = false;
+                    self.stream_lines.push_back(line);
                     self.trim_stream_lines();
                     return;
                 }
@@ -1548,7 +1623,9 @@ impl RunsView {
             .map(|line| {
                 // Try to parse as a stage-stream JSON line
                 if let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) {
-                    match obj.get("kind").and_then(|v| v.as_str()) {
+                    // Normalize: use the shared helper to get a canonical kind.
+                    let kind = classify_stream_value(&obj);
+                    match kind.as_deref() {
                         Some("reasoning") => {
                             let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
                             Line::from(Span::styled(
@@ -1566,8 +1643,13 @@ impl RunsView {
                             ))
                         }
                         Some("log") => {
-                            // Operational-log fallback line — render the text field.
-                            let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            // Operational-log fallback line — render the text
+                            // field, falling back to `line` for EventKind.
+                            let text = obj
+                                .get("text")
+                                .or(obj.get("line"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
                             Line::from(Span::styled(
                                 text.to_string(),
                                 Style::default().fg(DEFAULT_THEME.text),
@@ -1627,10 +1709,7 @@ impl RunsView {
                             ))
                         }
                         Some("done") | Some("stream_reset") => Line::from(Span::styled(
-                            format!(
-                                "── {}",
-                                obj.get("kind").and_then(|v| v.as_str()).unwrap_or("")
-                            ),
+                            format!("── {}", kind.as_deref().unwrap_or("")),
                             Style::default()
                                 .fg(DEFAULT_THEME.chrome)
                                 .add_modifier(Modifier::BOLD),
@@ -2743,6 +2822,7 @@ mod tests {
             ActiveRun {
                 status: "running".to_string(),
                 stage: "build".to_string(),
+                sub_stage: String::new(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
                 prompt_tokens: None,
@@ -2801,6 +2881,7 @@ mod tests {
             ActiveRun {
                 status: "running".to_string(),
                 stage: "build".to_string(),
+                sub_stage: String::new(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
                 prompt_tokens: None,
@@ -2870,6 +2951,7 @@ mod tests {
             ActiveRun {
                 status: "failed".to_string(),
                 stage: "build".to_string(),
+                sub_stage: String::new(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
                 prompt_tokens: None,
@@ -2914,6 +2996,7 @@ mod tests {
             ActiveRun {
                 status: "running".to_string(),
                 stage: "build".to_string(),
+                sub_stage: String::new(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
                 prompt_tokens: None,
@@ -2974,6 +3057,7 @@ mod tests {
             ActiveRun {
                 status: "done".to_string(),
                 stage: "done".to_string(),
+                sub_stage: String::new(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
                 prompt_tokens: None,
@@ -3017,6 +3101,7 @@ mod tests {
             ActiveRun {
                 status: "running".to_string(),
                 stage: "build".to_string(),
+                sub_stage: String::new(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
                 // Cumulative: 10k prompt, 2k cached → would give 20%
@@ -3426,5 +3511,144 @@ Buffer:
             prompt < tool && tool < summary && summary < title && title < tokens,
             "committed order must be prompt → tools → response → reasoning title.\nCombined:\n{combined}"
         );
+    }
+
+    // ── classify_stream_value tests ─────────────────────────────
+
+    #[test]
+    fn classify_old_stage_stream_line_envelope() {
+        let v = serde_json::json!({
+            "type": "stage_stream_line",
+            "kind": "text",
+            "text": "hello",
+        });
+        assert_eq!(classify_stream_value(&v).as_deref(), Some("text"));
+    }
+
+    #[test]
+    fn classify_event_kind_stream_chunk() {
+        let v = serde_json::json!({
+            "type": "stream_chunk",
+            "text": "hello",
+        });
+        assert_eq!(classify_stream_value(&v).as_deref(), Some("text"));
+    }
+
+    #[test]
+    fn classify_event_kind_reasoning_chunk() {
+        let v = serde_json::json!({
+            "type": "reasoning_chunk",
+            "text": "thinking",
+        });
+        assert_eq!(classify_stream_value(&v).as_deref(), Some("reasoning"));
+    }
+
+    #[test]
+    fn classify_event_kind_exec_output_stdout() {
+        let v = serde_json::json!({
+            "type": "exec_output",
+            "is_stderr": false,
+            "text": "out",
+        });
+        assert_eq!(classify_stream_value(&v).as_deref(), Some("stdout"));
+    }
+
+    #[test]
+    fn classify_event_kind_exec_output_stderr() {
+        let v = serde_json::json!({
+            "type": "exec_output",
+            "is_stderr": true,
+            "text": "err",
+        });
+        assert_eq!(classify_stream_value(&v).as_deref(), Some("stderr"));
+    }
+
+    #[test]
+    fn classify_event_kind_log_line() {
+        let v = serde_json::json!({
+            "type": "log_line",
+            "line": "some log",
+        });
+        assert_eq!(classify_stream_value(&v).as_deref(), Some("log"));
+    }
+
+    #[test]
+    fn classify_event_kind_tool_output_chunk() {
+        let v = serde_json::json!({
+            "type": "tool_output_chunk",
+            "id": "t1",
+            "name": "Bash",
+            "text": "output",
+        });
+        assert_eq!(classify_stream_value(&v).as_deref(), Some("tool_output"));
+    }
+
+    #[test]
+    fn classify_event_kind_tool_result() {
+        let v = serde_json::json!({
+            "type": "tool_result",
+            "id": "t1",
+            "name": "Bash",
+            "output": "result",
+        });
+        assert_eq!(classify_stream_value(&v).as_deref(), Some("tool_result"));
+    }
+
+    #[test]
+    fn classify_event_kind_turn_complete() {
+        let v = serde_json::json!({
+            "type": "turn_complete",
+            "turn": 1,
+        });
+        assert_eq!(classify_stream_value(&v).as_deref(), Some("turn_complete"));
+    }
+
+    #[test]
+    fn classify_event_kind_done() {
+        let v = serde_json::json!({
+            "type": "done",
+            "text": "done",
+        });
+        assert_eq!(classify_stream_value(&v).as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn classify_event_kind_stream_reset() {
+        let v = serde_json::json!({"type": "stream_reset"});
+        assert_eq!(classify_stream_value(&v).as_deref(), Some("stream_reset"));
+    }
+
+    #[test]
+    fn classify_event_kind_stage_boundary() {
+        let v = serde_json::json!({
+            "type": "stage_boundary",
+            "stage": "implement",
+            "stage_type": "agent",
+            "active": true,
+        });
+        assert_eq!(classify_stream_value(&v).as_deref(), Some("stage_boundary"));
+    }
+
+    #[test]
+    fn classify_unknown_type_falls_back_to_kind_field() {
+        let v = serde_json::json!({
+            "type": "something_new",
+            "kind": "custom",
+        });
+        assert_eq!(classify_stream_value(&v).as_deref(), Some("custom"));
+    }
+
+    #[test]
+    fn classify_unknown_type_no_kind_returns_none() {
+        let v = serde_json::json!({
+            "type": "something_new",
+        });
+        assert_eq!(classify_stream_value(&v), None);
+    }
+
+    #[test]
+    fn classify_non_json_object_returns_none() {
+        let v = serde_json::json!("just a string");
+        assert_eq!(classify_stream_value(&v), None);
     }
 }
