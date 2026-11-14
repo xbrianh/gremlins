@@ -116,9 +116,11 @@ pub(crate) trait Conversation: Send + Sync {
 
     /// Build the outgoing request for the current turn.
     ///
-    /// May trigger compaction before building the turn script when
-    /// token thresholds are exceeded. Returns an error when the assembled
-    /// messages exceed the configured prompt-size ceiling.
+    /// Returns an error when the assembled messages exceed the configured
+    /// prompt-size ceiling. Implementations may additionally mutate their
+    /// history (for example, [`StandardConversation`] auto-compacts when the
+    /// previous turn's prompt token count exceeded the configured threshold)
+    /// before assembling the script.
     async fn render_turn(
         &mut self,
         nested: bool,
@@ -180,6 +182,14 @@ pub(crate) trait Conversation: Send + Sync {
     /// child loop's discoveries survive after the child is gone.
     fn tool_evidence(&self) -> String {
         collect_tool_evidence(&self.messages())
+    }
+
+    /// Whether a compaction pass during [`render_turn`] replaced the
+    /// prefix (e.g. auto-compaction triggered by token threshold).
+    /// Defaults to `false`; [`StandardConversation`] sets this when its
+    /// auto-compaction path fires.
+    fn compacted_prefix(&self) -> bool {
+        false
     }
 }
 

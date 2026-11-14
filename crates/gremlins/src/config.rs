@@ -754,6 +754,7 @@ pub fn clear_global() {
 
 thread_local! {
     static TEST_MAX_PROMPT_BYTES: Cell<Option<u64>> = const { Cell::new(None) };
+    static TEST_COMPACTION_THRESHOLD_TOKENS: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
 /// Set a test-local max-prompt-bytes override. Must be called while holding
@@ -763,6 +764,15 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn set_test_max_prompt_bytes(value: u64) {
     TEST_MAX_PROMPT_BYTES.with(|cell| cell.set(Some(value)));
+}
+
+/// Set a test-local compaction-threshold-tokens override. Must be called while
+/// holding the [`crate::test_support::EnvGuard`] lock.
+///
+/// Only compiled during `#[cfg(test)]` — callers are guarded by `#[cfg(test)]`.
+#[cfg(test)]
+pub(crate) fn set_test_compaction_threshold_tokens(value: u64) {
+    TEST_COMPACTION_THRESHOLD_TOKENS.with(|cell| cell.set(Some(value)));
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,6 +1179,23 @@ pub(crate) fn max_prompt_bytes() -> u64 {
                 .and_then(|v| v.parse().ok())
         })
         .unwrap_or(DEFAULT_MAX_PROMPT_BYTES)
+}
+
+/// GREMLINS_COMPACTION_THRESHOLD_TOKENS — trigger automatic compaction when
+/// the previous turn's prompt token count exceeds this many tokens. Default
+/// 150 000. The env var takes precedence over Settings.yaml
+/// `compaction.threshold-tokens` so the TUI chat gremlin can pin the
+/// threshold to [`u64::MAX`] via its environment.
+pub(crate) fn compaction_threshold_tokens() -> u64 {
+    // Test-local override takes highest priority.
+    if let Some(v) = TEST_COMPACTION_THRESHOLD_TOKENS.with(Cell::get) {
+        return v;
+    }
+    std::env::var("GREMLINS_COMPACTION_THRESHOLD_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .or_else(|| get_global().map(|c| c.compaction_threshold_tokens()))
+        .unwrap_or(DEFAULT_COMPACTION_THRESHOLD_TOKENS)
 }
 
 /// GREMLINS_MAX_LANDSCAPE_TOOL_TOKENS — default token budget for the
@@ -2303,6 +2330,33 @@ model-profiles:
         let mut env = EnvGuard::lock();
         env.set("GREMLINS_MAX_PROMPT_BYTES", "512");
         assert_eq!(max_prompt_bytes(), 512);
+    }
+
+    #[test]
+    fn test_compaction_threshold_tokens_default() {
+        let _env = EnvGuard::lock();
+        assert!(
+            TEST_COMPACTION_THRESHOLD_TOKENS.with(Cell::get).is_none(),
+            "test-local override leaked from prior test"
+        );
+        assert_eq!(
+            compaction_threshold_tokens(),
+            DEFAULT_COMPACTION_THRESHOLD_TOKENS
+        );
+    }
+
+    #[test]
+    fn test_compaction_threshold_tokens_from_env() {
+        let mut env = EnvGuard::lock();
+        env.set("GREMLINS_COMPACTION_THRESHOLD_TOKENS", "512");
+        assert_eq!(compaction_threshold_tokens(), 512);
+    }
+
+    #[test]
+    fn test_compaction_threshold_tokens_test_override() {
+        let _env = EnvGuard::lock();
+        set_test_compaction_threshold_tokens(9);
+        assert_eq!(compaction_threshold_tokens(), 9);
     }
 
     #[test]
