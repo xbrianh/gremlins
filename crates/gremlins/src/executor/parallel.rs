@@ -215,7 +215,7 @@ pub(crate) async fn run_parallel(
             continue;
         }
 
-        let child_id = format!("{}-{}", gremlin.id.as_str(), child_name);
+        let child_id = format!("{}:{}", gremlin.id.as_str(), child_name);
         let parent_id = gremlin.id.to_string();
         let group_name_owned = group_name.to_string();
 
@@ -1358,7 +1358,7 @@ mod tests {
 
         // Failed children keep their state for forensics; their own log file
         // must stay unprefixed and timestamped.
-        let child_state = StateData::open("gr-test-bad").unwrap();
+        let child_state = StateData::open("gr-test:bad").unwrap();
         let mut child_log = String::new();
         child_state
             .open_blob("log", state::BlobMode::Read)

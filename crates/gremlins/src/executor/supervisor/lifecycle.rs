@@ -44,7 +44,7 @@ pub(crate) fn setup_gremlin_channels(
     // Stage boundaries flow on the bus via send_stage_boundary; the
     // stage_stream proxy subscriber picks them up.
 
-    let log_flush = spawn_log_writer(log_rx, store, relay);
+    let log_flush = spawn_log_writer(log_rx, store, relay, run_id);
     (interactive_handle, log_flush, log_sub)
 }
 
@@ -74,6 +74,7 @@ fn spawn_log_writer(
     mut log_rx: ReceiverHalf<EventKind>,
     store: Arc<dyn state::StateStore + Send + Sync>,
     relay: Option<LogRelay>,
+    run_id: String,
 ) -> tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>> {
     let (barrier_tx, mut barrier_rx) =
         tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<()>>();
@@ -133,7 +134,17 @@ fn spawn_log_writer(
                             let ts =
                                 crate::executor::state::stamp_from_epoch_millis(dispatch.ts().wall_millis());
                             let line = match dispatch.kind() {
-                                EventKind::LogLine { line, .. } => line,
+                                // Skip descendant log lines (e.g. `parent:child`):
+                                // the run-scoped subscription matches them via
+                                // ancestor matching, but they are re-emitted with
+                                // a prefix through the LogRelay pathway. Writing
+                                // them here too would double-deliver each line.
+                                EventKind::LogLine { id, line } => {
+                                    if *id != run_id {
+                                        continue;
+                                    }
+                                    line
+                                }
                                 _ => continue,
                             };
                             for part in line.split('\n') {

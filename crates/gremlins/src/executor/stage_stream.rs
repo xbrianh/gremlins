@@ -14,6 +14,26 @@ use crate::executor::supervisor::{error_response, init_bus, subscribe_run, Share
 use crate::executor::EventKind;
 use crate::magic_bus::Recv;
 
+/// Extract the `id` field from an [`EventKind`] when the variant carries a
+/// run-scoped id. Returns `None` for stream events (`Ready`, `StreamChunk`,
+/// …) that are untagged as well as for events lacking an id.
+fn event_run_id(kind: &EventKind) -> Option<&str> {
+    match kind {
+        EventKind::RunStarted { id, .. }
+        | EventKind::RunCompleted { id, .. }
+        | EventKind::RunFailed { id, .. }
+        | EventKind::RunStopped { id }
+        | EventKind::RunRemoved { id }
+        | EventKind::TokenUsage { id, .. }
+        | EventKind::StageTransition { id, .. }
+        | EventKind::Bail { id, .. }
+        | EventKind::LogLine { id, .. }
+        | EventKind::StageBoundary { id, .. }
+        | EventKind::ExecOutput { id, .. } => Some(id.as_str()),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // handle_stage_stream
 // ---------------------------------------------------------------------------
@@ -61,7 +81,16 @@ pub(crate) async fn handle_stage_stream(
             result = bus_rx.recv() => {
                 match result {
                     Recv::Event(dispatch) => {
-                        let value = match serde_json::to_value(dispatch.into_kind()) {
+                        let kind = dispatch.into_kind();
+                        // Ancestor matching delivers descendant events to the
+                        // parent subscription (e.g. `r:parent` receives
+                        // `r:parent:child` events). Filter to the requested
+                        // run id so that `/watch` on a parent does not
+                        // concatenate child output into the parent pane.
+                        if event_run_id(&kind).is_some_and(|rid| rid != id) {
+                            continue;
+                        }
+                        let value = match serde_json::to_value(kind) {
                             Ok(value) => value,
                             Err(e) => {
                                 log::warn!("stage_stream: serialize event failed: {e}");
