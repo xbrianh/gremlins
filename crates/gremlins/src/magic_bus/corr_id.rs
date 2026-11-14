@@ -476,13 +476,9 @@ mod tests {
             .matches_prefix(&prefix));
 
         // Does NOT match a different run
-        assert!(!CorrId::new()
-            .with_run("other")
-            .matches_prefix(&prefix));
+        assert!(!CorrId::new().with_run("other").matches_prefix(&prefix));
         // Does NOT match substring prefix
-        assert!(!CorrId::new()
-            .with_run("par")
-            .matches_prefix(&prefix));
+        assert!(!CorrId::new().with_run("par").matches_prefix(&prefix));
     }
 
     #[test]
@@ -498,9 +494,7 @@ mod tests {
             .matches_prefix(&prefix));
 
         // Does NOT match parent or sibling
-        assert!(!CorrId::new()
-            .with_run("parent")
-            .matches_prefix(&prefix));
+        assert!(!CorrId::new().with_run("parent").matches_prefix(&prefix));
         assert!(!CorrId::new()
             .with_run("parent:sibling")
             .matches_prefix(&prefix));
@@ -517,17 +511,13 @@ mod tests {
         assert!(!CorrId::new()
             .with_run("parent:child")
             .matches_prefix(&prefix));
-        assert!(!CorrId::new()
-            .with_run("parent")
-            .matches_prefix(&prefix));
+        assert!(!CorrId::new().with_run("parent").matches_prefix(&prefix));
     }
 
     #[test]
     fn run_ancestor_with_other_segments_still_matches() {
         // run ancestor match combined with exact match on other fields
-        let prefix = CorrId::new()
-            .with_run("parent")
-            .with_stage("build");
+        let prefix = CorrId::new().with_run("parent").with_stage("build");
 
         let child_event = CorrId::new()
             .with_run("parent:child-a")

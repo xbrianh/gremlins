@@ -1572,7 +1572,8 @@ impl StateStore for FileSystemStateStore {
                 let Ok(name) = entry.file_name().into_string() else {
                     continue;
                 };
-                if !name.starts_with(&safe_id) || name.as_bytes().get(safe_id.len()) != Some(&b'-') {
+                if !name.starts_with(&safe_id) || name.as_bytes().get(safe_id.len()) != Some(&b'-')
+                {
                     continue;
                 }
                 // Only match `<id>-NNNN` (four-digit suffix), not arbitrary
