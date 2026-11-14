@@ -103,10 +103,11 @@ pub(crate) const FORK_TRANSIENT: [&str; 13] = [
 /// A validated gremlin id.
 ///
 /// The only way to obtain one is [`validate_gremlin_id`], so a `GremlinId` in
-/// hand is proof that the value is safe to use as a single path component
-/// (after applying [`state::state_safe_id`] to replace `:` with `-`):
-/// `[A-Za-z0-9_-]+`, never empty, never containing `..`, never starting or
-/// ending with `:`, and never containing `::`.
+/// hand is proof that the value is safe for use as a path component after
+/// applying [`state::state_safe_id`] (which encodes `:` as `=` for filesystem
+/// safety on macOS): each colon-separated component is `[A-Za-z0-9_-]+`, the
+/// string is never empty, never contains `..`, never starts or ends with `:`,
+/// and never contains `::`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GremlinId(String);
 
@@ -142,26 +143,8 @@ impl std::fmt::Display for GremlinId {
 /// `[A-Za-z0-9_-]+`. `..` is rejected anywhere in the full string.
 /// The empty string is rejected too.
 pub fn validate_gremlin_id(id: &str) -> Result<GremlinId, String> {
-    let illegal = || format!("gremlin_id contains illegal characters: {id:?}");
-    if id.is_empty() {
-        return Err(illegal());
-    }
-    if id.contains("..") {
-        return Err(illegal());
-    }
-    // Reject `:` at start, end, or doubled.
-    if id.starts_with(':') || id.ends_with(':') || id.contains("::") {
-        return Err(illegal());
-    }
-    // Each colon-separated component must be non-empty and [A-Za-z0-9_-]+.
-    if !id.split(':').all(|comp| {
-        !comp.is_empty()
-            && comp
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-    }) {
-        return Err(illegal());
-    }
+    state::validate_gremlin_id_format(id)
+        .map_err(|e| format!("gremlin_id contains illegal characters: {id:?}: {e}"))?;
     Ok(GremlinId(id.to_string()))
 }
 
@@ -877,10 +860,14 @@ impl Gremlin {
         );
         let child_gremlin_id = validate_gremlin_id(child_id).map_err(RunError::Message)?;
 
-        // Reject child IDs that would collide with the parent's attempt
-        // directory naming scheme (<parent_id>-NNNN). Parallel children are
-        // named `{parent}:{child_name}` (hierarchical), so the colon separator
-        // naturally prevents collision with the parent's own attempt dirs.
+        // Reject child IDs whose state_safe_id form would collide with the
+        // parent's attempt directory naming scheme (<parent_id>-NNNN). This
+        // guard is belt-and-suspenders now that state_safe_id reversibly
+        // encodes `:` as `=`: a hierarchical child like `parent:0001`
+        // encodes to `parent=0001`, not `parent-0001`. Still, a literal
+        // `parent-0001` and the safe form of `parent:0001` would NOT collide
+        // on disk, so this guard only catches accidental `-` vs `:` confusion
+        // in the id string itself.
         if !parent_id.is_empty() {
             let parent_prefix = format!("{parent_id}-");
             if let Some(suffix) = child_id.strip_prefix(&parent_prefix) {
@@ -1625,6 +1612,49 @@ mod tests {
         assert_eq!(id.to_string(), "a-b_c9");
         assert_eq!(id.as_str(), "a-b_c9");
         assert_eq!(id.into_string(), "a-b_c9");
+    }
+
+    #[test]
+    fn gremlin_id_accepts_hierarchical_ids() {
+        // Colon-separated components.
+        for id in ["parent:child", "a:b:c", "plan:build", "x:x:x:x"] {
+            let validated = validate_gremlin_id(id).unwrap_or_else(|e| panic!("{id}: {e}"));
+            assert_eq!(validated.as_str(), id);
+        }
+    }
+
+    #[test]
+    fn gremlin_id_rejects_colon_at_boundaries_or_doubled() {
+        for id in [":bad", "bad:", "a::b", ":", "a:b::c"] {
+            let error = validate_gremlin_id(id).expect_err(id);
+            assert!(
+                error.contains(&format!("{id:?}")),
+                "message should name the id: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn gremlin_id_rejects_colon_with_dotdot() {
+        // `..` in any component is rejected.
+        for id in ["a:..:b", "..:a", "a:.."] {
+            let error = validate_gremlin_id(id).expect_err(id);
+            assert!(
+                error.contains(&format!("{id:?}")),
+                "message should name the id: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn gremlin_id_rejects_empty_component() {
+        for id in [":a", "a::b", "a:"] {
+            let error = validate_gremlin_id(id).expect_err(id);
+            assert!(
+                error.contains(&format!("{id:?}")),
+                "message should name the id: {error}"
+            );
+        }
     }
 
     // --- environment resolution ---

@@ -91,10 +91,13 @@ impl CorrId {
 
     /// Segment-aware prefix match.
     ///
-    /// Every field set on `prefix` must be equal to the corresponding field on
-    /// `self`. A `None` field in `prefix` matches any value. `r:ab` does *not*
-    /// match `r:abc` because segment equality is exact, not string-prefix
-    /// based.
+    /// Every field set on `prefix` must match the corresponding field on
+    /// `self`. A `None` field in `prefix` matches any value.
+    ///
+    /// **Run** uses component-wise ancestor matching on colon-delimited
+    /// hierarchy levels: `r:parent` matches `r:parent:child` and
+    /// `r:parent:child:grand`. **Stage**, **turn**, **tool**, and **attempt**
+    /// remain exact-match: `r:ab` does *not* match `r:abc`.
     pub fn matches_prefix(&self, prefix: &CorrId) -> bool {
         run_matches_ancestor(prefix.run.as_deref(), self.run.as_deref())
             && segment_matches(&self.stage, &prefix.stage)
@@ -302,20 +305,18 @@ fn escape_segment(value: &str) -> String {
 /// prefix: "parent:child" → matches "parent:child", "parent:child:grand"
 /// prefix: "parent:child:grand" → matches only "parent:child:grand"
 /// ```
+///
+/// Matching operates on the unescaped run value. A literal colon that was
+/// escaped in the CorrId string form (e.g. `r:parent\:child`) is
+/// indistinguishable from a hierarchy separator at match time: the prefix
+/// `r:parent` matches the run value `parent:child` as an ancestor.
 fn run_matches_ancestor(prefix_run: Option<&str>, event_run: Option<&str>) -> bool {
     match (prefix_run, event_run) {
         (None, _) => true,
         (Some(_), None) => false,
         (Some(prefix), Some(event)) => {
-            let prefix_parts: Vec<&str> = prefix.split(':').collect();
-            let event_parts: Vec<&str> = event.split(':').collect();
-            if prefix_parts.len() > event_parts.len() {
-                return false;
-            }
-            prefix_parts
-                .iter()
-                .zip(event_parts.iter())
-                .all(|(p, e)| p == e)
+            let mut ev = event.split(':');
+            prefix.split(':').all(|p| ev.next() == Some(p))
         }
     }
 }
@@ -534,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn escaped_colon_in_run_value_is_literal_not_hierarchy_separator() {
+    fn escaped_colon_is_indistinguishable_from_hierarchy_separator() {
         // r:parent\:child — the \: is a literal colon in the run value, not a hierarchy separator
         let corr_id: CorrId = "r:parent\\:child:s:build".parse().unwrap();
         assert_eq!(corr_id.run(), Some("parent:child"));

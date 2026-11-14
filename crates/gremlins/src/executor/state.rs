@@ -428,11 +428,18 @@ fn is_file_artifact(data_uri: &str) -> bool {
     data_uri.starts_with('/')
 }
 
-/// Validate that a gremlin id is safe to use as a path segment.
+/// Validate that a gremlin id conforms to the format rules.
 ///
 /// Accepts `:` as a hierarchy separator between `[A-Za-z0-9_-]+` components.
 /// Rejects empty strings, strings containing `..`, `:` at start/end, and `::`.
-fn validate_gremlin_id_component(id: &str) -> Result<(), StateError> {
+///
+/// This does **not** guarantee the id is safe as a raw filesystem path
+/// segment — callers must apply [`state_safe_id`] before using the
+/// result in a path.
+///
+/// Public entry point used by both [`StateData::new`]/[`StateData::open`] and
+/// [`super::gremlin::validate_gremlin_id`].
+pub(crate) fn validate_gremlin_id_format(id: &str) -> Result<(), StateError> {
     if id.is_empty()
         || id.contains("..")
         || id.starts_with(':')
@@ -452,15 +459,23 @@ fn validate_gremlin_id_component(id: &str) -> Result<(), StateError> {
     Ok(())
 }
 
-/// Replace `:` with `-` so a hierarchical gremlin id can be used in a
+/// Replace `:` with `=` so a hierarchical gremlin id can be used in a
 /// filesystem path. macOS maps `:` to `/` at the POSIX layer (legacy HFS
-/// compatibility), so a raw `:` in a directory name is not safe.
+/// compatibility), so raw `:` in a directory name is unsafe.
 ///
-/// The mapping is intentionally lossy: `parent:child` and `parent-child`
-/// both map to `parent-child`. This is tolerable because state lookups
-/// are always driven by the runtime id, never by scanning the filesystem.
+/// `=` is outside the id alphabet (`[A-Za-z0-9_-]`) and therefore cannot
+/// appear in a valid gremlin id, so the mapping is reversible and unambiguous:
+/// distinct ids map to distinct directory names and [`reverse_state_safe_id`]
+/// recovers the original id. Existing hyphenated ids encode to themselves,
+/// preserving backward compatibility with pre-hierarchy state directories.
 pub(crate) fn state_safe_id(id: &str) -> String {
-    id.replace(':', "-")
+    id.replace(':', "=")
+}
+
+/// Recover the original hierarchical gremlin id from its
+/// [`state_safe_id`]-encoded filesystem-safe form.
+pub(crate) fn reverse_state_safe_id(encoded: &str) -> String {
+    encoded.replace('=', ":")
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +533,7 @@ impl FileSystemStateStore {
         initial: &Map<String, Value>,
         ephemeral: bool,
     ) -> Result<Self, StateError> {
-        validate_gremlin_id_component(gremlin_id)?;
+        validate_gremlin_id_format(gremlin_id)?;
         if ephemeral {
             let temp = tempfile::TempDir::new().map_err(StateError::Io)?;
             let state_dir = temp.path().to_path_buf();
@@ -543,7 +558,7 @@ impl FileSystemStateStore {
     /// Lists `state_root/<gremlin_id>-*` and opens the lexicographically
     /// largest attempt directory.
     pub fn open(gremlin_id: &str) -> Result<Self, StateError> {
-        validate_gremlin_id_component(gremlin_id)?;
+        validate_gremlin_id_format(gremlin_id)?;
         let state_dir = latest_attempt_dir(gremlin_id)?;
         Ok(FileSystemStateStore {
             root: StateRoot::Path(state_dir),
@@ -568,10 +583,12 @@ impl FileSystemStateStore {
     }
 
     /// The gremlin id embedded in this store's directory name (the directory
-    /// name with the trailing `-NNNN` attempt suffix removed).
+    /// name with the trailing `-NNNN` attempt suffix removed, then
+    /// [`reverse_state_safe_id`] applied to recover the original
+    /// hierarchical id).
     fn gremlin_id_from_dir(&self) -> Option<String> {
         let name = self.root.path().file_name()?.to_string_lossy().into_owned();
-        strip_attempt_suffix(&name)
+        strip_attempt_suffix(&name).map(|encoded| reverse_state_safe_id(&encoded))
     }
 
     /// The numeric attempt suffix of this store's directory, if present.
@@ -1326,7 +1343,7 @@ impl StateStore for FileSystemStateStore {
         &self,
         child_gremlin_id: &str,
     ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
-        validate_gremlin_id_component(child_gremlin_id)?;
+        validate_gremlin_id_format(child_gremlin_id)?;
         let parent_ad = self.artifact_dir();
 
         if self.root.is_temp() {
@@ -1401,12 +1418,16 @@ impl StateStore for FileSystemStateStore {
             })?
             .to_string();
         let (gremlin_id, current) = {
-            let base = strip_attempt_suffix(&dir_name).ok_or_else(|| {
+            let dir_base = strip_attempt_suffix(&dir_name).ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!("directory {dir_name:?} does not use padded attempt naming",),
                 )
             })?;
+            // `dir_base` is the safe-encoded form (state_safe_id). Reverse
+            // the encoding so we can compare against the recorded (original)
+            // gremlin id from state.json.
+            let gremlin_id = reverse_state_safe_id(&dir_base);
             // Verify the gremlin id embedded in the directory matches the
             // recorded id in state.json so that a gremlin id that itself ends
             // in four decimal digits (e.g. `demo-1234`) is never mistaken for
@@ -1415,11 +1436,11 @@ impl StateStore for FileSystemStateStore {
                 .get("id")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            if recorded_id.as_deref() != Some(&base) {
+            if recorded_id.as_deref() != Some(&gremlin_id) {
                 return Err(Box::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!(
-                        "directory {dir_name:?} appears to be attempt {base:?}-* but the \
+                        "directory {dir_name:?} appears to be attempt {gremlin_id:?}-* but the \
                          recorded gremlin id is {recorded_id:?}",
                     ),
                 )));
@@ -1430,7 +1451,7 @@ impl StateStore for FileSystemStateStore {
                     "fork_to_stage requires a padded attempt directory name",
                 )
             })?;
-            (base, current)
+            (gremlin_id, current)
         };
         let next = current.checked_add(1).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "attempt number overflow")
@@ -1582,6 +1603,20 @@ impl StateStore for FileSystemStateStore {
                 if suffix.len() != 4 || !suffix.iter().all(|b| b.is_ascii_digit()) {
                     // But still clean up tmp dirs from failed forks.
                     if !name[safe_id.len() + 1..].starts_with('.') {
+                        continue;
+                    }
+                }
+                // Defence-in-depth: verify the recorded gremlin id in
+                // state.json matches `id` so that a stale directory whose
+                // safe_id happens to share a prefix never gets removed
+                // accidentally.
+                let state_json = path.join("state.json");
+                if state_json.is_file() {
+                    let recorded = read_state_json(Some(&state_json))
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    if recorded.as_deref() != Some(&id) {
                         continue;
                     }
                 }
@@ -2257,13 +2292,14 @@ pub fn list_state_dirs() -> Vec<(String, PathBuf)> {
         };
 
         // Prefer the recorded gremlin id from state.json; otherwise use the
-        // directory name with any attempt suffix stripped.
+        // directory name with any attempt suffix stripped and safe encoding
+        // reversed.
         let id = read_state_json(Some(&state_json_path))
             .get("id")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string)
-            .or_else(|| strip_attempt_suffix(&name))
+            .or_else(|| strip_attempt_suffix(&name).map(|encoded| reverse_state_safe_id(&encoded)))
             .unwrap_or_else(|| name.clone());
 
         match latest.get(&id) {
@@ -2468,6 +2504,69 @@ mod tests {
         )
         .unwrap();
         sf
+    }
+
+    // -----------------------------------------------------------------------
+    // state_safe_id / reverse_state_safe_id roundtrip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn state_safe_id_roundtrips_through_reverse() {
+        // Every valid hierarchical id round-trips through encode/decode.
+        for id in [
+            "parent:child",
+            "a:b:c",
+            "gr-test",
+            "a-b",
+            "a_b",
+            "plan:build",
+            "x:x:x:x",
+            "deep:nested:path:here",
+        ] {
+            let encoded = state_safe_id(id);
+            let decoded = reverse_state_safe_id(&encoded);
+            assert_eq!(id, decoded, "{id:?} -> {encoded:?} -> {decoded:?}");
+        }
+    }
+
+    #[test]
+    fn state_safe_id_distinct_ids_produce_distinct_names() {
+        // parent:child and parent-child must encode differently.
+        let a = state_safe_id("parent:child");
+        let b = state_safe_id("parent-child");
+        assert_ne!(a, b, "{a:?} must not collide with {b:?}");
+
+        // parent:child and parent:child:grand must encode differently.
+        let c = state_safe_id("parent:child:grand");
+        assert_ne!(a, c, "{a:?} must not collide with {c:?}");
+    }
+
+    #[test]
+    fn state_safe_id_transforms_colon_and_dash() {
+        assert_eq!(state_safe_id("a:b"), "a=b");
+        assert_eq!(state_safe_id("a-b"), "a-b");
+        assert_eq!(state_safe_id("a:b-c"), "a=b-c");
+        assert_eq!(state_safe_id("a"), "a");
+        assert_eq!(state_safe_id(""), "");
+    }
+
+    #[test]
+    fn reverse_state_safe_id_recovers_original() {
+        assert_eq!(reverse_state_safe_id("a=b"), "a:b");
+        assert_eq!(reverse_state_safe_id("a-b"), "a-b");
+        assert_eq!(reverse_state_safe_id("a=b-c"), "a:b-c");
+        assert_eq!(reverse_state_safe_id("abc"), "abc");
+        assert_eq!(reverse_state_safe_id(""), "");
+    }
+
+    #[test]
+    fn reverse_state_safe_id_handles_edge_cases() {
+        // `=` only appears as a colon encoding; a plain id round-trips.
+        assert_eq!(reverse_state_safe_id("a="), "a:");
+        assert_eq!(reverse_state_safe_id("=a"), ":a");
+        assert_eq!(reverse_state_safe_id("="), ":");
+        assert_eq!(reverse_state_safe_id("a"), "a");
+        assert_eq!(reverse_state_safe_id("a-b"), "a-b");
     }
 
     // -----------------------------------------------------------------------
