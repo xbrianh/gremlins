@@ -601,13 +601,11 @@ fn send_chat_input(
         // empty one. Collected here (on the chat submission path) so it
         // reflects the operator's shell at submit time. The chat gremlin is
         // interactive, so automatic compaction is disabled by pinning the
-        // token threshold to u64::MAX; set
+        // token threshold to u64::MAX (18446744073709551615); set
         // GREMLINS_COMPACTION_THRESHOLD_TOKENS yourself to opt back in.
         let mut env: HashMap<String, String> = std::env::vars().collect();
-        env.insert(
-            "GREMLINS_COMPACTION_THRESHOLD_TOKENS".to_string(),
-            u64::MAX.to_string(),
-        );
+        env.entry("GREMLINS_COMPACTION_THRESHOLD_TOKENS".to_string())
+            .or_insert_with(|| u64::MAX.to_string());
         let request = build_chat_request(
             &enriched_input,
             &turn_id,

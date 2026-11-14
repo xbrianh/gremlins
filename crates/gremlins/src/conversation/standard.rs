@@ -248,16 +248,14 @@ impl Conversation for StandardConversation {
         // Auto-compact when the previous turn's prompt grew past the
         // configured token threshold, before the byte-size gate below.
         let threshold = crate::config::compaction_threshold_tokens();
-        if self
-            .last_prompt_tokens
-            .is_some_and(|tokens| tokens > threshold)
-        {
-            log::info!(
-                "auto-compaction: last_prompt_tokens={} exceeds threshold={}",
-                self.last_prompt_tokens.unwrap_or_default(),
-                threshold
-            );
-            self.compact(combined_system.as_deref(), None).await;
+        if let Some(tokens) = self.last_prompt_tokens {
+            if tokens > threshold {
+                log::info!(
+                    "auto-compaction: last_prompt_tokens={tokens} exceeds threshold={threshold}"
+                );
+                self.compact(combined_system.as_deref(), None).await;
+                self.last_prompt_tokens = None;
+            }
         }
 
         // Coarse prompt-size gate: sum text byte lengths of all messages

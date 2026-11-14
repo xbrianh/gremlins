@@ -1183,20 +1183,18 @@ pub(crate) fn max_prompt_bytes() -> u64 {
 
 /// GREMLINS_COMPACTION_THRESHOLD_TOKENS — trigger automatic compaction when
 /// the previous turn's prompt token count exceeds this many tokens. Default
-/// 150 000. Settings.yaml `compaction.threshold-tokens` takes precedence over
-/// the env var.
+/// 150 000. The env var takes precedence over Settings.yaml
+/// `compaction.threshold-tokens` so the TUI chat gremlin can pin the
+/// threshold to [`u64::MAX`] via its environment.
 pub(crate) fn compaction_threshold_tokens() -> u64 {
     // Test-local override takes highest priority.
     if let Some(v) = TEST_COMPACTION_THRESHOLD_TOKENS.with(Cell::get) {
         return v;
     }
-    get_global()
-        .map(|c| c.compaction_threshold_tokens())
-        .or_else(|| {
-            std::env::var("GREMLINS_COMPACTION_THRESHOLD_TOKENS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-        })
+    std::env::var("GREMLINS_COMPACTION_THRESHOLD_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .or_else(|| get_global().map(|c| c.compaction_threshold_tokens()))
         .unwrap_or(DEFAULT_COMPACTION_THRESHOLD_TOKENS)
 }
 
@@ -2337,6 +2335,10 @@ model-profiles:
     #[test]
     fn test_compaction_threshold_tokens_default() {
         let _env = EnvGuard::lock();
+        assert!(
+            TEST_COMPACTION_THRESHOLD_TOKENS.with(Cell::get).is_none(),
+            "test-local override leaked from prior test"
+        );
         assert_eq!(
             compaction_threshold_tokens(),
             DEFAULT_COMPACTION_THRESHOLD_TOKENS
