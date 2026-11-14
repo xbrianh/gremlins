@@ -9,7 +9,7 @@ pub mod core;
 pub mod definition;
 pub mod executor;
 pub use gremlins_landscape as landscape;
-pub mod magic_bus;
+pub use gremlins_magic_bus as magic_bus;
 pub mod model_uri;
 pub mod prelude;
 pub mod schemas;

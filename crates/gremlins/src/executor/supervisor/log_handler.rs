@@ -10,14 +10,16 @@ use tokio::sync::mpsc;
 
 use crate::config;
 use crate::executor::gremlin::validate_gremlin_id;
-use crate::executor::socket;
 use crate::executor::state::{self, FileSystemStateStore};
-use crate::magic_bus::Subscriber;
+
+use crate::executor::socket;
+use gremlins_magic_bus::Subscriber;
+use gremlins_magic_bus::{init_bus, EventKind};
 
 use super::actor_client::Client;
-use super::event::{init_bus, EventKind};
+use super::error_response;
 use super::ops::resolve_store_for_id;
-use super::{error_response, SharedWriter};
+use gremlins_magic_bus::connection::SharedWriter;
 
 pub(crate) async fn handle_log(
     request: &Value,
@@ -178,7 +180,7 @@ pub(crate) async fn handle_log(
             tokio::select! {
                 result = log_rx.recv() => {
                     match result {
-                        crate::magic_bus::Recv::Event(dispatch) => {
+                        gremlins_magic_bus::Recv::Event(dispatch) => {
                             match dispatch.kind() {
                                 EventKind::LogLine { id: line_id, line } => {
                                     // Keep only the logged-in run's own lines —
@@ -236,10 +238,10 @@ pub(crate) async fn handle_log(
                                 _ => continue,
                             }
                         }
-                        crate::magic_bus::Recv::Lagged(n) => {
+                        gremlins_magic_bus::Recv::Lagged(n) => {
                             log_line!(format!("[skipped {n} lines]"));
                         }
-                        crate::magic_bus::Recv::Closed => break,
+                        gremlins_magic_bus::Recv::Closed => break,
                     }
                 }
                 _ = socket::read_json_line(&mut reader) => { break; }

@@ -86,7 +86,7 @@ pub(crate) struct ToolOutputLine {
 pub(crate) struct AgentLoopTelemetry {
     /// Async stream-event emitter. Nested loops inherit the parent's hook so
     /// child tool events reach the parent stream with the correct id prefix.
-    pub(crate) emit_stream_event: Option<crate::clients::event::StreamEventFn>,
+    pub(crate) emit_stream_event: Option<crate::clients::StreamEventFn>,
     /// True when a stream-event consumer is wired.
     pub(crate) wants_stream_events: bool,
     pub(crate) tool_output: Option<tokio::sync::mpsc::Sender<ToolOutputLine>>,

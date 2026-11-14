@@ -5,8 +5,8 @@ use rig_core::operation::Completion;
 
 use crate::clients::conversation::Conversation;
 use crate::clients::error::ClientError;
-use crate::clients::event::EventKind;
 use crate::clients::interactive::{InteractiveCommand, InteractiveSession, PauseToken};
+use gremlins_magic_bus::EventKind;
 
 use super::agent_loop::{InteractiveBoundary, LoopState};
 use super::plug::LoopHooks;

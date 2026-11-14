@@ -12,13 +12,15 @@ use tokio::sync::{mpsc, watch};
 
 use crate::executor::socket;
 
+use gremlins_magic_bus::connection::{ConnectionGuard, SharedWriter};
+
 use super::actor::ActorMsg;
 use super::actor_client::Client;
 use super::chat::{handle_cancel_chat, handle_chat};
 use super::debug::handle_debug;
 use super::log_handler::handle_log;
 use super::ops::{handle_chat_model, handle_compact, handle_session_stop};
-use super::{error_response, ok_response, ConnectionGuard, SharedWriter};
+use super::{error_response, ok_response};
 
 /// Validate `id` as a session identifier.
 pub(crate) fn validate_session_id(id: &str) -> Result<(), String> {
@@ -133,7 +135,7 @@ pub(crate) async fn handle_session_main(
     actor_tx: mpsc::UnboundedSender<ActorMsg>,
 ) {
     // Hold the connection-count guard for the lifetime of the main connection.
-    let _guard = ConnectionGuard::new(&actor_tx);
+    let _guard = ConnectionGuard::new(&actor_tx, ActorMsg::ConnectionUp, ActorMsg::ConnectionDown);
 
     let (request_tx, request_rx) = mpsc::channel::<Value>(64);
 
@@ -320,7 +322,7 @@ pub(crate) async fn handle_session_aux(
     actor_tx: mpsc::UnboundedSender<ActorMsg>,
 ) {
     // Hold the connection-count guard for the lifetime of the aux connection.
-    let _guard = ConnectionGuard::new(&actor_tx);
+    let _guard = ConnectionGuard::new(&actor_tx, ActorMsg::ConnectionUp, ActorMsg::ConnectionDown);
     let writer = SharedWriter::new(write_half);
     let mut reader = BufReader::new(read_half);
 

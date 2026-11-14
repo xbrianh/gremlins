@@ -10,9 +10,9 @@ use crate::definition::ExecutorStage;
 use crate::executor::exec_runner::{commit_exec, prepare_exec, run_shell};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state::{Checkout, Collision};
-use crate::executor::supervisor::emit_event;
-use crate::executor::EventKind;
 use crate::executor::RunError;
+use gremlins_magic_bus::emit_event;
+use gremlins_magic_bus::EventKind;
 
 use crate::executor::run::{
     collect_checkout_keys, exec_commit_err, exec_prepare_err, stage_failed,

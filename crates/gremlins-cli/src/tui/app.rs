@@ -67,7 +67,7 @@ pub struct ActiveRun {
     pub stage: String,
     /// Active leaf stage for blob lookup during nested execution.
     pub sub_stage: String,
-    /// Pipeline name carried by [`gremlins::executor::EventKind::RunStarted`].
+    /// Pipeline name carried by [`gremlins_magic_bus::EventKind::RunStarted`].
     pub definition: String,
     /// Project associated with the run.
     pub project: String,

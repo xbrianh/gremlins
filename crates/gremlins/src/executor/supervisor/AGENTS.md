@@ -14,8 +14,8 @@ The module was split from a monolithic `supervisor.rs` during the
 
 | File | Role |
 |---|---|
-| `mod.rs` | Hub: module declarations, `RunHandle`/`RunState`, `CurrentTurn`, `SharedWriter`, `DebugDetachGuard`, accept loop (`run_supervisor`, `handle_connection`), `dispatch_op`, `ok_response`/`error_response`, and all pub(crate) re-exports. |
-| `event.rs` | Global event bus (`Bus<EventKind>`), `init_bus`, `subscribe_all`/`subscribe_run`, `emit_event`, connection counter, `ConnectionGuard`, and `check_shutdown`. |
+| `mod.rs` | Hub: module declarations, `RunHandle`/`RunState`, `CurrentTurn`, `DebugDetachGuard`, accept loop (`run_supervisor`, `handle_connection`), `dispatch_op`, `ok_response`/`error_response`, and all pub(crate) re-exports. |
+| (bus crate) | The global event bus (`Bus<EventKind>`), `init_bus`, `subscribe_all`/`subscribe_run`, `emit_event`, `SharedWriter`, `BusSubGuard`, and `ConnectionGuard` live in the `gremlins-magic-bus` crate (`concrete.rs`, `connection.rs`). |
 | `lifecycle.rs` | Child gremlin lifecycle: `setup_gremlin_channels`, `run_gremlin_task`, `spawn_log_writer`, `spawn_gremlin_runner`, `launch_child`/`stop_child`, `terminate_and_reap`. |
 | `log_handler.rs` | Streaming log handler (`handle_log`) and `LogSource` enum. |
 | `debug.rs` | Interactive debug handler (`handle_debug`) and `send_debug_status`. |
@@ -102,9 +102,9 @@ and emits the terminal `DaemonEvent`.
 |---|---|
 | Add a new op handler | Add a function in the appropriate `ops/` sub-module, wire it in `dispatch_op` (`mod.rs`). |
 | Change child launch/stop | `lifecycle.rs::launch_child` / `stop_child` |
-| Change the event bus | `event.rs::init_bus`, `subscribe_run`, `emit_event` |
+| Change the event bus | `gremlins_magic_bus::concrete` (`init_bus`, `subscribe_run`, `emit_event`) |
 | Understand session lifecycle | `session.rs::run_session_listener` / `handle_session_main`; state in `actor.rs::SessionState` |
 | Debug a chat turn | `chat/mod.rs::run_chat_turn` + `chat/turn_finalizer.rs` |
 | Understand the interactive debug flow | `debug.rs::handle_debug` |
 | Read gremlin state for a query | `state_view.rs::state_view_for_id` |
-| Change socket/lock protocol | `supervisor` delegates to `executor/socket.rs` |
+| Change socket/lock protocol | `supervisor` delegates to `crate::executor::socket` |

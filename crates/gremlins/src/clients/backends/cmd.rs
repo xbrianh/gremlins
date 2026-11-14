@@ -18,8 +18,8 @@ use crate::clients::interactive::InteractiveSession;
 use crate::clients::params::ResolvedParams;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::stream_json::{self, StreamState};
-use crate::executor::supervisor::emit_event;
-use crate::executor::EventKind;
+use gremlins_magic_bus::EventKind;
+use gremlins_magic_bus::emit_event;
 
 fn footer_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();

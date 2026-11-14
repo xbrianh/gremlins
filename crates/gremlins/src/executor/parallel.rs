@@ -1244,22 +1244,22 @@ mod tests {
 
     /// Drain bus event_rx until `deadline`, collecting LogLine lines.
     async fn drain_log_bus(
-        rx: &mut crate::magic_bus::ReceiverHalf<crate::executor::EventKind>,
+        rx: &mut gremlins_magic_bus::ReceiverHalf<gremlins_magic_bus::EventKind>,
         deadline: std::time::Instant,
     ) -> Vec<String> {
         let mut lines = Vec::new();
         while std::time::Instant::now() < deadline {
             match rx.try_recv() {
                 Ok(dispatch) => {
-                    if let crate::executor::EventKind::LogLine { line, .. } = dispatch.kind() {
+                    if let gremlins_magic_bus::EventKind::LogLine { line, .. } = dispatch.kind() {
                         lines.push(line.clone());
                     }
                 }
-                Err(crate::magic_bus::TryRecvError::Empty) => {
+                Err(gremlins_magic_bus::TryRecvError::Empty) => {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-                Err(crate::magic_bus::TryRecvError::Closed)
-                | Err(crate::magic_bus::TryRecvError::Lagged(_)) => break,
+                Err(gremlins_magic_bus::TryRecvError::Closed)
+                | Err(gremlins_magic_bus::TryRecvError::Lagged(_)) => break,
             }
         }
         lines
@@ -1285,7 +1285,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd/true");
 
-        let (_sub, mut parent_log_rx) = crate::executor::supervisor::subscribe_all();
+        let (_sub, mut parent_log_rx) = gremlins_magic_bus::subscribe_all();
 
         let stage = first_executor_stage(&stages);
         // ErrorPolicy::All with one failing child keeps group_error None so
@@ -1323,7 +1323,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages.clone(), "cmd/true");
 
-        let (_sub, mut parent_log_rx) = crate::executor::supervisor::subscribe_all();
+        let (_sub, mut parent_log_rx) = gremlins_magic_bus::subscribe_all();
 
         let stage = first_executor_stage(&stages);
         let result = run_parallel(&stage, &mut gremlin, "", "", None, None).await;

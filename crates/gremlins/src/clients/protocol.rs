@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use super::conversation::Conversation;
 use rig_core::completion::Message;
 
+pub use gremlins_magic_bus::stats::{add_opt, TurnStats, UsageStats};
+
 /// A signed compaction block from the Anthropic on-demand compaction API
 /// (`compact-2026-09-04`). Round-tripped verbatim in subsequent requests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,42 +27,6 @@ pub struct CompactionResult {
     pub input_tokens: Option<u64>,
     /// Output tokens produced by the compaction summarization.
     pub output_tokens: Option<u64>,
-}
-
-/// Aggregated token usage summary from an agent run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UsageStats {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completion_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cached_input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_creation_input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_tokens: Option<u64>,
-    pub turns: usize,
-}
-
-/// One turn's token/cache delta.
-///
-/// Field names intentionally mirror [`UsageStats`] so chat consumers see the
-/// same canonical wire keys for both per-turn and aggregate usage.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TurnStats {
-    /// The agent-loop turn index that produced this usage.
-    pub turn: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completion_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cached_input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_creation_input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_tokens: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -102,60 +68,5 @@ impl Clone for CompletedRun {
             token_usage: self.token_usage.clone(),
             conversation: self.conversation.clone(),
         }
-    }
-}
-
-/// Sum two optional token counters.
-///
-/// When both sides are present their values are added together. If only one
-/// side is present it is propagated unchanged, and when both are absent the
-/// total stays absent. A reported zero (`Some(0)`) is preserved, so absence
-/// is never turned into a measured zero and a measured zero is never treated
-/// as missing.
-pub fn add_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a + b),
-        (a, b) => a.or(b),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn add_opt_sums_and_propagates_absence() {
-        assert_eq!(add_opt(Some(2), Some(3)), Some(5));
-        assert_eq!(add_opt(Some(2), None), Some(2));
-        assert_eq!(add_opt(None, Some(3)), Some(3));
-        assert_eq!(add_opt(None, None), None);
-        assert_eq!(add_opt(Some(0), None), Some(0));
-    }
-
-    #[test]
-    fn usage_stats_round_trips_omitted_counter_fields() {
-        let stats = UsageStats {
-            prompt_tokens: Some(10),
-            completion_tokens: None,
-            cached_input_tokens: None,
-            cache_creation_input_tokens: None,
-            reasoning_tokens: Some(2),
-            turns: 4,
-        };
-
-        let json = serde_json::to_value(&stats).unwrap();
-        assert_eq!(json["prompt_tokens"], 10);
-        assert_eq!(json["reasoning_tokens"], 2);
-        assert!(json.get("completion_tokens").is_none());
-        assert!(json.get("cached_input_tokens").is_none());
-        assert!(json.get("cache_creation_input_tokens").is_none());
-
-        let decoded: UsageStats = serde_json::from_value(json).unwrap();
-        assert_eq!(decoded.prompt_tokens, Some(10));
-        assert_eq!(decoded.completion_tokens, None);
-        assert_eq!(decoded.cached_input_tokens, None);
-        assert_eq!(decoded.cache_creation_input_tokens, None);
-        assert_eq!(decoded.reasoning_tokens, Some(2));
-        assert_eq!(decoded.turns, 4);
     }
 }

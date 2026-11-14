@@ -2,7 +2,7 @@
 
 use std::time::{Instant, SystemTime};
 
-use super::CorrId;
+use crate::CorrId;
 
 /// A capture of both monotonic and wall-clock time.
 ///

@@ -21,17 +21,20 @@ use tokio::sync::{mpsc, watch};
 
 use crate::clients::cancel::CancelToken;
 use crate::clients::client::{Client as ModelClient, ModelURI};
-use crate::clients::event::EventKind;
 use crate::clients::protocol::{add_opt, UsageStats};
 use crate::config;
 use crate::definition::ChatDefinition;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
 use crate::executor::state;
-use crate::magic_bus::Recv;
+use gremlins_magic_bus::connection::BusSubGuard;
+use gremlins_magic_bus::subscribe_run_backpressured;
+use gremlins_magic_bus::EventKind;
+use gremlins_magic_bus::Recv;
 
 use super::actor::ActorMsg;
 use super::actor_client::Client;
-use super::{error_response, ok_response, CurrentTurn, SharedWriter};
+use super::{error_response, ok_response, CurrentTurn};
+use gremlins_magic_bus::connection::SharedWriter;
 
 /// Daemon process environment, captured once at startup. Requests without `env`
 /// fall back to this snapshot.
@@ -526,8 +529,8 @@ async fn run_chat_turn(
     // rather than dropping live stream events. The guard moves into the
     // TurnFinalizer so it's dropped before the gremlin is re-inserted —
     // otherwise the next turn (same run id) fills the old, undrained mailbox.
-    let (stream_sub, mut stream_rx) = super::subscribe_run_backpressured(&id, 256);
-    let stream_guard = super::BusSubGuard::new(stream_sub);
+    let (stream_sub, mut stream_rx) = subscribe_run_backpressured(&id, 256);
+    let stream_guard = BusSubGuard::new(stream_sub);
 
     // Terminal-path resources live on the finalizer so every exit path
     // re-inserts the gremlin and clears the in-flight turn the same way.

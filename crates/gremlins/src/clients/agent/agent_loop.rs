@@ -13,8 +13,8 @@ use rig_core::streaming::Streamed;
 use tokio::sync::{mpsc, watch, Semaphore};
 
 use crate::clients::backend::RunParams;
-use crate::clients::event::EventKind;
 use crate::clients::interactive::{InteractiveCommand, InteractiveSession, PauseToken};
+use gremlins_magic_bus::EventKind;
 
 use super::interactive::{interactive_loop, maybe_pause, InteractiveLoopResult};
 use super::plug::LoopHooks;

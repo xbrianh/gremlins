@@ -17,10 +17,10 @@ use rig_core::streaming::{Item, StreamEvent, Streamed};
 
 use crate::clients::cancel::CancelToken;
 use crate::clients::error::ClientError;
-use crate::clients::event::EventKind;
 use crate::clients::format::{apply_chunk, assistant_tool_message, format_tool_call};
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::tools::AgentLoopRuntime;
+use gremlins_magic_bus::EventKind;
 
 use super::agent_loop::{
     cancelled_error, retry_backoff, LoopOpts, LoopState, StreamAccumulator, StreamTurnOutcome,

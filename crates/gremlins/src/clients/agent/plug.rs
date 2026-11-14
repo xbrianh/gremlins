@@ -1,11 +1,11 @@
-use crate::clients::event::EventKind;
 use crate::clients::protocol::UsageStats;
 use crate::clients::LogLineFn;
+use gremlins_magic_bus::EventKind;
 use rig_core::completion::CompletionRequest;
 use std::future::Future;
 use std::sync::Arc;
 
-pub(crate) use crate::clients::event::StreamEventFn;
+pub(crate) use crate::clients::StreamEventFn;
 
 /// Inversion-of-control hooks that decouple the agent loop from
 /// `crate::executor` and `crate::landscape`. Every cross-package

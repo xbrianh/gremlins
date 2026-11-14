@@ -9,12 +9,13 @@ use tokio::sync::mpsc;
 
 use crate::config;
 use crate::definition::{StageSpec, StaticDefinition};
-use crate::executor::event::EventKind;
 use crate::executor::gremlin::{Gremlin, GremlinConfig};
 use crate::executor::state;
 
+use gremlins_magic_bus::emit_event;
+use gremlins_magic_bus::EventKind;
+
 use super::super::actor_client::Client;
-use super::super::event::emit_event;
 use super::super::lifecycle::spawn_gremlin_runner;
 use super::super::lifecycle::terminate_and_reap;
 use super::super::{error_response, ok_response, valid_id};

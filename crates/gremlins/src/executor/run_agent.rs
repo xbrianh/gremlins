@@ -19,10 +19,11 @@ use crate::executor::agent_runner::{commit_agent, prepare_agent};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state;
 use crate::executor::state::{Checkout, Collision, FileSystemStateStore};
-use crate::executor::supervisor::emit_event;
-use crate::executor::EventKind;
 use crate::executor::RunError;
 use crate::task_kind::TaskKind;
+use gremlins_magic_bus::emit_event;
+use gremlins_magic_bus::emit_run_event_async;
+use gremlins_magic_bus::EventKind;
 use indexmap::IndexMap;
 use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::completion::Message;
@@ -274,7 +275,7 @@ pub(crate) async fn run_agent(
                 let cost_usd = client_for_cost.total_cost_usd();
                 *live_usage_tracker.lock().unwrap() =
                     Some((usage.clone(), totals.clone(), cost_usd));
-                crate::executor::supervisor::emit_event(EventKind::TokenUsage {
+                emit_event(EventKind::TokenUsage {
                     id: gremlin_id.clone(),
                     usage,
                     cost_usd,
@@ -288,7 +289,7 @@ pub(crate) async fn run_agent(
         let gremlin_id = gremlin.id.to_string();
         hooks.register_log_line(move |msg: &str| {
             if log::Level::Info <= crate::executor::log_level_threshold() {
-                crate::executor::supervisor::emit_event(EventKind::LogLine {
+                emit_event(EventKind::LogLine {
                     id: gremlin_id.clone(),
                     line: msg.to_string(),
                 });
@@ -307,7 +308,7 @@ pub(crate) async fn run_agent(
         hooks.register_stream_event(move |event: EventKind| {
             let gremlin_id = gremlin_id.clone();
             async move {
-                crate::executor::supervisor::emit_run_event_async(&gremlin_id, event).await;
+                emit_run_event_async(&gremlin_id, event).await;
             }
         });
     }

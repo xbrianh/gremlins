@@ -20,10 +20,10 @@ use super::done_helpers::done_user_message;
 use crate::clients::cancel::CancelToken;
 use crate::clients::conversation::Conversation;
 use crate::clients::error::ClientError;
-use crate::clients::event::EventKind;
 use crate::clients::format::{format_tool_call, trunc};
 use crate::clients::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
 use crate::clients::tools::{self, AgentLoopRuntime};
+use gremlins_magic_bus::EventKind;
 
 use super::agent_loop::{
     cancelled_error, emit_final, emit_summary, DoneDecision, EmptyTurnAction, LoopState,

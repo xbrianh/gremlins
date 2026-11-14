@@ -23,9 +23,8 @@ use crate::definition::ChatDefinition;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run_agent;
 use crate::executor::supervisor::chat::chat_payload;
-use crate::executor::supervisor::BusSubGuard;
-use crate::executor::supervisor::SharedWriter;
 use crate::executor::RunError;
+use gremlins_magic_bus::connection::{BusSubGuard, SharedWriter};
 
 use crate::executor::supervisor::actor::ActorMsg;
 use crate::executor::supervisor::actor_client::Client;

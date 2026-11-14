@@ -85,7 +85,6 @@ pub enum RunError {
 pub mod agent_runner;
 pub mod blob_io;
 pub mod bootstrap;
-pub mod event;
 pub mod exec_runner;
 pub mod gremlin;
 pub mod parallel;
@@ -97,5 +96,3 @@ pub mod stage_stream;
 pub mod state;
 pub mod supervisor;
 pub mod vars;
-
-pub use event::EventKind;
