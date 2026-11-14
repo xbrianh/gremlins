@@ -17,8 +17,11 @@
 //! replaces the oldest history messages with a signed compaction
 //! block (server) or a plain summary (local). The most recent
 //! `KEEP_RECENT` user+assistant pairs are preserved verbatim.
-//! It is called by the `/compact` TUI command handler; there is no
-//! automatic compaction.
+//! It is called by the `/compact` TUI command handler and, when
+//! [`render_turn`](StandardConversation::render_turn) observes a previous
+//! turn whose prompt token count exceeded the configured
+//! `compaction_threshold_tokens`, it runs automatically before the
+//! byte-size gate.
 
 use async_trait::async_trait;
 use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
@@ -53,6 +56,9 @@ pub(crate) struct StandardConversation {
     prompt_committed: bool,
     preserve_reasoning_in_history: bool,
     last_text: String,
+    /// Prompt token count reported by the provider for the previous turn.
+    /// Drives automatic compaction in [`render_turn`].
+    last_prompt_tokens: Option<u64>,
     /// Snapshot produced by the most recent [`Conversation::finalize`] call.
     /// Once set, [`Conversation::messages`] returns this final transcript so
     /// persistence consumers see the exact durable message list.
@@ -75,6 +81,7 @@ impl StandardConversation {
             prompt_committed: false,
             preserve_reasoning_in_history: preserve_reasoning,
             last_text: String::new(),
+            last_prompt_tokens: None,
             finalized_messages: None,
             backend,
         }
@@ -179,6 +186,7 @@ impl Conversation for StandardConversation {
             prompt_committed: self.prompt_committed,
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: self.last_text.clone(),
+            last_prompt_tokens: self.last_prompt_tokens,
             finalized_messages: self.finalized_messages.clone(),
             backend: self.backend.clone(),
         })
@@ -195,7 +203,7 @@ impl Conversation for StandardConversation {
         text: &str,
         reasoning_items: &[Sealed<Reasoning>],
         tool_calls: &[ToolCall],
-        _input_tokens: Option<u64>,
+        input_tokens: Option<u64>,
     ) {
         // Commit the pending user prompt before the assistant message.
         let prompt = self.next_prompt.clone();
@@ -207,6 +215,7 @@ impl Conversation for StandardConversation {
             tool_calls,
             self.preserve_reasoning_in_history,
         ));
+        self.last_prompt_tokens = input_tokens;
     }
 
     fn record_tool_results(&mut self, results: Vec<Message>) {
@@ -235,6 +244,21 @@ impl Conversation for StandardConversation {
     ) -> Result<TurnScript, TurnScriptError> {
         let combined_system = system_prompt;
         let next_user_prompt = self.next_prompt.clone();
+
+        // Auto-compact when the previous turn's prompt grew past the
+        // configured token threshold, before the byte-size gate below.
+        let threshold = crate::config::compaction_threshold_tokens();
+        if self
+            .last_prompt_tokens
+            .is_some_and(|tokens| tokens > threshold)
+        {
+            log::info!(
+                "auto-compaction: last_prompt_tokens={} exceeds threshold={}",
+                self.last_prompt_tokens.unwrap_or_default(),
+                threshold
+            );
+            self.compact(combined_system.as_deref(), None).await;
+        }
 
         // Coarse prompt-size gate: sum text byte lengths of all messages
         // (including system prompt) and reject oversized turns before the
@@ -334,6 +358,7 @@ impl Conversation for StandardConversation {
             // carried forward.
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: String::new(),
+            last_prompt_tokens: None,
             finalized_messages: None,
             backend: self.backend.clone(),
         })

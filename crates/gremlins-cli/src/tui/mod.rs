@@ -599,8 +599,15 @@ fn send_chat_input(
         // Forward the TUI process's environment so the chat gremlin's Bash
         // tool runs commands under the operator's environment rather than an
         // empty one. Collected here (on the chat submission path) so it
-        // reflects the operator's shell at submit time.
-        let env: HashMap<String, String> = std::env::vars().collect();
+        // reflects the operator's shell at submit time. The chat gremlin is
+        // interactive, so automatic compaction is disabled by pinning the
+        // token threshold to u64::MAX; set
+        // GREMLINS_COMPACTION_THRESHOLD_TOKENS yourself to opt back in.
+        let mut env: HashMap<String, String> = std::env::vars().collect();
+        env.insert(
+            "GREMLINS_COMPACTION_THRESHOLD_TOKENS".to_string(),
+            u64::MAX.to_string(),
+        );
         let request = build_chat_request(
             &enriched_input,
             &turn_id,
