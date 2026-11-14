@@ -2822,6 +2822,7 @@ mod tests {
             ActiveRun {
                 status: "running".to_string(),
                 stage: "build".to_string(),
+                sub_stage: String::new(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
                 prompt_tokens: None,
@@ -2880,6 +2881,7 @@ mod tests {
             ActiveRun {
                 status: "running".to_string(),
                 stage: "build".to_string(),
+                sub_stage: String::new(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
                 prompt_tokens: None,
@@ -2949,6 +2951,7 @@ mod tests {
             ActiveRun {
                 status: "failed".to_string(),
                 stage: "build".to_string(),
+                sub_stage: String::new(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
                 prompt_tokens: None,
@@ -2993,6 +2996,7 @@ mod tests {
             ActiveRun {
                 status: "running".to_string(),
                 stage: "build".to_string(),
+                sub_stage: String::new(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
                 prompt_tokens: None,
@@ -3053,6 +3057,7 @@ mod tests {
             ActiveRun {
                 status: "done".to_string(),
                 stage: "done".to_string(),
+                sub_stage: String::new(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
                 prompt_tokens: None,
@@ -3096,6 +3101,7 @@ mod tests {
             ActiveRun {
                 status: "running".to_string(),
                 stage: "build".to_string(),
+                sub_stage: String::new(),
                 definition: "def".to_string(),
                 project: "gremlins".to_string(),
                 // Cumulative: 10k prompt, 2k cached → would give 20%

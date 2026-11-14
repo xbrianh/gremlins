@@ -191,9 +191,8 @@ fn start_watch_follow(
     // to replay. For terminal runs (done/failed/stopped), always
     // select the operational log so final diagnostics remain visible.
     let run = app.active_runs.get(&follow_id);
-    let is_terminal = run.map_or(true, |r| {
-        matches!(r.status.as_str(), "done" | "failed" | "stopped")
-    });
+    let is_terminal =
+        run.is_none_or(|r| matches!(r.status.as_str(), "done" | "failed" | "stopped"));
     let current_stage = if is_terminal {
         String::new()
     } else {
@@ -204,13 +203,25 @@ fn start_watch_follow(
     let replay_stage = if is_terminal {
         String::new()
     } else if let Some(r) = run {
-        if r.sub_stage.is_empty() { r.stage.clone() } else { r.sub_stage.clone() }
+        if r.sub_stage.is_empty() {
+            r.stage.clone()
+        } else {
+            r.sub_stage.clone()
+        }
     } else {
         String::new()
     };
 
     let follow_task = tokio::spawn(async move {
-        watch_replay::replay_and_dedup(client, follow_id, current_stage, replay_stage, generation, log_tx).await;
+        watch_replay::replay_and_dedup(
+            client,
+            follow_id,
+            current_stage,
+            replay_stage,
+            generation,
+            log_tx,
+        )
+        .await;
     });
     *watch_follow_handle = Some(follow_task);
 }
