@@ -2,10 +2,8 @@
 
 use std::sync::OnceLock;
 
-pub(crate) use crate::executor::event::EventKind;
-use crate::magic_bus::{
-    Bus, CorrId, DispatchEvent, ReceiverHalf, Subscriber, SubscriberRegistration,
-};
+use crate::event_kind::EventKind;
+use crate::{Bus, CorrId, DispatchEvent, ReceiverHalf, Subscriber, SubscriberRegistration};
 
 // ---------------------------------------------------------------------------
 // Global event bus
@@ -13,7 +11,7 @@ use crate::magic_bus::{
 
 static BUS: OnceLock<Bus<EventKind>> = OnceLock::new();
 
-pub(crate) fn init_bus() -> &'static Bus<EventKind> {
+pub fn init_bus() -> &'static Bus<EventKind> {
     BUS.get_or_init(|| {
         let bus = Bus::new();
         // One-time registration: log every LogLine event via the log crate so
@@ -30,15 +28,15 @@ pub(crate) fn init_bus() -> &'static Bus<EventKind> {
             handle.spawn(async move {
                 loop {
                     match rx.recv().await {
-                        crate::magic_bus::Recv::Event(dispatch) => {
+                        crate::Recv::Event(dispatch) => {
                             if let EventKind::LogLine { line, .. } = dispatch.kind() {
                                 log::info!("{line}");
                             }
                         }
-                        crate::magic_bus::Recv::Lagged(n) => {
+                        crate::Recv::Lagged(n) => {
                             log::warn!("log subscriber lagged; {n} log lines dropped");
                         }
-                        crate::magic_bus::Recv::Closed => break,
+                        crate::Recv::Closed => break,
                     }
                 }
             });
@@ -49,14 +47,14 @@ pub(crate) fn init_bus() -> &'static Bus<EventKind> {
 
 /// Subscribe to all events on the bus with lag-tolerant delivery (replaces
 /// the old broadcast-channel subscribe for the connection forwarder).
-pub(crate) fn subscribe_all() -> (Subscriber<EventKind>, ReceiverHalf<EventKind>) {
+pub fn subscribe_all() -> (Subscriber<EventKind>, ReceiverHalf<EventKind>) {
     init_bus()
         .subscribe(SubscriberRegistration::lag_tolerant(CorrId::new(), 10_000))
         .expect("lag-tolerant subscription cannot fail")
 }
 
 /// Subscribe to a single gremlin's run-scoped events with lossless delivery.
-pub(crate) fn subscribe_run(id: &str) -> (Subscriber<EventKind>, ReceiverHalf<EventKind>) {
+pub fn subscribe_run(id: &str) -> (Subscriber<EventKind>, ReceiverHalf<EventKind>) {
     init_bus()
         .subscribe(SubscriberRegistration::lossless(CorrId::new().with_run(id)))
         .expect("lossless subscription cannot fail")
@@ -66,7 +64,7 @@ pub(crate) fn subscribe_run(id: &str) -> (Subscriber<EventKind>, ReceiverHalf<Ev
 /// (broadcast) delivery. Drops events on overflow instead of buffering
 /// unboundedly — the right choice for debug consumers and the stage-stream
 /// forwarder where a slow consumer should not grow daemon memory.
-pub(crate) fn subscribe_run_lag_tolerant(
+pub fn subscribe_run_lag_tolerant(
     id: &str,
     capacity: usize,
 ) -> (Subscriber<EventKind>, ReceiverHalf<EventKind>) {
@@ -85,7 +83,7 @@ pub(crate) fn subscribe_run_lag_tolerant(
 /// buffer caps daemon memory for a runaway chat while an awaited send (see
 /// [`emit_run_event_async`]) applies backpressure to the agent loop instead
 /// of dropping live stream events.
-pub(crate) fn subscribe_run_backpressured(
+pub fn subscribe_run_backpressured(
     id: &str,
     bound: usize,
 ) -> (Subscriber<EventKind>, ReceiverHalf<EventKind>) {
@@ -97,7 +95,7 @@ pub(crate) fn subscribe_run_backpressured(
         .expect("backpressured subscription cannot fail")
 }
 
-pub(crate) fn emit_event(event: EventKind) {
+pub fn emit_event(event: EventKind) {
     // Run-bearing events carry a run-scoped correlation id so per-gremlin
     // subscribers (subscribed with a `r:<id>` prefix) receive only their own
     // run's events; everything else keeps an empty id and reaches all
@@ -112,6 +110,7 @@ pub(crate) fn emit_event(event: EventKind) {
         | EventKind::StageTransition { id, .. }
         | EventKind::Bail { id, .. }
         | EventKind::LogLine { id, .. }
+        | EventKind::PromptRequest { id, .. }
         | EventKind::StageBoundary { id, .. }
         | EventKind::ExecOutput { id, .. } => {
             if id.is_empty() {
@@ -139,7 +138,7 @@ pub(crate) fn emit_event(event: EventKind) {
 /// applies backpressure to the agent loop instead of silently dropping live
 /// stream events; lossless and lag-tolerant subscribers still deliver
 /// synchronously under the hood.
-pub(crate) async fn emit_run_event_async(id: &str, event: EventKind) {
+pub async fn emit_run_event_async(id: &str, event: EventKind) {
     let corr_id = if id.is_empty() {
         CorrId::new()
     } else {

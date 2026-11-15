@@ -4,7 +4,7 @@ use std::fmt;
 
 use tokio::sync::{broadcast, mpsc};
 
-use super::DispatchEvent;
+use crate::DispatchEvent;
 
 /// The receiver half that a subscriber task polls.
 #[derive(Debug)]

@@ -1,6 +1,6 @@
 //! Delivery semantics and subscriber registration.
 
-use super::CorrId;
+use crate::CorrId;
 
 /// How a subscriber wants events delivered.
 ///

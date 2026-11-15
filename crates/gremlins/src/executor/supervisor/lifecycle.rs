@@ -8,9 +8,11 @@ use crate::clients::client::Client;
 use crate::clients::interactive::{InteractiveChannels, InteractiveHandle};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state;
-use crate::magic_bus::{CorrId, ReceiverHalf, SubscriberRegistration};
 
-use super::event::{emit_event, init_bus, EventKind};
+use gremlins_magic_bus::EventKind;
+use gremlins_magic_bus::{emit_event, init_bus};
+use gremlins_magic_bus::{CorrId, ReceiverHalf, SubscriberRegistration};
+
 use super::RunState;
 
 /// Set up log + interactive + stage-stream channels on a gremlin. Returns the
@@ -23,7 +25,7 @@ pub(crate) fn setup_gremlin_channels(
 ) -> (
     InteractiveHandle,
     tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
-    crate::magic_bus::Subscriber<EventKind>,
+    gremlins_magic_bus::Subscriber<EventKind>,
 ) {
     let channels = InteractiveChannels::new();
     let (interactive_handle, interactive_session) = channels.split();
@@ -128,7 +130,7 @@ fn spawn_log_writer(
             tokio::select! {
                 result = log_rx.recv() => {
                     match result {
-                        crate::magic_bus::Recv::Event(dispatch) => {
+                        gremlins_magic_bus::Recv::Event(dispatch) => {
                             // Use the event's captured timestamp so the persisted
                             // record matches the emit time, not the receive time.
                             let ts =
@@ -160,11 +162,11 @@ fn spawn_log_writer(
                                 }
                             }
                         }
-                        crate::magic_bus::Recv::Lagged(_) => {
+                        gremlins_magic_bus::Recv::Lagged(_) => {
                             // Log writer can't meaningfully recover from lag, but
                             // this is Lossless so lag shouldn't occur.
                         }
-                        crate::magic_bus::Recv::Closed => break,
+                        gremlins_magic_bus::Recv::Closed => break,
                     }
                 }
                 // Flush barrier: send a flush command through the write channel;

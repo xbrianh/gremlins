@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub(crate) use super::agent::plug::LoopHooks;
 use super::agent::task_models::TaskModelSelector;
 use super::cancel::CancelToken;
 use super::conversation::Conversation;
@@ -62,10 +61,9 @@ pub struct RunParams {
     /// Additional filesystem roots to add to the tool sandbox beyond the
     /// worktree and artifact directory. Threaded from [`GremlinConfig`].
     pub extra_sandbox_roots: Vec<PathBuf>,
-    /// Inversion-of-control hooks that carry cross-package dependencies
-    /// (prompt-debug, token-usage) into the agent loop. `None` defaults
-    /// to no-op hooks.
-    pub hooks: Option<LoopHooks>,
+    /// Pre-resolved file-path context for short-circuiting discovery tools.
+    /// Built from the operator prompt in chat sessions; empty for headless.
+    pub(crate) path_context: crate::clients::path_context::PathContext,
 }
 
 impl RunParams {
@@ -102,7 +100,7 @@ impl RunParams {
             discovered_skills: None,
             active_skills: None,
             extra_sandbox_roots: Vec::new(),
-            hooks: None,
+            path_context: crate::clients::path_context::PathContext::default(),
         }
     }
 }
@@ -133,7 +131,7 @@ impl Clone for RunParams {
             discovered_skills: self.discovered_skills.clone(),
             active_skills: self.active_skills.clone(),
             extra_sandbox_roots: self.extra_sandbox_roots.clone(),
-            hooks: self.hooks.clone(),
+            path_context: self.path_context.clone(),
         }
     }
 }

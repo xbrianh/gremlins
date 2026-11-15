@@ -4,8 +4,8 @@ use std::fmt;
 
 use tokio::sync::{broadcast, mpsc};
 
-use super::receiver::ReceiverHalf;
-use super::{CorrId, DeliveryPolicy, DispatchEvent};
+use crate::receiver::ReceiverHalf;
+use crate::{CorrId, DeliveryPolicy, DispatchEvent};
 
 /// The concrete channel backing a subscriber's delivery policy.
 ///

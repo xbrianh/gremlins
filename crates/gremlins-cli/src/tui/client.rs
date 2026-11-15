@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use gremlins::executor::socket;
-use gremlins::executor::EventKind;
+use gremlins_magic_bus::EventKind;
 use serde_json::Value;
 use tokio::io::BufReader;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};

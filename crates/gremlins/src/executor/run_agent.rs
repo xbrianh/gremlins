@@ -19,10 +19,9 @@ use crate::executor::agent_runner::{commit_agent, prepare_agent};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state;
 use crate::executor::state::{Checkout, Collision, FileSystemStateStore};
-use crate::executor::supervisor::emit_event;
-use crate::executor::EventKind;
 use crate::executor::RunError;
 use crate::task_kind::TaskKind;
+use gremlins_magic_bus::{emit_event, EventKind};
 use indexmap::IndexMap;
 use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::completion::Message;
@@ -220,102 +219,60 @@ pub(crate) async fn run_agent(
         conv.set_compaction_threshold_tokens(t);
     }
 
-    // ── Live usage tracker for failure persistence ─────
-    // Stores (combined_usage, stage_local_usage, cost_usd).
-    // `combined_usage` = baseline + current stage (emitted to live UI).
-    // `stage_local_usage` = just the current stage's delta (used on
-    // failure to avoid double-counting the baseline).
-    let live_usage = std::sync::Arc::new(std::sync::Mutex::new(
-        None::<(
-            crate::clients::protocol::UsageStats,
-            crate::clients::protocol::UsageStats,
-            Option<f64>,
-        )>,
-    ));
-
-    // ── Build inversion-of-control hooks ─────
-    // Wires cross-package dependencies (log, prompt-debug,
-    // token-usage) into the agent loop without the loop importing
-    // `crate::executor` or `crate::landscape`.
-    let mut hooks = crate::clients::agent::plug::LoopHooks::new();
-    {
+    // ── Bus subscriber for prompt-debug dumps and live token usage ─────
+    // The agent loop emits run-scoped `PromptRequest` and `TokenUsage`
+    // events. Prompt dumps are DEBUG-gated; token-usage tracking is
+    // always active so failed stages can persist partial-turn totals.
+    let stage_usage: std::sync::Arc<
+        std::sync::Mutex<Option<crate::clients::protocol::UsageStats>>,
+    > = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (prompt_dumper_guard, prompt_dumper_task) = {
+        use gremlins_magic_bus::{subscribe_run, Recv};
+        let (sub, mut rx) = subscribe_run(gremlin.id.as_str());
+        let guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
         let store = gremlin.state.store_handle();
-        hooks.register_prompt_debug(move |request| {
-            if crate::executor::log_level_threshold() < log::LevelFilter::Debug {
-                return;
-            }
-            let ts = crate::executor::state::now_stamp_millis();
-            let ts_clean = ts
-                .trim_matches(|c: char| c == '[' || c == ']')
-                .replace(':', "-");
-            let name = format!("prompt_{ts_clean}.txt");
-            match store.open(&name, crate::executor::state::BlobMode::Write) {
-                Ok(mut blob) => {
-                    let json = serde_json::to_string_pretty(request).unwrap_or_default();
-                    let _ = std::io::Write::write_all(&mut blob, json.as_bytes());
-                    let _ = std::io::Write::write_all(&mut blob, b"\n");
+        let prompt_gremlin_id = gremlin.id.to_string();
+        let usage_snap = stage_usage.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Recv::Event(dispatch) => match dispatch.kind() {
+                        EventKind::TokenUsage { id, usage, .. } if *id == prompt_gremlin_id => {
+                            *usage_snap.lock().unwrap() = Some(usage.clone());
+                        }
+                        EventKind::PromptRequest { id, json }
+                            if *id == prompt_gremlin_id
+                                && crate::core::logging::log_level_threshold()
+                                    >= log::LevelFilter::Debug =>
+                        {
+                            let ts = state::now_stamp_millis()
+                                .trim_matches(|c: char| c == '[' || c == ']')
+                                .replace(':', "-");
+                            let name = format!("prompt_{ts}.txt");
+                            match store.open(&name, state::BlobMode::Write) {
+                                Ok(mut blob) => {
+                                    let _ = std::io::Write::write_all(&mut blob, json.as_bytes());
+                                    let _ = std::io::Write::write_all(&mut blob, b"\n");
+                                }
+                                Err(e) => {
+                                    log::warn!("prompt dump: failed to open {name}: {e}");
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+                    Recv::Lagged(_) => continue,
+                    Recv::Closed => break,
                 }
-                Err(e) => {
-                    log::warn!("dump_prompt_if_debug: failed to open {name}: {e}");
-                }
             }
         });
-    }
-    {
-        let gremlin_id = gremlin.id.to_string();
-        let client_for_cost = client.clone();
-        let baseline_usage = crate::executor::supervisor::usage_stats_from_state(
-            gremlin.state.read_field("token_usage").as_ref(),
-        );
-        let live_usage_tracker = live_usage.clone();
-        hooks.register_token_usage(
-            move |totals, last_prompt_tokens, last_cached_input_tokens| {
-                let usage = crate::executor::supervisor::add_usage_stats(&baseline_usage, &totals);
-                let cost_usd = client_for_cost.total_cost_usd();
-                *live_usage_tracker.lock().unwrap() =
-                    Some((usage.clone(), totals.clone(), cost_usd));
-                crate::executor::supervisor::emit_event(EventKind::TokenUsage {
-                    id: gremlin_id.clone(),
-                    usage,
-                    cost_usd,
-                    last_prompt_tokens,
-                    last_cached_input_tokens,
-                });
-            },
-        );
-    }
-    {
-        let gremlin_id = gremlin.id.to_string();
-        hooks.register_log_line(move |msg: &str| {
-            if log::Level::Info <= crate::executor::log_level_threshold() {
-                crate::executor::supervisor::emit_event(EventKind::LogLine {
-                    id: gremlin_id.clone(),
-                    line: msg.to_string(),
-                });
-            }
-        });
-    }
-    // Register the stream-event hook only when an interactive session exists
-    // (chat, debug, or pipeline runs launched through the actor). Naked runs
-    // and tests skip the hook so `wants_stream_events` stays false, avoiding
-    // live-output channel allocation and EventKind construction overhead.
-    //
-    // Check non-consumingly: the actual session is constructed below (the
-    // single authoritative construction site).
-    if gremlin.interactive_session.is_some() || gremlin.runtime_config.interactive.is_some() {
-        let gremlin_id = gremlin.id.to_string();
-        hooks.register_stream_event(move |event: EventKind| {
-            let gremlin_id = gremlin_id.clone();
-            async move {
-                crate::executor::supervisor::emit_run_event_async(&gremlin_id, event).await;
-            }
-        });
-    }
+        (guard, task)
+    };
     let prepopulated_conversation: Box<dyn crate::clients::conversation::Conversation> =
         Box::new(conv);
 
     let params = RunParams {
-        prompt: prepared.user_prompt(),
+        prompt: prepared.user_prompt(is_chat),
         label: prepared.name.clone(),
         model: prepared
             .model
@@ -348,7 +305,16 @@ pub(crate) async fn run_agent(
         discovered_skills: gremlin.discovered_skills.clone(),
         active_skills: gremlin.active_skills.clone(),
         extra_sandbox_roots: gremlin.extra_sandbox_roots.clone(),
-        hooks: Some(hooks),
+        path_context: {
+            let mut path_context = crate::clients::path_context::PathContext::new(&prepared.prompt);
+            let cwd = prepared.cwd.clone();
+            tokio::task::spawn_blocking(move || {
+                path_context.resolve(std::path::Path::new(&cwd));
+                path_context
+            })
+            .await
+            .unwrap_or_default()
+        },
     };
 
     let effective_model = params
@@ -396,25 +362,31 @@ pub(crate) async fn run_agent(
         params.model.as_deref().unwrap_or("default")
     );
 
-    let completed = match client.run(params, interactive).await {
+    let run_result = client.run(params, interactive).await;
+    // Close our subscription so the prompt-dump task drains any
+    // already-buffered events and then exits.
+    drop(prompt_dumper_guard);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), prompt_dumper_task).await;
+
+    let completed = match run_result {
         Ok(c) => c,
         Err(error) => {
-            // Persist the live usage counters from partial (failed) agent-loop
-            // turns so the Gremlin::finish() snapshot has accurate token
-            // totals rather than the previous stage's stale values.
-            if let Some((_combined, stage_local, _cost_usd)) = live_usage.lock().unwrap().take() {
+            // Persist partial token usage from failed agent-loop turns so
+            // the Gremlin::finish() snapshot has accurate totals rather
+            // than the previous stage's stale values.
+            if let Some(usage) = stage_usage.lock().unwrap().take() {
                 let mut delta: HashMap<String, i64> = HashMap::new();
-                delta.insert("turns".to_string(), stage_local.turns as i64);
+                delta.insert("turns".to_string(), usage.turns as i64);
                 delta.extend(
                     [
-                        ("prompt_tokens", stage_local.prompt_tokens),
-                        ("completion_tokens", stage_local.completion_tokens),
-                        ("cached_input_tokens", stage_local.cached_input_tokens),
+                        ("prompt_tokens", usage.prompt_tokens),
+                        ("completion_tokens", usage.completion_tokens),
+                        ("cached_input_tokens", usage.cached_input_tokens),
                         (
                             "cache_creation_input_tokens",
-                            stage_local.cache_creation_input_tokens,
+                            usage.cache_creation_input_tokens,
                         ),
-                        ("reasoning_tokens", stage_local.reasoning_tokens),
+                        ("reasoning_tokens", usage.reasoning_tokens),
                     ]
                     .into_iter()
                     .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),

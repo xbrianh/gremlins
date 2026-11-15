@@ -5,6 +5,8 @@ use super::schema::validate_tool_args;
 use super::tool_specs::always_available;
 use super::util::{parse_args, result_status};
 use crate::clients::conversation::Conversation;
+use crate::clients::tools::util::req_str;
+use crate::core::paths::resolve;
 
 /// Dispatch a single tool call. `conv` is the parent conversation;
 /// fan-out handlers (`Task`) use it to seed a child loop.
@@ -87,6 +89,18 @@ pub(crate) async fn invoke_with_conversation(
         return ToolOutcome::text(err);
     }
 
+    // Short-circuit Landscape when PathContext has a pre-resolved outline
+    // for the requested file path. This runs after chat-only gating,
+    // argument parsing/validation, and sandbox checks so malformed or
+    // out-of-sandbox calls still fail normally; only a call that would
+    // otherwise be dispatched is served from the cache (skipping the I/O of
+    // `outline_file`).
+    if !ctx.path_context.is_empty() && name == "Landscape" {
+        if let Some(outcome) = path_context_serve(ctx, args_json) {
+            return outcome;
+        }
+    }
+
     // Dispatch through the registry.
     let mut outcome = match handler {
         Some(h) => h.invoke(id, ctx, conv, &repaired_args_json).await,
@@ -139,6 +153,24 @@ pub(crate) fn cap_output(name: &str, output: String) -> String {
     } else {
         output
     }
+}
+
+/// Try to serve a Landscape call from [`PathContext`].
+///
+/// Returns `Some(ToolOutcome)` when the requested file path matches a
+/// pre-resolved entry. Returns `None` when the path is not in the context
+/// or args can't be parsed.
+fn path_context_serve(ctx: &AgentLoopRuntime, args_json: &str) -> Option<ToolOutcome> {
+    let args: serde_json::Value = serde_json::from_str(args_json).ok()?;
+    let file_path = req_str(&args, "file_path").ok()?;
+    let cwd: Option<&std::path::Path> = ctx.cwd.as_deref();
+    let resolved = resolve(file_path, cwd);
+
+    let outline = ctx.path_context.get(&resolved)?;
+
+    // Mark the output as pre-resolved so the agent knows the outline may be
+    // stale after edits and can re-run Landscape to refresh it.
+    Some(ToolOutcome::text(format!("[pre-resolved]\n{outline}")))
 }
 
 /// Convenience wrapper for tests that don't need conversation contexts.

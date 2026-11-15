@@ -26,7 +26,7 @@ semantics. Keep those seams intact.
 | `run_agent.rs` | Agent stage runner: `resolve_task_models`, `run_agent`, chat conversation persistence (`messages_from_conversation`, `persist_chat_conversation_turn`, `read_chat_conversation`, `append_chat_conversation_turn`, `persist_compacted_conversation`), and tool-call accounting. |
 | `run_exec.rs` | Exec stage runner: thin wrapper around `prepare_exec` + `run_shell` + `commit_exec` from `exec_runner`. |
 | `stage_stream.rs` | Stage stream protocol: `StageStreamKind` classification, live + replay serving (`serve_stage_stream_loop`), `agent_stream_lines`/`exec_stream_line` formatting, and `ReplayDedupe` for resume tail replay. |
-| `socket.rs` | Unix-domain socket + daemon lock helpers (`GremlinsDaemonLock`, `bind_socket`, `connect_socket`, JSON-line read/write). The socket lives at `$state_root/executor.sock`. |
+| `socket.rs` | Unix-domain socket + daemon lock helpers. Lives in `executor::socket`. The socket lives at `$state_root/executor.sock`. |
 | `exec_runner.rs` | Exec leaf execution: `prepare_exec`, `run_shell`, and `commit_exec`. Owns `ExecPrepared` and `ExecError`. |
 | `bootstrap.rs` | Worktree bootstrap: `bootstrap.cmds`, `bootstrap.launch_cmds`, and `bootstrap.cli_out`, plus the small `gremlins:bind_artifact(...)` DSL. |
 | `vars.rs` | `{var}` substitution. `substitute_vars` is the shared resolver used by bootstrap, exec, and agent paths; `substitute_vars_to_env` exports to environment. |
@@ -89,7 +89,7 @@ terminal `RunState`, and emits the terminal `DaemonEvent`.
 
 The lock protocol serializes daemon startup: parent CLI acquires
 `executor.lock`, dups the fd, and spawns `gremlins serve <fd>`; the child
-reconstructs the lock from the inherited fd (`socket.rs`).
+reconstructs the lock from the inherited fd (`crate::executor::socket`).
 
 ## Key invariants
 
@@ -135,7 +135,7 @@ reconstructs the lock from the inherited fd (`socket.rs`).
 | Add or change stage streaming / replay | `stage_stream.rs` — `serve_stage_stream_loop`, `ReplayDedupe`, `agent_stream_lines` |
 | Add or change agent stage execution / conversation I/O | `run_agent.rs` + `agent_runner.rs` |
 | Add or change exec stage execution | `run_exec.rs` + `exec_runner.rs` |
-| Change the daemon socket/lock protocol | `socket.rs::GremlinsDaemonLock`, `bind_socket`, `connect_socket` |
+| Change the daemon socket/lock protocol | `executor::socket::GremlinsDaemonLock`, `bind_socket`, `connect_socket` |
 | Change bootstrap behavior / DSL | `bootstrap.rs::run_definition_bootstrap`, `parse_gremlins_command`, `bind_artifact` |
 | Change exec/agent leaf execution | `exec_runner.rs` / `agent_runner.rs` (`prepare_*` + `commit_*`) |
 | Change agent system prompt | `agent_runner.rs` (`prepare_agent`'s `system_prompt`) and `clients/system_prompts.rs` |

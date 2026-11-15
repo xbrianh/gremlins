@@ -282,6 +282,60 @@ impl TranscriptWidget {
             .insert(id.to_string(), call.to_string());
     }
 
+    /// Push live progress from a running Task tool (Scout/Implement/Fork)
+    /// into a transcript slot keyed by the parent tool-call id. Creates or
+    /// updates a [`StreamingWidget`] that renders its title even when the
+    /// body is empty (like the reasoning band) and retains its tail for the
+    /// eventual [`commit_tool_result`](Self::commit_tool_result) commit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_task_progress(
+        &mut self,
+        parent_id: &str,
+        kind: &str,
+        call: &str,
+        reasoning: &str,
+        text: &str,
+        stats: Option<&serde_json::Value>,
+        total: Option<&serde_json::Value>,
+    ) {
+        if parent_id.is_empty() {
+            return;
+        }
+        // Seal the response accumulator on first push so response text that
+        // arrived before this task slot appears before it in the transcript.
+        if !self.tools.contains_key(parent_id) {
+            self.seal_response();
+        }
+        let stream = self.tools.entry(parent_id.to_string()).or_insert_with(|| {
+            // Same configuration as a tool stream but renders its title
+            // live so the task kind + token stats are always visible.
+            StreamingWidget::tool(Self::STREAM_MAX_ROWS).render_title_when_empty()
+        });
+        // Title: kind prefix + formatted call, plus compact token stats when present.
+        let stats_title = crate::tui::usage_title_part(stats, total);
+        let base = if kind.is_empty() {
+            call.to_string()
+        } else if call.is_empty() {
+            kind.to_string()
+        } else {
+            format!("{kind}: {call}")
+        };
+        let title = if stats.is_none() {
+            base
+        } else {
+            format!("{base}  {stats_title}")
+        };
+        stream.set_title(&title);
+        if !reasoning.is_empty() {
+            stream.push_text(reasoning);
+        }
+        if !text.is_empty() {
+            stream.push_text(text);
+        }
+        self.tool_calls_by_id
+            .insert(parent_id.to_string(), call.to_string());
+    }
+
     /// Commit a finished tool call into the transcript's permanent tool
     /// segment. Every tool — streaming or not — creates (or reuses) a
     /// [`StreamingWidget`] and commits via [`commit_tool_stream_block`]

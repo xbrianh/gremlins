@@ -9,24 +9,15 @@
 //! hot path, so the registry is a `RwLock<Vec<_>>` with only `try_send`-style
 //! work performed under the read lock.
 
-mod corr_id;
-mod event;
-mod policy;
-mod receiver;
-mod subscriber;
-
-pub use corr_id::{CorrId, ParseCorrIdError};
-pub use event::{DispatchEvent, Timestamp};
-pub use policy::{DeliveryPolicy, SubscriberRegistration};
-pub use receiver::{ReceiverHalf, Recv, TryRecvError};
-pub use subscriber::{Subscriber, SubscriberError};
-
-pub(crate) use subscriber::SubscriberMailbox;
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use futures::future::join_all;
+
+use crate::subscriber::SubscriberMailbox;
+use crate::{
+    CorrId, DispatchEvent, ReceiverHalf, Subscriber, SubscriberError, SubscriberRegistration,
+};
 
 /// A fan-out registry keyed by correlation-id prefixes.
 pub struct Bus<P> {
@@ -122,6 +113,7 @@ impl<P: Clone + Send + 'static> Bus<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Recv, TryRecvError};
 
     #[derive(Clone, Debug, PartialEq)]
     struct Payload(u64);

@@ -16,9 +16,7 @@ pub(crate) use defaults::{
 };
 pub(crate) use definitions::tool_definitions;
 pub(crate) use dispatch::invoke_with_conversation;
-pub(crate) use runtime::{
-    AgentLoopRuntime, AgentLoopTelemetry, SandboxMode, TaskFn, ToolOutcome, ToolOutputLine,
-};
+pub(crate) use runtime::{AgentLoopRuntime, SandboxMode, TaskFn, ToolOutcome};
 pub(crate) use sandbox::audit_log_path;
 pub(crate) use tool_specs::MAX_CONCURRENT_TOOLS;
 pub(crate) use util::preview_str;

@@ -25,10 +25,10 @@ use crate::executor::parallel::run_parallel;
 use crate::executor::stage_stream::send_stage_boundary;
 use crate::executor::state;
 use crate::executor::state::StateStore;
-use crate::executor::supervisor::emit_event;
 use crate::executor::vars;
-use crate::executor::EventKind;
 use crate::executor::RunError;
+use gremlins_magic_bus::emit_event;
+use gremlins_magic_bus::EventKind;
 use indexmap::IndexMap;
 
 // ---------------------------------------------------------------------------
@@ -115,7 +115,7 @@ async fn run_stage_scoped(
         } else {
             (display_stage.to_string(), Some(stage.name().to_string()))
         };
-        crate::executor::supervisor::emit_event(EventKind::StageTransition {
+        emit_event(EventKind::StageTransition {
             id: gremlin.id.to_string(),
             stage: event_stage,
             sub_stage,
@@ -569,7 +569,7 @@ impl Gremlin {
             }
 
             self.state.set_stage(stage.name(), None, "");
-            crate::executor::supervisor::emit_event(EventKind::StageTransition {
+            emit_event(EventKind::StageTransition {
                 id: self.id.to_string(),
                 stage: stage.name().to_string(),
                 sub_stage: None,
@@ -690,7 +690,7 @@ impl Gremlin {
                     .unwrap_or(0) as usize,
             };
             let cost_usd = tree.get("total_cost_usd").and_then(|v| v.as_f64());
-            crate::executor::supervisor::emit_event(EventKind::TokenUsage {
+            emit_event(EventKind::TokenUsage {
                 id: self.id.to_string(),
                 usage,
                 cost_usd,
@@ -1513,7 +1513,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
 
-        let (_sub, mut event_rx) = crate::executor::supervisor::subscribe_all();
+        let (_sub, mut event_rx) = gremlins_magic_bus::subscribe_all();
 
         let stage = take_first_stage(&mut gremlin).await;
 
@@ -1532,11 +1532,11 @@ mod tests {
                         lines.push(line.clone());
                     }
                 }
-                Err(crate::magic_bus::TryRecvError::Empty) => {
+                Err(gremlins_magic_bus::TryRecvError::Empty) => {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-                Err(crate::magic_bus::TryRecvError::Closed)
-                | Err(crate::magic_bus::TryRecvError::Lagged(_)) => break,
+                Err(gremlins_magic_bus::TryRecvError::Closed)
+                | Err(gremlins_magic_bus::TryRecvError::Lagged(_)) => break,
             }
         }
         let failure_line = lines
@@ -1728,7 +1728,7 @@ mod tests {
         let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
 
         // Subscribe to the event bus before running so we see the Bail and log lines.
-        let (_event_sub, mut event_rx) = crate::executor::supervisor::subscribe_all();
+        let (_event_sub, mut event_rx) = gremlins_magic_bus::subscribe_all();
 
         assert_eq!(gremlin.run(None).await.unwrap(), 1);
 
@@ -1752,11 +1752,11 @@ mod tests {
                     }
                     _ => {}
                 },
-                Err(crate::magic_bus::TryRecvError::Empty) => {
+                Err(gremlins_magic_bus::TryRecvError::Empty) => {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-                Err(crate::magic_bus::TryRecvError::Closed)
-                | Err(crate::magic_bus::TryRecvError::Lagged(_)) => break,
+                Err(gremlins_magic_bus::TryRecvError::Closed)
+                | Err(gremlins_magic_bus::TryRecvError::Lagged(_)) => break,
             }
         }
         let bail_line = lines
@@ -1796,7 +1796,7 @@ mod tests {
             .unwrap()];
         let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
 
-        let (_sub, mut event_rx) = crate::executor::supervisor::subscribe_all();
+        let (_sub, mut event_rx) = gremlins_magic_bus::subscribe_all();
 
         match gremlin.run(None).await {
             Err(RunError::StageFailed { stage, .. }) => assert_eq!(stage, "broken"),
@@ -1812,11 +1812,11 @@ mod tests {
                         lines.push(line.clone());
                     }
                 }
-                Err(crate::magic_bus::TryRecvError::Empty) => {
+                Err(gremlins_magic_bus::TryRecvError::Empty) => {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-                Err(crate::magic_bus::TryRecvError::Closed)
-                | Err(crate::magic_bus::TryRecvError::Lagged(_)) => break,
+                Err(gremlins_magic_bus::TryRecvError::Closed)
+                | Err(gremlins_magic_bus::TryRecvError::Lagged(_)) => break,
             }
         }
         let error_line = lines

@@ -10,9 +10,11 @@ use tokio::io::BufReader;
 use tokio::net::unix::OwnedReadHalf;
 
 use crate::executor::socket;
-use crate::executor::supervisor::{error_response, init_bus, subscribe_run, SharedWriter};
-use crate::executor::EventKind;
-use crate::magic_bus::Recv;
+use crate::executor::supervisor::error_response;
+use gremlins_magic_bus::connection::SharedWriter;
+use gremlins_magic_bus::EventKind;
+use gremlins_magic_bus::Recv;
+use gremlins_magic_bus::{emit_event, init_bus, subscribe_run};
 
 /// Extract the `id` field from an [`EventKind`] when the variant carries a
 /// run-scoped id. Returns `None` for stream events (`Ready`, `StreamChunk`,
@@ -82,6 +84,12 @@ pub(crate) async fn handle_stage_stream(
                 match result {
                     Recv::Event(dispatch) => {
                         let kind = dispatch.into_kind();
+                        // Prompt-debug dumps are an in-process channel to
+                        // `run_agent`'s fold task; never forward them to a
+                        // stage-stream client.
+                        if matches!(kind, EventKind::PromptRequest { .. }) {
+                            continue;
+                        }
                         // Ancestor matching delivers descendant events to the
                         // parent subscription (e.g. `r:parent` receives
                         // `r:parent:child` events). Filter to the requested
@@ -125,7 +133,7 @@ pub(crate) async fn handle_stage_stream(
 /// it opens.
 pub(crate) fn send_stage_boundary(gremlin_id: &str, stage_name: &str, stage_type: &str) {
     let active = !stage_name.is_empty();
-    crate::executor::supervisor::emit_event(EventKind::StageBoundary {
+    emit_event(EventKind::StageBoundary {
         id: gremlin_id.to_string(),
         stage: stage_name.to_string(),
         stage_type: stage_type.to_string(),

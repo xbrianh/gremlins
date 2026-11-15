@@ -14,8 +14,6 @@ use rig_core::completion::Message;
 use crate::clients::backend::ClientError;
 use crate::executor::state::StateError;
 
-pub(crate) use crate::core::logging::log_level_threshold;
-
 /// Read a string field from a JSON object, defaulting to `""`.
 pub(crate) fn str_field(map: &Map<String, Value>, field: &str) -> String {
     map.get(field)
@@ -85,7 +83,6 @@ pub enum RunError {
 pub mod agent_runner;
 pub mod blob_io;
 pub mod bootstrap;
-pub mod event;
 pub mod exec_runner;
 pub mod gremlin;
 pub mod parallel;
@@ -97,5 +94,3 @@ pub mod stage_stream;
 pub mod state;
 pub mod supervisor;
 pub mod vars;
-
-pub use event::EventKind;

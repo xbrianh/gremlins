@@ -15,8 +15,6 @@ turn_flow.rs        Post-turn resolution: handle_done_decision,
 done_helpers.rs     Build the Done action-ledger + tool_result user message
 interactive.rs      Pause / interactive-session state machine
                     (maybe_pause, interactive_loop, await_interactive_turn)
-plug.rs             Inversion-of-control hooks: log, prompt debug dump,
-                    token-usage emit. Wired by executor/run.rs.
 system_prompts.rs   Agent/task/fork system prompts + chat preamble helpers.
                     Also owns BATCHING_GUIDANCE.
 task.rs             Task runner factory: make_task_runner, task id chains
@@ -47,9 +45,9 @@ After each tool batch, `turn_flow.rs` functions handle turn resolution:
 
 ## Key types
 
-- **`LoopState`** — mutable state carried through each turn: conversation handle, usage accumulators, turn counter, raw/captured writers, timeout backoff schedule, hooks.
+- **`LoopState`** — mutable state carried through each turn: conversation handle, usage accumulators, turn counter, raw/captured writers, timeout backoff schedule, and the run-scoped `message_prefix` used for direct bus emission of prompt dumps, token usage, and stream events.
 - **`LoopOpts`** — immutable per-run options: `tool_filter`, `temperature`, `max_tokens`, `extra`, `tool_mode`, `preserve_reasoning_in_history`.
-- **`RunContext`** — everything the caller (backend/executor) wires in: `RunParams`, sandbox roots, prefix, timeout, artifact expectation budget, hooks.
+- **`RunContext`** — everything the caller (backend/executor) wires in: `RunParams`, sandbox roots, prefix, timeout, and artifact expectation budget.
 - **`ToolJob`** — a single tool call queued for execution: `ToolCall` + `CallId` + `ToolName`. Dispatched concurrently with cancellation racing.
 - **`StreamAccumulator`** / **`StreamTurnOutput`** / **`StreamTurnOutcome`** — the stream consumption result: text, tool calls, reasoning, usage, and the control-flow signal (Continue, Done, Empty, Bail, Quit).
 

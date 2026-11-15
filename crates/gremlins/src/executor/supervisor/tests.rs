@@ -1,10 +1,10 @@
 //! Tests for the supervisor module.
 
 use super::actor::{self, ActorMsg};
+use super::chat::{add_usage_stats, usage_stats_from_state};
 use super::{
-    add_usage_stats, create_chat_gremlin, handle_artifact, handle_chat_model, handle_compact,
-    handle_launch, handle_model, parallel_runtime_keys, resolve_chat_env,
-    resolve_filepath_source_values, usage_stats_from_state,
+    create_chat_gremlin, handle_artifact, handle_chat_model, handle_compact, handle_launch,
+    handle_model, parallel_runtime_keys, resolve_chat_env, resolve_filepath_source_values,
 };
 use crate::clients::client::{Client, ModelURI};
 use crate::clients::protocol::UsageStats;
@@ -12,6 +12,7 @@ use crate::executor::gremlin::Gremlin;
 use crate::executor::socket;
 use crate::schemas::bootstrap::{InputSource, InputSources};
 use crate::test_support::Sandbox;
+use gremlins_magic_bus::connection::SharedWriter;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -297,14 +298,14 @@ fn sandbox_dirs(config: Option<&str>) -> (Sandbox, PathBuf, PathBuf) {
 async fn chat_pair_actor(
     actor_tx: &mpsc::UnboundedSender<ActorMsg>,
 ) -> (
-    super::SharedWriter,
+    SharedWriter,
     tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
     tokio::net::unix::OwnedReadHalf,
     String,
 ) {
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
     let (server_read, server_write) = server.into_split();
-    let writer = super::SharedWriter::new(server_write);
+    let writer = SharedWriter::new(server_write);
     let (client_read, _client_write) = client.into_split();
     let reader = tokio::io::BufReader::new(client_read);
 
@@ -1522,7 +1523,7 @@ async fn main_socket_eof_still_tears_down_session() {
         .unwrap();
     let (server, _addr) = listener.accept().await.unwrap();
     let (server_read, server_write) = server.into_split();
-    let writer = super::SharedWriter::new(server_write);
+    let writer = SharedWriter::new(server_write);
 
     let actor_tx_for_task = actor_tx.clone();
     let session_id_for_task = session_id.clone();

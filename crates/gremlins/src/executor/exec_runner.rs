@@ -9,6 +9,7 @@ use crate::definition::Exec;
 use crate::executor::state::{self, StateStore};
 use crate::executor::state::{BlobMode, StateData};
 use crate::executor::vars;
+use gremlins_magic_bus::emit_event;
 use tokio::sync::mpsc;
 
 #[derive(Debug)]
@@ -291,7 +292,7 @@ pub async fn run_shell(
         tokio::spawn(async move {
             while let Some(ev) = rx.recv().await {
                 let ts = state::now_stamp_millis();
-                crate::executor::supervisor::emit_event(crate::executor::EventKind::ExecOutput {
+                emit_event(gremlins_magic_bus::EventKind::ExecOutput {
                     id: gid.clone(),
                     is_stderr: ev.is_stderr,
                     text: ev.text,
@@ -350,8 +351,7 @@ pub fn process_shell_result(
     // there is no gremlin_id — the log subscriber handles the log::info!
     // side automatically.
     {
-        use crate::executor::supervisor::emit_event;
-        use crate::executor::EventKind;
+        use gremlins_magic_bus::EventKind;
         emit_event(EventKind::LogLine {
             id: prepared.gremlin_id.clone().unwrap_or_default(),
             line: format!(

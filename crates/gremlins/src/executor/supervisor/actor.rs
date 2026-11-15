@@ -32,16 +32,15 @@ use tokio::task::JoinHandle;
 
 use crate::clients::cancel::CancelToken;
 use crate::clients::interactive::{InteractiveCommand, InteractiveHandle};
-use crate::executor::event::EventKind;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
-use crate::executor::socket;
 use crate::executor::state;
-use crate::magic_bus::{ReceiverHalf, Subscriber};
 
-use super::event::{emit_event, init_bus, subscribe_run};
 use super::lifecycle::{run_gremlin_task, setup_gremlin_channels, LaunchResult, LogRelay};
 use super::state_view::definition_name_from_tree;
 use super::{CurrentTurn, RunHandle, RunState};
+use crate::executor::socket;
+use gremlins_magic_bus::{emit_event, init_bus, subscribe_run};
+use gremlins_magic_bus::{EventKind, ReceiverHalf, Subscriber};
 /// Response payload for [`ActorMsg::ListRunStoresWithIds`].
 type ListRunStoresWithIdsResponse = (Vec<String>, Vec<(String, StoreHandle)>);
 

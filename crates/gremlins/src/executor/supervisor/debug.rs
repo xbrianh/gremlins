@@ -6,18 +6,19 @@ use serde_json::Value;
 use tokio::io::BufReader;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::clients::event::EventKind;
 use crate::clients::interactive::InteractiveCommand;
 use crate::config;
 use crate::executor::gremlin::validate_gremlin_id;
-use crate::executor::socket;
 use crate::executor::state;
-use crate::executor::supervisor::event::subscribe_run_lag_tolerant;
-use crate::magic_bus::Recv;
+
+use crate::executor::socket;
+use gremlins_magic_bus::subscribe_run_lag_tolerant;
+use gremlins_magic_bus::{EventKind, Recv};
 
 use super::actor::ActorMsg;
 use super::ops::resolve_store_for_id;
-use super::{error_response, BusSubGuard, DebugDetachGuard, SharedWriter};
+use super::{error_response, DebugDetachGuard};
+use gremlins_magic_bus::connection::{BusSubGuard, SharedWriter};
 
 pub(crate) async fn send_debug_status(writer: &SharedWriter, stage: &str) {
     let payload = serde_json::json!({"type": "status", "stage": stage});

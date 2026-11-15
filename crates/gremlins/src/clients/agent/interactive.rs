@@ -5,11 +5,10 @@ use rig_core::operation::Completion;
 
 use crate::clients::conversation::Conversation;
 use crate::clients::error::ClientError;
-use crate::clients::event::EventKind;
 use crate::clients::interactive::{InteractiveCommand, InteractiveSession, PauseToken};
+use gremlins_magic_bus::{emit_run_event_async, EventKind};
 
 use super::agent_loop::{InteractiveBoundary, LoopState};
-use super::plug::LoopHooks;
 
 /// Future that resolves when a [`PauseToken`] fires, or never if there is no token.
 pub(super) async fn maybe_pause(pause: &Option<Arc<PauseToken>>) {
@@ -35,7 +34,7 @@ pub(super) enum InteractiveLoopResult {
 /// Interactive state machine. Called when the operator triggers pause
 /// (via [`PauseToken`]) or when re-entering after a `RunTurn`/`Inject`.
 ///
-/// On entry, emits `Ready { turn }` through the stream-event hook. Then blocks
+/// On entry, emits `Ready { turn }` through the bus. Then blocks
 /// reading `InteractiveCommand`s from the session's `cmd_rx`. `Inject` and
 /// `RunTurn` return so the outer turn loop executes exactly one turn and then
 /// re-enters this function.
@@ -44,12 +43,10 @@ pub(super) async fn interactive_loop(
     conv: &mut dyn Conversation,
     session: &mut InteractiveSession,
     turn: usize,
-    hooks: &LoopHooks,
+    message_prefix: &str,
 ) -> Result<InteractiveLoopResult, ClientError> {
     log::debug!("interactive_loop: broadcasting Ready (turn={turn})");
-    if hooks.wants_stream_events {
-        hooks.emit_stream_event(EventKind::Ready { turn }).await;
-    }
+    emit_run_event_async(message_prefix, EventKind::Ready { turn }).await;
 
     log::debug!("interactive_loop: waiting for command (turn={turn})");
     let cmd = match session.cmd_rx.recv().await {
@@ -59,13 +56,13 @@ pub(super) async fn interactive_loop(
         }
         None => {
             log::debug!("interactive_loop: cmd_rx closed, ending session (turn={turn})");
-            if hooks.wants_stream_events {
-                hooks
-                    .emit_stream_event(EventKind::Ended {
-                        reason: "disconnect".to_string(),
-                    })
-                    .await;
-            }
+            emit_run_event_async(
+                message_prefix,
+                EventKind::Ended {
+                    reason: "disconnect".to_string(),
+                },
+            )
+            .await;
             return Ok(InteractiveLoopResult::Resumed);
         }
     };
@@ -85,26 +82,26 @@ pub(super) async fn interactive_loop(
         }
         InteractiveCommand::Bail(reason) => {
             log::debug!("interactive_loop: Bail command (reason={reason:?}, turn={turn})");
-            if hooks.wants_stream_events {
-                hooks
-                    .emit_stream_event(EventKind::Ended {
-                        reason: "bailed".to_string(),
-                    })
-                    .await;
-            }
+            emit_run_event_async(
+                message_prefix,
+                EventKind::Ended {
+                    reason: "bailed".to_string(),
+                },
+            )
+            .await;
             Err(ClientError::Bail {
                 reason: format!("operator bailed: {reason}"),
             })
         }
         InteractiveCommand::Quit => {
             log::debug!("interactive_loop: Quit command (turn={turn})");
-            if hooks.wants_stream_events {
-                hooks
-                    .emit_stream_event(EventKind::Ended {
-                        reason: "resumed".to_string(),
-                    })
-                    .await;
-            }
+            emit_run_event_async(
+                message_prefix,
+                EventKind::Ended {
+                    reason: "resumed".to_string(),
+                },
+            )
+            .await;
             Ok(InteractiveLoopResult::Resumed)
         }
     }
@@ -131,7 +128,7 @@ pub(super) async fn await_interactive_turn(
                 &mut *state.conv,
                 &mut session,
                 state.turn_num,
-                &state.hooks,
+                &state.message_prefix,
             )
             .await
             {
@@ -165,42 +162,15 @@ pub(super) async fn await_interactive_turn(
                 p.reset();
             }
 
-            let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
-            let amended_system = match &state.system_prompt {
-                Some(sp) => format!("{sp}{debug_note}"),
-                None => debug_note.trim_start().to_string(),
-            };
-            state.system_prompt = Some(amended_system);
-
-            let mut session = InteractiveSession {
-                cmd_rx: state.cmd_rx.take().unwrap(),
-                pause: state.pause.clone().unwrap(),
-            };
-            match interactive_loop(
-                model,
-                &mut *state.conv,
-                &mut session,
-                state.turn_num,
-                &state.hooks,
-            )
-            .await
-            {
-                Ok(InteractiveLoopResult::Resumed) => {
-                    state.system_prompt = state.original_system_prompt.clone();
-                    state.cmd_rx = Some(session.cmd_rx);
+            // enter_interactive_mode guards the session invariant
+            // (both cmd_rx and pause present) before acting; a missing
+            // session degrades to ContinueLoop instead of panicking.
+            match state.enter_interactive_mode(model, prefix).await? {
+                InteractiveLoopResult::Resumed => {
                     return Ok(InteractiveBoundary::ContinueLoop);
                 }
-                Ok(InteractiveLoopResult::RunOneTurn) => {
+                InteractiveLoopResult::RunOneTurn => {
                     state.interactive_active = true;
-                    state.cmd_rx = Some(session.cmd_rx);
-                }
-                Err(e) => {
-                    state.hook_log(&format!(
-                        "agent_loop: exit (operator bailed, label={})",
-                        prefix
-                    ));
-                    state.hook_log(&format!("{prefix}exit: operator bailed"));
-                    return Err(e);
                 }
             }
         }

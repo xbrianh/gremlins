@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::clients::path_context::PathContext;
 use crate::clients::tools::{self, AgentLoopRuntime};
 use crate::task_kind::TaskKind;
 use rig_core::driver::DynModel;
@@ -116,15 +117,23 @@ fn make_task_runner_at_depth(
     Arc::new(
         move |kind: TaskKind,
               task: String,
-              parent_conversation: Box<dyn crate::clients::conversation::Conversation>| {
+              parent_conversation: Box<dyn crate::clients::conversation::Conversation>,
+              parent_id: String,
+              parent_call: String| {
             let model = model.clone();
             let task_model_selector = task_model_selector.clone();
             let tool_filter = tool_filter.clone();
             let cancel = cancel.clone();
             let mut child_ctx = ctx.clone();
+            // Child workers never inherit the parent's resolved path cache: the
+            // cache is keyed to the parent prompt and would short-circuit
+            // discovery in a task whose context is entirely different.
+            child_ctx.path_context = PathContext::default();
             let prefix = prefix.clone();
             let id_chain = id_chain.clone();
             let extra = extra.clone();
+            let parent_id = parent_id.clone();
+            let parent_call = parent_call.clone();
 
             let task_cwd = ctx.cwd.clone();
 
@@ -237,6 +246,9 @@ fn make_task_runner_at_depth(
                     selected_extra.clone(),
                     child_preserve_reasoning,
                     prepopulated_conversation,
+                    &parent_id,
+                    &parent_call,
+                    &kind.to_string(),
                 )
                 .await;
 
@@ -477,17 +489,12 @@ mod tests {
             allowed_tools: None,
             task_fn: None,
             audit_lock: None,
-            log_line_fn: None,
-
             id_prefix: String::new(),
-            telemetry: tools::AgentLoopTelemetry {
-                emit_stream_event: None,
-                wants_stream_events: false,
-                tool_output: None,
-            },
+            message_prefix: String::new(),
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            path_context: crate::clients::path_context::PathContext::default(),
         }
     }
 
@@ -524,6 +531,8 @@ mod tests {
             TaskKind::Scout,
             "first call".into(),
             Box::new(ConversationStub::new("")),
+            String::new(),
+            String::new(),
         )
         .await;
         assert!(
@@ -575,6 +584,8 @@ mod tests {
             TaskKind::Scout,
             "x".repeat(10_000),
             Box::new(ConversationStub::new("")),
+            String::new(),
+            String::new(),
         )
         .await;
         assert!(
@@ -638,7 +649,14 @@ mod tests {
 
         let parent_history = vec![Message::user("earlier parent turn")];
         let parent_conversation = Box::new(ConversationStub::with_history("", parent_history));
-        let output = runner(TaskKind::Fork, "child task".into(), parent_conversation).await;
+        let output = runner(
+            TaskKind::Fork,
+            "child task".into(),
+            parent_conversation,
+            String::new(),
+            String::new(),
+        )
+        .await;
 
         assert_eq!(output.output, "fork reply");
         // Fork must bypass task-models entirely, even when another kind is
@@ -744,6 +762,8 @@ mod tests {
             TaskKind::Scout,
             "go".into(),
             Box::new(ConversationStub::new("")),
+            String::new(),
+            String::new(),
         )
         .await;
         assert!(
@@ -814,6 +834,8 @@ mod tests {
             TaskKind::Scout,
             "go".into(),
             Box::new(ConversationStub::new("")),
+            String::new(),
+            String::new(),
         )
         .await;
         assert!(
@@ -862,6 +884,8 @@ mod tests {
             TaskKind::Scout,
             "too deep".into(),
             Box::new(ConversationStub::new("")),
+            String::new(),
+            String::new(),
         )
         .await;
         assert!(
@@ -909,6 +933,8 @@ mod tests {
             TaskKind::Scout,
             "transient".into(),
             Box::new(ConversationStub::new("")),
+            String::new(),
+            String::new(),
         ));
         tokio::time::advance(std::time::Duration::from_secs(60)).await;
         let output = handle.await.unwrap();
@@ -958,6 +984,8 @@ mod tests {
             TaskKind::Scout,
             "exhaust".into(),
             Box::new(ConversationStub::new("")),
+            String::new(),
+            String::new(),
         ));
         tokio::time::advance(std::time::Duration::from_secs(200)).await;
         let output = handle.await.unwrap();
@@ -1026,6 +1054,8 @@ mod tests {
                     TaskKind::Scout,
                     format!("call {i}"),
                     Box::new(ConversationStub::new("")),
+                    String::new(),
+                    String::new(),
                 ))
             })
             .collect();
@@ -1149,6 +1179,8 @@ mod tests {
                 TaskKind::Scout,
                 "task".into(),
                 Box::new(ConversationStub::new("")),
+                String::new(),
+                String::new(),
             ));
             let lines = drain_log(&log_rx);
             let segments = segments_of(&task_prefixes(&lines));
@@ -1174,6 +1206,8 @@ mod tests {
                 TaskKind::Scout,
                 "task".into(),
                 Box::new(ConversationStub::new("")),
+                String::new(),
+                String::new(),
             ));
             let lines = drain_log(&log_rx);
             let segments = segments_of(&task_prefixes(&lines));
@@ -1200,12 +1234,16 @@ mod tests {
                     TaskKind::Scout,
                     "one".into(),
                     Box::new(ConversationStub::new("")),
+                    String::new(),
+                    String::new(),
                 )
                 .await;
                 runner(
                     TaskKind::Scout,
                     "two".into(),
                     Box::new(ConversationStub::new("")),
+                    String::new(),
+                    String::new(),
                 )
                 .await;
             });

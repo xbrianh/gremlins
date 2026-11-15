@@ -2242,7 +2242,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             // ── Daemon events ─────────────────────────────────
             Some(event) = event_rx.recv() => {
                 match event {
-                    gremlins::executor::EventKind::RunStarted { id, definition, stage } => {
+                    gremlins_magic_bus::EventKind::RunStarted { id, definition, stage } => {
                         log::info!("[run started] {id} ({definition}) stage={stage}");
                         app.on_run_started(id, definition, stage);
                         // Invalidate any in-flight ls snapshot so a stale
@@ -2250,14 +2250,14 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // (the snapshot predates the daemon event).
                         status_generation = status_generation.wrapping_add(1);
                     }
-                    gremlins::executor::EventKind::RunCompleted { id, exit_code } => {
+                    gremlins_magic_bus::EventKind::RunCompleted { id, exit_code } => {
                         log::info!("[run completed] {id} (exit {exit_code})");
                         if app.watch_following.as_deref() == Some(id.as_str()) {
                             app.watch_follow_error = None;
                         }
                         app.on_run_completed(id);
                     }
-                    gremlins::executor::EventKind::RunFailed { id, exit_code, error } => {
+                    gremlins_magic_bus::EventKind::RunFailed { id, exit_code, error } => {
                         let err_detail = error.as_deref().unwrap_or("");
                         if err_detail.is_empty() {
                             log::info!("[run failed] {id} (exit {exit_code})");
@@ -2269,14 +2269,14 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         }
                         app.on_run_failed(id);
                     }
-                    gremlins::executor::EventKind::RunStopped { id } => {
+                    gremlins_magic_bus::EventKind::RunStopped { id } => {
                         log::info!("[run stopped] {id}");
                         if app.watch_following.as_deref() == Some(id.as_str()) {
                             app.watch_follow_error = None;
                         }
                         app.on_run_stopped(id);
                     }
-                    gremlins::executor::EventKind::RunRemoved { id } => {
+                    gremlins_magic_bus::EventKind::RunRemoved { id } => {
                         log::info!("[run removed] {id}");
                         if app.watch_following.as_deref() == Some(id.as_str()) {
                             close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
@@ -2287,19 +2287,19 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // already removed from active_runs.
                         status_generation = status_generation.wrapping_add(1);
                     }
-                    gremlins::executor::EventKind::StageTransition { id, stage, sub_stage } => {
+                    gremlins_magic_bus::EventKind::StageTransition { id, stage, sub_stage } => {
                         log::info!("[{id}] stage → {stage}, sub_stage={:?}", sub_stage);
                         app.on_stage_transition(id, stage, sub_stage);
                     }
-                    gremlins::executor::EventKind::LogLine { id, line } => {
+                    gremlins_magic_bus::EventKind::LogLine { id, line } => {
                         if app.following_log.as_deref() == Some(&id) {
                             live_area.push_transcript_line(line.clone());
                         }
                     }
-                    gremlins::executor::EventKind::Bail { id, reason } => {
+                    gremlins_magic_bus::EventKind::Bail { id, reason } => {
                         log::info!("[{id}] bail: {reason}");
                     }
-                    gremlins::executor::EventKind::TokenUsage {
+                    gremlins_magic_bus::EventKind::TokenUsage {
                         id,
                         usage,
                         cost_usd,
@@ -2507,6 +2507,16 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             Some(event) = chat_rx.recv() => {
                 // Drop events that belong to a superseded turn (a turn that
                 // was cancelled by Esc or replaced by a newer submit).
+                // TaskProgress events are keyed by parent tool-call id, not by
+                // turn, and are handled before the turn filter below.
+                if let ChatEvent::TaskProgress { parent_id, chain, kind, call, reasoning, text, stats, total } = &event {
+                    log::debug!(
+                        "TaskProgress parent_id={parent_id} kind={kind} chain={chain} reasoning_len={} text_len={}",
+                        reasoning.len(), text.len()
+                    );
+                    live_area.push_task_progress(parent_id, kind, call, reasoning, text, stats.as_ref(), total.as_ref());
+                    continue;
+                }
                 let event_turn = match &event {
                     ChatEvent::StreamChunk { turn, .. }
                     | ChatEvent::ReasoningChunk { turn, .. }
@@ -2517,6 +2527,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     | ChatEvent::Ended { turn, .. }
                     | ChatEvent::Error { turn, .. }
                     | ChatEvent::SystemWarning { turn, .. } => turn.clone(),
+                    ChatEvent::TaskProgress { .. } => unreachable!("handled above"),
                 };
                 match (&active_turn, &event_turn) {
                     (Some(active), Some(ev)) if active != ev => {
@@ -2669,6 +2680,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         let full = format!("⚠ {msg}");
                         live_area.push_transcript_line(full);
                     }
+                    ChatEvent::TaskProgress { .. } => unreachable!("handled above"),
                 }
             }
 

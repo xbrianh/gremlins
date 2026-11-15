@@ -9,7 +9,6 @@ pub(crate) mod actor;
 pub(crate) mod actor_client;
 pub(crate) mod chat;
 pub(crate) mod debug;
-pub(crate) mod event;
 pub(crate) mod lifecycle;
 pub(crate) mod log_handler;
 pub(crate) mod ops;
@@ -28,9 +27,12 @@ use tokio::io::BufReader;
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, watch};
 
-use crate::executor::event::EventKind;
-use crate::executor::gremlin::validate_gremlin_id;
 use crate::executor::socket::{self, GremlinsDaemonLock};
+use gremlins_magic_bus::connection::{ConnectionGuard, SharedWriter};
+use gremlins_magic_bus::EventKind;
+use gremlins_magic_bus::{init_bus, subscribe_all};
+
+use crate::executor::gremlin::validate_gremlin_id;
 use crate::executor::state;
 
 // ── Re-exports needed by external executor modules ──────────────────────
@@ -41,12 +43,8 @@ pub(crate) use crate::clients::interactive::InteractiveHandle;
 pub(crate) use crate::clients::interactive::{InteractiveChannels, InteractiveCommand};
 
 // Items consumed by mod.rs itself.
-pub(crate) use self::chat::{add_usage_stats, base_process_env, usage_stats_from_state};
+pub(crate) use self::chat::base_process_env;
 pub(crate) use self::debug::handle_debug;
-pub(crate) use self::event::{
-    emit_event, emit_run_event_async, init_bus, subscribe_all, subscribe_run,
-    subscribe_run_backpressured,
-};
 pub(crate) use self::lifecycle::{launch_child, stop_child, LaunchResult, LogRelay};
 pub(crate) use self::log_handler::handle_log;
 pub(crate) use self::ops::{
@@ -66,35 +64,6 @@ pub(crate) use self::chat::{
 pub(crate) use self::ops::resolve_filepath_source_values;
 #[allow(unused_imports)]
 pub(crate) use self::ops::{handle_chat_model, handle_compact, parallel_runtime_keys};
-
-// ---------------------------------------------------------------------------
-// SharedWriter — Arc<Mutex<WriteHalf>> for concurrent socket writes
-// ---------------------------------------------------------------------------
-
-pub(crate) struct SharedWriter {
-    inner: Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
-}
-
-impl SharedWriter {
-    pub(crate) fn new(inner: tokio::net::unix::OwnedWriteHalf) -> Self {
-        Self {
-            inner: Arc::new(tokio::sync::Mutex::new(inner)),
-        }
-    }
-
-    pub(crate) async fn write_json_line(&self, value: &Value) -> Result<(), String> {
-        let mut guard = self.inner.lock().await;
-        socket::write_json_line(&mut *guard, value).await
-    }
-}
-
-impl Clone for SharedWriter {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
-    }
-}
 
 /// RAII guard that restores pause and sends Quit on drop (even during abort).
 pub(crate) struct DebugDetachGuard {
@@ -118,33 +87,6 @@ impl Drop for DebugDetachGuard {
         if let Some(interactive) = &self.interactive {
             let _ = interactive.cmd_tx.try_send(InteractiveCommand::Quit);
             interactive.pause.reset();
-        }
-    }
-}
-
-/// RAII guard that unsubscribes a bus subscriber on drop.
-///
-/// Chat turns and debug sessions register run-scoped subscriptions; a
-/// subscription that outlived its consumer would accumulate and — once its
-/// bounded buffer filled — stall the agent loop of a later run that reuses the
-/// same id. Dropping this guard unsubscribes on every exit path, including
-/// early returns.
-pub(crate) struct BusSubGuard {
-    subscriber: Option<crate::magic_bus::Subscriber<EventKind>>,
-}
-
-impl BusSubGuard {
-    pub(crate) fn new(subscriber: crate::magic_bus::Subscriber<EventKind>) -> Self {
-        Self {
-            subscriber: Some(subscriber),
-        }
-    }
-}
-
-impl Drop for BusSubGuard {
-    fn drop(&mut self) {
-        if let Some(subscriber) = self.subscriber.take() {
-            init_bus().unsubscribe(&subscriber);
         }
     }
 }
@@ -195,7 +137,7 @@ pub(crate) struct RunHandle {
     /// Bus subscriber for the run's lossless log-writer subscription.
     /// Held so finish and stop paths can unregister it, preventing the run's
     /// log task, blocking writer, and state store from living until daemon exit.
-    pub log_sub: Option<crate::magic_bus::Subscriber<EventKind>>,
+    pub log_sub: Option<gremlins_magic_bus::Subscriber<EventKind>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -204,32 +146,6 @@ pub struct RunState {
     pub status: String,
     pub stage: String,
     pub started_at: String,
-}
-
-// ---------------------------------------------------------------------------
-// Connection guard — RAII counter via the actor
-// ---------------------------------------------------------------------------
-
-/// RAII guard: sends `ConnectionUp` on construction, `ConnectionDown` on drop.
-pub(crate) struct ConnectionGuard {
-    actor_tx: Option<mpsc::UnboundedSender<actor::ActorMsg>>,
-}
-
-impl ConnectionGuard {
-    pub(crate) fn new(actor_tx: &mpsc::UnboundedSender<actor::ActorMsg>) -> Self {
-        let _ = actor_tx.send(actor::ActorMsg::ConnectionUp);
-        Self {
-            actor_tx: Some(actor_tx.clone()),
-        }
-    }
-}
-
-impl Drop for ConnectionGuard {
-    fn drop(&mut self) {
-        if let Some(tx) = self.actor_tx.take() {
-            let _ = tx.send(actor::ActorMsg::ConnectionDown);
-        }
-    }
 }
 
 /// Validate `"id"` field from a JSON-RPC-style request against [`validate_gremlin_id`].
@@ -274,7 +190,11 @@ pub async fn run_supervisor(
                         log::info!("supervisor: accepted connection");
                         let actor_tx = actor_tx.clone();
                         tokio::spawn(async move {
-                            let _guard = ConnectionGuard::new(&actor_tx);
+                            let _guard = ConnectionGuard::new(
+                                &actor_tx,
+                                actor::ActorMsg::ConnectionUp,
+                                actor::ActorMsg::ConnectionDown,
+                            );
                             handle_connection(stream, actor_tx).await;
                         });
                     }
@@ -330,7 +250,7 @@ async fn handle_connection(
         let _ = event_start_rx.wait_for(|v| *v).await;
         loop {
             match event_rx.recv().await {
-                crate::magic_bus::Recv::Event(dispatch) => {
+                gremlins_magic_bus::Recv::Event(dispatch) => {
                     let kind = dispatch.kind();
                     // Stream events belong to per-run/session subscribers
                     // (chat, debug). Forwarding them through the global
@@ -348,6 +268,10 @@ async fn handle_connection(
                             | EventKind::Ready { .. }
                             | EventKind::Ended { .. }
                             | EventKind::ExecOutput { .. }
+                            // Prompt-debug dumps are consumed in-process by
+                            // `run_agent`; they are never part of the client
+                            // protocol and can be large.
+                            | EventKind::PromptRequest { .. }
                     ) {
                         continue;
                     }
@@ -356,7 +280,7 @@ async fn handle_connection(
                         break;
                     }
                 }
-                crate::magic_bus::Recv::Lagged(skipped) => {
+                gremlins_magic_bus::Recv::Lagged(skipped) => {
                     let payload = serde_json::json!({
                         "type": "event_lagged",
                         "skipped": skipped,
@@ -365,7 +289,7 @@ async fn handle_connection(
                         break;
                     }
                 }
-                crate::magic_bus::Recv::Closed => break,
+                gremlins_magic_bus::Recv::Closed => break,
             }
         }
     });

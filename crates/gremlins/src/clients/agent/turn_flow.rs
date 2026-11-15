@@ -20,14 +20,12 @@ use super::done_helpers::done_user_message;
 use crate::clients::cancel::CancelToken;
 use crate::clients::conversation::Conversation;
 use crate::clients::error::ClientError;
-use crate::clients::event::EventKind;
 use crate::clients::format::{format_tool_call, trunc};
 use crate::clients::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
 use crate::clients::tools::{self, AgentLoopRuntime};
+use gremlins_magic_bus::{emit_run_event_async, EventKind};
 
-use super::agent_loop::{
-    cancelled_error, emit_final, emit_summary, DoneDecision, EmptyTurnAction, LoopState,
-};
+use super::agent_loop::{cancelled_error, DoneDecision, EmptyTurnAction, LoopState};
 
 fn missing_artifacts(expected: &[PathBuf]) -> Vec<&PathBuf> {
     expected
@@ -192,8 +190,8 @@ pub(super) async fn handle_done_decision(
                 state.total_reasoning_tokens,
             );
             if !nested {
-                emit_final(prefix, state.turns, "", &state.hooks);
-                emit_summary(
+                state.emit_final(prefix, state.turns, "");
+                state.emit_summary(
                     prefix,
                     state.turn_num,
                     loop_start,
@@ -202,17 +200,16 @@ pub(super) async fn handle_done_decision(
                     state.total_cached_tokens,
                     state.total_cache_creation_tokens,
                     state.total_reasoning_tokens,
-                    &state.hooks,
                 );
             }
-            if !nested && state.hooks.wants_stream_events {
+            if !nested {
                 log::debug!("agent_loop: broadcasting Done (turn={})", state.turn_num);
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {
                         return Err(cancelled_error("cancelled", &state.conv.messages()));
                     }
-                    _ = state.hooks.emit_stream_event(EventKind::Done {
+                    _ = emit_run_event_async(&state.message_prefix, EventKind::Done {
                         text: result_text.clone(),
                         summary: done_summary.clone(),
                         usage: Some(usage.clone()),
@@ -337,8 +334,8 @@ pub(super) fn handle_empty_turn(
         state.total_reasoning_tokens,
     );
     if !nested {
-        emit_final(prefix, state.turns, " (exhausted)", &state.hooks);
-        emit_summary(
+        state.emit_final(prefix, state.turns, " (exhausted)");
+        state.emit_summary(
             prefix,
             state.turn_num,
             loop_start,
@@ -347,7 +344,6 @@ pub(super) fn handle_empty_turn(
             state.total_cached_tokens,
             state.total_cache_creation_tokens,
             state.total_reasoning_tokens,
-            &state.hooks,
         );
     }
     let artifact = state
@@ -418,24 +414,50 @@ pub(super) async fn emit_turn_artifacts(
     raw: &mut Option<std::fs::File>,
     captured: &mut Option<Vec<serde_json::Value>>,
     prefix: &str,
+    wants_events: bool,
+    parent_id: &str,
+    parent_call: &str,
+    kind: &str,
+    chain: &str,
 ) -> Result<(), ClientError> {
-    if !nested && state.hooks.wants_stream_events {
-        log::debug!(
-            "agent_loop: broadcasting TurnComplete (turn={})",
-            state.turn_num
-        );
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                return Err(cancelled_error("cancelled", &state.conv.messages()));
+    if wants_events {
+        if nested {
+            // A sub-agent turn summary updates the parent's Task slot with
+            // this turn's stats instead of broadcasting a top-level TurnComplete.
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    return Err(cancelled_error("cancelled", &state.conv.messages()));
+                }
+                _ = emit_run_event_async(&state.message_prefix, EventKind::TaskProgress {
+                    parent_id: parent_id.to_string(),
+                    chain: chain.to_string(),
+                    kind: kind.to_string(),
+                    call: parent_call.to_string(),
+                    reasoning: String::new(),
+                    text: String::new(),
+                    stats: turn_stats.clone(),
+                    totals: Some(totals.clone()),
+                }) => {}
             }
-            _ = state.hooks.emit_stream_event(EventKind::TurnComplete {
-                turn: state.turn_num,
-                text: text.to_string(),
-                tool_calls: tool_calls.iter().map(format_tool_call).collect(),
-                stats: turn_stats.clone(),
-                totals: Some(totals.clone()),
-            }) => {}
+        } else {
+            log::debug!(
+                "agent_loop: broadcasting TurnComplete (turn={})",
+                state.turn_num
+            );
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    return Err(cancelled_error("cancelled", &state.conv.messages()));
+                }
+                _ = emit_run_event_async(&state.message_prefix, EventKind::TurnComplete {
+                    turn: state.turn_num,
+                    text: text.to_string(),
+                    tool_calls: tool_calls.iter().map(format_tool_call).collect(),
+                    stats: turn_stats.clone(),
+                    totals: Some(totals.clone()),
+                }) => {}
+            }
         }
     }
 
@@ -455,7 +477,7 @@ pub(super) async fn emit_turn_artifacts(
     }
     state.conv.record_prose(text);
 
-    emit_turn_metrics(
+    state.emit_turn_metrics(
         prefix,
         state.turn_num,
         first_token,
@@ -465,7 +487,6 @@ pub(super) async fn emit_turn_artifacts(
         text,
         tool_calls,
         turn_usage,
-        &state.hooks,
     );
     Ok(())
 }
@@ -485,74 +506,4 @@ fn write_raw(raw: &mut Option<std::fs::File>, evt: &serde_json::Value) {
             let _ = f.flush();
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_turn_metrics(
-    prefix: &str,
-    turn: usize,
-    first_token: Option<Instant>,
-    last_token: Option<Instant>,
-    turn_start: Instant,
-    reasoning: &str,
-    text: &str,
-    tool_calls: &[ToolCall],
-    usage: Option<&Usage>,
-    hooks: &super::plug::LoopHooks,
-) {
-    if !crate::config::telemetry_enabled() {
-        return;
-    }
-
-    let ttft = first_token
-        .map(|ft| ft.duration_since(turn_start))
-        .map(|d| format!("{:.1}s", d.as_secs_f64()))
-        .unwrap_or_else(|| "-".into());
-
-    let gen_time = match (first_token, last_token) {
-        (Some(ft), Some(lt)) => {
-            let d = lt.duration_since(ft);
-            format!("{:.1}s", d.as_secs_f64())
-        }
-        _ => "-".into(),
-    };
-
-    let prompt = usage.and_then(|u| u.input_tokens).unwrap_or(0);
-    let completion = usage.and_then(|u| u.output_tokens).unwrap_or(0);
-    let cached = usage.and_then(|u| u.cached_input_tokens).unwrap_or(0);
-    let reasoning_tok = usage.and_then(|u| u.reasoning_tokens).unwrap_or(0);
-
-    let cache_pct = if prompt > 0 {
-        format!("{:.0}%", (cached as f64 / (prompt as f64).max(1.0)) * 100.0)
-    } else {
-        "-".into()
-    };
-
-    let reasoning_bytes = reasoning.len();
-    let text_bytes = text.len();
-    let total_bytes = reasoning_bytes + text_bytes;
-    let reasoning_byte_ratio = if total_bytes > 0 {
-        format!(
-            "{:.0}%",
-            (reasoning_bytes as f64 / total_bytes as f64) * 100.0
-        )
-    } else {
-        "-".into()
-    };
-
-    let msg = format!(
-        "metrics: turn={} ttft={} gen={} tools={} prompt={} completion={} cached={}({}) reasoning_tok={} reasoning_byte_ratio={}",
-        turn,
-        ttft,
-        gen_time,
-        tool_calls.len(),
-        prompt,
-        completion,
-        cached,
-        cache_pct,
-        reasoning_tok,
-        reasoning_byte_ratio,
-    );
-    log::info!("{prefix}{msg}");
-    hooks.log_line(&format!("{prefix}{msg}"));
 }
