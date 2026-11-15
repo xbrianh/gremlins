@@ -283,7 +283,7 @@ pub(crate) async fn handle_debug(
                         EventKind::Ready { .. } => {
                             // Agent re-entered interactive mode (after RunOneTurn).
                         }
-                        EventKind::TurnComplete { turn, text, tool_calls, stats, totals } => {
+                        EventKind::TurnComplete { turn, text, tool_calls, stats, totals, .. } => {
                             emit!(serde_json::json!({"type": "turn_complete", "turn": turn, "text": text, "tool_calls": tool_calls, "stats": stats, "totals": totals}));
                         }
                         EventKind::Done { text, usage, .. } => {

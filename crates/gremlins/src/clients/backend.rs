@@ -56,8 +56,6 @@ pub struct RunParams {
     /// Discovered skills for this session. Session-bound so concurrent chat
     /// sessions resolve their own project's skills instead of a shared slot.
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
-    /// Shared mutable reference to active skill names.
-    pub active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
     /// Additional filesystem roots to add to the tool sandbox beyond the
     /// worktree and artifact directory. Threaded from [`GremlinConfig`].
     pub extra_sandbox_roots: Vec<PathBuf>,
@@ -98,7 +96,6 @@ impl RunParams {
             prepopulated_conversation: crate::conversation::new_blank_for_run_params(),
             skills_available: false,
             discovered_skills: None,
-            active_skills: None,
             extra_sandbox_roots: Vec::new(),
             path_context: crate::clients::path_context::PathContext::default(),
         }
@@ -129,7 +126,6 @@ impl Clone for RunParams {
             prepopulated_conversation: self.prepopulated_conversation.clone(),
             skills_available: self.skills_available,
             discovered_skills: self.discovered_skills.clone(),
-            active_skills: self.active_skills.clone(),
             extra_sandbox_roots: self.extra_sandbox_roots.clone(),
             path_context: self.path_context.clone(),
         }

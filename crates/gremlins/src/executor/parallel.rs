@@ -874,7 +874,6 @@ mod tests {
             enclosing_task_models: None,
             enclosing_model: None,
             discovered_skills: None,
-            active_skills: None,
             extra_sandbox_roots: Vec::new(),
         };
         (sandbox, gremlin)

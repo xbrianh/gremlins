@@ -22,14 +22,12 @@ use tokio::io::BufReader;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use super::chat::{parse_chat_event, ChatEvent};
-
 /// Outbound side of a single daemon socket connection.
 struct OutState {
-    /// Daemon events forwarded to the TUI event loop.
+    /// Daemon lifecycle events forwarded to the TUI event loop.
     event_tx: mpsc::UnboundedSender<EventKind>,
-    /// Chat events routed to the TUI chat arm.
-    chat_tx: mpsc::UnboundedSender<ChatEvent>,
+    /// Chat stream events tagged with the client turn id for staleness filtering.
+    chat_tx: mpsc::UnboundedSender<(EventKind, Option<String>)>,
     /// Raw JSON lines that are neither responses nor EventKinds.
     raw_tx: mpsc::UnboundedSender<Value>,
 }
@@ -457,22 +455,22 @@ impl DaemonClient {
         self.session.shutdown().await;
     }
 
-    /// A sender for chat events, so a caller can inject a locally-detected
+    /// A sender for daemon events, so a caller can inject a locally-detected
     /// error (e.g. a failed chat request) into the same stream the TUI's
-    /// chat arm consumes.
-    pub fn chat_sender(&self) -> mpsc::UnboundedSender<ChatEvent> {
+    /// event loop consumes.
+    pub fn chat_sender(&self) -> mpsc::UnboundedSender<(EventKind, Option<String>)> {
         self.out.chat_tx.clone()
     }
 }
 
 /// Connect to the executor daemon, create a session, and return the client
-/// handle plus receivers for unsolicited [`EventKind`] values,
-/// [`ChatEvent`] values, and raw JSON lines.
+/// handle plus receivers for unsolicited [`EventKind`] values (lifecycle events),
+/// chat events tagged with the client turn id, and raw JSON lines.
 pub async fn connect() -> Result<
     (
         DaemonClient,
         mpsc::UnboundedReceiver<EventKind>,
-        mpsc::UnboundedReceiver<ChatEvent>,
+        mpsc::UnboundedReceiver<(EventKind, Option<String>)>,
         mpsc::UnboundedReceiver<Value>,
     ),
     String,
@@ -546,9 +544,9 @@ pub async fn connect() -> Result<
 /// Background reader: deserialise every incoming line from one connection.
 ///
 /// Unsolicited [`EventKind`] values are classified first and forwarded
-/// to the TUI event loop. Chat events are classified next. Everything else
-/// is treated as a response to the oldest pending request (FIFO). If no
-/// request is waiting, the line is forwarded as a raw JSON value.
+/// to the TUI event loop. Everything else is treated as a response to the
+/// oldest pending request (FIFO). If no request is waiting, the line is
+/// forwarded as a raw JSON value.
 async fn read_loop(
     mut reader: BufReader<OwnedReadHalf>,
     out: Arc<OutState>,
@@ -568,18 +566,46 @@ async fn read_loop(
             continue;
         }
 
-        // Classify chat events next — they pattern-match on `type` string
-        // values and would otherwise be deserialized as EventKind, causing
-        // chat output to be sent to event_tx and lost from chat_tx.
-        if let Some(event) = parse_chat_event(&value) {
-            let _ = out.chat_tx.send(event);
-            continue;
-        }
-
         // Classify as an EventKind next — unsolicited events can arrive
         // at any time, even when a request is pending.
         if let Ok(event) = serde_json::from_value::<EventKind>(value.clone()) {
-            let _ = out.event_tx.send(event);
+            // Chat events carry a `chat_turn` tag inserted by the daemon's
+            // chat_payload wrapper. Extract it before forwarding so the TUI
+            // can filter stale turns.
+            //
+            // IMPORTANT: only classify as chat when the tag is present.
+            // Bare `type:"error"` lines (request/response errors) must reach
+            // the FIFO response queue, not the chat stream.
+            if event.is_chat_event() {
+                let chat_turn = value
+                    .get("chat_turn")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let can_route_to_chat = |kind: &EventKind| -> bool {
+                    match kind {
+                        EventKind::Error { .. } | EventKind::SystemWarning { .. } => {
+                            chat_turn.is_some()
+                        }
+                        _ => true,
+                    }
+                };
+                if can_route_to_chat(&event) {
+                    let _ = out.chat_tx.send((event, chat_turn));
+                } else {
+                    // Bare error/system_warning — treat as a response.
+                    let response_tx = {
+                        let mut guard = responses.lock().await;
+                        guard.pop_front()
+                    };
+                    if let Some(tx) = response_tx {
+                        let _ = tx.send(value);
+                    } else {
+                        let _ = out.raw_tx.send(value);
+                    }
+                }
+            } else {
+                let _ = out.event_tx.send(event);
+            }
             continue;
         }
 

@@ -1119,7 +1119,6 @@ pub(crate) async fn run_agent_loop(
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
         id_prefix: String::new(),
         message_prefix: message_prefix.clone(),
-        active_skills: ctx.params.active_skills.clone(),
         skills_available: ctx.params.skills_available,
         discovered_skills: ctx.params.discovered_skills.clone(),
         path_context: ctx.params.path_context.clone(),
@@ -1216,13 +1215,16 @@ pub(crate) async fn run_agent_loop_nested(
         single_turn: false,
     };
     // Nested loops never expose LoadSkill even when the parent has skills.
+    // Clear both skills_available (gates chat-only tools) and
+    // discovered_skills (gates LoadSkill's own lookup) so a sub-agent
+    // cannot emit SkillLoaded attributed to the parent run.
     let is_chat = false;
     let tool_defs = tools::tool_definitions(tool_filter, is_chat, ToolMode::Full);
     let mut raw: Option<std::fs::File> = None;
     let mut captured: Option<Vec<serde_json::Value>> = None;
     let mut nested_tool_ctx = tool_ctx.clone();
     nested_tool_ctx.skills_available = false;
-    nested_tool_ctx.active_skills = None;
+    nested_tool_ctx.discovered_skills = None;
     // Nested loops keep the parent's stream (so their `ToolResult` events reach
     // the parent TUI) via the same `message_prefix`.
     // Prefix this task's tool call IDs with its chain so two tasks that reuse a
@@ -1670,89 +1672,6 @@ fn emit_turn_stats(prefix: &str, turn: usize, stats: Option<&TurnStats>, totals:
     log::info!("{msg}");
 }
 
-// ── lifted test helpers (used by conversation/standard.rs tests) ────────
-
-#[cfg(test)]
-pub(crate) struct LogSink {
-    pub(crate) tx: std::sync::mpsc::Sender<String>,
-}
-
-#[cfg(test)]
-impl LogSink {
-    pub(crate) fn new() -> (Self, std::sync::mpsc::Receiver<String>) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        (Self { tx }, rx)
-    }
-}
-
-/// Process-global logger installed exactly once for tests. Records are
-/// forwarded to whichever sink the currently active [`LogGuard`] installed;
-/// when no guard is active the records are dropped.
-#[cfg(test)]
-struct GlobalLogSink;
-
-#[cfg(test)]
-static ACTIVE_SINK: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>> =
-    std::sync::Mutex::new(None);
-
-#[cfg(test)]
-impl log::Log for GlobalLogSink {
-    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        metadata.level() <= log::max_level()
-    }
-    fn log(&self, record: &log::Record<'_>) {
-        if !self.enabled(record.metadata()) {
-            return;
-        }
-        if let Ok(guard) = ACTIVE_SINK.lock() {
-            if let Some(tx) = guard.as_ref() {
-                let _ = tx.send(record.args().to_string());
-            }
-        }
-    }
-    fn flush(&self) {}
-}
-
-/// Serializes log-capturing tests and scopes the active sink to the guard's
-/// lifetime. The process-global logger itself is installed only once, so a
-/// second test still captures its own records.
-#[cfg(test)]
-pub(crate) struct LogGuard {
-    prior_level: log::LevelFilter,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-#[cfg(test)]
-static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(test)]
-pub(crate) fn log_guard(sink: LogSink) -> LogGuard {
-    static INSTALL: std::sync::Once = std::sync::Once::new();
-    let lock = LOG_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-    INSTALL.call_once(|| {
-        log::set_boxed_logger(Box::new(GlobalLogSink)).ok();
-    });
-    let prior_level = log::max_level();
-    log::set_max_level(log::LevelFilter::Trace);
-    *ACTIVE_SINK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner()) = Some(sink.tx);
-    LogGuard {
-        prior_level,
-        _lock: lock,
-    }
-}
-
-#[cfg(test)]
-impl Drop for LogGuard {
-    fn drop(&mut self) {
-        *ACTIVE_SINK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = None;
-        log::set_max_level(self.prior_level);
-    }
-}
-
 #[cfg(test)]
 pub(crate) fn loop_opts(filter: Option<&[String]>) -> LoopOpts<'_> {
     LoopOpts {
@@ -1813,7 +1732,6 @@ pub(crate) fn test_ctx(
             prepopulated_conversation: conv.clone(),
             skills_available: false,
             discovered_skills: None,
-            active_skills: None,
             extra_sandbox_roots: Vec::new(),
             path_context: PathContext::default(),
         },
@@ -1839,11 +1757,17 @@ pub(crate) fn test_tool_ctx() -> crate::clients::tools::AgentLoopRuntime {
         audit_lock: Some(std::sync::Arc::new(std::sync::Mutex::new(()))),
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: PathContext::default(),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_tool_ctx_with_prefix(prefix: &str) -> crate::clients::tools::AgentLoopRuntime {
+    let mut ctx = test_tool_ctx();
+    ctx.message_prefix = prefix.to_string();
+    ctx
 }
 
 #[cfg(test)]
@@ -1859,6 +1783,31 @@ mod tests {
     use rig_core::operation::Completion;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Subscribe to run-scoped bus events for the given prefix, returning the
+    /// receiver half so tests can drain `LogLine` events.
+    fn subscribe_log(
+        prefix: &str,
+    ) -> (
+        gremlins_magic_bus::connection::BusSubGuard,
+        gremlins_magic_bus::ReceiverHalf<gremlins_magic_bus::EventKind>,
+    ) {
+        let (sub, rx) = gremlins_magic_bus::subscribe_run(prefix);
+        (gremlins_magic_bus::connection::BusSubGuard::new(sub), rx)
+    }
+
+    /// Drain all pending `LogLine` events from the bus receiver into a `Vec<String>`.
+    fn drain_bus_log(
+        rx: &mut gremlins_magic_bus::ReceiverHalf<gremlins_magic_bus::EventKind>,
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        while let Ok(dispatch) = rx.try_recv() {
+            if let gremlins_magic_bus::EventKind::LogLine { line, .. } = dispatch.kind() {
+                lines.push(line.clone());
+            }
+        }
+        lines
+    }
 
     #[test]
     fn turn_stats_passes_through_partial_usage_without_zero_filling() {
@@ -5304,12 +5253,12 @@ mod tests {
         ]])
         .erase();
 
-        let tool_ctx = test_tool_ctx();
+        let prefix = "done_test";
+        let tool_ctx = test_tool_ctx_with_prefix(prefix);
         let tool_defs = tools::tool_definitions(None, false, ToolMode::Full);
         let cancel = CancelToken::new();
         let opts = loop_opts(None);
-        let (sink, log_rx) = LogSink::new();
-        let _guard = log_guard(sink);
+        let (_log_guard, mut log_rx) = subscribe_log(prefix);
 
         let result = run_agent_loop_core(
             &model,
@@ -5340,10 +5289,7 @@ mod tests {
         .unwrap();
 
         // The Done summary must reach the `tool:` log line.
-        let mut logs = Vec::new();
-        while let Ok(line) = log_rx.try_recv() {
-            logs.push(line);
-        }
+        let logs = drain_bus_log(&mut log_rx);
         assert!(
             logs.iter()
                 .any(|l| l.contains("tool: Done implemented the fix")),

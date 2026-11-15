@@ -11,6 +11,54 @@ The bus core stays unaware of any payload beyond the concrete `EventKind`
 (`event_kind.rs`), which lives here so the executor and client layers can share
 it without depending on each other.
 
+## Design principles
+
+These principles govern every use of the bus in the gremlins codebase:
+
+1. **The bus is a global singleton.** One `Bus<EventKind>` per process,
+   initialized once in `concrete.rs::init_bus()`. There is never a second
+   instance and the bus is never reset. Callers reference it through the
+   free functions in `concrete.rs` (`emit_event`, `subscribe_all`, etc.),
+   never by holding a reference to the `Bus` itself.
+
+2. **Messages are sent at their point of origin.** No aggregation on the
+   sender side. No closures, no re-emit, no message handling logic. The
+   only infrastructure a sender needs is the correlation id prefix
+   (`CorrId`) to tag events with their run identity:
+
+   ```rust
+   // In the agent loop, when a tool result arrives:
+   emit_run_event_async(&state.message_prefix, EventKind::ToolResult { … }).await;
+
+   // In stream_consume, when a text delta arrives:
+   emit_run_event_async(&state.message_prefix, EventKind::StreamChunk { … }).await;
+
+   // In turn_flow, when a turn completes:
+   emit_run_event_async(&state.message_prefix, EventKind::TurnComplete { … }).await;
+   ```
+
+   Each `emit` call is a single fire-and-forget (or fire-and-await)
+   operation at the exact point where the event naturally occurs. The
+   sender never collects events into a buffer for later delivery, never
+   wraps emit calls in a helper that batches them, and never inspects the
+   event after emitting it.
+
+3. **All aggregation is performed on the receiver side.** Subscribers
+   join, filter, buffer, and fold events according to their own needs.
+   The sender should never batch, debounce, or collect events for a
+   specific consumer — that is the subscriber's responsibility.
+
+   For example, the chat supervisor subscribes per-run with
+   `subscribe_run_backpressured` and independently drains stream chunks,
+   tool results, turn completions, and Done events into its own forwarding
+   loop. The agent loop has no knowledge that a chat subscriber exists.
+
+These principles drove the streaming refactor in #2273 (the
+`gremlins-magic-bus` crate extraction). Before the refactor, the agent
+loop accumulated events into closures that were passed down to the chat
+layer — aggregation on the sender side. After the refactor, every event
+is emitted at its origin and the chat layer subscribes independently.
+
 ## Module layout
 
 | File | Contents |

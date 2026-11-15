@@ -491,7 +491,6 @@ mod tests {
             audit_lock: None,
             id_prefix: String::new(),
             message_prefix: String::new(),
-            active_skills: None,
             skills_available: false,
             discovered_skills: None,
             path_context: crate::clients::path_context::PathContext::default(),
@@ -1069,15 +1068,11 @@ mod tests {
         }
     }
 
-    /// libtest replaces the test thread's stderr with an in-memory buffer, and
-    /// `std::thread::spawn` propagates that capture to children, so `eprintln!`
-    /// from the agent loop cannot be observed on fd 2 from a test thread. A raw
-    /// pthread inherits no capture state, so the work runs there with fd 2
-    /// pointed at a temp file. That needs POSIX fd redirection, so these tests
-    /// are Unix-only as a unit; the format tests above stay portable.
-    #[cfg(unix)]
+    /// Prefix/lineage assertions that read the emitted `LogLine` bus events
+    /// for a `[task.<chain>]`-formatted `task: begin` line.
     mod capture {
         use super::*;
+        use gremlins_magic_bus::{connection::BusSubGuard, EventKind, ReceiverHalf};
 
         /// Filter token for format tests — used to tell which log lines
         /// belong to this runner. Passed as both the runner's prefix (its trailing
@@ -1134,16 +1129,21 @@ mod tests {
             ]
         }
 
+        /// Per-test unique message prefix so parallel tests don't capture each
+        /// other's bus log lines. Keeps `TEST_BASE` as a substring for filtering.
+        fn unique_prefix() -> String {
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            format!("{TEST_BASE}{}", SEQ.fetch_add(1, Ordering::Relaxed))
+        }
+
         fn runner_with_turns(
             turns: Vec<Vec<rig_core::test_utils::MockStreamEvent>>,
-        ) -> (
-            tools::TaskFn,
-            crate::clients::agent::agent_loop::LogGuard,
-            std::sync::mpsc::Receiver<String>,
-        ) {
-            let (sink, log_rx) = crate::clients::agent::agent_loop::LogSink::new();
-            let guard = crate::clients::agent::agent_loop::log_guard(sink);
-            let ctx = depth_test_ctx();
+        ) -> (tools::TaskFn, BusSubGuard, ReceiverHalf<EventKind>) {
+            let mut ctx = depth_test_ctx();
+            let prefix = unique_prefix();
+            ctx.message_prefix = prefix.clone();
+            let (sub, log_rx) = gremlins_magic_bus::subscribe_run(&prefix);
+            let guard = BusSubGuard::new(sub);
             let runner = make_task_runner(
                 rig_core::test_utils::MockCompletionModel::from_stream_turns(turns).erase(),
                 None,
@@ -1163,18 +1163,20 @@ mod tests {
             (runner, guard, log_rx)
         }
 
-        /// Drain the captured log lines into a Vec.
-        fn drain_log(rx: &std::sync::mpsc::Receiver<String>) -> Vec<String> {
+        /// Drain the captured `LogLine` bus events into a Vec.
+        fn drain_log(rx: &mut ReceiverHalf<EventKind>) -> Vec<String> {
             let mut lines = Vec::new();
-            while let Ok(line) = rx.try_recv() {
-                lines.push(line);
+            while let Ok(dispatch) = rx.try_recv() {
+                if let EventKind::LogLine { line, .. } = dispatch.kind() {
+                    lines.push(line.clone());
+                }
             }
             lines
         }
 
         #[test]
         fn task_prefix_wraps_a_single_segment_at_depth_one() {
-            let (runner, _guard, log_rx) = runner_with_turns(vec![turn_text("only")]);
+            let (runner, _guard, mut log_rx) = runner_with_turns(vec![turn_text("only")]);
             block_on(runner(
                 TaskKind::Scout,
                 "task".into(),
@@ -1182,7 +1184,7 @@ mod tests {
                 String::new(),
                 String::new(),
             ));
-            let lines = drain_log(&log_rx);
+            let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 1, "get {segments:?} from {lines:?}");
             assert_eq!(
@@ -1200,7 +1202,7 @@ mod tests {
         /// its prefix must carry the parent's segment as lineage.
         #[test]
         fn nested_task_prefix_appends_to_the_parent_chain() {
-            let (runner, _guard, log_rx) =
+            let (runner, _guard, mut log_rx) =
                 runner_with_turns(vec![turn_task_call(), turn_text("leaf"), turn_text("done")]);
             block_on(runner(
                 TaskKind::Scout,
@@ -1209,7 +1211,7 @@ mod tests {
                 String::new(),
                 String::new(),
             ));
-            let lines = drain_log(&log_rx);
+            let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 2, "got {segments:?} from {lines:?}");
             let (parent, child) = (&segments[0], &segments[1]);
@@ -1228,7 +1230,8 @@ mod tests {
         /// shared parent segment.
         #[test]
         fn sibling_invocations_get_distinct_segments() {
-            let (runner, _guard, log_rx) = runner_with_turns(vec![turn_text("a"), turn_text("b")]);
+            let (runner, _guard, mut log_rx) =
+                runner_with_turns(vec![turn_text("a"), turn_text("b")]);
             block_on(async {
                 runner(
                     TaskKind::Scout,
@@ -1247,7 +1250,7 @@ mod tests {
                 )
                 .await;
             });
-            let lines = drain_log(&log_rx);
+            let lines = drain_log(&mut log_rx);
             let segments = segments_of(&task_prefixes(&lines));
             assert_eq!(segments.len(), 2, "got {segments:?} from {lines:?}");
             assert_ne!(segments[0], segments[1], "siblings must not share an id");

@@ -187,17 +187,22 @@ pub(crate) async fn handle_chat(
     //    Skills are discovered from the project root on each turn so newly
     //    added skills take effect without a daemon restart. Discovery runs in
     //    spawn_blocking so filesystem I/O does not stall the async executor.
+    //
+    //    Operator-requested skills are stored in the session. Model-loaded
+    //    skills arrive via SkillLoaded bus events during the turn and are
+    //    appended to the session by run_chat_turn. At turn start we read both
+    //    to build the combined active set.
     let project_root_for_skills = project_root.clone();
     let all_skills =
         tokio::task::spawn_blocking(move || crate::skills::discover(&project_root_for_skills))
             .await
             .unwrap_or_default();
-    // The actor merges the operator toggles into the session's active set and
-    // returns the resulting names plus the shared `Arc` the agent loop reads.
-    let (active_skills, active_skills_arc) = match client
-        .session_update_skills(session_id, requested_skills.clone())
-        .await
-    {
+    // Store the operator's requested skill set in the session.
+    client
+        .session_set_operator_skills(session_id, requested_skills.clone())
+        .await;
+    // Read the combined active set: operator-requested + model-loaded.
+    let active_skills = match client.session_get_combined_skills(session_id).await {
         Some(skills) => skills,
         None => {
             let resp = error_response("session closed");
@@ -309,7 +314,6 @@ pub(crate) async fn handle_chat(
     // replace the one captured at creation rather than freeze at first contact.
     gremlin.env = env;
     // Wire up skills for the LoadSkill tool.
-    gremlin.active_skills = Some(active_skills_arc);
     gremlin.discovered_skills = Some(Arc::new(all_skills));
 
     // Point the run-map handle's cancel token at this turn so `stop` cancels
@@ -389,12 +393,15 @@ pub(crate) async fn handle_chat(
     // operator knows a previously-activated skill is no longer available.
     if !unresolved_skills.is_empty() {
         let msg = format!("skill(s) not found: {}", unresolved_skills.join(", "));
-        let warning = serde_json::json!({
-            "type": "system_warning",
-            "message": msg,
-            "turn": turn,
-        });
-        let _ = writer.write_json_line(&warning).await;
+        let payload = chat_payload(
+            &turn,
+            serde_json::to_value(EventKind::SystemWarning {
+                message: msg,
+                turn: turn.clone(),
+            })
+            .unwrap_or_default(),
+        );
+        let _ = writer.write_json_line(&payload).await;
     }
 }
 
@@ -486,7 +493,7 @@ pub(crate) fn add_usage_stats(baseline: &UsageStats, delta: &UsageStats) -> Usag
 /// Build a chat JSON line, tagged with the client's turn id for stale-event filtering.
 pub(crate) fn chat_payload(turn: &Option<String>, fields: serde_json::Value) -> serde_json::Value {
     let mut obj = match fields {
-        serde_json::Value::Object(m) => m,
+        serde_json::Value::Object(obj) => obj,
         other => {
             let mut m = serde_json::Map::new();
             m.insert("value".to_string(), other);
@@ -494,7 +501,10 @@ pub(crate) fn chat_payload(turn: &Option<String>, fields: serde_json::Value) -> 
         }
     };
     if let Some(t) = turn {
-        obj.insert("turn".to_string(), serde_json::Value::String(t.clone()));
+        obj.insert(
+            "chat_turn".to_string(),
+            serde_json::Value::String(t.clone()),
+        );
     }
     serde_json::Value::Object(obj)
 }
@@ -581,6 +591,10 @@ async fn run_chat_turn(
         (result, gremlin)
     });
 
+    // Pre-construct the actor client so SkillLoaded events don't clone
+    // the sender on every occurrence.
+    let actor_client = Client::new(ctx.actor_tx.clone());
+
     // Forward stream events until a terminal event, a write error, or a
     // cancellation.
     loop {
@@ -601,56 +615,78 @@ async fn run_chat_turn(
                     // Backpressured receivers never lag; ignore defensively.
                     Recv::Lagged(_) => continue,
                     Recv::Closed => {
+                        let ev = EventKind::Error {
+                            message: "agent exited before completing".to_string(),
+                            turn,
+                        };
                         finalizer
                             .stream_terminal(
                                 &mut run_task,
-                                serde_json::json!({"type": "error", "id": id, "message": "agent exited before completing"}),
+                                serde_json::to_value(&ev).unwrap_or_default(),
                             )
                             .await;
                         return;
                     }
                 };
                 match event {
-                    EventKind::StreamChunk { text } => {
-                        send!(serde_json::json!({"type": "stream_chunk", "text": text}));
+                    EventKind::StreamChunk { .. }
+                    | EventKind::ReasoningChunk { .. }
+                    | EventKind::ToolOutputChunk { .. }
+                    | EventKind::StreamReset
+                    | EventKind::ToolResult { .. }
+                    | EventKind::TaskProgress { .. } => {
+                        send!(serde_json::to_value(&event).unwrap_or_default());
                     }
-                    EventKind::ReasoningChunk { text } => {
-                        send!(serde_json::json!({"type": "reasoning_chunk", "text": text}));
-                    }
-                    EventKind::ToolOutputChunk { id, name, call, text } => {
-                        send!(serde_json::json!({"type": "tool_output_chunk", "id": id, "name": name, "call": call, "text": text}));
-                    }
-                    EventKind::StreamReset => {
-                        send!(serde_json::json!({"type": "stream_reset"}));
-                    }
-                    EventKind::ToolResult { id, name, call, output } => {
-                        send!(serde_json::json!({"type": "tool_result", "id": id, "name": name, "call": call, "output": output}));
-                    }
-                    EventKind::TurnComplete { turn: tc_turn, text, tool_calls, stats, totals } => {
+                    EventKind::TurnComplete { turn, text, tool_calls, stats, totals, .. } => {
                         let total = totals.as_ref().map(|t| add_usage_stats(&baseline_usage, t));
-                        send!(serde_json::json!({"type": "turn_complete", "loop_turn": tc_turn, "text": text, "tool_calls": tool_calls, "stats": stats, "total": total}));
+                        let ev = EventKind::TurnComplete {
+                            turn,
+                            text,
+                            tool_calls,
+                            stats,
+                            totals: total,
+                        };
+                        send!(serde_json::to_value(&ev).unwrap_or_default());
                     }
                     EventKind::Done { text, summary, usage } => {
                         let usage = usage.as_ref().map(|u| add_usage_stats(&baseline_usage, u));
+                        let ev = EventKind::Done { text, summary, usage };
                         finalizer
                             .stream_terminal(
                                 &mut run_task,
-                                serde_json::json!({"type": "done", "id": id, "text": text, "summary": summary, "usage": usage}),
+                                serde_json::to_value(&ev).unwrap_or_default(),
                             )
                             .await;
                         return;
                     }
-                    EventKind::Ended { reason } => {
+                    EventKind::Ended { .. } => {
                         finalizer
                             .stream_terminal(
                                 &mut run_task,
-                                serde_json::json!({"type": "ended", "id": id, "reason": reason}),
+                                serde_json::to_value(&event).unwrap_or_default(),
                             )
                             .await;
                         return;
                     }
                     EventKind::Ready { .. } => {
                         // Ignore Ready in chat mode.
+                    }
+                    EventKind::Error { .. } => {
+                        // Forward errors from the bus (e.g. agent exit).
+                        send!(serde_json::to_value(&event).unwrap_or_default());
+                    }
+                    EventKind::SystemWarning { .. } => {
+                        send!(serde_json::to_value(&event).unwrap_or_default());
+                    }
+                    EventKind::SkillLoaded { name, .. } => {
+                        // Append the model-loaded skill to the session so the
+                        // next turn's system prompt picks it up.
+                        actor_client
+                            .session_append_model_skills(
+                                &ctx.session_id,
+                                vec![name],
+                            )
+                            .await;
                     }
                     // Other run-scoped events (log lines, token usage, run
                     // lifecycle) are not part of the chat stream protocol.
@@ -953,7 +989,6 @@ pub(crate) fn create_chat_gremlin(
         enclosing_task_models: None,
         enclosing_model: None,
         discovered_skills: None,
-        active_skills: None,
         extra_sandbox_roots: Vec::new(),
     })
 }

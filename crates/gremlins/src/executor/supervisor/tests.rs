@@ -1564,7 +1564,7 @@ fn chat_payload_serializes_tool_output_chunk() {
     assert_eq!(value["name"], "Bash");
     assert_eq!(value["call"], "Bash(command=\"ls\")");
     assert_eq!(value["text"], "hi\n");
-    assert_eq!(value["turn"], "t-9");
+    assert_eq!(value["chat_turn"], "t-9");
 }
 
 #[test]
@@ -1578,7 +1578,7 @@ fn chat_payload_serializes_tool_result() {
     assert_eq!(value["name"], "Grep");
     assert_eq!(value["call"], "Grep(pattern=\"fn\")");
     assert_eq!(value["output"], "x.rs:1:fn");
-    assert_eq!(value["turn"], "t-9");
+    assert_eq!(value["chat_turn"], "t-9");
 }
 
 // ── handle_compact ──────────────────────────────────────────

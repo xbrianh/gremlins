@@ -25,7 +25,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -53,10 +53,6 @@ pub(crate) type LogFlushHandle = mpsc::UnboundedSender<oneshot::Sender<()>>;
 /// What [`ActorMsg::StopRun`] hands back when the id was live: the run's state
 /// broadcaster so the caller can finish `terminate_and_reap`.
 pub(crate) type StoppedRun = watch::Sender<RunState>;
-
-/// Result of [`ActorMsg::SessionUpdateSkills`]: the active skill names and the
-/// shared set the agent loop reads.
-pub(crate) type ActiveSkills = (Vec<String>, Arc<Mutex<Vec<String>>>);
 
 /// Result of [`ActorMsg::GetRunLogFlushAndSubscribe`]: flush handle, bus
 /// subscriber, and receiver for log follow.
@@ -103,11 +99,11 @@ pub(crate) struct SessionState {
     pub closed: bool,
     /// Set when teardown has begun. Makes teardown idempotent.
     pub torn_down: bool,
-    /// Session-scoped set of active skill names, shared with the agent loop so
-    /// the LoadSkill tool can add names mid-turn.
-    pub active_skills: Arc<Mutex<Vec<String>>>,
     /// Skill names the operator explicitly requested on the last turn.
     pub operator_skills: Vec<String>,
+    /// Skill names loaded by the model during the session, accumulated across
+    /// turns.
+    pub model_loaded_skills: Vec<String>,
 }
 
 impl SessionState {
@@ -121,8 +117,8 @@ impl SessionState {
             aux_sockets: Vec::new(),
             closed: false,
             torn_down: false,
-            active_skills: Arc::new(Mutex::new(Vec::new())),
             operator_skills: Vec::new(),
+            model_loaded_skills: Vec::new(),
         }
     }
 
@@ -364,17 +360,22 @@ pub(crate) enum ActorMsg {
         session_id: String,
         respond: oneshot::Sender<Vec<String>>,
     },
-    /// Merge the operator's requested skill set into the session's active set.
-    /// Returns the resulting active names and the shared `Arc`.
-    SessionUpdateSkills {
+    /// Store the operator-requested skill names for this session.
+    SessionSetOperatorSkills {
         session_id: String,
-        requested: Vec<String>,
-        respond: oneshot::Sender<Option<ActiveSkills>>,
+        skill_names: Vec<String>,
+        respond: oneshot::Sender<()>,
     },
-    #[allow(dead_code)]
-    SessionGetActiveSkills {
+    /// Append model-loaded skill names to the session's accumulated set.
+    SessionAppendModelSkills {
         session_id: String,
-        respond: oneshot::Sender<Option<Arc<Mutex<Vec<String>>>>>,
+        skill_names: Vec<String>,
+        respond: oneshot::Sender<()>,
+    },
+    /// Return the session's combined active skill names: operator + model.
+    SessionGetCombinedSkills {
+        session_id: String,
+        respond: oneshot::Sender<Option<Vec<String>>>,
     },
     /// Tear the session down. The reply fires once the drain has finished;
     /// the drain itself runs in a task spawned by the actor (see module docs).
@@ -607,8 +608,9 @@ impl ActorState {
             | ActorMsg::SessionRemoveChatId { .. }
             | ActorMsg::SessionGetChatIds { .. }
             | ActorMsg::SessionGetChatGremlinKeys { .. }
-            | ActorMsg::SessionUpdateSkills { .. }
-            | ActorMsg::SessionGetActiveSkills { .. }
+            | ActorMsg::SessionAppendModelSkills { .. }
+            | ActorMsg::SessionGetCombinedSkills { .. }
+            | ActorMsg::SessionSetOperatorSkills { .. }
             | ActorMsg::SessionTeardown { .. }
             | ActorMsg::SessionReinsertAndMarkInterrupted { .. }
             | ActorMsg::SessionSetListenerTask { .. }
@@ -1254,37 +1256,45 @@ impl ActorState {
                 let _ = respond.send(keys);
             }
 
-            ActorMsg::SessionUpdateSkills {
+            ActorMsg::SessionAppendModelSkills {
                 session_id,
-                requested,
+                skill_names,
                 respond,
             } => {
-                let result = self.sessions.get_mut(&session_id).map(|session| {
-                    let skills = Arc::clone(&session.active_skills);
-                    let prev_operator = std::mem::take(&mut session.operator_skills);
-                    let mut guard = skills.lock().unwrap();
-                    for name in &requested {
-                        if !guard.contains(name) {
-                            guard.push(name.clone());
+                if let Some(session) = self.sessions.get_mut(&session_id) {
+                    for name in skill_names {
+                        if !session.model_loaded_skills.contains(&name) {
+                            session.model_loaded_skills.push(name);
                         }
                     }
-                    guard.retain(|name| requested.contains(name) || !prev_operator.contains(name));
-                    let names = guard.clone();
-                    drop(guard);
-                    session.operator_skills = requested;
-                    (names, skills)
-                });
-                let _ = respond.send(result);
+                }
+                let _ = respond.send(());
             }
 
-            ActorMsg::SessionGetActiveSkills {
+            ActorMsg::SessionSetOperatorSkills {
+                session_id,
+                skill_names,
+                respond,
+            } => {
+                if let Some(session) = self.sessions.get_mut(&session_id) {
+                    session.operator_skills = skill_names;
+                }
+                let _ = respond.send(());
+            }
+
+            ActorMsg::SessionGetCombinedSkills {
                 session_id,
                 respond,
             } => {
-                let skills = self
-                    .sessions
-                    .get(&session_id)
-                    .map(|session| Arc::clone(&session.active_skills));
+                let skills = self.sessions.get(&session_id).map(|session| {
+                    let mut combined = session.operator_skills.clone();
+                    for name in &session.model_loaded_skills {
+                        if !combined.contains(name) {
+                            combined.push(name.clone());
+                        }
+                    }
+                    combined
+                });
                 let _ = respond.send(skills);
             }
 

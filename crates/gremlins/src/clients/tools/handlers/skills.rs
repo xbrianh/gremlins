@@ -1,5 +1,8 @@
 use async_trait::async_trait;
 
+use gremlins_magic_bus::emit_run_event_async;
+use gremlins_magic_bus::EventKind;
+
 use crate::clients::conversation::Conversation;
 use crate::clients::tools::registry::ToolHandler;
 use crate::clients::tools::runtime::{AgentLoopRuntime, ToolOutcome};
@@ -24,21 +27,18 @@ impl ToolHandler for LoadSkillTool {
             Ok(v) => v,
             Err(e) => return ToolOutcome::text(e),
         };
-        ToolOutcome::text(load_skill_invoke(ctx, &args))
+        ToolOutcome::text(load_skill_invoke(ctx, &args).await)
     }
 }
 
 /// Invoke handler for the LoadSkill tool.
-pub(crate) fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String {
+pub(crate) async fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String {
     let name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => return "Error: missing 'name' for LoadSkill tool".to_string(),
     };
 
     let Some(discovered) = ctx.discovered_skills.as_ref() else {
-        return "Error: LoadSkill is only available in chat sessions".to_string();
-    };
-    let Some(active) = &ctx.active_skills else {
         return "Error: LoadSkill is only available in chat sessions".to_string();
     };
     // Look up the skill by name.
@@ -56,18 +56,22 @@ pub(crate) fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value
         return format!("Error: skill {name:?} is not available for model invocation");
     }
 
-    // Single critical section: check containment AND push so two
-    // concurrent LoadSkill calls for the same name cannot both pass
-    // the check and both push.
-    let mut active_guard = match active.lock() {
-        Ok(g) => g,
-        Err(e) => return format!("Error: internal lock error: {e}"),
-    };
-    if active_guard.contains(&name.to_string()) {
-        return format!("Skill {name:?} is already active.");
-    }
-    active_guard.push(name.to_string());
-    drop(active_guard);
+    // Announce the activation on the bus. The supervisor subscribes and
+    // folds the skill body into the next turn's system prompt. The actor
+    // deduplicates by name, so repeated LoadSkill calls for the same skill
+    // are idempotent (though the model receives a success acknowledgement
+    // each time — there is no "already active" error in this design).
+    //
+    // Emit the canonical name from the resolved skill, not the raw
+    // invocation argument, in case find_skill resolved an alias.
+    emit_run_event_async(
+        &ctx.message_prefix,
+        EventKind::SkillLoaded {
+            id: ctx.message_prefix.clone(),
+            name: loaded.skill.name.clone(),
+        },
+    )
+    .await;
 
     // Return a body-free acknowledgement. The skill body is injected as a
     // trusted system-prompt amendment at the next turn boundary, not written

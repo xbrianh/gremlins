@@ -303,7 +303,6 @@ pub(crate) async fn run_agent(
         prepopulated_conversation,
         skills_available: gremlin.discovered_skills.is_some(),
         discovered_skills: gremlin.discovered_skills.clone(),
-        active_skills: gremlin.active_skills.clone(),
         extra_sandbox_roots: gremlin.extra_sandbox_roots.clone(),
         path_context: {
             let mut path_context = crate::clients::path_context::PathContext::new(&prepared.prompt);
