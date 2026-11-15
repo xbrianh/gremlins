@@ -64,10 +64,14 @@ pub(crate) async fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json:
     //
     // Emit the canonical name from the resolved skill, not the raw
     // invocation argument, in case find_skill resolved an alias.
-    emit_run_event_async(&ctx.message_prefix, EventKind::SkillLoaded {
-        id: ctx.message_prefix.clone(),
-        name: loaded.skill.name.clone(),
-    }).await;
+    emit_run_event_async(
+        &ctx.message_prefix,
+        EventKind::SkillLoaded {
+            id: ctx.message_prefix.clone(),
+            name: loaded.skill.name.clone(),
+        },
+    )
+    .await;
 
     // Return a body-free acknowledgement. The skill body is injected as a
     // trusted system-prompt amendment at the next turn boundary, not written
