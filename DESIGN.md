@@ -989,7 +989,124 @@ terminal features handle that. Widgets describe their own content and
 lifecycle; `LiveArea` just lays them out, commits overflow to scrollback, and
 diffs the result to the terminal.
 
-## 9. Chat backend
+## 9. Magic bus — runtime event routing
+
+`gremlins-magic-bus` is the global singleton event router that carries live
+streaming data from the agent loop to front-end consumers. It replaces the
+pre-#2273 closure-aggregation model, where the agent loop collected events
+into callbacks passed down from the caller.
+
+### 9.1 Design principles
+
+These are the architectural rules that govern every bus interaction:
+
+1. **The bus is a global singleton.** One `Bus<EventKind>` per daemon
+   process, initialized once at startup. There is never a second instance
+   and the bus is never reset. Callers reference it through free functions
+   (`emit_event`, `subscribe_all`, `subscribe_run_backpressured`, etc.)
+   rather than by holding a reference.
+
+2. **Messages are sent at their point of origin.** Each call site that
+   produces an observable event emits it directly. No aggregation on the
+   sender side — no closures, no re-emit, no message-handling logic. The
+   only infrastructure a sender needs is a `CorrId` prefix to tag events
+   with their run identity:
+
+   ```rust
+   // agent_loop.rs — tool result just arrived
+   emit_run_event_async(&state.message_prefix, EventKind::ToolResult { … });
+
+   // stream_consume.rs — text delta from the model
+   emit_run_event_async(&state.message_prefix, EventKind::StreamChunk { … });
+
+   // turn_flow.rs — turn completed
+   emit_run_event_async(&state.message_prefix, EventKind::TurnComplete { … });
+   ```
+
+   Each emit is a single fire-and-forget (or fire-and-await) operation at
+   the exact point where the event naturally occurs. The sender never
+   collects events into a buffer for later delivery, never wraps emit
+   calls in a helper that batches them, and never inspects the event after
+   emitting it.
+
+3. **All aggregation is performed on the receiver side.** Subscribers
+   join, filter, buffer, and fold events according to their own needs.
+   The sender should never batch, debounce, or collect events for a
+   specific consumer — that is the subscriber's responsibility.
+
+### 9.2 What it carries
+
+The bus carries `EventKind` variants that fall into three categories:
+
+- **Stream events** — `StreamChunk`, `ReasoningChunk`, `ToolResult`,
+  `ToolOutputChunk`, `TurnComplete`, `Done`, `Ended`, `StreamReset`,
+  `TaskProgress`. These are the live, real-time events that the chat
+  supervisor and TUI consume to render streaming turns.
+
+- **Lifecycle events** — `Ready`, `Bail`. These signal stage state
+  transitions that the TUI and interactive debug session consume.
+
+- **Telemetry events** — `LogLine`, `TokenUsage`, `PromptRequest`,
+  `TurnStats`. These are fire-and-forget records consumed by the log
+  subsystem and the run auditor.
+
+### 9.3 Delivery policies
+
+Subscribers declare their tolerance for lag at subscription time:
+
+| Policy | Channel | Producer behavior | Use case |
+|---|---|---|---|
+| `Lossless` | unbounded `mpsc` | never blocks, never drops | Log lines, token accounting |
+| `Backpressured { bound }` | bounded `mpsc` | `emit` drops when full; `emit_async` awaits capacity | Chat stream events |
+| `LagTolerant { capacity }` | `broadcast` | drops on `Lagged`; receiver resyncs from folded state | Run-map status folding |
+
+Chat stream events use backpressured delivery: a bounded channel prevents
+unbounded memory growth, and `emit_async` awaits capacity rather than
+dropping, so a slow front-end slows the agent loop rather than losing
+streaming content. Cancellation (`Esc`/`stop`) is raced against every
+`emit_async` await point, so cancellation still unwinds promptly even when
+the channel is full.
+
+### 9.4 Correlation ids
+
+A `CorrId` names a point in the gremlin lifecycle as a segmented path:
+
+```text
+run -> stage -> turn -> tool -> attempt
+```
+
+Every field is optional. The empty `CorrId::new()` matches everything.
+Prefix matching is **segment-aware** — `r:ab` must not match `r:abc`.
+A `None` prefix field is a wildcard for that segment only.
+
+Run-scoped events are tagged with the run id so per-gremlin subscribers
+see only their own events. Non-run-scoped events (global log lines,
+lifecycle signals) use the empty `CorrId` and reach everyone.
+
+### 9.5 How it is wired
+
+`concrete.rs` provides the bridge between the generic `Bus<P>` and the
+gremlins `EventKind`:
+
+- `init_bus()` — one-time construction plus a lag-tolerant subscriber that
+  routes every `LogLine` event through the `log` crate.
+- `emit_event(EventKind)` — wraps run-bearing event kinds onto a
+  run-scoped `CorrId`. Non-run-bearing kinds use the empty `CorrId`.
+- `emit_run_event_async(prefix, EventKind)` — async emit with run prefix.
+- `subscribe_run_backpressured(id, bound)` — the chat supervisor's
+  per-run subscription for live stream forwarding.
+
+### 9.6 Relationship to the chat backend
+
+The bus is the transport layer that makes the chat backend (§10) thin. The
+agent loop emits stream events at their origin; the chat supervisor
+subscribes independently and forwards them to the front-end. The agent
+loop has no knowledge that a chat subscriber exists — it emits events
+whether or not anyone is listening. This is the same principle that lets
+logs, telemetry, and the interactive debug session all consume the same
+events through their own subscriptions.
+
+## 10. Chat backend
 
 A chat is a gremlin — a persistent one with an unbounded chain of Agent stages.
 Each user message appends a new stage to the chain; each stage runs a fresh
