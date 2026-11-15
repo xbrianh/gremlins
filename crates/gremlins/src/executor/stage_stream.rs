@@ -84,6 +84,12 @@ pub(crate) async fn handle_stage_stream(
                 match result {
                     Recv::Event(dispatch) => {
                         let kind = dispatch.into_kind();
+                        // Prompt-debug dumps are an in-process channel to
+                        // `run_agent`'s fold task; never forward them to a
+                        // stage-stream client.
+                        if matches!(kind, EventKind::PromptRequest { .. }) {
+                            continue;
+                        }
                         // Ancestor matching delivers descendant events to the
                         // parent subscription (e.g. `r:parent` receives
                         // `r:parent:child` events). Filter to the requested

@@ -268,6 +268,10 @@ async fn handle_connection(
                             | EventKind::Ready { .. }
                             | EventKind::Ended { .. }
                             | EventKind::ExecOutput { .. }
+                            // Prompt-debug dumps are consumed in-process by
+                            // `run_agent`; they are never part of the client
+                            // protocol and can be large.
+                            | EventKind::PromptRequest { .. }
                     ) {
                         continue;
                     }

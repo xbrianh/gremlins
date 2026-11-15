@@ -110,6 +110,7 @@ pub fn emit_event(event: EventKind) {
         | EventKind::StageTransition { id, .. }
         | EventKind::Bail { id, .. }
         | EventKind::LogLine { id, .. }
+        | EventKind::PromptRequest { id, .. }
         | EventKind::StageBoundary { id, .. }
         | EventKind::ExecOutput { id, .. } => {
             if id.is_empty() {

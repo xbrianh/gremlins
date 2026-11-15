@@ -359,8 +359,6 @@ pub(crate) async fn run_naked(
         reminder_budget: 0,
         completion_nudge_budget: 0,
         prepopulated_conversation: conv,
-        dump_prompt_debug_fn: Arc::new(|_| {}),
-        emit_token_usage_fn: Arc::new(|_, _, _| {}),
     };
 
     let opts = LoopOpts {

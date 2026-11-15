@@ -12,12 +12,11 @@ use rig_core::operation::Completion;
 use rig_core::streaming::Streamed;
 use tokio::sync::{mpsc, Semaphore};
 
-use crate::clients::backend::RunParams;
 use crate::clients::interactive::{InteractiveCommand, InteractiveSession, PauseToken};
 use gremlins_magic_bus::EventKind;
 
 use super::interactive::{interactive_loop, maybe_pause, InteractiveLoopResult};
-use crate::clients::cancel::{default_classify, is_retryable, CancelToken, ErrorClassifier};
+use crate::clients::cancel::{default_classify, is_retryable, CancelToken};
 use crate::clients::conversation::{Conversation, TurnScriptError};
 use crate::clients::error::ClientError;
 use crate::clients::format::{enrich_log_line, format_tool_call_parts, trunc};
@@ -25,6 +24,8 @@ use crate::clients::protocol::{CompletedRun, TurnStats, UsageStats};
 use crate::clients::tools::tool_specs::ToolMode;
 use crate::clients::tools::{self, AgentLoopRuntime, ToolOutcome};
 use gremlins_magic_bus::{emit_event, emit_run_event_async};
+
+pub(crate) use super::run_context::{LoopOpts, RunContext};
 
 // ── Architecture ────────────────────────────────────────────────────────────
 // agent_loop.rs orchestrates a single agent turn-sequence:
@@ -58,71 +59,6 @@ pub(super) async fn retry_backoff(cancel: &CancelToken, wait: f64) -> bool {
         _ = tokio::time::sleep(Duration::from_secs_f64(wait)) => false,
         _ = cancel.cancelled() => true,
     }
-}
-
-#[derive(Clone)]
-pub(crate) struct RunContext {
-    pub(crate) params: RunParams,
-    pub(crate) prefix: String,
-    pub(crate) idle_timeout: f64,
-    pub(crate) expected_artifact_paths: Vec<PathBuf>,
-    pub(crate) reminder_budget: usize,
-    pub(crate) completion_nudge_budget: usize,
-    pub(crate) prepopulated_conversation: Box<dyn Conversation>,
-    /// Prompt debug dumper: called with every serialized CompletionRequest.
-    pub(crate) dump_prompt_debug_fn: Arc<dyn Fn(&CompletionRequest) + Send + Sync>,
-    /// Token-usage emitter: (UsageStats, last_prompt_tokens, last_cached_input_tokens).
-    #[allow(clippy::type_complexity)]
-    pub(crate) emit_token_usage_fn: Arc<dyn Fn(UsageStats, Option<u64>, Option<u64>) + Send + Sync>,
-}
-
-impl RunContext {
-    pub(crate) fn from_params(params: RunParams) -> Self {
-        let idle_timeout = params
-            .idle_timeout
-            .unwrap_or_else(crate::config::stream_idle_timeout);
-        let prefix = if params.label.is_empty() {
-            String::new()
-        } else {
-            format!("[{}] ", params.label)
-        };
-        Self {
-            idle_timeout,
-            prefix,
-            expected_artifact_paths: params.expected_artifact_paths.clone(),
-            reminder_budget: crate::config::artifact_reminder_budget(),
-            completion_nudge_budget: crate::config::completion_nudge_budget(),
-            prepopulated_conversation: params.prepopulated_conversation.clone(),
-            dump_prompt_debug_fn: params
-                .dump_prompt_debug_fn
-                .clone()
-                .unwrap_or_else(|| Arc::new(|_| {})),
-            emit_token_usage_fn: params
-                .emit_token_usage_fn
-                .clone()
-                .unwrap_or_else(|| Arc::new(|_, _, _| {})),
-            params,
-        }
-    }
-}
-
-pub(crate) struct LoopOpts<'a> {
-    pub(crate) extra: Option<serde_json::Value>,
-    pub(crate) tool_filter: Option<&'a [String]>,
-    pub(crate) tool_mode: crate::clients::tools::tool_specs::ToolMode,
-    pub(crate) classify_error: Option<ErrorClassifier>,
-    pub(crate) temperature: Option<f64>,
-    pub(crate) max_tokens: Option<u64>,
-    pub(crate) preserve_reasoning_in_history: bool,
-    /// Fallback system preamble for naked runs that have no conversation
-    /// system prompt (e.g. local compaction). Ignored when the rendered turn
-    /// already carries a system prompt.
-    pub(crate) preamble: Option<String>,
-    /// When true, the agent loop will not loop on reasoning-only or empty
-    /// turns — it immediately exhausts. Used by single-turn naked
-    /// completions (local compaction, etc.) where the conversation has no
-    /// record_turn support and budgets are zero.
-    pub(crate) single_turn: bool,
 }
 
 /// A single tool invocation queued for concurrent execution within a turn.
@@ -170,9 +106,6 @@ pub(super) struct LoopState {
     pub(super) reminder_budget: usize,
     pub(super) completion_nudge_budget: usize,
     pub(super) single_turn: bool,
-    pub(super) dump_prompt_debug_fn: Arc<dyn Fn(&CompletionRequest) + Send + Sync>,
-    #[allow(clippy::type_complexity)]
-    pub(super) emit_token_usage_fn: Arc<dyn Fn(UsageStats, Option<u64>, Option<u64>) + Send + Sync>,
     /// Run-scoped id for direct bus emission of log lines and stream events.
     pub(super) message_prefix: String,
 }
@@ -251,8 +184,6 @@ impl LoopState {
         max_turns: usize,
         prefix: &str,
         preserve_reasoning_in_history: bool,
-        dump_prompt_debug_fn: Arc<dyn Fn(&CompletionRequest) + Send + Sync>,
-        emit_token_usage_fn: Arc<dyn Fn(UsageStats, Option<u64>, Option<u64>) + Send + Sync>,
         message_prefix: &str,
     ) -> Self {
         // Destructure the interactive session into its components so we can
@@ -300,8 +231,6 @@ impl LoopState {
             reminder_budget,
             completion_nudge_budget,
             single_turn,
-            dump_prompt_debug_fn,
-            emit_token_usage_fn,
             message_prefix: message_prefix.to_string(),
         }
     }
@@ -347,9 +276,15 @@ impl LoopState {
             b = self.prepare_stream_request(tool_defs, opts, nested) => b?,
         };
 
-        // Dump the full prompt to the state directory when
-        // GREMLINS_LOG_LEVEL=DEBUG and a debug store is configured.
-        (self.dump_prompt_debug_fn)(&builder);
+        // Emit unconditionally — the executor-side subscriber owns the
+        // DEBUG-threshold check. Nested loops never dump (they share the
+        // parent run's id and would otherwise duplicate the parent's dumps).
+        if !nested {
+            emit_event(EventKind::PromptRequest {
+                id: self.message_prefix.clone(),
+                json: serde_json::to_string_pretty(&builder).unwrap_or_default(),
+            });
+        }
 
         // Phase 2: launch the model stream, handling pre-stream errors and
         // retry inline (each path returns early).
@@ -1198,8 +1133,6 @@ pub(crate) async fn run_agent_loop(
         &ctx.expected_artifact_paths,
         ctx.reminder_budget,
         ctx.completion_nudge_budget,
-        Arc::clone(&ctx.dump_prompt_debug_fn),
-        Arc::clone(&ctx.emit_token_usage_fn),
         interactive,
         ctx.prepopulated_conversation.clone(),
     )
@@ -1282,8 +1215,6 @@ pub(crate) async fn run_agent_loop_nested(
         &[],
         0,
         completion_nudge_budget,
-        Arc::new(|_| {}),
-        Arc::new(|_, _, _| {}),
         None,
         prepopulated_conversation,
     )
@@ -1345,8 +1276,6 @@ pub(crate) async fn run_agent_loop_core(
     expected_artifact_paths: &[PathBuf],
     reminder_budget: usize,
     completion_nudge_budget: usize,
-    dump_prompt_debug_fn: Arc<dyn Fn(&CompletionRequest) + Send + Sync>,
-    emit_token_usage_fn: Arc<dyn Fn(UsageStats, Option<u64>, Option<u64>) + Send + Sync>,
     interactive: Option<InteractiveSession>,
     prepopulated_conversation: Box<dyn Conversation>,
 ) -> Result<CompletedRun, ClientError> {
@@ -1361,8 +1290,6 @@ pub(crate) async fn run_agent_loop_core(
         max_turns,
         prefix,
         opts.preserve_reasoning_in_history,
-        dump_prompt_debug_fn,
-        emit_token_usage_fn,
         &tool_ctx.message_prefix,
     );
     let loop_start = Instant::now();
@@ -1441,11 +1368,21 @@ pub(crate) async fn run_agent_loop_core(
         let totals = state.fold_turn_usage(turn_usage.as_ref());
 
         // ── Emit cumulative token usage ─────
-        let (last_prompt, last_cached) = turn_stats
-            .as_ref()
-            .map(|ts| (ts.prompt_tokens, ts.cached_input_tokens))
-            .unwrap_or((None, None));
-        (state.emit_token_usage_fn)(totals.clone(), last_prompt, last_cached);
+        // Nested loops fold into the parent's totals; only the outer loop
+        // reports so usage is never double-counted.
+        if !nested {
+            let (last_prompt, last_cached) = turn_stats
+                .as_ref()
+                .map(|ts| (ts.prompt_tokens, ts.cached_input_tokens))
+                .unwrap_or((None, None));
+            emit_event(EventKind::TokenUsage {
+                id: state.message_prefix.clone(),
+                usage: totals.clone(),
+                cost_usd: None,
+                last_prompt_tokens: last_prompt,
+                last_cached_input_tokens: last_cached,
+            });
+        }
 
         emit_turn_stats(prefix, state.turn_num, turn_stats.as_ref(), &totals);
 
@@ -1815,8 +1752,6 @@ pub(crate) fn test_ctx(
             discovered_skills: None,
             active_skills: None,
             extra_sandbox_roots: Vec::new(),
-            dump_prompt_debug_fn: None,
-            emit_token_usage_fn: None,
         },
         prefix: "[t] ".into(),
         idle_timeout: 0.05,
@@ -1824,8 +1759,6 @@ pub(crate) fn test_ctx(
         reminder_budget: 0,
         completion_nudge_budget: 0,
         prepopulated_conversation: conv,
-        dump_prompt_debug_fn: Arc::new(|_| {}),
-        emit_token_usage_fn: Arc::new(|_, _, _| {}),
     }
 }
 
@@ -4861,8 +4794,6 @@ mod tests {
                 &[],
                 0,
                 0,
-                Arc::new(|_| {}),
-                Arc::new(|_, _, _| {}),
                 Some(session),
                 Box::new(ConversationStub::new("hi")),
             )
@@ -4971,8 +4902,6 @@ mod tests {
                 &[],
                 0,
                 0,
-                Arc::new(|_| {}),
-                Arc::new(|_, _, _| {}),
                 Some(session),
                 Box::new(ConversationStub::new("hi")),
             )
@@ -5071,8 +5000,6 @@ mod tests {
                 &[],
                 0,
                 0,
-                Arc::new(|_| {}),
-                Arc::new(|_, _, _| {}),
                 Some(session),
                 Box::new(ConversationStub::new("hi")),
             )
@@ -5156,8 +5083,6 @@ mod tests {
                 &[],
                 0,
                 0,
-                Arc::new(|_| {}),
-                Arc::new(|_, _, _| {}),
                 Some(session),
                 Box::new(ConversationStub::new("hi")),
             )
@@ -5318,8 +5243,6 @@ mod tests {
             &[],
             0,
             0,
-            Arc::new(|_| {}),
-            Arc::new(|_, _, _| {}),
             None,
             Box::new(ConversationStub::new("hi")),
         )
@@ -5402,8 +5325,6 @@ mod tests {
             &[],
             0,
             0,
-            Arc::new(|_| {}),
-            Arc::new(|_, _, _| {}),
             None,
             // Run against the shipped implementation, not the stub: this test
             // guards the prompt-commit invariant in `StandardConversation`.

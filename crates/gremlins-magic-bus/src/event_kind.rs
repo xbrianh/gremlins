@@ -59,6 +59,10 @@ pub enum EventKind {
     #[serde(rename = "bail")]
     Bail { id: String, reason: String },
 
+    /// Serialized CompletionRequest for prompt-debug dumps.
+    #[serde(rename = "prompt_request")]
+    PromptRequest { id: String, json: String },
+
     // ── From InteractiveEvent ─────────────────────────────────────────
     #[serde(rename = "ready")]
     Ready { turn: usize },

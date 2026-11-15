@@ -9,12 +9,10 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use crate::artifacts::uri::Uri;
 use crate::clients::backend::RunParams;
 use crate::clients::client::ModelURI;
-use crate::clients::protocol::UsageStats;
 use crate::config;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent};
@@ -23,11 +21,10 @@ use crate::executor::state;
 use crate::executor::state::{Checkout, Collision, FileSystemStateStore};
 use crate::executor::RunError;
 use crate::task_kind::TaskKind;
-use gremlins_magic_bus::emit_event;
-use gremlins_magic_bus::EventKind;
+use gremlins_magic_bus::{emit_event, EventKind};
 use indexmap::IndexMap;
 use rig_core::completion::message::{AssistantContent, UserContent};
-use rig_core::completion::{CompletionRequest, Message};
+use rig_core::completion::Message;
 
 use crate::executor::run::{
     agent_commit_err, agent_prepare_err, client_run_err, collect_checkout_keys, resolve_client,
@@ -235,56 +232,28 @@ pub(crate) async fn run_agent(
         )>,
     ));
 
-    // ── Build inversion-of-control callbacks ─────
-    // Wires cross-package dependencies (prompt-debug, token-usage) into
-    // the agent loop without the loop importing `crate::executor`.
-    let dump_prompt_debug_fn: Arc<dyn Fn(&CompletionRequest) + Send + Sync> = {
-        let store = gremlin.state.store_handle();
-        Arc::new(move |request| {
-            if crate::executor::log_level_threshold() < log::LevelFilter::Debug {
-                return;
-            }
-            let ts = crate::executor::state::now_stamp_millis();
-            let ts_clean = ts
-                .trim_matches(|c: char| c == '[' || c == ']')
-                .replace(':', "-");
-            let name = format!("prompt_{ts_clean}.txt");
-            match store.open(&name, crate::executor::state::BlobMode::Write) {
-                Ok(mut blob) => {
-                    let json = serde_json::to_string_pretty(request).unwrap_or_default();
-                    let _ = std::io::Write::write_all(&mut blob, json.as_bytes());
-                    let _ = std::io::Write::write_all(&mut blob, b"\n");
-                }
-                Err(e) => {
-                    log::warn!("dump_prompt_if_debug: failed to open {name}: {e}");
-                }
-            }
-        })
-    };
-    #[allow(clippy::type_complexity)]
-    let emit_token_usage_fn: Arc<dyn Fn(UsageStats, Option<u64>, Option<u64>) + Send + Sync> = {
-        let gremlin_id = gremlin.id.to_string();
-        let client_for_cost = client.clone();
-        let baseline_usage = crate::executor::supervisor::usage_stats_from_state(
-            gremlin.state.read_field("token_usage").as_ref(),
-        );
-        let live_usage_tracker = live_usage.clone();
-        Arc::new(
-            move |totals, last_prompt_tokens, last_cached_input_tokens| {
-                let usage = crate::executor::supervisor::add_usage_stats(&baseline_usage, &totals);
-                let cost_usd = client_for_cost.total_cost_usd();
-                *live_usage_tracker.lock().unwrap() =
-                    Some((usage.clone(), totals.clone(), cost_usd));
-                emit_event(EventKind::TokenUsage {
-                    id: gremlin_id.clone(),
-                    usage,
-                    cost_usd,
-                    last_prompt_tokens,
-                    last_cached_input_tokens,
-                });
-            },
-        )
-    };
+    // ── Bus subscriber for prompt-debug dumps and live usage ─────
+    // The agent loop emits run-scoped `PromptRequest` and `TokenUsage`
+    // events. This subscriber folds them into the on-disk prompt dumps and
+    // the live-usage snapshot used to persist partial progress when a stage
+    // fails mid-run. Subscribing before `client.run` keeps the first turn's
+    // events from being missed.
+    let baseline_usage = crate::executor::supervisor::usage_stats_from_state(
+        gremlin.state.read_field("token_usage").as_ref(),
+    );
+    let cost_client = client.clone();
+    // Session cost is read from the backend client at each TokenUsage
+    // event; the fold task does not own the client so it receives this
+    // closure instead.
+    let session_cost_fn: Box<dyn Fn() -> Option<f64> + Send> =
+        Box::new(move || cost_client.total_cost_usd());
+    let fold = crate::executor::live_usage::spawn_live_usage_fold(
+        gremlin.id.as_str(),
+        gremlin.state.store_handle(),
+        live_usage.clone(),
+        session_cost_fn,
+        baseline_usage,
+    );
     let prepopulated_conversation: Box<dyn crate::clients::conversation::Conversation> =
         Box::new(conv);
 
@@ -322,8 +291,6 @@ pub(crate) async fn run_agent(
         discovered_skills: gremlin.discovered_skills.clone(),
         active_skills: gremlin.active_skills.clone(),
         extra_sandbox_roots: gremlin.extra_sandbox_roots.clone(),
-        dump_prompt_debug_fn: Some(dump_prompt_debug_fn),
-        emit_token_usage_fn: Some(emit_token_usage_fn),
     };
 
     let effective_model = params
@@ -371,7 +338,15 @@ pub(crate) async fn run_agent(
         params.model.as_deref().unwrap_or("default")
     );
 
-    let completed = match client.run(params, interactive).await {
+    let run_result = client.run(params, interactive).await;
+    // Close our subscription so the fold task drains any already-buffered
+    // events (notably the final turn's `TokenUsage`) and then exits, rather
+    // than racing an abort that could drop them.
+    drop(fold.guard);
+    // Bound the drain so a stuck fold task can never stall the stage.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), fold.task).await;
+
+    let completed = match run_result {
         Ok(c) => c,
         Err(error) => {
             // Persist the live usage counters from partial (failed) agent-loop

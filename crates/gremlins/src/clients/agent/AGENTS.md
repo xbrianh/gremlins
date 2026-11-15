@@ -45,9 +45,9 @@ After each tool batch, `turn_flow.rs` functions handle turn resolution:
 
 ## Key types
 
-- **`LoopState`** — mutable state carried through each turn: conversation handle, usage accumulators, turn counter, raw/captured writers, timeout backoff schedule, prompt-debug and token-usage callbacks.
+- **`LoopState`** — mutable state carried through each turn: conversation handle, usage accumulators, turn counter, raw/captured writers, timeout backoff schedule, and the run-scoped `message_prefix` used for direct bus emission of prompt dumps, token usage, and stream events.
 - **`LoopOpts`** — immutable per-run options: `tool_filter`, `temperature`, `max_tokens`, `extra`, `tool_mode`, `preserve_reasoning_in_history`.
-- **`RunContext`** — everything the caller (backend/executor) wires in: `RunParams`, sandbox roots, prefix, timeout, artifact expectation budget, prompt-debug and token-usage callbacks.
+- **`RunContext`** — everything the caller (backend/executor) wires in: `RunParams`, sandbox roots, prefix, timeout, and artifact expectation budget.
 - **`ToolJob`** — a single tool call queued for execution: `ToolCall` + `CallId` + `ToolName`. Dispatched concurrently with cancellation racing.
 - **`StreamAccumulator`** / **`StreamTurnOutput`** / **`StreamTurnOutcome`** — the stream consumption result: text, tool calls, reasoning, usage, and the control-flow signal (Continue, Done, Empty, Bail, Quit).
 
