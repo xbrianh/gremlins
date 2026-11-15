@@ -97,9 +97,9 @@ async fn emit_output_prefixes_the_tool_call_id() {
     let dir = tmp();
     let mut c = ctx(&dir);
     c.id_prefix = "a3f1.".to_string();
-    c.message_prefix = "test.run".to_string();
+    c.message_prefix = "test.prefix".to_string();
 
-    let (_sub, mut rx) = subscribe_run("test.run");
+    let (_sub, mut rx) = subscribe_run("test.prefix");
 
     c.emit_output("call_0", "Bash", "Bash echo hi", "hi\n")
         .await;
@@ -131,9 +131,9 @@ async fn emit_output_prefixes_the_tool_call_id() {
 async fn emit_output_without_prefix_keeps_the_raw_id() {
     let dir = tmp();
     let mut c = ctx(&dir);
-    c.message_prefix = "test.run".to_string();
+    c.message_prefix = "test.no-prefix".to_string();
 
-    let (_sub, mut rx) = subscribe_run("test.run");
+    let (_sub, mut rx) = subscribe_run("test.no-prefix");
 
     c.emit_output("call_0", "Bash", "call", "x").await;
 
