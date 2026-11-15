@@ -219,40 +219,48 @@ pub(crate) async fn run_agent(
         conv.set_compaction_threshold_tokens(t);
     }
 
-    // ── Bus subscriber for prompt-debug dumps ─────
-    // The agent loop emits run-scoped `PromptRequest` events. Subscribe
-    // before `client.run` so the first turn's dump is not missed.
+    // ── Bus subscriber for prompt-debug dumps and live token usage ─────
+    // The agent loop emits run-scoped `PromptRequest` and `TokenUsage`
+    // events. Prompt dumps are DEBUG-gated; token-usage tracking is
+    // always active so failed stages can persist partial-turn totals.
+    let stage_usage: std::sync::Arc<
+        std::sync::Mutex<Option<crate::clients::protocol::UsageStats>>,
+    > = std::sync::Arc::new(std::sync::Mutex::new(None));
     let (prompt_dumper_guard, prompt_dumper_task) = {
         use gremlins_magic_bus::{subscribe_run, Recv};
         let (sub, mut rx) = subscribe_run(gremlin.id.as_str());
         let guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
         let store = gremlin.state.store_handle();
         let prompt_gremlin_id = gremlin.id.to_string();
+        let usage_snap = stage_usage.clone();
         let task = tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Recv::Event(dispatch) => {
-                        if let EventKind::PromptRequest { id, json } = dispatch.kind() {
+                    Recv::Event(dispatch) => match dispatch.kind() {
+                        EventKind::TokenUsage { id, usage, .. } if *id == prompt_gremlin_id => {
+                            *usage_snap.lock().unwrap() = Some(usage.clone());
+                        }
+                        EventKind::PromptRequest { id, json }
                             if *id == prompt_gremlin_id
                                 && crate::core::logging::log_level_threshold()
-                                    >= log::LevelFilter::Debug
-                            {
-                                let ts = state::now_stamp_millis()
-                                    .trim_matches(|c: char| c == '[' || c == ']')
-                                    .replace(':', "-");
-                                let name = format!("prompt_{ts}.txt");
-                                match store.open(&name, state::BlobMode::Write) {
-                                    Ok(mut blob) => {
-                                        let _ = std::io::Write::write_all(&mut blob, json.as_bytes());
-                                        let _ = std::io::Write::write_all(&mut blob, b"\n");
-                                    }
-                                    Err(e) => {
-                                        log::warn!("prompt dump: failed to open {name}: {e}");
-                                    }
+                                    >= log::LevelFilter::Debug =>
+                        {
+                            let ts = state::now_stamp_millis()
+                                .trim_matches(|c: char| c == '[' || c == ']')
+                                .replace(':', "-");
+                            let name = format!("prompt_{ts}.txt");
+                            match store.open(&name, state::BlobMode::Write) {
+                                Ok(mut blob) => {
+                                    let _ = std::io::Write::write_all(&mut blob, json.as_bytes());
+                                    let _ = std::io::Write::write_all(&mut blob, b"\n");
+                                }
+                                Err(e) => {
+                                    log::warn!("prompt dump: failed to open {name}: {e}");
                                 }
                             }
                         }
-                    }
+                        _ => {}
+                    },
                     Recv::Lagged(_) => continue,
                     Recv::Closed => break,
                 }
@@ -353,6 +361,29 @@ pub(crate) async fn run_agent(
     let completed = match run_result {
         Ok(c) => c,
         Err(error) => {
+            // Persist partial token usage from failed agent-loop turns so
+            // the Gremlin::finish() snapshot has accurate totals rather
+            // than the previous stage's stale values.
+            if let Some(usage) = stage_usage.lock().unwrap().take() {
+                let mut delta: HashMap<String, i64> = HashMap::new();
+                delta.insert("turns".to_string(), usage.turns as i64);
+                delta.extend(
+                    [
+                        ("prompt_tokens", usage.prompt_tokens),
+                        ("completion_tokens", usage.completion_tokens),
+                        ("cached_input_tokens", usage.cached_input_tokens),
+                        (
+                            "cache_creation_input_tokens",
+                            usage.cache_creation_input_tokens,
+                        ),
+                        ("reasoning_tokens", usage.reasoning_tokens),
+                    ]
+                    .into_iter()
+                    .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
+                );
+                gremlin.state.accumulate_token_usage(&delta);
+                state::emit_stage_token_usage(gremlin.state.store_ref(), &stage_path, &delta);
+            }
             return Err(client_run_err(error, &prepared.name));
         }
     };

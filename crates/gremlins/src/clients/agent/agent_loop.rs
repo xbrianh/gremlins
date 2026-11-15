@@ -4804,13 +4804,14 @@ mod tests {
         let ready = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match evt_rx.recv().await {
-                    gremlins_magic_bus::Recv::Event(e) => match e.into_kind() {
-                        EventKind::Ready { .. } => return true,
-                        EventKind::Ended { .. } => return false,
-                        _ => continue,
-                    },
+                    gremlins_magic_bus::Recv::Event(e)
+                        if matches!(e.kind(), EventKind::Ready { .. }) =>
+                    {
+                        return true;
+                    }
                     gremlins_magic_bus::Recv::Closed => return false,
                     gremlins_magic_bus::Recv::Lagged(_) => continue,
+                    _ => continue,
                 }
             }
         })
@@ -5173,13 +5174,12 @@ mod tests {
         let ready = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match evt_rx.recv().await {
-                    Recv::Event(e) => match e.into_kind() {
-                        EventKind::Ready { .. } => return true,
-                        EventKind::Ended { .. } => return false,
-                        _ => continue,
-                    },
+                    Recv::Event(e) if matches!(e.kind(), EventKind::Ready { .. }) => {
+                        return true;
+                    }
                     Recv::Closed => return false,
                     Recv::Lagged(_) => continue,
+                    _ => continue,
                 }
             }
         })

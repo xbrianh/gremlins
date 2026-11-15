@@ -1,10 +1,10 @@
 //! Tests for the supervisor module.
 
 use super::actor::{self, ActorMsg};
+use super::chat::{add_usage_stats, usage_stats_from_state};
 use super::{
-    add_usage_stats, create_chat_gremlin, handle_artifact, handle_chat_model, handle_compact,
-    handle_launch, handle_model, parallel_runtime_keys, resolve_chat_env,
-    resolve_filepath_source_values, usage_stats_from_state,
+    create_chat_gremlin, handle_artifact, handle_chat_model, handle_compact, handle_launch,
+    handle_model, parallel_runtime_keys, resolve_chat_env, resolve_filepath_source_values,
 };
 use crate::clients::client::{Client, ModelURI};
 use crate::clients::protocol::UsageStats;
