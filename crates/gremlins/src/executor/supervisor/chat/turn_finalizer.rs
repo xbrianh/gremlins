@@ -25,6 +25,7 @@ use crate::executor::run_agent;
 use crate::executor::supervisor::chat::chat_payload;
 use crate::executor::RunError;
 use gremlins_magic_bus::connection::{BusSubGuard, SharedWriter};
+use gremlins_magic_bus::EventKind;
 
 use crate::executor::supervisor::actor::ActorMsg;
 use crate::executor::supervisor::actor_client::Client;
@@ -162,11 +163,12 @@ impl TurnFinalizer {
             self.reinsert(gremlin).await;
         }
         self.clear_turn_and_signal().await;
-        self.write(serde_json::json!({
-            "type": "ended",
-            "id": self.id,
-            "reason": "cancelled",
-        }))
+        self.write(
+            serde_json::to_value(EventKind::Ended {
+                reason: "cancelled".to_string(),
+            })
+            .unwrap_or_default(),
+        )
         .await;
     }
 
@@ -256,11 +258,12 @@ impl TurnFinalizer {
             )
             .await;
         let _ = self.done.send(true);
-        self.write(serde_json::json!({
-            "type": "ended",
-            "id": self.id,
-            "reason": "interrupted",
-        }))
+        self.write(
+            serde_json::to_value(EventKind::Ended {
+                reason: "interrupted".to_string(),
+            })
+            .unwrap_or_default(),
+        )
         .await;
     }
 
@@ -278,11 +281,7 @@ impl TurnFinalizer {
             self.reinsert(gremlin).await;
         }
         self.clear_turn_and_signal().await;
-        self.write(serde_json::json!({
-            "type": "ended",
-            "id": self.id,
-            "reason": message,
-        }))
-        .await;
+        self.write(serde_json::to_value(EventKind::Ended { reason: message }).unwrap_or_default())
+            .await;
     }
 }

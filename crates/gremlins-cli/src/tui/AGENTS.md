@@ -12,7 +12,6 @@ Terminal UI for the `gremlins` CLI. Built on **ratatui** with **crossterm** for 
 | `markdown.rs` | Markdown-to-ratatui renderer. Turns a markdown string into `Vec<Line<'static>>` of styled spans via `pulldown-cmark` (tables, strikethrough, task lists). |
 | `screen.rs` | `LiveArea` — owns the main terminal screen, the typed widget `Scene` (`transcript`/`reasoning`/`input_bar`/`info_bar` fields plus a typed `ScreenView` enum), diff-driven double buffering, `commit_scrollback()` (renders overflow + `scroll_region_up`), raw-mode/cursor lifecycle. Also defines the full-screen `RunsView` body with its inline watch stream pane. |
 | `widgets.rs` | `LiveAreaWidget` trait + the shared recursive layout engine + concrete widgets: composite transcript (single styled FIFO + current-turn draft state + one embedded tool `StreamingWidget` child), the `StreamingWidget` primitive, input bar, info bar, and the full-screen `DebugWidget`. |
-| `chat.rs` | Per-message chat client. Sends `{"op":"chat"}` over a fresh socket, parses streaming `ChatEvent` variants. |
 | `client.rs` | Persistent `DaemonClient`. Long-lived socket for request/response + unsolicited `DaemonEvent` broadcast. Also `follow_log()` on a dedicated connection. |
 | `commands.rs` | Slash-command dispatch. Returns `CommandResult` — the event loop handles each variant. |
 | `editor.rs` | Stub wired to `Ctrl+G`. Appends placeholder to transcript. |
@@ -28,7 +27,7 @@ run()
  ├─ Redirect stderr → state_root/tui.log
  └─ run_app()
       ├─ App::new()
-      ├─ client::connect() → DaemonClient + event_rx + raw_rx
+      ├─ client::connect() → DaemonClient + event_rx + chat_rx + raw_rx
       ├─ Initial "ls" snapshot → populates app.active_runs
       ├─ Crossterm event channel (poll 20ms → mpsc)
       ├─ Per-frame: live_area.compose(&app) → render widgets → commit overflow → draw
@@ -39,7 +38,7 @@ run()
       │    4. snapshot_rx  — run-snapshot refresh (after event_lagged)
       │    5. log_rx       — log-follow lines (dedicated connections)
       │    6. result_rx    — socket-op results
-      │    7. chat_rx      — ChatEvent stream
+      │    7. chat_rx      — (EventKind, Option<String>) stream (chat events with turn tags)
       │    8. debug_evt_rx — DebugEvent stream (recv_debug, pending when idle)
       └─ Exit: commit in-flight turn to history, abort log/debug tasks, client.shutdown()
 
@@ -83,10 +82,10 @@ returns `RunError::Reported` so the CLI exits nonzero without printing it again.
 3. Force an immediate frame so the pinned prompt appears before the first daemon event
 4. Set `app.active_request = true`, store `app.pending_user_message`
 5. Spawn a task that sends `{"op": "chat", "text", "id"}` via the persistent `DaemonClient` (Esc sends `{"op": "cancel_chat"}`)
-6. `ChatEvent::ReasoningChunk` → `live_area.push_reasoning_text()` (appends to the top-level reasoning band; partials are flushed on newline)
-7. `ChatEvent::ToolOutputChunk` → `live_area.push_tool_output_chunk(id, call, text)` creates or updates the live stream keyed by call id (sealing any accumulated response text first); `ChatEvent::ToolResult` → `live_area.commit_tool_result(id, call)` commits that stream's title plus retained 5-row tail into the transcript via the uniform `commit_tool_stream_block` path. `ChatEvent::TurnComplete` seeds the turn's tool-call list for end-of-turn reconciliation; all tools participate uniformly
-8. `ChatEvent::StreamChunk` → `live_area.push_response()` (accumulates raw response, marks the response region dirty)
-9. `ChatEvent::Done` → reconcile the raw response accumulator with `Done.text` (use summary only if nothing streamed), then `live_area.finish_turn()` flushes any uncommitted tool-call list entries, rebuilds the response, unpins the turn, clears its draft state plus the live reasoning/tool slots, and commits the reasoning title as the final FIFO line of the finished turn (the reasoning body is discarded; committed tool blocks and the title stay in the transcript FIFO forever)
+6. `EventKind::ReasoningChunk` → `live_area.push_reasoning_text()` (appends to the top-level reasoning band; partials are flushed on newline)
+7. `EventKind::ToolOutputChunk` → `live_area.push_tool_output_chunk(id, call, text)` creates or updates the live stream keyed by call id (sealing any accumulated response text first); `EventKind::ToolResult` → `live_area.commit_tool_result(id, call)` commits that stream's title plus retained 5-row tail into the transcript via the uniform `commit_tool_stream_block` path. `EventKind::TurnComplete` seeds the turn's tool-call list for end-of-turn reconciliation; all tools participate uniformly
+8. `EventKind::StreamChunk` → `live_area.push_response()` (accumulates raw response, marks the response region dirty)
+9. `EventKind::Done` → reconcile the raw response accumulator with `Done.text` (use summary only if nothing streamed), then `live_area.finish_turn()` flushes any uncommitted tool-call list entries, rebuilds the response, unpins the turn, clears its draft state plus the live reasoning/tool slots, and commits the reasoning title as the final FIFO line of the finished turn (the reasoning body is discarded; committed tool blocks and the title stay in the transcript FIFO forever)
 10. `Esc` during active request → abort chat task, send `cancel_chat`, `live_area.clear_current_turn()` truncates the FIFO back to the turn start
 
 ### Daemon events
@@ -152,11 +151,12 @@ typed `ScreenView` body across the whole terminal; the chat scene
 4. Update the keybindings table in `crates/gremlins/prompts/chat_system.md`
 5. Update `DESIGN.md` if the binding changes screen-level behaviour
 
-## Adding a New ChatEvent
+## Adding a New Chat Event
 
-1. Add variant to `ChatEvent` in `chat.rs`
-2. Add parsing in `parse_chat_event()`
-3. Add match arm in the `chat_rx` handler in `mod.rs`
+1. Add variant to `EventKind` in `gremlins-magic-bus/src/event_kind.rs` with a `#[serde(rename = "...")]` tag
+2. Add the variant to `is_chat_event()` and `is_stream_event()` helpers
+3. Add a match arm in the chat forwarding loop in `gremlins/src/executor/supervisor/chat/mod.rs`
+4. Add a match arm in the `chat_rx` handler in `tui/mod.rs`
 
 ## Adding a New DebugEvent
 

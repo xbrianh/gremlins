@@ -256,24 +256,7 @@ async fn handle_connection(
                     // (chat, debug). Forwarding them through the global
                     // control socket duplicates chat output and lets
                     // unrelated runs' stream events leak into other sessions.
-                    if matches!(
-                        kind,
-                        EventKind::StreamChunk { .. }
-                            | EventKind::ReasoningChunk { .. }
-                            | EventKind::ToolOutputChunk { .. }
-                            | EventKind::ToolResult { .. }
-                            | EventKind::TurnComplete { .. }
-                            | EventKind::Done { .. }
-                            | EventKind::StreamReset
-                            | EventKind::Ready { .. }
-                            | EventKind::Ended { .. }
-                            | EventKind::ExecOutput { .. }
-                            // Prompt-debug dumps are consumed in-process by
-                            // `run_agent`; they are never part of the client
-                            // protocol and can be large.
-                            | EventKind::PromptRequest { .. }
-                            | EventKind::SkillLoaded { .. }
-                    ) {
+                    if kind.is_stream_event() {
                         continue;
                     }
                     let value = serde_json::to_value(kind).unwrap_or(serde_json::Value::Null);

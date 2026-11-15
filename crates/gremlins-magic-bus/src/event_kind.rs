@@ -150,4 +150,59 @@ pub enum EventKind {
     /// activated. The name is the canonical skill identifier.
     #[serde(rename = "skill_loaded")]
     SkillLoaded { id: String, name: String },
+
+    // ── Chat error / warning ──────────────────────────────────────────
+    #[serde(rename = "error")]
+    Error {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn: Option<String>,
+    },
+    #[serde(rename = "system_warning")]
+    SystemWarning {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn: Option<String>,
+    },
+}
+
+impl EventKind {
+    /// Returns `true` for events that are part of the chat streaming protocol.
+    pub fn is_chat_event(&self) -> bool {
+        matches!(
+            self,
+            EventKind::StreamChunk { .. }
+                | EventKind::ReasoningChunk { .. }
+                | EventKind::ToolOutputChunk { .. }
+                | EventKind::ToolResult { .. }
+                | EventKind::TurnComplete { .. }
+                | EventKind::TaskProgress { .. }
+                | EventKind::Done { .. }
+                | EventKind::Ended { .. }
+                | EventKind::Error { .. }
+                | EventKind::SystemWarning { .. }
+        )
+    }
+
+    /// Returns `true` for events that should NOT be forwarded on the control socket.
+    /// Includes all stream events (chat + exec output + prompt requests + skill loaded).
+    pub fn is_stream_event(&self) -> bool {
+        matches!(
+            self,
+            EventKind::StreamChunk { .. }
+                | EventKind::ReasoningChunk { .. }
+                | EventKind::ToolOutputChunk { .. }
+                | EventKind::ToolResult { .. }
+                | EventKind::TurnComplete { .. }
+                | EventKind::Done { .. }
+                | EventKind::StreamReset
+                | EventKind::Ready { .. }
+                | EventKind::Ended { .. }
+                | EventKind::ExecOutput { .. }
+                | EventKind::PromptRequest { .. }
+                | EventKind::SkillLoaded { .. }
+                | EventKind::Error { .. }
+                | EventKind::SystemWarning { .. }
+        )
+    }
 }

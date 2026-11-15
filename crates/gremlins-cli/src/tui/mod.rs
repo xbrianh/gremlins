@@ -1,6 +1,5 @@
 pub mod app;
 pub mod buffer;
-pub mod chat;
 mod chat_context;
 mod chat_prefetch;
 pub mod client;
@@ -39,7 +38,6 @@ use tokio::io::BufReader;
 use tokio::sync::mpsc;
 
 use app::{App, Screen};
-use chat::ChatEvent;
 use commands::{dispatch, CommandResult};
 use editor::{open_editor, ReaderChannels, SuspendHandle};
 use gremlins::executor::socket;
@@ -628,10 +626,13 @@ fn send_chat_input(
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown error")
                         .to_string();
-                    let _ = chat_tx.send(ChatEvent::Error {
-                        message: msg,
-                        turn: Some(turn_id.clone()),
-                    });
+                    let _ = chat_tx.send((
+                        gremlins_magic_bus::EventKind::Error {
+                            message: msg,
+                            turn: Some(turn_id.clone()),
+                        },
+                        Some(turn_id.clone()),
+                    ));
                 } else {
                     // The chat turn is now airborne: the daemon has created
                     // (or refreshed) the session's chat gremlin and patched
@@ -648,10 +649,13 @@ fn send_chat_input(
                 }
             }
             Err(e) => {
-                let _ = chat_tx.send(ChatEvent::Error {
-                    message: e,
-                    turn: Some(turn_id.clone()),
-                });
+                let _ = chat_tx.send((
+                    gremlins_magic_bus::EventKind::Error {
+                        message: e,
+                        turn: Some(turn_id.clone()),
+                    },
+                    Some(turn_id.clone()),
+                ));
             }
         }
     });
@@ -2504,31 +2508,22 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             }
 
             // ── Chat events ────────────────────────────────
-            Some(event) = chat_rx.recv() => {
+            Some((event, turn)) = chat_rx.recv() => {
                 // Drop events that belong to a superseded turn (a turn that
                 // was cancelled by Esc or replaced by a newer submit).
                 // TaskProgress events are keyed by parent tool-call id, not by
                 // turn, and are handled before the turn filter below.
-                if let ChatEvent::TaskProgress { parent_id, chain, kind, call, reasoning, text, stats, total } = &event {
+                if let gremlins_magic_bus::EventKind::TaskProgress { parent_id, chain, kind, call, reasoning, text, stats, totals, .. } = &event {
                     log::debug!(
                         "TaskProgress parent_id={parent_id} kind={kind} chain={chain} reasoning_len={} text_len={}",
                         reasoning.len(), text.len()
                     );
-                    live_area.push_task_progress(parent_id, kind, call, reasoning, text, stats.as_ref(), total.as_ref());
+                    let stats_json = stats.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null));
+                    let totals_json = totals.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null));
+                    live_area.push_task_progress(parent_id, kind, call, reasoning, text, stats_json.as_ref(), totals_json.as_ref());
                     continue;
                 }
-                let event_turn = match &event {
-                    ChatEvent::StreamChunk { turn, .. }
-                    | ChatEvent::ReasoningChunk { turn, .. }
-                    | ChatEvent::ToolOutputChunk { turn, .. }
-                    | ChatEvent::ToolResult { turn, .. }
-                    | ChatEvent::TurnComplete { turn, .. }
-                    | ChatEvent::Done { turn, .. }
-                    | ChatEvent::Ended { turn, .. }
-                    | ChatEvent::Error { turn, .. }
-                    | ChatEvent::SystemWarning { turn, .. } => turn.clone(),
-                    ChatEvent::TaskProgress { .. } => unreachable!("handled above"),
-                };
+                let event_turn = turn.clone();
                 match (&active_turn, &event_turn) {
                     (Some(active), Some(ev)) if active != ev => {
                         log::debug!("dropping stale chat event for turn {ev} (active {active})");
@@ -2549,30 +2544,30 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                 }
 
                 match event {
-                    ChatEvent::StreamChunk { text, .. } => {
+                    gremlins_magic_bus::EventKind::StreamChunk { text, .. } => {
                         log::debug!("StreamChunk len={}", text.len());
                         live_area.push_response(&text);
                     }
-                    ChatEvent::ReasoningChunk { text, .. } => {
+                    gremlins_magic_bus::EventKind::ReasoningChunk { text, .. } => {
                         log::debug!("ReasoningChunk len={}", text.len());
                         live_area.push_reasoning_text(&text);
                     }
-                    ChatEvent::ToolOutputChunk { id, name, call, text, .. } => {
+                    gremlins_magic_bus::EventKind::ToolOutputChunk { id, name, call, text, .. } => {
                         log::debug!(
                             "ToolOutputChunk id={id} name={name} call={call} len={}",
                             text.len()
                         );
                         live_area.push_tool_output_chunk(&id, &call, &text);
                     }
-                    ChatEvent::ToolResult { id, name, call, output, .. } => {
+                    gremlins_magic_bus::EventKind::ToolResult { id, name: _, call, output, .. } => {
                         log::debug!(
-                            "ToolResult id={id} name={name} output_len={}",
+                            "ToolResult id={id} output_len={}",
                             output.len()
                         );
                         // All tools participate uniformly in the transcript.
                         live_area.commit_tool_result(&id, &call);
                     }
-                    ChatEvent::TurnComplete { text, tool_calls, stats, total, loop_turn, .. } => {
+                    gremlins_magic_bus::EventKind::TurnComplete { turn, text, tool_calls, stats, totals } => {
                         log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);
                         live_area.clear_tool_output();
                         // `text` is the model's full response for the just-completed
@@ -2591,10 +2586,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // compact per-turn token/cache summary prefixed with the
                         // agent-loop turn number so the operator can see which
                         // iteration the stats belong to.
-                        let turn_num = loop_turn.unwrap_or(0);
-                        live_area.set_reasoning_title(&stats_title(turn_num, stats.as_ref(), total.as_ref()));
+                        let turn_num = turn;
+                        let stats_json = stats.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null));
+                        let totals_json = totals.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null));
+                        live_area.set_reasoning_title(&stats_title(turn_num, stats_json.as_ref(), totals_json.as_ref()));
                     }
-                    ChatEvent::Done { text, summary, .. } => {
+                    gremlins_magic_bus::EventKind::Done { text, summary, .. } => {
                         log::debug!("Done text_len={} summary_len={} has_current_turn={}",
                             text.len(), summary.len(), live_area.has_current_turn());
                         if !live_area.has_current_turn() {
@@ -2630,7 +2627,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // next input event.
                         live_area.compose(&app)?;
                     }
-                    ChatEvent::Ended { reason, .. } => {
+                    gremlins_magic_bus::EventKind::Ended { reason, .. } => {
                         if !live_area.has_current_turn() {
                             continue;
                         }
@@ -2658,7 +2655,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // without waiting for the next input event.
                         live_area.compose(&app)?;
                     }
-                    ChatEvent::Error { message: msg, .. } => {
+                    gremlins_magic_bus::EventKind::Error { message: msg, .. } => {
                         if !live_area.has_current_turn() {
                             continue;
                         }
@@ -2673,14 +2670,15 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // without waiting for the next input event.
                         live_area.compose(&app)?;
                     }
-                    ChatEvent::SystemWarning { message: msg, .. } => {
+                    gremlins_magic_bus::EventKind::SystemWarning { message: msg, .. } => {
                         if !live_area.has_current_turn() {
                             continue;
                         }
                         let full = format!("⚠ {msg}");
                         live_area.push_transcript_line(full);
                     }
-                    ChatEvent::TaskProgress { .. } => unreachable!("handled above"),
+                    gremlins_magic_bus::EventKind::TaskProgress { .. } => unreachable!("handled above"),
+                    _ => {}
                 }
             }
 
