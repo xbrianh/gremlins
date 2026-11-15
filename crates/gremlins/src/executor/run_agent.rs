@@ -272,7 +272,7 @@ pub(crate) async fn run_agent(
         Box::new(conv);
 
     let params = RunParams {
-        prompt: prepared.user_prompt(),
+        prompt: prepared.user_prompt(is_chat),
         label: prepared.name.clone(),
         model: prepared
             .model
@@ -305,6 +305,16 @@ pub(crate) async fn run_agent(
         discovered_skills: gremlin.discovered_skills.clone(),
         active_skills: gremlin.active_skills.clone(),
         extra_sandbox_roots: gremlin.extra_sandbox_roots.clone(),
+        path_context: {
+            let mut path_context = crate::clients::path_context::PathContext::new(&prepared.prompt);
+            let cwd = prepared.cwd.clone();
+            tokio::task::spawn_blocking(move || {
+                path_context.resolve(std::path::Path::new(&cwd));
+                path_context
+            })
+            .await
+            .unwrap_or_default()
+        },
     };
 
     let effective_model = params

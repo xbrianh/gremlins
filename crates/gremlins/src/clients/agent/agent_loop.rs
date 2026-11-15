@@ -20,6 +20,8 @@ use crate::clients::cancel::{default_classify, is_retryable, CancelToken};
 use crate::clients::conversation::{Conversation, TurnScriptError};
 use crate::clients::error::ClientError;
 use crate::clients::format::{enrich_log_line, format_tool_call_parts, trunc};
+#[cfg(test)]
+use crate::clients::path_context::PathContext;
 use crate::clients::protocol::{CompletedRun, TurnStats, UsageStats};
 use crate::clients::tools::tool_specs::ToolMode;
 use crate::clients::tools::{self, AgentLoopRuntime, ToolOutcome};
@@ -1120,6 +1122,7 @@ pub(crate) async fn run_agent_loop(
         active_skills: ctx.params.active_skills.clone(),
         skills_available: ctx.params.skills_available,
         discovered_skills: ctx.params.discovered_skills.clone(),
+        path_context: ctx.params.path_context.clone(),
     };
     let tool_defs = tools::tool_definitions(
         opts.tool_filter,
@@ -1812,6 +1815,7 @@ pub(crate) fn test_ctx(
             discovered_skills: None,
             active_skills: None,
             extra_sandbox_roots: Vec::new(),
+            path_context: PathContext::default(),
         },
         prefix: "[t] ".into(),
         idle_timeout: 0.05,
@@ -1838,6 +1842,7 @@ pub(crate) fn test_tool_ctx() -> crate::clients::tools::AgentLoopRuntime {
         active_skills: None,
         skills_available: false,
         discovered_skills: None,
+        path_context: PathContext::default(),
     }
 }
 

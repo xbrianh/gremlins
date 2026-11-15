@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::clients::path_context::PathContext;
 use crate::clients::tools::{self, AgentLoopRuntime};
 use crate::task_kind::TaskKind;
 use rig_core::driver::DynModel;
@@ -124,6 +125,10 @@ fn make_task_runner_at_depth(
             let tool_filter = tool_filter.clone();
             let cancel = cancel.clone();
             let mut child_ctx = ctx.clone();
+            // Child workers never inherit the parent's resolved path cache: the
+            // cache is keyed to the parent prompt and would short-circuit
+            // discovery in a task whose context is entirely different.
+            child_ctx.path_context = PathContext::default();
             let prefix = prefix.clone();
             let id_chain = id_chain.clone();
             let extra = extra.clone();
@@ -489,6 +494,7 @@ mod tests {
             active_skills: None,
             skills_available: false,
             discovered_skills: None,
+            path_context: crate::clients::path_context::PathContext::default(),
         }
     }
 

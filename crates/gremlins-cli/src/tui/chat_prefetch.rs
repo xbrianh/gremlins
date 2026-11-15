@@ -1,8 +1,8 @@
 //! Message-aware context pre-fetching.
 //!
-//! Scans the operator's message for gremlin IDs, file paths, and definition
-//! names, then fetches a bounded context block to inject into the user message
-//! so the model doesn't burn its first turn on discovery tools.
+//! Scans the operator's message for gremlin IDs and definition names, then
+//! fetches a bounded context block to inject into the user message so the
+//! model doesn't burn its first turn on discovery tools.
 //!
 //! Each matcher is bounded: at most N candidates, at most B output bytes per
 //! matcher. Failures (missing file, bad state.json, timeout) silently omit
@@ -10,14 +10,13 @@
 //! never crowds out the operator's actual message.
 //!
 //! This module is designed to run inside `spawn_blocking` under a timeout —
-//! it performs synchronous I/O (directory scans, file reads, landscape
-//! outlines) and must never execute on the TUI's async event-loop thread.
+//! it performs synchronous I/O (directory scans, file reads) and must never
+//! execute on the TUI's async event-loop thread.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use gremlins::definition::r#static::loader::{fill_names, StageEntry};
-use gremlins::landscape::LandscapeExplorer;
 
 /// Maximum bytes for the entire pre-fetch block.
 const MAX_BLOCK_BYTES: usize = 2000;
@@ -25,12 +24,7 @@ const MAX_BLOCK_BYTES: usize = 2000;
 /// Maximum bytes per matcher section body (before the section header).
 const MAX_PER_MATCHER_BYTES: usize = 800;
 
-/// Maximum file size in bytes to pass to Landscape's outline_file.
-/// Matches `MAX_OUTLINE_BYTES` from `gremlins::landscape`.
-const MAX_OUTLINE_FILE_BYTES: u64 = 1024 * 1024;
-
 const MAX_GREMLIN_IDS: usize = 3;
-const MAX_FILE_PATHS: usize = 5;
 const MAX_DEFINITION_NAMES: usize = 3;
 
 /// Pre-fetch context for the operator's message.
@@ -52,9 +46,6 @@ pub(crate) fn prefetch_context(text: &str, project_root: &str, deadline: Instant
     let mut sections: Vec<String> = Vec::new();
 
     if let Some(s) = prefetch_gremlins(text, deadline) {
-        sections.push(s);
-    }
-    if let Some(s) = prefetch_files(text, project_root, deadline) {
         sections.push(s);
     }
     if let Some(s) = prefetch_definitions(text, project_root, deadline) {
@@ -215,109 +206,6 @@ fn latest_attempt_summary(gremlin_id: &str, state_root: &Path) -> Option<String>
     }
 
     Some(summary)
-}
-
-// ── File path matcher ─────────────────────────────────────────────────────
-
-fn prefetch_files(text: &str, project_root: &str, deadline: Instant) -> Option<String> {
-    // Match likely file paths. Allow a leading dot or slash so paths like
-    // `.gremlins/qa.json5` and `.github/workflows/ci.yml` are matched.
-    // The subsequent path checks validate each candidate.
-    let re = regex::Regex::new(
-        r"(?:^|\s)([/.]?[\w./-]+\.(?:rs|md|json5|yaml|yml|toml|py|js|ts|sh|txt|json))\b",
-    )
-    .ok()?;
-
-    let candidates: Vec<&str> = re
-        .captures_iter(text)
-        .filter_map(|cap| cap.get(1))
-        .map(|m| m.as_str())
-        .collect();
-
-    let mut paths: Vec<&str> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    // Canonicalize the project root once.
-    let canonical_root = Path::new(project_root)
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(project_root));
-
-    for c in candidates {
-        if Instant::now() >= deadline {
-            break;
-        }
-        if !seen.insert(c.to_string()) {
-            continue;
-        }
-        // Reject absolute paths (join discards the base) and parent-dir
-        // escapes — otherwise a candidate like `src/../../secret.md` would
-        // be outlined and injected into chat context.
-        if c.starts_with('/') || c.contains("..") {
-            continue;
-        }
-        let resolved = Path::new(project_root).join(c);
-        if !resolved.is_file() {
-            continue;
-        }
-        // Canonicalize the candidate and ensure it stays within the project
-        // root. Symlinks can point outside the project, so we must validate
-        // the real location rather than trusting the lexical path.
-        let canonical_candidate = match resolved.canonicalize() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        if !canonical_candidate.starts_with(&canonical_root) {
-            continue;
-        }
-        paths.push(c);
-        if paths.len() >= MAX_FILE_PATHS {
-            break;
-        }
-    }
-
-    if paths.is_empty() {
-        return None;
-    }
-
-    let explorer = LandscapeExplorer;
-    let mut lines: Vec<String> = Vec::new();
-
-    for &p in &paths {
-        if Instant::now() >= deadline {
-            break;
-        }
-        let full = Path::new(project_root).join(p);
-
-        // Apply a size limit before outlining — `outline_file` reads the
-        // entire file into memory, so a large file would cause an unbounded
-        // allocation.
-        let file_len = match std::fs::metadata(&full) {
-            Ok(m) => m.len(),
-            Err(_) => continue,
-        };
-        if file_len > MAX_OUTLINE_FILE_BYTES {
-            continue;
-        }
-
-        let outline_str = match explorer.outline_file(&full, false) {
-            Ok(items) if !items.is_empty() => items
-                .iter()
-                .map(|item| format!("{}|{}|{}", item.line, item.kind, item.name))
-                .collect::<Vec<_>>()
-                .join(" "),
-            Ok(_) => String::from("(no structural items)"),
-            Err(_) => continue,
-        };
-        lines.push(format!("{}:\n{}", p, outline_str));
-    }
-
-    if lines.is_empty() {
-        return None;
-    }
-
-    let body = lines.join("\n\n");
-    let body = cap_bytes(body, MAX_PER_MATCHER_BYTES);
-    Some(format!("### Files\n{body}"))
 }
 
 // ── Definition name matcher ───────────────────────────────────────────────
@@ -580,117 +468,6 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    // ── File path matcher ─────────────────────────────────────────────
-
-    #[test]
-    fn file_path_matcher_finds_real_files() {
-        let _guard = GLOBAL_CONFIG_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let rs_path = dir.path().join("src").join("lib.rs");
-        std::fs::create_dir_all(rs_path.parent().unwrap()).unwrap();
-        std::fs::write(&rs_path, "pub fn foo() {}").unwrap();
-
-        let deadline = Instant::now() + std::time::Duration::from_secs(5);
-        let text = "what does src/lib.rs do?";
-        let result = prefetch_files(text, dir.path().to_str().unwrap(), deadline);
-        assert!(result.is_some());
-        let body = result.unwrap();
-        assert!(body.contains("src/lib.rs"));
-        // Landscape should find the function.
-        assert!(body.contains("fn|foo"));
-    }
-
-    #[test]
-    fn file_path_matcher_rejects_parent_dir_escape() {
-        let _guard = GLOBAL_CONFIG_LOCK.lock().unwrap();
-        // Create an owned temporary parent containing both the project
-        // directory and the external fixture, rather than writing into
-        // the shared system temp directory.
-        let parent = tempfile::tempdir().unwrap();
-        let project = parent.path().join("project");
-        std::fs::create_dir(&project).unwrap();
-
-        // Create a file outside the project root (but inside the owned parent).
-        let outside = parent.path().join("secret.txt");
-        std::fs::write(&outside, "top secret").unwrap();
-
-        // Reference it via .. from inside the project.
-        let deadline = Instant::now() + std::time::Duration::from_secs(5);
-        let text = "look at ../secret.txt";
-        let result = prefetch_files(text, project.to_str().unwrap(), deadline);
-        // Must not include the escaped file.
-        if let Some(body) = result {
-            assert!(!body.contains("secret.txt"));
-        }
-    }
-
-    #[test]
-    fn file_path_matcher_rejects_absolute_paths() {
-        let _guard = GLOBAL_CONFIG_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        // Create a file at an absolute path inside the temp dir.
-        let abs_file = dir.path().join("foo.rs");
-        std::fs::write(&abs_file, "// test").unwrap();
-
-        let deadline = Instant::now() + std::time::Duration::from_secs(5);
-        // Reference it by absolute path.
-        let text = format!("look at {}", abs_file.display());
-        let result = prefetch_files(&text, dir.path().to_str().unwrap(), deadline);
-        // Absolute paths must be rejected.
-        if let Some(body) = result {
-            assert!(!body.contains("foo.rs"));
-        }
-    }
-
-    #[test]
-    fn file_path_matcher_skips_nonexistent() {
-        let _guard = GLOBAL_CONFIG_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let deadline = Instant::now() + std::time::Duration::from_secs(5);
-        let text = "check src/lib.rs and src/main.rs";
-        // Neither file exists.
-        let result = prefetch_files(text, dir.path().to_str().unwrap(), deadline);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn file_path_matcher_matches_leading_dot_paths() {
-        let _guard = GLOBAL_CONFIG_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let gremlins_dir = dir.path().join(".gremlins");
-        std::fs::create_dir(&gremlins_dir).unwrap();
-        std::fs::write(gremlins_dir.join("qa.json5"), "stages: []").unwrap();
-
-        let deadline = Instant::now() + std::time::Duration::from_secs(5);
-        let text = "check .gremlins/qa.json5 for the stages";
-        let result = prefetch_files(text, dir.path().to_str().unwrap(), deadline);
-        assert!(result.is_some());
-        let body = result.unwrap();
-        assert!(body.contains(".gremlins/qa.json5"));
-    }
-
-    #[test]
-    fn file_path_matcher_rejects_symlink_outside_root() {
-        let _guard = GLOBAL_CONFIG_LOCK.lock().unwrap();
-        let parent = tempfile::tempdir().unwrap();
-        let project = parent.path().join("project");
-        std::fs::create_dir(&project).unwrap();
-        let outside = parent.path().join("outside.rs");
-        std::fs::write(&outside, "pub fn secret() {}").unwrap();
-
-        // Create a symlink inside the project pointing outside.
-        let link = project.join("linked.rs");
-        std::os::unix::fs::symlink(&outside, &link).unwrap();
-
-        let deadline = Instant::now() + std::time::Duration::from_secs(5);
-        let text = "look at linked.rs";
-        let result = prefetch_files(text, project.to_str().unwrap(), deadline);
-        // Must not include the symlinked outside file.
-        if let Some(body) = result {
-            assert!(!body.contains("outside.rs"));
-        }
-    }
-
     // ── Definition name matcher: word-boundary matching ───────────────
 
     #[test]
@@ -848,39 +625,5 @@ mod tests {
         assert!(body.contains("error=something went wrong"));
         // Bail reason comes from bail_0001.json.
         assert!(body.contains("bail_reason=tests failed"));
-    }
-
-    // ── Block cap ─────────────────────────────────────────────────────
-
-    #[test]
-    fn prefetch_context_block_capped() {
-        let _guard = GLOBAL_CONFIG_LOCK.lock().unwrap();
-        // Create a temp project with many matching files to blow past the
-        // 2000-byte block cap.
-        let dir = tempfile::tempdir().unwrap();
-        for i in 0..20 {
-            let path = dir.path().join(format!("mod{i}.rs"));
-            let content =
-                format!("// Module {i}\npub fn func_{i}() {{}}\npub struct Struct{i} {{}}\n");
-            std::fs::write(&path, content).unwrap();
-        }
-
-        // Build a message referencing all of them.
-        let refs: Vec<String> = (0..20).map(|i| format!("mod{i}.rs")).collect();
-        let text = refs.join(" ");
-
-        let deadline = Instant::now() + std::time::Duration::from_secs(5);
-        let result = prefetch_context(&text, dir.path().to_str().unwrap(), deadline);
-
-        // Must not exceed the overall cap.
-        assert!(
-            result.len() <= MAX_BLOCK_BYTES,
-            "block {result_len} > max {MAX_BLOCK_BYTES}",
-            result_len = result.len()
-        );
-        // If it was truncated, the marker should be present.
-        if result.len() > 1000 {
-            assert!(result.contains("[truncated]"));
-        }
     }
 }

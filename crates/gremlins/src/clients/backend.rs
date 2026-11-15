@@ -61,6 +61,9 @@ pub struct RunParams {
     /// Additional filesystem roots to add to the tool sandbox beyond the
     /// worktree and artifact directory. Threaded from [`GremlinConfig`].
     pub extra_sandbox_roots: Vec<PathBuf>,
+    /// Pre-resolved file-path context for short-circuiting discovery tools.
+    /// Built from the operator prompt in chat sessions; empty for headless.
+    pub(crate) path_context: crate::clients::path_context::PathContext,
 }
 
 impl RunParams {
@@ -97,6 +100,7 @@ impl RunParams {
             discovered_skills: None,
             active_skills: None,
             extra_sandbox_roots: Vec::new(),
+            path_context: crate::clients::path_context::PathContext::default(),
         }
     }
 }
@@ -127,6 +131,7 @@ impl Clone for RunParams {
             discovered_skills: self.discovered_skills.clone(),
             active_skills: self.active_skills.clone(),
             extra_sandbox_roots: self.extra_sandbox_roots.clone(),
+            path_context: self.path_context.clone(),
         }
     }
 }

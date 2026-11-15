@@ -4,6 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::clients::conversation::Conversation;
+use crate::clients::path_context::PathContext;
 use crate::task_kind::TaskKind;
 use gremlins_magic_bus::{emit_run_event_async, EventKind};
 
@@ -107,6 +108,10 @@ pub(crate) struct AgentLoopRuntime {
     /// Discovered skills for this session. Session-bound so concurrent chat
     /// sessions resolve their own project's skills instead of a shared slot.
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
+    /// Pre-resolved file-path context for short-circuiting discovery tools.
+    /// Populated by the chat supervisor from the operator prompt and project
+    /// root; empty for headless pipelines.
+    pub(crate) path_context: PathContext,
 }
 
 impl AgentLoopRuntime {

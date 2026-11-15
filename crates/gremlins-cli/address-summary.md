@@ -1,44 +1,77 @@
-# Fix Summary
+# Address Summary
 
-## Critical correctness fixes
+Every fix categorized by file, line, category, and change.
 
-### `crates/gremlins/src/clients/agent/agent_loop.rs`, line ~1149
+---
+
+## `crates/gremlins/src/clients/path_context.rs` — full rewrite
+
+**Category**: Correctness, Performance, Testing
+
+1. **Split constructor into two phases** (plan: "resolution I/O must run inside the existing landscape outline build, not in the `PathContext` constructor") — `new(prompt)` is purely lexical (regex + dedup, no I/O); `resolve(&mut self, project_root)` does all canonicalize/metadata/outline_file work inside `spawn_blocking`.
+
+2. **Broadened tokenizer** (plan: "extensionless file names, directory paths, `~`-prefixed paths") — new regex `CANDIDATE_PATTERN` matches extension-based paths, `/`-containing directory paths, `.`/`~`-prefixed paths, and extensionless paths.
+
+3. **`~` expansion** via `crate::core::paths::expand_user` applied before path joining.
+
+4. **Absolute-path resolution** (plan: "tab-completed absolute paths resolve correctly") — `resolve_candidate` tries absolute paths as-is, then re-anchors on the project root as a fallback.
+
+5. **`..` containment** — rejected outright in `resolve_candidate`.
+
+6. **Symlink containment** — canonicalization + `starts_with(&canonical_root)` check rejects symlinks escaping the project root.
+
+7. **Candidate cap** — `MAX_CANDIDATES = 5` (matches old TUI matcher); size cap kept at 1 MiB.
+
+8. **Removed dead `suppresses_prefetch`** method (plan: "Delete, don't shim").
+
+9. **Updated doc comments** — now describe the module as a tool-dispatch cache rather than a `MutableModelContext`.
+
+10. **11 unit tests** covering tokenization forms, dedup, cap, real-file resolution, absolute re-anchoring, nonexistent → empty, `..` rejection, and Unix symlink escape rejection. All pass.
+
+---
+
+## `crates/gremlins/src/executor/agent_runner.rs` — preamble conditional on chat vs. pipeline
+
 **Category**: Correctness
-**Issue**: `run_agent_loop` hardcoded `wants_events: false` in its call to `run_agent_loop_core`, suppressing all `StreamChunk`, `ReasoningChunk`, and `TurnComplete` events for the top-level interactive agent loop.
-**Fix**: Compute `wants_events` from `interactive.is_some()` before the `interactive` value is moved into `run_agent_loop_core`. The top-level entry point now passes `wants_events: true` when an interactive session is present, restoring live text/reasoning streaming and turn-completion broadcasts for the chat TUI.
 
-### `crates/gremlins/src/clients/agent/stream_consume.rs`, lines ~183, ~201, ~223 and `turn_flow.rs`, line ~434
+1. **`build_workspace_preamble` now takes `is_chat: bool`** (line 223) — chat turns get only `"Your working directory is: {cwd}"`; pipeline stages get `"…\nRelevant environment variable: $GREMLIN_WORKDIR"`. This is the *opposite* of the prior hardcoded behavior and matches the plan: "a chat turn (no worktree) emits only the working-directory line and drops the empty `$GREMLIN_WORKDIR` hint."
+
+2. **`user_prompt(&self, is_chat: bool)`** — new parameter threaded through (line 244).
+
+3. **Tests updated** — `test_build_workspace_preamble_pipeline` asserts both lines; `test_build_workspace_preamble_chat_omits_env_var` asserts `$GREMLIN_WORKDIR` is absent for chat. The `test_prepare_workspace_preamble_absent` and `test_prepare_workspace_preamble_present` tests updated with the new semantics. All 27 tests pass.
+
+---
+
+## `crates/gremlins/src/executor/run_agent.rs` — PathContext I/O in spawn_blocking + is_chat threading
+
+**Category**: Correctness, Performance
+
+1. **`is_chat` derived from gremlin kind** (line 133 area) and passed to `prepared.user_prompt(is_chat)` (line 275).
+
+2. **PathContext resolution wrapped in `spawn_blocking`** (lines 308–318) — `PathContext::new(&prepared.prompt)` is lightweight (no I/O); `resolve()` runs inside `tokio::task::spawn_blocking` so blocking file I/O never stalls the async runtime.
+
+---
+
+## `crates/gremlins/src/clients/tools/dispatch.rs` — short-circuit after validation + stale annotation
+
 **Category**: Correctness
-**Issue**: The `chain` field in every `EventKind::TaskProgress` emission was hard-coded to `String::new()`, carrying no data despite the protocol carrying the field.
-**Fix**: Threaded `chain: &str` through the full parameter cascade — `run_agent_loop_core`, `LoopState::stream_turn`, `LoopState::consume_stream_events`, the free `consume_stream_events`, `LoopState::emit_turn_artifacts`, and the free `emit_turn_artifacts` — so the actual chain id from `run_agent_loop_nested` (via `id_chain`) reaches all four emission sites. The top-level `run_agent_loop` passes `""` for chain.
 
-### `crates/gremlins/src/clients/tools/handlers/task.rs`, line 27 and 67
-**Category**: Readability
-**Issue**: The function parameter was named `_id` (underscore-prefixed, Rust convention for intentionally unused) but was now consumed to build `parent_id`.
-**Fix**: Renamed `_id` to `id` at the binding site and the use site.
+1. **PathContext short-circuit moved after validation** (lines 92–102) — now runs after chat-only gating, tool-filter gating, argument parsing, repair, schema validation, and sandbox checks. Only a call that would otherwise be dispatched normally is served from the cache.
 
-## Dead code removal
+2. **Stale-cache annotation** (`path_context_serve`, line 173) — output is prefixed with `[pre-resolved]\n` so the agent knows the outline may be stale after edits.
 
-### `crates/gremlins/src/clients/agent/task.rs`, lines ~76-77 and ~115-116
-**Category**: Architecture
-**Issue**: `make_task_runner` and `make_task_runner_at_depth` accepted `parent_id: String` and `parent_call: String` parameters that were never used — the values always reach the nested loop via the extended `TaskFn` closure callback instead.
-**Fix**: Removed the dead parameters from both function signatures, the recursive call site in `make_task_runner_at_depth`, and the call site in `run_agent_loop`.
+---
 
-### `crates/gremlins-cli/src/tui/chat.rs`, lines ~72 and ~223
+## `crates/gremlins/src/clients/agent/task.rs` — strip path_context from child workers
+
 **Category**: Correctness
-**Issue**: `ChatEvent::TaskProgress` carried a `turn: Option<String>` field that was never populated (no `turn` member exists on `EventKind::TaskProgress` in `gremlins-magic-bus`).
-**Fix**: Removed the `turn` field from the `TaskProgress` variant and its parsing constructor. The handler in `tui/mod.rs` was restructured to process `TaskProgress` before the turn-staleness filter (which is turn-keyed), since task progress is keyed by parent tool-call id, not turn.
 
-## Title rendering
+1. **`child_ctx.path_context = PathContext::default()`** (line 131) — after cloning the parent context, the child's path cache is reset so the parent's prompt-scoped resolution never leaks into workers (plan: "propagates_to_task is false").
 
-### `crates/gremlins-cli/src/tui/screen.rs`, line 570 and `crates/gremlins-cli/src/tui/widgets.rs`, lines ~290-326
-**Category**: Public API / Readability
-**Issue**: `LiveArea::push_task_progress` accepted `kind` but dropped it (`_kind`), never forwarding it to the widget. The task kind never appeared in the slot title directly.
-**Fix**: Forwarded `kind` through both `LiveArea::push_task_progress` and `TranscriptWidget::push_task_progress`. The title now renders as `"{kind}: {call}  {stats}"` when both kind and call are present, `"{kind}"` when call is empty, and `"{call}"` when kind is empty — ensuring the task type is always visible in the slot title.
+---
 
-## Test compilation fixes
+## `crates/gremlins-cli/src/tui/chat_prefetch.rs` — no changes needed
 
-### `crates/gremlins/src/clients/agent/agent_loop.rs` and `crates/gremlins/src/clients/agent/task.rs`
-**Category**: Testing
-**Issue**: Mechanical compilation failures in existing tests due to signature changes (new `chain` parameter on `run_agent_loop_core`, removed `parent_id`/`parent_call` from `make_task_runner`).
-**Fix**: Added `""` for `chain` at every test call to `run_agent_loop_core`. Removed trailing `String::new(), String::new(),` args from every test call to `make_task_runner`.
+**Category**: Readability (confirmed)
+
+- `PathBuf` is still used in the remaining gremlin-ID and definition-name matchers. No unused-import warning.
