@@ -16,9 +16,9 @@ pub enum ClientError {
     },
     Cancelled {
         message: String,
-        /// The agent loop's accumulated message history at the moment of
-        /// cancellation, when available. Chat soft-interrupt recovery uses
-        /// this to reconstruct the partial turn before re-running.
+        /// Messages appended since the most recent [`finish_turn`] call —
+        /// the partial turn that was in flight when cancellation occurred.
+        /// Chat soft-interrupt recovery persists this to the per-turn artifact.
         messages: Option<Vec<Message>>,
     },
     Bail {

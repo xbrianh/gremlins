@@ -66,9 +66,9 @@ pub enum RunError {
     #[error(transparent)]
     Client(#[from] ClientError),
 
-    /// The operator cancelled the agent loop. Carries the loop's accumulated
-    /// message history when the backend captured it before unwinding; chat
-    /// soft-interrupt recovery uses this to reconstruct the partial turn.
+    /// The operator cancelled the agent loop. Carries the partial-turn
+    /// messages since the most recent turn boundary so chat soft-interrupt
+    /// recovery can persist them without index-based splitting.
     #[error("{message}")]
     Cancelled {
         message: String,

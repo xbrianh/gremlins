@@ -172,7 +172,8 @@ impl TurnFinalizer {
         .await;
     }
 
-    /// Soft-cancel recovery: persist the partial turn's messages, mark the
+    /// Soft-cancel recovery: persist the partial turn's messages (which are
+    /// already scoped to this turn via `messages_since_boundary`), mark the
     /// definition interrupted, re-insert the gremlin while keeping
     /// `current_turn` alive (marked interrupted), signal completion, and emit
     /// `ended` with reason `interrupted`.
@@ -183,8 +184,6 @@ impl TurnFinalizer {
         &self,
         mut recovered: Gremlin,
         messages: Option<Vec<Message>>,
-        pre_turn_len: usize,
-        user_prompt: String,
         chat_turn_num: Option<usize>,
     ) {
         // Race guard: a hard cancel may have arrived while we were awaiting
@@ -194,21 +193,15 @@ impl TurnFinalizer {
             return;
         }
 
-        // Persist partial messages to the current turn's per-turn artifact so
-        // the conversation history is preserved. Split off only messages
-        // added during this turn to avoid duplicating prior-turn history.
+        // Persist partial messages to the current turn's per-turn artifact.
+        // Messages are already scoped to this turn via `messages_since_boundary`
+        // so no index-based splitting is needed.
         let mut partial = messages.unwrap_or_default();
-        if partial.len() >= pre_turn_len {
-            partial = partial.split_off(pre_turn_len);
-        } else {
-            partial = Vec::new();
-        }
         run_agent::strip_unpaired_tool_messages(&mut partial);
-        if partial.is_empty() {
-            partial.push(Message::user(user_prompt.clone()));
-        }
         if let Some(turn_num) = chat_turn_num {
-            run_agent::append_chat_conversation_turn(&recovered, turn_num, &partial).await;
+            if !partial.is_empty() {
+                run_agent::append_chat_conversation_turn(&recovered, turn_num, &partial).await;
+            }
         }
 
         // Race guard: a hard cancel may have arrived during

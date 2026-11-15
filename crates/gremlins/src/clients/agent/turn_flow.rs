@@ -207,7 +207,7 @@ pub(super) async fn handle_done_decision(
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {
-                        return Err(cancelled_error("cancelled", &state.conv.messages()));
+                        return Err(cancelled_error("cancelled", state.conv.messages_since_boundary()));
                     }
                     _ = emit_run_event_async(&state.message_prefix, EventKind::Done {
                         text: result_text.clone(),
@@ -427,7 +427,7 @@ pub(super) async fn emit_turn_artifacts(
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    return Err(cancelled_error("cancelled", &state.conv.messages()));
+                    return Err(cancelled_error("cancelled", state.conv.messages_since_boundary()));
                 }
                 _ = emit_run_event_async(&state.message_prefix, EventKind::TaskProgress {
                     parent_id: parent_id.to_string(),
@@ -448,7 +448,7 @@ pub(super) async fn emit_turn_artifacts(
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    return Err(cancelled_error("cancelled", &state.conv.messages()));
+                    return Err(cancelled_error("cancelled", state.conv.messages_since_boundary()));
                 }
                 _ = emit_run_event_async(&state.message_prefix, EventKind::TurnComplete {
                     turn: state.turn_num,

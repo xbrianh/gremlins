@@ -107,8 +107,15 @@ pub(crate) trait Conversation: Send + Sync {
         input_tokens: Option<u64>,
     );
 
-    /// Record tool-result messages into history.
-    fn record_tool_results(&mut self, results: Vec<rig_core::completion::Message>);
+    /// Record tool-result messages into history and mark the turn boundary.
+    /// After this call, [`messages_since_boundary`] returns an empty slice
+    /// until the next assistant turn begins.
+    fn finish_turn(&mut self, results: Vec<rig_core::completion::Message>);
+
+    /// Messages appended to durable history since the most recent
+    /// [`finish_turn`] call. Returns the partial turn that was in
+    /// flight when cancellation occurred.
+    fn messages_since_boundary(&self) -> Vec<rig_core::completion::Message>;
 
     /// Drop the most recent assistant turn from history so the turn can be
     /// re-executed cleanly.
@@ -308,6 +315,7 @@ pub(crate) struct ConversationStub {
     prompt_committed: bool,
     preserve_reasoning: bool,
     last_text: String,
+    turn_boundary: usize,
     finalized_messages: Option<Vec<rig_core::completion::Message>>,
 }
 
@@ -321,6 +329,7 @@ impl ConversationStub {
             preserve_reasoning: false,
             last_text: String::new(),
             finalized_messages: None,
+            turn_boundary: 0,
         }
     }
 
@@ -333,6 +342,7 @@ impl ConversationStub {
             preserve_reasoning: false,
             last_text: String::new(),
             finalized_messages: None,
+            turn_boundary: 0,
         }
     }
 
@@ -349,6 +359,7 @@ impl ConversationStub {
             preserve_reasoning: self.preserve_reasoning,
             last_text: self.last_text.clone(),
             finalized_messages: self.finalized_messages.clone(),
+            turn_boundary: self.turn_boundary,
         })
     }
 }
@@ -385,9 +396,18 @@ impl Conversation for ConversationStub {
         ));
     }
 
-    fn record_tool_results(&mut self, results: Vec<rig_core::completion::Message>) {
+    fn finish_turn(&mut self, results: Vec<rig_core::completion::Message>) {
         self.history.extend(results);
         self.begin_next_turn();
+        self.turn_boundary = self.history.len();
+    }
+
+    fn messages_since_boundary(&self) -> Vec<rig_core::completion::Message> {
+        let mut msgs = self.history[self.turn_boundary..].to_vec();
+        if !self.prompt_committed {
+            msgs.push(self.next_prompt.clone());
+        }
+        msgs
     }
 
     fn pop_last_assistant_turn(&mut self) {
@@ -504,6 +524,7 @@ impl Conversation for ConversationStub {
             preserve_reasoning: self.preserve_reasoning,
             last_text: String::new(),
             finalized_messages: None,
+            turn_boundary: 0,
         })
     }
 

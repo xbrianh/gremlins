@@ -69,8 +69,12 @@ impl Conversation for NakedConversation {
         unreachable!("NakedConversation: record_turn called in multi-turn path")
     }
 
-    fn record_tool_results(&mut self, _results: Vec<rig_core::completion::Message>) {
-        unreachable!("NakedConversation: record_tool_results called in multi-turn path")
+    fn finish_turn(&mut self, _results: Vec<rig_core::completion::Message>) {
+        unreachable!("NakedConversation: finish_turn called in multi-turn path")
+    }
+
+    fn messages_since_boundary(&self) -> Vec<rig_core::completion::Message> {
+        self.messages()
     }
 
     fn pop_last_assistant_turn(&mut self) {
