@@ -1,16 +1,24 @@
 {
   prompt_dir: "prompts",
-  // Drag score optimizer — iterative refactoring loop driven by gremlins-drag.
+  // Drag score optimizer — single-pass refactoring driven by gremlins-drag.
   //
   // Usage:
   //   gremlins launch drag-optimizer --target crates/gremlins/src/lib.rs
   //   gremlins launch drag-optimizer --target src/ --drag-model openai/gpt-4o
   //   gremlins launch drag-optimizer --target my_pkg/ --instructions "focus on cyclomatic complexity"
+  //   gremlins launch drag-optimizer --base_ref main
+  //   gremlins launch drag-optimizer --base_ref main --instructions "focus on cyclomatic complexity"
+  //   gremlins launch drag-optimizer --diff ../some-branch --instructions "focus on the diff"
   //
   // Parameters (launch-time):
-  //   target                    (required)  module file or package directory to refactor
+  //   target                    (optional)  module file or package directory to refactor
+  //                                         when omitted, detected from the diff between
+  //                                         base_ref and the current branch HEAD
   //   drag-model                (optional)  model for comprehensibility scoring (gremlins-drag --model)
-  //   instructions              (optional)  extra guidance injected into the per-iteration refactoring prompt
+  //   instructions              (optional)  extra guidance injected into the refactoring prompt
+  //   diff                      (optional)  path to a diff file (e.g. from another branch)
+  //                                         injected into the planning prompt so the planner
+  //                                         can focus on the changed code
   //   base_ref                  (optional)  git ref to check out for the isolated worktree (default: HEAD)
   //   estimates-per-survey      (optional)  number of LLM estimates per survey (default: 5)
   //
@@ -18,22 +26,23 @@
   // collides with gremlins' own global --model flag.  Pass `--drag-model provider/model`
   // to forward a model spec to gremlins-drag.
   //
-  // How it works:
-  //   1. Baseline — run gremlins-drag once to capture the starting score.
-  //   2. Loop (max 11 iterations), split into three stages:
-  //      a. Plan — an agent inspects the latest drag reports, considers the
-  //         drivers of the drag score and candidate strategies, and writes a
-  //         concrete implementation plan.
-  //      b. Implement & QA — implement the plan, then verify, review, and
-  //         address review feedback (delegates to implement-and-qa).
-  //      c. Evaluate — re-run gremlins-drag, compare before/after drag, write
-  //         an evaluation report, and bail if the iteration made no progress.
-  //   3. Land — merge the worktree back into the main branch (manual via
+  // How it works (a single drag pass — detect, measure, plan, implement, measure):
+  //   1. Detect target — if --target was provided, use it; otherwise auto-detect
+  //      from the diff between base_ref and branch HEAD.
+  //   2. Measure — run gremlins-drag once to capture the baseline score.
+  //   3. Explain — capture the drag model explanation (formula, surveys, curves).
+  //   4. Plan — an agent inspects the baseline drag report and writes a
+  //      refactoring strategy targeting the drag drivers.
+  //   5. Implement & QA — implement the plan, then verify, review, and
+  //      address review feedback (delegates to implement-and-qa).
+  //   6. Measure — re-run gremlins-drag and compare before/after drag.
+  //   7. Land — merge the worktree back into the main branch (manual via
   //      `gremlins land`).
   bootstrap: {
     source: {
       target: {
         type: "string",
+        optional: true,
       },
       "drag-model": {
         type: "string",
@@ -41,6 +50,10 @@
       },
       instructions: {
         type: "string",
+        optional: true,
+      },
+      diff: {
+        type: "filepath",
         optional: true,
       },
       base_ref: {
@@ -69,55 +82,72 @@
       'printf "%s" {target} > "$GREMLINS_STATE_DIR/artifacts/target.txt"',
       'printf "%s" {drag-model} > "$GREMLINS_STATE_DIR/artifacts/drag_model.txt"',
       'printf "%s" {instructions} > "$GREMLINS_STATE_DIR/artifacts/instructions.txt"',
+      'gremlins:bind_artifact("artifact://diff.txt", diff)',
       'printf "%s" {estimates-per-survey} > "$GREMLINS_STATE_DIR/artifacts/comp_estimates.txt"',
       'printf "%s" {p} > "$GREMLINS_STATE_DIR/artifacts/p.txt"',
       'printf "%s" {skip-maintainability} > "$GREMLINS_STATE_DIR/artifacts/skip_maint.txt"',
       'BASE_REF={base_ref} && SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "${BASE_REF:-HEAD}") && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && printf "%s" "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"',
       // Build the drag config JSON file.  Scoring parameters come from the
       // project config (or --drag-config override) with bootstrap overrides.
-      // The config file is written to TWO places:
-      //   1. $GREMLINS_STATE_DIR/artifacts/drag_config.json — immutable artifact
-      //   2. $GREMLINS_STATE_DIR/drag_config.json — mutable, pointed to by
-      //      GREMLINS_DRAG_CLI_CONFIG so agents pick it up automatically.
-      // The target is written into the config for pipeline bookkeeping;
-      // gremlins-drag itself receives the target positionally.
-      'CONFIG_SRC="{drag-config}"; if [ -n "$CONFIG_SRC" ] && [ -f "$CONFIG_SRC" ]; then echo "using drag config: $CONFIG_SRC"; sed "s|^[[:space:]]*//.*||" "$CONFIG_SRC" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"; else sed "s|^[[:space:]]*//.*||" "$GREMLINS_PROJECT_ROOT/.gremlins/drag-config.json" > "$GREMLINS_STATE_DIR/artifacts/drag_config.json"; fi',
-      "MODEL_VAL=\"{drag-model}\" && ESTIMATES_VAL=\"{estimates-per-survey}\" && P_VAL=\"{p}\" && SKIP_MAINT_VAL=\"{skip-maintainability}\" && [ -z \"$ESTIMATES_VAL\" ] && ESTIMATES_VAL=\"5\" && [ -z \"$P_VAL\" ] && P_VAL=\"2.5\" && jq --arg model \"$MODEL_VAL\" --argjson estimates \"$ESTIMATES_VAL\" --argjson p_val \"$P_VAL\" --arg skip_maint \"$SKIP_MAINT_VAL\" --arg target \"{target}\" 'if $model != \"\" then .model = $model else . end | .estimates_per_survey = $estimates | .weights.p = $p_val | if $skip_maint != \"\" and $skip_maint != \"false\" then .skip_maintainability = true else . end | .path = $target' \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\" > \"$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json\" && mv \"$GREMLINS_STATE_DIR/artifacts/drag_config_tmp.json\" \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\" && cp \"$GREMLINS_STATE_DIR/artifacts/drag_config.json\" \"$GREMLINS_STATE_DIR/drag_config.json\"",
+      // Written directly into artifacts/; GREMLINS_DRAG_CLI_CONFIG points to
+      // it so gremlins-drag picks up scoring parameters.  Targets are passed
+      // positionally on the gremlins-drag CLI by each drag stage.
+      'DRAG_CONFIG_SRC={drag-config} DRAG_MODEL={drag-model} DRAG_ESTIMATES={estimates-per-survey} DRAG_P={p} DRAG_SKIP_MAINT={skip-maintainability} drag-bootstrap-config "$GREMLINS_STATE_DIR/artifacts/drag_config.json"',
     ],
     cli_out: {
       target: "artifact://target.txt",
       drag_model: "artifact://drag_model.txt",
       instructions: "artifact://instructions.txt",
       base_sha: "artifact://base_sha",
+      drag_config: "artifact://drag_config.json",
       estimates_per_survey: "artifact://comp_estimates.txt",
       p: "artifact://p.txt",
       skip_maintainability: "artifact://skip_maint.txt",
     },
-    env: "export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'\nTHE_ENV=\"${GREMLINS_PROJECT_ROOT}/.gremlins/env\"\nif [ -f \"$THE_ENV\" ]; then\n    source \"$THE_ENV\"\nfi\nexport PATH=\"${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}\"\nexport GREMLINS_DRAG_CLI_CONFIG=\"$GREMLINS_STATE_DIR/drag_config.json\"\n# GREMLINS_DRAG_CLI_CONFIG points to the mutable drag config file for\n# scoring parameters.  Targets are passed positionally on every call.",
+    env: "export GREMLINS_OPENAI_AGENTS_MAX_TURNS='1000'\nexport CARGO_TARGET_DIR=\"${CARGO_TARGET_DIR:-${GREMLINS_PROJECT_ROOT}/.cargo-gremlin-target}\"\nexport CARGO_INCREMENTAL=0\nTHE_ENV=\"${GREMLINS_PROJECT_ROOT}/.gremlins/env\"\nif [ -f \"$THE_ENV\" ]; then\n    source \"$THE_ENV\"\nfi\nexport PATH=\"${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}\"\nexport GREMLINS_DRAG_CLI_CONFIG=\"$GREMLINS_STATE_DIR/artifacts/drag_config.json\"\n# GREMLINS_DRAG_CLI_CONFIG points to the frozen drag config artifact for\n# scoring parameters.  Targets are passed positionally on every call.",
   },
   stages: [
-    // ── baseline ──────────────────────────────────────────────────────────
+    // ── detect the drag target (explicit --target, or diff-derived) ─────
+    {
+      name: "detect-target",
+      type: "exec",
+      interpolation: {
+        inputs: {
+          base_sha: 'content("artifact://base_sha")',
+          explicit_target: 'content("artifact://target.txt")',
+        },
+        outputs: {
+          target: "artifact://drag/target.txt",
+          drag_base_sha: "artifact://drag/drag_base_sha.txt",
+        },
+      },
+      options: {
+        cmds: [
+          // Capture the commit before drag changes start.
+          'git -C "$GREMLIN_WORKDIR" rev-parse HEAD | tr -d \'\\n\' > {drag_base_sha}',
+          // If --target was supplied, use it.  Otherwise auto-detect from the
+          // diff between base_ref and the current branch HEAD.
+          'EXPLICIT="{explicit_target}"\nif [ -n "$EXPLICIT" ]; then\n  echo "using explicit target: $EXPLICIT"\n  printf "%s" "$EXPLICIT" > "{target}"\nelse\n  BASE_SHA="{base_sha}"\n  CHANGED_FILES=()\n  while IFS= read -r -d \'\' f; do CHANGED_FILES+=("$f"); done < <(git -C "$GREMLINS_PROJECT_ROOT" diff "$BASE_SHA...HEAD" --name-only -z -- \'*.rs\')\n  if [ ${#CHANGED_FILES[@]} -eq 0 ]; then\n    while IFS= read -r -d \'\' f; do CHANGED_FILES+=("$f"); done < <(git -C "$GREMLINS_PROJECT_ROOT" diff "$BASE_SHA...HEAD" --name-only -z)\n  fi\n  if [ ${#CHANGED_FILES[@]} -eq 0 ]; then\n    TARGET="."\n  else\n    TARGET=$(dirname "${CHANGED_FILES[0]}")\n    while true; do\n      all_under=1\n      for f in "${CHANGED_FILES[@]}"; do\n        case "$f" in\n          "$TARGET"/*) ;;\n          *) all_under=0; break ;;\n        esac\n      done\n      if [ "$all_under" -eq 1 ] || [ "$TARGET" = "." ]; then\n        break\n      fi\n      TARGET=$(dirname "$TARGET")\n    done\n  fi\n  echo "detected drag target: $TARGET"\n  printf "%s" "$TARGET" > "{target}"\nfi',
+        ],
+      },
+    },
+    // ── measure: baseline ───────────────────────────────────────────────
     {
       name: "baseline",
       type: "exec",
       interpolation: {
         inputs: {
-          target: 'content("artifact://target.txt")',
-          base_sha: "artifact://base_sha",
+          target: 'content("artifact://drag/target.txt")',
         },
         outputs: {
           report: "artifact://baseline/report.json",
           drag_best: "artifact://drag_best.txt",
-          progression: "artifact://drag_progression.json",
         },
       },
       options: {
         cmds: [
-          'TARGET=$(jq -r ".path" "$GREMLINS_STATE_DIR/drag_config.json"); gremlins-drag "$TARGET" > {report}',
-          'cp {report} "$GREMLINS_STATE_DIR/drag_current.json"',
-          "cat {report} | jq '.drag' > {drag_best}\n",
-          'echo "baseline sum drag = $(cat {drag_best})"',
-          'if [ -f {progression} ]; then\n  echo "drag_progression.json already exists; skipping baseline seed"\nelse\n  BASE_SHA=$(cat {base_sha}) && DRAG=$(jq \'.drag\' < {report}) && jq -n --arg target "{target}" --arg base_sha "$BASE_SHA" --argjson drag "$DRAG" \'[{"iteration":"baseline","target":$target,"iter_start_sha":$base_sha,"iter_end_sha":$base_sha,"drag_before":null,"drag_after":$drag,"drag_delta":null,"commits":null,"verdict":"baseline"}]\' > {progression} && echo "seeded drag_progression.json (baseline drag=$DRAG)"\nfi',
+          'gremlins-drag "{target}" > {report}',
+          'DRAG=$(jq ".drag" {report})\nprintf "%s" "$DRAG" > {drag_best}\necho "baseline drag sum = $DRAG"',
         ],
       },
     },
@@ -136,209 +166,58 @@
         ],
       },
     },
-    // ── optimize loop ─────────────────────────────────────────────────────
-    // Each iteration runs plan → implement-and-qa → score → evaluate.
-    // The exec stages around those (context prep, scoring) are plumbing that
-    // keep the worktree, artifacts, and state files consistent.
+    // ── plan: strategy for the single drag-reduction pass ───────────────
     {
-      name: "optimize",
-      type: "sequence",
-      "max-iterations": 11,
-      body: [
-        // --- prepare the drag context (current + previous reports) ---
-        {
-          name: "prepare-context",
-          type: "exec",
-          interpolation: {
-            outputs: {
-              context: "artifact://{loop_iter}/drag_context.md",
-              iter_start_sha: "artifact://{loop_iter}/iter_start_sha.txt",
-              progression_in: "artifact://{loop_iter}/progression_in.json",
-              target: "artifact://{loop_iter}/scored_target.txt",
-            },
-          },
-          options: {
-            cmds: [
-              'git -C "$GREMLIN_WORKDIR" rev-parse HEAD > "$GREMLINS_STATE_DIR/artifacts/{loop_iter}/iter_start_sha.txt"',
-              // Update the mutable drag config with this iteration's target.
-              // Iteration 1 reads the bootstrap config; subsequent iterations
-              // read the previous iteration's drag config artifact (which may
-              // have been broadened by record-progression).
-              'PREV_CONFIG="$GREMLINS_STATE_DIR/artifacts/drag_config.json"; if [ "{loop_iter}" != "1" ]; then PREV=$(({loop_iter} - 1)); ALT="$GREMLINS_STATE_DIR/artifacts/$PREV/drag_config.json"; if [ -f "$ALT" ]; then PREV_CONFIG="$ALT"; fi; fi; TARGET=$(jq -r ".path" "$PREV_CONFIG"); jq --arg t "$TARGET" '.path = $t' "$GREMLINS_STATE_DIR/drag_config.json" > "$GREMLINS_STATE_DIR/drag_config_tmp.json" && mv "$GREMLINS_STATE_DIR/drag_config_tmp.json" "$GREMLINS_STATE_DIR/drag_config.json"; printf "%s" "$TARGET" > "{target}"; echo "prepare-context: target=$TARGET"',
-              // Copy the latest cumulative progression into a scoped artifact
-              // for this iteration.  Iteration 1 reads the baseline seed;
-              // subsequent iterations read the previous iteration's output.
-              'if [ "{loop_iter}" = "1" ]; then cp "$GREMLINS_STATE_DIR/artifacts/drag_progression.json" {progression_in}; else PREV=$(({loop_iter} - 1)); cp "$GREMLINS_STATE_DIR/artifacts/$PREV/drag_progression.json" {progression_in}; fi',
-              'STATE_DIR="$GREMLINS_STATE_DIR"\n{\n  if [ -f "$STATE_DIR/drag_previous.json" ]; then\n    echo "## Drag report before the last refactor (previous state)"\n    echo \'```json\'\n    cat "$STATE_DIR/drag_previous.json"\n    echo \'```\'\n    echo ""\n  fi\n  echo "## Drag report after the last refactor (current state)"\n  echo \'```json\'\n  cat "$STATE_DIR/drag_current.json"\n  echo \'```\'\n} > {context}\n',
-            ],
-          },
+      name: "plan",
+      type: "agent",
+      interpolation: {
+        inputs: {
+          target: 'content("artifact://drag/target.txt")',
+          drag_baseline: 'content("artifact://baseline/report.json")',
+          explain: 'content("artifact://explain.txt")',
+          instructions: 'content("artifact://instructions.txt")',
+          diff: 'content("artifact://diff.txt")?',
         },
-        // --- plan: choose a strategy and write an implementation plan ---
-        {
-          name: "drag-optimize-plan",
-          type: "agent",
-          interpolation: {
-            inputs: {
-              drag_context: 'content("artifact://{loop_iter}/drag_context.md")',
-              instructions: 'content("artifact://instructions.txt")',
-              explain: 'content("artifact://explain.txt")',
-              target: 'content("artifact://{loop_iter}/scored_target.txt")',
-            },
-            outputs: {
-              plan: "artifact://{loop_iter}/plan.md",
-            },
-          },
-          prompt: [
-            'You are planning a refactor of the target at {target} to reduce its drag score.\n\n**Your overriding goal is simple, beautiful, correct code.** Drag is the\nmetric, but genuine maintainability is the objective. The best refactorings\nare often the hardest — restructuring module boundaries, untangling\ncontrol flow, redesigning abstractions. Do not reach for the easy change\nwhen the right change is within reach. Effort spent now on quality means\nfar less maintenance burden later.\n\nThe reports below are the most recent drag analyses. The "current\nstate" report describes the code you are about to change. When a\n"previous state" report is present, it describes the code before the\nlast refactor, so you can compare what changed and how drag moved.\n\n{drag_context}\n\n## Drag model (how drag is computed)\n\n{explain}\n\n## How refactoring moves affect the score\n\n### token_count\nReducing a module\'s own token count directly lowers its footprint\n(since footprint includes the module itself) and may also reduce\nfootprints of upstream modules that transitively depend on it.\nSmaller total code means less surface area for bugs and lower\ncognitive load. However, token_count alone is a small part of the\ntotal drag: the comprehensibility and package-maintainability\nmultipliers can each amplify drag by up to ~12× (when m=2.5 or\np=2.5). The footprint multiplier (1+footprint)^w2 is unbounded.\n\n### footprint\nA module\'s footprint is the token sum of everything it transitively\ndepends on. Breaking deep dependency chains, inlining small\nsingle-use helpers back into their callers, and avoiding unnecessary\ncross-module couplings all reduce footprint. When a module is\nrefactored to depend on fewer other modules, its footprint\nshrinks — and every upstream module that depends on it may also\nbenefit. Footprint enters the formula as (1+footprint)^w2; larger\nfootprints amplify drag sub-linearly (w2=0.5 gives square-root\ngrowth).\n\n### comprehensibility\nComprehensibility is a multiplier on the footprint term:\nexp(m·(1−comp)). The survey dimensions and their anchors are described in the drag model above. To raise\ncomprehensibility, target the dimensions dragging a module\'s score\ndown: split dumping-ground files by concern (cohesion), break up\nmega-functions (sizing), and relocate inline tests out of the\nproduction file (test_hygiene), alongside naming, control-flow,\ndata-flow, and abstraction improvements. The effect is\nmultiplicative with footprint, so improving comprehensibility on\na high-footprint module yields more drag reduction than on a\nlow-footprint one.\n\n### package maintainability (only when `maint_score` is present)\nPackage maintainability is scored on ten dimensions (each 0–4),\nnormalized over 40 points; the dimensions and their anchors are\ndescribed in the drag model above. The package multiplier\nexp(p·(1−maint)) amplifies the sum of module drags within that\npackage; low maintainability can increase effective drag by up to\nexp(p). Improving any of the ten dimensions — extracting duplicated\nlogic into shared helpers, isolating changes to fewer files,\ntightening cross-module interfaces, flattening deep transitive\nchains, reducing public API surface, or sealing abstraction\nboundaries — raises maint_score and shrinks the package multiplier.\n\n## Splitting vs merging modules\n\nSplitting one module into two can increase or decrease total drag\ndepending on how the split affects each factor:\n\n- **token_count**: Splitting redistributes tokens across modules.\n  Total token_count across the package may stay roughly the same\n  (modulo any new imports, re-exports, or glue code).\n- **footprint**: Each half may still carry the same shared\n  transitive dependencies. If module A imports module B, A\'s\n  footprint includes B\'s tokens plus everything B depends on —\n  so splitting can increase the sum of footprints even when total\n  tokens are unchanged.\n- **comprehensibility**: Smaller, focused modules may be easier\n  to understand (raising comp). Conversely, fragmentation across\n  many files can obscure the overall design and force readers to\n  jump between files (lowering comp). The net effect depends on\n  whether the split creates clean conceptual boundaries or scatters\n  related logic.\n- **package maintainability** (when packages are present): More\n  modules may affect decomposition, change isolation, and\n  duplication scores. A split that creates clean, independent\n  boundaries can improve these dimensions. A split that scatters\n  related logic across files can hurt them. When no packages are\n  scored, this dimension does not apply.\n\nExample — splitting one module into two when both still share the\nsame transitive dependencies:\n\nOne module (2000 tokens, footprint 5000, comp 0.5, w2=0.5, m=2.5):\n  drag = (1+5000)^0.5 · exp(2.5·0.5) ≈ 70.7 · 3.49 ≈ 246.8\n\nSplit into A (1000 tokens) and B (1000 tokens), where A depends on B\nand both depend on shared downstream modules (3000 tokens beyond\nA/B themselves):\n  drag(A) = (1+5000)^0.5 · exp(2.5·0.5) ≈ 70.7 · 3.49 ≈ 246.8\n  drag(B) = (1+4000)^0.5 · exp(2.5·0.5) ≈ 63.3 · 3.49 ≈ 220.8\n  total ≈ 467.6\n\nHere splitting increased total drag because both halves still carry\nthe shared footprint. The outcome can differ when a split severs\nreal dependency edges (reducing actual transitive reach) or when\ncomprehensibility improves enough to offset the footprint penalty.\n\nMerging two modules reverses the analysis: footprint may decrease\n(fewer module-to-module edges), but comprehensibility may suffer if\nthe result is a large, unfocused file. When packages are present,\nthe net effect on package maintainability dimensions depends on\nwhether the merge consolidates related logic or creates a monolithic\nblob. When no packages are scored, this dimension does not apply.\n\n## Your job\n\n- Consider the drivers of the drag score in the current state and\n  identify the highest-leverage changes.\n- Consider multiple strategies — footprint reduction,\n  comprehensibility improvements, package-maintainability\n  improvements, and splitting vs merging modules — and choose the\n  one most likely to reduce total drag.\n- **Prioritize correctness and code quality above all else.**\n  The goal is simple, beautiful, correct code. Do not shy away\n  from difficult refactorings — effort spent now to improve the\n  codebase means much less maintenance effort in the future.\n  Prefer the change that makes the code genuinely better, even\n  when it requires more work: restructuring module boundaries,\n  untangling complex control flow, redesigning abstractions,\n  flattening deep dependency chains, or consolidating scattered\n  logic into coherent modules.\n- **Test code does not count toward token_count or footprint.**\n  `gremlins-drag` strips `#[cfg(test)]` items before counting\n  tokens, so moving test code never changes the footprint term.\n  Test_hygiene is the **least impactful** of the\n  comprehensibility dimensions — it can raise comp by at most a\n  few hundredths, which is negligible compared to footprint\n  reduction or improvements to sizing/cohesion/control-flow.\n- **A `mod tests` block already cleanly separated at the bottom\n  of a file is good test_hygiene.** Do not mechanically extract\n  these blocks into separate test files — it creates git churn\n  for zero measurable drag benefit.\n- Only consider test relocation when tests are genuinely\n  **interleaved with production code** in the same file (e.g.,\n  helper functions immediately followed by their unit tests).\n  Even then, treat it as a side effect of restructuring\n  production code, never as a standalone plan item.\n- **Test-only changes do not count as progress.** A plan whose\n  primary effect is test reorganization will be rolled back.\n- Write a concrete, ordered implementation plan. For each step, name\n  the file(s), describe the specific change, and explain why it\n  should reduce drag.\n- Size the plan to the problem, not to an arbitrary limit. If the\n  right fix touches many files and restructures module boundaries,\n  that is fine — describe every step needed for a complete,\n  correct implementation. The only constraint: the plan must be\n  completable in a single pass without bailing for help.\n- Do NOT edit any source files in this stage. Only write the plan.\n\nWrite the plan to `{plan}`.\n\n## Additional guidance\n{instructions}\n',
-          ],
-          //# Your job
-          //# Additional guidance
-          options: {
-            idle_timeout: 600,
-          },
+        outputs: {
+          plan: "artifact://drag/plan.md",
         },
-        // --- implement & QA: apply the plan, verify, review, and address feedback ---
-        {
-          name: "implement-and-qa",
-          type: "implement-and-qa",
-          options: {
-            verify_cmds: "make -j8 check && make -j8 test",
-            diff_base: "artifact://{loop_iter}/iter_start_sha.txt",
-            artifact_ns: "{loop_iter}/",
-          },
-        },
-        // --- cleanup build artifacts so scoring is not inflated ---
-        {
-          name: "cleanup-build-artifacts",
-          type: "exec",
-          options: {
-            cmds: [
-              "cargo clean 2>/dev/null || true",
-              "find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true",
-              "find . -type f -name '*.pyc' -delete 2>/dev/null || true",
-            ],
-          },
-        },
-        // --- score: re-measure drag and rotate state for the next iteration ---
-        {
-          name: "score",
-          type: "exec",
-          interpolation: {
-            inputs: {
-            },
-            outputs: {
-              report: "artifact://{loop_iter}/report.json",
-              drag_before: "artifact://{loop_iter}/drag_before.txt",
-              drag_after: "artifact://{loop_iter}/drag_after.txt",
-              drag_report_before: "artifact://{loop_iter}/drag_report_before.json",
-              drag_report_after: "artifact://{loop_iter}/drag_report_after.json",
-              iter_end_sha: "artifact://{loop_iter}/iter_end_sha.txt",
-              commit_count: "artifact://{loop_iter}/commit_count.txt",
-            },
-          },
-          options: {
-            cmds: [
-              'TARGET=$(jq -r ".path" "$GREMLINS_STATE_DIR/drag_config.json"); gremlins-drag "$TARGET" > {report}',
-              'STATE_DIR="$GREMLINS_STATE_DIR"\ndrag_sum() {\n  jq '.drag' < "$1"\n}\nif [ -f "$STATE_DIR/drag_current.json" ]; then\n  drag_sum "$STATE_DIR/drag_current.json" > {drag_before}\n  cp "$STATE_DIR/drag_current.json" {drag_report_before}\n  cp "$STATE_DIR/drag_current.json" "$STATE_DIR/drag_previous.json"\nelse\n  printf "0" > {drag_before}\n  echo "{}" > {drag_report_before}\nfi\ncp {report} "$STATE_DIR/drag_current.json"\ncp {report} {drag_report_after}\n',
-              'STATE_DIR="$GREMLINS_STATE_DIR"\ndrag_sum() {\n  jq '.drag' < "$1"\n}\nAFTER=$(drag_sum "$STATE_DIR/drag_current.json")\nprintf "%s" "$AFTER" > {drag_after}\nBEST=$(cat "$GREMLINS_STATE_DIR/artifacts/drag_best.txt" 2>/dev/null)\nif ! awk -v a="$AFTER" -v b="$BEST" \'BEGIN { exit (b < a) ? 0 : 1 }\' 2>/dev/null; then\n  BEST="$AFTER"\nfi\nprintf "%s" "$BEST" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"\necho "iteration {loop_iter} drag = $AFTER (best = $BEST)"\n',
-              'git -C "$GREMLIN_WORKDIR" rev-parse HEAD | tr -d \'\n\' > {iter_end_sha}',
-              'ITER_START=$(cat "$GREMLINS_STATE_DIR/artifacts/{loop_iter}/iter_start_sha.txt" 2>/dev/null) || { echo "FATAL: iter_start_sha.txt missing for {loop_iter}" >&2; exit 1; }\nCOMMITS=$(git -C "$GREMLIN_WORKDIR" rev-list --count "$ITER_START..HEAD" 2>/dev/null || echo "0")\nprintf "%s" "$COMMITS" > {commit_count}',
-            ],
-          },
-        },
-        // --- evaluate: agent judges legitimacy (gaming detection only — QA already verified correctness) ---
-        // `drag_reduced` is a required output — only written for legitimate,
-        // drag-reducing iterations. Missing → bail for operator review.
-        // Exception: when fewer than 3 entries exist in the progression
-        // artifact, non-improving iterations still write `reduced` so the
-        // optimizer can gather enough data points.
-        {
-          name: "drag-optimize-evaluate",
-          type: "agent",
-          interpolation: {
-            inputs: {
-              plan: 'content("artifact://{loop_iter}/plan.md")',
-              drag_before: 'content("artifact://{loop_iter}/drag_before.txt")',
-              drag_after: 'content("artifact://{loop_iter}/drag_after.txt")',
-              drag_report_before: 'content("artifact://{loop_iter}/drag_report_before.json")',
-              drag_report_after: 'content("artifact://{loop_iter}/drag_report_after.json")',
-              iter_start_sha: 'content("artifact://{loop_iter}/iter_start_sha.txt")',
-              progression: 'content("artifact://{loop_iter}/progression_in.json")',
-              target: 'content("artifact://{loop_iter}/scored_target.txt")',
-            },
-            outputs: {
-              drag_reduced: "artifact://{loop_iter}/drag_reduced.txt",
-            },
-          },
-          prompt: [
-            'Evaluate the just-completed refactoring iteration for {target}.\n\n## Drag scores\n\n- Before: {drag_before}\n- After: {drag_after}\n\n## The plan\n\n{plan}\n\n## Drag progression so far\n\n{progression}\n\n## Your job\n\nQA (verification, semantic review, complexity review) has already run and\npassed — the code compiles, tests pass, and reviewers approved the design.\nYour ONLY job is to detect **score gaming**: changes whose primary effect\nis to manipulate the drag formula without genuinely making the code easier\nto understand, modify, or maintain.\n\nRun read-only git commands (`git diff {iter_start_sha}`, `git log`, `git show`)\nto inspect exactly what changed.\n\n### Score gaming patterns to look for\n\nUse your judgment — don\'t pattern-match mechanically. Examples:\n\n- Cosmetic-only changes: renames without clarity gain, reordering\n  without structural benefit, whitespace-only changes\n- Splitting files without reducing actual coupling\n- Adding indirection that obscures rather than clarifies\n- Mechanically extracting `#[cfg(test)] mod tests` blocks that are\n  already cleanly separated at the bottom of a production file into\n  separate test files — pure churn with zero hygiene gain\n- Moving, splitting, or reorganizing test code without improving\n  test_hygiene\n- Deleting or weakening tests to shrink a file (breaks correctness;\n  also pointless for drag since tests are stripped from token counts)\n\n### Legitimate refactoring\n\nLegitimate changes make the code genuinely easier to maintain:\nsimpler control flow, reduced coupling, better abstractions, less\nduplication, tighter APIs, clearer names, flatter dependency chains,\nsplitting dumping-ground files by concern, breaking up mega-functions,\nand relocating tests that are genuinely interleaved with production\ncode (not already in a clean bottom-of-file `mod tests` block).\n\n**Scope is not a signal of gaming.** A refactoring that touches many\nfiles to restructure module boundaries or untangle complex coupling is\nentirely legitimate. Judge the quality of the changes, not the size of\nthe diff.\n\n### Drag report snapshots (before/after JSON)\n\nThe full before and after drag reports are provided below.  Use these\nto compare per-module drag components and confidence intervals:\n\n## Drag report before this iteration (JSON)\n\n{drag_report_before}\n\n## Drag report after this iteration (JSON)\n\n{drag_report_after}\n\n### Confidence intervals and noise\n\nWhen comprehensibility scoring ran (modules that were not scored\nwill lack `ci_lower`/`ci_upper` fields), each scored module in the\ndrag JSON report carries `ci_lower` and `ci_upper` fields — the 95%\nconfidence interval around the comprehensibility point estimate.\nCompare the before and after reports above to judge whether observed\ndrag deltas are signal or sampling noise:\n\n- Footprint and token reductions are deterministic — a module that\n  shrinks or drops dependencies has genuinely lower drag for those\n  components.  Deterministic reductions are never noise.\n- For comprehensibility-driven deltas: when the before and after\n  CIs overlap substantially — i.e. the after CI lower bound does\n  not exceed the before CI upper bound by a meaningful margin —\n  the apparent improvement may be sampling noise.  If the total\n  drag decrease is driven entirely by comprehensibility shifts whose\n  CIs overlap, treat the iteration as **noise, not progress** (write\n  `no_progress` unless the <3-entries grace rule applies).\n- When the delta exceeds the CI overlap — the after CI lower bound\n  clearly exceeds the before CI upper bound — the improvement is\n  **statistically meaningful** (write `reduced` unless gaming is\n  detected).\n- A very narrow CI (near-zero range) on a single module usually\n  means only one estimate was collected (n=1 clamp) — this indicates\n  **low evidence**, not high confidence.  Only treat genuinely\n  narrow CIs from multiple estimates as confident.  Wide CIs\n  indicate that the comprehensibility estimate is noisy and\n  comprehensibility-driven drag deltas should be interpreted with\n  caution.\n\n### Your verdict\n\nWrite ONLY one word — your verdict — to `{drag_reduced}`.  You MAY run\nread-only git commands (`git diff {iter_start_sha}`, `git log`, `git show`)\nto inspect changes.  Do NOT run mutating git commands and do NOT modify\nany files.  An exec stage after this one handles rollback if needed.\n\nVerdict priority — apply the FIRST rule that matches:\n\n1. **Score gaming detected** (any of the gaming patterns above):\n   Write `rolled_back`.  The exec stage will undo the commit.  Explain\n   clearly what gaming pattern you detected.\n\n2. **Grace period (< 3 entries in the progression above)**:\n   Write `reduced`.  The optimizer needs at least a few attempts to\n   understand the codebase\'s drag drivers; early non-improving iterations\n   are expected and should not bail.\n\n3. **CI-noise comprehensibility decrease (3+ entries)**:\n   If the total drag decreased (`after < before`) but the decrease is\n   driven entirely by comprehensibility shifts whose before/after CIs\n   overlap substantially (per the CI guidance above), write `no_progress`.\n   The apparent improvement is likely sampling noise and should not be\n   counted as genuine progress.\n\n4. **Real, meaningful drag reduction** (`after < before`):\n   Write `reduced`.  The iteration succeeded — drag went down and the\n   delta is either deterministic (footprint/token) or a statistically\n   meaningful comprehensibility improvement.  Loop continues.\n\n5. **No drag reduction (3+ entries, `after >= before`)**:\n   Write `no_progress`.  The pipeline will record this iteration and\n   then bail for operator review.\n\nSummary:\n- Write `rolled_back` → gaming, loop continues after exec rollback.\n- Write `reduced` → real progress (or grace period), loop continues.\n- Write `no_progress` → noise or no improvement with 3+ entries, record and bail for operator review.\n
-          //# Your job
-          //# Your verdict
-          options: {
-            idle_timeout: 600,
-          },
-        },
-        // --- rollback: deterministic exec that handles the evaluate verdict ---
-        {
-          name: "rollback",
-          type: "exec",
-          interpolation: {
-            inputs: {
-              verdict_path: "artifact://{loop_iter}/drag_reduced.txt",
-              iter_start_sha: 'content("artifact://{loop_iter}/iter_start_sha.txt")',
-            },
-          },
-          options: {
-            cmds: [
-              '# Read and sanitize the verdict. The evaluate agent always writes a verdict.\nVERDICT=""\nif [ -f {verdict_path} ]; then\n  VERDICT=$(tr -d \'\\n\' < {verdict_path})\nfi\n\n# Apply the verdict.\nif [ "$VERDICT" = "rolled_back" ]; then\n  echo "rolling back iteration {loop_iter} (gaming detected)"\n  git -C "$GREMLIN_WORKDIR" reset --hard {iter_start_sha}\n  if [ -f "$GREMLINS_STATE_DIR/drag_previous.json" ]; then\n    cp "$GREMLINS_STATE_DIR/drag_previous.json" "$GREMLINS_STATE_DIR/drag_current.json"\n    DRAG_BEFORE=$(cat "$GREMLINS_STATE_DIR/artifacts/{loop_iter}/drag_before.txt" 2>/dev/null)\n    printf "%s" "${DRAG_BEFORE:-0}" > "$GREMLINS_STATE_DIR/artifacts/drag_best.txt"\n    echo "restored drag_best to pre-iteration value"\n  fi\nelif [ "$VERDICT" = "reduced" ]; then\n  echo "iteration {loop_iter} is legitimate with drag improvement"\nelif [ "$VERDICT" = "no_progress" ]; then\n  echo "iteration {loop_iter}: no progress with 3+ entries; recording and bailing"\nelse\n  echo "iteration {loop_iter} verdict is unknown or empty: $VERDICT"\nfi\n',
-            ],
-          },
-        },
-        // --- record-progression: append iteration entry to the progression artifact ---
-        // When the target broadens (changed files span a wider common root),
-        // this stage recomputes ALL prior progression entries by checking out
-        // each entry's iter_end_sha and re-running gremlins-drag with the new
-        // target.  It also updates the mutable drag config (pointed to by
-        // GREMLINS_DRAG_CLI_CONFIG) and saves a config snapshot artifact.
-        // Delegates to the helper script drag-record-progression.
-        {
-          name: "record-progression",
-          type: "exec",
-          interpolation: {
-            inputs: {
-              base_sha_val: 'content("artifact://base_sha")',
-              progression_in: "artifact://{loop_iter}/progression_in.json",
-            },
-            outputs: {
-              progression_out: "artifact://{loop_iter}/drag_progression.json",
-              config_out: "artifact://{loop_iter}/drag_config.json",
-            },
-          },
-          options: {
-            cmds: [
-              'drag-record-progression \
-  "$GREMLIN_WORKDIR" \
-  "$GREMLINS_STATE_DIR" \
-  "{base_sha_val}" \
-  "{loop_iter}" \
-  "$GREMLINS_STATE_DIR/drag_config.json" \
-  {progression_in} \
-  {progression_out} \
-  {config_out}',
-            ],
-          },
-        },
-        // --- bail if no_progress signal was written by record-progression ---
-        {
-          name: "check-stop",
-          type: "exec",
-          options: {
-            cmds: [
-              'if [ -f "$GREMLINS_STATE_DIR/artifacts/stop_reason.txt" ]; then echo "stopping: $(cat $GREMLINS_STATE_DIR/artifacts/stop_reason.txt)"; exit 2; fi',
-            ],
-          },
-        },
+      },
+      prompt: [
+        'You are planning a refactor of the target at {target} to reduce its drag score.\n\n**Your overriding goal is simple, beautiful, correct code.** Drag is the\nmetric, but genuine maintainability is the objective. The best refactorings\nare often the hardest — restructuring module boundaries, untangling\ncontrol flow, redesigning abstractions. Do not reach for the easy change\nwhen the right change is within reach. Effort spent now on quality means\nfar less maintenance burden later.\n\n## Baseline drag report\n\nThe current drag score for the target is shown below.  This is the\nstarting point — your refactoring will reduce it.\n\n<baseline_report>\n{drag_baseline}\n</baseline_report>\n\n## Drag model (how drag is computed)\n\n{explain}\n\n## How refactoring moves affect the score\n\n### token_count\nReducing a module\'s own token count directly lowers its footprint\n(since footprint includes the module itself) and may also reduce\nfootprints of upstream modules that transitively depend on it.\nSmaller total code means less surface area for bugs and lower\ncognitive load. However, token_count alone is a small part of the\ntotal drag: the comprehensibility and package-maintainability\nmultipliers can each amplify drag by up to ~12× (when m=2.5 or\np=2.5). The footprint multiplier (1+footprint)^w2 is unbounded.\n\n### footprint\nA module\'s footprint is the token sum of everything it transitively\ndepends on. Breaking deep dependency chains, inlining small\nsingle-use helpers back into their callers, and avoiding unnecessary\ncross-module couplings all reduce footprint. When a module is\nrefactored to depend on fewer other modules, its footprint\nshrinks — and every upstream module that depends on it may also\nbenefit. Footprint enters the formula as (1+footprint)^w2; larger\nfootprints amplify drag sub-linearly (w2=0.5 gives square-root\ngrowth).\n\n### comprehensibility\nComprehensibility is a multiplier on the footprint term:\nexp(m·(1−comp)). The survey dimensions and their anchors are described in the drag model above. To raise\ncomprehensibility, target the dimensions dragging a module\'s score\ndown: split dumping-ground files by concern (cohesion), break up\nmega-functions (sizing), and relocate inline tests out of the\nproduction file (test_hygiene), alongside naming, control-flow,\ndata-flow, and abstraction improvements. The effect is\nmultiplicative with footprint, so improving comprehensibility on\na high-footprint module yields more drag reduction than on a\nlow-footprint one.\n\n### package maintainability (only when `maint_score` is present)\nPackage maintainability is scored on ten dimensions (each 0–4),\nnormalized over 40 points; the dimensions and their anchors are\ndescribed in the drag model above. The package multiplier\nexp(p·(1−maint)) amplifies the sum of module drags within that\npackage; low maintainability can increase effective drag by up to\nexp(p). Improving any of the ten dimensions — extracting duplicated\nlogic into shared helpers, isolating changes to fewer files,\ntightening cross-module interfaces, flattening deep transitive\nchains, reducing public API surface, or sealing abstraction\nboundaries — raises maint_score and shrinks the package multiplier.\n\n## Splitting vs merging modules\n\nSplitting one module into two can increase or decrease total drag\ndepending on how the split affects each factor:\n\n- **token_count**: Splitting redistributes tokens across modules.\n  Total token_count across the package may stay roughly the same\n  (modulo any new imports, re-exports, or glue code).\n- **footprint**: Each half may still carry the same shared\n  transitive dependencies. If module A imports module B, A\'s\n  footprint includes B\'s tokens plus everything B depends on —\n  so splitting can increase the sum of footprints even when total\n  tokens are unchanged.\n- **comprehensibility**: Smaller, focused modules may be easier\n  to understand (raising comp). Conversely, fragmentation across\n  many files can obscure the overall design and force readers to\n  jump between files (lowering comp). The net effect depends on\n  whether the split creates clean conceptual boundaries or scatters\n  related logic.\n- **package maintainability** (when packages are present): More\n  modules may affect decomposition, change isolation, and\n  duplication scores. A split that creates clean, independent\n  boundaries can improve these dimensions. A split that scatters\n  related logic across files can hurt them. When no packages are\n  scored, this dimension does not apply.\n\nExample — splitting one module into two when both still share the\nsame transitive dependencies:\n\nOne module (2000 tokens, footprint 5000, comp 0.5, w2=0.5, m=2.5):\n  drag = (1+5000)^0.5 · exp(2.5·0.5) ≈ 70.7 · 3.49 ≈ 246.8\n\nSplit into A (1000 tokens) and B (1000 tokens), where A depends on B\nand both depend on shared downstream modules (3000 tokens beyond\nA/B themselves):\n  drag(A) = (1+5000)^0.5 · exp(2.5·0.5) ≈ 70.7 · 3.49 ≈ 246.8\n  drag(B) = (1+4000)^0.5 · exp(2.5·0.5) ≈ 63.3 · 3.49 ≈ 220.8\n  total ≈ 467.6\n\nHere splitting increased total drag because both halves still carry\nthe shared footprint. The outcome can differ when a split severs\nreal dependency edges (reducing actual transitive reach) or when\ncomprehensibility improves enough to offset the footprint penalty.\n\nMerging two modules reverses the analysis: footprint may decrease\n(fewer module-to-module edges), but comprehensibility may suffer if\nthe result is a large, unfocused file. When packages are present,\nthe net effect on package maintainability dimensions depends on\nwhether the merge consolidates related logic or creates a monolithic\nblob. When no packages are scored, this dimension does not apply.\n\n## Feature diff\n\nThe diff below shows code that was recently changed. Use it to\nunderstand what was modified and focus your refactoring on the\nnew or modified code.  When no diff is provided (empty section\nbelow), refactor the target broadly.\n\n<feature_diff>\n{diff}\n</feature_diff>\n\n## Your job\n\nWrite a high-level refactoring strategy — not a step-by-step\nimplementation guide. The implementation agent will figure out\nconcrete edits; your job is to set direction.\n\n- Identify 2–4 specific drag drivers in the baseline report\n  (high-footprint modules, low-comprehensibility modules, heavy\n  cross-module coupling, etc.).\n- For each driver, describe the **strategy** to reduce it:\n  e.g. "break the dependency chain between X and Y by inverting\n  control through a trait" or "split the 3000-token dumping-ground\n  module Z by concern into three focused modules."\n- Explain **why** each strategy should reduce drag — which term(s)\n  in the formula it affects.\n- Prioritize the strategies in the order they should be applied.\n- Keep the plan short: a few paragraphs of prose, not a long\n  checklist. The implementation agent has the full codebase and\n  will determine exact details.\n\n### What to avoid\n\n- Test reorganization as a primary strategy (tests are stripped\n  from drag scoring; `mod tests` at bottom of file is fine).\n- Cosmetic-only changes (renames, reordering, whitespace).\n- Splitting files purely to split — only split when it severs\n  real dependency edges or creates cleaner conceptual boundaries.\n\n### Principles\n\n- **Correctness and code quality above all.** Prefer changes that\n  make the code genuinely better, even when they require more work.\n- **Scope is not limited.** If the right fix restructures module\n  boundaries across several files, that is fine. Just make sure\n  it is completable in a single pass.\n\nWrite the plan to `{plan}`. Do NOT edit source files.\n\n## Additional guidance\n{instructions}\n',
       ],
+      options: {
+        idle_timeout: 600,
+      },
+    },
+    // ── implement & QA: apply the plan, verify, review, and address feedback ─
+    {
+      name: "implement-and-qa",
+      type: "implement-and-qa",
+      options: {
+        verify_cmds: "make -j8 check && make -j8 test",
+        diff_base: "artifact://drag/drag_base_sha.txt",
+        artifact_ns: "drag/",
+      },
+    },
+    // ── measure: re-run gremlins-drag after the refactoring ─────────────
+    {
+      name: "after",
+      type: "exec",
+      interpolation: {
+        inputs: {
+          target: 'content("artifact://drag/target.txt")',
+        },
+        outputs: {
+          after_report: "artifact://after-report.json",
+          drag_after: "artifact://drag_after.txt",
+        },
+      },
+      options: {
+        cmds: [
+          'gremlins-drag "{target}" > {after_report}',
+          'DRAG=$(jq ".drag" {after_report})\nprintf "%s" "$DRAG" > {drag_after}\necho "after drag sum = $DRAG"',
+        ],
+      },
     },
     // ── commit message ────────────────────────────────────────────────────
     {
@@ -348,6 +227,8 @@
         inputs: {
           baseline_report: "artifact://baseline/report.json",
           drag_best_val: 'content("artifact://drag_best.txt")',
+          drag_after_val: 'content("artifact://drag_after.txt")',
+          target: 'content("artifact://drag/target.txt")',
         },
         outputs: {
           commit_message: "artifact://commit_message.txt",
@@ -355,10 +236,7 @@
       },
       options: {
         cmds: [
-          // Find the latest cumulative progression and scoped target.
-          // Each iteration writes artifact://{N}/drag_progression.json
-          // and artifact://{N}/drag_config.json; pick the newest.
-          'LATEST=$(ls -t "$GREMLINS_STATE_DIR/artifacts/"*/drag_progression.json 2>/dev/null | head -1)\nFALLBACK="$GREMLINS_STATE_DIR/artifacts/drag_progression.json"\nPROGRESSION="${LATEST:-$FALLBACK}"\nLATEST_CONFIG=$(ls -t "$GREMLINS_STATE_DIR/artifacts/"*/drag_config.json 2>/dev/null | head -1)\nif [ -n "$LATEST_CONFIG" ]; then\n  TARGET=$(jq -r \'.path\' "$LATEST_CONFIG")\nelse\n  TARGET=$(jq -r \'.path\' "$GREMLINS_STATE_DIR/artifacts/drag_config.json")\nfi\nBEST="{drag_best_val}"\n[ -z "$BEST" ] && BEST="N/A"\nBASE_SUM=$(jq \'.drag\' < {baseline_report})\nITER_COUNT=$(jq \'. | length - 1\' "$PROGRESSION" 2>/dev/null || echo "0")\nTRAJECTORY=$(jq -r \'[.[] | select(.verdict == "reduced" or .verdict == "baseline") | "\\(.iteration): \\(.drag_after)"] | join(" → ")\' "$PROGRESSION" 2>/dev/null)\n{\n  echo "drag-optimizer: reduce drag for $TARGET"\n  echo ""\n  echo "Baseline drag sum: $BASE_SUM → Best: $BEST"\n  echo "Trajectory: $TRAJECTORY"\n  echo "Iterations: $ITER_COUNT"\n  echo "Target: $TARGET"\n} > {commit_message}\n',
+          'BASE_SUM=$(jq ".drag" < {baseline_report})\nBEFORE="{drag_best_val}"\nAFTER="{drag_after_val}"\nTARGET="{target}"\n{\n  echo "drag-optimizer: reduce drag for $TARGET"\n  echo ""\n  echo "Baseline drag sum: $BASE_SUM"\n  echo "Drag before: $BEFORE"\n  echo "Drag after:  $AFTER"\n  echo "Target: $TARGET"\n} > {commit_message}',
         ],
       },
     },
