@@ -1066,35 +1066,35 @@ fn validate_tool_args_load_skill() {
 #[tokio::test]
 async fn load_skill_invoke_missing_name() {
     let c = ctx(&tmp());
-    let result = load_skill_invoke(&c, &serde_json::json!({}));
+    let result = load_skill_invoke(&c, &serde_json::json!({})).await;
     assert!(result.starts_with("Error: missing 'name'"), "got: {result}");
 }
 
-#[test]
-fn load_skill_invoke_no_skills_configured() {
+#[tokio::test]
+async fn load_skill_invoke_no_skills_configured() {
     let c = ctx(&tmp());
-    let result = load_skill_invoke(&c, &serde_json::json!({"name": "pdf"}));
+    let result = load_skill_invoke(&c, &serde_json::json!({"name": "pdf"})).await;
     assert!(
         result.starts_with("Error: LoadSkill is only available in chat sessions"),
         "got: {result}"
     );
 }
 
-#[test]
-fn load_skill_unknown_name() {
+#[tokio::test]
+async fn load_skill_unknown_name() {
     let _lock = EnvGuard::lock();
     let mut c = ctx(&tmp());
     c.discovered_skills = Some(Arc::new(vec![]));
     c.skills_available = true;
-    let result = load_skill_invoke(&c, &serde_json::json!({"name": "nonexistent"}));
+    let result = load_skill_invoke(&c, &serde_json::json!({"name": "nonexistent"})).await;
     assert!(
         result.starts_with("Error: skill \"nonexistent\" not found"),
         "got: {result}"
     );
 }
 
-#[test]
-fn load_skill_rejects_disable_model_invocation() {
+#[tokio::test]
+async fn load_skill_rejects_disable_model_invocation() {
     let _lock = EnvGuard::lock();
     let mut c = ctx(&tmp());
     let skill = crate::skills::Skill {
@@ -1112,15 +1112,15 @@ fn load_skill_rejects_disable_model_invocation() {
     };
     c.discovered_skills = Some(Arc::new(vec![loaded]));
     c.skills_available = true;
-    let result = load_skill_invoke(&c, &serde_json::json!({"name": "secret-ops"}));
+    let result = load_skill_invoke(&c, &serde_json::json!({"name": "secret-ops"})).await;
     assert!(
         result.starts_with("Error: skill \"secret-ops\" is not available for model invocation"),
         "got: {result}"
     );
 }
 
-#[test]
-fn load_skill_success_body_free() {
+#[tokio::test]
+async fn load_skill_success_body_free() {
     // A successful LoadSkill must return a body-free acknowledgement.
     // The skill body is injected as a trusted system-prompt amendment at
     // the next turn boundary, not written into the transcript.
@@ -1139,7 +1139,7 @@ fn load_skill_success_body_free() {
     };
     c.discovered_skills = Some(Arc::new(vec![loaded]));
     c.skills_available = true;
-    let result = load_skill_invoke(&c, &serde_json::json!({"name": "pdf"}));
+    let result = load_skill_invoke(&c, &serde_json::json!({"name": "pdf"})).await;
     assert!(
         result.starts_with("Skill \"pdf\" loaded successfully."),
         "got: {result}"

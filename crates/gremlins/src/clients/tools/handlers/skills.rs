@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use gremlins_magic_bus::emit_event;
+use gremlins_magic_bus::emit_run_event_async;
 use gremlins_magic_bus::EventKind;
 
 use crate::clients::conversation::Conversation;
@@ -27,12 +27,12 @@ impl ToolHandler for LoadSkillTool {
             Ok(v) => v,
             Err(e) => return ToolOutcome::text(e),
         };
-        ToolOutcome::text(load_skill_invoke(ctx, &args))
+        ToolOutcome::text(load_skill_invoke(ctx, &args).await)
     }
 }
 
 /// Invoke handler for the LoadSkill tool.
-pub(crate) fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String {
+pub(crate) async fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value) -> String {
     let name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => return "Error: missing 'name' for LoadSkill tool".to_string(),
@@ -64,10 +64,10 @@ pub(crate) fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value
     //
     // Emit the canonical name from the resolved skill, not the raw
     // invocation argument, in case find_skill resolved an alias.
-    emit_event(EventKind::SkillLoaded {
+    emit_run_event_async(&ctx.message_prefix, EventKind::SkillLoaded {
         id: ctx.message_prefix.clone(),
         name: loaded.skill.name.clone(),
-    });
+    }).await;
 
     // Return a body-free acknowledgement. The skill body is injected as a
     // trusted system-prompt amendment at the next turn boundary, not written

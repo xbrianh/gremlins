@@ -193,6 +193,7 @@ impl EventKind {
                 | EventKind::ReasoningChunk { .. }
                 | EventKind::ToolOutputChunk { .. }
                 | EventKind::ToolResult { .. }
+                | EventKind::TaskProgress { .. }
                 | EventKind::TurnComplete { .. }
                 | EventKind::Done { .. }
                 | EventKind::StreamReset
